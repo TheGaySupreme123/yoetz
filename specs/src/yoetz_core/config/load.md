@@ -1,0 +1,167 @@
+# src/yoetz_core/config/load.py — configuration source merging and safe startup parse
+
+**Wave:** C | **ADRs:** ADR-003, ADR-006, ADR-007, ADR-008, ADR-009 | **Imports (spec-tree):**
+`specs/src/yoetz_core/config/models.md`, `specs/src/yoetz_core/config/paths.md` |
+**Imported by:** `specs/src/yoetz_core/service/daemon.md` only
+
+## Purpose
+
+Owns the one algorithm that turns trusted `service run` startup flags, non-secret environment
+values, the user config file, and built-in defaults into a validated `YoetzConfig`. Ordinary CLI,
+MCP, agents, plugins, and future UI never call this loader or receive its result. Without this one
+service-owned loader, precedence would be re-invented per adapter, project repositories could
+smuggle configuration, and startup would parse untrusted TOML before any safety decision.
+
+## Public surface
+
+- `load_config(service_overrides: Mapping[str, str], env: Mapping[str, str], config_path: Path | None) -> YoetzConfig`
+  — full service-start precedence merge and validation. `env` is passed in (never read from
+  `os.environ` inside the function) so tests are hermetic. `service_overrides` can originate only
+  from the trusted local `service run` command, never a workflow/control/MCP request.
+- `parse_minimal_safe_config(env: Mapping[str, str], service_overrides: Mapping[str, str]) -> MinimalConfig`
+  — service startup step 1 in `specs/src/yoetz_core/service/daemon.md`: resolves only `profile`, `storage.data_dir`,
+  `logging.level`, and the config-file path, without touching the provider section, keyring, or
+  any adapter import.
+- `default_config_file_path() -> Path` — `config/paths.config_file_path()` re-export used by
+  help text and diagnostics.
+- `ENV_PREFIX = "YOETZ_CORE_"` — the sole recognized environment namespace.
+
+`MinimalConfig` is the registered small frozen dataclass: `profile`, `data_dir`, `log_level`, and
+`config_path_used`.
+
+## Behavior
+
+### Precedence (binding; highest first)
+
+1. explicit trusted `service run` startup flag (`service_overrides`);
+2. environment variable (`YOETZ_CORE_*`);
+3. user config file under the platform-native config directory;
+4. safe built-in default (the model defaults in `config/models.md`).
+
+The merge is computed per *leaf key*, not per section: setting `YOETZ_CORE_LOG_LEVEL` does not
+discard the file's `[logging] payloads` value.
+
+### Environment variable naming
+
+`ENV_PREFIX + SECTION + "_" + KEY`, upper-cased, dots/section nesting flattened with `_`:
+
+| Variable | Target key |
+|---|---|
+| `YOETZ_CORE_CONFIG` | path of the config file to read (replaces step 3's default path) |
+| `YOETZ_CORE_PROFILE` | `profile` |
+| `YOETZ_CORE_STORAGE_DATA_DIR` | `storage.data_dir` |
+| `YOETZ_CORE_STORAGE_DURABILITY` | `storage.durability` |
+| `YOETZ_CORE_VERIFICATION_SEMANTIC` | `verification.semantic` |
+| `YOETZ_CORE_VERIFICATION_MAX_FINDINGS` | `verification.max_findings` |
+| `YOETZ_CORE_LOG_LEVEL` | `logging.level` |
+| `YOETZ_CORE_PROVIDER_ID` | `provider.provider_id` |
+| `YOETZ_CORE_PROVIDER_ENDPOINT_PROFILE_ID` | `provider.endpoint_profile_id` |
+| `YOETZ_CORE_PROVIDER_ENDPOINT_PROFILE_VERSION` | `provider.endpoint_profile_version` |
+| `YOETZ_CORE_PROVIDER_MODEL` | `provider.model` |
+| `YOETZ_CORE_PROVIDER_TIMEOUT_SECONDS` | `provider.timeout_seconds` |
+
+There is intentionally no provider credential, token, secret, raw endpoint URL, privacy expansion,
+or approval environment variable. Provider credentials enter only through the running service's
+confidential secret-ingress/vault path and become opaque adapter-scoped handles. Environment and
+`service run` configuration may identify an installed exact profile only for the service-start process; they
+cannot authorize egress or loosen policy. Ordinary client process arguments are not configuration
+sources.
+
+An environment variable with the `YOETZ_CORE_` prefix that matches no known key is a hard
+`ConfigError("unknown_config_env_var")` naming the variable (fail closed beats silent typo).
+Values are strings; strict model validation performs the only type conversion (base-10 ints for
+integer keys; anything else fails).
+
+### TOML parsing
+
+- Parser: stdlib `tomllib.load` on bytes read from the config file. `tomllib` rejects duplicate
+  keys and invalid TOML natively; a `TOMLDecodeError` maps to `ConfigError("config_toml_invalid")`
+  with the line/column only — never the offending text.
+- The parsed dict goes to `YoetzConfig.model_validate(..., strict=True)`; `extra="forbid"` on
+  every model gives strict unknown-key rejection at all nesting levels.
+- File size is capped at 64 KiB before parsing (`ConfigError("config_file_too_large")`).
+- A missing config file is not an error: defaults apply. An unreadable existing file
+  (permissions) is `ConfigError("config_file_unreadable")`.
+- `profile = "release-probe"` read from the *file* source is rejected
+  (`ConfigError("release_probe_not_a_user_profile")`); it is accepted only from service-start
+  environment/overrides.
+
+### Project-config prohibition (binding)
+
+`load_config` reads exactly one config file: the user config under
+`config/paths.config_file_path()`, or the explicit `service run --config` /
+`YOETZ_CORE_CONFIG` service-start override.
+It never searches the current working directory, the repository root, `.yoetz*`, `.codex/`, or
+any ancestor directory. Consequences:
+
+- a repository checked out by the user cannot redirect `storage.data_dir` or key paths;
+- a repository cannot enable network/model behavior. Selecting `local-openai` or an endpoint
+  profile merely selects a candidate capability; effective policy authorization still requires the
+  service-owned ADR-009 setup/transition use case;
+- even an explicit `service run --config` pointing into a repository is honored as local-human
+  startup intent, but emits one bounded stderr diagnostic with reason `explicit_project_config`;
+  the path is never printed.
+  The resulting `data_dir` must still pass every `config/paths.md` safety check (which rejects
+  in-repo bundles regardless of consent).
+
+### `parse_minimal_safe_config`
+
+Runs before path validation, SQLite, keys, or logging exist (startup step 1). It applies the
+same precedence to only the three minimal keys plus the config path, using a tolerant reader
+that *ignores* all other sections without validating them (full validation happens in
+`load_config` at step 1½, before any adapter is constructed). It must not raise on unknown keys
+in *other* sections — a broken `[provider]` block must not prevent reading `logging.level` for
+the error report — but it does fail on unparseable TOML and on an invalid `profile` value.
+
+### Ordering with the rest of startup
+
+`load_config` performs no I/O beyond reading the one config file. It does not resolve or create
+`data_dir` (that is `config/paths.md`), does not construct a provider adapter (the ready service
+gateway composition does so only when capability, vault, and effective policy all permit), and does not configure logging (caller wires
+`observability/logging.md` using the returned config).
+
+Ordinary CLI/MCP clients use deterministic platform-native service endpoint discovery plus the
+authenticated control handshake. They do not read `YoetzConfig`, `YOETZ_CORE_CONFIG`, storage or
+provider profile values, and cannot point the service client at a caller-selected endpoint. Their
+own bounded rendering/log-level preferences, if any, are separate client-only values with no
+storage, key, provider, privacy, or endpoint authority.
+
+## Errors and edge cases
+
+- All failures are `ConfigError(reason_code)`; `service run` exits `2` before binding the control
+  endpoint and writes one structured stderr line (`observability/logging.md`). Ordinary CLI/MCP
+  clients never parse this config; they report bounded service absence/locked status instead.
+- Conflicting sources are not an error; precedence resolves them silently and
+  `MinimalConfig.config_path_used` records which file (if any) was read for diagnostics.
+- Any prefixed credential/secret environment key, including historical provider-key spellings, is
+  rejected as `ConfigError("secret_env_forbidden")`; the value is never read, logged, or echoed.
+- Empty-string environment values are treated as unset (documented; matches common tooling).
+
+## Invariants
+
+- Exactly one config file is read per service generation; ordinary client processes read none; no
+  directory search or repo-config discovery exists.
+- Secrets never enter `YoetzConfig`, environment-derived values, TOML, CLI/MCP arguments, logs, or
+  error messages.
+- Precedence is service-start override > env > file > default, per leaf key, once.
+- `load_config` is a pure function of `(service_overrides, env, file bytes)` — deterministic and
+  fully testable without a filesystem beyond the one file read.
+
+## Tests
+
+- `specs/tests/unit.md` — `tests/unit/config/test_load_precedence.py`: precedence matrix per key, env
+  naming table, unknown/secret env rejection, TOML duplicate key/oversize/invalid, missing vs
+  unreadable file, release-probe source rule, empty-string env, and absence of every credential
+  ingress path.
+- `specs/tests/integration.md` — startup uses `parse_minimal_safe_config` before path checks;
+  broken `[provider]` block still yields a readable minimal config.
+- `specs/tests/subprocess.md` — `service run` with invalid config binds no endpoint; MCP/ordinary
+  CLI ignore the service config source and report unavailability without stdout contamination.
+
+## Open questions
+
+None.
+
+An explicit project-contained service config is honored only as direct local-human
+service-start intent and always emits the bounded `explicit_project_config` warning; project
+discovery remains forbidden.

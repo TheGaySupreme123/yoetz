@@ -1,0 +1,83 @@
+# README.md — public project entry point and release overview
+
+**Wave:** F | **ADRs:** ADR-003, ADR-005, ADR-007 | **Imports (spec-tree):**
+`specs/README.md`, `src/yoetz_core/__init__.md`, `src/yoetz_core/version.md`,
+`tests/packaging.md`, `tests/subprocess.md`
+**Imported by:** people visiting the repository root, release notes, package metadata, and support
+links
+
+## Purpose
+
+This file is the first human-facing explanation of what `yoetz-core` is, how to install it, and
+what it promises at v0.1. It is not the contract source of truth, but it must accurately summarize
+the public surface without pointing readers to private planning docs.
+
+## Public surface
+
+The file must contain, at minimum, these sections:
+
+- a one-paragraph project summary;
+- a quick-start install and first-run path;
+- a “what this project does” section that names the strict-local default and optional semantic
+  review path;
+- a “development status” section that clearly states the repo is a working draft or public-alpha
+  style build, not a finished user guide;
+- links to the repository security, contribution, changelog, and license pages;
+- an explicit statement that the project is licensed under Apache-2.0;
+- a short command summary for the console script and `python -m yoetz_core`;
+- a support boundary note that points readers to the specs tree for implementer detail.
+
+## Behavior
+
+The README explains the project in terms an installer or new contributor can act on. It may say how
+to install from the published wheel or from a source checkout, but it must not invent hidden setup
+steps, private URLs, or architecture notes that are not part of the public repository.
+
+The README should describe the repository as:
+
+- the public `yoetz-core` package and its release artifacts;
+- the strict-local default plus optional capability-driven semantic review;
+- a file-level spec tree under `specs/` for the implementation contract;
+- a release that depends on reproducible packaging and locked dependencies.
+
+The document may mention the six public workflow operations by name, but it must not re-specify
+their behavior. It is allowed to point readers to `specs/README.md` and the relevant file-level
+specs for that detail.
+
+The README should keep the install story bounded:
+
+- tell readers how to install the released package;
+- explain that `yoetz-core` is the primary console entry point;
+- mention `python -m yoetz_core` only as an equivalent invocation;
+- avoid documenting unsupported developer-only paths as if they were public release paths.
+
+The v0.1 document leads with the install/first-run story after its one-paragraph summary. It stays
+text-only; a diagram is added only when a later user-tested need justifies another maintained view.
+
+## Errors and edge cases
+
+- The README must not claim the repository is production-complete unless the release process says
+  so.
+- It must not reference ignored private docs as required reading.
+- It must not promise runtime capabilities that are only available in a selected profile or via an
+  optional extra without saying so.
+- It must not expose secrets, local paths, or repository split history.
+
+## Invariants
+
+1. The README is honest but non-normative.
+2. The README never outranks the spec tree or the packaged metadata.
+3. The README explains, it does not implement.
+4. The README can be updated for phrasing, but it must not drift from the frozen release contract.
+
+## Tests
+
+- `tests/packaging/test_build_artifacts.py` — README presence and metadata inclusion.
+- `tests/packaging/test_wheel_and_sdist_contents.py` — README byte parity in source and wheel
+  metadata.
+- `tests/conformance/surfaces/test_cli_contract_matrix.py` — public command help links back to the
+  same project story.
+
+## Open questions
+
+None.

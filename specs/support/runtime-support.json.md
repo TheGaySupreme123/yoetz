@@ -1,0 +1,98 @@
+# support/runtime-support.json — exact artifact runtime and integration support allowlist
+
+**Wave:** F | **ADRs:** ADR-003, ADR-005, ADR-006, ADR-007, ADR-008, ADR-009 | **Imports (spec-tree):** capability
+matrix, release evidence, version/resource specs | **Imported by:** packaged support mirror,
+`src/yoetz_core/version.py`, startup diagnostics, public claim map
+
+## Purpose
+
+Turn tested release evidence into the exact allowlist used for write admission and support claims.
+Documentation, version ranges, and neighboring successful cells are never substitutes for an entry.
+
+## Public surface
+
+A canonical strict-JSON object with:
+
+- `schema: "yoetz.runtime-support/1"`, `manifest_version`, `release_version`, and
+  `package_artifact_digest`;
+- `resource_set_digest`, `capability_matrix_digest`, `release_evidence_digest`, and
+  `dependency_lock_digest`;
+- `runtime_cells`: ASCII-sorted exact combinations of CPython implementation/version/SOABI,
+  normalized platform tag, OS floor, architecture, APSW version, SQLite version/source ID,
+  amalgamation flag, and compile-options digest;
+- `mcp_cells`: exact SDK version and explicitly supported protocol-version set;
+- `codex_profiles`: exact Codex version, capability-profile ID/version, integration modes, and
+  required passing case IDs; no min/max range;
+- `key_backend_cells`: exact platform/backend distribution/backend-classification and supported
+  backup modes;
+- `local_service_cells`: exact platform, AF_UNIX adapter, peer-credential primitive,
+  control-protocol version, frame/schema set, singleton strategy, and required passing case IDs;
+- `secret_memory_cells`: measured mutable-allocation, page-lock, core-dump, overwrite, and
+  capability-gate outcomes without a perfect-zeroization claim;
+- `user_presence_cells`: exact candidate-artifact digest, normalized platform/release cell,
+  reviewed adapter/profile identity, OS-authentication primitive, authenticated-prompt,
+  trusted-display/action-binding, one-use-attestation, and availability outcomes, capability-
+  evidence digest, and required passing case IDs;
+- `session_event_cells`: exact lock/suspend monitor behavior and required passing case IDs;
+- `privacy_enforcement_cells`: exact policy/classifier/minimizer/scanner/gateway/receipt versions,
+  profile/channel/local-sink matrix, zero-egress evidence, and required passing case IDs;
+- `provider_profiles`: zero or more exact SDK/endpoint-profile/model/schema-policy cells;
+- `denied_cells` and `limitations`: sorted bounded reason records;
+- `manifest_digest`: SHA-256 of canonical content with this field omitted.
+
+Every optional capability uses a tagged object with `status: "present"|"absent"`; neither `null`
+nor a missing ambiguous field is permitted.
+
+## Behavior
+
+`generate_capability_matrix.py` and release-evidence review propose this source file. Release review
+accepts only cells whose complete required case set passed against the exact candidate artifact and
+whose evidence digests are included. Rows are sorted by canonical tuple identity; duplicate,
+overlapping, inferred, stale, inconclusive, or mixed-artifact rows are forbidden.
+
+At development time the file may contain no supported cells and a
+`development_unverified` limitation. A release with an advertised write-support claim must contain
+every and only the exact passing cells. Optional provider absence does not invalidate `local_only`
+deterministic/service cells. An upstream version not listed is `untested`; it is never accepted
+because it lies between listed versions.
+
+Pristine automatic OS-keyring initialization requires an exact passing `key_backend_cells` row and
+an exact passing `user_presence_cells` row for the same candidate artifact and normalized release
+cell. A keyring row alone is insufficient. Missing, absent, inconclusive, stale, cross-artifact, or
+mismatched presence evidence yields `human_authority_unavailable` and authorizes no keyring/vault
+mutation. This composite gate does not apply retroactively to loading an already committed
+keyring-mode vault; missing current presence instead limits that ready generation to local work and
+fences external activation.
+
+The source and packaged mirror change together. Runtime verifies canonical JSON, self-digest,
+resource/artifact identity, and exact cell match before granting write/semantic capabilities. The
+manifest is an evidence-bound allowlist, not a signature; it never claims authenticity by itself.
+
+## Errors and edge cases
+
+Unknown fields/statuses, float, duplicate key/cell, range syntax, wildcard platform/version,
+inconclusive advertised cell, digest mismatch, unsupported normalization, missing limitation, or
+source/package byte difference blocks release and write admission. Public diagnostics report only
+bounded cell identity/reason and never host paths, usernames, credentials, or raw evidence.
+
+## Invariants
+
+1. Every supported cell is exact and directly backed by the named candidate evidence.
+2. The file cannot infer continuous Codex, Python, provider, or platform support.
+3. Optional absence is a tagged structural record, never `null`.
+4. Equal evidence/policy inputs produce equal canonical bytes.
+5. Runtime cannot widen this reviewed allowlist.
+6. No supported keyring cell implies a supported user-presence cell; pristine auto-initialization
+   requires an exact same-artifact intersection.
+
+## Tests
+
+`tests/capability/`, `tests/packaging/test_platform_and_sqlite_gate.py`,
+`tests/packaging/test_version_manifest.py`, `tests/conformance/claims/test_public_claim_map.py`, and
+resource byte-parity/corruption tests.
+
+## Open questions
+
+None.
+
+Exact cell contents are empirical release-lock outputs under E-001 through E-011.

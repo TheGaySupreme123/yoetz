@@ -1,0 +1,46 @@
+# tests/integration/application/test_import_review.py — Codex JSONL import and review flow
+
+**Wave:** D | **ADRs:** ADR-003, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
+`src/yoetz_core/adapters/importers/codex_jsonl.md`, `src/yoetz_core/application/import_review.md`
+**Imported by:** integration application tests
+
+## Purpose
+
+Prove the import/review support workflow preserves the source stream, quarantines bad selections,
+and emits the expected public review results.
+
+## Public surface
+
+- `test_codex_jsonl_import_preserves_source_and_quarantine` — the raw source is retained and bad
+  paths quarantine.
+- `test_review_selection_and_validation_are_bounded` — review selection errors fail closed.
+- `test_imported_observations_use_codex_publication_channel` — imported observations keep the right
+  channel and coverage.
+
+## Behavior
+
+The test uses reviewed Codex JSONL fixtures and asserts:
+
+- source retention is exact;
+- unsupported or malformed review selections are rejected before publish;
+- imported observations remain imported observations, not locally verified facts;
+- quarantined imports stay quarantined.
+
+## Errors and edge cases
+
+- A selection that silently widens the review scope fails.
+- An import that erases source identity fails.
+
+## Invariants
+
+1. Source preservation is exact.
+2. Review bounds are explicit.
+3. Imported observations do not become stronger than they are.
+
+## Tests
+
+- `tests/integration/application/test_import_review.py`
+
+## Open questions
+
+None.

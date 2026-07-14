@@ -1,0 +1,233 @@
+# ADR-004 — Threat model, service-owned vault, object encryption, and key recovery
+
+**Status:** Founder-directed working decision (2026-07-14). The service-owned trust boundary and
+forbidden secret channels are binding. The concrete cryptographic envelope remains subject to an
+independent threat review before release.
+**Owning public specs:** `docs/adr/ADR-008-local-service-vault-trust-boundary.md`,
+`specs/src/yoetz_core/service/vault.md`, `specs/src/yoetz_core/service/unlock.md`,
+`specs/src/yoetz_core/ports/keys.md`, the key adapters, and the key-recovery runbook.
+
+## Threat model
+
+Encryption protects event payloads, captured command output/evidence, semantic cases/responses,
+receipts, operation results containing user content, and service-owned bundle keys against casual
+or at-rest disclosure: other local users, backup media, a stolen disk, and accidental sharing of
+an application-data copy. It does not protect against a compromised active user account,
+malicious root, inspection of the ready service's memory, or side channels. Structural metadata
+(bounded IDs, sizes, enums, versions, and timings) is deliberately visible.
+
+The per-user Yoetz service is trusted. CLI, MCP bridges, agents, LLMs, future UI renderers,
+provider adapters, repositories, and imported transcripts are outside the vault boundary. A future
+trusted desktop unlock prompt may be added as a narrowly scoped vault client; that does not make
+ordinary UI content trusted.
+
+## Key hierarchy and object encryption
+
+1. **Installation vault key (IVK):** one random 256-bit IVK protects the encrypted per-installation
+   key vault. In OS-backed mode the IVK is stored in the verified OS keyring. In explicitly
+   selected passphrase mode only an Argon2id-derived key-encryption key and an authenticated
+   envelope wrapping the IVK are persisted; neither the passphrase nor plaintext IVK is stored.
+2. **Bundle master key (BMK):** one random 256-bit BMK per task bundle. A BMK is stored only as an
+   IVK-wrapped authenticated vault record and as a short-lived service-memory handle after use.
+   A bundle record is never readable by a client process.
+3. **Derived bundle keys:** HKDF-SHA-256 with exact public salt
+   `b"yoetz/bundle-key-root/v1"`, exact ASCII info bytes `b"yoetz/kek/v1"` and
+   `b"yoetz/commitment/v1"`, and output length 32 derives only `K_wrap` and `K_commit` from each
+   BMK. No implicit NUL, Unicode normalization, or library-default empty salt is permitted. `K_wrap` wraps each
+   exact 32-byte object DEK with AES-256 Key Wrap per RFC 3394; AES-KW has no nonce. There is no
+   bundle-scoped lookup key.
+4. **Installation MAC keys:** at each successful unlock, the vault derives exactly three exported
+   256-bit installation MAC keys from the stable IVK with HKDF-SHA-256, exact public salt
+   `b"yoetz/installation-mac-root/v1"`, exact ASCII info bytes
+   `b"yoetz/catalog-lookup/v1"` (`K_lookup`), `b"yoetz/log-correlation/v1"` (`K_log`), and
+   `b"yoetz/privacy-audit/v1"` (`K_audit`), each with output length 32. These names describe internal key purposes, not values
+   that cross an interface. The derived bytes are never stored independently or returned: the
+   vault exposes only purpose- and generation-bound `MacKeyHandle` operations and destroys them on
+   relock. Because all three derive from the same installation IVK, they are stable across normal
+   service restarts but unlinkable across installations. v0.1 has no independent rotation;
+   changing `K_lookup` requires an explicit catalog-commitment migration. Separately, the vault
+   derives a nonexported internal `K_vault_locator` with exact salt
+   `b"yoetz/vault-internal-root/v1"`, info `b"yoetz/vault-record-locator/v1"`, and length 32 solely
+   for keyed record locators/index authentication; it is not a fourth `MacKeyHandle`, record, or
+   cross-module key.
+5. **Per-object DEK:** every encrypted object gets a fresh 256-bit DEK and random 96-bit payload
+   nonce. AES-256-GCM encrypts exactly one payload under that DEK; the stable bundle `K_wrap` wraps
+   the exact 32-byte DEK with nonce-free AES-256-KW (RFC 3394), yielding exactly 40 wrapped bytes.
+   No AES-GCM operation uses the stable `K_wrap`. Payload-nonce reuse under one DEK is structurally
+   prevented by the one-DEK/one-encryption rule; randomness remains defense in depth.
+6. **Object format `yoetz-object/1`:**
+   `magic "YZO1" | u8 format_version=1 | u32be header_len | header_json | 12-byte payload_nonce |
+   plaintext_size bytes ciphertext | 16-byte GCM tag`. `header_len` is `1..16384`; appended bytes
+   are forbidden. Canonical JCS UTF-8 `header_json` is the payload AEAD associated data and has the
+   exact fields frozen by `ports/objects.md`: format, object/task IDs, object kind, key slot,
+   algorithms, base64url-no-padding 40-byte wrapped DEK, plaintext size, media type, and creation
+   time. It contains no wrap nonce, embedded/self checksum, secret, or plaintext-derived filename.
+7. **Size policy:** plaintext cap 4 MiB (`MAX_OBJECT_PLAINTEXT_BYTES`). Larger artifacts are not
+   chunked in v0.1; only their digest and metadata may be recorded, with
+   `evidence_immutability = content_digest` coverage.
+
+Wrapped BMKs and encrypted objects are ciphertext, not an alternate plaintext key store. Plaintext
+IVKs, BMKs, derived keys (including installation MAC keys), DEKs, provider credentials, and
+decrypted payloads may exist only within
+the ready service's protected process memory for the shortest practical lifetime. They cross the
+service-internal `SecretMemoryPort`, which uses bounded mutable buffers, page-lock and no-core-dump
+hardening where positively tested, one-shot consumption, and best-effort overwrite. Python and
+provider libraries may create copies outside the adapter's control; no perfect zero-copy or
+zeroization claim is made.
+
+The one `MacKeyHandle` abstraction owns MAC execution for both bundle commitments and installation
+purposes. Every handle is minted with one closed purpose and an exact domain allowlist; it rejects a
+domain owned by another purpose before touching key material. Installation ownership is frozen as:
+
+| Handle purpose | Internal key | Exact allowed domains | Consumer |
+|---|---|---|---|
+| `catalog_lookup` | `K_lookup` | `b"yoetz/start-title/v1\x00"`, `b"yoetz/workspace-ref/v1\x00"`, `b"yoetz/external-task-ref/v1\x00"` | start-catalog adapters |
+| `log_correlation` | `K_log` | `b"yoetz/session-log-id/v1\x00"` | observability privacy helper |
+| `privacy_audit` | `K_audit` | `b"yoetz/privacy-egress-request/v1\x00"` | privacy audit/gateway helper |
+
+The service composition injects only the required handle into each consumer. A start-catalog,
+logger, or privacy component cannot obtain a different handle through ambient configuration or
+storage. Every MAC domain is a byte string ending in the delimiter `\x00`; vectors must compare
+those bytes, not a display string with the delimiter omitted. Domain constants belong to the
+consuming protocol modules; derivation and binding belong only to the vault/key port.
+
+For bundle object commitments, `ports/objects.md` and `INTERFACES.md` enumerate one exact trailing-
+NUL `b"yoetz/object/<enum-spelling>/v1\x00"` domain for every closed `ObjectKind`, including the
+commitment-only `import_stderr` and task-bound `privacy_audit` kinds. The formula is exactly
+`HMAC-SHA-256(K_commit, domain || raw_plaintext_bytes)`, rendered
+`hmac-sha256:<64 lowercase hex>`; “canonical plaintext” is not an implicit transformation.
+
+Vault records do not encrypt multiple values directly under the stable IVK with AES-GCM. Each
+immutable record generation receives a fresh 256-bit record DEK and random 96-bit payload nonce,
+uses that DEK for exactly one AES-256-GCM encryption with canonical header AAD, and wraps the exact
+record DEK under the IVK using nonce-free AES-256-KW (RFC 3394). Credential rotation creates a new
+generation and fresh record DEK. The encrypted-vault spec freezes no-overwrite/CAS publication and
+the exact header; no independent installation-MAC-key record exists.
+
+## Vault startup and locked state
+
+The service initializes the vault exactly once per process.
+
+1. Verify the private per-user data/runtime paths and local endpoint.
+2. Inspect only the non-secret vault mode marker and authenticated envelope metadata.
+3. For an existing `os_keyring` mode, load and verify only its correlated entry/sentinel. Current
+   user-presence capability does not decide whether existing local data may unlock. If the entry is
+   locked, missing, or contradictory, remain `locked`; never create a replacement.
+4. For a proven pristine `uninitialized` installation, evaluate keyring storage and local-human
+   authority before creating any stage, correlation value, IVK, entry, or mode marker. Automatic
+   keyring initialization is eligible only when the exact artifact/release cell has both:
+   - an approved keyring probe proving create-if-absent, round-trip load, and correlated-envelope
+     support; and
+   - an artifact-verified `UserPresenceCapability` whose exact adapter/profile/platform cell and
+     evidence digest occur in the packaged runtime-support allowlist and whose
+     `available`, `os_authenticated_prompt`, `trusted_action_binding`, and
+     `one_use_attestation` states are all active.
+   A platform-name guess, TTY, same-UID peer, unlocked-session signal, or caller boolean is never
+   that evidence.
+5. If keyring storage is usable but the exact presence cell is absent, unavailable, inconclusive,
+   stale, mismatched, or unverified, perform no vault/keyring mutation and remain
+   `uninitialized/locked` with bounded reason `human_authority_unavailable` (rendered as setup
+   required). A later zero-secret retry remeasures both capabilities. A local human may instead
+   explicitly choose pristine passphrase initialization; this is not an automatic fallback.
+6. Only after the complete step-4 predicate passes may the service stage, create-if-absent,
+   round-trip verify, and atomically commit immutable `os_keyring` mode. It then derives the
+   installation MAC keys, constructs purpose-scoped handles, and enters `ready`.
+7. If the configured keyring itself is unavailable or locked, remain alive in explicit `locked`;
+   do not open the catalog, bundle payloads, provider adapters, or any workflow operation.
+8. Passphrase mode is never a fallback from an existing OS-backed vault. It is selected explicitly
+   by a local human during a pristine first-install vault setup or a reviewed migration. First
+   setup uses the distinct confidential `vault_initialize` purpose: the foreground helper confirms
+   the passphrase twice locally but transmits one bounded secret, and the service re-proves that no
+   mode, ciphertext, sentinel, or keyring entry exists before atomically committing the wrapped
+   IVK, sentinel, and immutable mode. Existing passphrase unlock uses the separate `vault_unlock`
+   purpose. Neither path is an automatic response to keyring failure.
+
+A locked service may report only bounded structural state and reason codes. It never treats locked
+or missing keys as empty payloads and never creates replacement keys over existing encrypted data.
+
+## Forbidden secret channels
+
+An IVK, BMK, installation or bundle derived key, DEK, vault unlock passphrase, or
+portable-recovery secret never leaves the trusted local boundary and must never be supplied through
+or appear in:
+
+- an MCP tool argument/result, agent message, LLM prompt/context, or imported transcript;
+- a normal CLI argument, process title, environment variable, configuration file, stdin pipeline,
+  shell history, or command substitution;
+- an ordinary local-control request, provider content body/response, application event, SQLite structural row,
+  receipt, log, trace, exception, crash report, support bundle, clipboard, or temporary plaintext
+  file.
+
+Provider API credentials follow the same forbidden-channel list as content, with one necessary and
+narrow exception: for an already authorized physical attempt, the one-attempt custom transport may
+transmit the credential only as authentication metadata to the exact pinned TLS endpoint. It never
+enters the candidate/model body, prompt/context, preview, receipt, log, trace, exception, config,
+environment, or reusable SDK/default-header state. That authentication transmission is not a claim
+that the provider credential never leaves the machine; it is a separately bound transport action.
+
+Normal CLI/MCP/UI clients receive workflow results only; they never receive a key, credential
+handle, or decrypted vault state. The generic confidential ingress is purpose-typed; its local
+human helper reads directly from a foreground controlling TTY in no-echo mode and sends one
+one-shot mutable secret over the separately typed confidential local channel. Piped input,
+redirection, non-TTY operation, and MCP dispatch are rejected. The helper and service overwrite
+mutable buffers best-effort after one use.
+
+## Recovery and passphrase separation
+
+Vault unlock and portable backup recovery are distinct operations and types:
+
+- `SecretHandle(SecretPurpose.vault_unlock)` unlocks one local installation vault through the
+  trusted coordinator. It cannot be used by object APIs or serialized into a recovery artifact.
+- `RecoverySecret` wraps one bundle BMK into a separate versioned portable-recovery artifact. It
+  is obtained only through an explicit local-human maintenance flow and is never an automatic
+  service-start fallback.
+
+Backups remain either `machine_bound` (vault/key locator and fingerprint only) or
+`portable_recovery` (separate Argon2id-wrapped BMK artifact). A backup is called portable only
+after a clean-profile restore drill. Logical redaction and object deletion remain the only erasure
+claims; WAL pages, backups, snapshots, or storage remanence preclude a forensic-erasure promise.
+
+## Headless deployment evaluation
+
+A secret in an environment variable, command argument, config file, stdin, named plaintext file,
+or ordinary inherited pipe is rejected. A narrowly scoped inherited secret descriptor can be made
+safer only if all of the following are specified and proven: explicitly enabled headless mode;
+descriptor inherited directly from a trusted supervisor; descriptor number is non-secret but the
+bytes never appear in argv/env; same-UID/supervisor provenance checks; exact size and one-shot read;
+no seek/reopen/path; immediate close; mutable-buffer overwrite; no child inheritance; and failure
+closed on ambiguity.
+
+That mechanism is **not enabled in the v0.1 working default**. An already initialized keyring vault
+may unlock noninteractively; without measured user presence it is ready only for locally permitted
+work and external activation remains fenced. A pristine headless installation cannot auto-create
+keyring mode unless its exact release cell also carries the required verified
+`UserPresenceCapability`; otherwise it remains setup-required. Passphrase-locked headless startup
+remains locked.
+Adding inherited-descriptor unlock requires its own reviewed adapter/specification, platform tests,
+and founder confirmation rather than a generic `--password-fd` shortcut.
+
+## What stays plaintext
+
+SQLite structural tables, the catalog, vault mode marker, object headers, and log fields contain
+only bounded enums/IDs/digests/sizes/version identities. The encrypted vault contains authenticated
+wrapped BMK records; it does not persist separate installation MAC-key records. Ordinary exception
+handling records only a bounded structural correlation identity and reason/outcome code. v0.1 does
+not capture a raw traceback in plaintext or encrypted form. A future encrypted diagnostic artifact
+would require its own reviewed schema, explicit privacy authorization and retention policy,
+never-send/minimization gates, encrypted-object handling, and release tests; it cannot be enabled
+as a logging mode or support-bundle flag. Canary tests must prove user content, unlock material,
+plaintext keys, exception messages, and tracebacks are absent from DB/WAL/SHM/temp files, endpoint
+frames, logs, traces, exports, and support bundles.
+
+## Required proof before release
+
+Known-answer vectors for AES-256-KW, the IVK-derived installation MAC family, and every byte-exact
+trailing-NUL domain; vault-record and object-envelope tamper/truncation/wrong-key/wrong-slot/
+appended-byte fixtures; fresh-DEK/one-encryption and payload-nonce behavior under concurrency and restart; OS-keyring locked/missing
+behavior; the pristine-install cross-product of keyring create/load support and exact
+`UserPresenceCapability` evidence; proof that failed presence eligibility creates no stage, IVK,
+entry, or mode marker; existing-keyring ready-local behavior with external fencing; locked-to-ready
+transition; secret-channel canary scans including CLI/MCP/control frames
+and process metadata; clean-profile portable restore; destructive key-loss behavior; and an
+independent review of the IVK/BMK hierarchy, vault envelope, local unlock channel, and object
+envelope.
