@@ -1,8 +1,8 @@
 # tests/property/test_ranking_properties.py — ranking stability and cap properties
 
 **Wave:** B | **ADRs:** ADR-002, ADR-004, ADR-006 | **Imports (spec-tree):**
-`tests/property/strategies/events.py`, `src/yoetz_core/kernel/ranking.py`,
-`src/yoetz_core/domain/findings.py`
+`tests/property/strategies/events.py`, `src/yoetz/kernel/ranking.py`,
+`src/yoetz/domain/findings.py`
 **Imported by:** property-based ranking tests
 
 ## Purpose

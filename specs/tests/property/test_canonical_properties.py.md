@@ -1,7 +1,7 @@
 # tests/property/test_canonical_properties.py — canonical parser and encoder properties
 
 **Wave:** A | **ADRs:** ADR-002, ADR-005 | **Imports (spec-tree):**
-`tests/property/strategies/json_values.py`, `src/yoetz_core/protocol/canonical.py`
+`tests/property/strategies/json_values.py`, `src/yoetz/protocol/canonical.py`
 **Imported by:** property-based canonicalization tests
 
 ## Purpose

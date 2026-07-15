@@ -1,7 +1,7 @@
 # tests/unit/protocol/test_coverage.py — coverage lattice and weakest-merge rules
 
 **Wave:** A/B | **ADRs:** ADR-002, ADR-004, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/protocol/coverage.py`, `src/yoetz_core/domain/receipts.md`
+`src/yoetz/protocol/coverage.py`, `src/yoetz/domain/receipts.md`
 **Imported by:** the protocol and kernel unit suite
 
 ## Purpose

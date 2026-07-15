@@ -1,8 +1,8 @@
 # tests/unit/application/test_verdict_rules.py — check verdict and response rules
 
 **Wave:** C/D | **ADRs:** ADR-003, ADR-004, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/application/check.md`, `src/yoetz_core/application/respond.md`,
-`src/yoetz_core/domain/findings.md`
+`src/yoetz/application/check.md`, `src/yoetz/application/respond.md`,
+`src/yoetz/domain/findings.md`
 **Imported by:** the application unit suite
 
 ## Purpose

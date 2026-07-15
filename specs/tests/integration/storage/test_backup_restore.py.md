@@ -1,8 +1,8 @@
 # tests/integration/storage/test_backup_restore.py — backup and restore workflow
 
 **Wave:** C | **ADRs:** ADR-003, ADR-004, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/adapters/sqlite/repository.md`, `src/yoetz_core/adapters/sqlite/start_catalog.md`,
-`src/yoetz_core/adapters/privacy/catalog.md`, `src/yoetz_core/ports/maintenance.py.md`
+`src/yoetz/adapters/sqlite/repository.md`, `src/yoetz/adapters/sqlite/start_catalog.md`,
+`src/yoetz/adapters/privacy/catalog.md`, `src/yoetz/ports/maintenance.py.md`
 **Imported by:** integration storage tests
 
 ## Purpose

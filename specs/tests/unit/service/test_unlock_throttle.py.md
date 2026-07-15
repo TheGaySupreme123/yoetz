@@ -1,7 +1,7 @@
 # tests/unit/service/test_unlock_throttle.py — restart-safe passphrase throttle vectors
 
 **Wave:** C/D | **ADRs:** ADR-004, ADR-008 | **Imports (spec-tree):**
-`src/yoetz_core/service/unlock.md`, `src/yoetz_core/config/paths.md` | **Imported by:** unit suite
+`src/yoetz/service/unlock.md`, `src/yoetz/config/paths.md` | **Imported by:** unit suite
 
 ## Purpose
 

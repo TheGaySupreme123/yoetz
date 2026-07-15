@@ -1,8 +1,8 @@
 # schemas/operations/start-result-1.0.0.schema.json — start result schema
 
 **Wave:** D | **ADRs:** ADR-001, ADR-002, ADR-003, ADR-004 | **Imports (spec-tree):**
-`src/yoetz_core/application/start.md`, `src/yoetz_core/protocol/models.md`,
-`src/yoetz_core/protocol/errors.md`
+`src/yoetz/application/start.md`, `src/yoetz/protocol/models.md`,
+`src/yoetz/protocol/errors.md`
 **Imported by:** CLI, MCP, and packaging/parity tests
 
 ## Purpose
@@ -12,7 +12,7 @@ Describe the public result shape for the `start` operation.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/operations/start-result/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/operations/start-result/1.0.0`.
 - Owning model: `StartResultModel`.
 
 ## Behavior

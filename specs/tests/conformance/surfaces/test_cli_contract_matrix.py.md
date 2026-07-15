@@ -1,7 +1,7 @@
 # tests/conformance/surfaces/test_cli_contract_matrix.py — CLI contract matrix
 
 **Wave:** D | **ADRs:** ADR-003, ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/cli/app.md`, `src/yoetz_core/cli/exits.md`
+`src/yoetz/cli/app.md`, `src/yoetz/cli/exits.md`
 **Imported by:** conformance surface tests
 
 ## Purpose

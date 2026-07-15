@@ -11,7 +11,7 @@ local control hello.
 ## Public surface
 
 - Draft 2020-12, `$id`
-  `https://schemas.yoetz.dev/core/0.1/service/control-hello-result/1.0.0`.
+  `https://schemas.yoetz.dev/0.1/service/control-hello-result/1.0.0`.
 - Closed required fields: `protocol_version`, `service_version`, `service_instance_id`,
   `service_generation`, `status`, `allowed_methods`, `schema_manifest_digest`.
 - `status` is an offline `$ref` to service-status 1.0.0.

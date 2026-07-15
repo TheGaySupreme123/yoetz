@@ -1,7 +1,7 @@
 # tests/unit/config/test_paths.py — platform-path resolution and bundle safety classification
 
 **Wave:** C | **ADRs:** ADR-003 | **Imports (spec-tree):**
-`src/yoetz_core/config/paths.md`, `src/yoetz_core/config/models.md`
+`src/yoetz/config/paths.md`, `src/yoetz/config/models.md`
 **Imported by:** the config unit suite
 
 ## Purpose

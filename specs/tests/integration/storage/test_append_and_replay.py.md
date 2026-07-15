@@ -1,8 +1,8 @@
 # tests/integration/storage/test_append_and_replay.py — append atomicity and replay parity
 
 **Wave:** C | **ADRs:** ADR-001, ADR-003, ADR-004, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/adapters/sqlite/repository.md`, `src/yoetz_core/adapters/memory/ledger.md`,
-`src/yoetz_core/kernel/reducers.md`
+`src/yoetz/adapters/sqlite/repository.md`, `src/yoetz/adapters/memory/ledger.md`,
+`src/yoetz/kernel/reducers.md`
 **Imported by:** integration storage tests
 
 ## Purpose

@@ -54,10 +54,10 @@ Privacy claims are separate, directly tested entries:
 - `privacy.local_only_no_external_llm_content`: `local_only` prevents external LLM-provider
   construction and external user/task-content disclosure. It does not claim that a separately
   authorized bounded structural telemetry, diagnostics, update, or capability channel is off;
-- `privacy.zero_network_configuration`: Core and its clients perform no AF_INET/AF_INET6, DNS,
+- `privacy.zero_network_configuration`: Yoetz and its clients perform no AF_INET/AF_INET6, DNS,
   redirects, external provider, telemetry, crash upload, update check, capability-test or
   model-download traffic when `profile=local_only`, `network_egress_permitted=false`, and all five
-  channels are disabled. The claim names the exact platform/release profile, Core-owned
+  channels are disabled. The claim names the exact platform/release profile, Yoetz-owned
   service/client/confidential-helper processes, startup-through-`locked|ready`/operation interval,
   and allowlisted local IPC: service/confidential endpoints, optional exact local-model AF_UNIX, and
   measured OS credential/user-presence/session-lifecycle IPC such as allowlisted Linux AF_UNIX
@@ -68,7 +68,8 @@ Privacy claims are separate, directly tested entries:
   the process claim, and the latter retains its F-013 limitation;
 - `privacy.never_send_non_overridable`: every frozen forbidden-data kind in candidate/user content
   is blocked from all network channels and the local-model/agent-context/trusted-human-control
-  disclosure sinks; separately provisioned provider-auth metadata is governed by founder gate F-012;
+  disclosure sinks; separately provisioned provider-auth metadata is governed by resolved decision
+  F-012;
 - `privacy.policy_approved_outbound_only`: provider adapters accept only an exact bounded approved
   outbound case and composition grants no repository/database/environment/transcript handles; the
   claim is limited to reviewed bundled adapters and is not OS/process sandbox isolation;
@@ -100,7 +101,7 @@ Privacy claims are separate, directly tested entries:
   may activate without a reviewed installation-scoped encrypted-audit storage contract. Catalog
   refs are live without ledger inventory, v0.1 offers no individual audit-content deletion, backup/
   route restore preserves the root union, and clean restore never revives disclosure authority;
-- `privacy.local_model_same_fences`: Core grants a separately configured local model only an exact
+- `privacy.local_model_same_fences`: Yoetz grants a separately configured local model only an exact
   AF_UNIX disclosure path through the same classification/minimization/never-send fence and never
   launches or downloads it; the separate runtime's own network authority is governed by F-013.
 - `privacy.no_raw_traceback_capture`: v0.1 diagnostics retain only bounded structural identity and
@@ -109,8 +110,8 @@ Privacy claims are separate, directly tested entries:
   feature.
 - `privacy.one_attempt_provider_credentials`: each physical provider attempt uses a fresh exact
   endpoint/profile/request-body-digest/deadline-bound credential callback in the custom transport;
-  no SDK client/default-header object retains the real credential, while the working F-012
-  interpretation permits its authentication header only to the exact pinned TLS endpoint.
+  no SDK client/default-header object retains the real credential, while resolved decision F-012
+  permits its authentication header only to the exact pinned TLS endpoint.
 
 Each entry names `PRIVACY.md`, the technical protocol, applicable profile/composite policy/fixture, exact privacy
 conformance/integration/capability/packaging tests, limitations, and `not_yet_evidenced` until an

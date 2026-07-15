@@ -1,7 +1,7 @@
 # schemas/events/session-opened-1.0.0.schema.json — session-opened payload schema
 
 **Wave:** A/B/C | **ADRs:** ADR-001, ADR-002, ADR-003 | **Imports (spec-tree):**
-`src/yoetz_core/domain/events.md`, `src/yoetz_core/config/models.md`
+`src/yoetz/domain/events.md`, `src/yoetz/config/models.md`
 **Imported by:** start-operation and conformance fixtures
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the payload for the initial `start` lifecycle event.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/events/session-opened/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/session-opened/1.0.0`.
 - Owning model: `SessionOpenedPayload`.
 
 ## Behavior

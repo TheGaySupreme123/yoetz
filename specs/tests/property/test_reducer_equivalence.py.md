@@ -1,8 +1,8 @@
 # tests/property/test_reducer_equivalence.py — replay equivalence under partitioning
 
 **Wave:** B | **ADRs:** ADR-002, ADR-003, ADR-004, ADR-006 | **Imports (spec-tree):**
-`tests/property/strategies/events.py`, `src/yoetz_core/kernel/reducers.py`,
-`src/yoetz_core/kernel/projections.py`
+`tests/property/strategies/events.py`, `src/yoetz/kernel/reducers.py`,
+`src/yoetz/kernel/projections.py`
 **Imported by:** property-based reducer tests
 
 ## Purpose

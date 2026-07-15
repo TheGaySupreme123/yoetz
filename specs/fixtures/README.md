@@ -7,7 +7,7 @@ conformance, subprocess, packaging, and capability suites
 ## Purpose
 
 Define the reviewed examples that turn known protocol, durability, privacy, and honesty failure
-modes into the clean public Core contract. Fixtures are executable product stories, not test
+modes into the clean public Yoetz contract. Fixtures are executable product stories, not test
 decoration. They freeze identity bytes, replay meaning, finding behavior, coverage honesty, import
 limits, and backward-read compatibility before implementation spreads across adapters.
 

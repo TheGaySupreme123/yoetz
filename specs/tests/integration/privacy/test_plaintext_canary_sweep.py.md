@@ -1,7 +1,7 @@
 # tests/integration/privacy/test_plaintext_canary_sweep.py — plaintext canary sweep
 
 **Wave:** C–F | **ADRs:** ADR-004, ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/observability/privacy.md`, integration storage/object/application specs
+`src/yoetz/observability/privacy.md`, integration storage/object/application specs
 **Imported by:** integration privacy tests
 
 ## Purpose

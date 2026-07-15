@@ -26,7 +26,7 @@ Future headings:
 9. Troubleshooting and recovery
 10. Security/privacy and prohibited actions
 
-Examples use `yoetz-core integrate codex skill install|status|remove` with an explicit synthetic
+Examples use `yoetz integrate codex skill install|status|remove` with an explicit synthetic
 project root, JSON/preview/confirm-plan equivalents matching implemented CLI help.
 
 ## Behavior
@@ -37,7 +37,7 @@ State v0.1 installs only canonical `SKILL.md`, named references/compatibility da
 managed marker at:
 
 ```text
-<explicit-trusted-project>/.agents/skills/yoetz-core/
+<explicit-trusted-project>/.agents/skills/yoetz/
 ```
 
 It does not edit Codex global/project config, register/start MCP, install/update Yoetz/Codex, touch
@@ -50,7 +50,7 @@ records versions/sorted digests and no path/user/time/repository data.
 
 ### Prerequisites/status
 
-Verify installed `yoetz-core version --json`, resource set, current compatibility/capability matrix,
+Verify installed `yoetz version --json`, resource set, current compatibility/capability matrix,
 owner permissions, trusted repository and expected Codex version. Run `status` first. Explain states:
 absent, installed exact, modified/unmanaged, partial, incompatible, unsafe. Status is read-only and
 does not repair/update/register anything.
@@ -84,7 +84,7 @@ staging/rollback blindly.
 ### Discovery and MCP availability
 
 After exact install, launch the exact tested Codex in this trusted project and explicitly invoke
-`$yoetz-core` for alpha unless implicit discovery is advertised by current capability matrix. Verify
+`$yoetz` for alpha unless implicit discovery is advertised by current capability matrix. Verify
 skill recognized/version compatible and workflow guidance. Installation alone is not evidence.
 
 MCP registration is separate. If configured optional and Yoetz unavailable, Codex work continues and

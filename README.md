@@ -1,6 +1,6 @@
-# Yoetz Core
+# Yoetz
 
-Yoetz Core is being designed as a public, local-first, open-source system for recording structured
+Yoetz is being designed as a public, local-first, open-source system for recording structured
 work evidence, checking it deterministically, and producing honest receipts about what was and was
 not verified.
 
@@ -14,8 +14,8 @@ Start here:
 - [`specs/README.md`](specs/README.md) — how to read the specification tree and its current status;
 - [`specs/FILE_MANIFEST.md`](specs/FILE_MANIFEST.md) — exhaustive one-to-one future-file ownership;
 - [`specs/INTERFACES.md`](specs/INTERFACES.md) — shared types, constants, ports, and trust boundaries;
-- [`specs/OPEN_QUESTIONS.md`](specs/OPEN_QUESTIONS.md) — founder decisions and release-evidence
-  gates still required before implementation freeze;
+- [`specs/OPEN_QUESTIONS.md`](specs/OPEN_QUESTIONS.md) — resolved founder decisions plus empirical
+  and independent-review gates still required before release;
 - [`docs/adr/`](docs/adr/) — public architecture decisions;
 - [`PRIVACY.md`](PRIVACY.md), its future-file owner
   [`specs/repository/PRIVACY.md`](specs/repository/PRIVACY.md), and
@@ -31,5 +31,5 @@ and durable structural audit.
 Private strategy/architecture drafting inputs under `docs/architecture/` are intentionally ignored.
 The public ADRs and `specs/` tree must remain self-contained without them.
 
-Licensed under the [Apache License 2.0](LICENSE). The exact public copyright-holder wording for
-future notices and source headers remains an explicit founder decision.
+Licensed under the [Apache License 2.0](LICENSE), using the official unmodified license text and
+the SPDX expression `Apache-2.0`; Yoetz does not add a fabricated project-wide ownership notice.

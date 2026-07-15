@@ -46,8 +46,8 @@ rendering cannot omit material blocked categories or call incomplete semantic wo
 
 1. Four profiles have one LLM-disclosure meaning on every surface and imply nothing about non-LLM
    channel consent.
-2. Setup/rendering cannot widen Core policy.
-3. Core gives local and external models different transport authority but identical disclosure
+2. Setup/rendering cannot widen Yoetz policy.
+3. Yoetz gives local and external models different transport authority but identical disclosure
    fences; a separate local runtime's ambient authority is an explicit F-013 limitation.
 4. MCP/agent protocol input cannot create local-human policy authority or substitute for the
    confidential foreground decision path; F-011 records the malicious same-UID limit of TTY-only

@@ -1,8 +1,8 @@
 # tests/unit/protocol/test_request_and_entry_identity.py — request and ledger-entry identity rules
 
 **Wave:** A/B | **ADRs:** ADR-002, ADR-003, ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/application/publish_work.md`, `src/yoetz_core/application/respond.md`,
-`src/yoetz_core/domain/events.md`, `src/yoetz_core/protocol/canonical.md`
+`src/yoetz/application/publish_work.md`, `src/yoetz/application/respond.md`,
+`src/yoetz/domain/events.md`, `src/yoetz/protocol/canonical.md`
 **Imported by:** the protocol and boundary unit suite
 
 ## Purpose

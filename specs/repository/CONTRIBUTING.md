@@ -46,6 +46,11 @@ v0.1 uses this lightweight spec-first pull-request flow without a mandatory pull
 Commands name only tools frozen by the release locks; contributor prose does not create a second
 formatter, linter, type-checker, or review policy.
 
+The contributor type checker is the exactly pinned official npm Pyright distribution invoked with
+`npx --no-install pyright`; Node/npm are contributor and CI prerequisites only. T3 Code may inspire
+the guide's clarity and contributor experience, but its runtime architecture is not a Yoetz design
+input. End users follow the Python/`uv` install path; a public npm launcher is deferred.
+
 ## Errors and edge cases
 
 - A contribution that changes behavior without touching the authoritative spec is incomplete.
@@ -67,6 +72,4 @@ formatter, linter, type-checker, or review policy.
 
 ## Open questions
 
-None.
-
-F-005 is the sole central development type-checker gate.
+None. F-005 is resolved; E-001 freezes the exact npm, Node, and Pyright versions.

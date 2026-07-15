@@ -1,7 +1,7 @@
 # tests/conformance/operations/test_respond_contract.py — respond public contract
 
 **Wave:** D | **ADRs:** ADR-003, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/application/respond.md`, `src/yoetz_core/domain/findings.md`
+`src/yoetz/application/respond.md`, `src/yoetz/domain/findings.md`
 **Imported by:** conformance operations tests
 
 ## Purpose

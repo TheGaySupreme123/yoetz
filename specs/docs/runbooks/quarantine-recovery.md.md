@@ -1,10 +1,10 @@
 # docs/runbooks/quarantine-recovery.md — preserve-first response to unsafe bundle state
 
 **Wave:** C/F | **ADRs:** ADR-001, ADR-003, ADR-004, ADR-006 | **Imports (spec-tree):**
-`specs/src/yoetz_core/adapters/sqlite/recovery.md`,
-`specs/src/yoetz_core/adapters/sqlite/maintenance.py.md`,
-`specs/src/yoetz_core/ports/diagnostics.md`, `specs/src/yoetz_core/ports/objects.md`,
-`specs/src/yoetz_core/ports/ledger.md` | **Imported by:** storage errors, support and migration
+`specs/src/yoetz/adapters/sqlite/recovery.md`,
+`specs/src/yoetz/adapters/sqlite/maintenance.py.md`,
+`specs/src/yoetz/ports/diagnostics.md`, `specs/src/yoetz/ports/objects.md`,
+`specs/src/yoetz/ports/ledger.md` | **Imported by:** storage errors, support and migration
 runbooks
 
 ## Purpose
@@ -134,6 +134,5 @@ say “data repaired” when procedure restored an older backup.
 
 ## Open questions
 
-None.
-
-F-006 is the sole central public-contact gate.
+None. Ordinary support uses repository issues; security and conduct use the separate private routes
+specified by repository policy. E-012 verifies those routes before release.

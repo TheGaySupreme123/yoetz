@@ -2,9 +2,9 @@
 
 **Status:** Working decision revised 2026-07-14. Ratification requires the privacy/egress gates in
 ADR-009 plus recorded capability fixtures against every advertised provider/model/endpoint profile.
-**Owning public specs:** `specs/src/yoetz_core/ports/semantic.md`,
-`specs/src/yoetz_core/ports/privacy.md`, `specs/src/yoetz_core/application/egress.md`,
-`specs/src/yoetz_core/application/check.md`, provider-adapter specs, privacy configuration specs,
+**Owning public specs:** `specs/src/yoetz/ports/semantic.md`,
+`specs/src/yoetz/ports/privacy.md`, `specs/src/yoetz/application/egress.md`,
+`specs/src/yoetz/application/check.md`, provider-adapter specs, privacy configuration specs,
 and semantic/privacy capability and conformance tests.
 
 ## Decisions
@@ -32,10 +32,10 @@ and semantic/privacy capability and conformance tests.
    obtains a fresh service-issued `ProviderCredentialHandle` bound to exact provider/model/endpoint
    profile+version, purpose, dispatch ID, final request-body digest, service generation, and
    deadline. Only the custom HTTP transport may consume it through a one-shot header-injection
-   callback; the adapter and SDK never receive or retain reusable credential bytes. Under the
-   working F-012 interpretation, the custom transport necessarily sends that separately
+   callback; the adapter and SDK never receive or retain reusable credential bytes. Under resolved
+   decision F-012, the custom transport necessarily sends that separately
    provisioned credential as one-attempt authentication metadata to the exact pinned TLS endpoint,
-   never as candidate/model content; founder confirmation remains required.
+   never as candidate/model content.
 5. **Client policy:** each physical attempt constructs and closes one
    `AsyncOpenAI(base_url=service-resolved exact profile endpoint, timeout=explicit,
    max_retries=0, api_key=fixed_nonsecret_sentinel, http_client=one_attempt_custom_transport)`.

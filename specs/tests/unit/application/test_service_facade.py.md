@@ -1,6 +1,6 @@
 # tests/unit/application/test_service_facade.py — ready-only application facade unit suite
 
-**Wave:** D | **ADRs:** ADR-001, ADR-008 | **Imports (spec-tree):** `src/yoetz_core/application/service.md` | **Imported by:** test runner
+**Wave:** D | **ADRs:** ADR-001, ADR-008 | **Imports (spec-tree):** `src/yoetz/application/service.md` | **Imported by:** test runner
 
 ## Purpose
 

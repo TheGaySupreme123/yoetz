@@ -1,7 +1,7 @@
 # tests/unit/kernel/test_policy_research_evidence.py — research-evidence pack rule coverage
 
 **Wave:** B | **ADRs:** ADR-002, ADR-004, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/kernel/policies/research_evidence.md`, `src/yoetz_core/domain/findings.md`
+`src/yoetz/kernel/policies/research_evidence.md`, `src/yoetz/domain/findings.md`
 **Imported by:** the kernel unit suite
 
 ## Purpose

@@ -1,6 +1,6 @@
 # tests/capability/test_session_event_monitor.py — session-lock/suspend capability probe
 
-**Wave:** C/F | **ADRs:** ADR-008 | **Imports (spec-tree):** `src/yoetz_core/adapters/session_events.md` | **Imported by:** release evidence
+**Wave:** C/F | **ADRs:** ADR-008 | **Imports (spec-tree):** `src/yoetz/adapters/session_events.md` | **Imported by:** release evidence
 
 ## Purpose
 

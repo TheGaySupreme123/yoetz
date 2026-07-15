@@ -1,7 +1,7 @@
 # tests/property/strategies/json_values.py — generated JSON value strategies
 
 **Wave:** B | **ADRs:** ADR-001, ADR-002, ADR-003, ADR-004 | **Imports (spec-tree):**
-`src/yoetz_core/protocol/canonical.md`, `src/yoetz_core/domain/values.md`
+`src/yoetz/protocol/canonical.md`, `src/yoetz/domain/values.md`
 **Imported by:** property-based canonicalization tests
 
 ## Purpose

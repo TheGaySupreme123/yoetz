@@ -1,8 +1,8 @@
 # tests/integration/application/test_start.py — start operation end-to-end
 
 **Wave:** D | **ADRs:** ADR-003, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/application/start.md`, `src/yoetz_core/adapters/sqlite/start_catalog.md`,
-`src/yoetz_core/adapters/objects/encrypted_files.md`
+`src/yoetz/application/start.md`, `src/yoetz/adapters/sqlite/start_catalog.md`,
+`src/yoetz/adapters/objects/encrypted_files.md`
 **Imported by:** integration application tests
 
 ## Purpose

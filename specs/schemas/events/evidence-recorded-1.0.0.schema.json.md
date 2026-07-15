@@ -1,7 +1,7 @@
 # schemas/events/evidence-recorded-1.0.0.schema.json — evidence-recorded payload schema
 
 **Wave:** B | **ADRs:** ADR-002, ADR-003, ADR-004, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/domain/events.md`, `src/yoetz_core/protocol/coverage.md`
+`src/yoetz/domain/events.md`, `src/yoetz/protocol/coverage.md`
 **Imported by:** replay, evidence, and claim tests
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the payload that records observed evidence and its immutability strengt
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/events/evidence-recorded/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/evidence-recorded/1.0.0`.
 - Owning model: `EvidenceRecordedPayload`.
 
 ## Behavior

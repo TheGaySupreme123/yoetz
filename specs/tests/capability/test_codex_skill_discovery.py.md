@@ -10,7 +10,7 @@ consent, copy, modification protection, status, and removal preserve user-owned 
 
 ## Public surface
 
-Cases: explicit `$yoetz-core`; material-task implicit trigger if claimed; trivial non-trigger;
+Cases: explicit `$yoetz`; material-task implicit trigger if claimed; trivial non-trigger;
 canonical source/wheel/install parity; preview/decline/accept; existing identical/modified copy;
 compatible/incompatible skill-MCP versions; status/remove.
 

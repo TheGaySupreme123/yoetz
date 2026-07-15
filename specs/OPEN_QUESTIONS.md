@@ -1,4 +1,4 @@
-# Yoetz Core v0.1 — decision ledger and implementation-freeze gates
+# Yoetz v0.1 — decision ledger and implementation-freeze gates
 
 **Wave:** A–F | **ADRs:** ADR-001 through ADR-009 | **Imports (spec-tree):** all owning specs |
 **Imported by:** `specs/README.md`, ADR ratification, implementation-freeze review
@@ -49,19 +49,9 @@ empirical/review gates.
 
 ### Founder decisions required before implementation freeze
 
-| ID | Decision | Working default and recommendation | Owning files | Freeze condition |
-|---|---|---|---|---|
-| F-001 | Apache release copyright-holder name | **Apache-2.0 is selected.** The only remaining legal metadata choice is the exact person or entity named in the release copyright notice; no alternative license remains open. | `repository/LICENSE.md`, `repository/pyproject.toml.md`, `repository/README.md` | Founder supplies the exact public copyright-holder spelling. |
-| F-002 | Community standard | Adopt **Contributor Covenant 2.1**, with a real non-security enforcement contact distinct from the security intake. | `repository/CODE_OF_CONDUCT.md`, `repository/CONTRIBUTING.md`, `repository/SECURITY.md` | Founder selects the standard and public contact routing. |
-| F-005 | Development-only Node toolchain | Keep ADR-007's official npm Pyright pin in private `package.json`/lock files; Node is a contributor/CI prerequisite only and never an end-user/runtime surface. | ADR-007, `repository/package.json.md`, `repository/package-lock.json.md` | Founder ratifies or chooses a non-npm type checker and amends ADR-007. |
-| F-006 | Public contact routing | Name maintained public routes for security disclosure, community conduct, and general support; security and conduct intake must remain distinct. | `repository/SECURITY.md`, `repository/CODE_OF_CONDUCT.md`, quarantine runbook | Founder supplies the real channels before public release. |
-| F-007 | v0.1 decrypted-memory boundary | Recommended working rule: keep vault keys and decrypted state inside the one trusted local service behind swappable `VaultPort`/`SecretMemoryPort` boundaries, use platform page-lock/no-core capabilities where verified, and make only best-effort overwrite claims. A native broker/subprocess is the stronger but materially larger alternative. | ADR-004, ADR-008, `ports/keys.md`, `ports/secret_memory.md`, service capability tests | Founder accepts the in-service v0.1 boundary or requires a native vault broker before public alpha. |
-| F-008 | Headless passphrase unlock | Recommended working rule: defer inherited-secret-descriptor support. A headless v0.1 service can become ready through an approved unlocked OS keyring; otherwise it remains explicitly `locked`. The alternative is a narrowly scoped, one-shot inherited descriptor protocol with new lifecycle and leak tests. | ADR-004, ADR-008, service lifecycle and capability specs | Founder accepts deferral or explicitly requires the descriptor design in v0.1. |
-| F-009 | Provider-adapter isolation boundary | Recommended working rule: v0.1 loads only reviewed bundled adapters as trusted in-process service code. Composition passes an approved case and exact one-attempt transport capabilities, never repository/storage/environment handles; third-party and dynamic adapters are absent. Public claims must say this is not an OS sandbox and does not resist a malicious adapter already executing inside the trusted service. The stronger alternative is a least-authority sandboxed provider subprocess/broker with executable escape and ambient-access tests. | ADR-006, ADR-009, `adapters/privacy/gateway.md`, `adapters/providers/`, `repository/PRIVACY.md`, public claim map | Founder accepts bundled adapters inside the trusted computing base or requires sandboxed provider execution before public alpha. |
-| F-010 | Durable local-human authority in keyring mode | Current safe default: pristine automatic keyring initialization requires both verified create/load keyring support and an artifact-verified action-bound `UserPresencePort` for the exact release cell. Without both, no keyring/vault artifact or immutable mode is created; the service remains `uninitialized/locked` with `human_authority_unavailable`, and a local human may explicitly choose passphrase setup. Existing keyring vaults may remain ready-local without current presence, but external activation, policy widening, provider-credential set/rotate, and other durable authority changes stay fenced. Ordinary keyring unlock, TTY presence, and same-UID identity are insufficient. Alternatives are additional exact macOS/Linux presence adapters, enrollment/recovery of a separate Yoetz admin-authorization secret, or a reviewed first-install/migration design. | ADR-008, ADR-009, `ports/secret_memory.md`, `service/human_control.md`, setup wizard and platform capability specs | Founder selects the v0.1 authority source and supported platform/migration behavior; any secret option receives a complete setup, recovery, rotation, and leak contract before implementation. |
-| F-011 | Per-request confirmation strength | Recommended working rule: `confirm_every_request` uses an exact prepared-case preview plus explicit foreground `/dev/tty` approve/deny for a disclosure already inside the durable authorized policy. One decision binds exactly one physical attempt; every retry requires a fresh proposal, preview, and decision. It cannot widen policy and does not mint reusable authority, but it is intent/UX evidence rather than cryptographic human proof against malicious same-UID code with arbitrary shell/socket access. Strong OS/admin-secret reauthentication remains mandatory for durable widening and credential changes. The stronger but higher-friction alternative requires action-bound reauthentication for every external request. | ADR-009, `service/confidential_protocol.md`, `service/human_control.md`, `application/egress.md`, privacy wizard/fixtures/tests | Founder accepts foreground digest-bound consent inside the existing ceiling or requires strong reauthentication on every confirmed request. |
-| F-012 | Provider credential versus never-send wording | Recommended working interpretation: credentials discovered in candidate/user/repository/config/transcript content remain non-overridable never-send data. A separately and confidentially provisioned service-vault `ProviderCredentialHandle` may be emitted only as one-attempt authentication metadata to the exact pinned TLS provider endpoint; it never enters model body/context, preview, receipt, log, environment, config, or reusable SDK state. Encryption, vault-unlock, and recovery material have no exception. The literal alternative forbids all credential egress and therefore all credentialed external providers. | ADR-006, ADR-009, `domain/privacy.md`, `ports/secret_memory.md`, provider/gateway specs, `repository/PRIVACY.md` | Founder confirms the control-plane authentication exception or selects no credentialed external providers. |
-| F-013 | Local-model runtime trust boundary | Recommended working rule: Core itself connects only to an exact approved AF_UNIX endpoint and performs no model launch, download, DNS, or IP networking. A pre-existing local-model runtime that receives plaintext is nevertheless an explicitly trusted local disclosure sink unless its support cell proves enforceable no-network sandboxing; Core must not claim that another same-UID process lacks ambient network authority. Alternatives are a Core-managed verifiably network-denied runtime or no local-model support under the strongest local-only claim. | ADR-009, `adapters/providers/local_model.md`, `repository/PRIVACY.md`, setup wizard, public claim map and capability tests | Founder accepts the named local runtime as part of the trusted local computing base, requires managed sandboxing, or omits local-model support from v0.1. |
+None. Every founder item formerly listed here is resolved below. Empirical release evidence and
+the two independent security reviews remain required; closing product choices does not manufacture
+that evidence.
 
 ### Empirical release-lock gates
 
@@ -78,6 +68,7 @@ empirical/review gates.
 | E-009 | Codex skill materiality/activation examples | Freeze examples from bounded dogfood evidence; v0.1 must prefer explicit activation and avoid triggering on trivial work. | Skill fixtures and Codex capability evidence. |
 | E-010 | Local service endpoint, peer-credential, permission, lifecycle, keyring, memory-protection, and relock matrix | No platform support claim until a clean-profile service proves authenticated local attachment, locked/ready transitions, crash recovery, suspend/session-lock relock, and secret-canary absence. | Service/control capability evidence and platform matrix. |
 | E-011 | Privacy classifier, never-send scanner, minimizer/redactor, consent, endpoint binding, and receipt matrix | No “policy enforced” claim from configuration alone; every profile, channel, scope intersection, denial, and dispatch path must produce exact evidence. | ADR-009 privacy conformance, property, integration, and live-profile evidence. |
+| E-012 | Public security, conduct, and support routes | Before public release, prove that private vulnerability reporting is enabled, `security@yoetz.dev` and `conduct@yoetz.dev` are monitored by maintainers, and the repository issue route is available for ordinary support. | Repository policy-link check plus dated maintainer delivery/response drill. |
 
 ### Independent review blocker
 
@@ -103,9 +94,13 @@ empirical/review gates.
 - Broad waiver scopes, noninteractive/model waivers, or waiver of deterministic policy classes.
 - Structural task/workflow status without keys; the locked service exposes only its bounded service
   lifecycle/reason status, while all six task operations fail closed when required keys are locked.
-- Generic headless passphrase input and inherited-secret descriptors unless F-008 changes the v0.1
-  boundary.
-- A native vault broker/subprocess unless F-007 makes it a public-alpha prerequisite.
+- Generic headless passphrase input and inherited-secret descriptors. v0.1 unattended readiness
+  uses only an existing vault through a release-tested OS keyring; passphrase mode requires the
+  confidential human ceremony.
+- A native vault broker/subprocess; v0.1 uses the in-service `SecretMemoryPort` boundary.
+- A public npm/`npx yoetz` launcher. v0.1 remains a Python distribution with `uv` as its supported
+  install and tool runner; any npm launcher needs its own provenance, delegation, upgrade, and
+  platform contract.
 - Sigstore or other signing claims until verification is documented and tested.
 - Hosted retrieval for public schema `$id` URLs; v0.1 resolves the frozen schema set offline.
 - A combined rendered skill handbook; v0.1 ships the two separately owned reference documents.
@@ -114,16 +109,53 @@ empirical/review gates.
 - In-place repair of a quarantined route; v0.1 recovery builds/verifies a new target and switches
   routes through the catalog state machine.
 
-### Resolved working decisions already reflected across the tree
+### Resolved founder and working decisions reflected across the tree
 
 - Ignored architecture/strategy files are private drafting inputs only; the committed ADRs,
   `INTERFACES.md`, and owning specs are self-contained public authority.
-- Apache-2.0 is the selected public license; only the copyright-holder string remains to fill.
+- **F-001:** Yoetz uses the unmodified official Apache License 2.0 text and the exact SPDX expression
+  `Apache-2.0`. v0.1 does not invent or require a project-wide copyright-holder notice; applicable
+  ownership and repository history remain intact.
+- **F-002:** The project adopts Contributor Covenant 3.0. T3 Code may inspire the clarity and
+  contributor experience of repository documents, but it is not an authority for Yoetz runtime,
+  protocol, privacy, or security architecture.
+- **F-005:** The official npm Pyright package remains an exactly pinned contributor/CI tool only.
+  Node/npm are not Yoetz runtime requirements, and a public `npx yoetz` launcher is deferred as a
+  separate distribution surface rather than hidden inside the type-checker decision.
+- **F-006:** Private vulnerability reporting uses GitHub's private vulnerability-reporting surface
+  plus `security@yoetz.dev`; private conduct reports use the distinct `conduct@yoetz.dev` route;
+  ordinary support and bug reports use repository issues. E-012 verifies these routes before
+  release rather than treating prose as operational proof.
 - The persistent per-user local service is in v0.1 and is the sole owner of keys, decrypted state,
   durable writers, privacy policy enforcement, and outbound dispatch. CLI, MCP, and UI are clients.
-- If an approved OS keyring cannot unlock the vault, the service remains alive in explicit
-  `locked`; ordinary CLI/MCP arguments, environment, configuration, logs, transcripts, and LLM
-  context are forbidden secret-ingress channels.
+- **F-007:** v0.1 keeps vault keys, provider-credential handles, and decrypted state inside the
+  trusted local Yoetz service behind swappable `VaultPort`/`SecretMemoryPort` boundaries. Verified
+  page-lock/no-core protections and best-effort overwrite are used where available; a native vault
+  broker is deferred. This is a Yoetz-specific decision, not an inheritance from T3 Code.
+- **F-008:** Unattended readiness is required and is provided in v0.1 by automatic unlock of an
+  existing vault through an approved, release-tested OS keyring. If that path is unavailable or
+  locked, the service remains alive in explicit `locked`; passphrase vaults require the confidential
+  human ceremony. Arguments, environment, config, stdin, files, MCP, transcripts, and LLM context
+  are not passphrase-ingress channels.
+- **F-009:** v0.1 permits only reviewed bundled provider adapters from a closed registry as trusted
+  in-process service code. They receive an approved case and one-attempt transport capability, not
+  ambient repositories or state. This is capability minimization, not an OS sandbox.
+- **F-010:** Pristine automatic keyring initialization requires both verified keyring create/load
+  support and an action-bound `UserPresencePort` for the exact release cell. Otherwise Yoetz writes
+  no immutable keyring-mode state and offers explicit passphrase initialization. Existing keyring
+  vaults may unlock for permitted local work, but durable widening and credential mutation remain
+  fenced without strong presence.
+- **F-011:** `confirm_every_request` uses a foreground exact prepared-case preview and one explicit
+  decision for one physical attempt inside existing durable policy. Every retry needs a new decision;
+  durable widening and credential mutation still require strong action-bound reauthentication.
+- **F-012:** Candidate/user/repository/config/transcript credentials remain non-overridable
+  never-send data. A separately provisioned vault credential may be consumed only once as
+  authentication metadata for the exact pinned TLS endpoint and never enters model content,
+  previews, receipts, logs, config, environment, transcripts, or reusable SDK state.
+- **F-013:** Yoetz may connect only to an exact approved owner-only AF_UNIX local-model endpoint and
+  does not launch/download the model or perform DNS/IP networking. The separate runtime receives
+  plaintext and is therefore an explicitly trusted disclosure sink unless its exact support cell
+  proves enforceable network isolation; Yoetz does not claim away another process's authority.
 - Every outbound provider request follows classification, policy intersection, local
   minimization/redaction/secret scanning, optional trusted-human preview of the exact prepared
   case, gateway revalidation, and binding to one provider/model/endpoint profile. Network channels

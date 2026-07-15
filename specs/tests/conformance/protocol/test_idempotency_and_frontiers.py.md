@@ -1,7 +1,7 @@
 # tests/conformance/protocol/test_idempotency_and_frontiers.py — idempotency and frontier contracts
 
 **Wave:** A/B/C/D | **ADRs:** ADR-002, ADR-003, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/protocol/models.md`, `src/yoetz_core/kernel/projections.md`
+`src/yoetz/protocol/models.md`, `src/yoetz/kernel/projections.md`
 **Imported by:** conformance protocol tests
 
 ## Purpose

@@ -1,7 +1,7 @@
 # schemas/events/receipt-recorded-1.0.0.schema.json — receipt-recorded payload schema
 
 **Wave:** D/F | **ADRs:** ADR-002, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/domain/events.md`, `src/yoetz_core/domain/receipts.md`
+`src/yoetz/domain/events.md`, `src/yoetz/domain/receipts.md`
 **Imported by:** receipt and replay tests
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the payload that records a canonical receipt object in the ledger.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/events/receipt-recorded/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/receipt-recorded/1.0.0`.
 - Owning model: `ReceiptRecordedPayload`.
 
 ## Behavior

@@ -1,6 +1,6 @@
 # tests/unit/service/test_vault_state.py — vault state and handle-generation unit suite
 
-**Wave:** C | **ADRs:** ADR-004, ADR-008 | **Imports (spec-tree):** `src/yoetz_core/service/vault.md` | **Imported by:** test runner
+**Wave:** C | **ADRs:** ADR-004, ADR-008 | **Imports (spec-tree):** `src/yoetz/service/vault.md` | **Imported by:** test runner
 
 ## Purpose
 

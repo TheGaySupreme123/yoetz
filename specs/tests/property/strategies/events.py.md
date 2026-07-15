@@ -1,7 +1,7 @@
 # tests/property/strategies/events.py — generated event and payload strategies
 
 **Wave:** B | **ADRs:** ADR-002, ADR-003, ADR-005, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/domain/events.md`, `src/yoetz_core/domain/values.md`
+`src/yoetz/domain/events.md`, `src/yoetz/domain/values.md`
 **Imported by:** property-based replay and boundary tests
 
 ## Purpose

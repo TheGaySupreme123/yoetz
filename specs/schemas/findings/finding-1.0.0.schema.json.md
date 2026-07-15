@@ -1,7 +1,7 @@
 # schemas/findings/finding-1.0.0.schema.json — finding schema
 
 **Wave:** B | **ADRs:** ADR-002, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/domain/findings.md`, `src/yoetz_core/protocol/coverage.md`
+`src/yoetz/domain/findings.md`, `src/yoetz/protocol/coverage.md`
 **Imported by:** check/result schemas, receipts, and parity fixtures
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the canonical public finding value used by checks, receipts, and rankin
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/findings/finding/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/findings/finding/1.0.0`.
 - Owning model: `Finding`.
 
 ## Behavior

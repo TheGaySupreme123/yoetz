@@ -1,8 +1,8 @@
 # tests/unit/kernel/test_reducers_each_family.py — family-by-family reducer transition matrix
 
 **Wave:** B | **ADRs:** ADR-002, ADR-003, ADR-004, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/kernel/reducers.md`, `src/yoetz_core/domain/events.md`,
-`src/yoetz_core/kernel/projections.md`
+`src/yoetz/kernel/reducers.md`, `src/yoetz/domain/events.md`,
+`src/yoetz/kernel/projections.md`
 **Imported by:** the kernel unit suite
 
 ## Purpose

@@ -1,7 +1,7 @@
 # tests/conformance/adapters/test_start_catalog_port.py — start catalog port parity
 
 **Wave:** A–F | **ADRs:** all | **Imports (spec-tree):**
-`src/yoetz_core/ports/start_catalog.md`, `tests/conformance/adapters/test_ledger_port.py.md`
+`src/yoetz/ports/start_catalog.md`, `tests/conformance/adapters/test_ledger_port.py.md`
 **Imported by:** conformance adapter tests
 
 ## Purpose

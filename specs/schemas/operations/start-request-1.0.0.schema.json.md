@@ -1,7 +1,7 @@
 # schemas/operations/start-request-1.0.0.schema.json — start request schema
 
 **Wave:** D | **ADRs:** ADR-001, ADR-002, ADR-003, ADR-004 | **Imports (spec-tree):**
-`src/yoetz_core/application/start.md`, `src/yoetz_core/protocol/models.md`
+`src/yoetz/application/start.md`, `src/yoetz/protocol/models.md`
 **Imported by:** CLI, MCP, and validation fixtures
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the public request shape for the `start` operation.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/operations/start-request/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/operations/start-request/1.0.0`.
 - Owning model: `StartRequestModel`.
 
 ## Behavior

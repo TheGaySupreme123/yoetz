@@ -2,7 +2,7 @@
 
 **Wave:** F | **ADRs:** ADR-003, ADR-005, ADR-006, ADR-007, ADR-008, ADR-009 | **Imports (spec-tree):** capability
 matrix, release evidence, version/resource specs | **Imported by:** packaged support mirror,
-`src/yoetz_core/version.py`, startup diagnostics, public claim map
+`src/yoetz/version.py`, startup diagnostics, public claim map
 
 ## Purpose
 

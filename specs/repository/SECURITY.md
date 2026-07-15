@@ -22,9 +22,11 @@ The file must describe:
 
 ## Behavior
 
-The security policy must tell reporters how to share a problem safely and privately. It should
-encourage minimal reproduction details, version information, and impact description, but it must
-not ask for secrets, live customer data, or destructive proof in public.
+The preferred route is GitHub private vulnerability reporting for this repository, with
+`security@yoetz.dev` as a distinct maintained fallback. The security policy must tell reporters how
+to share a problem safely and privately. It should encourage minimal reproduction details, version
+information, and impact description, but it must not ask for secrets, live customer data, or
+destructive proof in public.
 
 The document should also state:
 
@@ -38,8 +40,8 @@ The policy must avoid promising instant triage or unconditional response times u
 actually commits to them.
 
 During public alpha, the newest published release is the only security-fix line promised; reports
-against older versions are still accepted and triaged, but backports are not promised. The actual
-private intake route is inserted only after F-006 supplies a maintained channel.
+against older versions are still accepted and triaged, but backports are not promised. E-012 must
+prove private reporting is enabled and the fallback mailbox is monitored before public release.
 
 ## Errors and edge cases
 
@@ -63,6 +65,4 @@ private intake route is inserted only after F-006 supplies a maintained channel.
 
 ## Open questions
 
-None.
-
-F-006 is the sole central public-contact gate.
+None. F-006 is resolved; E-012 is the operational contact-route gate.

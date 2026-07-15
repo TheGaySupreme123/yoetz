@@ -1,7 +1,7 @@
 # tests/unit/service/test_confidential_client.py — client-safe confidential state machine tests
 
 **Wave:** D | **ADRs:** ADR-004, ADR-008, ADR-009 | **Imports (spec-tree):**
-`src/yoetz_core/service/confidential_client.md`, confidential golden frames | **Imported by:** unit
+`src/yoetz/service/confidential_client.md`, confidential golden frames | **Imported by:** unit
 suite and client import-boundary gate
 
 ## Purpose

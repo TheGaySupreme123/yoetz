@@ -1,7 +1,7 @@
 # schemas/events/finding-recorded-1.0.0.schema.json — finding-recorded payload schema
 
 **Wave:** B | **ADRs:** ADR-002, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/domain/findings.md`, `src/yoetz_core/protocol/coverage.md`
+`src/yoetz/domain/findings.md`, `src/yoetz/protocol/coverage.md`
 **Imported by:** check, replay, and receipt tests
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the engine-authored finding payload mirrored field-for-field from the f
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/events/finding-recorded/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/finding-recorded/1.0.0`.
 - Owning model: `Finding`.
 
 ## Behavior

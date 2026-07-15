@@ -1,7 +1,7 @@
 # schemas/events/accepted-event-1.0.0.schema.json — accepted event schema
 
 **Wave:** A/B/C | **ADRs:** ADR-001, ADR-002, ADR-003, ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/domain/events.md`, `src/yoetz_core/protocol/coverage.md`
+`src/yoetz/domain/events.md`, `src/yoetz/protocol/coverage.md`
 **Imported by:** ledger parity, replay, and resource manifest tests
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the structural ledger envelope stored after acceptance.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/events/accepted-event/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/accepted-event/1.0.0`.
 - Owning model: `AcceptedEvent`.
 
 ## Behavior

@@ -1,8 +1,8 @@
 # tests/integration/application/test_respond_status_receipt.py — response, status, and receipt flow
 
 **Wave:** D | **ADRs:** ADR-003, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/application/respond.md`, `src/yoetz_core/application/status.md`,
-`src/yoetz_core/application/receipt.md`
+`src/yoetz/application/respond.md`, `src/yoetz/application/status.md`,
+`src/yoetz/application/receipt.md`
 **Imported by:** integration application tests
 
 ## Purpose

@@ -1,9 +1,9 @@
 # tests/integration/storage/test_quarantine_and_recovery.py — quarantine and recovery paths
 
 **Wave:** C | **ADRs:** ADR-003, ADR-004, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/adapters/sqlite/start_catalog.md`, `src/yoetz_core/adapters/sqlite/repository.md`,
-`src/yoetz_core/adapters/sqlite/recovery.md`, `src/yoetz_core/adapters/objects/envelope.md`,
-`src/yoetz_core/adapters/privacy/catalog.md`
+`src/yoetz/adapters/sqlite/start_catalog.md`, `src/yoetz/adapters/sqlite/repository.md`,
+`src/yoetz/adapters/sqlite/recovery.md`, `src/yoetz/adapters/objects/envelope.md`,
+`src/yoetz/adapters/privacy/catalog.md`
 **Imported by:** integration storage tests
 
 ## Purpose

@@ -5,17 +5,17 @@
 
 ## Purpose
 
-This file is the canonical legal grant that accompanies the public `yoetz-core` release. It defines
+This file is the canonical legal grant that accompanies the public `yoetz` release. It defines
 what downstream users may do with the code, under what conditions, and with what disclaimers.
 
 ## Public surface
 
-The founder selected **Apache License 2.0** for Yoetz Core. The file must contain:
+The founder selected **Apache License 2.0** for Yoetz. The file must contain:
 
 - the unmodified full Apache License, Version 2.0 text;
 - the SPDX identifier `Apache-2.0` in release metadata;
-- no project-specific prose inserted into or appended to the canonical license text; the final
-  copyright-holder declaration belongs in reviewed package metadata and the public README;
+- no project-specific prose inserted into or appended to the canonical license text;
+- no fabricated project-wide copyright-holder declaration in package metadata or the README;
 - no private addenda that are not part of the public grant.
 
 ## Behavior
@@ -58,7 +58,5 @@ root `NOTICE` file is introduced.
 
 ## Open questions
 
-None.
-
-Apache-2.0 is selected; the exact public copyright-holder spelling remains the reduced F-001
-central release-metadata gate.
+None. F-001 is resolved: use the official license text and SPDX expression without inventing a
+project-wide holder notice.

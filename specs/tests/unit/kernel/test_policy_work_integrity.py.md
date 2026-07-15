@@ -1,7 +1,7 @@
 # tests/unit/kernel/test_policy_work_integrity.py — work-integrity pack rule coverage
 
 **Wave:** B | **ADRs:** ADR-002, ADR-004, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/kernel/policies/work_integrity.md`, `src/yoetz_core/domain/findings.md`
+`src/yoetz/kernel/policies/work_integrity.md`, `src/yoetz/domain/findings.md`
 **Imported by:** the kernel unit suite
 
 ## Purpose

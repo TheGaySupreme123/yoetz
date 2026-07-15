@@ -1,8 +1,8 @@
 # tests/integration/application/test_publish_work.py — publish-work end-to-end
 
 **Wave:** D | **ADRs:** ADR-003, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/application/publish_work.md`, `src/yoetz_core/adapters/sqlite/repository.md`,
-`src/yoetz_core/adapters/objects/encrypted_files.md`
+`src/yoetz/application/publish_work.md`, `src/yoetz/adapters/sqlite/repository.md`,
+`src/yoetz/adapters/objects/encrypted_files.md`
 **Imported by:** integration application tests
 
 ## Purpose

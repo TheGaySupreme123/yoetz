@@ -66,7 +66,7 @@ socket/DNS/redirect/download/telemetry/update/capability attempts are zero, and 
 receipts contain no canary. The harness also allows only exact release-cell service/confidential,
 optional local-model, and OS credential/user-presence/session-lifecycle security IPC; arbitrary
 AF_UNIX/D-Bus/proxy use fails,
-and evidence names the exact Core-owned process/readiness boundary and external-agent exclusions.
+and evidence names the exact Yoetz-owned process/readiness boundary and external-agent exclusions.
 
 Provider refusal, timeout or invalid response completes deterministic check as
 `incomplete_check`, exposes that semantic review is incomplete, and returns final deterministic

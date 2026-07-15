@@ -2,7 +2,7 @@
 
 **Status:** Working decision for spec drafting (2026-07-13). Ratification requires the golden
 vectors plus an independent-implementation parity run.
-**Owning public specs:** `specs/INTERFACES.md`, `specs/src/yoetz_core/protocol/`,
+**Owning public specs:** `specs/INTERFACES.md`, `specs/src/yoetz/protocol/`,
 `specs/schemas/`, and `specs/fixtures/canonical/`.
 
 ## Decisions
@@ -34,7 +34,7 @@ vectors plus an independent-implementation parity run.
 6. **Schema-version policy:** `protocol_version = "0.1"`; each request/result/event schema is
    independently SemVer'd starting `1.0.0`; unknown public request versions are rejected
    (`PROTOCOL_VERSION_UNSUPPORTED` / `INVALID_REQUEST`); unknown *event* schemas are preserved
-   opaque. JSON Schema draft 2020-12 with `$id` under `https://schemas.yoetz.dev/core/0.1/`.
+   opaque. JSON Schema draft 2020-12 with `$id` under `https://schemas.yoetz.dev/0.1/`.
 7. **Golden vectors:** `fixtures/canonical/` freezes: canonicalization vectors (positive +
    rejection), request-digest vectors, accepted-envelope/entry-digest vectors, and ID-validation
    vectors. Released bytes are permanent compatibility obligations.

@@ -1,7 +1,7 @@
 # tests/integration/storage/test_checkpoint_and_wal_bounds.py — checkpoint and WAL degradation bounds
 
 **Wave:** C | **ADRs:** ADR-003, ADR-004 | **Imports (spec-tree):**
-`src/yoetz_core/adapters/sqlite/connection.md`, `src/yoetz_core/adapters/sqlite/repository.md`
+`src/yoetz/adapters/sqlite/connection.md`, `src/yoetz/adapters/sqlite/repository.md`
 **Imported by:** integration storage tests
 
 ## Purpose

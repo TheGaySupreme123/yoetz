@@ -1,8 +1,8 @@
 # tests/unit/application/test_semantic_post_validation.py — semantic result validation fences
 
 **Wave:** D/E | **ADRs:** ADR-003, ADR-004, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/application/check.md`, `src/yoetz_core/domain/findings.md`,
-`src/yoetz_core/protocol/coverage.py`
+`src/yoetz/application/check.md`, `src/yoetz/domain/findings.md`,
+`src/yoetz/protocol/coverage.py`
 **Imported by:** the application unit suite
 
 ## Purpose

@@ -1,7 +1,7 @@
 # schemas/common/coverage-1.0.0.schema.json — coverage value object schema
 
 **Wave:** A/B | **ADRs:** ADR-002, ADR-004, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/protocol/coverage.md`, `src/yoetz_core/protocol/models.md`
+`src/yoetz/protocol/coverage.md`, `src/yoetz/protocol/models.md`
 **Imported by:** findings, receipts, and public-operation schemas
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the frozen coverage object used to label evidence strength and honesty 
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/common/coverage/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/common/coverage/1.0.0`.
 - Owning model: `Coverage`.
 
 ## Behavior

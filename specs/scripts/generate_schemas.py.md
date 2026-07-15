@@ -1,8 +1,8 @@
 # scripts/generate_schemas.py — deterministic public JSON Schema generator
 
 **Wave:** A/F | **ADRs:** ADR-002, ADR-005, ADR-007 | **Imports (spec-tree):**
-`specs/src/yoetz_core/protocol/models.md`, `specs/src/yoetz_core/protocol/schemas.md`,
-`specs/src/yoetz_core/protocol/canonical.md` | **Imported by:** PR CI, resource verification,
+`specs/src/yoetz/protocol/models.md`, `specs/src/yoetz/protocol/schemas.md`,
+`specs/src/yoetz/protocol/canonical.md` | **Imported by:** PR CI, resource verification,
 release construction
 
 ## Purpose

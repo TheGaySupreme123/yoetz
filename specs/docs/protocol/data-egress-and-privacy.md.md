@@ -75,7 +75,7 @@ Four LLM profiles are closed values: `local_only`, `confirm_every_request`, `min
 `llm_inference` network channel and external LLM-provider construction; it is not consent or denial
 for the four non-LLM channels. Local model permission is orthogonal and names an exact trusted
 runtime profile. “No-network runtime” may be claimed only for a support cell with enforceable
-sandbox evidence; an AF_UNIX endpoint alone proves only Core's delivery path (F-013).
+sandbox evidence; an AF_UNIX endpoint alone proves only Yoetz's delivery path (F-013).
 External profiles bind the exact five-field `ProviderBinding`: `provider_id`, `model_id`,
 `endpoint_profile_id`, `endpoint_profile_version`, and `transport`. `trusted_provider`
 additionally binds allowed categories and purpose. Unknown profile, unbound endpoint, scope
@@ -99,13 +99,13 @@ with outcome/reason `channel_unavailable/channel_unavailable`, writes a no-dispa
 makes no DNS/socket attempt. Future transport support requires an exact owner, reviewed ADR/schema,
 and fresh local-human capability confirmation; a stored v0.1 policy row cannot activate silently.
 
-Core's zero-network state is the composite `profile=local_only`,
+Yoetz's zero-network state is the composite `profile=local_only`,
 `network_egress_permitted=false`, and all five channel policies disabled. That state permits only
 exact release-cell local IPC: service/confidential endpoints, an optional approved local-model
 AF_UNIX profile, and measured OS credential/user-presence/session-lifecycle security IPC such as
 allowlisted Linux AF_UNIX session-bus Secret Service routes and, separately, system-bus
 `org.freedesktop.login1` routes, or macOS native security/presence/session notifications. Arbitrary AF_UNIX,
-bus methods/peers, and proxies are forbidden. Evidence names platform/release profile, Core-owned
+bus methods/peers, and proxies are forbidden. Evidence names platform/release profile, Yoetz-owned
 service/client/helper processes, startup-through-`locked|ready` and operation interval, and local
 peers. External OS agents and a separately running local-model process are outside that process
 claim; the latter remains subject to F-013. Neither the profile token nor a true ceiling alone
@@ -272,7 +272,7 @@ content. Revocation is immediate.
   the exact final-request-body commitment.
 - Provider refusal/timeout/invalid output does not change what was authorized and completes semantic
   review as incomplete while deterministic results remain available.
-- Local-model permission cannot make Core launch/download/update a model or open IP networking; it
+- Local-model permission cannot make Yoetz launch/download/update a model or open IP networking; it
   does not attest a separately running model process's ambient network behavior (F-013).
 - Telemetry or crash adapters cannot reuse an approved LLM outbound case.
 - `network_egress_permitted=false` plus any enabled channel is invalid and dispatches nothing;

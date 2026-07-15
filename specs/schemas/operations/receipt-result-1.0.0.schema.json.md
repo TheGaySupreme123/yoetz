@@ -1,8 +1,8 @@
 # schemas/operations/receipt-result-1.0.0.schema.json — receipt result schema
 
 **Wave:** D | **ADRs:** ADR-001, ADR-002, ADR-003, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/application/receipt.md`, `src/yoetz_core/domain/receipts.md`,
-`src/yoetz_core/protocol/errors.md`
+`src/yoetz/application/receipt.md`, `src/yoetz/domain/receipts.md`,
+`src/yoetz/protocol/errors.md`
 **Imported by:** CLI, MCP, and parity tests
 
 ## Purpose
@@ -12,7 +12,7 @@ Describe the public result shape for receipts, including both subject and post-c
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/operations/receipt-result/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/operations/receipt-result/1.0.0`.
 - Owning model: `ReceiptResultModel`.
 
 ## Behavior

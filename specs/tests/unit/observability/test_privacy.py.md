@@ -1,7 +1,7 @@
 # tests/unit/observability/test_privacy.py — privacy helpers and session-hash separation
 
 **Wave:** F | **ADRs:** ADR-004, ADR-005, ADR-007, ADR-009 | **Imports (spec-tree):**
-`src/yoetz_core/observability/privacy.md`, `src/yoetz_core/ports/keys.md`
+`src/yoetz/observability/privacy.md`, `src/yoetz/ports/keys.md`
 **Imported by:** the observability unit suite
 
 ## Purpose

@@ -1,7 +1,7 @@
 # tests/unit/kernel/test_replay_and_projections.py — replay parity and projection digest stability
 
 **Wave:** B | **ADRs:** ADR-002, ADR-003, ADR-004, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/kernel/reducers.md`, `src/yoetz_core/kernel/projections.md`
+`src/yoetz/kernel/reducers.md`, `src/yoetz/kernel/projections.md`
 **Imported by:** the kernel unit suite
 
 ## Purpose

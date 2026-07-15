@@ -6,7 +6,7 @@ release evidence
 
 ## Purpose
 
-Verify `yoetz-core version --json` and package metadata report exact installed identities without
+Verify `yoetz version --json` and package metadata report exact installed identities without
 checkout dependence, unstated inference, private paths, or stronger support claims.
 
 ## Public surface

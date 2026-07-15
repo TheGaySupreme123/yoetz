@@ -1,7 +1,7 @@
 # tests/builders/events.py — explicit event-payload builder helpers
 
 **Wave:** D–F | **ADRs:** ADR-002, ADR-005, ADR-007 | **Imports (spec-tree):**
-`specs/src/yoetz_core/domain/events.md`, `specs/tests/builders/ids.py.md`,
+`specs/src/yoetz/domain/events.md`, `specs/tests/builders/ids.py.md`,
 `specs/tests/builders/clock.py.md` | **Imported by:** unit/property/integration/conformance tests
 
 ## Purpose

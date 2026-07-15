@@ -1,7 +1,7 @@
 # tests/integration/storage/test_start_catalog_state_machine.py — start catalog phase machine
 
 **Wave:** C | **ADRs:** ADR-003, ADR-004, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/adapters/sqlite/start_catalog.md`, `src/yoetz_core/application/start.md`
+`src/yoetz/adapters/sqlite/start_catalog.md`, `src/yoetz/application/start.md`
 **Imported by:** integration storage tests
 
 ## Purpose

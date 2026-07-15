@@ -13,7 +13,7 @@ human authorization have completed before any adapter can perform I/O.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/privacy/outbound-case/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/privacy/outbound-case/1.0.0`.
 - Media type: `application/vnd.yoetz.outbound-case+json`.
 - Closed root fields: `schema_version`, `case_id`, `request_id`, `authorization_id`, `channel`,
   `purpose`, `scope`, `destination`, `policy`, `content_items`, `approved_categories`,
@@ -91,7 +91,7 @@ A local disclosure is not serialized as this network outbound case and receives 
 4. Human authorization is bound to exact case, policy, scope, and expiry.
 5. Adapter input/composition grants no repository/database/filesystem/environment capability; this
    is a least-authority API claim, not process isolation.
-6. A local-model case uses identical disclosure fences and grants the Core adapter no IP-network
+6. A local-model case uses identical disclosure fences and grants the Yoetz adapter no IP-network
    capability; a separate runtime's ambient authority remains the explicit F-013 limitation.
 
 ## Tests

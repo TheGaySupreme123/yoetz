@@ -1,7 +1,7 @@
 # schemas/common/client-info-1.0.0.schema.json — client metadata boundary
 
 **Wave:** A | **ADRs:** ADR-002, ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/protocol/models.md`, `specs/schemas/README.md`
+`src/yoetz/protocol/models.md`, `specs/schemas/README.md`
 **Imported by:** request schemas, MCP/CLI envelopes, and validation fixtures
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the bounded client metadata attached to public requests for tracing and
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/common/client-info/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/common/client-info/1.0.0`.
 - Owning model: `ClientInfoModel`.
 
 ## Behavior

@@ -9,7 +9,7 @@ future desktop UI, documentation, conformance tests
 ## Purpose
 
 Freeze the experience and security contract for creating or widening privacy policy without tying
-Core to one graphical toolkit. A CLI trusted-control flow can satisfy v0.1; a future UI must present
+Yoetz to one graphical toolkit. A CLI trusted-control flow can satisfy v0.1; a future UI must present
 the same questions, examples, preview, and confirmation semantics.
 
 ## Public surface
@@ -24,7 +24,7 @@ It asks exactly the following twelve questions; the token and answer shape are p
 
 | Order | `question_id` | Meaning | Answer type |
 |---:|---|---|---|
-| 1 | `network_egress` | global ceiling: whether any Core network egress may be permitted | boolean |
+| 1 | `network_egress` | global ceiling: whether any Yoetz network egress may be permitted | boolean |
 | 2 | `local_models` | whether local models are permitted | boolean |
 | 3 | `external_provider` | which external provider/model/endpoint profile is trusted | exact external `ProviderBinding` or fixed token `none` |
 | 4 | `content_categories` | which categories/classes may be sent to the external LLM binding | closed `{categories: DataCategory[], data_classes: DataClass[]}` |
@@ -69,7 +69,7 @@ or local runtime, and vice versa. `local_model_categories` must be empty when lo
 `trusted_human_control` is deliberately not a persistent category grant: an authenticated YZH1
 preview may show the exact scope-valid nonsecret categories needed for that ceremony, while the
 never-send set remains blocked. The UI warns that categories approved for `agent_context` may enter
-the MCP/CLI/UI host agent's model context; Core's local receipt does not prove that host's later
+the MCP/CLI/UI host agent's model context; Yoetz's local receipt does not prove that host's later
 provider, network, retention, or training behavior.
 
 For questions 4–6, an item is allowed only when both its category and data class are selected.
@@ -120,16 +120,16 @@ post-secret-scan excerpts and category/count summary immediately before dispatch
 to one physical dispatch of the outbound-case digest; editing any transmitted byte invalidates it.
 Every physical retry requires a fresh preview/decision even for identical bytes. Resume before
 authorization consumption continues the same dispatch and is not a retry. When the case is already
-inside durable policy, exact foreground TTY consent is sufficient under working gate F-011 and is
-not cryptographic proof against arbitrary malicious same-UID automation.
+inside durable policy, exact foreground TTY consent is sufficient under resolved decision F-011
+and is not cryptographic proof against arbitrary malicious same-UID automation.
 
 Selecting a local model shows the exact runtime/profile and states that the process receives
 plaintext. Unless its support cell proves enforceable no-network sandboxing, the runtime is an
-explicitly trusted local component and Core's AF_UNIX-only delivery is not evidence about that
+explicitly trusted local component and Yoetz's AF_UNIX-only delivery is not evidence about that
 process's later network behavior (F-013).
 
 The future graphical UI may add navigation and accessibility affordances but cannot skip, merge,
-preselect, or weaken a question. Core owns policy validation and commit; the UI cannot write policy
+preselect, or weaken a question. Yoetz owns policy validation and commit; the UI cannot write policy
 files directly.
 
 ## Errors and edge cases
@@ -158,7 +158,7 @@ files directly.
 3. Widening requires a fresh foreground local-human decision bound internally to the exact draft;
    ordinary setup only queues it.
 4. Setup carries no keys, credentials, passphrases, or user-content payloads.
-5. Core, not the rendering surface, validates and commits policy.
+5. Yoetz, not the rendering surface, validates and commits policy.
 6. CLI and future UI implement the same twelve question IDs, typed answers, and
    `network_egress`-as-global-ceiling mapping.
 

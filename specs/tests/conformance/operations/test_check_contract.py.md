@@ -1,7 +1,7 @@
 # tests/conformance/operations/test_check_contract.py — check public contract
 
 **Wave:** D/E | **ADRs:** ADR-003, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/application/check.md`, `src/yoetz_core/kernel/ranking.md`
+`src/yoetz/application/check.md`, `src/yoetz/kernel/ranking.md`
 **Imported by:** conformance operations tests
 
 ## Purpose

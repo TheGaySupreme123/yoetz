@@ -1,7 +1,7 @@
 # schemas/common/operation-result-1.0.0.schema.json — common operation-result wrapper
 
 **Wave:** A/B/D | **ADRs:** ADR-002, ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/protocol/models.md`, `src/yoetz_core/protocol/errors.md`
+`src/yoetz/protocol/models.md`, `src/yoetz/protocol/errors.md`
 **Imported by:** all public operation result schemas
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the common result wrapper used by every public operation result schema.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/common/operation-result/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/common/operation-result/1.0.0`.
 - Owning model: common result envelope helper.
 
 ## Behavior

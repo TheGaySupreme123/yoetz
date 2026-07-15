@@ -1,7 +1,7 @@
 # tests/property/strategies/operations.py — generated operation and request strategies
 
 **Wave:** B/C/D | **ADRs:** ADR-003, ADR-005, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/protocol/models.md`, `src/yoetz_core/application/*.md`
+`src/yoetz/protocol/models.md`, `src/yoetz/application/*.md`
 **Imported by:** property-based operation tests
 
 ## Purpose

@@ -21,7 +21,7 @@ HOME/secrets, deadlock on pipes, or kill an unrelated process.
 
 ## Behavior
 
-Resolve `yoetz-core` or the selected Python from the isolated artifact environment and reject a path
+Resolve `yoetz` or the selected Python from the isolated artifact environment and reject a path
 inside the source checkout. Construct a minimal allowlisted environment: isolated HOME/XDG/Yoetz
 data/temp, UTF-8/C locale, UTC, fixed hash seed, explicit test marker, and only named test variables.
 Remove provider/package credentials, Python path/startup hooks, proxy variables, and ambient config.

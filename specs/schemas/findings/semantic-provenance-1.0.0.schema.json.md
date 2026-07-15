@@ -1,7 +1,7 @@
 # schemas/findings/semantic-provenance-1.0.0.schema.json — semantic provenance schema
 
 **Wave:** B/E | **ADRs:** ADR-002, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/domain/findings.md`
+`src/yoetz/domain/findings.md`
 **Imported by:** semantic check results and conformance fixtures
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the bounded audit trail for a semantic finding.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/findings/semantic-provenance/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/findings/semantic-provenance/1.0.0`.
 - Owning model: `SemanticProvenance`.
 
 ## Behavior

@@ -1,10 +1,10 @@
-# Yoetz Core v0.1 — file-level specification tree
+# Yoetz v0.1 — file-level specification tree
 
 **Status:** Working draft, written before any implementation code exists.
 **Method:** Every future code, data, resource, test, workflow, script, and public-document file in
-the public `yoetz-core` repository has one Markdown spec
-here, at the mirrored path (`specs/src/yoetz_core/protocol/canonical.md` specifies the future
-`src/yoetz_core/protocol/canonical.py`). Each spec is the file's code in natural language: what it
+the public `yoetz` repository has one Markdown spec
+here, at the mirrored path (`specs/src/yoetz/protocol/canonical.md` specifies the future
+`src/yoetz/protocol/canonical.py`). Each spec is the file's code in natural language: what it
 exports, what it imports, how every function behaves, how it fails, and which tests lock it.
 `specs/FILE_MANIFEST.md` is the exhaustive future-path ↔ owning-spec ledger. Directory-family
 indexes such as `specs/tests/unit.md` organize files but never substitute for the mirrored spec of
@@ -88,21 +88,21 @@ release gates are referenced only as explanatory text after that marker.
 The public file map includes these explicit modules because the behavior they own cannot remain an
 implicit composition detail:
 
-1. `src/yoetz_core/adapters/mcp_stdio.py` — the Yoetz-owned bounded stdio transport. The CLI/MCP
-   contract already imports `yoetz_core.adapters.mcp_stdio.bounded_stdio_server`; the earlier
+1. `src/yoetz/adapters/mcp_stdio.py` — the Yoetz-owned bounded stdio transport. The CLI/MCP
+   contract already imports `yoetz.adapters.mcp_stdio.bounded_stdio_server`; the earlier
    manifest draft omitted the file. Added.
-2. `src/yoetz_core/kernel/policies/` package with `work_integrity.py` and `research_evidence.py`.
+2. `src/yoetz/kernel/policies/` package with `work_integrity.py` and `research_evidence.py`.
    ADR-006 and the public policy inventory require two deterministic policy packs; giving each a file keeps
    `deterministic_checks.py` as the engine and the packs as versioned data+rules.
-3. `src/yoetz_core/adapters/memory/` package (`ledger.py`, `start_catalog.py`, `objects.py`) —
+3. `src/yoetz/adapters/memory/` package (`ledger.py`, `start_catalog.py`, `objects.py`) —
    the in-memory reference adapters the conformance suite runs against SQLite.
-4. `src/yoetz_core/ports/runtime.py` and its concrete runtime adapter — exact task routing,
+4. `src/yoetz/ports/runtime.py` and its concrete runtime adapter — exact task routing,
    capability admission, process ownership, and task-scoped port lifetime.
-5. `src/yoetz_core/ports/importer.py` plus parser and persistence adapters — bounded source capture,
+5. `src/yoetz/ports/importer.py` plus parser and persistence adapters — bounded source capture,
    crash-safe import planning/publication, and immutable import-report evidence.
 6. maintenance and integration modules — backup/restore/migrate and explicit Codex skill lifecycle
    remain support commands, not hidden branches of the six public workflow operations.
-7. `src/yoetz_core/service/`, local control/secret-ingress adapters, and the service schemas — one
+7. `src/yoetz/service/`, local control/secret-ingress adapters, and the service schemas — one
    persistent per-user authority owns vault keys, decrypted local state, writers, application
    composition, privacy policy, and outbound dispatch. CLI, MCP, and future ordinary UI are clients.
 8. privacy domain/application/port/adapter modules, `PRIVACY.md`, ADR-009, the technical protocol,
@@ -129,8 +129,8 @@ decision ledger.
 | `migrations/` | 2 | — |
 | `skills/` | 4 | 1 references-directory index |
 | `support/` | 1 | — |
-| `src/yoetz_core/` Python/code files | 125 | — |
-| `src/yoetz_core/resources/` | 70 | The resource manifest plus exactly 69 installed entries. |
+| `src/yoetz/` Python/code files | 125 | — |
+| `src/yoetz/resources/` | 70 | The resource manifest plus exactly 69 installed entries. |
 | `scripts/` | 6 | — |
 | `tests/` | 169 | 7 suite indexes |
 | **Total future files** | **508** | **10 indexes + 4 coordination files = 522 spec files** |

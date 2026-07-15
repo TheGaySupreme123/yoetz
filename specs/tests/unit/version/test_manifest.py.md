@@ -1,7 +1,7 @@
 # tests/unit/version/test_manifest.py — installed version manifest contract
 
 **Wave:** F | **ADRs:** ADR-003, ADR-005, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/version.md`, `src/yoetz_core/protocol/schemas.md`
+`src/yoetz/version.md`, `src/yoetz/protocol/schemas.md`
 **Imported by:** the version unit suite
 
 ## Purpose

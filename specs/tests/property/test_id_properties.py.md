@@ -1,7 +1,7 @@
 # tests/property/test_id_properties.py — identifier algebra and hostile input properties
 
 **Wave:** A/B | **ADRs:** ADR-002, ADR-005 | **Imports (spec-tree):**
-`tests/property/strategies/identifiers.py`, `src/yoetz_core/protocol/ids.py`
+`tests/property/strategies/identifiers.py`, `src/yoetz/protocol/ids.py`
 **Imported by:** property-based identifier tests
 
 ## Purpose

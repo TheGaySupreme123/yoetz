@@ -1,7 +1,7 @@
 # tests/integration/storage/test_projection_rebuild.py — projection cache rebuild behavior
 
 **Wave:** C | **ADRs:** ADR-003, ADR-004, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/adapters/sqlite/repository.md`, `src/yoetz_core/kernel/projections.md`
+`src/yoetz/adapters/sqlite/repository.md`, `src/yoetz/kernel/projections.md`
 **Imported by:** integration storage tests
 
 ## Purpose

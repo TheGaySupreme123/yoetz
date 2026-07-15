@@ -1,7 +1,7 @@
 # schemas/events/assignment-recorded-1.0.0.schema.json — assignment-recorded payload schema
 
 **Wave:** B | **ADRs:** ADR-002, ADR-003, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/domain/events.md`
+`src/yoetz/domain/events.md`
 **Imported by:** replay and obligation assignment tests
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the payload that records an obligation assignment.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/events/assignment-recorded/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/assignment-recorded/1.0.0`.
 - Owning model: `AssignmentRecordedPayload`.
 
 ## Behavior

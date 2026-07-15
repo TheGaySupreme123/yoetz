@@ -1,7 +1,7 @@
 # pyproject.toml — declarative build, package, and tool configuration
 
 **Wave:** F | **ADRs:** ADR-003, ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/version.md`, `src/yoetz_core/__init__.md`, `tests/packaging.md`,
+`src/yoetz/version.md`, `src/yoetz/__init__.md`, `tests/packaging.md`,
 `tests/subprocess.md`, `schemas/README.md`
 **Imported by:** the release build, editable installs, `uv`, packaging tests, and metadata probes
 
@@ -19,7 +19,7 @@ identity could drift from the checked-in source tree.
 
 The file must define, at minimum:
 
-- project metadata for the `yoetz-core` distribution;
+- project metadata for the `yoetz` distribution;
 - `license = "Apache-2.0"` as the exact SPDX license expression;
 - the Python version support floor/ceiling for v0.1;
 - the `src/` package layout;
@@ -93,6 +93,5 @@ the build and test environment reproducible.
 
 ## Open questions
 
-None.
-
-Apache-2.0 is frozen; F-005 and E-001 are the sole central development-toolchain gates.
+None. Apache-2.0 and the development-only npm Pyright choice are frozen; E-001 remains the exact
+development-toolchain version gate.

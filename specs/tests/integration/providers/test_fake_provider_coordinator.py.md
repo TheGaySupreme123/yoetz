@@ -1,7 +1,7 @@
 # tests/integration/providers/test_fake_provider_coordinator.py — scripted fake provider coordination
 
 **Wave:** E | **ADRs:** ADR-003, ADR-004, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/adapters/providers/fake.md`, `src/yoetz_core/application/check.md`
+`src/yoetz/adapters/providers/fake.md`, `src/yoetz/application/check.md`
 **Imported by:** integration provider tests
 
 ## Purpose

@@ -1,7 +1,7 @@
 # schemas/operations/publish-work-result-1.0.0.schema.json — publish-work result schema
 
 **Wave:** D | **ADRs:** ADR-001, ADR-002, ADR-003, ADR-004 | **Imports (spec-tree):**
-`src/yoetz_core/application/publish_work.md`, `src/yoetz_core/protocol/errors.md`
+`src/yoetz/application/publish_work.md`, `src/yoetz/protocol/errors.md`
 **Imported by:** CLI, MCP, and parity tests
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the public result shape for publish-work, including accepted summaries 
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/operations/publish-work-result/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/operations/publish-work-result/1.0.0`.
 - Owning model: `PublishWorkResultModel`.
 
 ## Behavior

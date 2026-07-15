@@ -1,7 +1,7 @@
 # uv.lock — frozen dependency resolution and artifact identity
 
 **Wave:** F | **ADRs:** ADR-003, ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/version.md`, `tests/packaging.md`, `tests/subprocess.md`
+`src/yoetz/version.md`, `tests/packaging.md`, `tests/subprocess.md`
 **Imported by:** `uv`, release builds, reproducible install tests, and offline verification
 
 ## Purpose

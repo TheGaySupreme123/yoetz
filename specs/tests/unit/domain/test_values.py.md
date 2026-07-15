@@ -1,8 +1,8 @@
 # tests/unit/domain/test_values.py — canonical domain value conversions
 
 **Wave:** A/B | **ADRs:** ADR-002, ADR-003, ADR-005 | **Imports (spec-tree):**
-`src/yoetz_core/domain/values.md`, `src/yoetz_core/protocol/canonical.md`,
-`src/yoetz_core/protocol/models.md`
+`src/yoetz/domain/values.md`, `src/yoetz/protocol/canonical.md`,
+`src/yoetz/protocol/models.md`
 **Imported by:** the domain unit suite
 
 ## Purpose
@@ -31,7 +31,7 @@ The suite proves:
 - subject-state references cannot smuggle hidden state or unbounded text;
 - `subject_state_relation` returns `different` only for two present unequal tree digests and the
   full relation matrix is locked against the worked state-A/state-B vector in
-  `specs/src/yoetz_core/domain/values.md`;
+  `specs/src/yoetz/domain/values.md`;
 - generated values prove `render_wire_sequence(parse_wire_sequence(x))`, timestamp
   string/datetime/string, and `freeze_json(freeze_json(x))` identities across hash seed, locale,
   timezone, Unicode, nesting, and integer boundaries.

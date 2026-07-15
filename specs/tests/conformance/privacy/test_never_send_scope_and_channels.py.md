@@ -35,7 +35,7 @@ Network instrumentation allows only exact release-cell service/confidential, opt
 and OS credential/user-presence/session-lifecycle security IPC, denies arbitrary AF_UNIX/D-Bus/
 proxies plus AF_INET/AF_INET6,
 DNS and redirects, and attributes every attempted call to one exact channel. Evidence names the
-Core-owned process/startup-through-ready boundary and excludes external OS/model agents. Agent-context canaries
+Yoetz-owned process/startup-through-ready boundary and excludes external OS/model agents. Agent-context canaries
 are checked separately because it is a local disclosure sink before MCP rendering, not an egress
 channel.
 

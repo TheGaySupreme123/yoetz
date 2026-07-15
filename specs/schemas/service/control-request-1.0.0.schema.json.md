@@ -12,7 +12,7 @@ definition. Vault secrets intentionally have no JSON method/body.
 
 ## Public surface
 
-- Draft 2020-12, `$id` `https://schemas.yoetz.dev/core/0.1/service/control-request/1.0.0`.
+- Draft 2020-12, `$id` `https://schemas.yoetz.dev/0.1/service/control-request/1.0.0`.
 - A disjoint closed `oneOf` containing twenty-five method-specific call branches plus one cancel
   branch. Every call branch requires only `kind`, `protocol_version`, `rpc_id`,
   `service_instance_id`, `service_generation`, `method`, `body`, and optional `deadline_ms`;

@@ -1,7 +1,7 @@
 # tests/unit/domain/test_event_payloads.py — event payload validation and immutability
 
 **Wave:** A/B | **ADRs:** ADR-002, ADR-003, ADR-005 | **Imports (spec-tree):**
-`src/yoetz_core/domain/events.md`, `src/yoetz_core/domain/values.md`, `src/yoetz_core/protocol/models.md`
+`src/yoetz/domain/events.md`, `src/yoetz/domain/values.md`, `src/yoetz/protocol/models.md`
 **Imported by:** the domain unit suite
 
 ## Purpose

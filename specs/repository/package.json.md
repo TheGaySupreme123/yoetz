@@ -6,11 +6,11 @@
 ## Purpose
 
 Pin the official npm distribution of Pyright without introducing a JavaScript runtime, build,
-package, or production dependency into Yoetz Core.
+package, or production dependency into Yoetz.
 
 ## Public surface
 
-A private npm package manifest with `name: "yoetz-core-dev-tools"`, `private: true`, no publish
+A private npm package manifest with `name: "yoetz-dev-tools"`, `private: true`, no publish
 configuration, one `typecheck` script invoking `pyright`, and exactly one development dependency:
 the ADR-007 Pyright version refreshed to the newest supported stable release at implementation lock.
 
@@ -25,7 +25,9 @@ dependencies, lifecycle hooks, workspaces, bundled files, or package publication
 
 An unpinned range, added dependency, lifecycle script, registry override, package publication
 setting, or mismatch with `package-lock.json` fails the dependency-policy gate. npm is optional for
-end users and absent from wheel/runtime requirements.
+end users and absent from wheel/runtime requirements. The package is never published as `yoetz`
+and does not provide an application `bin`; a future `npx yoetz` launcher requires a separate owner
+spec and release contract.
 
 ## Invariants
 
@@ -39,4 +41,5 @@ toolchain, execute generated code, or alter released Python artifacts.
 
 ## Open questions
 
-None.
+None. F-005 is resolved in favor of the official development-only npm Pyright package; E-001
+freezes its exact supported release.

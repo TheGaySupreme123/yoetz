@@ -1,7 +1,7 @@
 # tests/subprocess/helpers/frame_driver.py — byte-level MCP stdio stimulus and oracle
 
 **Wave:** D/F | **ADRs:** ADR-005 | **Imports (spec-tree):**
-`specs/tests/subprocess/helpers/child.py.md`, `specs/src/yoetz_core/adapters/mcp_stdio.md` |
+`specs/tests/subprocess/helpers/child.py.md`, `specs/src/yoetz/adapters/mcp_stdio.md` |
 **Imported by:** MCP framing, purity, backpressure, and cancellation tests
 
 ## Purpose

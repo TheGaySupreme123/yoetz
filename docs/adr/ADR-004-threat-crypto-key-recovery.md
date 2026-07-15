@@ -4,8 +4,8 @@
 forbidden secret channels are binding. The concrete cryptographic envelope remains subject to an
 independent threat review before release.
 **Owning public specs:** `docs/adr/ADR-008-local-service-vault-trust-boundary.md`,
-`specs/src/yoetz_core/service/vault.md`, `specs/src/yoetz_core/service/unlock.md`,
-`specs/src/yoetz_core/ports/keys.md`, the key adapters, and the key-recovery runbook.
+`specs/src/yoetz/service/vault.md`, `specs/src/yoetz/service/unlock.md`,
+`specs/src/yoetz/ports/keys.md`, the key adapters, and the key-recovery runbook.
 
 ## Threat model
 
@@ -187,7 +187,7 @@ Backups remain either `machine_bound` (vault/key locator and fingerprint only) o
 after a clean-profile restore drill. Logical redaction and object deletion remain the only erasure
 claims; WAL pages, backups, snapshots, or storage remanence preclude a forensic-erasure promise.
 
-## Headless deployment evaluation
+## Headless deployment
 
 A secret in an environment variable, command argument, config file, stdin, named plaintext file,
 or ordinary inherited pipe is rejected. A narrowly scoped inherited secret descriptor can be made
@@ -197,14 +197,16 @@ bytes never appear in argv/env; same-UID/supervisor provenance checks; exact siz
 no seek/reopen/path; immediate close; mutable-buffer overwrite; no child inheritance; and failure
 closed on ambiguity.
 
-That mechanism is **not enabled in the v0.1 working default**. An already initialized keyring vault
+That mechanism is **not enabled in v0.1**. An already initialized keyring vault
 may unlock noninteractively; without measured user presence it is ready only for locally permitted
 work and external activation remains fenced. A pristine headless installation cannot auto-create
 keyring mode unless its exact release cell also carries the required verified
 `UserPresenceCapability`; otherwise it remains setup-required. Passphrase-locked headless startup
 remains locked.
 Adding inherited-descriptor unlock requires its own reviewed adapter/specification, platform tests,
-and founder confirmation rather than a generic `--password-fd` shortcut.
+and a new ADR rather than a generic `--password-fd` shortcut. This is the resolved F-008 boundary:
+v0.1 provides unattended readiness through the approved OS-keyring path, not noninteractive
+passphrase transport.
 
 ## What stays plaintext
 

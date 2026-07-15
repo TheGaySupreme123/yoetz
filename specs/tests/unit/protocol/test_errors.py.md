@@ -1,7 +1,7 @@
 # tests/unit/protocol/test_errors.py — public error vocabulary and sanitization
 
 **Wave:** A/B | **ADRs:** ADR-002, ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/protocol/errors.py`, `src/yoetz_core/cli/exits.py`, `src/yoetz_core/mcp/errors.md`
+`src/yoetz/protocol/errors.py`, `src/yoetz/cli/exits.py`, `src/yoetz/mcp/errors.md`
 **Imported by:** the protocol and boundary unit suite
 
 ## Purpose

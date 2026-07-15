@@ -1,6 +1,6 @@
 # tests/property/test_service_control_frames.py — bounded control-frame property suite
 
-**Wave:** C | **ADRs:** ADR-008 | **Imports (spec-tree):** `src/yoetz_core/service/control_protocol.md` | **Imported by:** test runner
+**Wave:** C | **ADRs:** ADR-008 | **Imports (spec-tree):** `src/yoetz/service/control_protocol.md` | **Imported by:** test runner
 
 ## Purpose
 

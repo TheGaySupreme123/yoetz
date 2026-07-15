@@ -1,9 +1,9 @@
 # tests/integration/application/test_full_workflow.py — full vertical slice workflow
 
 **Wave:** D/E | **ADRs:** ADR-003, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/application/start.md`, `src/yoetz_core/application/publish_work.md`,
-`src/yoetz_core/application/check.md`, `src/yoetz_core/application/respond.md`,
-`src/yoetz_core/application/receipt.md`
+`src/yoetz/application/start.md`, `src/yoetz/application/publish_work.md`,
+`src/yoetz/application/check.md`, `src/yoetz/application/respond.md`,
+`src/yoetz/application/receipt.md`
 **Imported by:** integration application tests
 
 ## Purpose

@@ -1,8 +1,8 @@
 # tests/conformance/adapters/test_memory_sqlite_parity.py — memory and SQLite parity harness
 
 **Wave:** A–F | **ADRs:** all | **Imports (spec-tree):**
-`src/yoetz_core/adapters/memory/ledger.md`, `src/yoetz_core/adapters/sqlite/repository.md`,
-`src/yoetz_core/kernel/reducers.md`
+`src/yoetz/adapters/memory/ledger.md`, `src/yoetz/adapters/sqlite/repository.md`,
+`src/yoetz/kernel/reducers.md`
 **Imported by:** conformance adapter tests
 
 ## Purpose

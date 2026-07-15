@@ -1,11 +1,11 @@
-# Yoetz Core privacy
+# Yoetz privacy
 
-> **Specification-stage notice:** this repository does not contain the Yoetz Core product
+> **Specification-stage notice:** this repository does not contain the Yoetz product
 > implementation yet. The rules below are design commitments being frozen before implementation,
 > not claims about working software. Artifact-bound tests must pass before any release advertises
 > them as implemented guarantees.
 
-Yoetz Core is designed around one trusted persistent local service. The service—not the CLI, MCP,
+Yoetz is designed around one trusted persistent local service. The service—not the CLI, MCP,
 an agent, an LLM, or a future ordinary UI—owns encryption keys, decrypted local state, privacy
 policy, provider credentials, and outbound dispatch. Normal clients exchange only bounded control
 requests and results.
@@ -29,7 +29,7 @@ provider, model, and endpoint profile; it never means “send everything availab
 crash diagnostics, update checks, and capability testing have separate policies. Enabling one
 channel never enables another. A separate global network ceiling defaults off; turning it on
 authorizes no channel by itself. `local_only` governs LLM disclosure and may coexist with a
-separately consented bounded structural non-LLM channel. True Core zero-network mode is the
+separately consented bounded structural non-LLM channel. True Yoetz zero-network mode is the
 composite of `local_only`, the global ceiling off, and all five network channels disabled.
 That mode still permits only exact release-profiled local IPC required for the Yoetz service,
 confidential helper, approved local model, OS credential/user-presence service, and session-
@@ -66,7 +66,7 @@ credentialed external providers.
 ## Local models and human authority
 
 A local model receives plaintext only after the same classification, minimization, scope, and
-never-send checks. Core itself uses an exact AF_UNIX-only path and performs no model launch,
+never-send checks. Yoetz itself uses an exact AF_UNIX-only path and performs no model launch,
 download, DNS, or IP networking. A separately running model process is nevertheless a trusted
 local disclosure sink unless its exact support cell proves enforceable no-network sandboxing.
 

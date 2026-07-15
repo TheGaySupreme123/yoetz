@@ -1,7 +1,7 @@
 # tests/conformance/adapters/test_ledger_port.py — ledger port contract parity
 
 **Wave:** A–F | **ADRs:** all | **Imports (spec-tree):**
-`src/yoetz_core/ports/ledger.md`, `tests/conformance/protocol/test_idempotency_and_frontiers.py.md`
+`src/yoetz/ports/ledger.md`, `tests/conformance/protocol/test_idempotency_and_frontiers.py.md`
 **Imported by:** conformance adapter tests
 
 ## Purpose

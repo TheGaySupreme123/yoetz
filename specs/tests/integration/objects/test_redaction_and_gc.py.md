@@ -1,8 +1,8 @@
 # tests/integration/objects/test_redaction_and_gc.py — redaction history and garbage collection
 
 **Wave:** C/D | **ADRs:** ADR-003, ADR-004, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/adapters/sqlite/repository.md`, `src/yoetz_core/adapters/objects/encrypted_files.md`,
-`src/yoetz_core/adapters/privacy/catalog.md`
+`src/yoetz/adapters/sqlite/repository.md`, `src/yoetz/adapters/objects/encrypted_files.md`,
+`src/yoetz/adapters/privacy/catalog.md`
 **Imported by:** integration object-store tests
 
 ## Purpose

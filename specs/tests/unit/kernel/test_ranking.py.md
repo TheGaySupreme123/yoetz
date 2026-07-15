@@ -1,8 +1,8 @@
 # tests/unit/kernel/test_ranking.py — ranked finding ordering and verdict rules
 
 **Wave:** B | **ADRs:** ADR-002, ADR-004, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/kernel/ranking.md`, `src/yoetz_core/domain/findings.md`,
-`src/yoetz_core/protocol/coverage.py`
+`src/yoetz/kernel/ranking.md`, `src/yoetz/domain/findings.md`,
+`src/yoetz/protocol/coverage.py`
 **Imported by:** the kernel unit suite
 
 ## Purpose

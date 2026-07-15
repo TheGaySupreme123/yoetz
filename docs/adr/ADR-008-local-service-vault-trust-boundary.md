@@ -7,7 +7,7 @@ and the privacy protocol own outbound data authorization.
 
 ## Context
 
-The earlier draft treated `yoetz-core mcp serve` as a long-lived application owner and allowed a
+The earlier draft treated `yoetz mcp serve` as a long-lived application owner and allowed a
 standalone CLI command to open the same local state when MCP was absent. That made the integration
 surface the trust boundary, required each process to acquire keys, made safe passphrase operation
 through MCP impractical, and produced different behavior depending on which client started first.
@@ -60,15 +60,15 @@ deleting or replacing data.
 Committed passphrase mode never probes or uses keyring during startup. Later foreign/stale entries
 are ignored and not deleted; an explicitly discovered exact-identity contradiction is quarantined.
 
-Keyring usability is not action-bound human authorization. Under the safe F-010 working default,
+Keyring usability is not action-bound human authorization. Under the resolved F-010 decision,
 the first-install gate above prevents a new immutable keyring-mode choice when no verified
 `UserPresencePort` exists. Existing keyring vaults created by an earlier supported release or
 restored through reviewed migration remain readable: they may become ready for locally permitted
 work without current presence, but external activation, privacy widening, provider-credential
 set/rotate, and other durable authority changes stay fenced. No TTY click, same-UID peer, or
-ordinary keyring unlock substitutes for the missing capability. F-010 remains open for alternate
-verified platform adapters, a separately designed admin-authorization secret, or a reviewed
-first-install/migration design; any such choice must amend this default before implementation.
+ordinary keyring unlock substitutes for the missing capability. Alternate verified platform
+adapters, a separately designed admin-authorization secret, or a different first-install/migration
+design require a new ADR; they are not implicit v0.1 fallbacks.
 
 Normal clients use `ServiceClient` over the ordinary control protocol. MCP is a stdio-to-local-
 service bridge: its process owns MCP framing but no application, key, storage, or provider state.
@@ -106,7 +106,7 @@ durable policy uses exact foreground digest-bound consent and creates no reusabl
 accepts only a binding from one still-live YZH1 ceremony and never accepts a zero-length retry or
 creates a challenge. Ordinary control/MCP schemas and their import graphs expose no route to either
 confidential client. This is not a claim that arbitrary malicious same-UID code with socket access
-cannot emulate a YZH1 client; that limitation is explicit below and in founder gate F-011.
+cannot emulate a YZH1 client; that limitation is explicit below and in resolved decision F-011.
 
 The confidential secret-ingress channel is separately typed by a closed six-value `SecretPurpose`
 registry: `vault_initialize`, `vault_unlock`, `portable_recovery`,
@@ -182,13 +182,14 @@ CLI and MCP processes would handle keys or prompts, an MCP agent could influence
 multiple clients would retain decrypted state, and service behavior would depend on client
 lifetime. A noninteractive MCP process has no acceptable human prompt.
 
-### D. Inherited secret descriptor for headless passphrase unlock — evaluated, not selected by default
+### D. Inherited secret descriptor for headless passphrase unlock — evaluated, not selected
 
 An anonymous, one-shot descriptor inherited directly from an explicitly configured trusted
 supervisor can avoid argv/env/config/history exposure, but descriptor provenance, inheritance,
 buffering, lifetime, and platform supervisor semantics require a dedicated design and review.
-v0.1 therefore supports headless readiness only for an already initialized verified OS-keyring
-vault. A pristine headless install cannot auto-select keyring mode without the exact verified
+Resolved decision F-008 requires unattended readiness but does not require unattended passphrase
+transport. v0.1 therefore supports headless readiness only for an already initialized verified
+OS-keyring vault. A pristine headless install cannot auto-select keyring mode without the exact verified
 presence cell, and a passphrase-locked headless service remains locked; there is no generic
 password-fd option.
 
@@ -256,5 +257,5 @@ The v0.1 helper also owns the explicit first-install passphrase initialization c
 no-echo entries, one transmitted `vault_initialize` secret, atomic vault commit, and fail-closed
 crash recovery.
 Automatic pristine keyring initialization is therefore an artifact-gated convenience, not a
-keyring-only default. F-010 continues to govern any future admin secret, additional platform
-presence adapter, or migration that would change this authority model.
+keyring-only default. Any future admin secret, additional platform presence adapter, or migration
+that changes the resolved F-010 authority model requires an explicit ADR amendment.

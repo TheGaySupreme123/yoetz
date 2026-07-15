@@ -1,6 +1,6 @@
 # tests/unit/service/test_lifecycle.py — service lifecycle state-machine unit suite
 
-**Wave:** C | **ADRs:** ADR-001, ADR-008 | **Imports (spec-tree):** `src/yoetz_core/service/lifecycle.md` | **Imported by:** test runner
+**Wave:** C | **ADRs:** ADR-001, ADR-008 | **Imports (spec-tree):** `src/yoetz/service/lifecycle.md` | **Imported by:** test runner
 
 ## Purpose
 

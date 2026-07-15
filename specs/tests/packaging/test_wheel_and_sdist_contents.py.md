@@ -18,8 +18,8 @@ readme/security references, `py.typed`, optional extras, Python requirement, and
 
 Parse archives without unsafe extraction. Reject traversal, absolute/backslash/control/case-collision,
 duplicate, link/device, compression bomb, unexpected mode, or unbounded member. Compare normalized
-member paths to exact kind-specific allowlists. Wheel contains one `yoetz_core` package, console
-entry `yoetz-core`, declared resources, `py.typed`, dist-info/approved license files, and no tests/
+member paths to exact kind-specific allowlists. Wheel contains one `yoetz` package, console
+entry `yoetz`, declared resources, `py.typed`, dist-info/approved license files, and no tests/
 dev config/fixture authorship/private plans/transcripts/Git/editor/cache/temp/source map/database/
 WAL/SHM.
 

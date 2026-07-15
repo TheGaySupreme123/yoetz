@@ -114,7 +114,7 @@ unperformed checks.
 
 ### Skill discovery and integration
 
-- explicit `$yoetz-core` discovery and, if advertised, implicit trigger on material task;
+- explicit `$yoetz` discovery and, if advertised, implicit trigger on material task;
 - trivial-task non-trigger;
 - source/wheel/installed skill/reference byte parity;
 - preview/consent/diff, modified local copy protection, status/remove;

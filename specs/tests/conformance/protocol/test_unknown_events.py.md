@@ -1,7 +1,7 @@
 # tests/conformance/protocol/test_unknown_events.py — unknown event preservation contract
 
 **Wave:** A/B/C | **ADRs:** ADR-002, ADR-003, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/domain/events.md`, `src/yoetz_core/kernel/reducers.md`
+`src/yoetz/domain/events.md`, `src/yoetz/kernel/reducers.md`
 **Imported by:** conformance protocol tests
 
 ## Purpose

@@ -1,7 +1,7 @@
 # schemas/version/version-manifest-1.0.0.schema.json — installed version manifest schema
 
 **Wave:** F | **ADRs:** ADR-003, ADR-005, ADR-006, ADR-007, ADR-008, ADR-009 | **Imports (spec-tree):**
-`src/yoetz_core/version.md`, `specs/schemas/README.md`
+`src/yoetz/version.md`, `specs/schemas/README.md`
 **Imported by:** `version --json`, receipts, and release evidence
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the frozen manifest of installed package, runtime, and resource identit
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/version/version-manifest/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/version/version-manifest/1.0.0`.
 - Owning model: `VersionManifest`.
 
 ## Behavior

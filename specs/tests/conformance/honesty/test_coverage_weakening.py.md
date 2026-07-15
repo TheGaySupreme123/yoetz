@@ -1,7 +1,7 @@
 # tests/conformance/honesty/test_coverage_weakening.py — coverage weakening honesty
 
 **Wave:** A/B | **ADRs:** ADR-002, ADR-004, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/protocol/coverage.py`, `src/yoetz_core/domain/findings.md`
+`src/yoetz/protocol/coverage.py`, `src/yoetz/domain/findings.md`
 **Imported by:** conformance honesty tests
 
 ## Purpose

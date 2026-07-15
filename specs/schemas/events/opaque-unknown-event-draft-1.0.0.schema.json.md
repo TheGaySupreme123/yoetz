@@ -1,7 +1,7 @@
 # schemas/events/opaque-unknown-event-draft-1.0.0.schema.json — opaque unknown event schema
 
 **Wave:** A/B/C | **ADRs:** ADR-001, ADR-002, ADR-003, ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/domain/events.md`
+`src/yoetz/domain/events.md`
 **Imported by:** unknown-event preservation tests
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the opaque branch used to preserve unrecognized event families without 
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/events/opaque-unknown-event-draft/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/opaque-unknown-event-draft/1.0.0`.
 - Owning model: unknown-event payload branch.
 
 ## Behavior

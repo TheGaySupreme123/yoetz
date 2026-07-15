@@ -1,6 +1,6 @@
 # tests/unit/service/test_control_protocol.py — frozen service-control protocol unit suite
 
-**Wave:** C | **ADRs:** ADR-008 | **Imports (spec-tree):** `src/yoetz_core/service/control_protocol.md`, `ports/control.md` | **Imported by:** test runner
+**Wave:** C | **ADRs:** ADR-008 | **Imports (spec-tree):** `src/yoetz/service/control_protocol.md`, `ports/control.md` | **Imported by:** test runner
 
 ## Purpose
 

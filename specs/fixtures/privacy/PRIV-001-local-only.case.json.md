@@ -31,7 +31,7 @@ local-model variant additionally permits
 only its exact approved AF_UNIX profile. Arbitrary AF_UNIX, bus names/methods/peers, and local
 proxies fail. The fixture records zero AF_INET/AF_INET6 sockets, DNS, HTTP(S), redirects, telemetry,
 crash upload, update, capability-test, or model-download attempts. No network egress receipt claims
-a local call. Evidence names the exact platform/release profile, Core-owned processes, lifecycle
+a local call. Evidence names the exact platform/release profile, Yoetz-owned processes, lifecycle
 from startup through `locked|ready` and the operation, and each allowlisted local peer. It does not
 attest the external OS agent or separate model runtime.
 

@@ -1,7 +1,7 @@
 # tests/unit/observability/test_logging_allowlist.py — structured logging allowlist and redaction
 
 **Wave:** F | **ADRs:** ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/observability/logging.md`
+`src/yoetz/observability/logging.md`
 **Imported by:** the observability unit suite
 
 ## Purpose

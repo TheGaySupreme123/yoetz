@@ -1,8 +1,8 @@
 # tests/conformance/honesty/test_strict_local_zero_egress.py — strict-local zero-egress contract
 
 **Wave:** C–E | **ADRs:** ADR-003, ADR-004, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/config/models.md`, `src/yoetz_core/application/service.md`,
-`src/yoetz_core/adapters/providers/fake.md`
+`src/yoetz/config/models.md`, `src/yoetz/application/service.md`,
+`src/yoetz/adapters/providers/fake.md`
 **Imported by:** conformance honesty tests
 
 ## Purpose
@@ -40,7 +40,7 @@ The test runs the full strict-local workflow under external-egress denial and as
   capability-test, or model-download attempt in strict-local fails the test.
 - An unexpected AF_UNIX peer/path/credential or use of the local socket as a proxy fails the test.
 - An unallowlisted D-Bus name/method/peer or platform IPC route fails. Evidence names the exact
-  platform/release profile, Core-owned processes, startup-through-`locked|ready`/operation interval,
+  platform/release profile, Yoetz-owned processes, startup-through-`locked|ready`/operation interval,
   and local peers; it does not attest external OS agents or a model runtime.
 
 ## Invariants

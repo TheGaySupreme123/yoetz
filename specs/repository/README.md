@@ -1,14 +1,14 @@
 # README.md — public project entry point and release overview
 
 **Wave:** F | **ADRs:** ADR-003, ADR-005, ADR-007 | **Imports (spec-tree):**
-`specs/README.md`, `src/yoetz_core/__init__.md`, `src/yoetz_core/version.md`,
+`specs/README.md`, `src/yoetz/__init__.md`, `src/yoetz/version.md`,
 `tests/packaging.md`, `tests/subprocess.md`
 **Imported by:** people visiting the repository root, release notes, package metadata, and support
 links
 
 ## Purpose
 
-This file is the first human-facing explanation of what `yoetz-core` is, how to install it, and
+This file is the first human-facing explanation of what `yoetz` is, how to install it, and
 what it promises at v0.1. It is not the contract source of truth, but it must accurately summarize
 the public surface without pointing readers to private planning docs.
 
@@ -23,8 +23,10 @@ The file must contain, at minimum, these sections:
 - a “development status” section that clearly states the repo is a working draft or public-alpha
   style build, not a finished user guide;
 - links to the repository security, contribution, changelog, and license pages;
+- support routing: repository issues for ordinary bugs/questions, GitHub private vulnerability
+  reporting or `security@yoetz.dev` for security, and `conduct@yoetz.dev` for private conduct reports;
 - an explicit statement that the project is licensed under Apache-2.0;
-- a short command summary for the console script and `python -m yoetz_core`;
+- a short command summary for the console script and `python -m yoetz`;
 - a support boundary note that points readers to the specs tree for implementer detail.
 
 ## Behavior
@@ -35,7 +37,7 @@ steps, private URLs, or architecture notes that are not part of the public repos
 
 The README should describe the repository as:
 
-- the public `yoetz-core` package and its release artifacts;
+- the public `yoetz` package and its release artifacts;
 - the strict-local default plus optional capability-driven semantic review;
 - a file-level spec tree under `specs/` for the implementation contract;
 - a release that depends on reproducible packaging and locked dependencies.
@@ -47,12 +49,14 @@ specs for that detail.
 The README should keep the install story bounded:
 
 - tell readers how to install the released package;
-- explain that `yoetz-core` is the primary console entry point;
-- mention `python -m yoetz_core` only as an equivalent invocation;
+- explain that `yoetz` is the primary console entry point;
+- mention `python -m yoetz` only as an equivalent invocation;
 - avoid documenting unsupported developer-only paths as if they were public release paths.
 
 The v0.1 document leads with the install/first-run story after its one-paragraph summary. It stays
 text-only; a diagram is added only when a later user-tested need justifies another maintained view.
+It labels the three support routes clearly and never asks security or conduct reporters to use a
+public issue. E-012 verifies the private routes before release.
 
 ## Errors and edge cases
 

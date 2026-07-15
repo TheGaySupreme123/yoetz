@@ -1,7 +1,7 @@
 # tests/integration/objects/test_portable_recovery.py — portable recovery bundle behavior
 
 **Wave:** C/D | **ADRs:** ADR-003, ADR-004, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/adapters/objects/encrypted_files.md`, `src/yoetz_core/adapters/keys/passphrase.md`
+`src/yoetz/adapters/objects/encrypted_files.md`, `src/yoetz/adapters/keys/passphrase.md`
 **Imported by:** integration object/key tests
 
 ## Purpose

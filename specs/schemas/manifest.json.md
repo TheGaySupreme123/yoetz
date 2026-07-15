@@ -1,7 +1,7 @@
 # schemas/manifest.json — canonical schema inventory and byte-parity ledger
 
 **Wave:** A | **ADRs:** ADR-002, ADR-005, ADR-007, ADR-008, ADR-009 | **Imports (spec-tree):**
-`src/yoetz_core/protocol/schemas.md`, `src/yoetz_core/version.md`, `specs/schemas/README.md`
+`src/yoetz/protocol/schemas.md`, `src/yoetz/version.md`, `specs/schemas/README.md`
 **Imported by:** schema generation, release packaging, and parity tests
 
 ## Purpose

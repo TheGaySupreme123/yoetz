@@ -1,7 +1,7 @@
 # schemas/events/event-draft-1.0.0.schema.json — event draft schema
 
 **Wave:** A/B/C | **ADRs:** ADR-001, ADR-002, ADR-003, ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/domain/events.md`, `src/yoetz_core/protocol/models.md`
+`src/yoetz/domain/events.md`, `src/yoetz/protocol/models.md`
 **Imported by:** publish-work validation fixtures and conformance tests
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the client-shaped event draft wrapper used before ledger acceptance.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/events/event-draft/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/event-draft/1.0.0`.
 - Owning model: `EventDraft`.
 
 ## Behavior

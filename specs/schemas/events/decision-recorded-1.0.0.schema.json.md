@@ -1,7 +1,7 @@
 # schemas/events/decision-recorded-1.0.0.schema.json — decision-recorded payload schema
 
 **Wave:** B | **ADRs:** ADR-002, ADR-003, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/domain/events.md`
+`src/yoetz/domain/events.md`
 **Imported by:** replay and decision-chain tests
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the payload that records a decision and optional supersession.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/events/decision-recorded/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/decision-recorded/1.0.0`.
 - Owning model: `DecisionRecordedPayload`.
 
 ## Behavior

@@ -1,8 +1,8 @@
 # tests/property/test_ledger_state_machine_sqlite.py — SQLite-backed ledger state machine
 
 **Wave:** C | **ADRs:** ADR-003, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/adapters/sqlite/repository.md`, `src/yoetz_core/adapters/sqlite/start_catalog.md`,
-`src/yoetz_core/adapters/sqlite/migrations.md`
+`src/yoetz/adapters/sqlite/repository.md`, `src/yoetz/adapters/sqlite/start_catalog.md`,
+`src/yoetz/adapters/sqlite/migrations.md`
 **Imported by:** property-based conformance tests
 
 ## Purpose

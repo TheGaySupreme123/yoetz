@@ -3,18 +3,18 @@
 **Status:** Working decision for spec drafting (2026-07-14). Ratification requires an independent
 privacy/security review plus executable no-bypass, never-send, approval-resume, and zero-egress
 evidence.
-**Owning public specs:** `specs/src/yoetz_core/domain/privacy.md`,
-`specs/src/yoetz_core/application/egress.md`,
-`specs/src/yoetz_core/application/privacy_policy.md`,
-`specs/src/yoetz_core/ports/privacy.md`, privacy adapters/configuration/audit specs, ADR-006,
+**Owning public specs:** `specs/src/yoetz/domain/privacy.md`,
+`specs/src/yoetz/application/egress.md`,
+`specs/src/yoetz/application/privacy_policy.md`,
+`specs/src/yoetz/ports/privacy.md`, privacy adapters/configuration/audit specs, ADR-006,
 `PRIVACY.md`, the technical privacy protocol, policy schemas, fixtures, and tests.
 
 ## Context and trust boundary
 
-Yoetz Core is the policy authority. CLI, MCP, future UI, plugins, provider adapters, integrations,
+Yoetz is the policy authority. CLI, MCP, future UI, plugins, provider adapters, integrations,
 agents, and LLMs are clients or constrained effectors; none may decide what data is disclosable.
 Network egress and local disclosure are distinct: an MCP response may enter an agent/LLM context,
-and a local model still receives user content through Core's AF_UNIX-only path. A pre-existing
+and a local model still receives user content through Yoetz's AF_UNIX-only path. A pre-existing
 model runtime is a separate trusted disclosure sink unless its exact support cell proves enforced
 no-network isolation; AF_UNIX delivery alone does not prove what that process does later (F-013).
 
@@ -33,7 +33,8 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    not a bundled consent switch for telemetry, diagnostics, updates, or capability testing.
    `local_only` constructs no external LLM-provider transport, disables the `llm_inference`
    network channel, and permits a local model only when separately configured and explicitly
-   trusted under F-013. It may coexist with a separately authorized bounded non-LLM policy row, but
+   trusted under resolved decision F-013. It may coexist with a separately authorized bounded
+   non-LLM policy row, but
    no such channel may carry task/user content. v0.1 owns no production transport for those four
    channels, so proposed enablement is rejected and makes no I/O; adding one later requires an exact
    adapter/use-case owner, ADR review, and fresh human transition.
@@ -60,7 +61,7 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    covered by the never-send fence. The trusted human surface may render an approval preview and
    exact policy diff, but it never exposes cryptographic material or service-vault credentials.
    A local-model runtime receives plaintext and belongs to the trusted local computing base unless
-   its exact artifact/profile supplies independently enforceable sandbox evidence; Core's adapter
+   its exact artifact/profile supplies independently enforceable sandbox evidence; Yoetz's adapter
    makes no claim about another process's ambient network authority.
 4. **Data classes:** structural public data, ordinary task/user content, sensitive/confidential
    content, and secrets/cryptographic material are distinct. Classification combines source-owned
@@ -130,11 +131,11 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    rotation/slot interface. A dispatch receipt also requires exact `request_body_bytes`; a
    pre-dispatch receipt forbids it. HTTP/TLS framing, transport-generated metadata, and credential-bearing
    authentication fields are outside that commitment; provider credentials enter only through a
-   separately bound vault handle at the transport boundary and cannot alter the approved body. The
-   working interpretation pending founder gate F-012 is that this separately provisioned vault
-   credential may leave only as one-attempt authentication metadata to the exact pinned TLS
-   endpoint; candidate/user-discovered credentials remain never-send. The alternative is to forbid
-   credentialed external providers. Catalog-backed audit is permitted; content-bearing task audit
+   separately bound vault handle at the transport boundary and cannot alter the approved body.
+   Resolved decision F-012 permits this separately provisioned vault credential to leave only as
+   one-attempt authentication metadata to the exact pinned TLS
+   endpoint; candidate/user-discovered credentials remain never-send. Catalog-backed audit is
+   permitted; content-bearing task audit
    uses encrypted bundle objects referenced directly from the privacy catalog, while structural-only
    taskless audit requires no content object. No new task event family is required. A v0.1 non-LLM
    `channel_unavailable` decision is pre-dispatch: it has no dispatch
@@ -146,27 +147,27 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    likewise preserves terminal evidence but restores no live disclosure authority.
    A dangling/tampered catalog root quarantines the audit row and fences content disclosure rather
    than being swept or repaired with an invented ledger row.
-10. **Zero-egress definition:** true Core zero-network egress is the composite policy state
+10. **Zero-egress definition:** true Yoetz zero-network egress is the composite policy state
     `profile=local_only`, `network_egress_permitted=false`, all five channels disabled, and no
-    network-capable runtime path. In that state the Core-owned tested process set permits only the
+    network-capable runtime path. In that state the Yoetz-owned tested process set permits only the
     exact service/confidential AF_UNIX endpoints; a separately approved exact local-model AF_UNIX
     endpoint; and exact release-cell platform IPC needed for OS credential storage, user presence,
     or session-lifecycle security events.
     The last category includes measured Linux AF_UNIX routes to allowlisted session-bus Secret
     Service peers/methods and, separately, system-bus `org.freedesktop.login1` peers/methods, or
     measured macOS native security/presence/session notifications; it never permits
-    arbitrary AF_UNIX, arbitrary bus names/methods, or a local proxy. Core denies AF_INET, AF_INET6,
+    arbitrary AF_UNIX, arbitrary bus names/methods, or a local proxy. Yoetz denies AF_INET, AF_INET6,
     DNS, proxies, redirects, external provider
     construction, telemetry, diagnostics upload, update checks, and capability calls. The
     `local_only` profile alone is not a zero-network claim because a future owned capability may be
     separately enabled under the global ceiling (v0.1's four non-LLM rows remain unsupported/off).
-    Evidence names the exact platform/release profile, Core service/client/confidential-helper
+    Evidence names the exact platform/release profile, Yoetz service/client/confidential-helper
     processes, lifecycle interval from startup through `locked|ready` and tested operations, and
-    allowlisted local IPC peers. It proves those Core paths, not the ambient authority of the OS
+    allowlisted local IPC peers. It proves those Yoetz paths, not the ambient authority of the OS
     credential agent or a separately running model process; public wording is conditional on the
-    F-013 trust/sandbox choice.
+    resolved F-013 trust boundary.
 11. **Setup is an application use case:** a wizard or UI reads effective policy and submits a
-    proposed policy transition through the Core use case. It cannot write configuration or policy
+    proposed policy transition through the Yoetz use case. It cannot write configuration or policy
     storage directly. Its first question, `network_egress`, controls the global
     `network_egress_permitted` ceiling; answering yes still leaves all five channels denied until
     they are chosen independently. Setup explains concrete allowed/blocked examples, all five
@@ -188,7 +189,7 @@ valid `local_only` policies with one bounded but v0.1-unavailable non-LLM channe
 agent-context and local-model fences; exact approval binding/restart behavior; no secret-bearing
    configuration/environment/arguments; reviewed bundled-adapter composition (without claiming OS
    sandbox isolation); keyed terminal-receipt commitments; the initial-reservation no-receipt
-   exception; Core-process local-only AF_UNIX behavior without
+   exception; Yoetz-process local-only AF_UNIX behavior without
 overclaiming a separate model runtime; and no plaintext canaries across databases, objects, logs, traces, prompts,
 receipts, errors, or transports. Public copy must reserve “zero network egress” for the composite
 ceiling-plus-channel state, not infer it from `local_only` alone.

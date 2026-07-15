@@ -1,7 +1,7 @@
 # tests/conformance/operations/test_status_contract.py — status public contract
 
 **Wave:** D | **ADRs:** ADR-003, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/application/status.md`, `src/yoetz_core/kernel/projections.md`
+`src/yoetz/application/status.md`, `src/yoetz/kernel/projections.md`
 **Imported by:** conformance operations tests
 
 ## Purpose

@@ -1,7 +1,7 @@
 # schemas/receipts/receipt-document-1.0.0.schema.json — receipt document schema
 
 **Wave:** B/D/F | **ADRs:** ADR-002, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/domain/receipts.md`, `src/yoetz_core/kernel/receipt_builder.md`
+`src/yoetz/domain/receipts.md`, `src/yoetz/kernel/receipt_builder.md`
 **Imported by:** receipt builder, storage, and parity fixtures
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the canonical immutable receipt document stored as an encrypted object.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/receipts/receipt-document/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/receipts/receipt-document/1.0.0`.
 - Owning model: `ReceiptDocument`.
 
 ## Behavior

@@ -1,7 +1,7 @@
 # schemas/ — frozen public JSON Schema artifact set
 
 **Wave:** A | **ADRs:** ADR-002, ADR-005, ADR-007, ADR-008, ADR-009 | **Imports (spec-tree):**
-`src/yoetz_core/protocol/models.md`, `domain/events.md`, `domain/findings.md`,
+`src/yoetz/protocol/models.md`, `domain/events.md`, `domain/findings.md`,
 `domain/receipts.md`, `config/models.md` | **Imported by:** `protocol/schemas.md`,
 MCP server, CLI validation fixtures, resource manifest, conformance and packaging tests
 
@@ -12,7 +12,7 @@ wheel. These schemas are the language-neutral public contract. Pydantic may gene
 but no runtime-generated schema silently replaces a released artifact.
 
 All schemas use JSON Schema Draft 2020-12, closed objects, explicit formats/patterns, and canonical
-resource identities below `https://schemas.yoetz.dev/core/0.1/`. They describe accepted JSON
+resource identities below `https://schemas.yoetz.dev/0.1/`. They describe accepted JSON
 values; the stricter raw-byte parser still rejects duplicate keys, invalid UTF-8, BOM/NUL, floats,
 unsafe integers, and lone surrogates before schema evaluation.
 
@@ -96,12 +96,12 @@ The manifest lists exactly 52 `*.schema.json` artifacts and never lists itself; 
 ### Identifier rules
 
 - `$schema`: exactly `https://json-schema.org/draft/2020-12/schema`.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/<relative-directory>/<base-name>/<semver>`.
+- `$id`: `https://schemas.yoetz.dev/0.1/<relative-directory>/<base-name>/<semver>`.
   Derivation obtains `<base-name>` by stripping the exact terminal
   `-<semver>.schema.json` from the relative filename (not merely `.schema.json`), then appends that
   same SemVer as the final URL segment; path components use lower-kebab-case. For example,
   `events/accepted-event-1.0.0.schema.json` becomes
-  `https://schemas.yoetz.dev/core/0.1/events/accepted-event/1.0.0`.
+  `https://schemas.yoetz.dev/0.1/events/accepted-event/1.0.0`.
 - `$ref`: absolute `$id` or repository-root-relative references resolved only through
   the frozen registry; no network retrieval at runtime.
 - `$defs`: stable lower-snake-case logical names; no generator-specific numeric suffixes.
@@ -215,7 +215,7 @@ rejects the fallback blocks server startup and release.
    regenerated.
 5. CI regenerates into a temporary directory and requires exact semantic parity and, after
    canonical formatting, exact bytes. Runtime never rewrites the checked-in copies.
-6. Build copies the exact reviewed bytes into `yoetz_core/resources/schemas/`; packaging
+6. Build copies the exact reviewed bytes into `yoetz/resources/schemas/`; packaging
    tests prove source/wheel/installed equality.
 
 ### Compatibility policy

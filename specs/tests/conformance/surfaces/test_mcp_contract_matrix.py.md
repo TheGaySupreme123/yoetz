@@ -1,7 +1,7 @@
 # tests/conformance/surfaces/test_mcp_contract_matrix.py — MCP contract matrix
 
 **Wave:** D | **ADRs:** ADR-003, ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/mcp/server.md`, `src/yoetz_core/mcp/errors.md`
+`src/yoetz/mcp/server.md`, `src/yoetz/mcp/errors.md`
 **Imported by:** conformance surface tests
 
 ## Purpose

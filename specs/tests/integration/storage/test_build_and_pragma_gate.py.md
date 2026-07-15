@@ -1,7 +1,7 @@
 # tests/integration/storage/test_build_and_pragma_gate.py — SQLite build gate and PRAGMA identity
 
 **Wave:** C | **ADRs:** ADR-003, ADR-004, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/adapters/sqlite/connection.md`, `src/yoetz_core/version.md`
+`src/yoetz/adapters/sqlite/connection.md`, `src/yoetz/version.md`
 **Imported by:** integration storage tests
 
 ## Purpose

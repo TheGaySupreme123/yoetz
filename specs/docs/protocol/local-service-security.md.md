@@ -1,7 +1,7 @@
 # docs/protocol/local-service-security.md — local service, vault, and confidential-input security
 
 **Wave:** E | **ADRs:** ADR-001, ADR-004, ADR-008 | **Imports (spec-tree):**
-`src/yoetz_core/service/lifecycle.md`, `service/control_protocol.md`, `service/vault.md`,
+`src/yoetz/service/lifecycle.md`, `service/control_protocol.md`, `service/vault.md`,
 `service/secret_ingress.md`, `cli/unlock.md` | **Imported by:** public README/privacy/security docs
 
 ## Purpose

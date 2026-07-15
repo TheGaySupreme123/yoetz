@@ -1,7 +1,7 @@
 # tests/conformance/surfaces/test_cli_mcp_parity.py — CLI and MCP surface parity
 
 **Wave:** D | **ADRs:** ADR-003, ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/cli/app.md`, `src/yoetz_core/mcp/server.md`
+`src/yoetz/cli/app.md`, `src/yoetz/mcp/server.md`
 **Imported by:** conformance surface tests
 
 ## Purpose

@@ -1,6 +1,6 @@
 # tests/unit/service/test_runtime_context.py — ready-service runtime-context unit suite
 
-**Wave:** C | **ADRs:** ADR-001, ADR-008 | **Imports (spec-tree):** `src/yoetz_core/ports/runtime.md` | **Imported by:** test runner
+**Wave:** C | **ADRs:** ADR-001, ADR-008 | **Imports (spec-tree):** `src/yoetz/ports/runtime.md` | **Imported by:** test runner
 
 ## Purpose
 

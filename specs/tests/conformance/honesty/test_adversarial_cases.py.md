@@ -1,7 +1,7 @@
 # tests/conformance/honesty/test_adversarial_cases.py — adversarial public-claim cases
 
 **Wave:** A–F | **ADRs:** all | **Imports (spec-tree):**
-`tests/conformance/claims/test_public_claim_map.py.md`, `src/yoetz_core/domain/findings.md`
+`tests/conformance/claims/test_public_claim_map.py.md`, `src/yoetz/domain/findings.md`
 **Imported by:** conformance honesty tests
 
 ## Purpose

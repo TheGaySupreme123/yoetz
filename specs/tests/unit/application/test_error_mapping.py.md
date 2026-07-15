@@ -1,8 +1,8 @@
 # tests/unit/application/test_error_mapping.py — public error mapping and fallback rules
 
 **Wave:** C/D | **ADRs:** ADR-003, ADR-004, ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/application/service.md`, `src/yoetz_core/protocol/errors.md`,
-`src/yoetz_core/cli/exits.md`
+`src/yoetz/application/service.md`, `src/yoetz/protocol/errors.md`,
+`src/yoetz/cli/exits.md`
 **Imported by:** the application unit suite
 
 ## Purpose

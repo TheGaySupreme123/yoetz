@@ -1,7 +1,7 @@
 # tests/capability/test_user_presence.py — exact OS-backed human-presence evidence
 
 **Wave:** C/F | **ADRs:** ADR-008, ADR-009 | **Imports (spec-tree):**
-`src/yoetz_core/ports/secret_memory.md`, human-control protocol, platform support manifest |
+`src/yoetz/ports/secret_memory.md`, human-control protocol, platform support manifest |
 **Imported by:** capability suite and security/privacy claim gate
 
 ## Purpose

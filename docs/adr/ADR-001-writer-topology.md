@@ -4,9 +4,9 @@
 binding for v0.1 specification work. Lifecycle, peer-authentication, and crash-takeover proofs
 remain release gates.
 **Owning public specs:** `docs/adr/ADR-008-local-service-vault-trust-boundary.md`,
-`specs/src/yoetz_core/service/daemon.md`, `specs/src/yoetz_core/service/lifecycle.md`,
-`specs/src/yoetz_core/service/control_protocol.md`, `specs/src/yoetz_core/ports/runtime.md`,
-`specs/src/yoetz_core/adapters/runtime.md`, and the service subprocess specifications.
+`specs/src/yoetz/service/daemon.md`, `specs/src/yoetz/service/lifecycle.md`,
+`specs/src/yoetz/service/control_protocol.md`, `specs/src/yoetz/ports/runtime.md`,
+`specs/src/yoetz/adapters/runtime.md`, and the service subprocess specifications.
 
 ## Context
 
@@ -74,7 +74,7 @@ mandatory because stale or duplicate service processes must fail safely.
 
 ## Lifecycle contract
 
-v0.1 ships a foreground `yoetz-core service run` entrypoint suitable for an explicit terminal or
+v0.1 ships a foreground `yoetz service run` entrypoint suitable for an explicit terminal or
 an external per-user supervisor. Normal CLI commands do not secretly spawn, daemonize, or unlock a
 service. Native launchd/systemd-user installation and automatic startup are product conveniences,
 not correctness prerequisites, and require separate reviewed packaging files before they can be

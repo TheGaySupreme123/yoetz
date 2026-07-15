@@ -1,7 +1,7 @@
 # tests/unit/protocol/test_strict_json.py — raw JSON parser and canonicalizer fences
 
 **Wave:** A | **ADRs:** ADR-002, ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/protocol/canonical.py`, `src/yoetz_core/domain/values.md`
+`src/yoetz/protocol/canonical.py`, `src/yoetz/domain/values.md`
 **Imported by:** the protocol unit suite
 
 ## Purpose

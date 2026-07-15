@@ -1,6 +1,6 @@
 # tests/capability/test_local_control_channel.py — platform peer-credential capability probe
 
-**Wave:** C/F | **ADRs:** ADR-008 | **Imports (spec-tree):** `src/yoetz_core/adapters/control/unix_socket.md` | **Imported by:** release evidence
+**Wave:** C/F | **ADRs:** ADR-008 | **Imports (spec-tree):** `src/yoetz/adapters/control/unix_socket.md` | **Imported by:** release evidence
 
 ## Purpose
 

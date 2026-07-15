@@ -2,8 +2,8 @@
 
 **Status:** Working decision for spec drafting (2026-07-13). Ratification requires the pinned
 capability matrix run from an installed artifact.
-**Owning public specs:** `specs/src/yoetz_core/adapters/mcp_stdio.md`,
-`specs/src/yoetz_core/adapters/importers/codex_jsonl.md`, `specs/src/yoetz_core/mcp/`, the Codex
+**Owning public specs:** `specs/src/yoetz/adapters/mcp_stdio.md`,
+`specs/src/yoetz/adapters/importers/codex_jsonl.md`, `specs/src/yoetz/mcp/`, the Codex
 skill specs, and `specs/tests/capability/`.
 
 ## Decisions
@@ -12,8 +12,8 @@ skill specs, and `specs/tests/capability/`.
    capability run (candidate `0.139.0` as observed local fixture); anything newer than
    maximum-tested is "untested", not "supported". The release manifest records min/max/denied.
 2. **Integration posture:** Codex is the MCP client; Yoetz is a local stdio server registered via
-   `codex mcp add yoetz -- yoetz-core mcp serve`, default `required = false`. Skill installed
-   explicitly to `.agents/skills/yoetz-core/` with preview/consent.
+   `codex mcp add yoetz -- yoetz mcp serve`, default `required = false`. Skill installed
+   explicitly to `.agents/skills/yoetz/` with preview/consent.
 3. **MCP protocol/SDK:** protocol negotiated (latest published `2025-11-25`, never assumed); SDK
    pinned `mcp==1.28.1`, low-level `Server` surface, `validate_input=False`, direct
    `CallToolResult`, Yoetz-side jsonschema Draft 2020-12 output validation, nested constant
@@ -39,5 +39,5 @@ skill specs, and `specs/tests/capability/`.
 User & trusted-project MCP config; six tool calls (interactive + `codex exec`); optional-server
 failure disclosure; required-server startup failure; parent + subagents attribution; resume/
 reattach without duplicates; `--json` JSONL import with unknown-event quarantine; skill discovery
-(explicit `$yoetz-core` and implicit); cancellation/timeout ambiguous-write retry; stdout purity
+(explicit `$yoetz` and implicit); cancellation/timeout ambiguous-write retry; stdout purity
 under all of the above.

@@ -1,8 +1,8 @@
 # tests/unit/domain/test_receipts.py — receipt document and compact render behavior
 
 **Wave:** B | **ADRs:** ADR-002, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/domain/receipts.md`, `src/yoetz_core/protocol/coverage.py`,
-`src/yoetz_core/domain/findings.py`
+`src/yoetz/domain/receipts.md`, `src/yoetz/protocol/coverage.py`,
+`src/yoetz/domain/findings.py`
 **Imported by:** the domain and kernel unit suite
 
 ## Purpose

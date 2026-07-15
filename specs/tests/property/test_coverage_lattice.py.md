@@ -1,7 +1,7 @@
 # tests/property/test_coverage_lattice.py — coverage lattice algebra properties
 
 **Wave:** A/B | **ADRs:** ADR-002, ADR-004, ADR-006 | **Imports (spec-tree):**
-`tests/property/strategies/json_values.py`, `src/yoetz_core/protocol/coverage.py`
+`tests/property/strategies/json_values.py`, `src/yoetz/protocol/coverage.py`
 **Imported by:** property-based coverage tests
 
 ## Purpose

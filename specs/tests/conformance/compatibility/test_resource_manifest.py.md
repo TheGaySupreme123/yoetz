@@ -1,7 +1,7 @@
 # tests/conformance/compatibility/test_resource_manifest.py — resource manifest parity
 
 **Wave:** F | **ADRs:** ADR-003, ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/version.md`, `specs/schemas/README.md`, `specs/fixtures/README.md`
+`src/yoetz/version.md`, `specs/schemas/README.md`, `specs/fixtures/README.md`
 **Imported by:** conformance compatibility tests
 
 ## Purpose

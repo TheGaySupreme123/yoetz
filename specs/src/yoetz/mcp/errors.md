@@ -1,0 +1,65 @@
+# src/yoetz/mcp/errors.py — structured MCP error envelopes and sanitization
+
+**Wave:** D | **ADRs:** ADR-002, ADR-005 | **Imports (spec-tree):**
+`protocol/errors.md`, `protocol/models.md`, `mcp/summaries.md`
+**Imported by:** `mcp/server.md`, CLI envelope rendering, and error tests
+
+## Purpose
+
+This file converts public operation errors and validation failures into the exact MCP result shapes
+Yoetz sends over stdio. It is the one place where user-safe structured errors are assembled.
+
+## Public surface
+
+| Name | Signature (natural language) |
+|---|---|
+| `build_public_error_result(...)` | build a structured error envelope with `ok: false` |
+| `build_last_resort_internal_error_result()` | startup-built common fallback result shared by all tools |
+| `safe_validation_locations(exc)` | reduce a validation error to allowlisted locations and bounded reason codes |
+| `sanitize_unknown_tool_name(name)` | turn an invalid tool name into a safe public failure description |
+| `tool_error_envelope(...)` | convenience constructor for tool-level public failures |
+
+## Behavior
+
+`build_public_error_result(...)` returns a structured tool result that carries the public error code,
+correlation ID, retryability, and safe details. The object is suitable for MCP `structuredContent`
+and pairs with a compact summary in `content`.
+
+`build_last_resort_internal_error_result()` creates the request-independent fallback object used
+when helper code fails after the request is already in the dispatch fence. It must not call any
+helper that can throw and must be schema-valid for every public tool output schema.
+
+`safe_validation_locations(exc)` extracts only allowlisted field paths and bounded reason codes from
+structured validation errors. It must never echo the raw input value, the original exception text,
+or documentation URLs.
+
+`sanitize_unknown_tool_name(name)` maps a tool name that reached the valid `tools/call` method but
+did not match a registered tool into a safe invalid-request description. It must not reveal the
+full raw argument payload.
+
+`tool_error_envelope(...)` is a convenience wrapper for the common public error shape. It keeps the
+tool result format consistent between success and failure cases.
+
+## Errors and edge cases
+
+- JSON-RPC error objects are not used for ordinary public operation failures.
+- The last-resort fallback must still validate even when helper code is broken.
+- Unknown tool names are a tool-level failure, not an MCP protocol failure, when they arrive via a
+  valid MCP method.
+- Validation summaries may name fields, not payloads.
+
+## Invariants
+
+1. Public errors stay structured.
+2. No raw user text is echoed in validation summaries.
+3. Error envelopes remain compatible with `checked_call_result(...)`.
+4. The last-resort fallback is always schema-valid.
+
+## Tests
+
+- `tests/conformance/surfaces/test_mcp_contract_matrix.py` — public error-envelope structure,
+  allowlisted validation summaries, and side-effect-free unknown-tool behavior.
+
+## Open questions
+
+None.

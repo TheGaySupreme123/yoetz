@@ -1,7 +1,7 @@
 # tests/unit/protocol/test_models_and_schemas.py — boundary model and schema parity
 
 **Wave:** A/B | **ADRs:** ADR-002, ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/protocol/models.py`, `src/yoetz_core/protocol/schemas.py`,
+`src/yoetz/protocol/models.py`, `src/yoetz/protocol/schemas.py`,
 `specs/schemas/README.md`
 **Imported by:** the protocol unit suite
 

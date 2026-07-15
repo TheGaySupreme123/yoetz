@@ -1,7 +1,7 @@
 # tests/unit/domain/test_findings.py — finding shape, provenance, and ordering inputs
 
 **Wave:** B | **ADRs:** ADR-002, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/domain/findings.py`, `src/yoetz_core/protocol/coverage.py`
+`src/yoetz/domain/findings.py`, `src/yoetz/protocol/coverage.py`
 **Imported by:** the domain and kernel unit suite
 
 ## Purpose

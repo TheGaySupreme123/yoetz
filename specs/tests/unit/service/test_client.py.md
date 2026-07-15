@@ -1,6 +1,6 @@
 # tests/unit/service/test_client.py — ordinary ServiceClient unit suite
 
-**Wave:** C/D | **ADRs:** ADR-008 | **Imports (spec-tree):** `src/yoetz_core/service/client.md` | **Imported by:** test runner
+**Wave:** C/D | **ADRs:** ADR-008 | **Imports (spec-tree):** `src/yoetz/service/client.md` | **Imported by:** test runner
 
 ## Purpose
 

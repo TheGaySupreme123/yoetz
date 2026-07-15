@@ -1,8 +1,8 @@
 # tests/property/test_receipt_properties.py — receipt honesty and frontier properties
 
 **Wave:** B | **ADRs:** ADR-002, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`tests/property/strategies/events.py`, `src/yoetz_core/kernel/receipt_builder.py`,
-`src/yoetz_core/domain/receipts.py`
+`tests/property/strategies/events.py`, `src/yoetz/kernel/receipt_builder.py`,
+`src/yoetz/domain/receipts.py`
 **Imported by:** property-based receipt tests
 
 ## Purpose

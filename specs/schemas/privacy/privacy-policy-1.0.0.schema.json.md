@@ -13,7 +13,7 @@ that every surface and adapter must obey identically.
 ## Public surface
 
 - `$schema`: JSON Schema Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/privacy/privacy-policy/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/privacy/privacy-policy/1.0.0`.
 - Media type: `application/vnd.yoetz.privacy-policy+json`.
 - Closed root fields: `schema_version`, `policy_id`, `version`, `policy_digest`, `profile`,
   `network_egress_permitted`, `effective_scope`, `channel_policies`, `local_model_enabled`, optional

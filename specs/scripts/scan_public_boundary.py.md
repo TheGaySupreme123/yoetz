@@ -1,7 +1,7 @@
 # scripts/scan_public_boundary.py — public-repository and artifact privacy gate
 
 **Wave:** F | **ADRs:** ADR-004, ADR-007 | **Imports (spec-tree):**
-`specs/src/yoetz_core/observability/privacy.md`, `specs/tests/packaging.md` | **Imported by:** PR CI,
+`specs/src/yoetz/observability/privacy.md`, `specs/tests/packaging.md` | **Imported by:** PR CI,
 security/privacy workflow, tagged release workflow
 
 ## Purpose

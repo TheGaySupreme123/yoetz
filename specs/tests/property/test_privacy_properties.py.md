@@ -1,7 +1,7 @@
 # tests/property/test_privacy_properties.py — privacy/redaction property checks
 
 **Wave:** F | **ADRs:** ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/observability/privacy.md`
+`src/yoetz/observability/privacy.md`
 **Imported by:** property-based privacy tests
 
 ## Purpose

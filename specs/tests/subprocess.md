@@ -74,7 +74,7 @@ tests/subprocess/test_signals_and_cancellation.py
 
 ### CLI executable contract
 
-For console script and `python -m yoetz_core`, snapshot:
+For console script and `python -m yoetz`, snapshot:
 
 - root/per-command help, version, invalid/missing/unknown flags;
 - six operations in human and `--json` modes;

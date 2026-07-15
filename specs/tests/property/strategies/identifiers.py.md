@@ -1,7 +1,7 @@
 # tests/property/strategies/identifiers.py — generated identifier strategies
 
 **Wave:** B | **ADRs:** ADR-001, ADR-002, ADR-005 | **Imports (spec-tree):**
-`src/yoetz_core/protocol/ids.py`
+`src/yoetz/protocol/ids.py`
 **Imported by:** property-based identifier tests
 
 ## Purpose

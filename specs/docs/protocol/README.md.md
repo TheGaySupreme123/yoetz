@@ -6,7 +6,7 @@
 
 ## Purpose
 
-Specify the first public document a human or client implementer reads to understand Yoetz Core's
+Specify the first public document a human or client implementer reads to understand Yoetz's
 wire protocol: what it records, what it does not prove, the six operations, event/identity model,
 canonical/idempotent behavior, coverage and findings, error handling, version discovery, and the
 minimum safe client workflow.
@@ -19,7 +19,7 @@ strategy, customer context, internal repository history, or unsupported roadmap 
 
 The future Markdown file has these stable sections and anchors:
 
-1. `# Yoetz Core protocol v0.1`
+1. `# Yoetz protocol v0.1`
 2. Status and normative sources
 3. Trust model: ledger, observation, identity and coverage
 4. Six public workflow operations

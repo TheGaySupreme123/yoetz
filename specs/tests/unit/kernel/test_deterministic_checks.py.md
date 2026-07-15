@@ -1,8 +1,8 @@
 # tests/unit/kernel/test_deterministic_checks.py — deterministic policy engine behavior
 
 **Wave:** B | **ADRs:** ADR-002, ADR-004, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/kernel/deterministic_checks.md`, `src/yoetz_core/kernel/policies/work_integrity.md`,
-`src/yoetz_core/kernel/policies/research_evidence.md`
+`src/yoetz/kernel/deterministic_checks.md`, `src/yoetz/kernel/policies/work_integrity.md`,
+`src/yoetz/kernel/policies/research_evidence.md`
 **Imported by:** the kernel unit suite
 
 ## Purpose

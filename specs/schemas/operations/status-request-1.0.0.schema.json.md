@@ -1,7 +1,7 @@
 # schemas/operations/status-request-1.0.0.schema.json — status request schema
 
 **Wave:** D | **ADRs:** ADR-001, ADR-002, ADR-003, ADR-004, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/application/status.md`, `src/yoetz_core/kernel/projections.md`
+`src/yoetz/application/status.md`, `src/yoetz/kernel/projections.md`
 **Imported by:** CLI, MCP, and validation fixtures
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the read-only status query boundary.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/operations/status-request/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/operations/status-request/1.0.0`.
 - Owning model: `StatusRequestModel`.
 
 ## Behavior

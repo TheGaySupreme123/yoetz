@@ -1,7 +1,7 @@
 # schemas/config/yoetz-config-1.0.0.schema.json — configuration schema
 
 **Wave:** C/F | **ADRs:** ADR-003, ADR-004, ADR-006, ADR-007, ADR-008, ADR-009 | **Imports (spec-tree):**
-`src/yoetz_core/config/models.md`, `src/yoetz_core/config/load.md`
+`src/yoetz/config/models.md`, `src/yoetz/config/load.md`
 **Imported by:** trusted service startup, configuration-schema tests, and packaging tests
 
 ## Purpose
@@ -12,7 +12,7 @@ Ordinary CLI/MCP/UI clients do not receive or parse this object.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/config/yoetz-config/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/config/yoetz-config/1.0.0`.
 - Owning model: `YoetzConfig`.
 
 ## Behavior

@@ -13,17 +13,18 @@ workflow.
 
 The document must include:
 
-- acceptable and unacceptable behavior;
-- a reporting path for enforcement issues;
+- the official Contributor Covenant 3.0 acceptable/unacceptable behavior and enforcement terms;
+- private reporting to `conduct@yoetz.dev` for enforcement issues;
 - a statement that the standard applies in repository discussions and project spaces;
 - a concise escalation or moderation process;
 - the identity of the enforcement owner or team, if the project chooses to name one.
 
 ## Behavior
 
-The code of conduct should set a clear baseline for respectful, constructive interaction. It should
-describe how contributors and maintainers are expected to treat one another, and it should make the
-moderation path obvious when behavior crosses the line.
+The root document uses the official Contributor Covenant 3.0 text, filling only its project-scope
+and enforcement-contact fields. It sets a clear baseline for respectful, constructive interaction
+and makes the moderation path obvious when behavior crosses the line. The contact must be verified
+by E-012 before release; conduct reports never use a public issue or the security intake.
 
 The document must stay separate from technical specs:
 
@@ -53,6 +54,4 @@ The document must stay separate from technical specs:
 
 ## Open questions
 
-None.
-
-F-002 and F-006 are the sole central community-policy gates.
+None. F-002 and F-006 are resolved; E-012 verifies the separate private conduct route.

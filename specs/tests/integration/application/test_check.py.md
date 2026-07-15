@@ -1,8 +1,8 @@
 # tests/integration/application/test_check.py — check end-to-end and semantic gates
 
 **Wave:** D/E | **ADRs:** ADR-003, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/application/check.md`, `src/yoetz_core/adapters/providers/fake.md`,
-`src/yoetz_core/kernel/deterministic_checks.md`
+`src/yoetz/application/check.md`, `src/yoetz/adapters/providers/fake.md`,
+`src/yoetz/kernel/deterministic_checks.md`
 **Imported by:** integration application tests
 
 ## Purpose

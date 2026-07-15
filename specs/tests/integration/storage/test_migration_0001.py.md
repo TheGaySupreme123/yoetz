@@ -1,7 +1,7 @@
 # tests/integration/storage/test_migration_0001.py — first migration and schema identity
 
 **Wave:** C | **ADRs:** ADR-003, ADR-004, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/adapters/sqlite/migrations.md`, `src/yoetz_core/version.md`
+`src/yoetz/adapters/sqlite/migrations.md`, `src/yoetz/version.md`
 **Imported by:** integration storage tests
 
 ## Purpose

@@ -1,4 +1,4 @@
-# Yoetz Core v0.1 — shared interface registry
+# Yoetz v0.1 — shared interface registry
 
 Canonical names used across all spec files. A spec MUST use these names verbatim. Additions land
 here first. Signatures are Python-flavored natural language, not final code.
@@ -158,7 +158,7 @@ structural envelope frozen by `domain/events.py` plus decoded payload handle), `
 `projection_status = "unknown_unprojected"`). Payload dataclasses are named
 `<FamilyPascal>Payload`, e.g. `ObligationPublishedPayload`.
 
-Key payload fields (minimum; full shapes in `specs/src/yoetz_core/domain/events.md`):
+Key payload fields (minimum; full shapes in `specs/src/yoetz/domain/events.md`):
 
 - `obligation_published`: `obligation_id`, `description`, `evidence_expectation`, optional
   `acceptance_criteria`, `source_refs`.
@@ -833,7 +833,7 @@ a freshly recomputed preview digest and explicit acceptance. Its shared values a
 confirmation channel `interactive|noninteractive_flag`. Noninteractive execution requires both
 the exact preview digest and explicit acceptance; a generic `--yes` cannot stand alone. Modified,
 partial, unmanaged, unsafe, or changed-after-preview copies are preserved. v0.1 writes only the
-fixed `.agents/skills/yoetz-core/` directory inside one explicitly supplied trusted project; it
+fixed `.agents/skills/yoetz/` directory inside one explicitly supplied trusted project; it
 never edits Codex/MCP configuration, Git state, package resources, or arbitrary skills.
 
 ## 11. Application (`application/`)
@@ -933,7 +933,7 @@ facade and are never MCP tools.
 - `service/human_control.py`, `service/secret_ingress.py`, `cli/unlock.py`, and
   `cli/privacy_control.py`: server ceremony/secret consumers plus the separately trusted foreground
   TTY helpers; no ordinary approval flag/token or server import in the helper graph.
-- `mcp/server.py`: low-level `Server("yoetz-core")`, generated six-tool registry, dispatch,
+- `mcp/server.py`: low-level `Server("yoetz")`, generated six-tool registry, dispatch,
   prevalidated fallbacks (`LAST_RESORT_INTERNAL_ERROR_RESULT`), and one `ServiceClient`; it owns no
   runtime/application/provider/key state.
 - `cli/app.py`: Typer client surface with the six operations and registered support/service/privacy
@@ -960,7 +960,7 @@ facade and are never MCP tools.
 
 `version.py` exposes `VersionManifest`: package, protocol (`0.1`), local control protocol (`1.0`),
 privacy-policy schema (`1.0.0`), egress-receipt schema (`1.0.0`), engine (`0.1.0`), policy pack
-versions, projection (`core/0.1.0`), object format (`yoetz-object/1`), storage schema
+versions, projection (`yoetz/0.1.0`), object format (`yoetz-object/1`), storage schema
 (`user_version` 1, catalog 1), Python, APSW/SQLite source ID, MCP SDK, provider adapter versions.
 Its shared support values are frozen `ResourceIdentity(name, media_type, size_bytes,
 sha256_digest)` and `CapabilitySet(name, supported_versions, tested_versions, denied_versions)`.
@@ -968,7 +968,7 @@ Every capability collection is an exact ASCII-sorted set: membership is literal,
 range, interpolation, nearest-version, or inferred-between-probes semantics.
 
 `build_version_manifest` loads the installed
-`yoetz_core.resources/support/runtime-support.json` through `importlib.resources`, verifies that
+`yoetz.resources/support/runtime-support.json` through `importlib.resources`, verifies that
 resource's size/digest against the packaged resource manifest before trusting it, validates its
 schema and canonical self-digest, and then binds its exact runtime/Codex/MCP support sets into the
 manifest. Missing, malformed, mismatched, newer, or merely untested versions are not silently

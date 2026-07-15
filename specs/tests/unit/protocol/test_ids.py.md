@@ -1,7 +1,7 @@
 # tests/unit/protocol/test_ids.py — identifier contract matrix
 
 **Wave:** A | **ADRs:** ADR-002, ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/protocol/ids.py`, `src/yoetz_core/protocol/errors.md`
+`src/yoetz/protocol/ids.py`, `src/yoetz/protocol/errors.md`
 **Imported by:** the protocol unit suite
 
 ## Purpose

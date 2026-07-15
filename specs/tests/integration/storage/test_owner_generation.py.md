@@ -1,7 +1,7 @@
 # tests/integration/storage/test_owner_generation.py — owner generation and write authority
 
 **Wave:** C | **ADRs:** ADR-003, ADR-004 | **Imports (spec-tree):**
-`src/yoetz_core/adapters/sqlite/connection.md`, `src/yoetz_core/adapters/sqlite/repository.md`
+`src/yoetz/adapters/sqlite/connection.md`, `src/yoetz/adapters/sqlite/repository.md`
 **Imported by:** integration storage tests
 
 ## Purpose

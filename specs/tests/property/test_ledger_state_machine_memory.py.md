@@ -1,8 +1,8 @@
 # tests/property/test_ledger_state_machine_memory.py — in-memory ledger state machine
 
 **Wave:** B–C | **ADRs:** ADR-001 through ADR-004 | **Imports (spec-tree):**
-`src/yoetz_core/adapters/memory/ledger.md`, `src/yoetz_core/adapters/memory/start_catalog.md`,
-`src/yoetz_core/adapters/memory/objects.md`
+`src/yoetz/adapters/memory/ledger.md`, `src/yoetz/adapters/memory/start_catalog.md`,
+`src/yoetz/adapters/memory/objects.md`
 **Imported by:** property-based conformance tests
 
 ## Purpose

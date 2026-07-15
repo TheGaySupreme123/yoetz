@@ -1,7 +1,7 @@
 # tests/unit/protocol/test_canonical_vectors.py — golden canonical bytes and digests
 
 **Wave:** A | **ADRs:** ADR-002, ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/protocol/canonical.py`, `specs/fixtures/README.md`
+`src/yoetz/protocol/canonical.py`, `specs/fixtures/README.md`
 **Imported by:** the protocol unit suite
 
 ## Purpose

@@ -2,7 +2,7 @@
 
 **Status:** Working decision for spec drafting (2026-07-13). Ratification requires clean-VM
 install/upgrade/uninstall evidence from built artifacts.
-**Owning public specs:** repository-file specs, `specs/src/yoetz_core/version.md`, packaged resource
+**Owning public specs:** repository-file specs, `specs/src/yoetz/version.md`, packaged resource
 specs, packaging/capability tests, and release workflow/script specs.
 
 ## Decisions
@@ -16,31 +16,34 @@ specs, packaging/capability tests, and release workflow/script specs.
    `no_args_is_help=True`; no Click-internal coupling. Async bridge: exactly one top-level
    `anyio.run(...)` per process entry (CLI command, MCP bridge, or foreground service); no nested
    event-loop helpers.
-4. **Console script:** distribution and executable both `yoetz-core`
-   (`yoetz_core.cli.app:main`). `python -m yoetz_core` delegates to the same entry.
-5. **Wheel strategy:** yoetz-core itself is a pure-Python wheel; platform specificity comes from
+4. **Console script:** distribution and executable both `yoetz`
+   (`yoetz.cli.app:main`). `python -m yoetz` delegates to the same entry.
+5. **Wheel strategy:** yoetz itself is a pure-Python wheel; platform specificity comes from
    the pinned APSW dependency wheels. Advertised platform matrix v0.1: macOS 11.0+ arm64
    (`macosx_11_0_arm64`) and glibc 2.28+ x86-64 (`manylinux_2_28_x86_64`). No musl, Windows, or
    macOS x86-64 claims. Primary install:
-   `uv tool install --managed-python --python 3.14.6 "yoetz-core==0.1.0"`.
+   `uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"`.
 6. **Keys and optional extras:** the certified standard install includes direct pinned
    `cryptography` (AES-GCM, RFC 3394 AES Key Wrap, HKDF/HMAC) and `keyring` plus the approved
    macOS/Linux secure-backend dependencies because object/vault crypto and OS-keyring-first service
    startup are v0.1 core behavior, not semantic extras. Optional extras are `semantic-openai` (openai) and
    `portable-recovery` (argon2-cffi). Explicit passphrase-backed vault setup also requires the
    reviewed Argon2id implementation; absence leaves the service locked rather than downgrading.
-7. **Type/lint stack:** Ruff `0.15.21` (format+lint, line length 100), official npm Pyright
-   `1.1.411` via dev-only `package.json` + `npx --no-install pyright`, strict mode.
+7. **Type/lint stack and npm boundary:** Ruff `0.15.21` (format+lint, line length 100), official
+   npm Pyright `1.1.411` via dev-only private `package.json` + `npx --no-install pyright`, strict
+   mode. Node/npm are contributor and CI tools, not end-user runtime requirements. A public npm
+   package or `npx yoetz` launcher is a separate distribution surface and is deferred until it has
+   its own provenance, Python/uv delegation, upgrade, and platform contract.
 8. **Release artifacts:** sdist + wheel, SHA-256 checksums, CycloneDX SBOM via `uv export`,
    dependency lock, support matrix, conformance summary, known limitations, changelog, security
    policy. Sigstore signing deferred until a documented verification command exists (a signature
    without a verifier is not a gate).
 9. **Install/upgrade/uninstall:** documented and tested: `uv tool install/upgrade/uninstall`, the
-   foreground `yoetz-core service run` entrypoint suitable for a user-selected external
+   foreground `yoetz service run` entrypoint suitable for a user-selected external
    supervisor, `codex mcp add/remove yoetz`, and data-retention behavior on uninstall. Native
    launchd/systemd-user installer commands are deferred; uninstall never deletes bundles/vault/
    keyring entries.
-10. **Diagnostics:** `yoetz-core version --json` emits the full `VersionManifest`; startup safety
+10. **Diagnostics:** `yoetz version --json` emits the full `VersionManifest`; startup safety
     validation is mandatory but the public `doctor` command stays v0.2.
 
 ## Consequences

@@ -1,7 +1,7 @@
 # tests/unit/service/test_confidential_protocol.py — frozen YZH1/YZS1 wire vectors
 
 **Wave:** C/D | **ADRs:** ADR-004, ADR-008, ADR-009 | **Imports (spec-tree):**
-`src/yoetz_core/service/confidential_protocol.md`, reviewed golden fixtures | **Imported by:** unit
+`src/yoetz/service/confidential_protocol.md`, reviewed golden fixtures | **Imported by:** unit
 suite and confidential protocol release gate
 
 ## Purpose

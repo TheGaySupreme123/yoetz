@@ -60,7 +60,7 @@ tests/packaging/test_wheel_and_sdist_contents.py
 
 - Build sdist and pure-Python Yoetz wheel twice from clean normalized checkouts with fixed documented
   build environment; compare file lists and reproducibility metadata/digests according to ADR-007.
-- Assert distribution/executable `yoetz-core`, version metadata, Python
+- Assert distribution/executable `yoetz`, version metadata, Python
   `>=3.14,<3.15`, optional extras, entry point, `py.typed`, license/readme/security
   metadata, and no undeclared native binary in the Yoetz wheel.
 - Enforce allowlisted files. Exclude tests, development caches, private planning sources,

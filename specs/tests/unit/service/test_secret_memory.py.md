@@ -1,6 +1,6 @@
 # tests/unit/service/test_secret_memory.py — protected secret-memory contract unit suite
 
-**Wave:** C | **ADRs:** ADR-004, ADR-008 | **Imports (spec-tree):** `src/yoetz_core/ports/secret_memory.md`, `adapters/keys/secret_memory.md` | **Imported by:** test runner
+**Wave:** C | **ADRs:** ADR-004, ADR-008 | **Imports (spec-tree):** `src/yoetz/ports/secret_memory.md`, `adapters/keys/secret_memory.md` | **Imported by:** test runner
 
 ## Purpose
 

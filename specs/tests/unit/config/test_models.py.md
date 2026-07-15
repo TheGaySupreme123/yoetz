@@ -1,7 +1,7 @@
 # tests/unit/config/test_models.py — strict configuration model validation
 
 **Wave:** C | **ADRs:** ADR-003, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/config/models.md`
+`src/yoetz/config/models.md`
 **Imported by:** the config unit suite
 
 ## Purpose
@@ -13,7 +13,7 @@ Lock the strict config model, profile table, and secret rejection rules.
 - `test_defaults_and_schema_version` — default values and schema version are fixed.
 - `test_profile_capability_matrix` — each profile maps to the documented network/semantic policy.
 - `test_strict_local_forbids_external_but_accepts_exact_local_selection` — strict-local keeps the
-  Core path network-denied and can select only the closed nonsecret local-model tuple; it calls the
+  Yoetz path network-denied and can select only the closed nonsecret local-model tuple; it calls the
   separate runtime offline only when exact runtime sandbox evidence supports that claim.
 - `test_external_and_fake_profiles_forbid_local_model` — v0.1 never implicitly selects between
   semantic sinks.

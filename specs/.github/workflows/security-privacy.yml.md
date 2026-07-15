@@ -1,7 +1,7 @@
 # .github/workflows/security-privacy.yml — dependency, code, artifact, and plaintext-boundary gate
 
 **Wave:** F | **ADRs:** ADR-003, ADR-004, ADR-005, ADR-007 | **Imports (spec-tree):**
-`specs/scripts/scan_public_boundary.py.md`, `specs/src/yoetz_core/observability/privacy.md`,
+`specs/scripts/scan_public_boundary.py.md`, `specs/src/yoetz/observability/privacy.md`,
 `specs/tests/packaging.md` | **Imported by:** PR policy and tagged release
 
 ## Purpose

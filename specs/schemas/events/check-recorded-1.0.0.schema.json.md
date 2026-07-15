@@ -1,7 +1,7 @@
 # schemas/events/check-recorded-1.0.0.schema.json — check-recorded payload schema
 
 **Wave:** D/E | **ADRs:** ADR-001, ADR-002, ADR-003, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/domain/events.md`, `src/yoetz_core/domain/findings.md`
+`src/yoetz/domain/events.md`, `src/yoetz/domain/findings.md`
 **Imported by:** check and replay tests
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the payload that records a completed check and its verdict metadata.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/events/check-recorded/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/check-recorded/1.0.0`.
 - Owning model: `CheckRecordedPayload`.
 
 ## Behavior

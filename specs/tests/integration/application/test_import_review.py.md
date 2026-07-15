@@ -1,7 +1,7 @@
 # tests/integration/application/test_import_review.py — Codex JSONL import and review flow
 
 **Wave:** D | **ADRs:** ADR-003, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/adapters/importers/codex_jsonl.md`, `src/yoetz_core/application/import_review.md`
+`src/yoetz/adapters/importers/codex_jsonl.md`, `src/yoetz/application/import_review.md`
 **Imported by:** integration application tests
 
 ## Purpose

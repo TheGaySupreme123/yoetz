@@ -1,7 +1,7 @@
 # tests/conformance/protocol/test_frozen_schemas.py — frozen schema parity and registry completeness
 
 **Wave:** A | **ADRs:** ADR-002, ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/protocol/models.md`, `src/yoetz_core/protocol/schemas.md`,
+`src/yoetz/protocol/models.md`, `src/yoetz/protocol/schemas.md`,
 `specs/schemas/README.md`
 **Imported by:** conformance protocol tests
 

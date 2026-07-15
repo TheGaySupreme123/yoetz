@@ -1,7 +1,7 @@
 # schemas/events/session-resumed-1.0.0.schema.json — session-resumed payload schema
 
 **Wave:** A/B/C | **ADRs:** ADR-001, ADR-002, ADR-003 | **Imports (spec-tree):**
-`src/yoetz_core/domain/events.md`
+`src/yoetz/domain/events.md`
 **Imported by:** start-operation and conformance fixtures
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the payload for reattaching to an existing session route.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/events/session-resumed/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/session-resumed/1.0.0`.
 - Owning model: `SessionResumedPayload`.
 
 ## Behavior

@@ -1,7 +1,7 @@
 # tests/conformance/adapters/test_object_store_port.py — object store port parity
 
 **Wave:** C | **ADRs:** ADR-003, ADR-004, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/ports/objects.md`, `tests/conformance/adapters/test_ledger_port.py.md`
+`src/yoetz/ports/objects.md`, `tests/conformance/adapters/test_ledger_port.py.md`
 **Imported by:** conformance adapter tests
 
 ## Purpose

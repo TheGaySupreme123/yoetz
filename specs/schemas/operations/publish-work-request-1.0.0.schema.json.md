@@ -1,7 +1,7 @@
 # schemas/operations/publish-work-request-1.0.0.schema.json — publish-work request schema
 
 **Wave:** D | **ADRs:** ADR-001, ADR-002, ADR-003, ADR-004 | **Imports (spec-tree):**
-`src/yoetz_core/application/publish_work.md`, `src/yoetz_core/domain/events.md`
+`src/yoetz/application/publish_work.md`, `src/yoetz/domain/events.md`
 **Imported by:** CLI, MCP, and validation fixtures
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the request shape for atomically publishing a batch of event drafts.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/operations/publish-work-request/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/operations/publish-work-request/1.0.0`.
 - Owning model: `PublishWorkRequestModel`.
 
 ## Behavior

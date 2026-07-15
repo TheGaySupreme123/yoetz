@@ -1,7 +1,7 @@
 # schemas/common/subject-state-ref-1.0.0.schema.json — subject state reference schema
 
 **Wave:** A/B | **ADRs:** ADR-002, ADR-004, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/domain/events.md`, `src/yoetz_core/domain/findings.md`
+`src/yoetz/domain/events.md`, `src/yoetz/domain/findings.md`
 **Imported by:** action/result/evidence/claim schemas
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the bounded reference object that binds claims and actions to repositor
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/common/subject-state-ref/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/common/subject-state-ref/1.0.0`.
 - Owning model: `SubjectStateRef`.
 
 ## Behavior

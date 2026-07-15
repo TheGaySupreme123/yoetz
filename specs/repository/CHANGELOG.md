@@ -1,6 +1,6 @@
 # CHANGELOG.md — public release history and user-visible deltas
 
-**Wave:** F | **ADRs:** ADR-005, ADR-007 | **Imports (spec-tree):** `src/yoetz_core/version.md`,
+**Wave:** F | **ADRs:** ADR-005, ADR-007 | **Imports (spec-tree):** `src/yoetz/version.md`,
 `tests/packaging.md`
 **Imported by:** release notes, support triage, and upgrade planning
 

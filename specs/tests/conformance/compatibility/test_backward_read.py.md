@@ -1,7 +1,7 @@
 # tests/conformance/compatibility/test_backward_read.py — backward-read compatibility corpus
 
 **Wave:** F | **ADRs:** ADR-003, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/version.md`, `specs/fixtures/README.md`
+`src/yoetz/version.md`, `specs/fixtures/README.md`
 **Imported by:** conformance compatibility tests
 
 ## Purpose

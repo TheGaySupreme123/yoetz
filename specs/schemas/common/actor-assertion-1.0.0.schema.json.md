@@ -1,7 +1,7 @@
 # schemas/common/actor-assertion-1.0.0.schema.json — caller-asserted actor boundary
 
 **Wave:** A | **ADRs:** ADR-002, ADR-005, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/protocol/models.md`, `specs/schemas/README.md`
+`src/yoetz/protocol/models.md`, `specs/schemas/README.md`
 **Imported by:** request schemas, event schemas, and public validation fixtures
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the caller-asserted actor shape that appears in public requests and imp
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/common/actor-assertion/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/common/actor-assertion/1.0.0`.
 - Owning model: `ActorAssertionModel`.
 
 ## Behavior

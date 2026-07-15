@@ -1,14 +1,14 @@
 # scripts/verify_resource_manifest.py — synchronize and prove packaged resource parity
 
 **Wave:** A/F | **ADRs:** ADR-003, ADR-006, ADR-007 | **Imports (spec-tree):**
-`specs/src/yoetz_core/resources/manifest.json.md`, root resource specs | **Imported by:** PR CI,
+`specs/src/yoetz/resources/manifest.json.md`, root resource specs | **Imported by:** PR CI,
 packaging tests, release construction
 
 ## Purpose
 
 Maintain the exact relationship between reviewable public resource sources and the bytes installed
 inside the wheel. The script is the sole repository tool allowed to copy canonical resources into
-`src/yoetz_core/resources/` and regenerate its manifest. Its default verification mode is strictly
+`src/yoetz/resources/` and regenerate its manifest. Its default verification mode is strictly
 read-only.
 
 ## Public surface

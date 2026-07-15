@@ -1,7 +1,7 @@
 # tests/integration/objects/test_envelope_and_encrypted_files.py — object envelope and encrypted file lifecycle
 
 **Wave:** C | **ADRs:** ADR-003, ADR-004, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/adapters/objects/envelope.md`, `src/yoetz_core/adapters/objects/encrypted_files.md`
+`src/yoetz/adapters/objects/envelope.md`, `src/yoetz/adapters/objects/encrypted_files.md`
 **Imported by:** integration object-store tests
 
 ## Purpose

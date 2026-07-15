@@ -1,7 +1,7 @@
 # scripts/generate_capability_matrix.py — aggregate redacted external capability evidence
 
 **Wave:** D/F | **ADRs:** ADR-005, ADR-007 | **Imports (spec-tree):**
-`specs/tests/capability.md`, `specs/src/yoetz_core/version.md` | **Imported by:** capability and
+`specs/tests/capability.md`, `specs/src/yoetz/version.md` | **Imported by:** capability and
 tagged-release workflows, release-evidence generator
 
 ## Purpose

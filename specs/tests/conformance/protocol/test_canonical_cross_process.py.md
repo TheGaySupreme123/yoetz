@@ -1,7 +1,7 @@
 # tests/conformance/protocol/test_canonical_cross_process.py — cross-process canonical bytes
 
 **Wave:** A | **ADRs:** ADR-002, ADR-005 | **Imports (spec-tree):**
-`src/yoetz_core/protocol/canonical.md`, `tests/property/strategies/json_values.py.md`
+`src/yoetz/protocol/canonical.md`, `tests/property/strategies/json_values.py.md`
 **Imported by:** conformance protocol tests
 
 ## Purpose

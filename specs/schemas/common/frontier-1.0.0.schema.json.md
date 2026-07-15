@@ -1,7 +1,7 @@
 # schemas/common/frontier-1.0.0.schema.json — frontier identity schema
 
 **Wave:** A/B | **ADRs:** ADR-002, ADR-003, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/protocol/models.md`, `src/yoetz_core/domain/events.md`
+`src/yoetz/protocol/models.md`, `src/yoetz/domain/events.md`
 **Imported by:** operation, event, and result schemas
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the canonical frontier boundary used across request, event, and result 
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/common/frontier/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/common/frontier/1.0.0`.
 - Owning model: `Frontier`.
 
 ## Behavior

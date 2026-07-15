@@ -5,7 +5,7 @@
 
 ## Purpose
 
-Prove `yoetz-core` and the installed interpreter's `python -m yoetz_core` are two launch paths into
+Prove `yoetz` and the installed interpreter's `python -m yoetz` are two launch paths into
 one CLI contract, not divergent parsers/configuration/startup systems.
 
 ## Public surface

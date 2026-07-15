@@ -1,7 +1,7 @@
 # schemas/events/redaction-recorded-1.0.0.schema.json — redaction-recorded payload schema
 
 **Wave:** C/D | **ADRs:** ADR-003, ADR-004, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/domain/events.md`, `src/yoetz_core/domain/receipts.md`
+`src/yoetz/domain/events.md`, `src/yoetz/domain/receipts.md`
 **Imported by:** redaction and recovery tests
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the payload that records logical redaction or object deletion.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/events/redaction-recorded/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/redaction-recorded/1.0.0`.
 - Owning model: `RedactionRecordedPayload`.
 
 ## Behavior

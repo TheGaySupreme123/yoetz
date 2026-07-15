@@ -6,7 +6,7 @@ gates
 
 ## Purpose
 
-Provide the executable definition of “the same Yoetz Core” across the in-memory reference adapter,
+Provide the executable definition of “the same Yoetz” across the in-memory reference adapter,
 SQLite/object/key adapters, CLI, and MCP. Storage and transport are replaceable only when they
 produce the same canonical public behavior. This suite also binds README/product claims to evidence
 and prevents a technically successful path from overstating coverage.

@@ -1,7 +1,7 @@
 # schemas/operations/check-request-1.0.0.schema.json — check request schema
 
 **Wave:** D/E | **ADRs:** ADR-001, ADR-002, ADR-003, ADR-004, ADR-006 | **Imports (spec-tree):**
-`src/yoetz_core/application/check.md`, `src/yoetz_core/domain/findings.md`
+`src/yoetz/application/check.md`, `src/yoetz/domain/findings.md`
 **Imported by:** CLI, MCP, and validation fixtures
 
 ## Purpose
@@ -11,7 +11,7 @@ Describe the request shape for the `check` operation, including the frozen case 
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/core/0.1/operations/check-request/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/operations/check-request/1.0.0`.
 - Owning model: `CheckRequestModel`.
 
 ## Behavior

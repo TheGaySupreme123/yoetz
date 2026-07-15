@@ -1,7 +1,7 @@
 # tests/unit/config/test_load_precedence.py — config loading precedence and refusal rules
 
 **Wave:** C | **ADRs:** ADR-003, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/config/load.md`, `src/yoetz_core/config/models.md`, `src/yoetz_core/config/paths.md`
+`src/yoetz/config/load.md`, `src/yoetz/config/models.md`, `src/yoetz/config/paths.md`
 **Imported by:** the config unit suite
 
 ## Purpose

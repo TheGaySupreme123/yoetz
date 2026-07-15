@@ -32,7 +32,7 @@ to the exact technical protocol, policy schema, security policy, and evidence-bo
 
 ## Behavior
 
-The document states that Yoetz Core runs as a trusted local service. CLI, MCP, and future UI are
+The document states that Yoetz runs as a trusted local service. CLI, MCP, and future UI are
 control surfaces; they never own encryption keys or receive decrypted vault-unlock secrets. A
 keyring-backed vault, or a pristine installation eligible for automatic keyring initialization,
 first tries the approved OS keyring and may otherwise remain locked. A committed passphrase-backed
@@ -50,7 +50,7 @@ remains fenced until presence is restored and revalidated. v0.1 claims no asynch
 
 The safe installation default is `local_only` with `network_egress_permitted=false`, all five
 network channels denied, and no local model. The four privacy profiles govern LLM inference/content
-disclosure only. Under `local_only`, external LLM-provider adapters cannot be constructed and Core
+disclosure only. Under `local_only`, external LLM-provider adapters cannot be constructed and Yoetz
 makes no external user/task-data request. Future policy may separately authorize the global ceiling
 and one bounded non-LLM row without enabling external LLM inference. v0.1 ships no production
 transport for telemetry, crash upload, update checks, or capability testing: setup marks those rows
@@ -61,7 +61,7 @@ confirmation; it cannot silently activate an old draft/answer after upgrade. The
 and can never carry task/user content. A separately selected local model is a protected disclosure
 sink subject to scope, minimization, scanning, and never-send rules, but it receives plaintext. A
 pre-existing model runtime is an explicitly trusted local component unless its exact support cell
-proves enforceable no-network isolation; Core's AF_UNIX-only delivery does not establish that a
+proves enforceable no-network isolation; Yoetz's AF_UNIX-only delivery does not establish that a
 separate process lacks ambient networking (F-013).
 The other profiles are described exactly:
 
@@ -89,9 +89,9 @@ environment variables; credential/hidden authentication files; opportunistically
 databases; unrestricted logs, stderr or transcripts; and unrelated out-of-scope files. A permissive
 profile cannot waive this set.
 
-The working interpretation pending founder gate F-012 distinguishes candidate/user-discovered
-credentials, which are always blocked from model content, from one separately provisioned service-
-vault credential used only as one-attempt authentication metadata to the exact pinned TLS endpoint.
+Resolved decision F-012 distinguishes candidate/user-discovered credentials, which are always
+blocked from model content, from one separately provisioned service-vault credential used only as
+one-attempt authentication metadata to the exact pinned TLS endpoint.
 That provider credential never enters body/context/preview/receipt/log/SDK state; it does necessarily
 leave the machine in the authentication header. The alternative is to forbid credentialed external
 providers.
@@ -108,9 +108,9 @@ lifecycle security IPC (for example allowlisted Linux AF_UNIX session-bus Secret
 and, separately, system-bus `org.freedesktop.login1` routes, or macOS native security/presence/
 session notifications). It never permits
 arbitrary AF_UNIX, arbitrary bus methods/peers, or a local
-proxy. The evidence names the exact platform profile, Core-owned service/client/helper processes,
+proxy. The evidence names the exact platform profile, Yoetz-owned service/client/helper processes,
 startup-through-`locked|ready` lifecycle interval, operations, and allowlisted peers. OS agents and
-separate local-model runtimes are outside the Core process claim, with the local-runtime limitation
+separate local-model runtimes are outside the Yoetz process claim, with the local-runtime limitation
 stated below. Policy tightening is immediate;
 widening the global ceiling, content, provider, purpose, endpoint, scope, or a network channel
 requires explicit local-human confirmation through a trusted control surface. MCP, agents,
@@ -158,11 +158,11 @@ zero-knowledge, forensic erasure, or universal secret detection.
 ## Errors and edge cases
 
 - A locked service is not described as corrupt, deleted, or silently reset.
-- `local_only` means Core performs no external LLM or user/task-content egress, not “a provider call
+- `local_only` means Yoetz performs no external LLM or user/task-content egress, not “a provider call
   with redacted content.” It does not by itself mean that separately authorized bounded structural
   telemetry, diagnostics, update checks, or capability tests are disabled. If a local model is
   enabled, the UI names the separate runtime trust/sandbox limitation.
-- Local-model permission gives the Core adapter no IP-network, launch, or download capability; it
+- Local-model permission gives the Yoetz adapter no IP-network, launch, or download capability; it
   does not by itself remove a pre-existing runtime process's ambient authority.
 - Local OS keyring/user-presence IPC is not called network egress only for the exact release-tested
   platform route and peer/method allowlist; arbitrary local sockets, D-Bus calls, and proxies remain
@@ -194,7 +194,7 @@ zero-knowledge, forensic erasure, or universal secret detection.
    stored choice without fresh local-human authorization.
 10. `confirm_every_request` never authorizes a hidden retry budget: one foreground decision permits
     one physical dispatch.
-11. Zero-network evidence names its exact Core process/readiness boundary and allowlisted local OS
+11. Zero-network evidence names its exact Yoetz process/readiness boundary and allowlisted local OS
     IPC; it does not attest external OS agents or model runtimes.
 12. Privacy receipts are terminal; pending/approved/receipt-repair state is never presented as a
     finished outcome, and initial reservation failure is explicitly unreceipted and pre-dispatch.

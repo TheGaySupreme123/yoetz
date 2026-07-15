@@ -1,7 +1,7 @@
 # tests/conformance/honesty/test_receipt_wording.py — receipt wording and conclusion honesty
 
 **Wave:** B | **ADRs:** ADR-002, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/domain/receipts.md`, `src/yoetz_core/kernel/receipt_builder.md`
+`src/yoetz/domain/receipts.md`, `src/yoetz/kernel/receipt_builder.md`
 **Imported by:** conformance honesty tests
 
 ## Purpose

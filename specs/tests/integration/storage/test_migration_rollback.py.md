@@ -1,7 +1,7 @@
 # tests/integration/storage/test_migration_rollback.py — migration failure and rollback semantics
 
 **Wave:** C | **ADRs:** ADR-003, ADR-004, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/adapters/sqlite/migrations.md`
+`src/yoetz/adapters/sqlite/migrations.md`
 **Imported by:** integration storage tests
 
 ## Purpose

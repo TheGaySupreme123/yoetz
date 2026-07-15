@@ -1,8 +1,8 @@
 # tests/unit/kernel/test_receipt_builder.py — canonical receipt assembly rules
 
 **Wave:** B | **ADRs:** ADR-002, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz_core/kernel/receipt_builder.md`, `src/yoetz_core/domain/receipts.md`,
-`src/yoetz_core/kernel/ranking.md`
+`src/yoetz/kernel/receipt_builder.md`, `src/yoetz/domain/receipts.md`,
+`src/yoetz/kernel/ranking.md`
 **Imported by:** the kernel unit suite
 
 ## Purpose
