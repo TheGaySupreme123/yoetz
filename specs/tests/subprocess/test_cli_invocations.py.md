@@ -7,15 +7,18 @@ subprocess gates
 ## Purpose
 
 Prove the installed executable exposes the intended command tree and accepts inputs through the
-documented channels without a source checkout, TTY assumption, interactive prompt, or ambient config.
+documented channels without a source checkout or ambient config. Ordinary commands remain
+noninteractive; explicitly human-authority setup/control ceremonies are exercised with an isolated
+foreground PTY and never fall back to piped stdin.
 
 ## Public surface
 
 Pytest cases cover root/per-command help; `version`; six public operations; support commands
-`import`, `review`, `backup`, `restore`, `migrate`, `integrate`; input file/stdin/inline modes; and
-invalid invocation. Human-mode cases explicitly cover status gap wording, the three-finding display
-cap with stable ordering/suppressed count, and receipt wording no stronger than its canonical
-document. Parameter IDs are stable command/scenario labels.
+`import`, `review`, `backup`, `restore`, `migrate`, `integrate`; `privacy setup|show|propose|tighten`
+and `privacy receipts list|get`; input file/stdin/inline modes; and invalid invocation. Human-mode
+cases explicitly cover status gap wording, the three-finding display cap with stable ordering/
+suppressed count, receipt wording no stronger than its canonical document, and exact privacy recipe
+review. Parameter IDs are stable command/scenario labels.
 
 ## Behavior
 
@@ -33,6 +36,17 @@ cannot strengthen coverage/conclusion or hide redaction/limitations from the JSO
 commands assert consent/dry-run/overwrite boundaries and that no hidden public
 `doctor`/release-probe command appears.
 
+Privacy CLI snapshots cover all five recipe expansions and all thirteen typed answers. They
+distinguish the fail-safe `local_only + structural` installation seed from the editable
+`assisted-review` recommendation; show exact provider/model/endpoint, current data-use posture,
+scope, categories/classes, selection behavior, limits, omissions, and never-send exclusions; and
+prove a known-broad/stale/unknown data-use record removes the recommendation. Selecting a preset commits
+nothing until the exact trusted-local decision. After one assisted standing policy is committed,
+ordinary check/retry/respond/recheck invocations do not open a prompt; `confirm_every_request`,
+policy widening, credential mutation, and waiver retain their separate foreground paths.
+The check snapshot includes one post-validated semantic finding and shows its bounded direct
+main-agent message, uncertainty, and requested next step without exposing omitted packet content.
+
 The oracle includes exit, exact stdout/stderr bytes, bundle frontier before/after, created files,
 and network-denial observation. Findings do not make a successful operation fail. Invalid input
 cannot create/advance a catalog/bundle.
@@ -40,6 +54,8 @@ cannot create/advance a catalog/bundle.
 ## Errors and edge cases
 
 - No invocation may prompt when stdin is not a TTY or echo input/path/exception/traceback.
+- A privacy setup/control ceremony without a trusted controlling TTY fails closed and never reads
+  ordinary stdin; this is not a prompt path for ordinary commands.
 - Missing key/provider/storage states map to bounded documented errors.
 - Input path symlink/traversal/owner-permission cases fail before read or mutation.
 - A human render that reorders findings, exceeds the cap, drops the suppressed count/gap, or uses
@@ -53,6 +69,8 @@ cannot create/advance a catalog/bundle.
 3. Invalid invocation has no durable side effect.
 4. Strict-local command tests make no network call.
 5. Human rendering is a bounded projection of structured truth and never strengthens it.
+6. Presets are transparent editable draft macros, not consent, and assisted routine work is
+   noninteractive after the standing policy is committed.
 
 ## Tests
 

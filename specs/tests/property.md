@@ -131,6 +131,12 @@ After every rule, assert:
 - check/semantic result can steer only at frozen current frontier;
 - public outcomes match memory/SQLite and contain no plaintext canary.
 
+Privacy generators range across all four disclosure profiles, all five review-context profiles,
+every exact `ReviewSelectionPolicy` field, both current-data-use guard values, and independent sink
+category/class ceilings. Their meet may only remove selected recorded material; selection can never
+grant disclosure authority. Every emitted packet item is case-bound, in scope, under all caps, and
+either policy-eligible or represented by one closed omission reason.
+
 Crash rules model semantic before/after-commit uncertainty rather than attempting OS termination in
 this suite; physical kill points belong to subprocess tests.
 

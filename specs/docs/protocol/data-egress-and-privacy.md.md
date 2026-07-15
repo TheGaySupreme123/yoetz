@@ -86,6 +86,36 @@ human previews and approves those exact minimized bytes. `minimal_external` excl
 by default. `trusted_provider` may automate a broader but still enumerated set; it never means all
 available content.
 
+`ReviewContextProfile` is a separate closed value:
+`structural|goal_aware|assisted|expanded|custom`, paired with an exact compiled
+`ReviewSelectionPolicy` of sections, excerpt kinds, relevance, finding-prose eligibility,
+command-text eligibility, and caps.
+It determines which recorded case material the local selector considers, not whether that material
+may leave. `structural` contains typed timeline/
+state/rule/coverage facts; `goal_aware` adds allowed intent and claim prose; `assisted` adds
+mechanically linked problem-local recorded evidence, test/failure, diff, and repository excerpts;
+`expanded|custom` can select a broader explicitly approved recorded set. Every selected item still
+needs category/class/scope/destination authority and the same minimization/never-send path. No value
+creates a live repository/filesystem handle. The omission manifest distinguishes `not_recorded`,
+`not_selected`, `withheld_by_policy`, and `redacted_never_send`; none is synonymous with an
+unchanged subject state.
+
+The fail-safe seed is `local_only + structural + network false + all channels off`. The upstream
+CLI's *configured* recommendation is an inspectable standing workspace `trusted_provider +
+assisted` recipe with public-structural and ordinary-user-content classes, sensitive/transcript
+content off, and agent-context `finding_summary` enabled. It is eligible only for an exact current
+provider data-use profile stating training `prohibited`, retention `none|bounded`, and provider
+human access `prohibited|restricted`. Known-broad, unknown, or stale posture is ineligible. The recipe sets an editable
+`require_current_provider_data_use_evidence=true` runtime guard. The evidence record controls the
+badge and satisfies that explicit guard; it is not itself disclosure authority or a claim that
+Yoetz technically proves provider conduct. A custom policy may visibly turn the guard off through
+the normal widening ceremony and then carries no upstream no-training claim.
+
+After that standing policy is human-confirmed, ordinary checks, automatic retries, reviewer
+challenges, agent responses, and rechecks are automatic. Human involvement remains for widening,
+credential mutation, `confirm_every_request`, and finding waiver. Never-send/out-of-scope content
+has no approval path. Every physical attempt still receives a fresh authorization and receipt.
+
 `network_egress_permitted` is the global network ceiling. When false, all five channels must be
 disabled. When true, it authorizes no channel, category, destination, or request. The five exact
 `EgressChannel` values are `llm_inference`, `product_telemetry`, `crash_diagnostics`,
@@ -306,6 +336,8 @@ content. Revocation is immediate.
     successfully reserved terminal decision and physical attempt is durably receipted.
 14. Catalog privacy roots survive GC/backup/route move without ledger inventory, and restore never
     turns backed-up pending authority into a usable authorization.
+15. Review-context selection can only narrow candidate material; missing/hidden source is never
+    represented as observed unchanged source.
 
 ## Tests
 

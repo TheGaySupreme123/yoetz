@@ -1,6 +1,6 @@
 # ADR-009 — Central privacy, disclosure, and data-egress control
 
-**Status:** Working decision for spec drafting (2026-07-14). Ratification requires an independent
+**Status:** Working decision revised 2026-07-16. Ratification requires an independent
 privacy/security review plus executable no-bypass, never-send, approval-resume, and zero-egress
 evidence.
 **Owning public specs:** `specs/src/yoetz/domain/privacy.md`,
@@ -180,6 +180,37 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     deterministic verdict rules. A request is never dispatched unless the audit reservation is
     durable, and success is never acknowledged unless its terminal receipt is durable. Waiting and
     approval remain resumable state rather than fake completed receipts.
+13. **Useful review context remains user-controlled:** a closed `ReviewContextProfile` is stored
+    independently from the four LLM-disclosure profiles. `structural` selects only typed metadata;
+    `goal_aware` adds the goal/obligation/claim/decision/finding text needed to understand intent;
+    `assisted` adds bounded problem-local recorded evidence, test/failure, diff, and source excerpts;
+    `expanded` and `custom` admit broader explicitly allowed recorded material. Every selected item
+    still passes category/class/scope policy, minimization, redaction, never-send scanning, provider
+    binding, caps, authorization, and receipt. The selection profile grants neither live filesystem
+    access nor permission beyond the effective privacy policy.
+14. **Two defaults are intentionally different:** an unconfigured installation is seeded
+    `local_only`, global network false, every network channel off, and no local model. When a
+    technical user deliberately runs external semantic setup, the upstream CLI recommends the
+    inspectable `assisted` recipe for an exact endpoint profile with a current data-use record that
+    states customer-content training `prohibited`, retention `none|bounded`, and provider human
+    access `prohibited|restricted`. Known-broad, unknown, or stale posture removes the badge. The
+    recipe sets the editable `require_current_provider_data_use_evidence=true` runtime guard. A
+    technical user may turn it off only through a trusted loosening/custom transition, after which
+    the policy carries no upstream no-training recommendation. The user reviews and commits the expanded policy once. Within
+    that standing workspace policy, checks, retries, reviewer challenges, agent responses, and
+    rechecks run without per-request human prompts. `confirm_every_request` remains the optional
+    high-ceremony alternative.
+
+### Human involvement under the recommended recipe
+
+| Event | Human required? | Rule |
+|---|---:|---|
+| First `assisted` policy commit, later wider provider/category/class/scope, or credential set/rotate | yes | Exact trusted-local diff/credential ceremony |
+| Ordinary check, automatic retry inside the confirmed policy, reviewer challenge, agent response, or recheck | no | Direct agent-to-agent path with a fresh authorization and receipt per physical attempt |
+| Tightening policy | no | May apply immediately after the service proves it cannot widen |
+| `confirm_every_request` physical attempt | yes | Exact prepared-case foreground decision for that one attempt |
+| Finding waiver | yes | Existing interactive-human `finding_only` authority |
+| Never-send match or out-of-scope content | impossible to approve | Fail closed under every profile and fork claiming upstream conformance |
 
 ## Consequences and proof obligations
 
@@ -193,3 +224,8 @@ agent-context and local-model fences; exact approval binding/restart behavior; n
 overclaiming a separate model runtime; and no plaintext canaries across databases, objects, logs, traces, prompts,
 receipts, errors, or transports. Public copy must reserve “zero network egress” for the composite
 ceiling-plus-channel state, not infer it from `local_only` alone.
+The setup/conformance matrix additionally proves every `ReviewContextProfile`, the recommended
+recipe expansion, problem-local selection, agent-context delivery of reviewer findings, current
+provider data-use recommendation metadata, and automatic no-prompt behavior after standing policy
+authorization. A data-use record is evidence for recommendation wording, not technical proof of a
+provider's downstream behavior.

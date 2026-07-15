@@ -40,7 +40,8 @@ responses to CLI/MCP.
 For an LLM semantic request, `evaluate_semantic` performs exactly:
 
 1. Validate `candidate.channel == llm_inference`, exact purpose `semantic_check`, frozen
-   frontier/dependency/case identity, and requested local/external provider binding.
+   frontier/dependency/case identity, exact `ReviewContextProfile`, and requested local/external
+   provider binding.
 2. Load the effective policy as the intersection of machine ceiling plus workspace/task/request
    overlays. A concurrent generation change restarts policy evaluation before dispatch.
 3. Classify every candidate item locally. Any unknown/conflicting scope or never-send finding
@@ -53,12 +54,24 @@ For an LLM semantic request, `evaluate_semantic` performs exactly:
    - `minimal_external`: auto-approval is allowed only for the policy's smallest category/size set.
    - `trusted_provider`: auto-approval is allowed only for the exact provider/model/endpoint,
      purpose, scope, and listed categories; broader candidate items are removed or blocked.
+   Independently enforce the effective compiled `ReviewSelectionPolicy` before those disclosure
+   rules. `structural` and `goal_aware` cannot contain excerpts; `assisted` may contain only
+   mechanically linked recorded problem-local excerpts; `expanded|custom` still remain inside
+   their exact section/kind/relevance/command/cap selector and recorded refs. When
+   `require_current_provider_data_use_evidence=true`, the bound installed endpoint must retain a
+   current recommendation-eligible record; stale, unknown, known-broad, or mismatched evidence
+   returns bounded `endpoint_profile_unavailable` before proposal/dispatch. With the guard false,
+   an explicitly approved otherwise-supported exact endpoint may proceed but has no upstream
+   no-training recommendation claim.
 5. Minimize, redact, canonicalize, and scan the exact proposed bytes locally. Re-run the policy
    intersection after preparation. A forbidden match, empty/misleading case, or changed policy
    before a valid case exists follows the same structural pre-dispatch-subject branch and retains no
    denied bytes. Otherwise construct a task-owned `DisclosureProposal` and persist
    `PrivacyAuditPort.reserve` with its encrypted exact prepared excerpts and case digest before
    presenting a preview or preparing dispatch.
+   The omission manifest preserves `not_recorded|not_selected|withheld_by_policy|
+   redacted_never_send` without omitted plaintext. It is invalid to rewrite any of those as
+   unchanged content or an empty diff.
 6. If human approval is required, the confidential control surface renders those exact prepared
    excerpts, transformations, categories, destination, purpose, scope, and ceilings. If no trusted
    control port is attached, return `SemanticEgressAwaitingHuman` with only proposal/request IDs
@@ -104,6 +117,12 @@ approval.
 A trusted UI or explicit privacy-control CLI invokes `application/privacy_policy.md`/the confidential
 control surface to resolve the proposal. A normal workflow CLI argument, stdin piped by an agent,
 MCP tool argument, environment variable, config file, or LLM message cannot submit approval.
+
+The committed `assisted` workspace policy is automatic baseline authority: ordinary check calls,
+eligible retries, reviewer challenges, agent responses, and rechecks never enter the human-preview
+branch. Each physical attempt still receives its own authorization and receipt. Only
+`confirm_every_request`, policy widening, credential mutation, and the separate human waiver flow
+require a human; never-send matches remain unapprovable.
 
 ### Local disclosure
 
@@ -195,6 +214,8 @@ but unsuccessful semantic evaluation records its exact status and coverage gap.
    remain nonterminal state and never masquerade as finished receipts.
 10. Agent-context projection is completed and receipted before ordinary serialization; local-model
     disclosure is consumed once immediately before its physical write.
+11. Review-context selection can remove candidate items but cannot authorize them, and missing code
+    visibility never becomes a same-state observation.
 
 ## Tests
 

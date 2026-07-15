@@ -20,7 +20,7 @@ Yoetz skill. The file is a packaged resource, not a runtime-generated artifact.
 The installed copy matches the reviewed root reference byte-for-byte. It teaches publication
 materiality, the 16 event-family cheat sheet, obligation/evidence/claim relationships,
 subject-state binding, batching/retry, multi-agent attribution, forbidden content, and the three
-mini-flows exactly as reviewed at source.
+mini-flows exactly as reviewed at source, including bounded problem-local excerpt guidance.
 
 The runtime does not synthesize or rewrite the reference. Manifest verification checks byte size
 and SHA-256 before the skill is trusted.

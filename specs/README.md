@@ -111,6 +111,12 @@ implicit composition detail:
    human approval → gateway → receipt path. Composition passes reviewed bundled provider adapters
    no repository/storage/environment/transcript handles; this is not OS/process sandboxing from a
    malicious adapter already inside the trusted service.
+9. orthogonal review-context profiles and structured semantic review packets — the safe installation
+   seed remains `local_only + structural`, while the CLI may recommend an editable standing
+   `trusted_provider + assisted` recipe for an eligible exact endpoint. Deterministic checks supply
+   machine-readable bases; selected problem-local recorded excerpts may accompany them; accepted
+   model challenges return through the existing finding/respond/publish/check loop rather than a
+   new operation or provider-driven fetch channel.
 
 ## Status board
 
@@ -148,6 +154,8 @@ after the natural-language implementation contract is accepted.
   structural tables, logs, errors, or MCP text summaries.
 - Deterministic behavior depends only on canonical recorded inputs plus versioned policy/engine.
 - Semantic output is advisory, provenance-labeled, and deterministically fenced.
+- Missing or undisclosed source is never represented as unchanged source, and recommendation
+  evidence never becomes disclosure authority.
 - The trusted service is the sole holder of keys and decrypted state. Secret material never uses
   ordinary CLI/MCP arguments, environment variables, configuration, logs, traces, transcripts, or
   LLM context as an ingress or storage channel.

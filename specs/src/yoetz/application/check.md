@@ -67,18 +67,26 @@ resume revalidates the object/row facts for the recorded phase before moving for
    `CheckResult`; a different digest is `IDEMPOTENCY_CONFLICT`.
 2. **Run local checks.** Outside a write transaction, run every applicable deterministic policy
    against the immutable case at `F`. Record exact run/skipped/failed policy IDs and reasons,
-   normalize the returned `CandidateFinding` values, allocate stable finding IDs through
-   `IdPort`, persist the candidate-to-ID map, and finalize the immutable deterministic-result object. CAS
+   normalize the returned `DeterministicAssessment` values, allocate stable finding IDs through
+   `IdPort`, persist the candidate-to-ID map together with every exact `FindingBasis`, and finalize
+   the immutable deterministic-result object. Basis records contain rule/fact/state/visibility/
+   coverage refs only and stay encrypted; they do not enlarge public finding schemas. CAS
    `reserved → local_ready` only after that object is durable. A resumed operation reopens and
    verifies the object rather than rerunning merely because the process restarted.
 3. **Plan semantic/privacy work.** If mode is `deterministic_only` or no semantic case is material,
-   record `not_requested` and advance. Otherwise build the bounded internal `SemanticCase` and
-   `CandidateContext` from `F`, `D`, allowed IDs, and deterministic results. Persist them encrypted,
+   record `not_requested` and advance. Otherwise load the effective `ReviewContextProfile` and
+   build the bounded internal `ReviewPacket`, `SemanticCase`, and `CandidateContext` from `F`, `D`,
+   `frontier_refs`, the durably pinned deterministic IDs as `local_check_refs`, and deterministic
+   assessments. The packet contains goal/obligations/claims/decisions, a material ordered timeline,
+   exact bases/change observations/coverage, mechanically linked recorded excerpts permitted by the
+   profile, and an omission manifest. It never browses Git/filesystem or asks a provider what else
+   to fetch. Persist them encrypted,
    insert the deduplicated semantic job plus privacy proposal identity, and advance to
    `semantic_wait`. Capability/policy absence does not skip this durable accounting under
    `semantic_required`; it becomes a terminal incomplete semantic reason.
 4. **Prepare privacy case, resolve authority, and claim one attempt.** Invoke `PrivacyCoordinator`
-   to classify, intersect policy, minimize/redact/scan locally, reserve the exact prepared case,
+   to enforce context-profile selection, classify, intersect policy, minimize/redact/scan locally,
+   reserve the exact prepared case,
    and create/resume an approval proposal. `awaiting_human` is
    durable and returns `OPERATION_PENDING` without exposing preview content to MCP. Denial, expiry,
    policy/forbidden-data block, uncertainty, or absent approved capability terminally closes
@@ -102,8 +110,15 @@ resume revalidates the object/row facts for the recorded phase before moving for
    fsync, prompt, or approval wait occurs inside a database transaction.
 6. **Post-validate and select.** Deterministically reject or downgrade wrong schema/version,
    invented/out-of-case IDs or quotes, deterministic-status claims, coverage/authorship upgrades,
-   disallowed finding kinds/count/severity/conclusions, missing uncertainty/provenance,
+   disallowed finding kinds/count/severity/conclusions, missing uncertainty/provenance, challenges
+   without a supported discrepancy/direct agent message/closed requested next step, refs outside
+   `frontier_refs ∪ local_check_refs`, claims that hidden/unrecorded code means unchanged code,
    duplicates without new basis, stale `F`/`D`, or output after cancellation/deadline/supersession.
+   For an accepted `ReviewerChallenge`, resolve broad cited refs through the frozen projection and
+   pinned local deterministic map to sorted event/obligation/claim roots; reject an unresolved or
+   empty root set. The challenge maps to the existing semantic finding summary/detail and remains
+   `semantic_model_derived`; it cannot rewrite the paired deterministic basis or serialize a
+   same-check finding ID as a public subject.
    Select an attempt only in a short CAS that still matches the operation and job generations,
    active attempt, `F`, and `D`. At most one attempt is selected; late/non-selected objects remain
    audit data and cannot steer.
@@ -127,7 +142,12 @@ resume revalidates the object/row facts for the recorded phase before moving for
    `check_recorded` plus one `finding_recorded` per returned finding, persist
    exact coverage/status/reason/versions, finalized optional attempt provenance, and suppressed count, store the canonical structural result,
    set `complete/terminal`, clear leases, and commit. Only then acknowledge. A stale semantic
-   result is labeled stale and cannot steer; any completed result states that limitation.
+   result is labeled stale and cannot steer; any completed result states that limitation. Reviewer
+   messages exist only inside semantic findings that survive validation/ranking. At any cap of at
+   least two (including the default of three),
+   the ranker's single material-challenge slot guarantees the highest-ranked priority-1/2 challenge
+   reaches the ordinary `finding_summary` agent-context projection without a second advisory schema;
+   `max_findings=1` and priority-3 explanations retain ordinary rank semantics.
 10. **Replay or resume.** Same request ID and digest returns the stored original result without
     rerunning. Current generation plus live operation/job lease returns retryable
     `OPERATION_PENDING`. Expiry or stale owner generation permits fenced CAS reclaim and resume
@@ -195,6 +215,9 @@ or a concrete repository escape hatch.
 - If `F` or `D` changes before selection/finalization, stale semantic output cannot steer. The
   operation either completes with deterministic/stale coverage under the recorded policy or
   returns the contract's frontier conflict; it never publishes the stale candidate as current.
+- If an allowed problem-local excerpt was never recorded, the packet records `not_recorded` and
+  weakens coverage where material. It never infers an empty diff or reads the workspace to fill the
+  gap.
 - Object/key/storage failures before final commit leave resumable state and/or orphan encrypted
   objects. Only verified corruption or contradictory state quarantines.
 
@@ -212,11 +235,14 @@ or a concrete repository escape hatch.
 5. Acknowledgement follows the complete/terminal commit; timeout or cancellation never proves
    failure.
 6. The memory and SQLite adapters expose and implement one identical check orchestration contract.
+7. The reviewer-to-agent loop reuses finding/respond/publish/check; model output cannot add a
+   workflow operation, event family, context-fetch round, or waiver path.
 
 ## Tests
 
 - `specs/tests/unit.md`: mode/scope/max boundaries, logical digest exclusions, deterministic
-  policy accounting, verdict/coverage matrix, adversarial semantic post-validation and ranking.
+  policy accounting and bases, review-profile packet selection, split reference allowlists,
+  verdict/coverage matrix, adversarial semantic post-validation and ranking.
 - `specs/tests/conformance.md`: all phases, replay/conflict/pending/reclaim, exact canonical
   result/event parity between memory and SQLite, one-selected-attempt invariant.
 - `specs/tests/integration.md`: fake/live-profile absence, refusal/timeout/invalid/429/connection

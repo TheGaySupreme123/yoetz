@@ -38,8 +38,24 @@ never allocates replacement IDs.
 context, or database rows after construction.
 
 The `origin` field distinguishes deterministic policy findings from semantic-model-derived
-findings. The same surface type is used for both because the CLI, MCP, and receipt layers need one
-common representation, but the provenance and policy fields record which path produced it.
+findings. `FindingKind` describes the issue and never implies origin: the deterministic
+research-evidence pack and semantic reviewer may both produce an evidence-assessment kind. The same
+surface type is used for both because the CLI, MCP, and receipt layers need one common
+representation, but origin/provenance and policy fields record which path produced it.
+
+For a post-validated semantic `ReviewerChallenge`, `summary` states the discrepancy and `detail`
+contains the bounded direct message to the main agent, alternative interpretation, uncertainty,
+and smallest requested next step. This uses the existing finding schema so the message passes the
+existing `finding_summary` agent-context privacy fence. It does not turn a finding into a chat
+transcript or grant the model response/waiver authority.
+
+The challenge's internal `cited_refs` are not copied blindly. Post-validation resolves a cited
+action/result/evidence/frontier-finding to its recorded event/obligation/claim roots and resolves a
+same-check deterministic finding ID to that candidate's already frozen `subject_refs`. The semantic
+finding stores the sorted unique root union only. Resolution outside the frozen ref graph, an empty
+root union, or a local same-check finding that was not durably pinned rejects the challenge. This
+keeps public `subject_refs` valid even when the cited deterministic finding is later suppressed by
+the result cap.
 
 `priority` uses the shared three-level scheme:
 
@@ -90,6 +106,8 @@ equal-priority findings render stably across runs.
 5. Semantic provenance is auditable but bounded.
 6. Pure kernel functions create candidates; only the injected `IdPort` creates finding IDs.
 7. No semantic finding can precede its durable privacy receipt.
+8. Finding kind and origin remain independent, and semantic challenge prose stays bounded by the
+   exact supplied case.
 
 ## Tests
 

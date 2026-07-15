@@ -16,6 +16,7 @@ outbound request-body plaintext in structural audit records.
 
 - `enum PrivacyProfile`: `local_only`, `confirm_every_request`, `minimal_external`,
   `trusted_provider`.
+- `enum ReviewContextProfile`: `structural`, `goal_aware`, `assisted`, `expanded`, `custom`.
 - `enum EgressChannel`: exactly `llm_inference`, `product_telemetry`, `crash_diagnostics`,
   `update_checks`, `capability_testing`.
 - `enum LocalDisclosureSink`: `local_model`, `agent_context`, `trusted_human_control`.
@@ -43,7 +44,8 @@ outbound request-body plaintext in structural audit records.
   `insufficient_approved_context`, `provider_unavailable`, `provider_refused`, `provider_timeout`,
   `provider_invalid_response`, `transport_failed`, `audit_failed`, `deadline_expired`, `late`,
   `stale`, `outcome_unknown`.
-- Frozen values: `ProviderBinding`, `AuthorizationScope`, `ChannelPolicy`, `PrivacyPolicy`,
+- Frozen values: `ProviderBinding`, `ProviderDataUseProfile`, `ReviewSelectionPolicy`,
+  `AuthorizationScope`, `ChannelPolicy`, `PrivacyPolicy`,
   `PolicyOverlay`, `CandidateContextItem`, `CandidateContext`, `ClassifiedContextItem`,
   `ClassifiedContext`, `PreDispatchAuditDecision`, `AgentProjectionAuditSubject`,
   `DisclosureProposal`, `PrivacyAuditSubject`,
@@ -67,6 +69,39 @@ tuples before validation and canonicalization.
 `local_af_unix`). It has
 no URL, socket path, credential, header, or arbitrary option map.
 
+`ProviderDataUseProfile` is release/profile metadata keyed by the exact external endpoint-profile
+ID and version. It contains `data_use_profile_id`, `data_use_profile_version`,
+`customer_content_training: prohibited|permitted|unknown`,
+`retention: none|bounded|unbounded|unknown`, an exact nonnegative `retention_days_ceiling` only when
+bounded, `provider_human_access: prohibited|restricted|permitted|unknown`, canonical `reviewed_at`
+and `expires_at`, and an artifact-bound evidence digest. Known-broad posture is never collapsed into
+`unknown`. It is nonsecret, inspectable setup information. It does not authorize disclosure and
+does not claim Yoetz can technically verify the provider's downstream behavior. The upstream
+`assisted` recommendation is eligible only while this record is current, training is `prohibited`,
+retention is `none|bounded`, and human access is `prohibited|restricted`.
+
+`ReviewSelectionPolicy` is the canonical persistable selector behind one
+`ReviewContextProfile`. It contains sorted unique `sections` from
+`goal|obligations|claims|decisions|timeline|deterministic_assessments|change_observations|coverage|
+targeted_excerpts|omissions`; sorted unique `excerpt_kinds` from
+`evidence|test|failure|diff|command|repository`; `relevance:
+linked_subjects_only|linked_then_in_scope`; `include_finding_prose: bool`;
+`include_exact_command_text: bool`; and exact integer
+caps `max_timeline_items<=64`, `max_assessments<=64`, `max_change_observations<=32`,
+`max_excerpts<=16`, `max_omissions<=64`, `max_excerpt_bytes<=16_384`, and
+`max_total_excerpt_bytes<=131_072`. All caps are nonnegative; excerpt-byte caps are zero when
+`max_excerpts=0` and positive otherwise. It grants no category/class/scope/provider/channel.
+
+The four named selectors have canonical expansions: `structural` selects only
+`timeline|deterministic_assessments|change_observations|coverage|omissions`, no excerpt kinds,
+linked-only relevance, no finding prose, no exact commands, and zero excerpt caps; `goal_aware` adds
+`goal|obligations|claims|decisions`, enables policy-gated finding prose, but keeps zero excerpts; `assisted` adds
+`targeted_excerpts`, all six excerpt kinds, linked-only relevance, no exact command text, and the
+hard caps above while retaining finding prose; `expanded` uses the same sections/kinds and hard caps with
+`linked_then_in_scope` and exact command text eligible. `custom` stores the user's exact selector
+inside those ceilings. A policy whose named profile and selector do not match these rules is
+invalid.
+
 `AuthorizationScope` uses the same closed wire shape everywhere. It contains `kind` and
 `installation_id` (`ins_`) for every kind; workspace/task/request add
 `workspace_ref_commitment` (`hmac-sha256:<64 lowercase hex>`); task/request add `task_id` (`tsk_`);
@@ -83,8 +118,12 @@ Every unkeyed canonical digest in these privacy values uses
 provider binding, allowed purposes, scope ceiling, preview requirement, byte/token ceilings, and
 expiry ceiling. Each of the five channels has a separate value; no default is inherited from LLM
 inference. `PrivacyPolicy` contains `policy_id`, monotonically increasing `version`, canonical
-`policy_digest`, one `PrivacyProfile`, `network_egress_permitted`, all five channel policies,
-`local_model_enabled`, optional local-model binding, and local-sink category ceilings.
+`policy_digest`, one `PrivacyProfile`, one `ReviewContextProfile`, its exact
+`ReviewSelectionPolicy`, `require_current_provider_data_use_evidence: bool`,
+`network_egress_permitted`, all five channel policies, `local_model_enabled`, optional local-model
+binding, and local-sink category ceilings. The provider-data-use guard must be false without an
+external provider; when true, dispatch requires a current recommendation-eligible record. The
+guard—not the provider evidence itself—is user-controlled policy authority.
 
 The local-sink ceilings are independent. `agent_context` controls ordinary CLI/MCP/UI result
 projection; `local_model` controls only the named local runtime. First-run policy allows
@@ -95,6 +134,38 @@ scope-valid nonsecret categories needed for its preview, never a never-send kind
 category grant is inherited by a local sink or vice versa.
 
 `PrivacyProfile` governs only the `llm_inference` channel and LLM content-disclosure behavior.
+`ReviewContextProfile` plus its compiled `ReviewSelectionPolicy` is orthogonal and only narrows
+deterministic case construction before the same policy fence. Its human meanings are:
+
+- `structural`: typed IDs, statuses, event order, digests, subject-state relations, deterministic
+  rule/fact codes, coverage, and omission reasons; no user prose or source excerpts;
+- `goal_aware`: structural plus allowed task goals, obligations/acceptance criteria, claims,
+  decisions, and finding prose; no evidence/source/transcript excerpts;
+- `assisted`: goal-aware plus problem-local allowed evidence, test/failure, diff/command metadata,
+  and bounded repository excerpts already captured or agent-published in the frozen case;
+- `expanded`: every relevance-ranked recorded item allowed by the exact categories/classes/scope
+  and caps, still without ambient repository, transcript, log, or filesystem access;
+- `custom`: the exact user-selected selector plus category/class/scope/budget configuration, with
+  all ordinary classification and relevance rules still enforced.
+
+No context profile grants a category, class, purpose, provider, scope, or extra byte. A selected
+item must independently pass the `ChannelPolicy` intersection. `assisted` problem-local selection
+mechanically follows the reviewed claim/obligation/finding/action/result/evidence refs and records
+`not_recorded|not_selected|withheld_by_policy|redacted_never_send` omissions; unavailable content is
+never represented as unchanged. The official CLI's recommended recipe uses `assisted`, but the
+first-run seed uses `structural` with external disclosure disabled.
+
+Selector intersection is an exact meet: intersect section/kind sets, take the more restrictive
+relevance (`linked_subjects_only`), logical-AND finding-prose and exact-command eligibility, and
+minimum caps. The
+effective label remains a named profile only when the resulting selector exactly equals that named
+expansion; otherwise it is `custom`. Diff classification compares compiled selectors: a strict
+subset/min-cap reduction or either selector boolean true→false is tightening; a strict
+superset/cap increase or either boolean false→true is loosening; mixed or incomparable changes are
+treated as possible loosening and require trusted local-human authority.
+Changing `require_current_provider_data_use_evidence` false→true is tightening; true→false is
+loosening.
+
 `local_only` requires that channel disabled with no external provider binding; it does not silently
 disable a separately authorized non-LLM channel. `network_egress_permitted` is the global ceiling:
 when false, all five channel policies must be disabled; when true, it grants nothing without an
@@ -338,12 +409,16 @@ AF_UNIX disclosure to the exact bound runtime, not that runtime's later network 
     none, for both network-egress and local-disclosure receipt variants.
 13. A local proposal is consumed at most once; agent-context bytes exist in a serialized response
     only after the matching local receipt is durable, and local-model replay cannot resend it.
+14. Review-context selection and disclosure authority are independent: changing the former cannot
+    widen categories, classes, scope, destination, or caps, and missing excerpt content never proves
+    an unchanged subject state.
 
 ## Tests
 
 - Domain tests cover every enum, the network-ceiling x five-channel matrix, policy intersection,
   `local_only` plus bounded non-LLM channels, scope ancestry, provider/purpose binding, never-send
-  non-overridability, canonical ordering, case caps, and receipt plaintext rejection.
+  non-overridability, every review-context profile, provider data-use recommendation eligibility,
+  canonical ordering, case caps, and receipt plaintext rejection.
 - Property tests generate arbitrary overlay chains and prove the effective permission set never
   grows without a verified loosening transition.
 - Conformance tests prove provider constructors reject every input type except an exact approved

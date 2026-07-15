@@ -12,8 +12,9 @@ order, arbitrary overlay chains, scope trees, content mixes and retry interleavi
 ## Public surface
 
 Properties generate valid policies/proposals and adversarial near-valid values for all enums,
-profiles, channels, scopes, categories/classes/forbidden kinds, local sinks, caps, transformations,
-authorizations and outcomes using deterministic Hypothesis strategies.
+four privacy profiles, five review-context profiles, channels, scopes, categories/classes/forbidden
+kinds, local sinks, caps, transformations, authorizations and outcomes using deterministic
+Hypothesis strategies.
 
 ## Behavior
 
@@ -38,6 +39,14 @@ failure reason, every failure has exactly one allowed reason, and arbitrary cros
 validate for either network or local-disclosure receipts. Agent-context and trusted-
 human-control outputs are generated as local disclosures and never misclassified as network egress.
 
+Generated context selections prove `structural ≤ goal_aware ≤ assisted ≤ expanded` only with
+respect to eligible already recorded candidates; `custom` follows its explicit selector. Selection
+never grants category/class/scope/provider/channel authority, returns no ambient handle, and emits a
+typed omission for every relevant candidate it cannot include. Subject-state relation and content
+visibility remain independent across generated claimed-change combinations. The generator varies
+both `include_finding_prose` and `include_exact_command_text`; their meet is logical AND, and neither
+can bypass its category/class fence.
+
 ## Errors and edge cases
 
 Shrinkers retain the security-triggering item/scope transition. Tests cap bytes before expensive
@@ -55,6 +64,8 @@ duplicate/sorted sets, max/max+one, expiry equality and cancellation/dispatch ra
    consent; a fresh verified local-human widening is required.
 7. Initial reservation failure is no-receipt and pre-dispatch; every reserved terminal decision and
    every physical attempt has exactly one valid terminal receipt.
+8. Review-context selection may only narrow recorded candidate material; disclosure policy may
+   narrow it again but neither layer can widen the other.
 
 ## Tests
 

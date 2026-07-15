@@ -12,7 +12,15 @@ One canonical strict-JSON fixture case with `fixture_schema: "yoetz.fixture-case
 
 ## Behavior
 
-The `input` section contains trigger, disclosed-partial, and revised-plan sequences with a fixed failing result. The `expected` section freezes failed_work_omitted only when the completion claim hides the failure. Every referenced identifier, timestamp, key, digest, nonce, provider response, and fault point is explicit test data; a test may not replace it with current time, randomness, network state, or host paths. Multi-variant cases evaluate each variant independently and declare the relationship between their outcomes.
+The `input` section contains trigger, disclosed-partial, and revised-plan sequences with a fixed
+failing result and bounded failure excerpt. The `expected` section freezes `failed_work_omitted`
+only when the completion claim hides the failure, plus its exact `FindingBasis` trigger/missing fact
+codes and refs. The assisted semantic variant receives that basis/excerpt and returns a direct-agent
+challenge requesting acknowledgement/action or a revised claim; the disclosed variant produces no
+spurious challenge. Every referenced identifier, timestamp, key, digest, nonce, provider response,
+and fault point is explicit test data; a test may not replace it with current time, randomness,
+network state, or host paths. Multi-variant cases evaluate each variant independently and declare
+the relationship between their outcomes.
 
 ## Errors and edge cases
 

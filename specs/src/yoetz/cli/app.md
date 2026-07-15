@@ -18,7 +18,8 @@ objects, or fall back to direct execution.
 - Command tree: the six workflows; `mcp serve`; import/review/backup/restore/migrate/version and
   Codex integration; `service run|status|lock|stop|unlock|initialize-passphrase`; and
   `provider credential set|rotate` for foreground confidential provisioning; plus
-  `privacy receipts list|get` for bounded structural local audit inspection.
+  `privacy setup|show|propose|tighten` and `privacy receipts list|get` for transparent setup and
+  bounded structural local audit inspection.
 - No `build_runtime`, `RuntimeFactory`, application constructor, password/key/token option, or
   secret environment reader.
 
@@ -40,6 +41,28 @@ tighten` use least-authority ordinary control. `privacy decide-policy|decide-dis
 to `cli/privacy_control.md`, never an ordinary decision method. `privacy receipts list|get` are
 CLI/UI-only structural reads, never MCP tools; they render no excerpts/request bodies/object refs and
 are local-projection/audit-exempt so inspection does not create a new receipt.
+
+`privacy setup` is preset-first for convenience but answer-first for authority. It offers
+`private`, `metadata-only`, `assisted-review` (recommended only for an eligible exact endpoint),
+`expanded-review`, and `custom`. Selecting a preset expands it into the thirteen setup questions;
+the CLI prints the exact privacy profile, review-context profile and compiled selector,
+provider/model/endpoint, editable current-data-use runtime guard and versioned evidence posture,
+scope, categories/classes, source-selection behavior, exact agent-context categories/classes,
+byte/token ceilings, preview policy, and never-send exclusions before proposing a
+change. The user may edit any value. A preset choice alone commits nothing and never bypasses the
+trusted-local widening decision.
+
+`assisted-review` creates a standing workspace policy, so normal checks, automatic retries,
+reviewer findings, agent responses, and rechecks do not prompt a human. `--preset` is accepted only
+on interactive setup and never on ordinary workflow commands; noninteractive use must provide and
+review the complete typed draft through the trusted control contract. `confirm_every_request`
+remains separately selectable when the user wants one foreground decision per physical attempt.
+The CLI labels current provider data-use records as declared/evidence-bound posture, never as a
+technical guarantee, and removes the recommendation when that record is known-broad, stale, or
+unknown.
+The standard verification default is `semantic_if_configured`; after the selected provider and
+standing policy are active, ordinary checks invoke review without another hidden mode switch.
+Users can still choose deterministic-only or semantic-required behavior explicitly.
 
 `service unlock` and the distinct first-install-only `service initialize-passphrase` delegate to
 `cli/unlock.md`. The latter is available only for a pristine uninitialized vault, confirms the
@@ -72,10 +95,14 @@ the identical operation request ID.
 3. No secret appears in argv/env/config/stdin/history/output/logs.
 4. CLI and MCP preserve identical public operation semantics through one service.
 5. No built-in service-manager install/start command or hidden spawn exists in v0.1.
+6. CLI presets are editable draft macros, not policy authority, and the fail-safe installation seed
+   remains zero-egress until a user commits a different policy.
 
 ## Tests
 
 - `tests/subprocess/test_cli_invocations.py` covers command tree and service client behavior.
+- Privacy CLI snapshots cover all five recipe expansions, exact thirteen-answer review, eligible/
+  stale provider data-use posture, no-prompt assisted checks, and high-ceremony confirmation mode.
 - `tests/subprocess/test_service_unlock_boundary.py` covers TTY-only confidential input.
 - `tests/conformance/surfaces/test_cli_mcp_parity.py` covers exact operation parity.
 - `tests/packaging/test_service_boundary_imports.py` covers import trust boundary.

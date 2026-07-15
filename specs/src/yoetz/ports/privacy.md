@@ -84,12 +84,21 @@ inventory row is neither required nor permitted solely to keep a privacy object 
 and returns their deterministic intersection with a canonical digest and generation. On a truly
 absent first-run store, `config/privacy.md` atomically seeds the denied machine policy before ready;
 bootstrap config is not a permanent ceiling. Missing-after-bootstrap or unreadable policy fails
-closed to `local_only` with every network channel denied; it never falls back to a permissive
-built-in profile.
+closed to `local_only`, `review_context_profile=structural`, with every network channel denied; it
+also uses the canonical structural `ReviewSelectionPolicy` and a false current-data-use guard; it
+never falls back to a permissive built-in profile.
 
 The durable policy has a boolean `network_egress_permitted` global ceiling plus all five channel
 rows. False requires every row disabled; true grants none. `PrivacyProfile` constrains only
-`llm_inference`. v0.1 policy transitions reject enablement of the four unsupported non-LLM rows as
+`llm_inference`. Each `ReviewContextProfile` is compiled to its exact `ReviewSelectionPolicy` and
+intersected independently by section/kind set intersection, stricter relevance, logical-AND
+finding-prose and exact-command eligibility, and minimum caps. A noncanonical meet is labeled
+`custom`. It can only reduce
+semantic case selection and grants no channel/category/class/scope. Selector superset/cap increase,
+either selector boolean false→true, mixed/incomparable change, or turning the current-data-use guard
+off is policy widening; selector subset/min-cap reduction, either selector boolean true→false, or
+turning the guard on is tightening. v0.1 policy transitions reject
+enablement of the four unsupported non-LLM rows as
 `channel_unavailable` and persist nothing. If imported/corrupt-forward state contains such a row,
 evaluation fences it before authorization and completes a pre-dispatch
 `channel_unavailable/channel_unavailable` decision receipt with no attempt-only fields or I/O. A
@@ -303,6 +312,13 @@ swaps a candidate in only if policy/service/vault generations still match. Facto
 leaves that binding absent. Credential unavailability is checked only while minting the fresh
 attempt handle and returns structural semantic unavailability without adding a reusable credential
 to the registry. The policy commit remains valid and semantic checks use incomplete-check behavior.
+When `require_current_provider_data_use_evidence=true`, external reconciliation additionally
+requires the exact installed endpoint's current recommendation-eligible `ProviderDataUseProfile`.
+Expiry, unknown/known-broad training/retention/human-access posture, or a changed evidence digest
+removes/fences that binding with bounded `endpoint_profile_unavailable`; it does not rewrite policy
+or claim provider misbehavior. When the user explicitly sets the guard false through a trusted
+policy transition, reconciliation uses the otherwise-supported exact endpoint without presenting
+the upstream no-training recommendation.
 Startup and successful credential provisioning call the same reconciliation, so a crash after policy commit cannot require an
 untracked restart and cannot dispatch through the pre-commit registry.
 

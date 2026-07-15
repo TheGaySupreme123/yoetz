@@ -73,6 +73,15 @@ Privacy claims are separate, directly tested entries:
 - `privacy.policy_approved_outbound_only`: provider adapters accept only an exact bounded approved
   outbound case and composition grants no repository/database/environment/transcript handles; the
   claim is limited to reviewed bundled adapters and is not OS/process sandbox isolation;
+- `privacy.assisted_review_user_controlled`: the unconfigured seed remains zero-egress, while the
+  upstream CLI may recommend an inspectable standing workspace `assisted` recipe only for a current
+  exact provider data-use profile stating training `prohibited`, retention `none|bounded`, and
+  provider human access `prohibited|restricted`; known-broad, unknown, or stale posture is
+  ineligible. The recipe excludes sensitive/confidential content by default, remains editable,
+  sets `require_current_provider_data_use_evidence=true`, and ordinary in-policy checks/retries
+  require no repeated human prompt. A trusted custom loosening may disable that guard but forfeits
+  the upstream no-training recommendation. The data-use record is recommendation evidence, not
+  technical proof of provider conduct;
 - `privacy.local_human_widening_only`: ordinary agent/MCP/provider/import schemas cannot loosen
   policy; tightening can apply immediately and widening requires strong trusted local-human
   authority. Exact foreground consent for one already-authorized `confirm_every_request` preview
@@ -112,6 +121,12 @@ Privacy claims are separate, directly tested entries:
   endpoint/profile/request-body-digest/deadline-bound credential callback in the custom transport;
   no SDK client/default-header object retains the real credential, while resolved decision F-012
   permits its authentication header only to the exact pinned TLS endpoint.
+- `semantic.review_packet_and_agent_loop`: assisted semantic review receives the recorded goal,
+  obligations, claims, material timeline, deterministic bases, change/coverage facts, and bounded
+  problem-local recorded excerpts selected under policy; missing content is explicitly omitted,
+  never called unchanged. A post-validated reviewer challenge reaches the main agent as an ordinary
+  semantic finding, and remediation uses the existing respond/publish/recheck loop with no model
+  waiver or source-fetch authority;
 
 Each entry names `PRIVACY.md`, the technical protocol, applicable profile/composite policy/fixture, exact privacy
 conformance/integration/capability/packaging tests, limitations, and `not_yet_evidenced` until an

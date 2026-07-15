@@ -6,8 +6,9 @@ release gates
 
 ## Purpose
 
-Prove all public/control surfaces and adapters implement the same exact four privacy profiles,
-preview/setup contract and honest semantic-degradation result.
+Prove all public/control surfaces and adapters implement the same exact four privacy profiles, five
+review-context profiles, preview/setup contract, recommendation eligibility, and honest
+semantic-degradation result.
 
 ## Public surface
 
@@ -28,13 +29,26 @@ and requires a fresh preview/decision for every later physical retry. Waiting an
 nonterminal audit states with no finished egress receipt; only denial/expiry/pre-dispatch failure or
 a terminal physical-attempt outcome is receipted. Minimal external freezes exact removals/redactions.
 Trusted-provider remains exact binding/category/purpose/scope, including bounded sensitive content.
+Every context profile is independently intersected with those disclosure rules. Assisted review may
+include only linked problem-local recorded excerpts and must emit exact omission reasons; expanded
+or custom still cannot fetch the repository or override never-send.
 
-The setup matrix asks all ten questions, shows allowed/blocked examples, defaults the global ceiling
-false and all five channels denied, keeps the ceiling and five consents separate, and classifies
-each diff. `network_egress=true` enables nothing; false plus any enabled channel is rejected.
+The setup matrix asks all thirteen questions, shows allowed/blocked examples, starts from the
+fail-safe `local_only + structural` zero-egress seed, and separately displays the editable
+`assisted_review` recommendation. That recipe expands to the exact standing workspace trusted-
+provider policy, assisted context, named ordinary categories, sensitive/confidential and transcripts
+off, and no per-request preview. It appears only for a current exact endpoint data-use record whose
+training posture is `prohibited`, retention is `none|bounded`, and provider human access is
+`prohibited|restricted`. `permitted|unbounded|unknown`, stale, or mismatched evidence removes the
+badge; it does not prevent a local human from authoring a custom policy. The matrix keeps the
+ceiling and five consents separate and classifies each diff.
+`network_egress=true` enables nothing; false plus any enabled channel is rejected.
 Ordinary CLI/MCP may inspect safe policy status but cannot confirm widening. Provider
 refusal/timeout/invalid yields explicit incomplete semantic coverage and the same deterministic
 final result across surfaces.
+After a standing assisted policy is committed, normal checks, bounded retries, reviewer findings,
+agent responses, and rechecks do not await a human. Policy widening, credential mutation,
+`confirm_every_request`, and finding waiver retain their explicit human authority paths.
 
 ## Errors and edge cases
 
@@ -60,6 +74,8 @@ rendering cannot omit material blocked categories or call incomplete semantic wo
 8. `confirm_every_request` never hides multiple physical attempts behind one foreground decision.
 9. Public surfaces never serialize `awaiting_human|approved|receipt_pending` as terminal
    `PrivacyOutcome` values.
+10. The safe installation seed and the user-visible assisted recommendation are different, and
+    neither silently commits authority.
 
 ## Tests
 

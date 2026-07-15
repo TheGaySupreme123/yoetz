@@ -12,17 +12,21 @@ authority. Mutable scoped policy and human decisions live behind `PrivacyPolicyS
 ## Public surface
 
 - `class PrivacyBootstrapConfig` — frozen strict model containing the initial machine policy
-  profile, global `network_egress_permitted` ceiling, initial local-model choice, and five explicit
-  initial channel choices.
+  profile, review-context profile, global `network_egress_permitted` ceiling, initial local-model
+  choice, canonical review selector, false provider-data-use guard, and five explicit initial
+  channel choices.
 - `safe_privacy_bootstrap() -> PrivacyBootstrapConfig` — `local_only`,
-  `network_egress_permitted=false`, all five network channels denied, local model disabled.
+  `review_context_profile=structural`, the exact structural `ReviewSelectionPolicy`,
+  `require_current_provider_data_use_evidence=false`, `network_egress_permitted=false`, all five
+  network channels denied, local model disabled.
 - `seed_policy_if_absent(config, store) -> PrivacyPolicy` — atomically persists generation 1 only
   when the policy store proves absence; otherwise returns the existing policy unchanged.
 
 ## Behavior
 
 The only accepted v0.1 bootstrap value is the reviewed safe seed: `local_only`,
-`network_egress_permitted=false`, all five network channels denied, and local model disabled. A
+`review_context_profile=structural`, the canonical structural selector, false provider-data-use
+guard, `network_egress_permitted=false`, all five network channels denied, and local model disabled. A
 missing section yields the same value. On first ready startup, the policy store atomically persists
 that seed as the machine policy generation 1. Once any durable policy exists, bootstrap config has
 no intersection/ceiling effect and cannot overwrite, tighten, widen, reset, or roll back it. The
@@ -57,6 +61,8 @@ absent-or-generation-1 transaction; config never replaces an existing policy.
 4. The global network ceiling, all five channel decisions, and local-model permission remain
    explicit; the ceiling grants nothing and channel decisions remain mutually independent.
 5. Validation is pure and performs no I/O.
+6. The bootstrap is a fail-safe installation seed, not the CLI's later user-visible recommended
+   semantic-review recipe.
 
 ## Tests
 

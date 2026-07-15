@@ -11,10 +11,11 @@ binding, and plaintext rejection without network, filesystem, database, keyring,
 
 ## Public surface
 
-Named tests cover every `PrivacyProfile`, `EgressChannel`, `LocalDisclosureSink`, `DataClass`,
+Named tests cover every `PrivacyProfile`, `ReviewContextProfile`, `EgressChannel`,
+`LocalDisclosureSink`, `DataClass`,
 `DataCategory`, `ForbiddenDataKind`, scope/consent/outcome enum; four valid policy profiles; every
 invalid branch; setup union messages; request/receipt shapes; tightening/loosening classification;
-and exact reason-code mapping.
+provider data-use records, transparent recipe expansion; and exact reason-code mapping.
 
 ## Behavior
 
@@ -25,10 +26,21 @@ non-LLM channel decision; confirm-every-request permits an explicitly policy-all
 excerpt only after exact preview; minimal-external excludes sensitive/confidential;
 trusted-provider remains category/provider/purpose/scope bounded. Test every never-send kind is
 unrepresentable as approved content and all three local sinks use the same fence.
+`ReviewContextProfile` is an orthogonal selection ceiling: its exact selector includes separate
+finding-prose and exact-command booleans, and it cannot authorize a category, class,
+scope, provider, or channel. The installation seed is exactly `local_only + structural + network
+false + all channels off`; it is distinct from the editable upstream `assisted_review` recipe.
 
 Validate source schemas against positive/negative objects, including taskless egress receipt,
 request commitment branches, no-null absence, 16/256 KiB boundaries, sorted sets, canonical ID/time/
-digest spelling, and forbidden secret/free-text fields. Setup tests prove MCP/agent cannot construct
+digest spelling, canonical review-packet indexing, paired-or-absent deterministic summary/detail
+refs, structural no-prose enforcement, and forbidden secret/free-text fields. Setup tests expand every recipe into all
+thirteen typed answers and prove the exact assisted recipe categories/classes/context/scope/preview
+values. A current exact endpoint data-use record with training `prohibited`, retention
+`none|bounded`, and provider human access `prohibited|restricted` makes that recipe eligible;
+`permitted|unbounded|unknown`, stale, or mismatched evidence removes the recommendation without
+granting or revoking a user-authored custom policy. Setup tests
+also prove MCP/agent cannot construct
 confirmation, stale draft/revision/expiry commits nothing, tightening can commit, and widening
 requires authenticated local-human authority. The four v0.1 non-LLM channel answers render
 unsupported/off; an attempted enabling transition returns `channel_unavailable` without storing
@@ -72,6 +84,8 @@ Failure diagnostics contain only safe pointer/reason, never rejected values.
 7. No one-dispatch human decision can authorize two physical provider attempts.
 8. A finished receipt is terminal; waiting/approval/repair remains only in audit state.
 9. Initial reservation failure cannot fabricate durable audit evidence or hide a physical attempt.
+10. Recommendation metadata is inspectable evidence, never policy authority or a technical proof
+    of provider behavior.
 
 ## Tests
 

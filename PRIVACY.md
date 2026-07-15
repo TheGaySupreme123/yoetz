@@ -18,6 +18,12 @@ central path:
 `candidate context → classification → effective policy → minimization/redaction/secret scan →`
 `optional exact local-human preview → one-use authorization → bound gateway/provider → local receipt`
 
+This is the fail-safe installation seed, not a hidden choice on behalf of the user. If a technical
+user deliberately configures external semantic review, the CLI recommends an inspectable
+`assisted-review` recipe. It is committed once as a standing workspace policy and then runs ordinary
+checks/retries without per-request human prompts. The user may choose a stricter, broader, custom,
+or forked configuration instead.
+
 Provider adapters receive an already approved bounded case through reviewed interfaces. The v0.1
 working design permits only bundled adapters and passes them no repository, storage, environment,
 or transcript handles. This is not an OS sandbox: a malicious adapter already executing inside the
@@ -34,6 +40,23 @@ composite of `local_only`, the global ceiling off, and all five network channels
 That mode still permits only exact release-profiled local IPC required for the Yoetz service,
 confidential helper, approved local model, OS credential/user-presence service, and session-
 lifecycle monitor; it does not permit arbitrary AF_UNIX destinations.
+
+An independent review-context profile controls which potentially useful material is selected
+before those disclosure rules run: `structural`, `goal_aware`, `assisted`, `expanded`, or `custom`.
+The recommended `assisted` packet includes goal, obligations, claims, decisions, material timeline,
+deterministic finding bases, coverage and change-observation facts, plus bounded problem-local
+recorded evidence/test/failure/diff/source excerpts. It excludes sensitive/confidential content by
+default and carries an explicit omission reason when content was not recorded, selected, or allowed.
+Missing source never means “no code changed.” v0.1 does not browse live Git/filesystem to fill the
+packet; source must already be captured or agent-published in the frozen case.
+
+The upstream recommendation appears only for an exact installed endpoint whose current versioned
+data-use record states customer-content training `prohibited`, retention `none|bounded`, and
+provider human access `prohibited|restricted`. This is inspectable provider-profile evidence, not a
+technical guarantee that Yoetz can prove downstream provider behavior. Known-broad, unknown, or
+stale posture removes the recommendation. The recommended recipe visibly enables a current-evidence runtime guard; a
+technical user can turn that guard off through a custom policy, but that choice no longer carries
+the upstream no-training recommendation.
 
 The v0.1 working manifest contains no transport implementation for product telemetry, crash
 diagnostics upload, update checks, or capability testing. Setup shows those four channels as
@@ -75,6 +98,13 @@ separately designed confidential reauthentication mechanism. Ordinary MCP/agent 
 grant that authority. Under the current working design, exact foreground approval may authorize one
 `confirm_every_request` case already inside durable policy; it cannot widen policy or create a
 reusable grant, and it is not cryptographic proof against arbitrary malicious same-UID code.
+
+Under the recommended standing policy, the model's challenge is delivered to the main agent through
+the ordinary finding surface. The agent can acknowledge and act, provide evidence, revise its
+claim, dispute with evidence, or state an unresolved limitation, then runs a fresh check. None of
+those routine agent-to-agent steps requires a human. Humans remain required for policy widening,
+credential set/rotation, explicit `confirm_every_request`, and finding waiver. Never-send or
+out-of-scope material cannot be approved by anyone.
 
 A usable OS keyring does not itself prove action-bound human presence. Under the current safe
 default, pristine automatic keyring initialization requires both verified keyring create/load and

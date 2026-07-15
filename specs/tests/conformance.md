@@ -174,10 +174,14 @@ reports them.
 
 ### Privacy and local-service public claims
 
-Run all four privacy profiles through the same cases and prove policy intersection is monotone,
-never-send/out-of-scope data cannot be approved, every-request approval binds the exact prepared
-case, trusted-provider scope remains enumerated, and the five network channels never inherit one
-another's consent. The local-service security document and public claim map must state exactly what
+Run all four privacy profiles × five review-context profiles through the same cases and prove
+selector intersection and disclosure-policy intersection are monotone, context selection never
+grants category/class/scope/provider authority, never-send/out-of-scope data cannot be approved,
+every-request approval binds the exact prepared case, trusted-provider scope remains enumerated,
+and the five network channels never inherit one another's consent. Freeze all five transparent CLI
+recipes, the exact assisted expansion, exact eligible `prohibited + none|bounded +
+prohibited|restricted` provider evidence, negative known-broad/unknown/stale states, and automatic
+in-policy agent-to-agent review. The local-service security document and public claim map must state exactly what
 the executable endpoint, keyring, lock/relock, confidential-ingress, same-UID limitation, and
 memory-hardening evidence supports—never that local IPC or OS keyrings are universally secure.
 

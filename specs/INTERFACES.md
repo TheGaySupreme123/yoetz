@@ -80,6 +80,10 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
   (1 MiB). v0.1 rejects cap-plus-one exact-source imports rather than claiming chunk support.
 - `MAX_SEMANTIC_ITEM_BYTES = 16_384` (16 KiB);
   `MAX_SEMANTIC_CASE_BYTES = 262_144` (256 KiB), measured over canonical minimized case bytes.
+- Semantic review structure: `MAX_REVIEW_TEXT_BYTES = 4_096`,
+  `MAX_REVIEW_TIMELINE_ITEMS = 64`, `MAX_REVIEW_ASSESSMENTS = 64`,
+  `MAX_REVIEW_CHANGE_OBSERVATIONS = 32`, `MAX_REVIEW_EXCERPTS = 16`,
+  `MAX_REVIEW_OMISSIONS = 64`, and `MAX_REVIEW_CHALLENGES = 3`.
 - MCP transport cap (`adapters/mcp_stdio.py`): `MAX_JSON_FRAME_BYTES = 1_048_576` payload bytes
   excluding the single LF.
 - Local-service control framing (`service/control_protocol.py`):
@@ -227,13 +231,18 @@ provenance)` is the ID-free pure-kernel value. `Finding` adds exactly one server
 summary, detail, subject_refs: tuple[event/obligation/claim ids], policy_id, policy_version,
 subject_frontier, coverage: Coverage, provenance: SemanticProvenance | None)`.
 
-Deterministic finding kinds (`FindingKind`):
+Work-integrity finding kinds (`FindingKind`):
 `completion_with_open_obligations`, `requested_item_never_attempted`,
 `failed_work_omitted`, `claim_without_admissible_evidence`, `result_without_action`,
 `stale_evidence_for_changed_state`, `contradictory_claims_unresolved`,
 `ledger_stale_or_incomplete`, `weak_or_stale_response` (flags a hollow rejection/waiver).
-Semantic finding kinds: `evidence_does_not_support_claim`, `diff_does_not_match_account`,
+Research/evidence-assessment kinds: `evidence_does_not_support_claim`, `diff_does_not_match_account`,
 `material_limitation_omitted`, `questionable_finding_rejection`.
+
+Finding kind identifies the problem, not who detected it. The research-evidence pack may produce
+the latter four deterministically, and a semantic reviewer may propose the same kinds. `origin`
+alone distinguishes `deterministic` from `semantic_model_derived`; provenance rules follow origin,
+not the kind token.
 
 Verdict enum (`CheckVerdict`): `action_required`, `no_issue_detected`, `insufficient_coverage`,
 `incomplete_check`. Never `pass`.
@@ -244,10 +253,15 @@ Verdict enum (`CheckVerdict`): `action_required`, `no_issue_detected`, `insuffic
   `assignments`, `actions`, `results`, `evidence`, `claims`, `contradictions`, `findings`,
   `responses`, `latest_tested_state`, `freshness`, `unknown_event_count`, `coverage_gaps`.
 - `reduce_event(state, event) -> ProjectionState` (pure); `replay(events) -> ProjectionState`.
-- `run_deterministic_policies(case: FrozenCase, policy: PolicyPack) -> tuple[CandidateFinding, ...]`.
-  It is pure and never reads randomness. The application allocates one `fnd_` ID per normalized
-  candidate, persists the candidate-to-ID map in the immutable local-result object, and reuses it
-  after a crash.
+- `run_deterministic_policies(case: FrozenCase, policy: PolicyPack) -> DeterministicPolicyResult`.
+  It is pure and never reads randomness. The result contains ordered
+  `DeterministicAssessment(candidate, basis)` pairs. `FindingBasis` is internal/encrypted and binds
+  the exact rule ID, observed fact codes and refs, required-but-missing fact codes, three-valued
+  subject-state relation, frozen-source availability, coverage gaps, and evidence refs. Later
+  review selection/privacy creates the separate content-visibility fact; the pure basis never
+  depends on a context profile or disclosure policy. The
+  application allocates one `fnd_` ID per normalized candidate, persists the candidate-to-ID and
+  basis map in the immutable local-result object, and reuses it after a crash.
 - `rank_findings(deterministic, semantic, policy, max_findings) -> RankedFindings`
   (stable order: materiality desc, actionability desc, evidence strength desc, then ascending
   `finding_id` bytes as final deterministic tie-break; suppressed count retained).
@@ -512,6 +526,8 @@ The closed privacy enums are:
 
 - `PrivacyProfile`: `local_only`, `confirm_every_request`, `minimal_external`,
   `trusted_provider`;
+- `ReviewContextProfile`: `structural`, `goal_aware`, `assisted`, `expanded`, `custom`; it is
+  orthogonal to `PrivacyProfile` and controls deterministic semantic-case selection only;
 - `EgressChannel`: exactly `llm_inference`, `product_telemetry`, `crash_diagnostics`,
   `update_checks`, `capability_testing`;
 - `LocalDisclosureSink`: `local_model`, `agent_context`, `trusted_human_control`;
@@ -623,11 +639,18 @@ authorization, dispatch ID, credential handle, and receipt even when body bytes 
 Automatic profiles may mint retry attempts from baseline policy only within the one total
 retry/deadline budget; no branch reuses consumed authority.
 
-`PrivacyPolicy` contains the explicit boolean `network_egress_permitted` global ceiling plus all
-five exact `ChannelPolicy` rows. A false ceiling requires every row disabled; a true ceiling grants
-nothing. `PrivacyProfile` governs the `llm_inference` row/content rules only. `local_only` disables
+`PrivacyPolicy` contains the explicit `review_context_profile`, its compiled
+`ReviewSelectionPolicy`, editable `require_current_provider_data_use_evidence` boolean,
+`network_egress_permitted` global ceiling, plus all five exact `ChannelPolicy` rows. A false ceiling
+requires every row disabled; a true ceiling grants nothing. `PrivacyProfile` governs the
+`llm_inference` row/content rules only; `ReviewContextProfile` can only narrow which case items are
+considered and never grants a category, class, destination, scope, or byte. `local_only` disables
 external LLM construction and external task/user-content disclosure but is not a bundled decision
-for the four non-LLM rows. v0.1 owns no production transports for those four rows: setup renders
+for the four non-LLM rows. `ReviewSelectionPolicy` is the closed sections/excerpt-kinds/relevance/
+finding-prose/exact-command/caps value owned by `domain/privacy.md`; overlays meet by set
+intersection, stricter relevance, logical AND for both booleans, and minimum caps. Selector growth
+or disabling the current-data-use guard
+is a policy loosening. v0.1 owns no production transports for those four rows: setup renders
 them `unsupported`, enabling transitions return `channel_unavailable` without persistence or I/O,
 and forced enabled state yields a pre-dispatch `channel_unavailable/channel_unavailable` decision
 receipt with no authorization/dispatch/commitment/attempt-body fields. A later exact capability
@@ -640,6 +663,18 @@ ancestor-preserving union: every kind carries `kind` plus `installation_id`; wor
 add `workspace_ref_commitment`; task/request add `task_id`; and request adds `request_id`. Fields
 from a deeper kind are forbidden at shallower scope, and a generic `scope_ref` is never valid.
 
+Every installed external endpoint profile also carries a nonsecret, versioned
+`ProviderDataUseProfile`: `data_use_profile_id`, `data_use_profile_version`,
+`customer_content_training` (`prohibited|permitted|unknown`), `retention`
+(`none|bounded|unbounded|unknown`) with an exact ceiling only when bounded,
+`provider_human_access` (`prohibited|restricted|permitted|unknown`), `reviewed_at`, `expires_at`,
+and an artifact-bound evidence
+digest. It is recommendation metadata, not policy authority or proof of provider behavior. Upstream
+`assisted` recommendation eligibility requires a current record with training `prohibited`,
+retention `none|bounded`, and human access `prohibited|restricted`. The recommended policy's
+explicit guard turns currency into a runtime precondition; a custom policy may turn it off through
+a trusted loosening transition and then carries no upstream no-training claim.
+
 ### Semantic evaluation
 
 `SemanticEvaluatorPort.evaluate(case: ApprovedProviderCase, deadline: Deadline) -> SemanticResult`
@@ -648,8 +683,33 @@ at most one physical provider request. `SemanticResult` is the closed union
 `SemanticResultSuccess | SemanticResultRefused | SemanticResultTimeout |
 SemanticResultInvalid | SemanticResultLate | SemanticResultUnavailable`; expected refusal,
 timeout, invalid, late, and unavailable outcomes are values. `SemanticCase` remains an internal
-pre-egress candidate and is never provider input. Shared types are `SemanticCase`,
-`SemanticCaseItem`, `SemanticJudgment`, adapter-returned `ProviderAttemptProvenance`,
+pre-egress candidate and is never provider input. It contains a structured `ReviewPacket`: goal and
+obligations, claims and decisions, a material ordered timeline, deterministic findings plus
+`FindingBasis`, change observations, coverage, targeted recorded excerpts, and an omission manifest.
+Its reference allowlist is the union of `frontier_refs` (IDs present at frozen frontier F) and
+`local_check_refs` (new deterministic finding IDs already pinned in this check's durable local
+result); both sets and their union are case-digest inputs.
+
+`TargetedExcerptRef` identifies a bounded excerpt already captured or agent-published inside the
+frozen case and links it mechanically to a claim, obligation, finding, action, result, or evidence
+ref. It grants no live Git/filesystem access. `ChangeObservation` keeps `claimed_change`, existing
+three-valued `subject_state_relation`, and `content_visibility`
+(`available|not_recorded|not_selected|withheld_by_policy|redacted_never_send`) separate, so absent
+code can never become “no code changed.”
+
+`SemanticJudgment` contains only a closed conclusion plus zero to three bounded
+`ReviewerChallenge` values; each accepted challenge is the sole candidate-producing shape, so no
+parallel candidate/challenge pair can duplicate it. A challenge has case-bound `cited_refs`,
+discrepancy, alternative interpretation, direct main-agent message,
+`requested_next_step` (`act|provide_evidence|revise_claim|dispute_with_evidence|
+state_unresolved_limitation`), and uncertainty. Post-validation resolves every cited action/result/
+evidence/frontier-finding/local-check-finding ref to its canonical frozen event/obligation/claim
+roots; only those roots become public `Finding.subject_refs`. A local-check ID is never serialized
+as a dangling public subject. Accepted, ranked challenge prose maps into the existing semantic
+finding summary/detail; it does not add a public result field. The main agent
+replies through the existing `respond`/`publish_work` operations and rechecks. Shared types are
+`SemanticCase`, `ReviewPacket`, `ReviewAssessment`, `SemanticCaseItem`, `TargetedExcerptRef`, `ChangeObservation`,
+`SemanticJudgment`, `ReviewerChallenge`, adapter-returned `ProviderAttemptProvenance`,
 receipt-finalized `SemanticProvenance`, and the single `SemanticStatus`/`SemanticReason` enums
 registered in §7. Adapter provenance has no authorization/reservation/receipt IDs and cannot be
 published. Final provenance adds exact attempt, dispatch-authority, receipt, commitment, status,

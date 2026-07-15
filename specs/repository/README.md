@@ -18,8 +18,8 @@ The file must contain, at minimum, these sections:
 
 - a one-paragraph project summary;
 - a quick-start install and first-run path;
-- a “what this project does” section that names the strict-local default and optional semantic
-  review path;
+- a “what this project does” section that distinguishes the fail-safe strict-local installation
+  seed from the user-visible assisted semantic-review recommendation;
 - a “development status” section that clearly states the repo is a working draft or public-alpha
   style build, not a finished user guide;
 - links to the repository security, contribution, changelog, and license pages;
@@ -38,7 +38,10 @@ steps, private URLs, or architecture notes that are not part of the public repos
 The README should describe the repository as:
 
 - the public `yoetz` package and its release artifacts;
-- the strict-local default plus optional capability-driven semantic review;
+- a zero-egress deterministic installation seed plus optional user-configured semantic review;
+- an inspectable recommended assisted-review balance for eligible no-training endpoint profiles:
+  rich structured goal/timeline/deterministic-basis context, bounded linked recorded excerpts,
+  sensitive content off, and direct reviewer challenges back to the main agent;
 - a file-level spec tree under `specs/` for the implementation contract;
 - a release that depends on reproducible packaging and locked dependencies.
 
@@ -54,7 +57,10 @@ The README should keep the install story bounded:
 - avoid documenting unsupported developer-only paths as if they were public release paths.
 
 The v0.1 document leads with the install/first-run story after its one-paragraph summary. It stays
-text-only; a diagram is added only when a later user-tested need justifies another maintained view.
+text-only because the maintained Mermaid workflow lives in ADR-006. It states that routine checks,
+retries, agent responses, and rechecks need no human after a standing policy is committed, while
+setup/widening, credential changes, confirm-every-request, and finding waiver preserve explicit
+human authority.
 It labels the three support routes clearly and never asks security or conduct reporters to use a
 public issue. E-012 verifies the private routes before release.
 

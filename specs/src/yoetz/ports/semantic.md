@@ -2,7 +2,8 @@
 
 **Wave:** B (definition) / E (live use) | **ADRs:** ADR-006, ADR-009, ADR-002 | **Imports
 (spec-tree):** `protocol/errors.md`, `protocol/coverage.md`, `domain/findings.md`
-(SemanticProvenance), `domain/privacy.md` | **Imported by:**
+(SemanticProvenance), `domain/privacy.md`, `kernel/deterministic_checks.md` (`FindingBasis`) |
+**Imported by:**
 `application/egress.md`, `adapters/privacy/gateway.md`, `adapters/providers/openai_responses.md`,
 `adapters/providers/fake.md`
 
@@ -23,6 +24,12 @@ durable attempt/privacy-receipt persistence is the coordinator/audit port's job,
   - `async def evaluate(self, case: ApprovedProviderCase, deadline: Deadline) -> SemanticResult`
 - `@dataclass(frozen=True, slots=True) class SemanticCase` — internal pre-egress candidate shape;
   it has no provider-facing serializer and is converted to `CandidateContext` by application code.
+- `@dataclass(frozen=True, slots=True) class ReviewPacket` — structured goal, timeline, proof,
+  excerpt, and omission content selected under one `ReviewContextProfile`.
+- `@dataclass(frozen=True, slots=True) class ReviewAssessment` — one pinned deterministic finding
+  and basis with an optional policy-selected pair of finding-prose item references.
+- `@dataclass(frozen=True, slots=True) class TargetedExcerptRef` and `ChangeObservation` — bounded
+  recorded-excerpt binding and honest change/content-visibility facts.
 - `@dataclass(frozen=True, slots=True) class Deadline` — `expires_at: datetime` (UTC), method
   `remaining_seconds() -> float` (clamped at 0.0).
 - `SemanticResult` — a closed union (`type SemanticResult = SemanticResultSuccess |
@@ -34,8 +41,12 @@ durable attempt/privacy-receipt persistence is the coordinator/audit port's job,
 - `@dataclass(frozen=True, slots=True) class SemanticProvenance` — finalized attempt provenance,
   constructed only after the matching privacy receipt is durable.
 - `@dataclass(frozen=True, slots=True) class SemanticJudgment` — the parsed, schema-conforming
-  raw model judgment carried by `SemanticResultSuccess` (candidate findings, per-finding
-  uncertainty text, conclusion vocabulary), still untrusted until post-validation.
+  raw model judgment carried by `SemanticResultSuccess` (closed conclusion plus zero to three
+  `ReviewerChallenge` values), still untrusted until post-validation. Challenges are the sole
+  candidate-producing shape.
+- `@dataclass(frozen=True, slots=True) class ReviewerChallenge` — one case-bound discrepancy,
+  alternative interpretation, direct main-agent message, smallest requested next step, and
+  uncertainty statement.
 - `enum SemanticStatus` — `not_requested`, `not_configured`, `blocked_by_policy`,
   `blocked_forbidden_data`, `classification_uncertain`, `awaiting_human`, `human_denied`,
   `approval_expired`, `succeeded`, `refused`, `timeout`, `invalid`, `unavailable`, `late`, `stale`,
@@ -58,23 +69,128 @@ durable attempt/privacy-receipt persistence is the coordinator/audit port's job,
 
 ### `SemanticCase` — pre-egress candidate contract
 
-The check coordinator builds this internal case from a `FrozenCase`, then
+The check coordinator builds this internal case from a `FrozenCase` plus the durably pinned local
+deterministic result, then
 `application/egress.md` converts, classifies, authorizes, minimizes, redacts, and scans it. Provider
 adapters never receive this type:
 
-- Only: the claims under review, open/relevant obligations, accepted decisions, evidence
-  excerpts or digests, diff/command *metadata*, and the deterministic findings already computed —
-  each item carried with its canonical ID from `frozen.allowed_ids`.
-- Never: raw repositories, secrets, unrelated conversation, full transcripts, object plaintext
-  beyond the bounded excerpts, or anything outside `allowed_ids` (ADR-006 and this port's closed
-  input contract).
+- Always eligible for local selection: task goal/plan, open/relevant obligations and acceptance
+  criteria, current claims, accepted decisions/revisions, a material ordered action/result/evidence
+  timeline, deterministic findings plus their machine-readable `FindingBasis`, change observations,
+  coverage gaps, and the omission manifest.
+- Eligible only under the effective context/category/class policy: bounded evidence/test/failure,
+  diff/command, and repository excerpts that are already captured or agent-published in the frozen
+  case and mechanically linked to the reviewed subjects. Exact command strings are omitted by the
+  upstream `assisted` rules unless material and separately allowed.
+- Never: an ambient/raw repository, provider-driven fetch, live Git/filesystem lookup, secrets,
+  unrelated conversation, unrestricted logs/stderr, complete transcripts, object plaintext beyond
+  selected bounded excerpts, or refs outside the two exact allowlists.
 - Every candidate excerpt is subject to the frozen 16 KiB item and 256 KiB case caps; approval does
   not override them.
 - Fields: `case_id: str`, `subject_frontier: Frontier`, `dependency_digest: str`,
-  `allowed_ids: frozenset[str]`, `policy_id: str`, `policy_version: str`,
-  `items: tuple[SemanticCaseItem, ...]`, `question_set: tuple[str, ...]` (the bounded policy
-  questions, e.g. does-evidence-support-claim), `case_digest: str` (canonical bytes digest — the
-  dedup key in `semantic_jobs`).
+  `frontier_refs: frozenset[str]`, `local_check_refs: frozenset[str]`,
+  `review_context_profile: ReviewContextProfile`, `review_selection: ReviewSelectionPolicy`,
+  `policy_id: str`, `policy_version: str`,
+  `packet: ReviewPacket`, `items: tuple[SemanticCaseItem, ...]`,
+  `question_set: tuple[str, ...]`, and `case_digest: str` (canonical bytes digest — the dedup key in
+  `semantic_jobs`). `frontier_refs` are exactly the IDs present at F; `local_check_refs` are the
+  deterministic finding IDs already allocated/persisted for this same check. Their sorted union is
+  the only valid semantic subject-ref set and is bound into `case_digest`.
+
+`SemanticCaseItem` is exact: `item_id: str`, `section:
+goal|obligation|claim|decision|timeline|deterministic_summary|deterministic_detail|excerpt`,
+`category: DataCategory`, `source_kind:
+task|obligation|claim|decision|action|result|evidence|finding|test|failure|diff|command|repository`,
+`source_ref: str`, `linked_subject_refs: tuple[str, ...]`, `occurred_order: int`, `content: bytes`,
+`content_bytes: int`, and `content_digest: str`. Refs are sorted unique and must belong to
+`frontier_refs ∪ local_check_refs`; item IDs and source refs are opaque non-dereferenceable values.
+Items sort by section order above, `occurred_order`, source-ref bytes, then item ID. `content` is at
+most `MAX_SEMANTIC_ITEM_BYTES`; all item content plus structured packet bytes remain within
+`MAX_SEMANTIC_CASE_BYTES`.
+
+`ReviewPacket` is organized rather than flattened prose. Its exact fields are:
+
+- `goal_item_ids: tuple[str, ...]` (0..4), `obligation_item_ids` (0..32), `claim_item_ids`
+  (0..32), `decision_item_ids` (0..16), and `timeline_item_ids`
+  (0..`MAX_REVIEW_TIMELINE_ITEMS`);
+- `deterministic_assessments: tuple[ReviewAssessment, ...]`
+  (0..`MAX_REVIEW_ASSESSMENTS`), ordered by pack/rule/subject/candidate canonical bytes;
+- `change_observations: tuple[ChangeObservation, ...]`
+  (0..`MAX_REVIEW_CHANGE_OBSERVATIONS`), sorted by subject refs;
+- `coverage: Coverage`;
+- `targeted_excerpts: tuple[TargetedExcerptRef, ...]` (0..`MAX_REVIEW_EXCERPTS`), in the
+  deterministic selection order; and
+- `omissions: tuple[ReviewOmission, ...]` (0..`MAX_REVIEW_OMISSIONS`), sorted by subject/category/
+  reason bytes.
+
+Every item ID appears exactly once through one goal/obligation/claim/decision/timeline list, one
+assessment summary/detail field, or one targeted excerpt. Every targeted excerpt references one
+`section=excerpt` item; no orphan item is provider-renderable. `structural` includes only typed
+facts/codes; `goal_aware` adds allowed intent/claim/finding prose; `assisted` adds problem-local
+recorded excerpts; `expanded` and `custom` use their exact compiled `ReviewSelectionPolicy`.
+
+`ReviewAssessment` contains exactly `finding_ref` from `local_check_refs`, `finding_kind`,
+`priority`, sorted public-root `subject_refs` within `frontier_refs`, one `FindingBasis`, and
+optional `summary_item_id` plus `detail_item_id`. The two item IDs are both present or both absent.
+When present, they resolve respectively to `section=deterministic_summary|deterministic_detail`,
+`source_kind=finding`, category `finding_summary`, the same finding source/ref roots, and the exact
+bounded candidate summary/detail. They may be present only when `include_finding_prose=true` and
+the independent category/class policy admits them. Under `structural` they are
+absent, leaving only the typed kind/priority/roots/basis; this is how the profile sends useful
+deterministic facts without prose. The check coordinator derives this value one-to-one from the
+pinned `DeterministicAssessment`; neither provider output nor privacy code may mutate the basis.
+
+`TargetedExcerptRef` fields are `excerpt_item_id`, `source_kind:
+evidence|test|failure|diff|command|repository`, `linked_subject_refs` (1..16 allowed refs),
+`subject_state_relation`, `content_visibility`, `content_digest`, and `content_bytes`. It contains
+no path, locator, provider fetch token, or duplicate content.
+
+`ReviewOmission` fields are `subject_ref`, `category`, `source_kind`, and `reason:
+not_recorded|not_selected|withheld_by_policy|redacted_never_send`; it contains no omitted text,
+digest of omitted plaintext, or dereferenceable source. Before egress the case builder can emit
+`not_recorded|not_selected` and a `redacted_never_send` marker only when the frozen ledger already
+contains that structural redaction fact and no forbidden bytes. The privacy gateway may add
+`withheld_by_policy`. A newly discovered forbidden source/scan match blocks the whole request before
+approved-case construction; it never becomes a provider-visible omission.
+
+`ChangeObservation` exact fields are `subject_refs: tuple[str, ...]` (1..16),
+`claimed_change: bool`, `subject_state_relation: same|different|unknown`, `content_visibility:
+available|not_recorded|not_selected|withheld_by_policy|redacted_never_send`, optional
+`before_state_digest`, and optional `after_state_digest`. Two present comparable equal tree digests
+support `same`; two present comparable unequal tree digests support `different`; a single-sided,
+unpaired, described-only, redacted, conflicting, or absent comparison remains `unknown`.
+Visibility says whether the reviewer saw content and never changes the state relation. The prompt
+must therefore say “change asserted, state not observed” or “change observed, content hidden”
+instead of “no diff.”
+
+### `SemanticJudgment` and `ReviewerChallenge`
+
+The judgment is one-shot and closed: `conclusion:
+no_material_discrepancy|challenges_returned|insufficient_packet` plus
+`challenges: tuple[ReviewerChallenge, ...]` of 0..`MAX_REVIEW_CHALLENGES`. `challenges_returned`
+requires at least one challenge; `no_material_discrepancy` requires none; `insufficient_packet`
+requires none and relies on supplied omission/coverage refs. There is no parallel candidate-finding
+array: each accepted challenge produces at most one semantic candidate.
+
+A challenge contains exactly: `finding_kind` from the complete `FindingKind` registry; `summary`;
+`cited_refs` drawn only from `frontier_refs ∪ local_check_refs`; `discrepancy`;
+`alternative_interpretation`; `message_to_main_agent`; `requested_next_step` exactly
+`act|provide_evidence|revise_claim|dispute_with_evidence|state_unresolved_limitation`; and
+`uncertainty`. Each text is nonempty UTF-8 and at most `MAX_REVIEW_TEXT_BYTES`; `cited_refs` is
+sorted unique with 1..16 members. Excerpt support is cited through its supplied linked subject refs;
+free-text item IDs, source locators, and quotes absent from the packet are rejected.
+
+Post-validation requires the challenge to identify a material discrepancy supported by case facts,
+preserve deterministic origin/coverage, and remain useful under the packet's omissions. It resolves
+each cited frontier action/result/evidence/finding to its canonical event/obligation/claim roots and
+each cited `local_check_ref` to the pinned deterministic candidate's own public subject roots. The
+sorted root union must be nonempty and within `frontier_refs`; those roots—not broad cited refs—become
+the semantic `Finding.subject_refs`. Accepted, ranked challenge text becomes the existing semantic
+finding summary/detail. The public response path is
+unchanged: the main agent acknowledges/acts, publishes evidence, publishes a superseding claim,
+rejects with evidence, or records an unresolved limitation through `respond` plus `publish_work`,
+then runs a fresh `check`. The model cannot request arbitrary extra context, create an interactive
+fetch round, decide a waiver, or converse directly with the provider after return.
 
 ### `evaluate`
 
@@ -172,7 +288,8 @@ status.
    privacy fence.
 2. One `evaluate` call = at most one physical provider request; durable attempt identity lives in
    the coordinator's `semantic_attempts` rows, one per call.
-3. The approved case is complete and closed: nothing is fetched or enriched during `evaluate`.
+3. The approved case is complete and closed: nothing is fetched or enriched during `evaluate`;
+   targeted source means a bounded recorded excerpt, never a repository handle.
 4. A `SemanticResult` is advisory input to deterministic post-validation; no variant can directly
    create a finding, complete an operation, or strengthen coverage.
 5. Adapter-returned provisional provenance cannot be published. Final provenance exists only
@@ -181,6 +298,8 @@ status.
    privacy gateway — results,
    delays, refusals, malformed output, late responses — and the coordinator cannot distinguish it
    from the live adapter.
+7. Missing/hidden content and unchanged state are distinct typed facts; neither the case builder nor
+   model output may collapse one into the other.
 
 ## Tests
 
@@ -188,6 +307,9 @@ status.
   deterministic-status claims, coverage upgrades, stale frontier, duplicate response, refusal,
   timeout, invalid JSON, valid-but-wrong-schema, late result — all fenced by post-validation and
   none able to block deterministic operation.
+- Semantic packet fixtures prove deterministic bases, the split frontier/local-check allowlists,
+  profile-specific selection, problem-local excerpt inclusion/unrelated exclusion, the omission
+  manifest, honest unknown change visibility, and every reviewer-next-step value.
 - `specs/tests/conformance.md`: fake-provider scripts drive every `SemanticStatus`; provenance
   fields recorded per attempt.
 - Zero-egress subprocess tests permit exact profiled AF_UNIX service/confidential/local-model IPC

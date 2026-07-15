@@ -29,6 +29,12 @@ The test checks the reviewed claim map and asserts:
   objects and do not imply v0.1 has taskless content-encryption storage;
 - adapter claims are limited to closed reviewed-bundled composition with no injected ambient
   handles and explicitly disclaim OS/process sandbox isolation;
+- `privacy.assisted_review_user_controlled` maps the safe installation seed, transparent editable
+  recipe, current endpoint data-use eligibility, standing no-prompt operation, and provider-policy
+  evidence disclaimer to exact tests;
+- `semantic.review_packet_and_agent_loop` maps deterministic bases, structured problem-local packet,
+  omission/change honesty, direct challenge, existing respond/publish/check loop, and no live source
+  fetch to exact tests;
 - the v0.1 diagnostic claim permits only bounded structural identity and proves raw traceback
   capture is absent rather than merely owner-only/disabled by default;
 - any missing claim or unsupported claim is reported explicitly.
@@ -42,6 +48,7 @@ The test checks the reviewed claim map and asserts:
 1. Public claims are evidence-mapped.
 2. Unsupported claims are explicit.
 3. Wording stays within the claim map.
+4. Recommendation language never substitutes for consent or proof of provider behavior.
 
 ## Tests
 

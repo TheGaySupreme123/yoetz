@@ -19,13 +19,15 @@ The future root document has these stable sections:
 2. Default privacy posture
 3. Content classes and never-send data
 4. Four LLM privacy profiles
-5. Independent network channels
-6. Setup and later policy changes
-7. Per-request preview and approval
-8. Local egress receipts
-9. Encryption, locking, and confidential unlock
-10. Limitations and threat model
-11. How to inspect or report a privacy problem
+5. Review-context profiles and the assisted-review recommendation
+6. Independent network channels
+7. Setup and later policy changes
+8. Human involvement versus direct-to-agent review
+9. Per-request preview and approval
+10. Local egress receipts
+11. Encryption, locking, and confidential unlock
+12. Limitations and threat model
+13. How to inspect or report a privacy problem
 
 Examples use synthetic content and show both an allowed and blocked disclosure. The document links
 to the exact technical protocol, policy schema, security policy, and evidence-bound public claims.
@@ -48,7 +50,8 @@ may become ready for local work when presence is measured unavailable at ready/r
 when a human-control operation explicitly observes its failure, but external provider activation
 remains fenced until presence is restored and revalidated. v0.1 claims no asynchronous presence watcher.
 
-The safe installation default is `local_only` with `network_egress_permitted=false`, all five
+The safe installation default is `local_only`, `review_context_profile=structural`, with
+`network_egress_permitted=false`, all five
 network channels denied, and no local model. The four privacy profiles govern LLM inference/content
 disclosure only. Under `local_only`, external LLM-provider adapters cannot be constructed and Yoetz
 makes no external user/task-data request. Future policy may separately authorize the global ceiling
@@ -72,6 +75,24 @@ The other profiles are described exactly:
   redacted, secret-scanned case;
 - `trusted_provider`: a local human authorizes named content categories for one provider, endpoint
   profile, model policy, scope, and purpose; this never means unrestricted access.
+
+The document distinguishes that zero-egress seed from the CLI's recommended *configured* semantic
+review recipe. `ReviewContextProfile` is independently `structural|goal_aware|assisted|expanded|
+custom`; it only selects candidate material and cannot widen the privacy policy. `assisted` includes
+goal/obligation/claim/decision/finding prose, a material timeline, deterministic finding bases,
+change/coverage facts, and bounded problem-local evidence/test/failure/diff/repository excerpts
+already recorded at the frozen frontier. It excludes sensitive/confidential and transcript content
+by default, and says plainly that v0.1 has no live Git/filesystem source broker.
+
+The recommended recipe maps to a standing workspace-scoped `trusted_provider` policy with
+per-request preview off, public-structural plus ordinary-user-content classes, exact listed
+categories, and agent-context permission for `finding_summary`. It is offered only for a current
+endpoint data-use record stating training `prohibited`, retention `none|bounded`, and provider human
+access `prohibited|restricted`. Known-broad, unknown, or stale posture removes the recommendation.
+The recipe enables the editable current-evidence guard; a trusted custom loosening can disable it
+but cannot retain the upstream no-training claim. The text calls this recommendation evidence, not technical
+proof. Users may inspect/edit every answer, choose stricter/broader/custom behavior, or fork the
+open-source project; modified forks do not inherit upstream evidence claims.
 
 All outbound LLM requests traverse `candidate context -> classification -> effective user policy ->
 local minimization/redaction/secret scan -> optional human preview of the exact prepared case ->
@@ -116,6 +137,13 @@ widening the global ceiling, content, provider, purpose, endpoint, scope, or a n
 requires explicit local-human confirmation through a trusted control surface. MCP, agents,
 providers, plugins, and LLM output may request more context but cannot authorize or apply the
 widening.
+
+Once the standing assisted policy is committed, ordinary checks, automatic retries, reviewer
+findings, agent responses, and rechecks run without human prompting. The reviewer addresses the
+main agent through an ordinary semantic finding and can request action, evidence, claim revision,
+an evidence-backed dispute, or an explicit unresolved limitation. Human involvement remains for
+policy widening, credential mutation, `confirm_every_request`, and finding waiver; never-send and
+out-of-scope content are unapprovable.
 
 v0.1 crash diagnostics are bounded structural identities/counts only. Yoetz does not capture or
 upload exception messages, locals, source/path excerpts, or raw tracebacks, even to an owner-only
@@ -198,6 +226,8 @@ zero-knowledge, forensic erasure, or universal secret detection.
     IPC; it does not attest external OS agents or model runtimes.
 12. Privacy receipts are terminal; pending/approved/receipt-repair state is never presented as a
     finished outcome, and initial reservation failure is explicitly unreceipted and pre-dispatch.
+13. Review-context selection never grants disclosure, and absent/hidden code is never rendered as
+    observed unchanged code.
 
 ## Tests
 

@@ -6,26 +6,43 @@ tests
 
 ## Purpose
 
-Freeze the bounded meaning of `trusted_provider`: broader named categories for one exact destination,
-purpose and scope, never access to everything locally available.
+Freeze both the recommended `assisted` and deliberately broader `expanded` meanings of
+`trusted_provider`: named categories for one exact destination, purpose and scope, never access to
+everything locally available.
 
 ## Public surface
 
-Canonical fixture `yoetz.fixture-case/1.0.0`, ID `PRIV-004`, workspace scope `wsp_44444444`, policy
-`pvy_44444444-4444-4444-8444-444444444444`, provider `provider.example`, endpoint `ep_trusted_v2`,
-model allowlist `model-example-2`, purpose `selected-code-review`, approved categories
-`task_description`, `evidence_excerpt`, `diff_metadata`, and one explicitly selected
-`repository_excerpt` classified `sensitive_confidential`.
+Canonical multi-variant fixture `yoetz.fixture-case/1.0.0`, ID `PRIV-004`, workspace scope
+`wsp_44444444`, policy `pvy_44444444-4444-4444-8444-444444444444`, provider
+`provider.example`, endpoint `ep_trusted_v2`, model allowlist `model-example-2`, and purpose
+`selected-code-review`. The `assisted` variant uses a current recommendation-eligible data-use
+profile with training `prohibited`, retention `bounded`, and provider human access `restricted`;
+public-structural plus ordinary-user-content classes; goal/obligation/claim/decision/
+finding/timeline/diff/evidence categories, one linked ordinary `repository_excerpt`, and
+the canonical assisted selector with finding prose on and exact command text off plus exact agent-context selection
+`finding_summary|bounded_structural_metadata|declared_file_type` with
+`public_structural|ordinary_user_content`. Its current-data-use guard is true. The `expanded`
+variant adds one explicitly selected
+`repository_excerpt` classified `sensitive_confidential` after a separate widening.
 
 ## Behavior
 
-A fresh scoped local-human authorization permits exactly the listed categories and destination.
-The gateway includes only selected IDs within `wsp_44444444`; it blocks an otherwise readable raw
+A fresh scoped local-human authorization commits each variant's exact listed categories and
+destination. The assisted policy then performs ordinary checks/retries without another prompt,
+while every physical attempt still gets a fresh authorization/receipt. The gateway includes only
+mechanically linked selected IDs within `wsp_44444444`; it blocks an otherwise readable raw
 database, unrelated workspace file, full transcript and environment entry. The adapter receives no
 repository/object-store handles. Receipt scope, consent, categories, counts, transformations and
 request commitment match the exact final application body bytes; auth metadata/framing are
 excluded. Same provider at a different endpoint/model/purpose is
 denied.
+
+The assisted packet freezes goal/obligation/claim, ordered timeline, deterministic basis, an
+observed-changed state, linked failing-test and changed-hunk/enclosing-symbol excerpts, and explicit
+unrelated/not-recorded omissions. The expanded variant proves sensitive content is not silently
+inherited from the recommendation. Known-broad/stale/unknown data-use posture trips the assisted
+variant's explicit current-evidence guard; a separate trusted custom transition may turn the guard
+off without inheriting the recommendation claim.
 
 ## Errors and edge cases
 
@@ -36,7 +53,8 @@ the trusted binding.
 ## Invariants
 
 The fixture is canonical, synthetic, offline, deterministic and test/sdist-only. “Trusted” is a
-specific authorization tuple, never a bypass around minimization, never-send, or scope.
+specific authorization tuple, never a bypass around minimization, never-send, or scope. “Assisted”
+is a bounded standing recipe, not whole-repository access or technical proof of provider behavior.
 
 ## Tests
 

@@ -19,8 +19,9 @@ Yoetz skill. The file is a packaged resource and must not be regenerated from lo
 
 The installed copy matches the reviewed root reference byte-for-byte. It teaches coverage
 dimensions, conservative defaults, weakest-material dependency, deterministic-vs-semantic
-provenance, freshness and redaction gaps, finding disposition, receipt field mapping, and the
-bounded wording rules used at completion time.
+provenance, freshness and redaction gaps, finding disposition, reviewer-response/recheck patterns,
+change/content-visibility distinctions, receipt field mapping, and the bounded wording rules used
+at completion time.
 
 The runtime verifies byte size and digest through the resource manifest before using the file.
 

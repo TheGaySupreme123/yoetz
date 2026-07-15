@@ -82,6 +82,21 @@ logical request identity.
 
 ### Projection meaning
 
+When a semantic finding carries a post-validated reviewer challenge, the main agent uses the same
+three dispositions; no `ReviewerReply` wire type or fourth disposition is introduced. The intended
+compound flows are:
+
+- **accept/act:** `acknowledged`, then publish the material action/result/evidence;
+- **provide evidence:** publish bounded evidence, then `acknowledged` with those `evidence_refs`;
+- **revise claim:** publish the superseding claim and acknowledge the challenged finding;
+- **dispute with evidence:** `rejected` with a bounded reason and matching `evidence_refs`;
+- **cannot resolve:** `acknowledged` with the unresolved limitation, leaving the obligation/finding
+  visible.
+
+Every material branch ends with a fresh `check` at the new frontier. These labels are skill/UI
+guidance over existing events, not authority-bearing protocol values. The reviewer can recommend a
+branch but cannot submit the response, waive the finding, or declare itself resolved.
+
 - `acknowledged` records that the actor saw/accepted the finding as requiring attention. It does
   not resolve the underlying obligation, prove a fix, or suppress the finding.
 - `rejected` records disagreement and its stated basis. It remains visible in status and receipts;
@@ -118,6 +133,8 @@ logical request identity.
 4. Exactly one `response_recorded` event is acknowledged for one terminal response operation.
 5. No network call or plaintext payload work occurs inside the append transaction.
 6. Same-ID replay returns the original accepted event and frontiers byte-for-byte.
+7. Reviewer-to-agent dialogue is represented by attributable finding/response/work history; it is
+   never an unbounded model transcript or a shortcut around recheck.
 
 ## Tests
 

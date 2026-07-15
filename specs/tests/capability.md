@@ -180,6 +180,12 @@ avoidance of forbidden APIs, local-model AF_UNIX-only operation, five-channel in
 structural receipts. It does not claim same-UID sandbox isolation. Passing one cell never implies
 support for an untested platform/backend/model.
 
+That cell also covers all five review-context profiles and the exact canonical packet seen by the
+provider. For every externally advertised endpoint it records the versioned data-use profile and
+shows that current eligible evidence controls only the upstream assisted recommendation unless the
+editable runtime guard is enabled. Provider statements are recorded as evidence-bound posture,
+never as proof of downstream training, retention, or human-access behavior.
+
 The user-presence cell separately proves exact OS-authenticated prompt/action binding and one-use
 attestation and emits the exact artifact-bound `user_presence_cells` row. TTY or same-UID identity
 is a negative control. A pristine keyring-mode capability claim requires an exact passing keyring

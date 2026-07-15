@@ -22,7 +22,8 @@ byte-identical to the reviewed source skill and must not drift into a locally ed
 The packaged file is copied from the reviewed skill source without semantic rewriting. It retains
 the same sections, workflow steps, activation guidance, publication policy, handoff rules, resume
 behavior, finding response rules, receipt-bounded final wording, and safety/privacy limitations as
-the source skill.
+the source skill, including problem-local evidence publication, reviewer-challenge response
+patterns, and mandatory recheck after any response/new evidence/revised claim.
 
 The installer validates source and destination bytes, rejects traversal/symlink destinations, and
 preserves any preexisting modified installed copy unless explicit overwrite consent is given. The

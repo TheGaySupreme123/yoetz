@@ -16,7 +16,9 @@ that every surface and adapter must obey identically.
 - `$id`: `https://schemas.yoetz.dev/0.1/privacy/privacy-policy/1.0.0`.
 - Media type: `application/vnd.yoetz.privacy-policy+json`.
 - Closed root fields: `schema_version`, `policy_id`, `version`, `policy_digest`, `profile`,
-  `network_egress_permitted`, `effective_scope`, `channel_policies`, `local_model_enabled`, optional
+  `review_context_profile`, `review_selection`,
+  `require_current_provider_data_use_evidence`, `network_egress_permitted`, `effective_scope`,
+  `channel_policies`, `local_model_enabled`, optional
   `local_model_binding`, `local_sink_category_ceilings`, `never_send`, `created_at`, and optional
   `supersedes_policy_digest`.
 
@@ -24,6 +26,7 @@ Exact enums:
 
 - scope kind: `machine|workspace|task|request`;
 - LLM profile: `local_only|confirm_every_request|minimal_external|trusted_provider`;
+- review-context profile: `structural|goal_aware|assisted|expanded|custom`;
 - egress channel: `llm_inference|product_telemetry|crash_diagnostics|update_checks|
   capability_testing` (all five are the same `EgressChannel` vocabulary even though LLM has a
   richer typed subsection);
@@ -55,6 +58,38 @@ excerpt.
 `network_egress_permitted` is the global boolean network ceiling. `false` requires all five channel
 policies disabled. `true` grants no channel and no content permission by itself.
 
+`review_context_profile` is required and orthogonal to `profile`. It selects candidate material
+before policy enforcement: `structural` admits no user prose; `goal_aware` admits allowed goal,
+obligation, claim, decision, and finding prose but no excerpts; `assisted` may additionally select
+bounded problem-local evidence/test/failure/diff/repository excerpts already recorded in the frozen
+case; `expanded` may relevance-rank all recorded items allowed by the policy; `custom` uses the
+exact user-selected sections/kinds/relevance/booleans/budgets. Separate policy fields still control
+categories, classes, and scope. It never widens a channel policy or provides
+live repository/filesystem access. `structural` is the only valid first-run value in the built-in
+zero-egress seed. The upstream CLI recommendation expands to `assisted` only through an explicit
+policy transition.
+
+`review_selection` is the exact closed `ReviewSelectionPolicy` compiled from that profile. It has
+sorted unique `sections` drawn from `goal|obligations|claims|decisions|timeline|
+deterministic_assessments|change_observations|coverage|targeted_excerpts|omissions`; sorted unique
+`excerpt_kinds` from `evidence|test|failure|diff|command|repository`; `relevance:
+linked_subjects_only|linked_then_in_scope`; `include_finding_prose`; `include_exact_command_text`;
+and nonnegative integer
+caps `max_timeline_items<=64`, `max_assessments<=64`, `max_change_observations<=32`,
+`max_excerpts<=16`, `max_omissions<=64`, `max_excerpt_bytes<=16_384`, and
+`max_total_excerpt_bytes<=131_072`. Named profiles must equal the canonical expansions in
+`domain/privacy.md`; `custom` persists the exact user selection inside those ceilings. Selection
+grants no category/class/scope/provider/channel. Effective overlay intersection uses set
+intersection, logical-AND finding-prose and command eligibility, the stricter relevance, and
+minimum caps; a result
+that is not a named expansion is labeled `custom`.
+
+`require_current_provider_data_use_evidence` is a required boolean. It is false when no external
+provider is bound. When true, dispatch is additionally fenced on a current installed record with
+training `prohibited`, retention `none|bounded`, and provider human access
+`prohibited|restricted`. The upstream assisted recipe sets it true. An informed custom policy may
+set it false; that is an explicit loosening and cannot inherit the upstream recommendation claim.
+
 `channel_policies` contains exactly one closed policy for each of the five `EgressChannel` values.
 Each fixes enabled state, sorted allowed `DataCategory` and `DataClass` sets, optional exact
 `ProviderBinding`, purposes, scope ceiling, preview flag, byte/token ceilings and expiry ceiling. A
@@ -77,6 +112,18 @@ credential. `PrivacyProfile` branches govern the `llm_inference` policy only:
 `confirm_every_request` may include `sensitive_confidential` only when the policy names its category
 and data class and the exact post-minimization excerpt receives request-bound local-human preview
 approval. It is not exclusive to `trusted_provider`.
+
+The upstream `assisted` recipe uses `trusted_provider`, workspace scope,
+`preview_required=false`, `require_current_provider_data_use_evidence=true`, data classes
+`public_structural|ordinary_user_content`, and allowed
+categories `bounded_structural_metadata|declared_file_type|task_description|claim_text|
+obligation_text|decision_excerpt|evidence_excerpt|finding_summary|command_metadata|diff_metadata|
+repository_excerpt`. It excludes `sensitive_confidential` and `transcript_excerpt`, and its
+`agent_context` ceiling is exactly
+`{categories:[bounded_structural_metadata,declared_file_type,finding_summary],
+data_classes:[ordinary_user_content,public_structural]}` (each array ASCII-sorted in canonical
+bytes) so the main agent can receive the reviewer challenge. Those recipe facts are
+checked by setup/conformance; they are not implicit schema defaults.
 
 Every external LLM profile requires `network_egress_permitted=true` and an enabled
 `llm_inference` policy. Disabled channel policies forbid binding/categories/classes/purposes.
@@ -118,6 +165,10 @@ filesystem path, environment name/value, raw authorization challenge, or decrypt
   invalid commitments fail.
 - A profile/global-ceiling/binding/preview/category mismatch fails schema validation before policy
   evaluation. A false ceiling with any enabled channel is invalid.
+- A missing/unknown review-context value, or a preset/profile/category/class combination that
+  claims wider selection than its closed meaning, is invalid.
+- A named profile whose `review_selection` is not its exact expansion, an invalid custom selector,
+  or a true provider-data-use guard without an external binding is invalid.
 - Enabling one channel cannot imply, default, or materialize another.
 - A local runtime profile cannot contain a remote URL or network permission.
 - Removing a never-send constant or admitting `secret_or_cryptographic` to a local sink is invalid.
@@ -136,6 +187,10 @@ filesystem path, environment name/value, raw authorization challenge, or decrypt
    the agent-context fence runs before MCP rendering.
 6. No secret or user-content value is a policy field.
 7. Source and installed schema bytes are identical and resolved offline.
+8. Review-context selection can only narrow candidate material; the channel policy remains the
+   independent disclosure authority.
+9. Provider data-use evidence authorizes nothing; only the explicit editable guard determines
+   whether its currency is a runtime precondition.
 
 ## Tests
 

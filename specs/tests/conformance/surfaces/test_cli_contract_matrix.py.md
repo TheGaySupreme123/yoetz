@@ -11,6 +11,8 @@ Prove the CLI command matrix, JSON mode, help text, and exit codes match the pub
 ## Public surface
 
 - `test_command_matrix_matches_six_operations` — all required commands exist.
+- `test_privacy_command_and_recipe_matrix` — trusted-local privacy setup/audit commands, five
+  recipes, thirteen-answer expansion, and recommendation eligibility are exact.
 - `test_json_and_human_output_modes` — structured and human paths stay distinct.
 - `test_exit_code_matrix` — public codes map to the expected exits.
 
@@ -19,6 +21,8 @@ Prove the CLI command matrix, JSON mode, help text, and exit codes match the pub
 The test asserts:
 
 - the six operation commands and support commands are present;
+- `privacy setup|show|propose|tighten` and `privacy receipts list|get` are present while decision
+  commands remain confined to trusted human control;
 - `--json` output is structured and bounded;
 - human output never outruns structured truth;
 - exit codes match the frozen mapping for success, invalid input, pending, conflict, provider,
@@ -27,12 +31,15 @@ The test asserts:
 ## Errors and edge cases
 
 - A command that appears only in help text but not in the app fails.
+- A recipe that hides an expanded answer, recommends an ineligible endpoint, or silently commits a
+  policy fails.
 
 ## Invariants
 
 1. CLI command matrix is frozen.
 2. JSON mode stays structured.
 3. Exit code mapping is explicit.
+4. CLI convenience never becomes privacy authority.
 
 ## Tests
 

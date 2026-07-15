@@ -80,6 +80,11 @@ schema manifest, and privacy public-claim mappings are required source/sdist art
 schema artifacts and schema manifest have byte-identical installed mirrors; the eight privacy
 fixtures remain public test/sdist-only and must not appear in the wheel resource set.
 
+Privacy packaging snapshots also lock the four disclosure profiles × five review-context profiles,
+thirteen setup questions, exact assisted recipe and agent-context classes, provider-evidence
+disclaimer, user-editable guard, canonical outbound review packet, and automatic no-prompt wording
+for routine work inside standing policy.
+
 ### Clean installation
 
 On fresh advertised macOS arm64 and manylinux_2_28 x86-64 profiles:

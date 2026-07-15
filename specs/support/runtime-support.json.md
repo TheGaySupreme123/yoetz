@@ -36,7 +36,9 @@ A canonical strict-JSON object with:
 - `session_event_cells`: exact lock/suspend monitor behavior and required passing case IDs;
 - `privacy_enforcement_cells`: exact policy/classifier/minimizer/scanner/gateway/receipt versions,
   profile/channel/local-sink matrix, zero-egress evidence, and required passing case IDs;
-- `provider_profiles`: zero or more exact SDK/endpoint-profile/model/schema-policy cells;
+- `provider_profiles`: zero or more exact SDK/endpoint-profile/model/schema-policy cells, each with
+  a versioned customer-content-training/retention/provider-human-access data-use record, review/
+  expiry timestamps, evidence digest, and derived `assisted_recommendation_eligible` boolean;
 - `denied_cells` and `limitations`: sorted bounded reason records;
 - `manifest_digest`: SHA-256 of canonical content with this field omitted.
 
@@ -55,6 +57,15 @@ At development time the file may contain no supported cells and a
 every and only the exact passing cells. Optional provider absence does not invalidate `local_only`
 deterministic/service cells. An upstream version not listed is `untested`; it is never accepted
 because it lies between listed versions.
+
+`assisted_recommendation_eligible=true` is derived, never hand-entered: the exact provider cell and
+data-use evidence are current; `customer_content_training=prohibited`; retention is `none|bounded`
+with its exact ceiling; and provider-human access is `prohibited|restricted`. The flag is
+recommendation evidence, not technical proof of provider behavior. Unknown/stale posture must set
+it false. It fences runtime dispatch only when the user-controlled policy field
+`require_current_provider_data_use_evidence` is true; a technical user may explicitly turn that
+guard off through a trusted custom policy transition and then receives no upstream no-training
+claim.
 
 Pristine automatic OS-keyring initialization requires an exact passing `key_backend_cells` row and
 an exact passing `user_presence_cells` row for the same candidate artifact and normalized release
@@ -84,6 +95,8 @@ bounded cell identity/reason and never host paths, usernames, credentials, or ra
 5. Runtime cannot widen this reviewed allowlist.
 6. No supported keyring cell implies a supported user-presence cell; pristine auto-initialization
    requires an exact same-artifact intersection.
+7. Provider technical compatibility and upstream assisted-review recommendation eligibility are
+   separate, exact, evidence-bound facts.
 
 ## Tests
 

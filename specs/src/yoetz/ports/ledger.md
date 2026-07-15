@@ -89,8 +89,12 @@ No SQLite, APSW, or transport type appears in any signature. All methods are `as
 - `dependency_digest: str` — digest `D` over the material inputs (frontier head digest, policy
   pack IDs/versions, engine version, projection version, config digest) that a semantic result
   must still match at finalization.
-- `allowed_ids: frozenset[str]` — the closed set of event/obligation/claim/evidence/finding IDs
-  present at `F`; semantic post-validation rejects anything outside it.
+- `allowed_ids: frozenset[str]` — the closed set of event/obligation/claim/action/result/evidence/
+  finding IDs present at `F`; this becomes `SemanticCase.frontier_refs`. Semantic post-validation
+  later checks the union of this set plus the same-check durably pinned `local_check_refs`.
+  Decisions and responses are cited through their owning event IDs. Every action/result/evidence/finding entry
+  also carries a deterministic link to one or more canonical event/obligation/claim roots so a
+  semantic citation can be projected into the narrower public `Finding.subject_refs` contract.
 - `operation: OperationRecord` — the durable `pending/reserved` check-operation row created by
   this call (lease owner, generations, expiry).
 - `replayed_result: CheckResult | None` — non-`None` when the operation was already terminal for

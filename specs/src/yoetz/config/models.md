@@ -25,6 +25,9 @@ global network ceiling and five channel policies are distinct authority dimensio
 - `class LoggingConfig` — the `[logging]` section.
 - `class PrivacyBootstrapConfig` — imported from `config/privacy.md`; safe first-run seed only.
 - `class ProviderProfileConfig` — nonsecret exact external-provider identity/capability selection.
+- imported domain `ProviderDataUseProfile` — installed nonsecret recommendation metadata resolved
+  from that exact capability profile; this config module does not define or accept it as
+  user-authored configuration.
 - `class LocalModelProfileConfig` — nonsecret exact installed AF_UNIX local-model capability
   selection; it contains no socket locator or launch instruction.
 - `class ProfileCapabilities` (frozen dataclass) — `network: NetworkPolicy`,
@@ -75,9 +78,12 @@ this table; it does not decide whether a separately reviewed bounded non-LLM cha
 
 ### `VerificationConfig`
 
-- `semantic: Literal["disabled", "optional", "required"] = "disabled"` — maps to check modes
+- `semantic: Literal["disabled", "optional", "required"] = "optional"` — maps to check modes
   `deterministic_only` / `semantic_if_configured` / `semantic_required` as the default for
-  requests that do not specify a mode.
+  requests that do not specify a mode. Under the fail-safe `strict-local + local_only` seed this
+  still performs deterministic work with zero external egress; once a user configures an eligible
+  semantic sink and standing policy, ordinary checks actually invoke it without another hidden
+  mode switch.
 - `max_findings: int = MAX_FINDINGS_DEFAULT` (3) — validated `1 <= v <= MAX_FINDINGS_LIMIT`
   (10); out of range → `ConfigError("max_findings_out_of_range")`.
 
@@ -96,6 +102,11 @@ this table; it does not decide whether a separately reviewed bounded non-LLM cha
 - `timeout_seconds: int = 60`; `max_retries: int = 2` (Yoetz-owned budget, ADR-006) —
   both bounded (`1..300`, `0..2`).
 - `capability_profile: str` is required and must match the endpoint/model tuple.
+- The installed profile named by that tuple carries a versioned `ProviderDataUseProfile` with
+  customer-content-training, retention, provider-human-access, review/expiry, and evidence-digest
+  facts. Config does not let a user self-assert those facts. Unknown/stale posture removes the
+  upstream `assisted` recommendation badge but does not make an otherwise exact custom profile look
+  like verified no-training behavior.
 - **No secret or confidential locator fields exist.** There is no `api_key`, `token`, `password`,
   credential reference, socket path, header, or generic URL field, and
   `extra="forbid"` rejects any attempt to add one. A cross-field validator additionally scans

@@ -26,6 +26,10 @@ The reference contains:
 - deterministic-vs-semantic origin and provenance rules;
 - freshness, redaction, unknown-schema, and import-gap examples;
 - finding disposition semantics;
+- reviewer-challenge response patterns (`accept/act`, `provide evidence`, `revise claim`, `dispute
+  with evidence`, `state unresolved limitation`) mapped to existing respond/publish/recheck calls;
+- the difference between same state, asserted-but-unobserved change, observed change with hidden
+  content, and reviewed targeted change content;
 - JSON receipt field mapping and derived markdown rules;
 - approved and forbidden completion-wording examples.
 
@@ -45,6 +49,7 @@ redacted material as a real limitation.
 1. Coverage language never outruns the public contract.
 2. Receipt wording is bounded by the weakest material dependency.
 3. The reference remains usable offline.
+4. Missing source visibility is always a coverage limitation, never an unchanged-state fact.
 
 ## Tests
 

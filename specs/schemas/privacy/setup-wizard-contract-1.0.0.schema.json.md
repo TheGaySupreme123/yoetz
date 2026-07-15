@@ -27,15 +27,17 @@ branch fields fail.
 
 Client actions:
 
-- `begin`: current policy digest/version or explicit first-run marker; no answers.
-- `answer`: exactly one of the following twelve stable question IDs with its sole accepted answer
+- `begin`: current policy digest/version or explicit first-run marker; optional non-authoritative
+  `recipe_hint`; no answers.
+- `answer`: exactly one of the following thirteen stable question IDs with its sole accepted answer
   shape:
 
   | `question_id` | answer type |
   |---|---|
   | `network_egress` | JSON boolean |
   | `local_models` | JSON boolean |
-  | `external_provider` | exact closed external `ProviderBinding` (`provider_id`, `model_id`, `endpoint_profile_id`, `endpoint_profile_version`, `transport: external`) or the fixed token `none` |
+  | `external_provider` | exact closed `{binding: ProviderBinding, require_current_provider_data_use_evidence: boolean}` or the fixed token `none` |
+  | `review_context` | exact closed `{profile: structural\|goal_aware\|assisted\|expanded\|custom, selection: ReviewSelectionPolicy}` |
   | `content_categories` | closed `{categories, data_classes}` selection object |
   | `agent_context_categories` | closed `{categories, data_classes}` selection object |
   | `local_model_categories` | closed `{categories, data_classes}` selection object |
@@ -49,6 +51,21 @@ Client actions:
   No generic string, free-form object, alternate question spelling, or implicit coercion is
   accepted.
 
+The CLI may offer `private|metadata_only|assisted_review|expanded_review|custom` as convenience
+recipes. `begin` may carry one optional `recipe_hint` from that enum; it is non-authoritative and
+only asks the service to produce the same frozen thirteen-answer expansion. The label is retained
+only while the answers still byte-match that expansion; any edit makes it `custom`. The
+service-owned `policy_review` shows the exact expanded answers and diff before any widening can be
+decided. The recommended recipe expansion is frozen by the setup protocol and conformance tests;
+the fail-safe unanswered draft remains zero-egress. A recipe hint grants nothing and has no commit
+behavior.
+
+`review_context` controls deterministic case selection only and grants no disclosure permission.
+Its `ReviewSelectionPolicy` has the exact section/excerpt/relevance/finding-prose/command/cap fields and bounds in
+the privacy-policy schema. Named profiles must equal their canonical expansion; `custom` persists
+the exact edited selector. `assisted` selects problem-local excerpts already captured or
+agent-published in the frozen case; it neither browses live source nor converts missing content into
+an unchanged-state fact.
 `content_categories` applies only to the bound external `llm_inference` provider.
 `agent_context_categories` independently controls content released in ordinary CLI/MCP/UI results
 and never authorizes an external provider. `local_model_categories` independently controls the
@@ -76,21 +93,29 @@ enables none and merely allows later independently affirmative channel choices. 
 `PrivacyProfile` values are derived from the provider/category/confirmation choices for LLM
 inference only; they never encode consent for the four non-LLM channels.
 
-Service `question` uses only those twelve exact IDs and their exact answer types, display kind, closed
+Service `question` uses only those thirteen exact IDs and their exact answer types, display kind, closed
 choices, safe synthetic allowed/blocked examples, current non-secret selection, and whether the
 answer can widen disclosure. It cannot carry repository/task content.
 
 `policy_review` carries a complete candidate privacy-policy object, candidate digest, semantic diff
 arrays `tightens|loosens|unchanged`, the global network ceiling, independent five-channel
-summaries including exact `available|unsupported` capability state, never-send constants, and
+summaries including exact `available|unsupported` capability state, the review-context profile,
+exact compiled selector, optional verified non-authoritative recipe label, editable current-data-use
+runtime guard, current provider data-use profile ID/version/evidence digest/summary/expiry/
+recommendation eligibility, never-send constants, and
 `local_human_decision_required`. `decision_required` carries only
 `privacy_proposal_id` (a pending `ppr_` UUIDv4), exact draft digest, expected policy version and
-expiry. It carries no generic pending-request alias, challenge, authorization reference, proof,
+expiry, plus the exact reviewed data-use profile ID/version/evidence digest when an external
+provider is selected. Those values are part of the proposal digest and are revalidated at commit;
+a change invalidates the proposal. It carries no generic pending-request alias, challenge,
+authorization reference, proof,
 decision method or reusable token. A separate foreground `HumanControlService` confidentially
 renders the pending proposal, reauthenticates the local human and commits internally; that protocol
 is not represented here. `complete` carries committed policy ID/version/digest and effective
 scope. Error contains only `stale_version|expired|invalid_answer|unsupported_profile|
-local_human_required|channel_unavailable|service_locked|internal_error` plus safe correlation ID.
+local_human_required|channel_unavailable|recommendation_unavailable|service_locked|internal_error`
+plus safe correlation ID. `recommendation_unavailable` means the requested convenience recipe has
+no current eligible endpoint; it never makes an exact custom endpoint unusable by itself.
 
 Every draft, candidate, current-policy, and proposal digest uses
 `sha256:<64 lowercase hex>`. The `authorization_scope` answer preserves `installation_id` and every
@@ -125,8 +150,11 @@ treat `network_egress=true` as channel consent, treat `local_only` as a decision
 4. The global ceiling and five network channel choices remain independently visible; the ceiling
    grants nothing by itself.
 5. Cancel/crash/staleness leaves the prior policy unchanged.
-6. CLI and future UI render the same service-owned contract, including the twelve exact question IDs
+6. CLI and future UI render the same service-owned contract, including the thirteen exact question IDs
    and answer types.
+7. A recipe label never substitutes for the expanded policy or a trusted-local widening decision.
+8. The compiled selector and reviewed provider-data-use evidence are exact proposal inputs, while
+   the editable policy guard—not the evidence record—controls later runtime fencing.
 
 ## Tests
 

@@ -12,8 +12,9 @@ privacy boundaries; no untested provider/model/platform range is inferred.
 ## Public surface
 
 Parameterized exact cells name package/resource digest, OS/runtime, service/control version,
-provider SDK/provider/model/endpoint profile or local runtime/model, policy profile, network harness,
-fixtures, timestamps and normalized outcome. Live external cases are explicit opt-in.
+provider SDK/provider/model/endpoint profile or local runtime/model, policy profile,
+review-context profile, current versioned provider data-use record, network harness, fixtures,
+timestamps and normalized outcome. Live external cases are explicit opt-in.
 
 ## Behavior
 
@@ -33,6 +34,15 @@ evidence for that exact runtime profile. Otherwise the cell records that runtime
 unverified and no broader public claim is allowed.
 Run confirm-every-request only with local trusted preview authority; never automate approval through
 MCP/agent. Unsupported/unconfigured cells record unsupported, never pass.
+
+For an upstream-assisted external cell, also bind the exact `ProviderDataUseProfile` version,
+evidence digest, review/expiry time, customer-content-training posture, retention posture, and
+provider-human-access posture. Only a current record with training `prohibited`, retention
+`none|bounded`, and provider human access `prohibited|restricted` supports the recommendation;
+`permitted|unbounded|unknown` and stale records are negative cells. This check verifies Yoetz's eligibility decision and evidence
+binding; it does not claim to technically observe downstream provider training or retention.
+Packet fixtures prove the selected context can carry deterministic bases and bounded linked source/
+test/failure excerpts while omitting unrelated, sensitive, never-send, or unavailable content.
 
 The v0.1 capability manifest lists `product_telemetry`, `crash_diagnostics`, `update_checks`, and
 `capability_testing` as `unsupported`, with no adapter/profile cell. Proposing any row on returns
@@ -64,6 +74,9 @@ capability evidence cannot promote a profile or model not named exactly.
 7. AF_UNIX transport alone is not evidence that the model runtime has no network authority.
 8. No production non-LLM transport cell is inferred from policy vocabulary, and a future cell does
    not activate without fresh local-human authority.
+9. Provider data-use evidence alone controls only upstream recommendation eligibility and never
+   grants network or disclosure authority; the explicit policy guard may make current eligible
+   evidence a dispatch precondition.
 
 ## Tests
 

@@ -22,7 +22,7 @@ Contains:
 - event batching, writer-sequence, expected-frontier, and retry examples;
 - multi-agent assignment/attribution rules;
 - forbidden-content checklist;
-- three worked mini-flows: code change, research task, plan revision.
+- problem-local excerpt guidance and three worked mini-flows: code change, research task, plan revision.
 
 ### `references/coverage-and-receipts.md`
 
@@ -34,6 +34,7 @@ Contains:
 - deterministic vs semantic origin/provenance;
 - freshness, redaction, unknown-schema, and import gaps;
 - finding disposition semantics;
+- reviewer-challenge response/recheck patterns and honest change/content-visibility distinctions;
 - JSON receipt field map and derived Markdown rules;
 - approved/forbidden completion wording examples.
 
@@ -64,6 +65,7 @@ are described as kinds, never ranked. It includes at least these wording transfo
 - stale-after-material-change → prior evidence cannot support current completion;
 - imported observation → observed in bounded Codex JSONL, not complete internal trace;
 - semantic model-derived → advisory judgment with provider/profile provenance;
+- content not recorded/selected/authorized → explicit visibility gap, never “no code changed”;
 - redacted/unknown event → explicit gap, never silently omitted.
 
 Reference size is bounded (target ≤12 KiB each), headings are stable for agent retrieval, and the

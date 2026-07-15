@@ -20,7 +20,7 @@ revocation behavior identical across surfaces.
 - `async list_privacy_receipts(app, request: ListPrivacyReceiptsRequest) -> PrivacyReceiptPage`.
 - `async get_privacy_receipt(app, request: GetPrivacyReceiptRequest) -> PrivacyReceiptView`.
 - Frozen setup values: `PrivacySetupView`, `ChannelSetupChoice`, `AllowedBlockedExample`,
-  `PolicyProposalResult`, `PrivacyPolicyResult`.
+  `ProviderDataUseSummary`, `ReviewRecipeView`, `PolicyProposalResult`, `PrivacyPolicyResult`.
 
 These are support/control-plane operations, not additions to the six public workflow operations and
 not MCP tools. Their wire schemas belong to the trusted local control protocol, not the agent-facing
@@ -37,8 +37,10 @@ view or bounded `not_found` without an existence oracle outside the local authen
 
 `get_privacy_setup` returns the effective policy, ancestor ceilings, editable scope, explicit
 `network_egress_permitted` global ceiling, exact five network-channel decisions and capability
-states, local-model decision, provider/model/endpoint binding, allowed content categories, preview
-requirement, telemetry choice, independent `agent_context_categories` and
+states, local-model decision, provider/model/endpoint binding, its current versioned
+`ProviderDataUseSummary`, editable `require_current_provider_data_use_evidence`,
+`ReviewContextProfile`, exact `ReviewSelectionPolicy`, available transparent recipes, allowed content
+categories, preview requirement, telemetry choice, independent `agent_context_categories` and
 `local_model_categories`, and concrete examples. `content_categories` is external-LLM-only; no
 category selection is copied between those three destinations. Required examples include:
 
@@ -60,11 +62,20 @@ tightening delegates to `tighten_privacy_policy`. Any possible expansion persist
 proposal and requires trusted-control reauthentication; it cannot be committed by the proposing
 request.
 
+Context diffing compares compiled selectors, not enum labels: set/cap subset and either boolean
+true→false are tightening; superset and either boolean false→true are loosening; mixed/incomparable
+change is treated as possible loosening. Turning the
+current-data-use guard on is tightening; turning it off is loosening. For an external binding, the
+review/proposal stores the exact data-use profile ID/version/evidence digest that was displayed.
+
 `decide_privacy_policy` is service-internal and absent from ordinary control. It accepts only the
 proposal ID/digest and decision from `HumanControlService` together with a still-current one-use
 reauthentication proof bound to the exact proposal/service/vault generations. The service consumes
 that proof atomically with the exact prepared diff; it is never serialized or returned to the
-helper. Approval durably records the authority commitment, increments policy generation, and
+helper. Immediately before commit it re-resolves the exact endpoint data-use record and requires
+the displayed profile ID/version/evidence digest still match; any change expires the proposal and
+requires a new review even if the new record remains eligible. Approval durably records the
+authority commitment, increments policy generation, and
 closes/revokes affected sessions/grants. It then calls the gateway's generation-fenced
 `reconcile_policy` with current `HumanAuthorityCapability`: newly disallowed adapters are fenced immediately and newly allowed exact
 credential-free adapter factories activate atomically only when their installed nonsecret profile
@@ -74,11 +85,38 @@ fresh per-physical-attempt body/profile/deadline-bound handle; semantic work the
 incomplete, and later credential provisioning needs no reusable SDK client or adapter reconstruction.
 Editing choices creates a new proposal.
 
-The initial wizard asks independently: the global network-egress ceiling; local model permission; exact external
-provider/endpoint; allowed categories; per-request preview; bounded telemetry; and policy scope. It
-also shows all five channel decisions. Defaults are `local_only`, no network channels, no local
-model until separately configured, and request content blocked from agent context unless the
-workflow's scope policy explicitly permits its bounded projection.
+`ReviewRecipeView` is a non-authoritative expansion helper. `private`, `metadata_only`,
+`assisted_review`, `expanded_review`, and `custom` expose the exact resulting privacy profile,
+review-context profile and exact selector, editable provider-evidence guard, provider eligibility
+requirement, categories/classes, scope, preview flag, exact agent-context categories/classes, and
+byte/token ceilings. An optional setup `recipe_hint` requests this expansion and is preserved only
+while all thirteen answers still match. Applying one only creates an editable draft. The
+server independently validates the final policy and trusted local-human transition; it never stores
+the recipe label as substitute authority.
+
+The upstream recommended `assisted_review` expansion is the exact recipe frozen by the setup
+protocol. It is offered only when the selected endpoint's current installed data-use record states
+training `prohibited`, retention `none|bounded`, and provider human access
+`prohibited|restricted`. It sets the editable runtime guard true and the exact
+agent-context selection to categories `bounded_structural_metadata|declared_file_type|
+finding_summary` plus data classes `public_structural|ordinary_user_content`. A stale, unknown, or
+known-broad (`permitted|unbounded`) record removes the recommendation but does not forbid the user from selecting an exact
+supported endpoint in `custom` with the guard visibly false. No view calls that selection proven
+no-training behavior.
+
+The initial wizard asks independently: the global network-egress ceiling; local model permission;
+exact external provider/endpoint; review-context profile; allowed categories; per-request preview;
+bounded telemetry; and policy scope. It also shows all five channel decisions. The no-answer seed
+is `local_only`, `review_context_profile=structural`, no network channels, no local model until
+separately configured, and request content blocked from agent context unless the workflow's scope
+policy explicitly permits its bounded projection. This fail-safe seed is distinct from the
+user-visible `assisted_review` recommendation.
+
+Once a user commits the recommended standing workspace policy, ordinary semantic checks, bounded
+automatic retries, reviewer findings, agent responses, and rechecks require no per-request human
+decision. Every physical attempt still uses a new one-use authorization and receipt. Policy
+widening, credential mutation, `confirm_every_request`, and human-only finding waiver retain their
+existing ceremonies; never-send/out-of-scope content remains impossible to approve.
 
 `network_egress=false` requires all five rows off; `true` grants none. The four privacy profiles
 govern only LLM inference. v0.1 reports the four non-LLM channel capabilities
@@ -131,6 +169,8 @@ stored intent during reconciliation/update.
 10. The global ceiling grants no channel, and v0.1 stores no dormant consent for an unsupported
     non-LLM capability.
 11. Privacy receipt inspection is structural, snapshot-stable, non-mutating, and never an MCP tool.
+12. A review recipe is inspectable draft generation, not consent; context-profile selection cannot
+    widen the independently effective channel policy.
 
 ## Tests
 

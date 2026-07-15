@@ -21,6 +21,8 @@ non-trigger for each one.
 - `test_contradictory_claims_unresolved` — unresolved contradiction is detected.
 - `test_ledger_stale_or_incomplete` — unknown/redacted/stale history is detected.
 - `test_weak_or_stale_response` — hollow rejection or waiver is detected.
+- `test_change_claim_without_observed_state` — a claimed change with missing/hidden source stays
+  `subject_state_relation=unknown`, never `same`.
 
 ## Behavior
 
@@ -29,7 +31,10 @@ The suite asserts for each rule:
 - the rule triggers only for the documented subject state;
 - the closest non-trigger does not produce a finding;
 - coverage weakens when the source refs are partial;
-- each finding uses deterministic origin and the pack’s stable policy identity.
+- each candidate has an exact `FindingBasis` naming observed/missing facts, refs, state relation,
+  frozen-source availability, and coverage gaps;
+- each finding uses deterministic origin and the pack’s stable policy identity, while finding kind
+  alone makes no provenance claim.
 
 ## Errors and edge cases
 
@@ -41,6 +46,8 @@ The suite asserts for each rule:
 1. Work-integrity findings are conservative.
 2. Every rule has a non-trigger proof.
 3. Pack identity is fixed.
+4. The pack reports what it observed and did not observe without treating undisclosed code as an
+   unchanged tree.
 
 ## Tests
 

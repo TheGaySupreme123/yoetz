@@ -41,13 +41,21 @@ The ordering rules are fixed:
 4. if everything else ties, smaller `finding_id` bytes win so the order is deterministic.
 
 The sort key is therefore lexicographic and stable: priority bucket, actionability bucket,
-coverage/evidence bucket, origin preference, then `finding_id`. `max_findings` is applied only
-after that ordering is established, so the caller always gets the strongest possible prefix of the
-ranked set.
+coverage/evidence bucket, origin preference, then `finding_id`. The canonical direct-to-agent merge
+adds one bounded diversity rule after sorting: when `max_findings>=2` and at least one
+post-validated semantic reviewer challenge has material priority 1 or 2, the selected set must
+contain the highest-ranked such challenge. If the ordinary prefix omitted it, replace the prefix's
+lowest-ranked item, then sort the selected set by the same key. The displaced item becomes
+suppressed while the challenge leaves the suppressed tail, so total suppression remains
+`total_input_findings - returned_findings`. This reserves at most one slot; with
+`max_findings=1`, or only priority-3 semantic
+explanation, the ordinary strongest prefix wins.
 
 Deterministic findings outrank semantic findings when all else ties, because they are already
 proven against the frozen projection state. Semantic findings can still appear earlier when they are
-materially stronger by the same ordering rules.
+materially stronger by the same ordering rules. The one material-challenge slot does not relabel,
+rewrite, or resolve a deterministic finding; every displaced deterministic finding remains in the
+suppressed tail and the exact suppressed count is unchanged by the swap.
 
 The verdict logic is conservative:
 
@@ -81,6 +89,8 @@ those four is stale, the entire value is stale.
 - Duplicate `finding_id` values in the input are a broken invariant and must not be hidden.
 - A finding with a malformed coverage vector is invalid upstream.
 - The ranker never rewrites finding text, provenance, or policy identity.
+- The reviewer-voice rule applies only to post-validated semantic challenge findings and can reserve
+  at most one slot.
 
 ## Invariants
 
@@ -89,6 +99,8 @@ those four is stale, the entire value is stale.
 3. Suppressed-count accounting is exact.
 4. Verdicts never outrun the evidence or coverage.
 5. Ranking is pure and side-effect free.
+6. At any cap of at least two (including the default of three), one material accepted reviewer challenge reaches the main-agent finding
+   surface without mutating deterministic truth.
 
 ## Tests
 

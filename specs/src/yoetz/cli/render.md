@@ -33,7 +33,10 @@ Human wording is a fixed lookup table over valid pairs and cannot expose provide
 receipt. It must never strengthen the phrasing beyond the coverage or gap state.
 
 `render_human_findings(findings)` enforces the top-three CLI rule and preserves the ordering
-returned by the kernel. Suppressed findings may be mentioned as a count, not expanded.
+returned by the kernel. For a returned semantic challenge, it preserves the bounded direct message
+and requested-next-step wording already present in the finding detail and labels its semantic
+origin; it does not infer a new action, hide uncertainty, or start a provider conversation.
+Suppressed findings may be mentioned as a count, not expanded.
 
 `render_human_error(error)` produces a short safe message for the CLI without exposing a traceback
 or hidden payloads.
@@ -54,6 +57,8 @@ or hidden payloads.
 3. No raw secret or path leakage.
 4. The receipt wording matches the structured conclusion.
 5. `incomplete_check` always tells the local caller the exact bounded semantic reason.
+6. Reviewer guidance is visible as finding content but never rendered as authority or proof of a
+   completed fix.
 
 ## Tests
 

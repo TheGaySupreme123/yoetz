@@ -7,7 +7,8 @@
 ## Purpose
 
 Observe one explicitly approved provider endpoint/model/SDK profile with synthetic minimized data,
-hard cost/network/time caps, provenance capture, and deterministic post-validation. It is optional
+hard cost/network/time caps, a synthetic structured review packet, provenance capture, and
+deterministic post-validation. It is optional
 and never part of strict-local correctness. Although this is release capability evidence, its one
 provider dispatch is deliberately classified and authorized as `llm_inference`; it is not the
 unsupported v0.1 product `capability_testing` network channel.
@@ -30,7 +31,11 @@ status without testing or revealing credential presence. Allow network only to t
 set `trust_env=False`, no proxy/netrc/env auth, redirects off, exact HTTPS host/port/path/method/
 TLS/SNI/certificate validation, adapter retries zero, request `max_output_tokens=2048`, response
 body/encoding cap `1_048_576`, and spend/wall-time caps to frozen policy. Submit a public synthetic
-case containing no repository/user data and verify minimized payload digest.
+assisted-style case containing no repository/user data: goal, obligations, claims, timeline,
+deterministic assessment/basis, an artificial linked source/test excerpt, honest change visibility,
+and omissions. Verify the exact minimized payload digest and that the structured result can address
+the synthetic main agent using the closed `ReviewerChallenge` schema. The probe provides no
+repository handle and permits no second provider fetch.
 
 Capture the custom transport's structural proof that the actual SDK request body bytes equal the
 deterministic rendered body, the receipt commitment covers those bytes with the exact trailing-NUL
@@ -47,6 +52,11 @@ schema/freshness/finding fences and compare the bounded outcome. Refusal/rate li
 refusal/inconclusive/fail, never pass; release narrows the optional claim if a required cell lacks
 evidence.
 
+Bind the cell to the installed `ProviderDataUseProfile` version/evidence digest and verify whether
+Yoetz would display the upstream assisted recommendation. This proves only the local eligibility
+rule and current evidence binding; the live model call is not a technical audit of provider
+training, retention, or human access.
+
 ## Errors and edge cases
 
 - Unapproved/manual developer execution skips as unauthorized but cannot count as passing release
@@ -59,6 +69,8 @@ evidence.
   retention, a stock transport, raw/chunked/compressed response over the cap, or real credential
   retention in the SDK client fails before the cell can pass.
 - Live output cannot strengthen deterministic coverage or select after stale frontier.
+- Invented refs, missing direct-agent message, open-ended context requests, or a “no source shown,
+  therefore no change” conclusion fail post-validation.
 
 ## Invariants
 
@@ -67,6 +79,7 @@ evidence.
 3. Spend/request/network/time are hard bounded.
 4. Semantic evidence remains advisory and freshness-fenced.
 5. Strict-local support is independent.
+6. Recommendation eligibility is evidence-bound and does not widen the approved request.
 
 ## Tests
 

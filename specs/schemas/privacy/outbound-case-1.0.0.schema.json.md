@@ -18,7 +18,8 @@ human authorization have completed before any adapter can perform I/O.
 - Closed root fields: `schema_version`, `case_id`, `request_id`, `authorization_id`, `channel`,
   `purpose`, `scope`, `destination`, `policy`, `content_items`, `approved_categories`,
   `blocked_categories`, `minimization`, `secret_scan`, `limits`, `canonical_content_digest`,
-  `created_at`, and optional `human_authorization`.
+  `created_at`, optional `human_authorization`, and the LLM-only fields
+  `review_context_profile`, `review_selection_digest`, and `review_packet`.
 
 ## Behavior
 
@@ -38,13 +39,59 @@ closed destination profile and prohibit provider/model fields. `policy` carries 
 digest and authorization scope digest.
 
 `content_items` is an ordered tuple of at most 64 closed items. Each item has `item_id`, one allowed
-content category, a bounded opaque `source_ref`, UTF-8 `content` of at most 16 KiB, exact UTF-8 byte
+content category, a bounded opaque `source_ref`, optional LLM-only `section` exactly
+`goal|obligation|claim|decision|timeline|deterministic_summary|deterministic_detail|excerpt`,
+optional LLM-only `source_kind` exactly
+`task|obligation|claim|decision|action|result|evidence|finding|test|failure|diff|command|repository`,
+sorted unique `linked_subject_refs` (0..16), UTF-8 `content` of at most 16 KiB, exact UTF-8 byte
 count, content digest, and transformations. A transformation is `selected|minimized|redacted` with
 bounded reason code and before/after byte counts; it contains no removed text. Whole canonical
 transmission content is at most 256 KiB. Items cannot contain filesystem paths or unrestricted
 references. The schema grants no `source_ref` dereference operation and composition supplies no
 repository/database/filesystem/environment resolver. v0.1's reviewed bundled in-process adapter is
 trusted to honor that contract; the schema is not an OS sandbox against malicious Python code.
+
+For `channel=llm_inference`, all three review fields are required; for every other channel they are
+forbidden. `review_context_profile` is the effective
+`structural|goal_aware|assisted|expanded|custom` token. `review_selection_digest` commits to the
+exact effective `ReviewSelectionPolicy`. `review_packet` is a closed canonical index over
+`content_items`, not another plaintext container. It has exactly:
+
+- `goal_item_ids` (0..4), `obligation_item_ids` (0..32), `claim_item_ids` (0..32),
+  `decision_item_ids` (0..16), and `timeline_item_ids` (0..64);
+- `deterministic_assessments` (0..64), each with the pinned deterministic `finding_ref`,
+  `finding_kind`, `priority`, optional paired `summary_item_id` and `detail_item_id`, public root `subject_refs`,
+  `rule_id`, sorted `observed_facts`, sorted `required_but_missing_facts`,
+  `subject_state_relation`, `source_availability: available|not_recorded|redacted_at_source`,
+  sorted coverage-gap codes, and sorted supporting refs;
+- `change_observations` (0..32), each with sorted subject refs, `claimed_change`,
+  `subject_state_relation`, `content_visibility`, and optional paired before/after state digests;
+- the exact closed `coverage` object;
+- `targeted_excerpts` (0..16), each pointing to one `section=excerpt` content item and carrying
+  source kind, linked refs, state relation, visibility, digest, and byte count; and
+- `omissions` (0..64), each containing only subject ref, category, source kind, and
+  `not_recorded|not_selected|withheld_by_policy|redacted_never_send` reason.
+
+Every referenced item ID exists exactly once and has the matching section/category/source kind;
+every LLM content item is referenced exactly once by a prose/timeline section, deterministic
+assessment text field, or targeted excerpt. The total remains 64 items even though individual
+section maxima are larger. Assessment fact entries use the closed policy-pack fact-code registries
+and canonical ref ordering. Assessment summary/detail refs are both present or both absent. When
+present they require `include_finding_prose=true` in the selector committed by
+`review_selection_digest` and point respectively to `deterministic_summary|deterministic_detail` items with
+`source_kind=finding`, category `finding_summary`, and matching finding/root refs. They are forbidden
+for `review_context_profile=structural`; another profile still omits them when independent
+category/class policy withholds finding prose. Omissions contain no content, content digest, source
+locator, or removed value. A `redacted_never_send` omission is valid only for an already-recorded
+structural redaction marker; a forbidden source or newly detected scan match prevents outbound-case
+construction.
+
+The provider adapter renders its named `goal`, `obligations`, `claims`, `decisions`, `timeline`,
+`deterministic_assessments`, `change_observations`, `coverage`, `targeted_excerpts`, and `omissions`
+sections only by resolving these approved item IDs. It cannot regroup an item, add prose, or infer
+missing sections from generic `content_items`. This review packet, all structural objects, and all
+content bytes are inputs to `canonical_content_digest` and the later exact provider-body
+commitment.
 
 `approved_categories` and `blocked_categories` are sorted unique. Never-send and out-of-scope are
 allowed only in `blocked_categories`, never on an item. `minimization` contains candidate/included/
@@ -82,6 +129,8 @@ A local disclosure is not serialized as this network outbound case and receives 
   revalidates authorization expiry.
 - Reviewed bundled provider renderers are contractually limited to wrapping the case without
   adding, fetching, summarizing, or substituting content; third-party/dynamic adapters are absent.
+- An LLM case with missing/duplicate/orphan section refs, a packet/profile/selection mismatch, or a
+  deterministic assessment whose fact code/ref is outside the frozen registries fails before I/O.
 
 ## Invariants
 
@@ -93,6 +142,8 @@ A local disclosure is not serialized as this network outbound case and receives 
    is a least-authority API claim, not process isolation.
 6. A local-model case uses identical disclosure fences and grants the Yoetz adapter no IP-network
    capability; a separate runtime's ambient authority remains the explicit F-013 limitation.
+7. LLM provider input has one canonical structured packet encoding; generic item order cannot
+   silently change its semantic sections.
 
 ## Tests
 

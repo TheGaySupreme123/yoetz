@@ -18,6 +18,7 @@ normalizes it into Yoetz’s closed semantic-result union with provisional
 |---|---|
 | `OpenAIResponsesEvaluator` | implementation of `SemanticEvaluatorPort` for the native OpenAI profile |
 | `OpenAIProfile` | frozen exact nonsecret model/endpoint-profile/capability identity |
+| imported `ProviderDataUseProfile` | domain-owned versioned training/retention/human-access metadata bound to the endpoint profile |
 | `RenderedOpenAIRequest` | exact final application JSON body bytes plus body SHA-256 and nonsecret profile/dispatch binding |
 | `render_case(case)` | deterministically convert an approved case into `RenderedOpenAIRequest` |
 | `OneAttemptCredentialTransport` | adapter-private custom HTTP transport that consumes one bound credential handle for one request |
@@ -82,6 +83,11 @@ must be validated for:
 - explicit endpoint profile identifier and version;
 - capability flags that allow the exact JSON schema subset Yoetz expects;
 - a bounded data-retention and request-ID reporting posture.
+- one exact current `ProviderDataUseProfile`: customer-content training
+  `prohibited|permitted|unknown`, retention `none|bounded|unbounded|unknown` plus a ceiling only
+  when bounded, provider-human access `prohibited|restricted|permitted|unknown`, review/expiry
+  timestamps, and an
+  artifact-bound evidence digest;
 - exact HTTPS scheme, DNS host, port, path, `POST` method, TLS hostname/SNI and certificate-
   verification posture; no user/config-supplied URL, alternate address, proxy, or redirect;
 - exact `max_output_tokens=2048`, raw response-body cap `1_048_576`, and identity-only content
@@ -91,6 +97,13 @@ The adapter fails fast if the profile claims structured outputs but does not act
 in the tested environment. An “OpenAI-compatible” base URL is not accepted by default; it must
 first have its own named, versioned, executable capability profile accepted by the semantic port
 and release evidence.
+
+The data-use record is inspectable recommendation evidence, not a provider capability inferred from
+the name and not a technical no-training proof. Upstream `assisted` eligibility requires a current
+record with training `prohibited`, retention `none|bounded`, and provider human access
+`prohibited|restricted`. Known-broad, unknown, expiry, or evidence change removes the badge and
+fences runtime only when the explicit current-evidence guard is true; a trusted `custom` policy may
+turn that guard off without inheriting the recommendation claim.
 
 ### Approved-case rendering
 
@@ -117,6 +130,54 @@ Composition supplies the renderer no repository, bundle, transcript, environment
 keyring, or application-state handle. Minimization is complete before this adapter is called. This
 reviewed bundled in-process module is trusted to honor that API boundary; v0.1 does not claim an OS
 sandbox against malicious Python code.
+
+### Reviewer prompt and structured output
+
+The system instruction is versioned and semantically equivalent to the following stable template:
+
+> You are a bounded reviewer helping the main agent complete the user's stated goal. Review only
+> the supplied packet. Distinguish agent claims, deterministic observations, and unavailable
+> content. Never say no code changed merely because no source excerpt was disclosed. Compare the
+> completion claim with the goal, obligations, decisions, ordered timeline, deterministic finding
+> bases, state/change observations, evidence freshness, failures, limitations, and selected
+> excerpts. If a material discrepancy exists, address the main agent directly, explain the
+> discrepancy and strongest plausible alternative, cite only supplied refs, and request the
+> smallest resolving action or evidence. Do not invent repository facts, fetch more context,
+> overrule deterministic results, waive findings, or claim stronger coverage than the packet.
+
+The user payload is canonical structured data, not a concatenated transcript. Its top-level
+sections are `goal`, `obligations`, `claims`, `decisions`, `timeline`,
+`deterministic_assessments`, `change_observations`, `coverage`, `targeted_excerpts`, and
+`omissions`. The renderer obtains those sections only from the validated outbound case's
+`review_packet` item-ID index and verifies its `review_selection_digest`; it never reconstructs
+section meaning from generic item order. `structural` omits all user prose; `goal_aware` adds intent/claim prose; `assisted`
+adds bounded problem-local recorded evidence/test/failure/diff/source excerpts; `expanded|custom`
+may include a broader explicitly approved recorded set. The provider sees only approved structural
+omission entries, never omitted bytes. A newly detected never-send match blocks before this request
+exists; `redacted_never_send` can appear only as a pre-existing ledger redaction marker with no
+forbidden bytes available to the adapter.
+
+The structured output schema contains exactly `conclusion:
+no_material_discrepancy|challenges_returned|insufficient_packet` and `reviewer_challenges` with at
+most `MAX_REVIEW_CHALLENGES` entries. Challenges are the sole candidate-producing shape. Each has
+one registered finding kind, bounded summary, case-bound `cited_refs`, discrepancy, alternative
+interpretation, `message_to_main_agent`,
+`requested_next_step` (`act|provide_evidence|revise_claim|dispute_with_evidence|
+state_unresolved_limitation`), and uncertainty. It has no context-request/fetch/tool field and no
+free-form assistant transcript. The normalizer/post-validator resolves cited refs to canonical
+frozen event/obligation/claim roots and maps an accepted challenge into the existing semantic
+finding summary/detail.
+
+Illustrative inputs differ only by approved packet content:
+
+- `structural`: “edit claimed; state relation unknown; excerpt not recorded; tests reported
+  success” — the model may ask for state-bound evidence but may not assert no diff;
+- `goal_aware`: adds “goal: preserve JSON output” and the completion claim, so the model can detect
+  an omitted obligation without source;
+- `assisted`: additionally includes the linked changed hunk, enclosing symbol, failing-test excerpt,
+  and deterministic basis, so the model can challenge the exact mismatch;
+- `expanded|custom`: may include more recorded in-scope excerpts only when their categories/classes
+  were explicitly authorized.
 
 ### One-attempt credential transport
 
@@ -171,11 +232,14 @@ judgment content looks plausible.
 
 - allowed finding kinds only;
 - bounded summaries and details;
-- allowed referenced IDs only;
+- allowed cited IDs only, with deterministic resolution to public subject roots;
 - no coverage inflation beyond what the case supports;
 - no novel conclusion vocabulary outside the approved set;
 - no invented provenance or request ID;
 - no overlong arrays or recursive structures.
+- challenge refs are within `frontier_refs ∪ local_check_refs`, every challenge has a supported
+  discrepancy/direct main-agent message/closed next step, and missing/hidden source is never
+  normalized into unchanged source;
 
 The judgment remains untrusted until the coordinator’s deterministic post-validation accepts it. This
 module only ensures that the model output is structurally compatible with a Yoetz judgment.
@@ -220,14 +284,16 @@ The adapter must respect:
 `render_case(case)` emits the minimized semantic prompt/input payload. It includes only the items
 allowed by the semantic port:
 
-- claims under review;
-- open/relevant obligations;
-- accepted decisions;
-- evidence excerpts or digests;
-- diff/command metadata;
-- the deterministic findings already computed.
+- goal, claims under review, open/relevant obligations, and accepted decisions;
+- ordered material timeline and coverage/omission facts;
+- deterministic findings plus their exact machine-readable bases;
+- change observations that keep state relation and content visibility separate;
+- evidence/test/failure excerpts or digests and diff/command metadata; and
+- policy-approved problem-local repository excerpts already recorded in the case.
 
-It must not add raw repository content, secrets, unrelated conversation, or out-of-case material.
+It must not add a repository handle, broad/ambient source, secrets, unrelated conversation, or
+out-of-case material. A targeted recorded excerpt is allowed content; ambient repository access is
+not.
 
 `normalize_response(response, profile)` converts the provider result into one of the closed semantic
 result variants:
@@ -239,7 +305,8 @@ result variants:
 - late arrival.
 
 `normalize_judgment(...)` validates the parsed judgment before it can be accepted. It ensures that
-returned findings are within the allowed kinds, IDs, coverage ceiling, and size limits. It also
+returned challenges use allowed kinds, case-bound cited refs, conservative coverage, and the exact
+text/count limits. It also
 keeps the judgment provenance-bounded instead of letting provider output write directly into the
 ledger.
 
@@ -302,15 +369,19 @@ The module must never:
    input.
 10. Credential validation is byte-exact, non-normalizing, offline, and never logs or returns the
     protected view.
+11. Provider data-use posture controls upstream recommendation eligibility and is never presented
+    as technical proof of downstream provider behavior.
 
 ## Tests
 
 - `tests/capability/test_provider_profile_live.py` — opt-in exact SDK/provider/model success,
   refusal, invalid, timeout, provenance, exact SDK body-byte parity, per-attempt custom transport,
   no retained real credential in client/default headers, poisoned proxy/netrc/environment denial,
-  exact TLS/destination enforcement, `max_output_tokens`, and raw/chunked/compressed body caps.
+  exact TLS/destination enforcement, current data-use-profile/recommendation gating,
+  `max_output_tokens`, and raw/chunked/compressed body caps.
 - `tests/unit/application/test_semantic_post_validation.py` — allowed IDs, coverage ceiling,
-  schema, freshness, and out-of-case rejection.
+  split frontier/local-check IDs, review challenges, change/visibility honesty, schema, freshness,
+  and out-of-case rejection.
 - `tests/unit/service/test_secret_memory.py` — credential boundary vectors at lengths 0/15/16/512/513,
   every accepted token68 class, misplaced `=`, whitespace/CRLF/NUL/control/non-ASCII, hostile
   representation, no normalization/copy/log, and no vault mutation on failure.

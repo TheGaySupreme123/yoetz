@@ -20,14 +20,37 @@ trust layer.
 
 | Name | Signature (natural language) |
 |---|---|
-| `run_deterministic_policies(case, policy)` | evaluate one frozen case against one policy pack |
+| `FindingBasis` | internal frozen rule/fact/state/source-availability/coverage explanation for one candidate |
+| `DeterministicAssessment` | one `CandidateFinding` paired with its exact `FindingBasis` |
+| `DeterministicPolicyResult` | ordered assessments plus exact run/skipped/failed pack accounting |
+| `run_deterministic_policies(case, policy)` | evaluate one frozen case and return `DeterministicPolicyResult` |
 
 ## Behavior
 
 `run_deterministic_policies(case, policy)` is pure. It inspects the frozen projection snapshot
-contained in `case`, applies the rule set bundled in `policy`, and returns a tuple of deterministic
-`CandidateFinding` values. It does not rank the findings, allocate IDs, build a receipt, or decide whether semantic
-evaluation should run next.
+contained in `case`, applies the rule set bundled in `policy`, and returns ordered
+`DeterministicAssessment` values. It does not rank the findings, allocate IDs, build a receipt, or
+decide whether semantic evaluation should run next.
+
+`FindingBasis` contains only canonical, machine-readable facts already in the frozen case. Its exact
+fields are: `rule_id: str`; `observed_facts: tuple[FindingFact, ...]`;
+`required_but_missing_facts: tuple[FindingFact, ...]`;
+`subject_state_relation: same|different|unknown`; `source_availability:
+available|not_recorded|redacted_at_source`; `coverage_gaps: tuple[str, ...]`; and
+`supporting_refs: tuple[str, ...]`. `FindingFact` is exactly `(fact_code: str,
+subject_refs: tuple[str, ...])`. Each ref tuple is sorted unique and contains 1..`MAX_REF_LIST`
+frozen-case IDs; `supporting_refs` is sorted unique and has at most `MAX_REF_LIST`; fact tuples sort
+by unsigned UTF-8 `fact_code` then canonical ref bytes. Fact codes come only from the two pack
+registries below, never provider/config text. The basis contains no hidden reasoning, ambient
+repository data, policy-selection result, or new conclusion prose.
+
+`source_availability` is intentionally earlier than disclosure visibility. It says only whether the
+frozen projection supplied comparable material or an already-redacted marker. The later case
+builder/gateway derives `available|not_recorded|not_selected|withheld_by_policy|
+redacted_never_send` for each `ChangeObservation`/omission. A pure deterministic basis can never
+contain `not_selected` or `withheld_by_policy` because no review-context or egress policy has run.
+The basis stays in encrypted local check/semantic-case objects and need not enlarge the public
+finding/event schemas.
 
 The `policy` argument is the loaded immutable pack from `kernel/policies/*`, not a dynamic rule
 source. The engine rejects an unknown or tampered policy pack rather than trying to approximate it.
@@ -44,13 +67,16 @@ Each pack runs in a fixed internal order and each rule yields zero or one findin
 describe the same logical subject, the pack keeps the strongest single finding and drops the rest
 before the engine returns the tuple.
 
-Every produced candidate must:
+Every produced assessment must:
 
 - carry the exact `kind`, `priority`, `summary`, `detail`, `subject_refs`,
   `policy_id`, `policy_version`, `subject_frontier`, and `coverage` required by the shared finding
   model;
 - be conservative about coverage and never claim stronger support than the supporting refs justify;
 - use `provenance = None` because the origin is deterministic, not semantic-model-derived.
+- carry a basis whose trigger facts are sufficient for the candidate and whose missing/source-
+  availability facts explain what the rule did *not* observe. An edit claim without comparable
+  state is `unknown/not_recorded`, never a same-state or no-diff fact.
 
 The deterministic engine is monotonic with respect to the checked state. If the input case is more
 complete, the engine may produce more findings or weaker coverage, but it must never silently
@@ -98,6 +124,8 @@ Rule-level expectations are:
 4. Deterministic findings never carry semantic provenance.
 5. The work-integrity and research-evidence packs remain separate so one can evolve without
    silently changing the other.
+6. Every deterministic candidate has exactly one stable basis, and basis generation cannot change
+   whether a rule fires.
 
 ## Tests
 
@@ -105,6 +133,8 @@ Rule-level expectations are:
 - `specs/tests/unit.md` — rule-by-rule fixture coverage for each pack.
 - `fixtures/policies/` — frozen case fixtures that prove the required findings and no-spurious
   findings cases.
+- Basis fixtures freeze trigger/missing fact codes, state relation, source availability, coverage
+  gaps, and byte-equivalent output across repeated runs.
 
 ## Open questions
 

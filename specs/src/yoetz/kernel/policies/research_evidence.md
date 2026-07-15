@@ -18,13 +18,15 @@ credible basis.
 | `RESEARCH_EVIDENCE_POLICY_ID` | `str = "research-evidence"` |
 | `RESEARCH_EVIDENCE_POLICY_VERSION` | `str = "0.1.0"` |
 | `RESEARCH_EVIDENCE_POLICY_PACK` | frozen `PolicyPack` instance for this rule set |
-| `research_evidence_findings(case)` | run the pack against a frozen case |
+| `RESEARCH_EVIDENCE_FACT_CODES` | frozen exact fact-code registry for every rule basis |
+| `research_evidence_findings(case)` | run the pack and return deterministic assessments |
 
 ## Behavior
 
 The pack examines the frozen case’s claims, evidence refs, subject-state references, and any
-captured diff or command metadata preserved in the projection. It emits deterministic findings when
-the evidence story and the claim story diverge.
+captured diff or command metadata preserved in the projection. It emits deterministic assessments
+when the evidence story and the claim story diverge, pairing every candidate with a stable
+machine-readable `FindingBasis`.
 
 The rule inventory is stable and intentionally small:
 
@@ -36,6 +38,12 @@ The rule inventory is stable and intentionally small:
   evidence makes material.
 - `questionable_finding_rejection` — a deterministic finding was rejected or waived without a
   strong enough explanation in the record.
+
+`RESEARCH_EVIDENCE_FACT_CODES` is exactly: `claim_support_present`,
+`claim_support_mismatch`, `captured_state_present`, `account_state_mismatch`,
+`material_limitation_present`, `limitation_disclosure_absent`, `finding_rejection_present`, and
+`rejection_basis_insufficient`. A rule may use only these codes in its observed/missing tuples;
+adding or renaming one changes the pack version and its golden basis fixtures.
 
 Rule-level behavior is conservative and subject-bound:
 
@@ -54,6 +62,15 @@ Rule-level behavior is conservative and subject-bound:
 
 Like the work-integrity pack, each rule produces at most one finding per logical subject. The pack
 normalizes repeated symptoms so the caller sees the strongest record of the mismatch.
+
+The four kind tokens in this pack describe evidence problems, not semantic origin. This pack emits
+them with `origin=deterministic`; a model may independently propose the same kind with
+`origin=semantic_model_derived`. Origin/provenance, not kind, is authoritative.
+
+Each rule basis names the precise claim/evidence/diff/response refs it observed, the support fact
+that failed or was missing, the subject-state relation when applicable, visibility of any linked
+excerpt, and its coverage gaps. When content is absent, the rule may emit an evidence limitation but
+cannot claim it inspected or refuted the missing content.
 
 `research_evidence_findings(case)` uses only the frozen projection state, the case frontier, the
 allowed IDs, and the policy version. It never reads provider output, network resources, or raw
@@ -75,9 +92,10 @@ refutation than the refs justify.
 
 1. The pack is deterministic and side-effect free.
 2. The pack only speaks about research evidence, not generic work integrity.
-3. Same frozen case → same finding tuple.
+3. Same frozen case → same assessment tuple.
 4. The pack never strengthens coverage beyond the available evidence refs.
 5. The pack ID and version are stable release identities.
+6. Evidence problem kind never implies semantic provenance; the origin field remains authoritative.
 
 ## Tests
 

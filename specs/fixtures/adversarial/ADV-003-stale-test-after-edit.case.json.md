@@ -12,7 +12,18 @@ One canonical strict-JSON fixture case with `fixture_schema: "yoetz.fixture-case
 
 ## Behavior
 
-The `input` section contains state A test evidence, state B completion claim, fresh-remediation, and prose-only described-state variants. The `expected` section freezes stale_evidence_for_changed_state only when canonical state commitments differ; prose never proves equality. Every referenced identifier, timestamp, key, digest, nonce, provider response, and fault point is explicit test data; a test may not replace it with current time, randomness, network state, or host paths. Multi-variant cases evaluate each variant independently and declare the relationship between their outcomes.
+The `input` section contains state A test evidence, state B completion claim, fresh-remediation,
+prose-only described-state, claimed-edit-without-state, and changed-state-content-withheld variants.
+The `expected` section freezes `stale_evidence_for_changed_state` only when canonical state
+commitments differ; prose never proves equality. It also freezes the independent
+`claimed_change`, `subject_state_relation`, and `content_visibility` fields: claimed-but-unobserved
+is basis `unknown/not_recorded`, while two unequal tree digests produce basis
+`different/available` and separate packet visibility `withheld_by_policy` when policy hides the
+excerpt. No variant may render either condition as “no diff.” Every
+referenced identifier, timestamp, key, digest, nonce, provider response, and fault point is explicit
+test data; a test may not replace it with current time, randomness, network state, or host paths.
+Multi-variant cases evaluate each variant independently and declare the relationship between their
+outcomes.
 
 ## Errors and edge cases
 

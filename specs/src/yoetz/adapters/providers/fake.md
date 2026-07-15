@@ -37,6 +37,7 @@ not by calling the fake to simulate absence.
 
 - a delay before resolution;
 - a parsed success judgment;
+- zero or more structured `ReviewerChallenge` values covering every closed next-step token;
 - a refusal;
 - a timeout;
 - malformed or schema-invalid output;
@@ -62,6 +63,9 @@ The fake must be able to produce every semantic outcome the coordinator needs to
 4. an invalid output or wrong schema;
 5. a late result after lease loss;
 6. a provider-unavailable error class.
+7. a valid agent-addressed challenge tied to a local deterministic finding ID, and invalid
+   challenges with a frontier/local-check ref violation, unsupported discrepancy, or false “no
+   change” inference from hidden content.
 
 The fake returns the same closed semantic result variants as the live adapter so the coordinator can
 exercise the real state machine.
@@ -76,6 +80,9 @@ The conformance suite uses this fake to simulate:
 - duplicate response arrivals;
 - refusal after a valid earlier attempt;
 - coverage inflation;
+- deterministic basis omission or mutation;
+- unrelated source selection and missing-content-as-no-diff claims;
+- invalid or valid direct-agent challenge/next-step values;
 - invalid JSON;
 - wrong schema;
 - late results after another state has already been committed.
@@ -144,6 +151,7 @@ but it must never reach out to a network or depend on the real OpenAI SDK.
 5. The fake never silently succeeds on exhausted input.
 6. Provenance remains bounded and explicit.
 7. Tests claiming privacy coverage instantiate it only behind the real gateway.
+8. The fake sees exactly the approved structured packet and cannot obtain omitted repository state.
 
 ## Tests
 

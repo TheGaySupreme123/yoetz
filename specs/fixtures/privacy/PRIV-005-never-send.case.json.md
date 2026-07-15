@@ -12,8 +12,11 @@ MCP responses or agent/LLM context as well as network requests.
 ## Public surface
 
 Canonical fixture `yoetz.fixture-case/1.0.0`, ID `PRIV-005`, with one synthetic canary per exact
-never-send token and mixed-content variants. Policy is `trusted_provider` and otherwise authorizes
-all expressible user-content categories, proving the denial is non-overridable.
+never-send token and mixed-content variants across all five `ReviewContextProfile` values. Policy
+stores the matching canonical/custom `ReviewSelectionPolicy`, is `trusted_provider`, and otherwise
+authorizes all expressible user-content categories, proving the denial is non-overridable. Both
+selector booleans and both current-data-use guard values are exercised because none can affect
+never-send.
 
 ## Behavior
 

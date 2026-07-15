@@ -27,7 +27,9 @@ The reference contains:
 - event batching, writer-sequence, expected-frontier, and retry examples;
 - multi-agent assignment and attribution rules;
 - forbidden-content guidance;
-- three worked mini-flows: code change, research task, and plan revision.
+- three worked mini-flows: code change, research task, and plan revision. The code-change flow shows
+  a bounded state-bound changed hunk/enclosing symbol plus linked test/failure evidence, and
+  contrasts it with forbidden repository-wide or unrelated source publication;
 
 All examples use stable typed IDs, canonical integers, timestamp strings, and bounded payloads.
 The document does not widen the public workflow contract and does not introduce new event families.
@@ -44,6 +46,8 @@ The document does not widen the public workflow contract and does not introduce 
 1. The reference teaches publication discipline, not hidden reasoning or full transcripts.
 2. Examples remain small, concrete, and offline-verifiable.
 3. The 16-family cheat sheet matches the frozen registry exactly.
+4. Problem-local excerpts remain ordinary evidence in existing event families; they never create a
+   source-browsing operation or imply independent observation.
 
 ## Tests
 

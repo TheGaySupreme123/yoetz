@@ -61,6 +61,13 @@ cell may claim runtime no-network isolation only when it binds verifiable sandbo
 evidence to that exact runtime artifact/profile. Without it, public UI/docs state that approved
 content is disclosed to the named local runtime and do not claim its later network behavior.
 
+The local adapter consumes the same structured `ReviewPacket` and returns the same
+`ReviewerChallenge` schema as an external adapter. The effective `ReviewContextProfile` controls
+selection, and the local-model category ceiling remains independent. Problem-local source means a
+bounded excerpt already recorded in the frozen case; the adapter receives no workspace handle and
+cannot ask the service or model runtime to fetch more. Missing/withheld content remains an explicit
+omission and cannot be interpreted as unchanged code.
+
 For each physical call, the gateway atomically `consume_local`s the fresh proposal immediately
 before the first AF_UNIX write. A consumed proposal is never resent on crash/replay; completion
 records the actual or `outcome_unknown` `LocalDisclosureReceipt`, and retry uses a fresh proposal.
@@ -89,6 +96,8 @@ config, privacy policy, CLI/MCP, environment, or model output is rejected.
 7. No advertised support cell exists without artifact-bound profile and capability evidence.
 8. Config selection alone creates no socket/IPC capability; policy reconciliation and local consume
    gate construction and each physical write.
+9. Local/external reviewers use the same basis/challenge/change-visibility semantics even though
+   their transport and data-use recommendation rules differ.
 
 ## Tests
 

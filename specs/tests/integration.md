@@ -159,8 +159,12 @@ CLI/MCP as owners of `Application`, keys, storage, or provider state:
 
 - start modes and idempotent resume;
 - publish known/unknown atomic batches and ambiguous retry;
-- deterministic-only, semantic-if-configured, semantic-required check;
-- fake provider success/refusal/timeout/invalid/late/invented-ID/coverage-upgrade/stale-frontier;
+- deterministic-only, semantic-if-configured, semantic-required check, with optional semantic as
+  the ordinary configuration default;
+- exact deterministic finding bases; rich selected review packets and typed omissions; fake
+  provider success/refusal/timeout/invalid/late/invented-ID/coverage-upgrade/stale-frontier;
+- assisted `check → reviewer challenge → respond/publish_work → fresh check → receipt`, using only
+  existing finding and response surfaces;
 - response dispositions, waiver authority/scope/expiry, recheck;
 - status views/frontier/pagination/cache-lag disclosure;
 - receipt JSON/Markdown, own-event-excluded frontier, idempotent return;
@@ -175,10 +179,13 @@ receipt, close/reopen/replay.
 The seven service integration modules prove one service/many clients and one writer generation;
 `starting → ready|locked`, explicit lock/relock, and restart transitions; encrypted-vault and
 best-effort secret-memory cleanup; separately typed confidential secret ingress; and local-human
-privacy decisions that ordinary control/MCP cannot submit. The egress integration path prepares
-minimized/redacted/scanned cases, binds exact approval when required, dispatches only through the
-gateway, and commits structural receipts for success, denial, timeout, invalid, and ambiguous
-outcomes. Provider failure preserves deterministic `incomplete_check` results.
+privacy decisions that ordinary control/MCP cannot submit. The egress integration path compiles the
+exact review selector, prepares the canonical rich packet, minimizes/redacts/scans it, binds exact
+approval when required, dispatches only through the gateway, and commits structural receipts for
+success, denial, timeout, invalid, and ambiguous outcomes. It proves the explicit current-data-use
+guard fences only when enabled, standing assisted policy requires no routine human prompt, and
+agent-context projection either carries the accepted challenge through the existing finding fields
+or emits a typed omission. Provider failure preserves deterministic `incomplete_check` results.
 
 ### Backup, restore, privacy
 

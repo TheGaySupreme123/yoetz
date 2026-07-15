@@ -63,7 +63,7 @@ that evidence.
 | E-004 | Ownership heartbeat/stale thresholds, operation/import/check lease durations, writer-queue depth, MCP idle-route cache | Preserve generation fencing regardless of measured durations; choose bounded values from fault/contention runs. | Runtime/storage conformance evidence. |
 | E-005 | WAL/checkpoint/page/backup/soak budgets, object-layout scale, and property/state-machine run budgets | Public caps already bound correctness; tune operational thresholds without weakening atomicity or coverage. | Nightly fault/soak evidence and runbooks. |
 | E-006 | Argon2id recovery parameters | Calibrate on the slowest advertised profile, record parameters in each artifact, and pass clean-profile restore. | ADR-004 independent review and recovery evidence. |
-| E-007 | Exact semantic provider/model/endpoint profile, case cap, timeout/retry budget, cost/usage fields | One bound profile only; unprofiled endpoints remain unavailable and provider credentials never use environment/config/ordinary client channels. | ADR-006/009 opt-in live capability evidence. |
+| E-007 | Exact semantic provider/model/endpoint profile, current provider data-use record, case cap, timeout/retry budget, cost/usage fields | One bound profile only; recommendation eligibility requires current versioned customer-training, retention, human-access, and evidence-digest facts. Unprofiled endpoints remain unavailable and provider credentials never use environment/config/ordinary client channels. | ADR-006/009 opt-in live capability and data-use-profile evidence. |
 | E-008 | Release build reproducibility, SBOM/checksum/provenance formats, artifact allowlist, and public-boundary detector vocabulary | No signing claim until a tested end-user verification command exists. | Packaging suite and release workflow evidence. |
 | E-009 | Codex skill materiality/activation examples | Freeze examples from bounded dogfood evidence; v0.1 must prefer explicit activation and avoid triggering on trivial work. | Skill fixtures and Codex capability evidence. |
 | E-010 | Local service endpoint, peer-credential, permission, lifecycle, keyring, memory-protection, and relock matrix | No platform support claim until a clean-profile service proves authenticated local attachment, locked/ready transitions, crash recovery, suspend/session-lock relock, and secret-canary absence. | Service/control capability evidence and platform matrix. |
@@ -156,6 +156,16 @@ that evidence.
   does not launch/download the model or perform DNS/IP networking. The separate runtime receives
   plaintext and is therefore an explicitly trusted disclosure sink unless its exact support cell
   proves enforceable network isolation; Yoetz does not claim away another process's authority.
+- **F-014:** Keep the zero-egress installation seed, but make `assisted` the upstream CLI's
+  recommended review-context recipe after an explicit technical-user setup decision. It uses a
+  standing workspace policy, public-structural plus ordinary-user-content classes, rich goal/
+  obligation/claim/timeline/deterministic-basis context, bounded problem-local excerpts already
+  recorded in the frozen case, and an exact endpoint whose current data-use record states training
+  `prohibited`, retention `none|bounded`, and provider human access `prohibited|restricted`. The
+  recipe's editable current-evidence guard is on. Known-broad, unknown, or stale posture removes the
+  recommendation; an explicit custom loosening may turn the guard off without retaining that claim. It
+  does not prompt per ordinary check/retry. Users may choose stricter, broader, custom, or forked
+  behavior; never-send and scope remain non-overridable for upstream-conforming builds.
 - Every outbound provider request follows classification, policy intersection, local
   minimization/redaction/secret scanning, optional trusted-human preview of the exact prepared
   case, gateway revalidation, and binding to one provider/model/endpoint profile. Network channels

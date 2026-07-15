@@ -30,6 +30,12 @@ receipt semantics, exact v0.1 commitment/audit-store fields, and the task-bundle
 privacy-audit storage boundary. Reject `dispatched`, `key_slot_ref`, or pending/approved state in a
 finished receipt vocabulary.
 
+Also byte-lock agreement on four privacy profiles × five review-context profiles, all thirteen
+setup questions, the exact editable assisted recipe, current endpoint no-training evidence and its
+non-guarantee disclaimer, problem-local excerpt/no-live-fetch boundary, and automatic no-prompt
+wording after standing authority is committed. A stale recommendation badge or copy implying a
+model can waive never-send/policy/finding authority blocks release.
+
 ## Errors and edge cases
 
 Missing/extra/stale digest, duplicate `$id`, network `$ref`, generated widening, fixture packaged by
@@ -43,6 +49,8 @@ The scan operates on extracted artifacts without executing them or contacting a 
 3. Public privacy copy maps to executable evidence and explicit limitations.
 4. Built artifacts contain no private or secret material.
 5. Root/docs/schema/manifests agree on exact vocabulary.
+6. Public assisted-review convenience remains user-controlled, evidence-bound, and no broader than
+   its executable privacy tests.
 
 ## Tests
 

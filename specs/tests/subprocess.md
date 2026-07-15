@@ -151,6 +151,14 @@ peer-authenticated ingress; pipes/stdin/argv/env/config/MCP fail before secret r
 widening and per-request disclosure approval require the separate local-human control ceremony,
 with no reusable token crossing back to the CLI or MCP process.
 
+Privacy CLI subprocess snapshots cover `setup|show|propose|tighten` and receipt inspection, all five
+recipe expansions, all thirteen typed answers, editable review, exact eligible states, known-broad/
+unknown/stale recommendation rejection, and `recommendation_unavailable`. A PTY is used only for the intentional trusted-control
+ceremony. After one assisted-policy commit, ordinary check/retry/challenge/respond/recheck paths
+produce no prompt; `confirm_every_request` alone prompts once per physical attempt. Human output
+shows the reviewer's direct explanation and requested next step through the existing finding
+surface, while MCP exposes no policy-decision tool.
+
 ### Durability kill matrix
 
 Fault controller deterministically stops the child at all 16 semantic boundaries:

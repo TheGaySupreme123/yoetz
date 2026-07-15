@@ -19,7 +19,8 @@ network spy distinguishing AF_UNIX from AF_INET/AF_INET6/DNS/redirect.
 ## Behavior
 
 For each profile assert exact state transitions, adapter constructor count, final bytes, categories,
-scope, destination and receipt. Confirm-every-request persists exact one-dispatch approval across a
+scope, review-context selection, omissions, destination and receipt. Confirm-every-request persists
+exact one-dispatch approval across a
 crash before authorization consumption and resumes that same dispatch without re-prompting. Once a
 physical attempt is consumed, retry—even with identical bytes—requires a fresh exact foreground
 preview/decision and new proposal/authorization/dispatch/receipt; changed bytes/policy/scope/expiry
@@ -33,6 +34,30 @@ produce no finished receipt.
 The registry rejects third-party/dynamic adapter factories. Monkeypatched file/environment/database/
 subprocess APIs prove the bundled adapter does not call them, without claiming hostile in-process
 Python could not do so.
+
+Before classification, the local selector deterministically applies the effective
+`ReviewContextProfile`; after classification, policy can only reduce that result. Assisted fixtures
+contain the goal, material timeline, deterministic bases, honest change visibility, and only
+mechanically linked recorded excerpts. Their omission manifest distinguishes
+`not_recorded|not_selected|withheld_by_policy|redacted_never_send`. Monkeypatched Git/filesystem/
+object lookup proves neither selection nor provider evaluation performs a live source fetch.
+Structural review sends deterministic kind/priority/root/basis fields without finding prose or
+summary/detail item refs. Goal-aware-or-richer review includes those refs only as an exact pair when
+`finding_summary` and its data class are independently authorized.
+
+The upstream assisted recommendation is available only when the exact endpoint's current installed
+data-use record says training `prohibited`, retention `none|bounded`, and provider human access
+`prohibited|restricted`. For an already selected external `assisted` case, known-broad/stale/unknown/mismatched records
+return `endpoint_profile_unavailable` before proposal or dispatch when the editable current-evidence
+guard is true; an explicit trusted custom transition can turn that guard off and still select the
+exact otherwise-supported endpoint without the recommendation claim. Once the resulting standing policy is
+committed, ordinary attempts and approved retries use fresh authorizations and receipts with zero
+human-control calls; only `confirm_every_request` re-prompts per attempt.
+
+With agent-context `finding_summary` allowed, the projected ordinary finding summary/detail carries
+the post-validated direct reviewer message and requested next step. With it denied, the normal
+omission marker appears and no challenge plaintext leaks. There is no second advisory-message
+projection or provider-conversation channel.
 
 For every external physical attempt, freeze the deterministic adapter's exact final application
 body bytes and assert the receipt MAC uses the byte-exact
@@ -113,6 +138,8 @@ quarantines the semantic result, and recovery writes the real attempt outcome.
 13. Receipt outcomes are terminal and initial reservation failure is the sole no-receipt exception.
 14. A committed proposal increments catalog privacy-root generation and becomes live without a
     task-ledger inventory row; route/GC races preserve or quarantine it but never sweep it.
+15. Context selection, disclosure authority, and provider recommendation evidence are separate
+    gates; none can widen either of the others.
 
 ## Tests
 

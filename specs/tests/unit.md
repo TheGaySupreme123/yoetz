@@ -176,7 +176,9 @@ response. Work-integrity and research-evidence packs reuse engine mechanics but 
 triggers/fixtures.
 
 Ranking tests freeze deduplication, materiality/actionability/evidence ordering, deterministic ID
-tie-break, default 3/max 10 cap, suppressed count, and independence from input iteration order.
+tie-break, default 3/max 10 cap, suppressed count, independence from input iteration order, and the
+single cap-at-least-two slot that keeps one material post-validated reviewer challenge visible without
+rewriting deterministic truth.
 
 Receipt tests freeze subject frontier excluding its own event, conclusion wording, per-conclusion
 weakest coverage, unresolved/suppressed finding inclusion, redaction/profile effects, versions,
@@ -185,9 +187,11 @@ canonical digest, and derived Markdown no-stronger-than-JSON.
 ### Application boundary helpers
 
 Pure helpers test public-error mapping, deterministic/semantic-required verdict rules, frozen-case
-construction, semantic post-validation (invented IDs, out-of-case quote, coverage upgrade,
-deterministic claim, stale frontier), deadline arithmetic with injected clock, and ambiguous-outcome
-decisions. End-to-end operation orchestration remains integration/conformance.
+construction, one-to-one deterministic finding bases, canonical review-packet selection and
+omissions, semantic post-validation (invented IDs, out-of-case quote, coverage upgrade,
+deterministic claim, malformed challenge, stale frontier), deadline arithmetic with injected clock,
+and ambiguous-outcome decisions. End-to-end operation orchestration remains
+integration/conformance.
 
 ### Service boundary
 
@@ -209,9 +213,12 @@ Test strict unknown-key/config profile validation, precedence using supplied map
 environment), forbidden project config escalation, and the isolated path-safety classifier against
 synthetic repository/sync/symlink/permission layouts plus injected mount-table/statfs fixtures.
 Overrides remain safety-gated and the unit test never reads the real home or mount table. Also test
-logging field/mode allowlists, hostile string/exception objects, no traceback capture, opaque
-session/request MAC purpose/domain separation (including trailing-NUL vectors), all privacy
-detectors, and deterministic manifest construction from supplied distribution/runtime probe values.
+the default `semantic=optional`, all four privacy profiles and five orthogonal review-context
+profiles, exact `ReviewSelectionPolicy` expansion/intersection, the editable current-data-use
+runtime guard, installed-evidence versus user-authored configuration, logging field/mode allowlists,
+hostile string/exception objects, no traceback capture, opaque session/request MAC purpose/domain
+separation (including trailing-NUL vectors), all privacy detectors, and deterministic manifest
+construction from supplied distribution/runtime probe values.
 
 ## Errors and edge cases
 

@@ -14,12 +14,14 @@ policy-approved external case.
 Canonical fixture `yoetz.fixture-case/1.0.0`, ID `PRIV-003`, task-scoped policy
 `pvy_33333333-3333-4333-8333-333333333333`, provider `provider.example`, endpoint `ep_example_v1`,
 model `model-example-1`, purpose `semantic-review`, three selected candidate items, two irrelevant
-items, and exact before/after byte/token/count/digest assertions.
+items, `review_context_profile=goal_aware`, its canonical finding-prose-on/zero-excerpt selector,
+`require_current_provider_data_use_evidence=false`, and exact before/after byte/token/count/digest
+assertions.
 
 ## Behavior
 
-The classifier admits bounded structural metadata, one task sentence, and one evidence excerpt;
-minimization removes a redundant excerpt and unrelated conversation; redaction replaces the one
+The classifier admits bounded structural metadata, one task sentence, and one current-claim
+sentence; minimization removes a redundant claim sentence and unrelated conversation; redaction replaces the one
 synthetic email span without retaining removed text; secret scanning passes the final case. The
 gateway dispatches only the exact three approved items, and the structural receipt freezes category,
 candidate/included/removed counts, byte/token totals, one redaction, policy/destination/scope, and
@@ -29,6 +31,9 @@ the commitment input. Its terminal attempt receipt freezes `audit_store_version=
 `request_commitment.algorithm=hmac-sha256/yoetz-privacy-egress-request-v1`, canonical prefixed
 lowercase-hex commitment, and exact `counts.request_body_bytes`; because its outcome is `completed`,
 it contains neither `safe_failure_reason` nor `key_slot_ref`.
+The fixture proves the lower-context automatic option: goal-aware selection excludes repository/
+test/failure excerpts even when they are recorded and policy-visible, and its omission manifest
+labels them `not_selected` rather than unchanged.
 
 ## Errors and edge cases
 

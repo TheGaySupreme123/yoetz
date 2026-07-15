@@ -73,13 +73,19 @@ The implemented skill teaches this exact state machine:
 4. **Delegate with context.** Give each subagent session/task/writer/assignment context and require
    concise typed material publications. Do not share or publish full transcripts.
 5. **Publish material work.** Batch decisions, attempts, results, evidence references, claims, and
-   plan revisions when they change what another participant/reviewer needs to know.
+   plan revisions when they change what another participant/reviewer needs to know. When semantic
+   review would otherwise be blind, publish only the bounded problem-local changed hunk, enclosing
+   symbol, linked test/failure excerpt, or directly supporting/contradicting evidence needed to
+   evaluate the claim; label its source/state/coverage honestly.
 6. **Recover current state.** After resume, compaction, handoff, or uncertainty, call
    `status` before relying on memory. Treat freshness/unknown/redaction gaps as real.
 7. **Check before completion.** Publish the intended material completion claim and current evidence,
    then call `check` before telling the user the task is complete.
-8. **Respond deliberately.** Acknowledge and fix valid findings; reject or waive only with a bounded
-   reason, authority, scope, and expiry where applicable. A response does not erase the finding.
+8. **Respond deliberately.** Read each reviewer challenge as advisory. Accept and act, provide
+   evidence, revise the completion claim, dispute with evidence, or state that the limitation
+   cannot currently be resolved. Encode those choices through existing `respond` plus material
+   `publish_work`; reject or waive only with the existing bounded reason/authority rules. A response
+   does not erase the finding.
 9. **Recheck after change.** Material edits, new evidence, plan changes, or finding responses require
    a current check; do not reuse a stale verdict.
 10. **Receipt and final answer.** Request a receipt and word the final response no more strongly than
@@ -103,7 +109,9 @@ Publish:
 Do not publish:
 
 - chain-of-thought, hidden reasoning, full prompts/transcripts, every file read, every search query,
-  heartbeat/status chatter, duplicated terminal output, credentials, secrets, or raw source;
+  heartbeat/status chatter, duplicated terminal output, credentials, secrets, broad/unrelated raw
+  source, or a whole repository. A small problem-local source/diff/test excerpt is permitted only
+  when material, in scope, state-bound, and allowed by effective privacy policy;
 - an action result without binding it to relevant repository/artifact state where staleness matters;
 - a success claim inferred solely from tool invocation or process start;
 - a stronger identity/observation/immutability class than the channel proves.
@@ -135,6 +143,12 @@ The skill gives concrete wording examples:
 
 Codex retains judgment: it may reject a model-derived or inapplicable finding, but it records the
 reason and does not describe rejection as proof the finding was false.
+
+When a reviewer says code did not change, Codex first checks the structured change observation. If
+content was `not_recorded`, `not_selected`, `withheld_by_policy`, or `redacted_never_send`, it treats
+the statement as unsupported and may publish better evidence or reject it with evidence. Only an
+observed equal subject-state relation supports unchanged-state language. Any response, new evidence,
+or revised claim is followed by a current check before completion.
 
 ### Installation/versioning
 
@@ -174,6 +188,8 @@ Those are separate previewed integration steps.
 4. Degradation is disclosed, never papered over with invented Yoetz state.
 5. Installed bytes and advertised compatibility are testable release artifacts.
 6. User/host policy—not Yoetz—owns any hard gate.
+7. The agent/reviewer loop remains `check → respond/publish_work → check`; it never asks a human for
+   routine assisted-review findings and never treats the reviewer as waiver authority.
 
 ## Tests
 

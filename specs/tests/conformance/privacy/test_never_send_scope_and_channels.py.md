@@ -39,6 +39,12 @@ Yoetz-owned process/startup-through-ready boundary and excludes external OS/mode
 are checked separately because it is a local disclosure sink before MCP rendering, not an egress
 channel.
 
+Repeat the never-send and scope matrix for `structural`, `goal_aware`, `assisted`, `expanded`, and
+`custom`. A broader context selector may choose more already recorded candidates but cannot make a
+forbidden, unrelated, out-of-scope, or unclassified excerpt representable as approved content. An
+omission retains only its typed subject/category/reason; no withheld plaintext appears in the
+manifest or model prompt.
+
 ## Errors and edge cases
 
 Include encoding splits, nested values, misleading file types, wildcard policy, ambiguous scope,
@@ -59,6 +65,7 @@ zero prompt/authorization/network activity; tests never fabricate a receipt for 
    requires a fresh exact local-human transition and cannot consume dormant intent.
 7. Terminal receipts never use pending `awaiting_human|approved|receipt_pending` or removed
    `dispatched` outcomes.
+8. No review-context profile or recipe weakens never-send, scope, classification, or byte caps.
 
 ## Tests
 

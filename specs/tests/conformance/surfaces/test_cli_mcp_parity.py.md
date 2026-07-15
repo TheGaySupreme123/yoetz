@@ -22,6 +22,9 @@ The test drives the same request through CLI and MCP and asserts:
 - exit codes and `isError` states align with public errors;
 - safe human summaries do not reveal more than the structured payload;
 - wrapper-specific transport noise does not affect the oracle.
+- ordinary operation parity includes projected semantic findings carrying a bounded reviewer
+  challenge; MCP can respond or publish work but cannot create local-human setup, widening, waiver,
+  credential, or per-request approval authority.
 
 ## Errors and edge cases
 
@@ -32,6 +35,7 @@ The test drives the same request through CLI and MCP and asserts:
 1. CLI and MCP share the same public contract.
 2. Structured truth is identical.
 3. Summaries remain weaker.
+4. Operation parity does not expose CLI-only human-control authority through MCP.
 
 ## Tests
 

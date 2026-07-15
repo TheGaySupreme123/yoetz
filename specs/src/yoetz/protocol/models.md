@@ -111,6 +111,13 @@ application service:
 - `ReceiptRequestModel` / `ReceiptResultModel` carry the frozen-frontier receipt query and the
   canonical receipt payload.
 
+A post-validated `ReviewerChallenge` does not add a wire model. Its discrepancy is the semantic
+finding `summary`; its bounded direct main-agent message, alternative interpretation, uncertainty,
+and requested next step are deterministically formatted into `detail`. Ordinary agent-context
+projection therefore uses the existing `/findings/*/summary|detail` `finding_summary` category and
+either includes both authorized fields or emits the normal omission markers. No second advisory
+message, provider reply, or human-approval field exists.
+
 `ActorAssertionModel` captures the caller's assertion about who or what is acting. It is
 validated as a shape, not accepted as truth. The implementation may preserve a display name and an
 `asserted_by` marker, but the server assigns the durable assurance level.

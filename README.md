@@ -28,6 +28,22 @@ writers, privacy authority, or provider access. External disclosure is denied by
 pass centralized classification, policy, minimization, secret scanning, exact destination binding,
 and durable structural audit.
 
+Two defaults are deliberately separate. An unconfigured installation stays zero-egress and
+deterministic. When a technical user chooses external semantic review, the CLI's recommended
+`assisted-review` recipe shows and confirms a standing workspace policy that sends the reviewer a
+useful structured packet: goal, obligations, claims, material timeline, deterministic findings and
+their exact bases, coverage gaps, and bounded problem-local evidence/test/diff/source excerpts
+already recorded in the case. Sensitive/confidential content is off, never-send remains absolute,
+and the recipe is recommended only for an exact endpoint profile with a current data-use record
+stating training `prohibited`, retention `none|bounded`, and provider human access
+`prohibited|restricted`. Known-broad, unknown, or stale posture removes the recommendation.
+
+Inside that confirmed policy, review is direct-to-agent: the reviewer returns a bounded challenge
+to the main agent, which can act, provide evidence, revise its claim, dispute with evidence, or state
+an unresolved limitation, then recheck. Routine checks and retries need no human prompt. Users can
+choose stricter, broader, custom, or forked behavior; changed forks do not automatically inherit
+upstream privacy/support claims.
+
 Private strategy/architecture drafting inputs under `docs/architecture/` are intentionally ignored.
 The public ADRs and `specs/` tree must remain self-contained without them.
 
