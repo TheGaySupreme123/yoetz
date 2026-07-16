@@ -1,7 +1,7 @@
 # src/yoetz/adapters/sqlite/maintenance.py — SQLite bundle backup, restore, and migration
 
 **Wave:** C | **ADRs:** ADR-001, ADR-003, ADR-004, ADR-007 | **Imports (spec-tree):**
-`ports/maintenance.md`, `adapters/sqlite/connection.md`, `adapters/sqlite/recovery.md`,
+`ports/maintenance.py.md`, `adapters/sqlite/connection.md`, `adapters/sqlite/recovery.md`,
 `adapters/sqlite/migrations.md`, `adapters/sqlite/start_catalog.md`,
 `adapters/sqlite/repository.md`, `adapters/objects/encrypted_files.md`, `ports/keys.md`,
 `adapters/privacy/catalog.md`, `config/paths.md`, `protocol/canonical.md`,

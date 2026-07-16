@@ -56,13 +56,45 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    records a structural no-dispatch `channel_unavailable` decision receipt, and performs no
    DNS/socket I/O. A future capability needs a fresh local-human policy transition. The ceiling and
    every channel default denied; absence is not silently replaced by a generic HTTP client.
-3. **Local disclosure sinks:** `local_model`, `agent_context`, and `trusted_human_control` are not
-   network-egress channels. The first two receive only policy-approved minimized content and are
-   covered by the never-send fence. The trusted human surface may render an approval preview and
-   exact policy diff, but it never exposes cryptographic material or service-vault credentials.
+3. **Local disclosure sinks:** `local_model`, `agent_context`, `local_human_view`, and
+   `trusted_human_control` are not network-egress channels. They receive only policy-approved
+   minimized content and are covered by the never-send fence. The trusted human surface may render an
+   approval preview and exact policy diff, but it never exposes cryptographic material or
+   service-vault credentials.
    A local-model runtime receives plaintext and belongs to the trusted local computing base unless
    its exact artifact/profile supplies independently enforceable sandbox evidence; Yoetz's adapter
    makes no claim about another process's ambient network authority.
+
+   **Revised 2026-07-16 (see ADR-010, F-018/F-019).** The original single `agent_context` sink
+   conflated two audiences with different risk, and its structural-only default therefore withheld
+   finding prose from the local human as well as from the agent, on the zero-egress install every
+   user starts with. That default protected nobody in the common case and broke the
+   `check → respond → recheck` loop the product exists for. Two changes correct it without weakening
+   the fence:
+
+   `local_human_view` is now a separate sink for ordinary human-readable rendering to an attached
+   controlling terminal. A local human reading a vault they unlocked is not a third-party
+   disclosure. It admits every non-never-send category at
+   `public_structural|ordinary_user_content`. `--json`, non-TTY or redirected streams, and every
+   `mcp_bridge` client remain `agent_context`; the client never selects its own sink. Terminal
+   emulation by a same-UID process is the stated threat-model limit that already bounds the unlock
+   TTY contract, not a claimed cryptographic exclusion.
+
+   `agent_context` is now conditioned on a computed closed `DisclosureProvenance`
+   (`self_authored`, `engine_derived_from_self_authored`, `other_writer`, `imported`). Material the
+   requesting writer authored at the frozen frontier, and kernel prose derived solely from it,
+   project at the policy's data classes without a category grant: that content is already in the
+   host's context, so withholding it discloses nothing new and costs the loop. Other-writer
+   material, imports, and provider-derived semantic prose — including every reviewer challenge —
+   still require the explicit `agent_context_categories` grant. Provenance is computed from the
+   ledger, never asserted by a caller; ambiguity or an unresolvable ref denies; it is recomputed per
+   projection and never cached across frontiers.
+
+   Both local client sinks take the same reserve/complete receipt path: `local_human_view` is a
+   looser ceiling, never an unaudited one. Provenance widens only `agent_context`, only for the
+   requesting writer, and never past `sensitive_confidential` or the never-send set, which remain
+   absolute at every sink under every provenance. Serving static reviewed guidance documents is not a
+   sink at all, because they carry no user content and are identical for every installation.
 4. **Data classes:** structural public data, ordinary task/user content, sensitive/confidential
    content, and secrets/cryptographic material are distinct. Classification combines source-owned
    structural labels, scope validation, and deterministic secret scanning. Unknown or conflicting

@@ -1,29 +1,36 @@
-# src/yoetz/resources/skills/codex/yoetz/SKILL.md — installed Codex cooperative-workflow skill
+# src/yoetz/resources/skills/codex/yoetz/SKILL.md — installed Codex skill header
 
-**Wave:** D | **ADRs:** ADR-002, ADR-005, ADR-007 | **Imports (spec-tree):**
-`specs/skills/codex/yoetz/SKILL.md`, `specs/skills/codex/yoetz/references.md`,
+**Wave:** D | **ADRs:** ADR-002, ADR-005, ADR-007, ADR-010 | **Imports (spec-tree):**
+`specs/skills/codex/yoetz/SKILL.md`, `specs/guidance/README.md`,
 `specs/src/yoetz/resources/manifest.json.md` | **Imported by:** package startup/version,
 skill installation, capability and packaging tests
 
 ## Purpose
 
-Define the exact installed copy of the public Yoetz skill. The wheel-installed file must be
+Define the exact installed copy of the Codex skill header. The wheel-installed file must be
 byte-identical to the reviewed source skill and must not drift into a locally edited variant.
+
+This resource is the Codex-shaped part only: frontmatter, activation, layout, and links. The
+workflow, publication policy, and coverage rules it links to are the shared `guidance/` resources,
+packaged once and installed beside it (ADR-010). This file is not their packaged copy and must not
+duplicate them.
 
 ## Public surface
 
 - `skills/codex/yoetz/SKILL.md` logical resource copy installed at
   `src/yoetz/resources/skills/codex/yoetz/SKILL.md`.
-- Compatible with the two installed references under
-  `src/yoetz/resources/skills/codex/yoetz/references/`.
+- Installed alongside the four shared guidance members from `src/yoetz/resources/guidance/`, which
+  the Codex adapter places under the skill's `references/` directory.
 
 ## Behavior
 
 The packaged file is copied from the reviewed skill source without semantic rewriting. It retains
-the same sections, workflow steps, activation guidance, publication policy, handoff rules, resume
-behavior, finding response rules, receipt-bounded final wording, and safety/privacy limitations as
-the source skill, including problem-local evidence publication, reviewer-challenge response
-patterns, and mandatory recheck after any response/new evidence/revised claim.
+the same frontmatter, activation guidance, Codex tool/command compatibility, installed layout, and
+links into the shared guidance as the source skill.
+
+Its content is verified to contain no restatement of a rule owned by `guidance/`: a workflow step,
+publication rule, or coverage wording appearing here rather than in its owner is drift and fails the
+build.
 
 The installer validates source and destination bytes, rejects traversal/symlink destinations, and
 preserves any preexisting modified installed copy unless explicit overwrite consent is given. The

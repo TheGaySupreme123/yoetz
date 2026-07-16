@@ -17,7 +17,8 @@ capability sentinels, and canary/network-attempt collectors.
 
 ## Behavior
 
-For every `ForbiddenDataKind`, assert absence from outbound/local-model/agent-context bytes, MCP
+For every `ForbiddenDataKind`, assert absence under every `DisclosureProvenance` — including
+`self_authored` — and from outbound/local-model/agent-context/local-human-view bytes, MCP
 structured/text output, previews except bounded trusted-human selected display, receipts, logs,
 errors, traces, stderr, crash and telemetry. Test tightening immediate, widening human-only, and
 forged agent/MCP/provider/import authority denied. Test scope ancestry/intersection and every

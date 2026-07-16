@@ -1,14 +1,28 @@
-# skills/codex/yoetz/SKILL.md — Codex cooperative-workflow skill specification
+# skills/codex/yoetz/SKILL.md — Codex skill header and activation adapter
 
-**Wave:** D | **ADRs:** ADR-002, ADR-005, ADR-007 | **Imports (spec-tree):**
-`specs/INTERFACES.md`, operation schemas, `references.md` | **Imported by:** release
-resources, `cli integrate codex skill install`, capability and packaging tests
+**Wave:** D | **ADRs:** ADR-002, ADR-005, ADR-007, ADR-010 | **Imports (spec-tree):**
+`specs/INTERFACES.md`, operation schemas, `guidance/README.md`, `guidance/agent-instructions.md`,
+`guidance/workflow.md`, `guidance/publication-policy.md`, `guidance/coverage-and-receipts.md` |
+**Imported by:** release resources, `cli integrate codex skill install`, capability and packaging
+tests
 
 ## Purpose
 
-Specify the canonical source skill that teaches Codex how to use Yoetz without turning Yoetz into
-an orchestrator, transcript recorder, or mandatory gate. The installed skill is a product surface:
-it determines whether cooperative publication is useful, current, honest, and low-ceremony.
+Specify the canonical Codex skill: the frontmatter, activation semantics, and install layout that
+let Codex discover and apply Yoetz's harness-neutral guidance ergonomically.
+
+This is the first harness adapter for guidance, not the owner of it (ADR-010). The workflow,
+publication policy, and coverage rules live under `guidance/` and are shared byte-for-byte with
+every other harness and with the MCP baseline. This file owns only what is genuinely Codex-shaped:
+
+- the required Codex skill frontmatter and its compatibility metadata;
+- when and how Codex activates the skill;
+- the `.agents/skills/yoetz/` install layout and how the shared members are laid out inside it;
+- the Codex capability profiles this skill is tested against.
+
+It owns no workflow step, no publication rule, no coverage wording, and no forbidden-content rule.
+Restating one here instead of linking to its owner is a drift failure. Codex is first because its
+skill surface makes the guidance land well — not because the guidance is about Codex.
 
 This file is a specification of the future skill content. The implemented source will live at
 `skills/codex/yoetz/SKILL.md` and be copied byte-for-byte into the wheel before explicit
@@ -26,22 +40,32 @@ installation into a trusted project.
   versions, and required MCP server name `yoetz`.
 - No secrets, installation-specific paths, provider/model names, or mutable network references.
 
+The frontmatter shape is the Codex-specific part of this file and must match
+`HarnessProfile(codex).frontmatter_profile`. Another harness's skill spec owns its own header shape
+and shares none of these fields.
+
 ### Required skill sections
 
-1. What Yoetz does and does not do.
-2. When to activate it.
-3. Startup/availability disclosure.
-4. The ten-step cooperative workflow.
-5. Material-publication policy.
-6. Multi-agent attribution and handoff.
-7. Resume/compaction recovery.
-8. Finding response and recheck.
-9. Receipt-bounded final wording.
-10. Degraded/unavailable behavior.
-11. Safety/privacy rules.
-12. Command/tool compatibility and reference links.
+The skill file itself is deliberately thin. It contains exactly:
 
-The skill links only to the two installed reference files specified by `references.md`.
+1. When Codex should activate the skill, and when it should not.
+2. Startup/availability disclosure.
+3. Codex-specific tool/command compatibility and the required MCP server name.
+4. Links into the installed shared guidance, at the narrow section relevant to each step.
+
+Everything else is owned by `guidance/` and installed alongside, not restated:
+`guidance/workflow.md` owns the ten steps, multi-agent attribution, resume/compaction recovery,
+finding response, receipt-bounded wording, and degraded behavior;
+`guidance/publication-policy.md` owns material-publication and forbidden-content rules;
+`guidance/coverage-and-receipts.md` owns coverage and receipt language;
+`guidance/agent-instructions.md` owns the non-negotiable floor.
+
+### Installed layout
+
+`install_skill(codex, …)` writes `HarnessProfile(codex).skill_root` — `.agents/skills/yoetz/` —
+containing this `SKILL.md`, the compatibility manifest, and the four shared guidance members under
+`references/`, each byte-identical to `resources/guidance/`. The `references/` name is a Codex
+layout convention owned here; the bytes inside are not.
 
 ## Behavior
 
@@ -60,95 +84,22 @@ If the optional MCP server is unavailable, Codex continues the user's work unles
 explicitly made Yoetz required. It discloses that no live Yoetz ledger or receipt will exist. It
 never invents session IDs, publications, checks, findings, or receipts.
 
-### Ten-step workflow
+### Shared workflow, publication, and wording
 
-The implemented skill teaches this exact state machine:
+These are owned by `guidance/` and installed beside this skill; the skill links to the relevant
+section and restates none of them:
 
-1. **Materiality decision.** Decide whether Yoetz is proportionate; record no ceremony for trivial
-   work.
-2. **Start or attach.** Call `start` with stable request identity and appropriate
-   `create`/`attach`/`create_or_attach` semantics. Show active/degraded status.
-3. **Publish plan and obligations.** Publish a bounded plan, explicit requested outcomes,
-   acceptance/evidence expectations, and assignments. Do not paste the user's whole prompt.
-4. **Delegate with context.** Give each subagent session/task/writer/assignment context and require
-   concise typed material publications. Do not share or publish full transcripts.
-5. **Publish material work.** Batch decisions, attempts, results, evidence references, claims, and
-   plan revisions when they change what another participant/reviewer needs to know. When semantic
-   review would otherwise be blind, publish only the bounded problem-local changed hunk, enclosing
-   symbol, linked test/failure excerpt, or directly supporting/contradicting evidence needed to
-   evaluate the claim; label its source/state/coverage honestly.
-6. **Recover current state.** After resume, compaction, handoff, or uncertainty, call
-   `status` before relying on memory. Treat freshness/unknown/redaction gaps as real.
-7. **Check before completion.** Publish the intended material completion claim and current evidence,
-   then call `check` before telling the user the task is complete.
-8. **Respond deliberately.** Read each reviewer challenge as advisory. Accept and act, provide
-   evidence, revise the completion claim, dispute with evidence, or state that the limitation
-   cannot currently be resolved. Encode those choices through existing `respond` plus material
-   `publish_work`; reject or waive only with the existing bounded reason/authority rules. A response
-   does not erase the finding.
-9. **Recheck after change.** Material edits, new evidence, plan changes, or finding responses require
-   a current check; do not reuse a stale verdict.
-10. **Receipt and final answer.** Request a receipt and word the final response no more strongly than
-    the receipt's weakest material coverage, freshness, unresolved findings, and limitations.
+| Concern | Owner |
+|---|---|
+| Ten-step cooperative workflow, multi-agent attribution, resume/compaction, finding response, receipt-bounded final wording, degraded behavior | `guidance/workflow.md` |
+| Material-publication and forbidden-content rules, event-family cheat sheet, problem-local excerpt boundary | `guidance/publication-policy.md` |
+| Coverage dimensions, freshness/redaction gaps, receipt field map, approved and forbidden completion wording | `guidance/coverage-and-receipts.md` |
+| The non-negotiable floor every host receives regardless of this skill | `guidance/agent-instructions.md` |
 
-Every mutating call reuses its original request/operation IDs after timeout or reconnect. The skill
-states that timeout means unknown outcome; Codex retries idempotently or inspects `status`.
-
-### Publication policy
-
-Publish:
-
-- obligations created by explicit user requirements or accepted plans;
-- decisions that change scope, approach, compatibility, security, or expected output;
-- bounded actions/results whose success or failure materially supports completion;
-- immutable evidence/digests or honest mutable references;
-- plan revisions/supersessions and disclosed abandoned work;
-- material claims and limitations;
-- finding responses and waivers.
-
-Do not publish:
-
-- chain-of-thought, hidden reasoning, full prompts/transcripts, every file read, every search query,
-  heartbeat/status chatter, duplicated terminal output, credentials, secrets, broad/unrelated raw
-  source, or a whole repository. A small problem-local source/diff/test excerpt is permitted only
-  when material, in scope, state-bound, and allowed by effective privacy policy;
-- an action result without binding it to relevant repository/artifact state where staleness matters;
-- a success claim inferred solely from tool invocation or process start;
-- a stronger identity/observation/immutability class than the channel proves.
-
-Batch adjacent events up to public limits while preserving logical order and per-writer sequence.
-When uncertain, prefer one concise event describing the material transition over noisy telemetry.
-
-### Multi-agent behavior
-
-The parent publishes assignments and gives each delegate a distinct logical writer identity.
-Subagents may read compact status/projections and publish their own actions/results/claims. The
-parent does not impersonate them and does not upgrade caller-asserted identity.
-
-Before integration, the parent reads current assignments, decisions, contradictions, and open
-obligations. A subagent summary is a claim, not proof; link accepted evidence/results separately.
-Contradictory publications remain visible until a recorded decision resolves them.
-
-### Findings and final language
-
-The skill gives concrete wording examples:
-
-- permitted: “Yoetz found no deterministic issue in the cooperatively published record at the
-  current frontier; publication remained self-asserted and repository state was not independently
-  reproduced.”
-- forbidden: “Yoetz verified the work.”
-- permitted when degraded: “The deterministic check completed; semantic review was not configured.”
-- required when unavailable: “Yoetz was unavailable, so no live ledger check or receipt was
-  produced.”
-
-Codex retains judgment: it may reject a model-derived or inapplicable finding, but it records the
-reason and does not describe rejection as proof the finding was false.
-
-When a reviewer says code did not change, Codex first checks the structured change observation. If
-content was `not_recorded`, `not_selected`, `withheld_by_policy`, or `redacted_never_send`, it treats
-the statement as unsupported and may publish better evidence or reject it with evidence. Only an
-observed equal subject-state relation supports unchanged-state language. Any response, new evidence,
-or revised claim is followed by a current check before completion.
+Codex reaches these as installed files under `references/`. An unprofiled MCP host reaches the same
+bytes as `yoetz://guidance/<name>` resources. Neither path is authoritative over the other, because
+both serve one owner's bytes. If this file and a guidance document ever disagree, the guidance
+document wins and the build fails.
 
 ### Installation/versioning
 
@@ -167,40 +118,43 @@ Those are separate previewed integration steps.
 
 ## Errors and edge cases
 
-- Start succeeds but publication fails: disclose partial ledger/freshness; retry same IDs.
-- Unknown event/server version: stop using incompatible operations and disclose, rather than
-  guessing a downgraded payload.
-- Context compaction loses local IDs: call `status`/reattach; never create a duplicate task
-  merely to continue.
-- Check provider timeout/refusal: preserve the deterministic result in every mode. When semantic
-  was required, return it as `incomplete_check` with no semantic findings and state the exact
-  missing-semantic reason; never turn the completed local result into an operation failure.
-- Receipt generation fails: do not fabricate or summarize it as present; final answer can cite the
-  last durable frontier and limitation.
+Workflow-level degradation — publication failure, compaction, provider timeout, receipt failure — is
+owned by `guidance/workflow.md` and behaves identically on every harness. Only the Codex-specific
+cases live here:
+
 - Skill/MCP version mismatch: capability check fails visibly; host work can continue only under the
   optional-server policy.
+- Codex discovers the skill but the `yoetz` MCP server is absent: the skill still loads and discloses
+  that no live ledger or receipt will exist. Skill presence is never evidence of server availability.
+- The installed copy is modified: installation preserves it and refuses silent replacement; a
+  modified skill is not silently trusted as the reviewed one.
+- The installed guidance members drift from `resources/guidance/`: byte parity fails and the skill is
+  reported `modified`, never repaired in place.
 
 ## Invariants
 
-1. The skill teaches cooperative publication, not execution/orchestration.
-2. It never asks Codex to expose hidden reasoning or full transcripts.
-3. Every completion flow checks current state and bounds final wording by coverage.
-4. Degradation is disclosed, never papered over with invented Yoetz state.
-5. Installed bytes and advertised compatibility are testable release artifacts.
-6. User/host policy—not Yoetz—owns any hard gate.
-7. The agent/reviewer loop remains `check → respond/publish_work → check`; it never asks a human for
-   routine assisted-review findings and never treats the reviewer as waiver authority.
+1. This file owns Codex frontmatter, activation, and layout only; it restates no shared rule.
+2. Installed bytes and advertised compatibility are testable release artifacts.
+3. Installed guidance members are byte-identical to `resources/guidance/` and to every other
+   harness's copy.
+4. The skill never claims Yoetz observes, enforces, or verifies, and never implies that installing it
+   strengthens coverage.
+5. User/host policy — not Yoetz — owns any hard gate.
+6. Removing this skill removes no shared guidance owner and breaks no other harness.
 
 ## Tests
 
-- `specs/tests/capability.md`: explicit and implicit discovery, start/publish/check/respond/
+- `specs/tests/capability.md`: explicit and implicit Codex discovery, start/publish/check/respond/
   receipt workflow, parent/subagent attribution, resume/compaction, server unavailable optional vs
   required, cancellation/retry, and modified-skill install protection.
-- `specs/tests/conformance.md`: scripted model follows all ten steps and never publishes
-  forbidden transcript/secret/per-read data; final answer is no stronger than fixture receipt.
-- `specs/tests/packaging.md`: source/wheel/installed byte equality and compatibility manifest.
-- Adversarial fixtures: abandoned obligation, omitted failure, stale test, wrong semantic suggestion,
-  and import-only missing event each produce the required skill response.
+- `specs/tests/conformance.md`: a scripted model follows all ten steps and never publishes
+  forbidden transcript/secret/per-read data; the final answer is no stronger than the fixture
+  receipt. The same fixtures run against an unprofiled MCP host with no installed skill, proving the
+  guidance — not this file — carries the behavior.
+- `specs/tests/packaging.md`: source/wheel/installed byte equality, compatibility manifest, and
+  guidance-member parity with `resources/guidance/`.
+- A drift check fails the build if this file restates a workflow, publication, or coverage rule owned
+  by `guidance/`.
 
 ## Open questions
 

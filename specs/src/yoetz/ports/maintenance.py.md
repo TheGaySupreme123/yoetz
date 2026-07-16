@@ -3,8 +3,8 @@
 **Wave:** C/D | **ADRs:** ADR-001, ADR-003, ADR-004, ADR-007 | **Imports (spec-tree):**
 `protocol/errors.md`, `protocol/ids.md`, `domain/values.md` (`Frontier`), `ports/keys.md`,
 `ports/objects.md`, `ports/privacy.md`,
-`version.md` | **Imported by:** `application/maintenance.md`,
-`adapters/sqlite/maintenance.md`, CLI composition and maintenance tests
+`version.md` | **Imported by:** `application/maintenance.py.md`,
+`adapters/sqlite/maintenance.py.md`, CLI composition and maintenance tests
 
 ## Purpose
 

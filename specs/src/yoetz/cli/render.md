@@ -45,7 +45,16 @@ or hidden payloads.
 
 - The human renderer must tolerate missing optional sections.
 - If a finding set is empty, the renderer says so plainly instead of inventing a reassuring tone.
-- If the user requested JSON, these functions are bypassed.
+- If the user requested JSON, these functions are bypassed. `--json` also resolves to the
+  `agent_context` sink rather than `local_human_view`, so a JSON result may legitimately carry less
+  prose than the human rendering of the same operation. That is a sink difference, not a renderer
+  inconsistency.
+- These renderers run only for human-readable output on an attached controlling terminal, which the
+  service resolves to `local_human_view`. They never widen a projection: the service has already
+  fenced the content, and the renderer displays what it received.
+- Where prose was withheld by policy, the renderer shows the structural finding and its omission
+  marker. It never presents withheld prose as an absent problem, an empty finding, or a reassuring
+  result.
 - An unknown or invalid semantic status/reason pair is a schema failure, never rendered as
   free-form fallback text.
 - The receipt renderer must not claim "verified" when the coverage state is weaker.

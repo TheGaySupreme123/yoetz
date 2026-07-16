@@ -30,7 +30,7 @@ following thirteen questions; the token and answer shape are protocol, not UI co
 | 3 | `external_provider` | which external provider/model/endpoint profile is trusted and whether current eligible data-use evidence is a runtime guard | closed `{binding: ProviderBinding, require_current_provider_data_use_evidence: boolean}` or fixed token `none` |
 | 4 | `review_context` | which deterministic selection strategy builds semantic review cases | closed `{profile: structural\|goal_aware\|assisted\|expanded\|custom, selection: ReviewSelectionPolicy}` |
 | 5 | `content_categories` | which categories/classes may be sent to the external LLM binding | closed `{categories: DataCategory[], data_classes: DataClass[]}` |
-| 6 | `agent_context_categories` | which categories/classes ordinary CLI/MCP/UI results may release to an agent-capable host | same closed selection object |
+| 6 | `agent_context_categories` | which categories/classes results may release to an agent-capable host for material that host did not author; self-authored material is already provenance-allowed and human-readable local terminal output is the separate `local_human_view` sink | same closed selection object |
 | 7 | `local_model_categories` | which categories/classes the selected local model runtime may receive | same closed selection object |
 | 8 | `request_confirmation` | whether every external LLM request needs preview/confirmation | boolean |
 | 9 | `product_telemetry` | whether product telemetry is permitted | boolean |
@@ -71,9 +71,29 @@ The no-answer/fail-safe draft defaults to `local_only`, `review_context=structur
 `network_egress=false`, all five network channels disabled, no local model unless explicitly
 selected, no external/local-model content categories, and
 `agent_context_categories={categories:[bounded_structural_metadata, declared_file_type],
-data_classes:[public_structural]}`. This lets clients
-receive IDs, status codes, counts, digests, and declared file types but omits task/finding/evidence
-prose until a human explicitly widens that sink. Question 1 maps to
+data_classes:[public_structural]}`.
+
+That ceiling governs only material the requesting writer did not author. Because `agent_context` is
+provenance-conditional, an agent always receives its own published prose and the deterministic
+findings computed solely from it, on this default and with zero egress: that content is already in
+the host's context, so withholding it protects nothing while breaking the
+`check → respond → recheck` loop the product exists for. What the default withholds from an
+unwidened agent is exactly what it did not author — another writer's or subagent's material,
+imported Codex events, and semantic reviewer prose — plus every `sensitive_confidential` item and
+the whole never-send set, which no provenance ever unlocks.
+
+The default therefore lets an unwidened client receive IDs, status codes, counts, digests, declared
+file types, and its own material, and omits other-authored task/finding/evidence prose until a human
+explicitly widens that sink.
+
+Ordinary human-readable CLI/UI rendering to an attached controlling terminal resolves to the
+separate `local_human_view` sink and is not gated by this answer at all. A local human reading their
+own terminal, on a vault they unlocked, is not a disclosure to a third party. `--json`, a piped or
+redirected stream, a non-TTY invocation, and every MCP client resolve to `agent_context`. The wizard
+states this plainly, because a user answering question 6 is choosing what reaches an *agent host*,
+not what they themselves may read.
+
+Question 1 maps to
 `PrivacyPolicy.network_egress_permitted`: `false` forces all five channels denied; `true` enables
 none and only permits later channel-specific choices. Choosing network egress is not consent to a
 provider, channel, or content class. Choosing a provider is not consent to telemetry, diagnostics,

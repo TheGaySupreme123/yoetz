@@ -1,24 +1,38 @@
 # src/yoetz/adapters/integrations/codex_skill.py — trusted-project Codex skill file adapter
 
-**Wave:** D | **ADRs:** ADR-005, ADR-007 | **Imports (spec-tree):**
-`ports/integrations.md`, `config/paths.md`, `observability/privacy.md`,
-`resources/manifest.json.md`, skill and reference specs | **Imported by:** runtime/CLI integration
-composition, integration/capability/packaging tests
+**Wave:** D | **ADRs:** ADR-005, ADR-007, ADR-010 | **Imports (spec-tree):**
+`ports/integrations.py.md`, `config/paths.md`, `observability/privacy.md`,
+`resources/manifest.json.md`, `guidance/README.md`, Codex skill specs | **Imported by:**
+runtime/CLI integration composition, integration/capability/packaging tests
 
 ## Purpose
 
-Implement the exact filesystem/resource mechanics for `IntegrationsPort`: verify the packaged
-canonical skill bundle, classify one trusted-project destination, stage/swap only that directory,
-write a nonsecret managed marker, and refuse to overwrite or remove modified user-owned files.
+Implement the exact filesystem/resource mechanics of `IntegrationsPort` for the `codex` harness:
+verify the packaged canonical bundle, classify one trusted-project destination, stage/swap only that
+directory, write a nonsecret managed marker, and refuse to overwrite or remove modified user-owned
+files.
+
+This is the first harness adapter, not the definition of harness integration (ADR-010). Everything
+Codex-specific lives here and in the reviewed `HarnessProfile` for `codex`: the `.agents/skills/
+yoetz/` root, the Codex skill-header shape, and the Codex capability profiles. The guidance members
+it installs are the harness-neutral `resources/guidance/` bytes and are not owned, authored, or
+varied by this adapter. A second harness is a sibling adapter with its own profile; it copies the
+same guidance and touches nothing here.
 
 This adapter deliberately does not parse or edit Codex TOML/config, register MCP, invoke Codex, run
 Git, stage/commit files, update `.gitignore`, download anything, or manage arbitrary destinations.
 
 ## Public surface
 
-- `class CodexSkillIntegration(IntegrationsPort)` — implements four port methods.
-- `load_packaged_skill_source() -> CodexSkillSource` — verifies installed resource manifest before
-  returning the exact inventory.
+- `class CodexSkillIntegration(IntegrationsPort)` — implements the four port methods for
+  `HarnessId.codex` and rejects any other harness value.
+- `CODEX_HARNESS_PROFILE: HarnessProfile` — the reviewed profile: `skill_root=.agents/skills/
+  yoetz/`, the Codex frontmatter profile, the exact Codex capability-profile IDs, tested Codex
+  version bounds, and `hooks=None` (Codex observation hooks are deferred; no v0.1 harness earns
+  `hook_observed`).
+- `load_packaged_skill_source() -> SkillSource` — verifies installed resource manifest before
+  returning the exact inventory, composed of the Codex skill header plus the neutral guidance
+  members.
 - `inspect_destination(target, source) -> DestinationInspection` — descriptor-safe read-only state.
 - `build_managed_marker(source, scope) -> bytes` — canonical `.yoetz-install.json`.
 - `recover_interrupted_swap(target, expected_preview=None) -> DestinationInspection` — conservative
@@ -30,11 +44,16 @@ Git, stage/commit files, update `.gitignore`, download anything, or manage arbit
 
 ### Packaged source
 
-Load only manifest entries for logical skill root `skills/codex/yoetz/`. Require exact
-`SKILL.md`, named references, compatibility manifest and no extra/collision. Verify size/SHA-256,
+Load only manifest entries for the Codex skill root `skills/codex/yoetz/` plus the neutral guidance
+root `guidance/`. Require the exact Codex `SKILL.md`, the exact guidance members named by
+`guidance/README.md`, the compatibility manifest, and no extra/collision. Verify size/SHA-256,
 UTF-8/LF/final newline, skill frontmatter/name/version/protocol/Codex tested set, link containment and
 public boundary. Read via package resources; no cwd/root source/network fallback. Source files are
 bounded and immutable for one adapter call.
+
+Guidance members are copied byte-for-byte from `guidance/` into the destination layout Codex
+expects; this adapter never rewrites, reflows, templates, merges, or per-harness edits their bytes,
+so the same member installed by any harness is identical. Only the skill header is Codex-shaped.
 
 ### Target validation
 

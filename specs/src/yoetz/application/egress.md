@@ -216,6 +216,15 @@ but unsuccessful semantic evaluation records its exact status and coverage gap.
     disclosure is consumed once immediately before its physical write.
 11. Review-context selection can remove candidate items but cannot authorize them, and missing code
     visibility never becomes a same-state observation.
+12. Every ordinary client result is projected to exactly one resolved `LocalDisclosureSink`. The
+    service resolves it from the control client and rendering mode — human-readable output on an
+    attached controlling terminal is `local_human_view`; `--json`, a non-TTY or redirected stream,
+    and every `mcp_bridge` client are `agent_context` — and a client never selects, requests, or
+    influences its own sink.
+13. Both local client sinks take the same reserve/complete receipt path. `local_human_view` is a
+    looser ceiling, never an unaudited one.
+14. Provenance can widen only `agent_context`, only for the requesting writer, and never past
+    `sensitive_confidential` or the never-send set.
 
 ## Tests
 

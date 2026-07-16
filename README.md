@@ -28,6 +28,17 @@ writers, privacy authority, or provider access. External disclosure is denied by
 pass centralized classification, policy, minimization, secret scanning, exact destination binding,
 and durable structural audit.
 
+Yoetz works with any agent over MCP. A host needs no integration, no installed skill, and no
+configuration: it gets the six operations, a short set of always-delivered instructions, and the
+same guidance documents every harness ships, fetchable on demand. Codex is the first harness with a
+first-party integration because its skill surface delivers that guidance natively — the guidance
+itself is harness-neutral, owned once under `guidance/`, and shipped byte-identically everywhere.
+Harness integration is a port with Codex as its first adapter, so a fork can make Yoetz first-party
+on another harness by adding an adapter and a profile, without touching the core
+([`docs/adr/ADR-010`](docs/adr/ADR-010-harness-integration-port.md)). Integration buys ergonomics,
+never a stronger claim: an agent publishing over MCP earns the weakest honest coverage, and the
+coverage vector says so exactly.
+
 Two defaults are deliberately separate. An unconfigured installation stays zero-egress and
 deterministic. When a technical user chooses external semantic review, the CLI's recommended
 `assisted-review` recipe shows and confirms a standing workspace policy that sends the reviewer a

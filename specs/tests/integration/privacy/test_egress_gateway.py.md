@@ -56,8 +56,23 @@ human-control calls; only `confirm_every_request` re-prompts per attempt.
 
 With agent-context `finding_summary` allowed, the projected ordinary finding summary/detail carries
 the post-validated direct reviewer message and requested next step. With it denied, the normal
-omission marker appears and no challenge plaintext leaks. There is no second advisory-message
+omission marker appears and no challenge plaintext leaks. A reviewer challenge is provider-derived,
+so provenance never admits it and only this explicit grant does. There is no second advisory-message
 projection or provider-conversation channel.
+
+Provenance cases run on the default zero-egress policy with no `agent_context` category grant. The
+requesting writer's own claim prose, and a deterministic finding whose `subject_refs` are all its
+own, project; a subagent's material, an imported Codex event, a finding mixing self-authored and
+other-writer refs, and a semantic challenge do not. A caller-asserted provenance is ignored, and an
+unresolvable ref denies. Re-projecting at a later frontier recomputes provenance and proves a
+foreign event appended afterwards cannot retroactively widen an earlier resolution.
+
+Sink cases prove the same operation projects to `local_human_view` for human-readable output on an
+attached controlling terminal and to `agent_context` for `--json`, a redirected stream, and every
+`mcp_bridge` client; that the client cannot select its own sink; that `local_human_view` admits
+ordinary user content the unwidened `agent_context` withholds; and that both sinks reserve and
+complete a `LocalDisclosureReceipt`. Neither sink admits `sensitive_confidential` or any never-send
+kind under any provenance.
 
 For every external physical attempt, freeze the deterministic adapter's exact final application
 body bytes and assert the receipt MAC uses the byte-exact

@@ -39,7 +39,7 @@ No SQLite, APSW, or transport type appears in any signature. All methods are `as
 - `@dataclass(frozen=True, slots=True) class FrozenCase`
 - `@dataclass(frozen=True, slots=True) class OperationRecord`
 - `@dataclass(frozen=True, slots=True) class StoredProjection`
-- `enum ProjectionView` — `compact`, `assignment`, `obligations`, `findings`, `evidence`, `history`, `versions`
+- `enum ProjectionView` — `compact`, `assignment`, `obligations`, `findings`, `candidate_findings`, `evidence`, `history`, `versions`
 - `enum OperationKind` — `publish_work`, `check`, `respond`, `receipt`
 - `enum OperationState` — `pending`, `complete`, `quarantined`
 - Type alias `SessionId = str` (validated `ses_` ID; opaque past validation).
@@ -112,6 +112,12 @@ reason codes only), `result_digest: str | None`, `quarantine_code: str | None`,
 view slice for list views), `frontier: Frontier` (the event frontier the cache represents),
 `lag: int` (events accepted after that frontier; 0 when current), `projection_version: str`,
 `rebuild_required: bool`.
+
+`load_projection(session_id, candidate_findings)` returns the full `ProjectionState`, never a view
+slice: a deterministic rule reads the whole case, so there is no slice that could answer it. It is
+the same state the check path loads, and `candidate_findings` is the only list view served through
+`load_projection` rather than `query_projection` for that reason (`application/status.md`,
+`INTERFACES.md`).
 
 ### `append_batch`
 

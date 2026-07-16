@@ -43,6 +43,21 @@ research-evidence pack and semantic reviewer may both produce an evidence-assess
 surface type is used for both because the CLI, MCP, and receipt layers need one common
 representation, but origin/provenance and policy fields record which path produced it.
 
+A deterministic finding's `summary` and `detail` are rule-templated prose that refer to their
+subjects by ID. They never quote, paraphrase, or embed the content behind a `subject_ref`: not an
+obligation's description, not a claim's statement, not evidence bytes, not a file excerpt. A
+deterministic finding says the equivalent of "completion claim while obligation o7 remains open",
+never the text of o7. The rule that fired and the IDs it fired on are the whole message; the reader
+who wants the subject reads the subject.
+
+The consequence is a disclosure property rather than a style preference. Because deterministic prose
+carries no content from its refs, it discloses nothing about material the requesting writer did not
+author, even when its `subject_refs` span several writers in the task — the refs are IDs the writer
+already holds, and the prose adds no content behind them.
+
+This constraint binds deterministic findings only. A post-validated semantic `ReviewerChallenge` is
+provider-derived prose and keeps its existing treatment and its existing agent-context fence.
+
 For a post-validated semantic `ReviewerChallenge`, `summary` states the discrepancy and `detail`
 contains the bounded direct message to the main agent, alternative interpretation, uncertainty,
 and smallest requested next step. This uses the existing finding schema so the message passes the
@@ -108,10 +123,16 @@ equal-priority findings render stably across runs.
 7. No semantic finding can precede its durable privacy receipt.
 8. Finding kind and origin remain independent, and semantic challenge prose stays bounded by the
    exact supplied case.
+9. Deterministic finding prose is rule-templated and names its subjects by ID: no content from
+   behind a `subject_ref` reaches `summary` or `detail`, so a deterministic finding discloses
+   nothing about material the requesting writer did not author, whatever writers its refs span.
 
 ## Tests
 
-- `tests/unit/domain/test_findings.py` — kind, priority, and provenance validation.
+- `tests/unit/domain/test_findings.py` — kind, priority, and provenance validation; deterministic
+  prose carries no content from behind its refs — fixtures whose obligation description, claim
+  statement, and evidence bytes are distinctive marker strings produce `summary`/`detail` containing
+  no marker, including when `subject_refs` span multiple writers.
 - `tests/unit/kernel/test_ranking.py` — ordering and suppression-count behavior.
 - `tests/subprocess/test_cli_invocations.py` — three-item cap, stable ordering, suppressed count, and
   no-stronger-than-evidence human wording.

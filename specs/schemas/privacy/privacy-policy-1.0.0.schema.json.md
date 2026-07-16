@@ -35,7 +35,8 @@ Exact enums:
 - data category: `bounded_structural_metadata|declared_file_type|task_description|claim_text|
   obligation_text|decision_excerpt|evidence_excerpt|finding_summary|command_metadata|diff_metadata|
   repository_excerpt|transcript_excerpt|diagnostic_metadata`;
-- protected local sink: `local_model|agent_context|trusted_human_control`.
+- protected local sink: `local_model|agent_context|local_human_view|trusted_human_control`;
+- disclosure provenance: `self_authored|engine_derived_from_self_authored|other_writer|imported`.
 
 ## Behavior
 
@@ -122,8 +123,17 @@ repository_excerpt`. It excludes `sensitive_confidential` and `transcript_excerp
 `agent_context` ceiling is exactly
 `{categories:[bounded_structural_metadata,declared_file_type,finding_summary],
 data_classes:[ordinary_user_content,public_structural]}` (each array ASCII-sorted in canonical
-bytes) so the main agent can receive the reviewer challenge. Those recipe facts are
+bytes) so the main agent can receive the reviewer challenge. A reviewer challenge is
+provider-derived and therefore never self-authored, so this grant — not provenance — is what admits
+it; the recipe must carry it explicitly. Those recipe facts are
 checked by setup/conformance; they are not implicit schema defaults.
+
+`agent_context` is the one provenance-conditional sink: its category set governs material the
+requesting writer did not author, while `self_authored` and `engine_derived_from_self_authored`
+items are admitted at the policy's data classes without a category grant. `local_human_view` admits
+every non-never-send category at `public_structural|ordinary_user_content` and is not
+provenance-conditional. Neither mechanism admits `sensitive_confidential` or any never-send kind,
+which remain absolute at every sink and under every provenance.
 
 Every external LLM profile requires `network_egress_permitted=true` and an enabled
 `llm_inference` policy. Disabled channel policies forbid binding/categories/classes/purposes.

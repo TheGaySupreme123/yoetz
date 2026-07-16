@@ -136,8 +136,14 @@ No arithmetic averaging exists anywhere.
 - `ActorType`: `human`, `harness`, `logical_agent`, `model_backed_worker`, `delegated_subagent`,
   `yoetz_engine`, `importer`.
 - Boundary: `ActorAssertionModel(actor_id, actor_type, display_name?, asserted_by?)`;
-  `ClientInfoModel(kind: codex_cli|yoetz_cli|test_client|importer, version, integration:
-  cooperative_mcp|local_cli|codex_jsonl_import)`.
+  `ClientInfoModel(kind: codex_cli|cooperative_agent|yoetz_cli|test_client|importer, version,
+  integration: cooperative_mcp|local_cli|codex_jsonl_import)`. `cooperative_agent` is the
+  transport-neutral value every harness without a first-party Yoetz integration uses; it is valid
+  with `cooperative_mcp` or `local_cli` and is the honest identity for any MCP host Yoetz has not
+  separately profiled. `codex_cli` is not a generic agent token and may be sent only by a client
+  matching an installed Codex capability profile (ADR-005). A distinct `kind` records provenance
+  only: assurance derives from the integration channel, so no `kind` value strengthens or weakens
+  `Coverage`, and adding a first-party harness later is a `kind` addition, never a coverage change.
 - Domain: `Actor(actor_id, actor_type, assurance)` — assurance is server-assigned, never copied
   from the caller.
 - Domain `Frontier(sequence: int, head_digest: str)` is the one frontier type. Sequence zero is
@@ -313,13 +319,24 @@ the session inside their authoritative transaction; `append_batch` does the same
 `operation_kind=receipt`. Terminal same-digest replay precedes this predicate because it commits
 nothing. SQLite uses the co-located importer rows; memory uses one shared task-state lock.
 
-`ProjectionView` is `compact`, `assignment`, `obligations`, `findings`, `evidence`, `history`, or
-`versions`. `ProjectionQuery(session_id, view, filter, at_frontier, limit, cursor)` uses one typed
-`ProjectionFilter` variant per view. `ProjectionCursor` is a versioned opaque encoding bound to the
-session, query digest, frontier, projection version, and last stable sort key. `ProjectionPage`
-contains typed rows (or one typed singleton), requested/head/effective frontiers, projection lag,
-next cursor, coverage, and gaps. Adapters filter and page at the storage/projection boundary;
-application code MUST NOT materialize an unbounded `ProjectionState` merely to answer `status`.
+`ProjectionView` is `compact`, `assignment`, `obligations`, `findings`, `candidate_findings`,
+`evidence`, `history`, or `versions`. `ProjectionQuery(session_id, view, filter, at_frontier, limit,
+cursor)` uses one typed `ProjectionFilter` variant per view. `ProjectionCursor` is a versioned
+opaque encoding bound to the session, query digest, frontier, projection version, and last stable
+sort key. `ProjectionPage` contains typed rows (or one typed singleton), requested/head/effective
+frontiers, projection lag, next cursor, coverage, and gaps. Adapters filter and page at the
+storage/projection boundary; application code MUST NOT materialize an unbounded `ProjectionState`
+merely to answer `status`.
+
+`candidate_findings` is the one registered exception to that last rule, because a deterministic rule
+evaluates one whole frozen case and no repository can page a rule evaluation. It loads
+`ProjectionState` through `load_projection`, runs the deterministic packs, and pages the resulting
+tuple. The exception covers rule evaluation only and never row filtering, which stays at the
+storage boundary for every view including this one's inputs. Its rows are `CandidateFinding` values,
+which use the same registered stable finding order as the `findings` view but break ties on the
+engine's canonical emission ordinal, having no `finding_id`. The view returns no `CheckVerdict` and allocates no ID: only a recorded `check` produces
+either, so nothing the view returns can be responded to, waived, or cited in a receipt
+(`application/status.md`, `application/check.md`).
 
 ### Start catalog
 
@@ -530,7 +547,16 @@ The closed privacy enums are:
   orthogonal to `PrivacyProfile` and controls deterministic semantic-case selection only;
 - `EgressChannel`: exactly `llm_inference`, `product_telemetry`, `crash_diagnostics`,
   `update_checks`, `capability_testing`;
-- `LocalDisclosureSink`: `local_model`, `agent_context`, `trusted_human_control`;
+- `LocalDisclosureSink`: `local_model`, `agent_context`, `local_human_view`,
+  `trusted_human_control`. `agent_context` is an agent-capable host's model context, which the host
+  may forward to its own provider. `local_human_view` is ordinary human-readable CLI/UI output
+  rendered to an attached controlling terminal for the local user who already unlocked this vault;
+  it is not a disclosure to a third party and is not gated by the agent ceiling. Selection is
+  server-side and fail-safe: a client resolves to `local_human_view` only for human-readable
+  rendering with an attached controlling terminal, and `--json`, a piped or redirected stream, a
+  non-TTY invocation, and every `mcp_bridge` client all resolve to `agent_context`. Terminal
+  emulation by a same-UID process is the same stated threat-model limit that already bounds the
+  unlock TTY contract, not a claimed cryptographic exclusion;
 - `DataClass`: `public_structural`, `ordinary_user_content`, `sensitive_confidential`,
   `secret_or_cryptographic`;
 - `DataCategory`: `bounded_structural_metadata`, `declared_file_type`, `task_description`,
@@ -555,6 +581,28 @@ The closed privacy enums are:
   `api_credential`, `authentication_token`, `cookie`, `private_certificate`, `keyring_content`,
   `unrelated_environment`, `credential_file`, `hidden_auth_configuration`, `raw_database`,
   `unrestricted_log`, `raw_stderr`, `complete_transcript`, `out_of_scope_file`.
+
+`DisclosureProvenance` is the closed authorship fact the `agent_context` ceiling is conditioned on:
+`self_authored`, `other_writer`, `imported`, or `engine_derived_from_self_authored`. It is computed
+server-side from the ledger, never asserted by a caller. An item is `self_authored` only when every
+contributing accepted event was written by the requesting `writer_id` in this session at or before
+the frozen frontier. Kernel prose derived solely from such events — a deterministic finding's
+`summary`/`detail` whose `subject_refs` are all `self_authored` — is
+`engine_derived_from_self_authored`. Semantic findings are never either value: reviewer prose is
+provider-derived and stays under the ordinary ceiling. Import-derived material is always
+`imported`, even when the importing writer matches, because the agent did not author what the
+importer observed.
+
+The `agent_context` ceiling is therefore provenance-conditional rather than a flat category set.
+Items whose provenance is `self_authored` or `engine_derived_from_self_authored` project to the
+requesting writer at the ceiling's data classes without needing a category grant: returning an
+agent the prose it just published, or a deterministic finding computed only from it, discloses
+nothing that host does not already hold. Everything else — `other_writer`, `imported`, and all
+semantic findings — requires the explicit `agent_context_categories` grant. `sensitive_confidential`
+and every `ForbiddenDataKind` remain absolute regardless of provenance; self-authorship never
+unlocks a class, only a category the host demonstrably already has. Provenance is recomputed at
+projection time against the frozen frontier and is never cached across frontiers, and each
+projection still reserves and completes its `AgentProjectionAuditSubject` receipt.
 
 `PrivacyPolicyStorePort` alone loads/intersects and mutates the machine ceiling plus
 workspace/task/request overlays. `PrivacyAuditPort` durably reserves the closed
@@ -877,15 +925,41 @@ never suffices. Portable-recovery execution additionally requires the foreground
 helper after confirmation, so it fails closed in noninteractive v0.1 environments; machine-bound
 maintenance may use either reviewed automation channel. MCP exposes no maintenance method.
 
-### External-tool integration
+### Harness integration
 
-`IntegrationsPort` methods are `preview_codex_skill`, `install_codex_skill`,
-`status_codex_skill`, and `remove_codex_skill` over their exact command/result values.
-Shared types are `IntegrationScope` (only `trusted_project`), `IntegrationAction`,
-`IntegrationState`, `IntegrationReason`, `IntegrationTarget`, `CodexSkillSource`,
-`IntegrationFile`, `CodexSkillPreviewCommand`, `CodexSkillApplyCommand`,
-`CodexSkillStatusCommand`, `IntegrationPreview`, `IntegrationStatus`, `IntegrationResult`, and
-`IntegrationError`.
+`IntegrationsPort` methods are `preview_skill`, `install_skill`, `status_skill`, and
+`remove_skill`, each taking an exact `HarnessId` plus its command value. The port names the
+capability, never one harness; Codex is the first adapter, not the definition (ADR-010).
+Shared types are `HarnessId`, `HarnessProfile`, `IntegrationScope` (only `trusted_project`),
+`IntegrationAction`, `IntegrationState`, `IntegrationReason`, `IntegrationTarget`, `SkillSource`,
+`IntegrationFile`, `SkillPreviewCommand`, `SkillApplyCommand`, `SkillStatusCommand`,
+`IntegrationPreview`, `IntegrationStatus`, `IntegrationResult`, and `IntegrationError`.
+
+`HarnessId` is a closed enum whose v0.1 membership is exactly `codex`. `HarnessProfile` is the
+frozen per-harness descriptor: `harness_id`, `skill_root` (the exact relative install directory),
+`frontmatter_profile` (the harness's required skill-header shape), `capability_profile_ids`,
+`supported_versions`, and `hooks: HarnessHookProfile | None`. `hooks` is declared now and is
+`None` for every v0.1 harness: no harness supplies observation hooks yet, so no v0.1 integration
+can emit the `hook_observed` publication channel or artifact-observation class (ADR-005). The field
+exists so that adding hooks is a profile capability rather than a second port.
+
+`HarnessHookProfile` distinguishes two arms. An **observation hook** reports what the harness saw
+the agent do and is the only arm that would earn `hook_observed`; it is deferred to v0.2. A
+**trigger hook** fires on a harness lifecycle event — context compaction is the motivating case —
+and prompts the agent to re-ground by calling `status`. A trigger hook earns no coverage: it
+observes nothing, and the `status` result it causes discloses only what that call would already
+have returned under the ordinary provenance rules and the `agent_context` ceiling ("Privacy policy,
+disclosure, and outbound gateway" above), so it touches no coverage lattice value and changes no
+honesty wording. v0.1 declares neither arm, and
+E-013 must freeze which lifecycle trigger points a harness exposes before any trigger hook ships.
+
+Adding a first-party harness is exactly one `HarnessId` value plus one adapter under
+`adapters/integrations/`; it requires no change to this port, to `IntegrationService`, or to any
+guidance content. The guidance a harness installs is owned once, harness-neutrally, under
+`guidance/` and is not duplicated per harness. A harness Yoetz has not profiled is still fully
+supported through the MCP baseline and identifies itself as `cooperative_agent` (§6); first-party
+integration buys harness-native ergonomics and, once observation hooks exist, stronger coverage —
+never a different public contract.
 
 `IntegrationService` owns request validation and confirmation. Install/replace/remove are bound to
 a freshly recomputed preview digest and explicit acceptance. Its shared values are
@@ -893,8 +967,9 @@ a freshly recomputed preview digest and explicit acceptance. Its shared values a
 confirmation channel `interactive|noninteractive_flag`. Noninteractive execution requires both
 the exact preview digest and explicit acceptance; a generic `--yes` cannot stand alone. Modified,
 partial, unmanaged, unsafe, or changed-after-preview copies are preserved. v0.1 writes only the
-fixed `.agents/skills/yoetz/` directory inside one explicitly supplied trusted project; it
-never edits Codex/MCP configuration, Git state, package resources, or arbitrary skills.
+profile's exact `skill_root` — `.agents/skills/yoetz/` for `codex` — inside one explicitly supplied
+trusted project; it never edits harness/MCP configuration, Git state, package resources, or
+arbitrary skills.
 
 ## 11. Application (`application/`)
 
@@ -994,8 +1069,25 @@ facade and are never MCP tools.
   `cli/privacy_control.py`: server ceremony/secret consumers plus the separately trusted foreground
   TTY helpers; no ordinary approval flag/token or server import in the helper graph.
 - `mcp/server.py`: low-level `Server("yoetz")`, generated six-tool registry, dispatch,
-  prevalidated fallbacks (`LAST_RESORT_INTERNAL_ERROR_RESULT`), and one `ServiceClient`; it owns no
+  prevalidated fallbacks (`LAST_RESORT_INTERNAL_ERROR_RESULT`), the initialize `instructions`
+  string, a read-only guidance resource registry, and one `ServiceClient`; it owns no
   runtime/application/provider/key state.
+- `mcp/descriptors.py`: the one owner of every agent-read string on the MCP surface — the six tool
+  names, descriptions, and annotations, plus the `instructions` text. All are loaded from the
+  packaged `guidance/` resources and verified against the resource manifest before use; none is
+  composed at runtime from user, task, provider, or environment values. Shared values are
+  `ToolDescriptor`, `TOOL_DESCRIPTORS` (frozen, in the same order `tools/list` returns), and
+  `server_instructions()`. `status` and `receipt` carry `readOnlyHint=true`; no descriptor carries a
+  `destructiveHint`, because no Yoetz operation deletes recorded evidence. Descriptor and
+  instruction text is bound by the same honesty lint as the guidance references: it may not say
+  "verified", "proved", "authenticated", or "complete" except where the surrounding sentence states
+  the exact sufficient coverage.
+- `mcp/resources.py`: exposes the packaged harness-neutral guidance documents as MCP resources under
+  stable `yoetz://guidance/<name>` URIs, so a host with no first-party integration can still fetch
+  the publication policy and coverage rules on demand. Resources are static reviewed product bytes
+  read through `importlib.resources` and digest-checked against the resource manifest; the registry
+  is read-only, closed, and contains no ledger, task, projection, or user content. It is therefore
+  not a `LocalDisclosureSink` and creates no disclosure receipt.
 - `cli/app.py`: Typer client surface with the six operations and registered support/service/privacy
   command trees; ordinary `--json`/stdin never carry unlock, credential, or reauthentication bytes.
 - `cli/exits.py`: `exit_code_for(PublicErrorCode | success) -> int`.

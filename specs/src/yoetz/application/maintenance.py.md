@@ -1,7 +1,7 @@
 # src/yoetz/application/maintenance.py — maintenance use-case orchestration and consent gate
 
 **Wave:** D | **ADRs:** ADR-001, ADR-003, ADR-004, ADR-007 | **Imports (spec-tree):**
-`protocol/errors.md`, `ports/maintenance.md`, `ports/clock.md`, `ports/diagnostics.md`,
+`protocol/errors.md`, `ports/maintenance.py.md`, `ports/clock.md`, `ports/diagnostics.md`,
 `application/unit_of_work.md` | **Imported by:** CLI support-command composition and maintenance tests
 
 ## Purpose

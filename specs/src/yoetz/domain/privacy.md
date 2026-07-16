@@ -19,7 +19,11 @@ outbound request-body plaintext in structural audit records.
 - `enum ReviewContextProfile`: `structural`, `goal_aware`, `assisted`, `expanded`, `custom`.
 - `enum EgressChannel`: exactly `llm_inference`, `product_telemetry`, `crash_diagnostics`,
   `update_checks`, `capability_testing`.
-- `enum LocalDisclosureSink`: `local_model`, `agent_context`, `trusted_human_control`.
+- `enum LocalDisclosureSink`: `local_model`, `agent_context`, `local_human_view`,
+  `trusted_human_control`.
+- `enum DisclosureProvenance`: `self_authored`, `engine_derived_from_self_authored`,
+  `other_writer`, `imported`. Computed server-side from the ledger at the frozen frontier and never
+  asserted by a caller; it conditions the `agent_context` ceiling only.
 - `enum DataClass`: `public_structural`, `ordinary_user_content`, `sensitive_confidential`,
   `secret_or_cryptographic`.
 - `enum DataCategory`: `bounded_structural_metadata`, `declared_file_type`, `task_description`,
@@ -229,12 +233,17 @@ never-send material. A trusted human preview may decrypt only those bounded prep
 through the confidential control surface; later dispatch may not add or substitute bytes.
 
 `AgentProjectionAuditSubject` is the separate plaintext-free subject for every
-`client_result_projection` to `agent_context`, whether it approves all, some, or no content leaves.
+`client_result_projection` to `agent_context` or `local_human_view`, whether it approves all, some,
+or no content leaves.
 It contains required service-allocated `projection_request_id` (`req_`), control RPC/method/
 service-instance/generation binding, optional original workflow request ID, exact scope, policy
-ID/version/digest,
+ID/version/digest, the resolved `LocalDisclosureSink`, the per-item `DisclosureProvenance` that
+authorized each allowed field,
 installation-keyed internal-result and projection commitments, sorted JSON Pointer/category/
-allow-or-omit/reason decisions, bounded counts, service generation, and finish time. It contains no
+allow-or-omit/reason decisions, bounded counts, service generation, and finish time. Recording the
+sink and provenance is what makes a provenance-conditional allow auditable after the fact: a
+reviewer can tell an allow that rested on a category grant from one that rested on self-authorship,
+without the subject ever holding the content. It contains no
 result value, excerpt, source reference, unkeyed plaintext digest, or encrypted duplicate object.
 The source content remains in its existing task objects; projection is an atomic, non-previewed
 operation and does not need resumable copied plaintext. Replay recomputes and verifies the keyed

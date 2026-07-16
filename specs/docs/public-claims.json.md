@@ -67,8 +67,9 @@ Privacy claims are separate, directly tested entries:
   or local proxy is implied; external OS agents and a separate local-model runtime remain outside
   the process claim, and the latter retains its F-013 limitation;
 - `privacy.never_send_non_overridable`: every frozen forbidden-data kind in candidate/user content
-  is blocked from all network channels and the local-model/agent-context/trusted-human-control
-  disclosure sinks; separately provisioned provider-auth metadata is governed by resolved decision
+  is blocked from all network channels and the local-model/agent-context/local-human-view/
+  trusted-human-control disclosure sinks, under every `DisclosureProvenance` including
+  `self_authored`; separately provisioned provider-auth metadata is governed by resolved decision
   F-012;
 - `privacy.policy_approved_outbound_only`: provider adapters accept only an exact bounded approved
   outbound case and composition grants no repository/database/environment/transcript handles; the

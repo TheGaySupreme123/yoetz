@@ -7,13 +7,16 @@ runtime composition and privacy tests
 ## Purpose
 
 Implement `PrivacyClassifierPort` locally with reviewed source/category rules, scope validation,
-deterministic minimization/redaction, and an exact-byte secret scan. It is the content fence shared
-by external providers, local models, and agent-context projection.
+provenance resolution, deterministic minimization/redaction, and an exact-byte secret scan. It is
+the content fence shared by external providers, local models, agent-context projection, and
+local-human rendering.
 
 ## Public surface
 
 - `class LocalPrivacyEnforcer(PrivacyClassifierPort)`.
 - `class ClassificationRuleset` — immutable versioned category/source/scope rules.
+- `class ProvenanceRuleset` — immutable versioned rules resolving each item to exactly one
+  `DisclosureProvenance`.
 - `class ReviewSelectionRuleset` — immutable profile-specific timeline/relevance/excerpt ordering.
 - `class MinimizationRuleset` — immutable purpose-specific field ordering and byte/token ceilings.
 - `class SecretScanRuleset` — immutable detector-version identity.
@@ -25,6 +28,45 @@ its origin is inside the selected scope. It applies the most sensitive matching 
 or missing proof is `classification_uncertain`. Source rules mark structural never-send sources
 (vault/keyring/credential files, environment, raw database/log/transcript access, out-of-scope
 files) before byte scanning.
+
+### Provenance resolution
+
+For `agent_context`, `classify` additionally resolves each item to exactly one
+`DisclosureProvenance` from the ledger, using the frozen frontier and the requesting `writer_id`.
+An item is `self_authored` only when every contributing accepted event was written by that writer in
+this session at or before that frontier. A deterministic finding's `summary`/`detail` whose
+`subject_refs` all resolve `self_authored` is `engine_derived_from_self_authored`. Anything else is
+`other_writer` or `imported`; import-derived material is always `imported` even when the importing
+writer matches, because the agent did not author what the importer observed. Semantic findings are
+never `self_authored` or `engine_derived_from_self_authored`: reviewer prose is provider-derived.
+
+Provenance is computed, never asserted. A caller-supplied provenance, actor claim, or client hint is
+ignored. Resolution failure, ambiguity, or an unresolvable ref is `classification_uncertain` and
+denies — provenance is a fail-safe input like every other classification fact, and an item whose
+authorship cannot be proven is not self-authored by default.
+
+Provenance is recomputed at each projection against that projection's frozen frontier and is never
+cached across frontiers. An event appended by another writer after the frontier cannot retroactively
+change an item already resolved at it, and an item resolved at one frontier carries no authority at
+another.
+
+### Sink ceilings
+
+`agent_context` is provenance-conditional. Items resolving `self_authored` or
+`engine_derived_from_self_authored` are allowed at the ceiling's data classes without a category
+grant; returning an agent the prose it just published, or a deterministic finding computed only from
+it, discloses nothing that host does not already hold. Every other item — `other_writer`,
+`imported`, and all semantic findings — requires the explicit `agent_context_categories` grant.
+
+`local_human_view` is the ordinary human-readable rendering ceiling for the local user who already
+unlocked this vault. It is not provenance-conditional: the human is not a third party, and gating
+their own terminal behind an agent ceiling protects nobody. It admits every non-never-send category
+at `public_structural|ordinary_user_content`.
+
+`sensitive_confidential` and every `ForbiddenDataKind` remain absolute at every sink. Self-authorship
+and local-human rendering unlock a category the consumer demonstrably already has; neither unlocks a
+data class, and neither weakens the never-send set. There is no path by which provenance,
+sink, or terminal presence admits a secret.
 
 `minimize_and_scan` removes nonrequired categories and lowest-priority items first, applies only
 versioned deterministic redactions, serializes the exact approved logical case bytes, and scans
@@ -75,6 +117,12 @@ errors or receipts.
 4. The adapter performs no filesystem discovery or network I/O.
 5. Selection never confuses `not_recorded|not_selected|withheld_by_policy|redacted_never_send` with
    observed same-state content.
+6. Provenance is computed from the ledger at the frozen frontier and never accepted from a caller.
+7. Unresolvable or ambiguous provenance denies; nothing is `self_authored` by default.
+8. No provenance, sink, or terminal presence admits `sensitive_confidential` or any
+   `ForbiddenDataKind`.
+9. `local_human_view` and `agent_context` are separate ceilings; neither inherits the other.
+10. Semantic findings are never self-authored.
 
 ## Tests
 
@@ -83,6 +131,16 @@ chunk boundaries, cap edges, byte-for-byte determinism, and renderer-injected fi
 that the gateway must block before authorization consumption/network I/O are covered. Review
 selection fixtures cover every context profile, linked-versus-unrelated ordering, excerpt caps, and
 the omission/change-visibility matrix.
+
+Provenance fixtures cover the full matrix: self-authored claim prose and its derived deterministic
+finding project on a default zero-egress policy; a subagent's material and an imported Codex event
+do not; a semantic reviewer challenge does not without the explicit grant; a finding whose
+`subject_refs` mix self-authored and other-writer material resolves to the weaker value; a
+caller-asserted provenance is ignored; an unresolvable ref denies. Frontier fixtures prove
+provenance is recomputed per projection and that a later foreign event cannot retroactively widen an
+earlier resolution. Sink fixtures prove `local_human_view` admits ordinary user content that
+`agent_context` withholds on the same policy, and that neither admits `sensitive_confidential` or a
+never-send item under any provenance.
 
 ## Open questions
 

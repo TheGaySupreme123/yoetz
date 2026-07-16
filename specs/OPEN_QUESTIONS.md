@@ -69,6 +69,7 @@ that evidence.
 | E-010 | Local service endpoint, peer-credential, permission, lifecycle, keyring, memory-protection, and relock matrix | No platform support claim until a clean-profile service proves authenticated local attachment, locked/ready transitions, crash recovery, suspend/session-lock relock, and secret-canary absence. | Service/control capability evidence and platform matrix. |
 | E-011 | Privacy classifier, never-send scanner, minimizer/redactor, consent, endpoint binding, and receipt matrix | No “policy enforced” claim from configuration alone; every profile, channel, scope intersection, denial, and dispatch path must produce exact evidence. | ADR-009 privacy conformance, property, integration, and live-profile evidence. |
 | E-012 | Public security, conduct, and support routes | Before public release, prove that private vulnerability reporting is enabled, `security@yoetz.dev` and `conduct@yoetz.dev` are monitored by maintainers, and the repository issue route is available for ordinary support. | Repository policy-link check plus dated maintainer delivery/response drill. |
+| E-013 | Exact harness lifecycle trigger points a trigger hook may bind to, context compaction among them | Which hooks a harness actually exposes is capability evidence, not a spec choice: an installed-artifact capability run must freeze the exact lifecycle events, their payload, and what a hook may do at each before any trigger hook ships. v0.1 declares no hooks of either arm. | ADR-010 installed-artifact capability evidence and harness support matrix. |
 
 ### Independent review blocker
 
@@ -86,7 +87,17 @@ that evidence.
 - Live Git/filesystem artifact inspection during import review; v0.1 compares recorded evidence
   only.
 - Chunked import/object formats above the exact 4 MiB source/object cap.
-- Codex hooks or app-server integration, additional harnesses, and remote service exposure.
+- Codex hooks or app-server integration, additional first-party harnesses, and remote service
+  exposure. Additional harnesses are additive by construction under ADR-010: an adapter plus a
+  `HarnessId` value, with no port, guidance, or registry change. Hooks land on
+  `HarnessProfile.hooks`, which distinguishes two arms. Observation hooks report what the harness
+  saw and are the only deferred capability that would make `hook_observed` earnable. Trigger hooks
+  fire on a harness lifecycle event — context compaction is the motivating case — and prompt the
+  agent to re-ground by calling `status`; they earn no coverage, because the `status` result they
+  cause discloses only what that call would already have returned under the ordinary provenance
+  rules and the `agent_context` ceiling. E-013 must freeze the exact lifecycle trigger points a
+  harness exposes before any trigger hook ships. v0.1 declares neither arm.
+- MCP prompts. v0.1 ships tools, resources, and the `instructions` string only.
 - Launchd/systemd convenience installers, multi-user service hosting, remote control, and
   independent concurrent service writers; the single-user persistent local service and
   authenticated local IPC are v0.1 requirements.
@@ -166,6 +177,42 @@ that evidence.
   recommendation; an explicit custom loosening may turn the guard off without retaining that claim. It
   does not prompt per ordinary check/retry. Users may choose stricter, broader, custom, or forked
   behavior; never-send and scope remain non-overridable for upstream-conforming builds.
+- **F-015:** Harness integration is a port and Codex is its first adapter (ADR-010). Agent guidance
+  is owned once, harness-neutrally, under `guidance/` with exactly one packaged copy;
+  `IntegrationsPort` is parameterized by a closed `HarnessId` (v0.1: exactly `codex`) plus a
+  reviewed `HarnessProfile`. Adding a first-party harness is one `HarnessId` value plus one adapter
+  and requires no port, registry, guidance, or schema change, so a fork can do it without touching
+  the core. `HarnessProfile.hooks` is declared and `None` for every v0.1 harness, keeping
+  `hook_observed` unearnable in v0.1 and making hooks a later profile capability rather than a
+  second port.
+- **F-016:** Any MCP host is supported with no integration. `guidance/agent-instructions.md` is
+  served verbatim as the initialize `instructions` string to every host and must carry every rule
+  whose absence would cause harm, because it is the only tier guaranteed to arrive; the four
+  guidance documents are also exposed as read-only `yoetz://guidance/<name>` resources. MCP declares
+  tools and resources only. `mcp/descriptors.py` owns every agent-read string, loads it from verified
+  packaged resources with no runtime composition or fallback, and is bound by the guidance wording
+  lint. An unprofiled host therefore earns `cooperative_mcp`/`self_asserted`/`published_only` — the
+  weakest honest coverage — rather than a warned-about degraded mode.
+- **F-017:** `ClientInfoModel.kind` gains the transport-neutral `cooperative_agent` value so every
+  harness has exactly one honest identity and no unprofiled host must misreport itself as
+  `codex_cli` or `test_client`. `kind` is provenance only: assurance derives from the integration
+  channel, so no `kind` value participates in `Coverage`, and recognising a harness first-party stays
+  additive.
+- **F-018:** Local client disclosure splits by audience. Ordinary human-readable rendering to an
+  attached controlling terminal resolves to a new `local_human_view` sink and is not gated by the
+  agent ceiling: a local human reading a vault they unlocked is not a third-party disclosure, and
+  gating their own terminal protects nobody. `--json`, non-TTY or redirected streams, and every
+  `mcp_bridge` client resolve to `agent_context`; the client never selects its own sink. Terminal
+  emulation by a same-UID process is the stated threat-model limit already bounding the unlock TTY
+  contract.
+- **F-019:** `agent_context` becomes provenance-conditional on a computed, closed
+  `DisclosureProvenance`. Material the requesting writer authored at the frozen frontier, and kernel
+  prose derived solely from it, project without a category grant, because that content already sits
+  in the host's context and withholding it protects nothing while breaking the
+  `check → respond → recheck` loop on the default install. Other-writer material, imports, and
+  provider-derived semantic prose still require the explicit grant. Provenance is computed from the
+  ledger and never asserted; ambiguity denies; `sensitive_confidential` and every never-send kind
+  stay absolute under every provenance. This amends the ADR-009 boundary and is recorded there.
 - Every outbound provider request follows classification, policy intersection, local
   minimization/redaction/secret scanning, optional trusted-human preview of the exact prepared
   case, gateway revalidation, and binding to one provider/model/endpoint profile. Network channels

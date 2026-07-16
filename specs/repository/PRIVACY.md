@@ -84,9 +84,22 @@ change/coverage facts, and bounded problem-local evidence/test/failure/diff/repo
 already recorded at the frozen frontier. It excludes sensitive/confidential and transcript content
 by default, and says plainly that v0.1 has no live Git/filesystem source broker.
 
+Two local disclosures are deliberately separated from all of this. Ordinary human-readable output on
+your own terminal is the `local_human_view` sink: reading a finding you asked for, on a vault you
+unlocked, on your own machine, is not a disclosure to anyone, and no privacy answer gates it.
+Releasing content to an *agent-capable host* is the `agent_context` sink, and that one is gated —
+because that host may forward its context to its own provider, which Yoetz cannot see or promise
+anything about. That sink is conditioned on authorship: an agent always receives back its own
+published material and the deterministic findings computed solely from it, because that content is
+already in its context and withholding it would protect nothing. Material the agent did not
+author — another writer's work, imported records, and a semantic reviewer's prose — stays gated
+until you widen it. Never-send and sensitive/confidential content are absolute at every sink and
+under every authorship.
+
 The recommended recipe maps to a standing workspace-scoped `trusted_provider` policy with
 per-request preview off, public-structural plus ordinary-user-content classes, exact listed
-categories, and agent-context permission for `finding_summary`. It is offered only for a current
+categories, and agent-context permission for `finding_summary` so the reviewer's challenge — which
+the agent did not author — can reach it. It is offered only for a current
 endpoint data-use record stating training `prohibited`, retention `none|bounded`, and provider human
 access `prohibited|restricted`. Known-broad, unknown, or stale posture removes the recommendation.
 The recipe enables the editable current-evidence guard; a trusted custom loosening can disable it

@@ -67,8 +67,13 @@ the exact edited selector. `assisted` selects problem-local excerpts already cap
 agent-published in the frozen case; it neither browses live source nor converts missing content into
 an unchanged-state fact.
 `content_categories` applies only to the bound external `llm_inference` provider.
-`agent_context_categories` independently controls content released in ordinary CLI/MCP/UI results
-and never authorizes an external provider. `local_model_categories` independently controls the
+`agent_context_categories` independently controls content released to an agent-capable host and
+never authorizes an external provider. It governs only material the requesting writer did not
+author: `agent_context` is provenance-conditional, so `self_authored` and
+`engine_derived_from_self_authored` items are allowed at the ceiling's data classes without a
+category grant. It does not govern ordinary human-readable terminal rendering, which resolves to the
+separate `local_human_view` sink and has no wizard question, because a local human reading their own
+unlocked vault is not a disclosure. `local_model_categories` independently controls the
 named local runtime and must be empty when `local_models=false`. No answer silently copies
 categories between sinks. `trusted_human_control` is not a persistent wizard category grant:
 during an authenticated foreground YZH1 ceremony it may show any scope-valid nonsecret category
@@ -77,8 +82,9 @@ required by that exact preview, while the never-send set remains non-overridable
 Each selection object has exactly `categories` (ASCII-sorted unique closed `DataCategory[]`) and
 `data_classes` (ASCII-sorted unique subset of `public_structural|ordinary_user_content|
 sensitive_confidential`). `secret_or_cryptographic` is schema-invalid. Category and class must both
-authorize an item. Defaults are structural only for `agent_context` and empty for external/local
-model. Adding `sensitive_confidential` is a separately highlighted widening, requires strong YZH1
+authorize an item, except where `agent_context` provenance already allows it. Defaults are
+structural only for `agent_context` — which, given provenance, still returns an agent its own
+material — and empty for external/local model. Adding `sensitive_confidential` is a separately highlighted widening, requires strong YZH1
 reauthentication, and never changes the never-send rule.
 - `review`: exact draft digest and expected current policy version.
 - `propose`: exact draft digest and expected current version; widening can only create a pending

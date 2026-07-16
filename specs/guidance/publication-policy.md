@@ -1,19 +1,24 @@
-# skills/codex/yoetz/references/publication-policy.md — Codex publication policy reference
+# guidance/publication-policy.md — harness-neutral publication policy reference
 
-**Wave:** D | **ADRs:** ADR-002, ADR-005 | **Imports (spec-tree):**
-`specs/INTERFACES.md`, `specs/skills/codex/yoetz/SKILL.md` | **Imported by:** the installed
-Yoetz skill and capability/packaging tests
+**Wave:** D | **ADRs:** ADR-002, ADR-005, ADR-010 | **Imports (spec-tree):**
+`specs/INTERFACES.md`, `guidance/README.md`, `guidance/workflow.md` | **Imported by:**
+`mcp/resources.md`, every harness skill spec, capability/packaging tests
 
 ## Purpose
 
 Define the concise reference document that teaches when material work should be published into the
-Yoetz ledger and when it should stay out of the record. This file is normative for the installed
-skill only insofar as it restates the frozen public contract.
+Yoetz ledger and when it should stay out of the record. It is normative only insofar as it restates
+the frozen public contract.
+
+This document is harness-neutral and owned once (ADR-010). It reaches an unprofiled MCP host as the
+`yoetz://guidance/publication-policy.md` resource and a first-party harness as an installed file;
+both are the same bytes.
 
 ## Public surface
 
-- `skills/codex/yoetz/references/publication-policy.md` — public markdown reference shipped
-  beside the skill.
+- `guidance/publication-policy.md` — public markdown reference, bounded (target ≤12 KiB), with
+  stable headings so an agent can retrieve one section. Addressed by the logical resource name
+  `guidance/publication-policy.md`.
 
 ## Behavior
 
@@ -36,10 +41,13 @@ The document does not widen the public workflow contract and does not introduce 
 
 ## Errors and edge cases
 
-- If the event registry changes, the reference must be updated in lockstep or the skill build fails.
+- If the event registry changes, the reference must be updated in lockstep or the build fails.
 - Example payloads that contain secrets, real repository paths, or production identifiers are
   invalid.
 - A reference that contradicts `INTERFACES.md` is a build failure, not a soft warning.
+- Naming a harness, install path, provider, or model fails the public-boundary scan; harness-specific
+  ergonomics belong in that harness's own skill spec.
+- Exceeding the size bound fails packaging rather than shipping a document hosts will truncate.
 
 ## Invariants
 
@@ -48,12 +56,15 @@ The document does not widen the public workflow contract and does not introduce 
 3. The 16-family cheat sheet matches the frozen registry exactly.
 4. Problem-local excerpts remain ordinary evidence in existing event families; they never create a
    source-browsing operation or imply independent observation.
+5. The document is harness-neutral and byte-identical wherever it is served.
 
 ## Tests
 
-- `specs/tests/capability.md`
+- `specs/tests/capability.md` — including retrieval by an unprofiled MCP host with no installed
+  skill.
 - `specs/tests/conformance.md`
-- `specs/tests/packaging.md`
+- `specs/tests/packaging.md` — byte parity across the resource and every harness install, plus the
+  size bound.
 
 ## Open questions
 

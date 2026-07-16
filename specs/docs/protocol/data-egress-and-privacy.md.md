@@ -147,9 +147,32 @@ source/path excerpts, or raw tracebacks. A future encrypted diagnostic-content a
 separate reviewed schema, local privacy authorization, minimization/never-send enforcement,
 encrypted storage, retention, and release evidence; it is not a logging/debug/support-bundle mode.
 
-The exact `LocalDisclosureSink` values are `local_model`, `agent_context`, and
-`trusted_human_control`. They are not network channels. In particular, `agent_context` is fenced
-before CLI/MCP rendering; MCP is not a sink enum and cannot inherit an external consent.
+The exact `LocalDisclosureSink` values are `local_model`, `agent_context`, `local_human_view`, and
+`trusted_human_control`. They are not network channels. Both client sinks are fenced before CLI/MCP
+rendering; MCP is not a sink enum and cannot inherit an external consent.
+
+The two client sinks are separated by audience, not by transport. `local_human_view` is ordinary
+human-readable rendering to an attached controlling terminal for the local user who already unlocked
+this vault — not a third-party disclosure, and not gated by the agent ceiling. `agent_context` is an
+agent-capable host's model context, which that host may forward to its own provider. The service
+resolves the sink from the control client and rendering mode: human-readable output on a controlling
+terminal is `local_human_view`, while `--json`, a piped or redirected stream, a non-TTY invocation,
+and every `mcp_bridge` client are `agent_context`. A client never selects its own sink. Terminal
+emulation by a same-UID process is the stated threat-model limit that already bounds the unlock TTY
+contract, not a claimed cryptographic exclusion.
+
+`agent_context` is additionally conditioned on the computed `DisclosureProvenance` values
+`self_authored`, `engine_derived_from_self_authored`, `other_writer`, and `imported`. Material the
+requesting writer authored at the frozen frontier, and kernel prose derived solely from it, project
+at the policy's data classes without a category grant; everything else — including every
+provider-derived semantic finding — requires the explicit `agent_context_categories` grant.
+Provenance is computed from the ledger, never asserted; ambiguity denies; it is recomputed per
+projection and never cached across frontiers. Both client sinks take the same reserve/complete
+receipt path, and neither sink nor any provenance admits `sensitive_confidential` or a never-send
+kind.
+
+Serving the static reviewed `guidance/` documents over MCP resources is not a sink at all: those
+bytes carry no ledger, task, or user content and are identical for every installation.
 
 ### Outbound state machine
 

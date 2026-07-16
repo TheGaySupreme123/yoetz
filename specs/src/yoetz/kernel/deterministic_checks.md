@@ -4,7 +4,7 @@
 `kernel/projections.md`, `kernel/policies/work_integrity.md`,
 `kernel/policies/research_evidence.md`, `domain/findings.md`, `protocol/coverage.md`,
 `protocol/errors.md`, `version.md` | **Imported by:** `application/check.md`,
-`adapters/sqlite/repository.md`, `kernel/ranking.md`
+`application/status.md`, `adapters/sqlite/repository.md`, `kernel/ranking.md`
 
 ## Purpose
 
@@ -15,6 +15,12 @@ the versioned policy packs. It never looks at provider output, network state, or
 The engine exists so the system can explain failures even when semantic evaluation is unavailable,
 delayed, or refused. Deterministic checks are not a fallback in the weak sense; they are a primary
 trust layer.
+
+Because the engine is pure, one evaluation serves two callers with different durability. `check`
+freezes a case, allocates finding IDs, records events, and reaches a verdict; `status` with
+`view=candidate_findings` runs the identical packs over the identical case shape and records
+nothing. The engine cannot tell the callers apart and is given no way to, which is why a candidate
+and a recorded finding at the same frontier can never disagree.
 
 ## Public surface
 
@@ -73,6 +79,11 @@ Every produced assessment must:
   `policy_id`, `policy_version`, `subject_frontier`, and `coverage` required by the shared finding
   model;
 - be conservative about coverage and never claim stronger support than the supporting refs justify;
+- render `summary` and `detail` from the firing rule's own template, naming subjects by ID and
+  copying no content from behind a `subject_ref` — not an obligation's description, a claim's
+  statement, evidence bytes, or a file excerpt (`domain/findings.md`). The rule and its IDs are the
+  whole message, which is why deterministic prose discloses nothing about material the requesting
+  writer did not author;
 - use `provenance = None` because the origin is deterministic, not semantic-model-derived.
 - carry a basis whose trigger facts are sufficient for the candidate and whose missing/source-
   availability facts explain what the rule did *not* observe. An edit claim without comparable
@@ -126,6 +137,8 @@ Rule-level expectations are:
    silently changing the other.
 6. Every deterministic candidate has exactly one stable basis, and basis generation cannot change
    whether a rule fires.
+7. Rule prose is templated and ID-only: no content from behind a `subject_ref` reaches `summary` or
+   `detail`.
 
 ## Tests
 
@@ -134,7 +147,8 @@ Rule-level expectations are:
 - `fixtures/policies/` — frozen case fixtures that prove the required findings and no-spurious
   findings cases.
 - Basis fixtures freeze trigger/missing fact codes, state relation, source availability, coverage
-  gaps, and byte-equivalent output across repeated runs.
+  gaps, and byte-equivalent output across repeated runs. Marker-string fixtures prove no rule's
+  rendered `summary`/`detail` carries content from behind a `subject_ref`.
 
 ## Open questions
 

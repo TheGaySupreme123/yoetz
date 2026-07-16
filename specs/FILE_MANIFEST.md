@@ -8,8 +8,8 @@ This is the complete one-to-one ledger between the natural-language specificatio
 files planned for the public v0.1 repository. It is declarative: adding, removing, renaming, or
 splitting a future file requires changing this reviewed table and its owning spec together.
 
-The inventory contains 522 spec files: 508 exact future-file owners,
-10 directory indexes, and 4 coordination files. The 508 future paths are unique. The nine
+The inventory contains 528 spec files: 514 exact future-file owners,
+10 directory indexes, and 4 coordination files. The 514 future paths are unique. The ten
 already-authored public ADRs are current decision authorities, not future-file candidates, so
 they are intentionally outside the mirrored ownership universe. Ignored local architecture/
 strategy inputs are neither inventoried nor authoritative.
@@ -97,6 +97,11 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/fixtures/replay/empty.case.json.md` | `future_file` | `fixtures/replay/empty.case.json` | `exact_suffix` | — | `A-B` | `draft` | Owns exactly this future public repository file. |
 | `specs/fixtures/replay/multi-writer.case.json.md` | `future_file` | `fixtures/replay/multi-writer.case.json` | `exact_suffix` | — | `A-B` | `draft` | Owns exactly this future public repository file. |
 | `specs/fixtures/replay/page-size-equivalence.case.json.md` | `future_file` | `fixtures/replay/page-size-equivalence.case.json` | `exact_suffix` | — | `A-C` | `draft` | Owns exactly this future public repository file. |
+| `specs/guidance/README.md` | `index_only` | — | `none` | `guidance/` | `D` | `draft` | Enumerates this directory family and owns no future file. |
+| `specs/guidance/agent-instructions.md` | `future_file` | `guidance/agent-instructions.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/guidance/coverage-and-receipts.md` | `future_file` | `guidance/coverage-and-receipts.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/guidance/publication-policy.md` | `future_file` | `guidance/publication-policy.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/guidance/workflow.md` | `future_file` | `guidance/workflow.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/fixtures/replay/projection-rebuild.case.json.md` | `future_file` | `fixtures/replay/projection-rebuild.case.json` | `exact_suffix` | — | `A-C` | `draft` | Owns exactly this future public repository file. |
 | `specs/fixtures/replay/supersession-redaction.case.json.md` | `future_file` | `fixtures/replay/supersession-redaction.case.json` | `exact_suffix` | — | `A-B` | `draft` | Owns exactly this future public repository file. |
 | `specs/fixtures/replay/unknown-schema.case.json.md` | `future_file` | `fixtures/replay/unknown-schema.case.json` | `exact_suffix` | — | `A-B` | `draft` | Owns exactly this future public repository file. |
@@ -178,9 +183,6 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/scripts/verify_spec_manifest.py.md` | `future_file` | `scripts/verify_spec_manifest.py` | `exact_suffix` | — | `A/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/skills/codex/yoetz/SKILL.md` | `future_file` | `skills/codex/yoetz/SKILL.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/skills/codex/yoetz/manifest.json.md` | `future_file` | `skills/codex/yoetz/manifest.json` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
-| `specs/skills/codex/yoetz/references.md` | `index_only` | — | `none` | `skills/codex/yoetz/references/` | `D` | `draft` | Enumerates this directory family and owns no future file. |
-| `specs/skills/codex/yoetz/references/coverage-and-receipts.md` | `future_file` | `skills/codex/yoetz/references/coverage-and-receipts.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
-| `specs/skills/codex/yoetz/references/publication-policy.md` | `future_file` | `skills/codex/yoetz/references/publication-policy.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/__init__.md` | `future_file` | `src/yoetz/__init__.py` | `python_shorthand` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/__main__.md` | `future_file` | `src/yoetz/__main__.py` | `python_shorthand` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/__init__.md` | `future_file` | `src/yoetz/adapters/__init__.py` | `python_shorthand` | — | `F` | `draft` | Owns exactly this future public repository file. |
@@ -264,7 +266,9 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/src/yoetz/kernel/receipt_builder.md` | `future_file` | `src/yoetz/kernel/receipt_builder.py` | `python_shorthand` | — | `B` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/kernel/reducers.md` | `future_file` | `src/yoetz/kernel/reducers.py` | `python_shorthand` | — | `B` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/mcp/__init__.md` | `future_file` | `src/yoetz/mcp/__init__.py` | `python_shorthand` | — | `F` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/mcp/descriptors.md` | `future_file` | `src/yoetz/mcp/descriptors.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/mcp/errors.md` | `future_file` | `src/yoetz/mcp/errors.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/mcp/resources.md` | `future_file` | `src/yoetz/mcp/resources.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/mcp/server.md` | `future_file` | `src/yoetz/mcp/server.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/mcp/summaries.md` | `future_file` | `src/yoetz/mcp/summaries.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/observability/__init__.md` | `future_file` | `src/yoetz/observability/__init__.py` | `python_shorthand` | — | `F` | `draft` | Owns exactly this future public repository file. |
@@ -303,6 +307,10 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/src/yoetz/resources/fixtures/canonical/rfc8785-applicable.case.json.md` | `future_file` | `src/yoetz/resources/fixtures/canonical/rfc8785-applicable.case.json` | `exact_suffix` | — | `A/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/resources/fixtures/canonical/unicode-normalization-distinct.case.json.md` | `future_file` | `src/yoetz/resources/fixtures/canonical/unicode-normalization-distinct.case.json` | `exact_suffix` | — | `A/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/resources/fixtures/canonical/utf16-property-order.case.json.md` | `future_file` | `src/yoetz/resources/fixtures/canonical/utf16-property-order.case.json` | `exact_suffix` | — | `A/F` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/resources/guidance/agent-instructions.md` | `future_file` | `src/yoetz/resources/guidance/agent-instructions.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/resources/guidance/coverage-and-receipts.md` | `future_file` | `src/yoetz/resources/guidance/coverage-and-receipts.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/resources/guidance/publication-policy.md` | `future_file` | `src/yoetz/resources/guidance/publication-policy.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/resources/guidance/workflow.md` | `future_file` | `src/yoetz/resources/guidance/workflow.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/resources/manifest.json.md` | `future_file` | `src/yoetz/resources/manifest.json` | `exact_suffix` | — | `A/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/resources/migrations/bundle/0001.sql.md` | `future_file` | `src/yoetz/resources/migrations/bundle/0001.sql` | `exact_suffix` | — | `C/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/resources/migrations/catalog/0001.sql.md` | `future_file` | `src/yoetz/resources/migrations/catalog/0001.sql` | `exact_suffix` | — | `C/F` | `draft` | Owns exactly this future public repository file. |
@@ -361,8 +369,6 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/src/yoetz/resources/schemas/version/version-manifest-1.0.0.schema.json.md` | `future_file` | `src/yoetz/resources/schemas/version/version-manifest-1.0.0.schema.json` | `exact_suffix` | — | `A/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/resources/skills/codex/yoetz/SKILL.md` | `future_file` | `src/yoetz/resources/skills/codex/yoetz/SKILL.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/resources/skills/codex/yoetz/manifest.json.md` | `future_file` | `src/yoetz/resources/skills/codex/yoetz/manifest.json` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
-| `specs/src/yoetz/resources/skills/codex/yoetz/references/coverage-and-receipts.md` | `future_file` | `src/yoetz/resources/skills/codex/yoetz/references/coverage-and-receipts.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
-| `specs/src/yoetz/resources/skills/codex/yoetz/references/publication-policy.md` | `future_file` | `src/yoetz/resources/skills/codex/yoetz/references/publication-policy.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/resources/support/runtime-support.json.md` | `future_file` | `src/yoetz/resources/support/runtime-support.json` | `exact_suffix` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/service/__init__.md` | `future_file` | `src/yoetz/service/__init__.py` | `python_shorthand` | — | `C/D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/service/client.md` | `future_file` | `src/yoetz/service/client.py` | `python_shorthand` | — | `C/D` | `draft` | Owns exactly this future public repository file. |

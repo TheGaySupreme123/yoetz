@@ -79,7 +79,7 @@ are measured in UTF-8 bytes.
 | `task_title` | str ≤ `MAX_LABEL_BYTES` | yes | User content; lives only in the encrypted payload object owned by `specs/src/yoetz/ports/objects.md` |
 | `external_ref` | str ≤ `MAX_LABEL_BYTES` | no | Raw task identity as supplied to `start`; catalog keeps only its keyed commitment |
 | `workspace_ref` | str ≤ `MAX_LABEL_BYTES` | no | Raw workspace identity; same commitment rule |
-| `client_kind` | enum `codex_cli\|yoetz_cli\|test_client\|importer` | yes | From `ClientInfoModel` |
+| `client_kind` | enum `codex_cli\|cooperative_agent\|yoetz_cli\|test_client\|importer` | yes | From `ClientInfoModel`; provenance only, never an assurance input |
 | `client_version` | str ≤ `MAX_LABEL_BYTES` | yes | |
 | `integration` | enum `cooperative_mcp\|local_cli\|codex_jsonl_import` | yes | |
 | `profile` | enum `strict-local\|local-openai\|test-fake\|release-probe` | yes | Active config profile at open |

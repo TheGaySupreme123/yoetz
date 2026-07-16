@@ -1,8 +1,9 @@
 # src/yoetz/application/status.py — bounded read-only projection queries at a stable frontier
 
-**Wave:** D | **ADRs:** ADR-001, ADR-002, ADR-003, ADR-004, ADR-005 | **Imports
+**Wave:** D | **ADRs:** ADR-001, ADR-002, ADR-003, ADR-004, ADR-005, ADR-006 | **Imports
 (spec-tree):** `protocol/models.md`, `protocol/canonical.md`, `protocol/coverage.md`,
-`protocol/errors.md`, `domain/values.md`, `kernel/projections.md`, `ports/ledger.md` |
+`protocol/errors.md`, `domain/values.md`, `domain/findings.md`, `kernel/projections.md`,
+`kernel/deterministic_checks.md`, `ports/ledger.md` |
 **Imported by:** `application/service.md`
 
 ## Purpose
@@ -12,6 +13,15 @@ creating an idempotency operation. It serves one deterministic view at the lates
 requested stable frontier, applies only closed filters, paginates every list, and discloses
 projection lag, rebuild state, unknown events, redactions, and unavailable payloads. It is a view
 of recorded evidence, never a claim that unobserved work did or did not happen.
+
+Status is also the surface an agent uses on itself while working: to recover what it has already
+done and committed to after resume, handoff, or context loss, and — through `candidate_findings` —
+to run the deterministic packs against the current record without recording anything. That view
+exists because `check` is the completion-time instrument: it reserves an operation, appends
+`check_recorded` and `finding_recorded`, and creates findings that require `respond` to clear.
+Paying that to ask a question during the work would make the ledger a record of the agent's
+uncertainty rather than of its work. Looking must be free of consequence, or the agent stops
+looking.
 
 ## Public surface
 
@@ -32,8 +42,9 @@ pagination semantics through `load_projection`.
 1. Resolve the validated `session_id` and optional/required-by-wire `writer_id` to exactly one task
    runtime. Status never enumerates bundles, guesses from paths, or treats possession of an ID as
    authorization.
-2. Require `view` to be exactly `compact`, `assignment`, `obligations`, `findings`, `evidence`,
-   `history`, or `versions`. Strictly reject unknown filter keys, duplicate set members, filter
+2. Require `view` to be exactly `compact`, `assignment`, `obligations`, `findings`,
+   `candidate_findings`, `evidence`, `history`, or `versions`. Strictly reject unknown filter keys,
+   duplicate set members, filter
    values not meaningful for the chosen view, negative/noncanonical frontiers, oversized cursors,
    and limits outside the registered bounds before any query.
 3. `at_frontier = null` means the head observed when the first page starts. A supplied canonical
@@ -56,6 +67,7 @@ bounded set at the frozen frontier:
 | `assignment` | current assignments and their bounded obligation/scope references | `actor_id`, `include_resolved` |
 | `obligations` | latest obligation state plus revision/evidence reference summaries | `actor_id`, `include_resolved`, `status` (`open` or `resolved`) |
 | `findings` | findings with current response/waiver state and coverage | `origin`, `priority`, `disposition`, `include_resolved` |
+| `candidate_findings` | ID-free deterministic candidates computed from the frozen record at this frontier, each with its rule/policy identity, basis facts, and coverage; no verdict, no semantic candidates | `priority` |
 | `evidence` | evidence identity, strength, subject-state freshness, availability and references; no large content | `strength`, `freshness`, `include_unavailable` |
 | `history` | structural accepted-event summaries, not payload bodies or the entire ledger | `schema_name`, `actor_id`, `after_sequence` |
 | `versions` | protocol/engine/policy/projection/object/storage/Python/SQLite/provider-profile identities relevant to this task/runtime | none |
@@ -63,6 +75,48 @@ bounded set at the frozen frontier:
 Set-valued filters are sorted/unique and enum-valued filters use exact registered tokens. Adding a
 filter changes the schema version; adapters may not accept arbitrary predicates, column names, SQL,
 or free-form search.
+
+### The `candidate_findings` view
+
+The view replays to the frozen frontier and calls `run_deterministic_policies` against the resulting
+case. Both halves are already pure, so the result is a deterministic function of recorded evidence
+at an exact frontier — the same character as the projection itself, which is already a derived cache
+of meaning rather than stored bytes. The view freezes no case object, reserves no operation, takes
+no lease, allocates no ID, and persists nothing.
+
+Three properties keep it from becoming a second `check`:
+
+- **It returns no verdict.** No `CheckVerdict` token appears in the result. `no_issue_detected` is a
+  recorded conclusion carrying coverage and a durable receipt; nothing computed here can produce it.
+- **An empty result is not a clean result.** An empty candidate tuple means only that no rule fired
+  against this record at this frontier. The result carries the same gaps, freshness, and coverage
+  metadata as any other view, and `guidance/coverage-and-receipts.md` owns the rule that only a
+  recorded check bounds an agent's final wording.
+- **Candidates have no IDs.** `finding_id` is allocated through `IdPort` in `check` and nowhere
+  else, so a candidate is structurally uncitable: `respond` cannot address it, a receipt cannot
+  reference it, and no event can name it. The absent ID is the enforcement, not a rule about it.
+
+Candidates carry the exact `policy_id`/`policy_version` that produced them, so the same frontier and
+the same pack reproduce the same tuple. A `check` recorded later at an unchanged frontier draws its
+findings from exactly this candidate set, then ranks and caps them to `max_findings` — so the view
+is a superset of what that check returns, never a different answer, and never itself a substitute
+for the ranked, recorded, coverage-bound result. Semantic evaluation never runs here: the view is
+deterministic-only by construction, which invariant 6 already requires of every status call.
+
+Unlike every other view, `candidate_findings` cannot be served from a `ProjectionQuery`: a rule
+evaluates one whole frozen case, not a page of rows. The view therefore loads `ProjectionState`
+through `load_projection` exactly as the check path does, runs the packs, and paginates the
+resulting candidate tuple. This is not the pattern the port prerequisite below forbids — that
+prohibition is on loading whole projections to slice *rows* the repository could have filtered and
+paged itself. No repository can page a rule evaluation. The response stays bounded, paginated, and
+capped, and the internal cost is exactly `check` step 2 with none of its durability.
+
+Deterministic candidate prose is rule-templated and names its subjects by ID (`domain/findings.md`),
+so a candidate discloses nothing about material the requesting writer did not author and the
+`agent_context` ceiling has nothing to withhold from it. The view is an agent projection like any
+other and reserves and completes its `AgentProjectionAuditSubject` receipt. That receipt lives in
+the privacy audit store, not the task ledger, so looking stays free of ledger consequence while
+remaining audited.
 
 ### Query, page, and frontier semantics
 
@@ -77,7 +131,12 @@ or free-form search.
    never loads the whole ledger merely to slice in application memory.
 3. Sort deterministically by view-specific stable keys: assignment/obligation/evidence rows by
    their canonical ID bytes, findings by registered stable finding order then ID, and history by
-   ingestion sequence. The cursor is exclusive of the last returned key. A page has at most the
+   ingestion sequence. Candidate findings use the same registered stable finding order as the
+   `findings` view, so an agent never sees one ordering here and a different one in a check result,
+   but they carry no ID to break ties and use the engine's canonical emission ordinal instead; that
+   ordinal is the cursor position and is already byte-stable for a frozen case and pack
+   (`kernel/deterministic_checks.md`), which is exactly the frontier the cursor binds. The cursor is
+   exclusive of the last returned key. A page has at most the
    validated limit and reports a next cursor only when another matching row exists at the same
    snapshot frontier.
 4. Return the requested/head frontier, the exact projection frontier represented by the rows,
@@ -131,6 +190,9 @@ check/kernel path and is not silently redefined by this spec.
   retry needs no idempotency lookup because status made no durable effect.
 - Empty match is a successful empty page with the exact frontier/coverage metadata, not evidence
   that the corresponding real-world work never occurred.
+- An unknown or tampered policy pack is an internal policy wiring error and fails the
+  `candidate_findings` request. It never degrades to an empty candidate list, which a reader could
+  mistake for a record that no rule objected to.
 
 ## Invariants
 
@@ -140,13 +202,21 @@ check/kernel path and is not silently redefined by this spec.
 4. Unknown, redacted, unavailable, stale, and rebuild gaps remain explicit and weaken coverage.
 5. Cursor input cannot inject repository predicates or cross a task/view/filter/frontier boundary.
 6. Status performs no semantic-provider/network work and never strengthens actor/coverage claims.
+7. `candidate_findings` returns no verdict and allocates no finding ID, so nothing it returns can be
+   responded to, waived, cited in a receipt, or named by an event. An empty result is never a
+   conclusion.
 
 ## Tests
 
 - `specs/tests/unit.md`: view/filter cross-product, unknown-key rejection, bounds, cursor binding
-  and tampering, empty-page semantics, subject/result frontier equality.
+  and tampering, empty-page semantics, subject/result frontier equality; a `candidate_findings`
+  result carries no verdict field and no finding ID, and a wired-wrong pack fails rather than
+  returning an empty tuple.
 - `specs/tests/conformance.md`: all views over golden fixtures; latest/historical snapshot and
   multi-page parity between memory and SQLite; append-between-pages isolation; deterministic order.
+  every finding a recorded `check` returns appears among the `candidate_findings` candidates at the
+  same frontier with identical rule identity, policy version, priority, and prose, and the
+  `candidate_findings` call itself appends no event and creates no operation.
 - `specs/tests/integration.md`: projection lag/rebuild, key locked/missing structural slice,
   redacted/unknown events, canonical corruption detection, session/writer mismatch.
 - `specs/tests/property.md`: arbitrary page sizes/cursors concatenate to the same exact view as one

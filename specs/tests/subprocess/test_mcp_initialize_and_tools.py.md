@@ -17,9 +17,12 @@ cancellation, shutdown/EOF, supported protocol and named fallback.
 ## Behavior
 
 Send literal golden frames via the byte driver. Assert no application/tool output before successful
-initialization; negotiated protocol/capabilities/server identity are exact. `tools/list` returns
-exactly start/publish/check/respond/status/receipt in frozen order with schemas/annotations matching
-reviewed resource digests.
+initialization; negotiated protocol/capabilities/server identity are exact. Declared capabilities are
+exactly tools and resources; the negotiated `instructions` string is byte-equal to the packaged
+`guidance/agent-instructions.md` resource. `tools/list` returns exactly
+start/publish/check/respond/status/receipt in frozen order with schemas/annotations matching
+reviewed resource digests. `resources/list` returns exactly the four `yoetz://guidance/<name>` URIs
+and adds no operation.
 
 Invoke a deterministic workflow and compare structured results, compact text summaries, `isError`,
 IDs/frontiers/coverage, and ledger effects. Invalid JSON-RPC vs valid application errors use distinct
@@ -32,6 +35,10 @@ server remains synchronized for the next request.
 - Unknown params/fields fail strict Yoetz validation even if SDK would coerce them.
 - Unsupported protocol fails negotiation without opening/mutating a bundle.
 - All stdout frames parse; stderr is sanitized and content-free.
+- A corrupted or digest-mismatched guidance resource fails startup before initialize completes; the
+  server never negotiates with empty or unverified `instructions`.
+- An unknown or traversing `resources/read` URI returns a bounded structural error and touches no
+  filesystem path.
 
 ## Invariants
 
@@ -39,6 +46,8 @@ server remains synchronized for the next request.
 2. Lifecycle errors have no product side effects.
 3. `isError` and structured envelopes agree.
 4. Cancellation/internal errors do not desynchronize framing.
+5. `instructions` bytes equal the packaged resource bytes, with no runtime composition or fallback.
+6. Resources are exactly the four guidance documents and add no seventh operation.
 
 ## Tests
 

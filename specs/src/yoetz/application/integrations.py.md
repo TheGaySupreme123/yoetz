@@ -1,27 +1,31 @@
-# src/yoetz/application/integrations.py — Codex skill preview, consent, status, and removal
+# src/yoetz/application/integrations.py — harness skill preview, consent, status, and removal
 
-**Wave:** D | **ADRs:** ADR-005, ADR-007 | **Imports (spec-tree):**
-`ports/integrations.md`, `protocol/errors.md`, `ports/diagnostics.md` | **Imported by:**
-CLI `integrate codex skill` commands and integration tests
+**Wave:** D | **ADRs:** ADR-005, ADR-007, ADR-010 | **Imports (spec-tree):**
+`ports/integrations.py.md`, `protocol/errors.md`, `ports/diagnostics.md` | **Imported by:**
+CLI `integrate <harness> skill` commands and integration tests
 
 ## Purpose
 
-Own the support use case that lets a user deliberately integrate the packaged Yoetz skill into one
-trusted Codex project. It validates intent, enforces preview-before-mutation, keeps prompts/rendering
-out of the filesystem adapter, and maps local integration failures without leaking project content.
+Own the support use case that lets a user deliberately integrate the packaged Yoetz guidance into
+one trusted project, in the layout their agent harness expects. It validates intent, enforces
+preview-before-mutation, keeps prompts/rendering out of the filesystem adapter, and maps local
+integration failures without leaking project content.
 
-It is not an MCP tool, public workflow operation, package installer, Codex config editor, or skill
+It is harness-neutral: it carries an exact `HarnessId` through to the port and holds no per-harness
+branch, path, or content of its own (ADR-010). Codex is the only v0.1 value.
+
+It is not an MCP tool, public workflow operation, package installer, harness config editor, or skill
 updater daemon.
 
 ## Public surface
 
 - `IntegrationService(integrations: IntegrationsPort, diagnostics: DiagnosticsPort)`.
-- `preview_codex_skill(IntegrationRequest) -> IntegrationPreview`.
-- `install_codex_skill(IntegrationRequest, IntegrationConfirmation) -> IntegrationResult`.
-- `status_codex_skill(IntegrationStatusRequest) -> IntegrationStatus`.
-- `remove_codex_skill(IntegrationRequest, IntegrationConfirmation) -> IntegrationResult`.
-- `IntegrationRequest(request_id, project_root, action, replace_modified=False)`.
-- `IntegrationStatusRequest(project_root)`.
+- `preview_skill(IntegrationRequest) -> IntegrationPreview`.
+- `install_skill(IntegrationRequest, IntegrationConfirmation) -> IntegrationResult`.
+- `status_skill(IntegrationStatusRequest) -> IntegrationStatus`.
+- `remove_skill(IntegrationRequest, IntegrationConfirmation) -> IntegrationResult`.
+- `IntegrationRequest(request_id, harness, project_root, action, replace_modified=False)`.
+- `IntegrationStatusRequest(harness, project_root)`.
 - `IntegrationConfirmation(preview_digest, explicitly_accepted, channel)` with
   `interactive|noninteractive_flag`.
 
@@ -33,14 +37,16 @@ values registered in `specs/INTERFACES.md`.
 
 ### Preview/status
 
-Validate action and explicit project-root presence/length/syntax without resolving it. `preview`
-converts to the exact port command and returns its structural result. The CLI renderer may, on the
-local user's terminal, separately request/display a bounded source-vs-current diff through an
-ephemeral adapter view; this service never persists or logs modified bytes.
+Validate the `HarnessId` against the closed registry, then validate action and explicit project-root
+presence/length/syntax without resolving it. An unregistered harness is `INVALID_REQUEST` before any
+port call. `preview` converts to the exact port command and returns its structural result. The CLI
+renderer may, on the local user's terminal, separately request/display a bounded source-vs-current
+diff through an ephemeral adapter view; this service never persists or logs modified bytes.
 
 Status calls the read-only port method and renders state/source/installed digests, compatibility,
 marker validity and structural file states. It must not create directories, repair markers, update
-files, register MCP, or infer trust from cwd.
+files, register MCP, or infer trust from cwd. The service never defaults, guesses, or infers a
+harness from the environment, cwd, installed editors, or running processes; the user names it.
 
 ### Install
 
@@ -51,10 +57,10 @@ files, register MCP, or infer trust from cwd.
    `--yes` and `--preview-digest`; otherwise return confirmation-required immediately.
 3. If state is `modified|partial|unmanaged`, refuse unless request explicitly set
    `replace_modified=True` before preview and confirmation binds it. A generic yes cannot flip it.
-4. Call `install_codex_skill`; on stale preview, return the new-preview requirement and do not retry
-   automatically against changed user files.
+4. Call `install_skill` with the requested harness; on stale preview, return the new-preview
+   requirement and do not retry automatically against changed user files.
 5. Return structural before/after/digests and bounded next steps: skill install does not mean MCP is
-   registered/available and does not prove Codex discovery until capability evidence.
+   registered/available and does not prove harness discovery until capability evidence.
 
 An exact installed state is idempotent no-op. The service never changes requested scope or chooses a
 parent/global project to make installation succeed.
@@ -72,32 +78,39 @@ Map integration reasons to CLI invalid/conflict/unsafe/internal exit families. E
 is not an internal exception. Re-raise cancellation; retry after uncertain filesystem swap uses same
 request/preview only if adapter state still matches, otherwise status + new preview.
 
-Diagnostics contain action, state before/after, compatibility, managed file count, source/installed/
-preview digest and bounded reason. Exclude project root, Git remote/branch, modified content/diff,
-user/home name, environment, exception and any Yoetz task data.
+Diagnostics contain harness ID, action, state before/after, compatibility, managed file count,
+source/installed/preview digest and bounded reason. Exclude project root, Git remote/branch,
+modified content/diff, user/home name, environment, exception and any Yoetz task data.
 
 ## Errors and edge cases
 
 - Non-TTY invocation never prompts implicitly or reads stdin that may contain operation JSON.
-- Incompatible source/target has no force flag; updating package/Codex is a separate user action.
+- Incompatible source/target has no force flag; updating the package or the harness is a separate
+  user action.
 - A status/preview target may be absent; absence is a normal structural state.
 - Cancellation after adapter swap is outcome-unknown; status determines exact/old/unsafe without
   overwriting.
-- Integration is optional. Failure never blocks unrelated Codex work unless host/user policy does.
+- Integration is optional and per-harness. Failure never blocks unrelated harness work unless
+  host/user policy does, and never blocks the MCP baseline, which needs no integration at all.
+- Installing for one harness neither installs, upgrades, nor invalidates another's copy.
 
 ## Invariants
 
 1. Mutating calls require a current exact preview and explicit consent.
-2. Service never handles filesystem bytes, package resources, or Codex config directly.
+2. Service never handles filesystem bytes, package resources, or harness config directly.
 3. Modified content cannot enter diagnostics/evidence or be silently replaced/removed.
 4. Skill installation is not described as MCP availability or capability proof.
 5. Only trusted-project scope exists in v0.1.
+6. The service holds no per-harness branch, path, or content; it forwards an exact `HarnessId`.
+7. The harness is always named by the user and never inferred from the environment.
 
 ## Tests
 
 - `specs/tests/unit.md`: request/action/confirmation mapping, modified-replace double consent, no-TTY,
-  errors/cancellation/privacy.
-- `specs/tests/integration.md`: application-to-port ordering and stale-preview/no-auto-retry.
+  errors/cancellation/privacy; unregistered harness rejected before any port call; no environment
+  inference of the harness.
+- `specs/tests/integration.md`: application-to-port ordering and stale-preview/no-auto-retry; the
+  synthetic second harness profile proves no service-side branch exists.
 - `specs/tests/subprocess.md`: exact CLI preview/decline/install/status/remove output and exits.
 - `specs/tests/capability.md`: real Codex discovery, optional unavailable behavior and byte parity.
 

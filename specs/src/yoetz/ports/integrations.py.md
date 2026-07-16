@@ -1,26 +1,48 @@
-# src/yoetz/ports/integrations.py — explicit external-tool integration filesystem boundary
+# src/yoetz/ports/integrations.py — explicit harness-integration filesystem boundary
 
-**Wave:** D | **ADRs:** ADR-005, ADR-007 | **Imports (spec-tree):** `protocol/errors.md`,
-`version.md` | **Imported by:** `application/integrations.md`,
-`adapters/integrations/codex_skill.md`, CLI integration composition and capability tests
+**Wave:** D | **ADRs:** ADR-005, ADR-007, ADR-010 | **Imports (spec-tree):** `protocol/errors.md`,
+`version.md` | **Imported by:** `application/integrations.py.md`,
+`adapters/integrations/codex_skill.py.md`, CLI integration composition and capability tests
 
 ## Purpose
 
-Define the narrow boundary for installing the canonical Yoetz Codex skill into one trusted project.
-Integration changes user-owned repository files, so it must be previewed, digest-bound, consented,
-and conflict-safe. This port prevents the CLI/application from manipulating `.agents` directly and
-prevents a generic plugin/config writer from emerging.
+Define the narrow boundary for installing the canonical harness-neutral Yoetz guidance into one
+trusted project, in the exact layout one agent harness expects. Integration changes user-owned
+repository files, so it must be previewed, digest-bound, consented, and conflict-safe. This port
+prevents the CLI/application from manipulating skill directories directly and prevents a generic
+plugin/config writer from emerging.
 
-v0.1 integrates only the Codex skill files. It does not edit global/project Codex config, register
-MCP, install executables, modify source package resources, or manage arbitrary skills.
+The port names the capability, never one harness. Codex is the first adapter, not the definition
+(ADR-010). Adding a first-party harness is exactly one `HarnessId` value plus one adapter under
+`adapters/integrations/`; it changes no method, no shared type, and no guidance content, which is
+owned once under `guidance/` and never duplicated per harness. This is what lets a fork add a
+harness first-party without editing the shared registry.
+
+v0.1 integrates only skill-shaped guidance files. It does not edit any harness's global/project
+config, register MCP, install executables, modify source package resources, or manage arbitrary
+skills. A harness Yoetz has not profiled needs no integration at all: it reaches the same six
+operations and the same guidance through the MCP baseline (`mcp/resources.md`).
 
 ## Public surface
 
 - `class IntegrationsPort(Protocol)` with async methods:
-  - `preview_codex_skill(command: CodexSkillPreviewCommand) -> IntegrationPreview`;
-  - `install_codex_skill(command: CodexSkillApplyCommand) -> IntegrationResult`;
-  - `status_codex_skill(command: CodexSkillStatusCommand) -> IntegrationStatus`;
-  - `remove_codex_skill(command: CodexSkillApplyCommand) -> IntegrationResult`.
+  - `preview_skill(harness: HarnessId, command: SkillPreviewCommand) -> IntegrationPreview`;
+  - `install_skill(harness: HarnessId, command: SkillApplyCommand) -> IntegrationResult`;
+  - `status_skill(harness: HarnessId, command: SkillStatusCommand) -> IntegrationStatus`;
+  - `remove_skill(harness: HarnessId, command: SkillApplyCommand) -> IntegrationResult`.
+- `HarnessId` — closed enum; v0.1 membership is exactly `codex`. An unregistered value is
+  `INVALID_REQUEST` at the boundary and never reaches an adapter.
+- `HarnessProfile(harness_id, skill_root, frontmatter_profile, capability_profile_ids,
+  supported_versions, hooks: HarnessHookProfile | None)` — the frozen per-harness descriptor. It is
+  reviewed packaged data, not caller input: `skill_root` is the exact relative install directory
+  (`.agents/skills/yoetz/` for `codex`), and `frontmatter_profile` is the harness's required
+  skill-header shape. `hooks` is `None` for every v0.1 harness, so no v0.1 integration emits the
+  `hook_observed` publication channel or artifact-observation class (ADR-005); the field exists so
+  that adding hooks is a profile capability rather than a second port.
+- `HarnessHookProfile` — the two-armed hook descriptor. It distinguishes **observation hooks**,
+  which report what the harness saw and are the only arm that would earn `hook_observed`, from
+  **trigger hooks**, which fire on a harness lifecycle event and prompt the agent to call `status`
+  and earn no coverage. v0.1 declares neither arm.
 - `IntegrationScope` — single v0.1 value `trusted_project`.
 - `IntegrationAction` — `install|replace|remove|noop`.
 - `IntegrationState` — `absent|installed_exact|modified|partial|incompatible|unsafe`.
@@ -29,14 +51,15 @@ MCP, install executables, modify source package resources, or manage arbitrary s
   marker_invalid|write_failed|remove_refused`.
 - `IntegrationTarget(scope, project_root)` — redacted opaque target; never serialized/logged. The
   adapter validates an exact trusted repository root; cwd is never implicit.
-- `CodexSkillSource(skill_version, protocol_range, codex_tested_set, resource_set_digest,
-  files: tuple[IntegrationFile, ...])`.
+- `SkillSource(harness_id, skill_version, protocol_range, harness_tested_set, resource_set_digest,
+  files: tuple[IntegrationFile, ...])`. `harness_tested_set` is the profile's tested host-version
+  set; the shared guidance members it carries are identical across harnesses by construction.
 - `IntegrationFile(relative_path, size, sha256, media_type)` — allowed canonical skill/reference or
   managed marker member.
-- `CodexSkillPreviewCommand(request_id, target, requested_action, replace_modified)`.
-- `CodexSkillApplyCommand(request_id, target, requested_action, preview_digest,
+- `SkillPreviewCommand(request_id, target, requested_action, replace_modified)`.
+- `SkillApplyCommand(request_id, target, requested_action, preview_digest,
   explicitly_accepted, replace_modified)`.
-- `CodexSkillStatusCommand(target)`.
+- `SkillStatusCommand(target)`.
 - `IntegrationPreview(action, state_before, source_digest, installed_digest,
   compatibility, file_changes, warnings, preview_digest)`.
 - `IntegrationStatus(state, source_digest, installed_digest, compatibility, file_states,
@@ -53,14 +76,19 @@ size). A local human diff is a separate ephemeral renderer input and never enter
 
 ### Source and target contract
 
-Source is the installed, manifest-verified packaged skill bundle: `SKILL.md`, exactly named reference
-files, compatibility metadata, and no runtime-generated instruction. Source, repository canonical
-files and packaged resources are byte-identical. No network/update channel or checkout fallback.
+Source is the installed, manifest-verified packaged bundle for the requested `HarnessId`: the
+harness's skill header, the harness-neutral guidance members copied byte-for-byte from
+`resources/guidance/`, compatibility metadata, and no runtime-generated instruction. Source,
+repository canonical files, and packaged resources are byte-identical. No network/update channel or
+checkout fallback. Two harnesses installing the same guidance member install the same bytes; a
+harness adapter may choose the header and layout its host requires, never the guidance content.
 
-Target scope is exactly `<trusted-project>/.agents/skills/yoetz/`. The project root is supplied
-explicitly and must be an existing trusted repository directory owned by the user. No global/user
-Codex scope, parent search, nested repository guess, workspace name match, symlink path, or caller-
-chosen destination relative path exists in v0.1.
+Target scope is exactly `<trusted-project>/<profile.skill_root>`, resolved only from the reviewed
+`HarnessProfile` for the requested harness — `.agents/skills/yoetz/` for `codex`. The project root
+is supplied explicitly and must be an existing trusted repository directory owned by the user. No
+global/user harness scope, parent search, nested repository guess, workspace name match, symlink
+path, or caller-chosen destination relative path exists in v0.1. A caller cannot supply, override,
+or extend `skill_root`; an unregistered `HarnessId` is rejected before any path is resolved.
 
 ### Preview
 
@@ -90,13 +118,15 @@ or `replace`. If destination changed since preview, return `preview_stale` witho
 - `modified|partial`: default `modified_copy`/`partial_install`, preserving all files. Replacement is
   legal only when preview explicitly requested `replace_modified=True`, the user confirmed that
   exact digest, and current bytes still match preview. Never infer consent from `--yes` alone.
-- `incompatible`: do not install unless the previewed source itself is compatible with installed
-  Yoetz/Codex support policy; no `force` bypass in v0.1.
+- `incompatible`: do not install unless the previewed source itself is compatible with the installed
+  Yoetz protocol and the profile's harness support policy; no `force` bypass in v0.1.
 
-Managed marker `.yoetz-install.json` is canonical structural JSON containing marker schema, adapter/
-skill/protocol/resource-set versions, exact managed relative file digests/sizes, scope, and marker
-self-digest. It contains no absolute project path, username, time, Git remote/branch, task data or
-secret. Skill/reference files remain byte-identical to package resources.
+Managed marker `.yoetz-install.json` is canonical structural JSON containing marker schema,
+`harness_id`, adapter/skill/protocol/resource-set versions, exact managed relative file digests/
+sizes, scope, and marker self-digest. It contains no absolute project path, username, time, Git
+remote/branch, task data or secret. Skill and guidance files remain byte-identical to package
+resources. A marker written by one harness adapter is not valid for another; a mismatched
+`harness_id` is `marker_invalid`, never a silent adoption of another harness's directory.
 
 For replacement, stage a complete new directory and a structural swap marker. Rename old destination
 to an owner-only rollback sibling, rename new into place, fsync parent, verify, then remove rollback
@@ -108,8 +138,9 @@ individual modified file in place.
 
 Status is read-only and recomputes source/destination/marker digests. It distinguishes exact managed
 install, identical content without valid managed marker (reported `modified`/unmanaged), modified
-managed file, missing/extra expected member (`partial`), source/installed protocol/Codex mismatch,
-and unsafe target. It does not update marker or call network.
+managed file, missing/extra expected member (`partial`), source/installed protocol or harness-version
+mismatch, and unsafe target. It does not update marker or call network. Status for one harness reads
+only that harness's `skill_root` and never reports another harness's install state.
 
 ### Remove
 
@@ -119,6 +150,29 @@ fsync parent, verify no unexpected/unmanaged member existed, then delete staging
 file/marker is modified, missing, extra, unsafe, or changed after preview, refuse and preserve it.
 There is no force-remove-modified behavior in v0.1.
 
+### Hook arms
+
+`HarnessHookProfile` distinguishes two arms, and the distinction is a coverage distinction rather
+than a mechanical one.
+
+A **trigger hook** fires on a harness lifecycle event — context compaction is the motivating case —
+and prompts the agent to re-ground by calling `status`. It earns no coverage. It observes nothing:
+the only disclosure it causes is the `status` result, bounded by the ordinary provenance rules and
+the `agent_context` ceiling exactly as an agent-initiated `status` call is, and it discloses nothing
+that call would not already have returned. A trigger hook therefore touches no coverage lattice
+value, strengthens no claim, and changes no honesty wording; a task whose agent re-grounded because
+a trigger fired is indistinguishable, in recorded evidence, from one whose agent called `status` on
+its own judgment.
+
+An **observation hook** reports to Yoetz what the harness saw the agent do, and it is the only arm
+that would earn the `hook_observed` publication channel or artifact-observation class (ADR-005). It
+remains deferred to v0.2.
+
+v0.1 declares neither arm: `hooks` is `None` for every v0.1 profile. Whether a specific harness
+exposes a usable compaction or lifecycle trigger point is capability evidence rather than a spec
+choice, and E-013 must freeze the exact trigger points a harness exposes before any trigger hook
+ships.
+
 ## Errors and edge cases
 
 - Nonexistent/untrusted project, nested/symlinked destination, broad permissions, case collision,
@@ -127,8 +181,10 @@ There is no force-remove-modified behavior in v0.1.
   leaves old or new complete and a bounded recovery marker. It never silently resolves modified
   ambiguity.
 - A manually created byte-identical directory without the managed marker is not deletion-safe.
-- No method edits `.codex`, MCP configuration, Git index, `.gitignore`, package sources, or any path
-  outside the exact skill directory/sibling staging marker.
+- No method edits any harness's configuration directory, MCP configuration, Git index, `.gitignore`,
+  package sources, or any path outside the exact skill directory/sibling staging marker.
+- An unregistered, absent, or misspelled `HarnessId` fails at the boundary with `INVALID_REQUEST`
+  before target resolution, source loading, or any filesystem read.
 - Errors/status/evidence use state/reason/digests/relative managed paths only, never project path or
   modified file content.
 
@@ -136,23 +192,43 @@ There is no force-remove-modified behavior in v0.1.
 
 1. Every mutation is bound to a fresh preview and explicit consent.
 2. Modified/unmanaged copies are never overwritten or removed by default.
-3. Installed skill/reference bytes equal verified packaged resources.
-4. Scope is one explicitly supplied trusted project and one fixed destination.
-5. Integration cannot edit Codex/MCP config or arbitrary files.
+3. Installed skill/guidance bytes equal verified packaged resources.
+4. Scope is one explicitly supplied trusted project and one profile-fixed destination.
+5. Integration cannot edit harness/MCP config or arbitrary files.
 6. Status is read-only and network-free.
+7. The port is harness-neutral: no method, shared type, or guidance member names one harness, and
+   adding a harness adds an adapter plus a `HarnessId` value only.
+8. Guidance content is identical across harnesses; only the header and layout may differ.
+9. No v0.1 profile declares observation hooks, so no integration strengthens coverage over the MCP
+   baseline. A trigger hook could not strengthen it either: it observes nothing and earns no
+   coverage.
 
 ## Tests
 
 - `specs/tests/unit.md`: state/action lattice, preview digest, marker schema, compatibility and safe
-  error shapes.
+  error shapes; unregistered `HarnessId` rejection before path resolution; `skill_root` is
+  profile-derived and not caller-influenced.
 - `specs/tests/integration.md`: absent/exact/modified/partial/unmanaged install/replace/remove,
-  symlink/path/permission/TOCTOU and crash-swap recovery.
+  symlink/path/permission/TOCTOU and crash-swap recovery; a foreign `harness_id` marker is
+  `marker_invalid` rather than adopted.
 - `specs/tests/capability.md`: real Codex discovery plus source/wheel/installed parity and modified-
   copy protection.
-- `specs/tests/packaging.md`: manifest/source bytes and no unexpected integration resource.
+- `specs/tests/packaging.md`: manifest/source bytes and no unexpected integration resource; every
+  harness's installed guidance members are byte-identical to `resources/guidance/` and to each
+  other.
+- A second synthetic test-only harness profile exercises the port's neutrality without shipping a
+  second real integration, proving the fork path needs no registry edit.
 
 ## Open questions
 
 None.
 
 Global/user skill scope is deferred to v0.2.
+
+Additional first-party `HarnessId` values are deferred to v0.2 and are additive by construction:
+they require an adapter and a profile, not a port or guidance change. Harness hooks are deferred
+with them and land on `HarnessProfile.hooks`, which distinguishes two arms. Observation hooks — the
+only integration capability that would earn `hook_observed` coverage — are deferred to v0.2. Trigger
+hooks, which fire on a harness lifecycle event and prompt the agent to call `status`, earn no
+coverage and are gated on the E-013 capability evidence for the exact lifecycle trigger points a
+harness exposes. v0.1 declares neither arm.

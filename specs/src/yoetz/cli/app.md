@@ -15,11 +15,15 @@ objects, or fall back to direct execution.
 - Typer `app`, `main()`, one `run_async` bridge.
 - `build_service_client(client_kind=cli) -> ServiceClient`.
 - Shared six-operation/status/receipt client commands.
-- Command tree: the six workflows; `mcp serve`; import/review/backup/restore/migrate/version and
-  Codex integration; `service run|status|lock|stop|unlock|initialize-passphrase`; and
+- Command tree: the six workflows; `mcp serve`; import/review/backup/restore/migrate/version;
+  `integrate <harness> skill preview|install|status|remove`, where `<harness>` is an exact
+  registered `HarnessId` (v0.1: exactly `codex`) that the user always names and the CLI never infers
+  from cwd, environment, installed editors, or running processes;
+  `service run|status|lock|stop|unlock|initialize-passphrase`; and
   `provider credential set|rotate` for foreground confidential provisioning; plus
   `privacy setup|show|propose|tighten` and `privacy receipts list|get` for transparent setup and
-  bounded structural local audit inspection.
+  bounded structural local audit inspection, and the trusted-human-only
+  `privacy decide-policy|decide-disclosure`.
 - No `build_runtime`, `RuntimeFactory`, application constructor, password/key/token option, or
   secret environment reader.
 

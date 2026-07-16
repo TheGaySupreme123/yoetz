@@ -76,8 +76,27 @@ approved disclosure:
 - opportunistically accessible raw databases, unrestricted logs, stderr, or complete transcripts;
 - unrelated files or content outside the authorized workspace/task/request scope.
 
-No privacy profile, plugin, provider label, MCP request, agent message, or human click can waive
-this set. Classification and scanning are defense in depth; uncertain content fails closed.
+No privacy profile, plugin, provider label, MCP request, agent message, authorship, or human click
+can waive this set. Classification and scanning are defense in depth; uncertain content fails closed.
+
+## Your own terminal is not a disclosure
+
+Two local audiences are deliberately kept apart.
+
+Ordinary human-readable output on your own terminal is its own sink. Reading a finding you asked
+for, on a vault you unlocked, on your own machine, is not a disclosure to anyone, and no privacy
+answer gates it. An unconfigured install still shows you your own findings in full.
+
+Releasing content into an *agent-capable host* is a different sink, and that one is gated — because
+that host may forward its context to its own provider, and Yoetz can neither see nor promise
+anything about what happens there. That gate is conditioned on authorship. An agent always receives
+back the material it published and the deterministic findings computed solely from it: that content
+is already sitting in its context, so withholding it would protect nothing while breaking the very
+check-and-respond loop the tool exists for. Material the agent did not author — another agent's
+work, imported records, and a semantic reviewer's prose — stays gated until you widen it.
+
+Authorship never unlocks a data class. Sensitive/confidential content and the never-send set above
+remain absolute at every sink, no matter who wrote what.
 
 A separately provisioned provider credential presents a necessary founder clarification: the
 working design permits a fresh one-attempt vault handle to emit that credential only as
