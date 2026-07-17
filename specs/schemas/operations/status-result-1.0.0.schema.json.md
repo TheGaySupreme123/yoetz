@@ -11,7 +11,7 @@ Describe the read-only page/result shape for status.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/operations/status-result/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/operations/status-result-1.0.0.schema.json`.
 - Owning model: `StatusResultModel`.
 
 ## Behavior

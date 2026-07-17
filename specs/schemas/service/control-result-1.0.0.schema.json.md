@@ -13,7 +13,7 @@ workflow results reuse their operation schemas; this artifact owns every support
 
 ## Public surface
 
-- Draft 2020-12, `$id` `https://schemas.yoetz.dev/0.1/service/control-result/1.0.0`.
+- Draft 2020-12, `$id` `https://schemas.yoetz.dev/0.1/service/control-result-1.0.0.schema.json`.
 - A disjoint closed `oneOf` with one `ok` and one `error` branch for each of the exact twenty-five
   method constants. Every branch requires only `protocol_version`, `rpc_id`,
   `service_instance_id`, `service_generation`, `method`, `outcome`, and `body`.

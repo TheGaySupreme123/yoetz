@@ -11,7 +11,7 @@ Describe the public request shape for freezing and rendering a receipt.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/operations/receipt-request/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/operations/receipt-request-1.0.0.schema.json`.
 - Owning model: `ReceiptRequestModel`.
 
 ## Behavior

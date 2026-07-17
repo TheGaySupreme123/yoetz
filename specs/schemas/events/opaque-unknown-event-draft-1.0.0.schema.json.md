@@ -11,7 +11,7 @@ Describe the opaque branch used to preserve unrecognized event families without 
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/events/opaque-unknown-event-draft/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/opaque-unknown-event-draft-1.0.0.schema.json`.
 - Owning model: unknown-event payload branch.
 
 ## Behavior

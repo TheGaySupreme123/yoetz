@@ -11,7 +11,7 @@ Describe the structured public error object shared by CLI and MCP results.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/common/public-error/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/common/public-error-1.0.0.schema.json`.
 - Owning model: `PublicOperationError`.
 
 ## Behavior

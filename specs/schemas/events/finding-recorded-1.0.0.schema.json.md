@@ -11,7 +11,7 @@ Describe the engine-authored finding payload mirrored field-for-field from the f
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/events/finding-recorded/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/finding-recorded-1.0.0.schema.json`.
 - Owning model: `Finding`.
 
 ## Behavior

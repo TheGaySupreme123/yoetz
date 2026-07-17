@@ -11,7 +11,7 @@ Describe the canonical public finding value used by checks, receipts, and rankin
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/findings/finding/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/findings/finding-1.0.0.schema.json`.
 - Owning model: `Finding`.
 
 ## Behavior

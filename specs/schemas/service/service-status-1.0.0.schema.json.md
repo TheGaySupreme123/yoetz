@@ -10,7 +10,7 @@ credential, path or decrypted state.
 
 ## Public surface
 
-- Draft 2020-12, `$id` `https://schemas.yoetz.dev/0.1/service/service-status/1.0.0`.
+- Draft 2020-12, `$id` `https://schemas.yoetz.dev/0.1/service/service-status-1.0.0.schema.json`.
 - Closed required fields: `protocol_version`, `service_version`, `service_instance_id`,
   `service_generation`, `state`, `state_reason`, `vault_mode`, `capabilities`, `session_monitor`;
   optional `idle_relock_seconds`.

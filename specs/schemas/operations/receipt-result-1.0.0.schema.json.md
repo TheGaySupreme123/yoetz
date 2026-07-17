@@ -12,7 +12,7 @@ Describe the public result shape for receipts, including both subject and post-c
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/operations/receipt-result/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/operations/receipt-result-1.0.0.schema.json`.
 - Owning model: `ReceiptResultModel`.
 
 ## Behavior
@@ -29,7 +29,7 @@ The schema must admit the canonical machine document and the bounded human deriv
 changing the stored truth.
 
 The conclusion code is the exact offline `$ref`
-`https://schemas.yoetz.dev/0.1/receipts/receipt-document/1.0.0#/$defs/receipt_conclusion`; it is not
+`https://schemas.yoetz.dev/0.1/receipts/receipt-document-1.0.0.schema.json#/$defs/receipt_conclusion`; it is not
 a separately restated string enum.
 
 Receipt/task/session/object IDs, frontiers, conclusion/redaction enums, digests, counts, coverage,

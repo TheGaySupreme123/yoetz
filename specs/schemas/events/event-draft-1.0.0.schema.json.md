@@ -11,7 +11,7 @@ Describe the client-shaped event draft wrapper used before ledger acceptance.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/events/event-draft/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/event-draft-1.0.0.schema.json`.
 - Owning model: `EventDraft`.
 
 ## Behavior

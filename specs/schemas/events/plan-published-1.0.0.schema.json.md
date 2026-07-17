@@ -11,7 +11,7 @@ Describe the initial plan publication payload.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/events/plan-published/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/plan-published-1.0.0.schema.json`.
 - Owning model: `PlanPublishedPayload`.
 
 ## Behavior

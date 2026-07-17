@@ -100,21 +100,39 @@ The manifest lists exactly 52 `*.schema.json` artifacts and never lists itself; 
 ### Identifier rules
 
 - `$schema`: exactly `https://json-schema.org/draft/2020-12/schema`.
-- `$id`: `https://schemas.yoetz.dev/0.1/<relative-directory>/<base-name>/<semver>`.
-  Derivation obtains `<base-name>` by stripping the exact terminal
-  `-<semver>.schema.json` from the relative filename (not merely `.schema.json`), then appends that
-  same SemVer as the final URL segment; path components use lower-kebab-case. For example,
-  `events/accepted-event-1.0.0.schema.json` becomes
-  `https://schemas.yoetz.dev/0.1/events/accepted-event/1.0.0`.
-- `$ref`: absolute `$id` or repository-root-relative references resolved only through
-  the frozen registry; no network retrieval at runtime.
+- `$id`: `https://schemas.yoetz.dev/0.1/<exact-relative-schema-path>`. The checked-in
+  `schemas/` directory is the static document root mounted at `/0.1/`, so identity and hosting
+  require no rewrite route. For example, `events/accepted-event-1.0.0.schema.json` is exactly
+  `https://schemas.yoetz.dev/0.1/events/accepted-event-1.0.0.schema.json`.
+- `$ref`: the absolute static-file `$id`, optionally followed by a fragment. Runtime, generators,
+  and tests resolve it through the frozen local registry only; no gate or installed operation may
+  issue DNS or HTTP merely because the identifier is an HTTPS URL.
 - `$defs`: stable lower-snake-case logical names; no generator-specific numeric suffixes.
 - `title` and `description` are documentation only and excluded from behavioral
   comparison only during candidate normalization; released bytes, including descriptions, remain
   frozen.
 
-The common operation-result wrapper is a separately public schema for language-neutral clients.
-Schema URLs are identifiers only in v0.1 and are not promised as hosted retrieval endpoints.
+The common operation-result definitions are a separately public schema for language-neutral
+clients.
+
+### Static hosting and offline closure
+
+The complete checked-in `schemas/` tree is directly deployable without renaming: its contents are
+served byte-for-byte below `https://schemas.yoetz.dev/0.1/`, including
+`https://schemas.yoetz.dev/0.1/manifest.json`. Every schema response uses
+`application/schema+json; charset=utf-8`, public CORS, `nosniff`, and immutable caching because a
+released versioned schema path is never rewritten. The manifest response uses `application/json`,
+a digest ETag, and bounded revalidation caching; it advances atomically only to a reviewed
+superset/new release inventory and remains bound to the listed member bytes.
+
+Hosting is a publication surface, never a runtime dependency. The local gate constructs a closed
+URI-to-file registry from `schemas/manifest.json`, proves for every member that
+`$id == SCHEMA_NAMESPACE + relative_path`, resolves every fragment with network disabled, and
+compares the root bytes with `src/yoetz/resources/schemas/`. Release staging serves the same tree
+from a loopback static server and fetches every canonical URL path before publication. The tagged
+release publishes those already-tested bytes to the immutable `/0.1/` prefix and downloads them
+again for digest parity. A missing host, DNS failure, or CDN outage never prevents an installed
+Yoetz operation from validating locally; it blocks only a release claiming hosted availability.
 
 ### Exact future-file inventory
 

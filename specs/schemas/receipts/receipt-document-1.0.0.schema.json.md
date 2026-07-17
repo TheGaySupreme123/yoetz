@@ -11,7 +11,7 @@ Describe the canonical immutable receipt document stored as an encrypted object.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/receipts/receipt-document/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/receipts/receipt-document-1.0.0.schema.json`.
 - Owning model: `ReceiptDocument`.
 - Reusable fragment `$defs/receipt_conclusion`, the schema form of domain
   `ReceiptConclusion`.

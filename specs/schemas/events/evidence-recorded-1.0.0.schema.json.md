@@ -11,7 +11,7 @@ Describe the payload that records observed evidence and its immutability strengt
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/events/evidence-recorded/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/evidence-recorded-1.0.0.schema.json`.
 - Owning model: `EvidenceRecordedPayload`.
 
 ## Behavior

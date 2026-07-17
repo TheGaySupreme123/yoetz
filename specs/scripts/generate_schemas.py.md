@@ -76,8 +76,10 @@ Validate every generated document against the chosen dialect metaschema availabl
 development environment, then run Yoetz-specific checks:
 
 - `$id`, destination, media-type/schema-name, and registry version agree;
-- no unknown format keyword or remote `$ref` exists;
-- all `$ref` values are local and resolve exactly once;
+- every `$id` is exactly `SCHEMA_NAMESPACE + destination_relative_path` and is therefore a direct
+  static-file URL;
+- every `$ref` is an absolute canonical member URL (plus optional fragment), resolves exactly once
+  through the candidate local registry, and succeeds while DNS/socket/HTTP access is denied;
 - regexes are anchored, ASCII-explicit where required, and below complexity/length caps;
 - arrays and strings have explicit bounds; integers stay within canonical safe/SQLite ranges;
 - discriminated unions use stable literal tags and reject unknown variants;
@@ -90,10 +92,17 @@ Any disagreement is a generator failure.
 
 ### Rendering and tree comparison
 
-Render UTF-8 without BOM, two-space indentation, LF-only lines, stable key order, and one final LF.
-The reviewed root uses one schema per explicit registry destination plus a generated public index.
+Render canonical compact UTF-8 without BOM, insignificant whitespace, or a terminal newline, using
+UTF-16 code-unit object-key order. The reviewed root uses one schema per explicit registry
+destination plus a generated public index.
 `--check` reads raw bytes under `schemas/`, rejects symlinks and unexpected files, and prints only a
 bounded path/status diff. It never rewrites.
+
+The same check treats `schemas/` as the document root for `/0.1/`: for every manifest member it
+derives the URL path, opens the corresponding local file without a network client, and proves the
+root and packaged mirror bytes agree. A loopback static-server integration test may exercise HTTP
+path/content-type/header behavior, but schema/ref validation itself remains file-backed and runs
+with network denied.
 
 `--write` stages all output in a sibling temporary directory, fsyncs files, verifies the staged
 tree, then atomically replaces only generator-owned schema files. It does not delete an unknown

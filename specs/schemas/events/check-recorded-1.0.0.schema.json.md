@@ -11,7 +11,7 @@ Describe the payload that records a completed check and its verdict metadata.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/events/check-recorded/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/check-recorded-1.0.0.schema.json`.
 - Owning model: `CheckRecordedPayload`.
 
 ## Behavior

@@ -34,6 +34,7 @@ assemble-release-evidence
 approve-publication
 publish-pypi
 publish-github-release
+publish-schema-site
 verify-published
 release-required
 ```
@@ -146,6 +147,15 @@ evidence, then attaches the same artifacts, `SHA256SUMS`, SBOM, provenance/attes
 matrix, support matrix, known limitations, and verification instructions. Prerelease tags are
 marked prerelease; release notes do not strengthen evidence wording.
 
+`publish-schema-site` receives only the protected schema-host publication authority. It deploys
+the already-tested `schemas/` bytes without regeneration or renaming at
+`https://schemas.yoetz.dev/0.1/`, serving each immutable `*.schema.json` path as
+`application/schema+json; charset=utf-8`, the manifest as `application/json`, public CORS,
+`X-Content-Type-Options: nosniff`, immutable member caching, and digest-ETag manifest
+revalidation. It may not overwrite a different digest at an existing versioned schema path; the
+manifest changes only by an atomic reviewed inventory publication. Provider credentials or origin
+details never enter artifacts/logs.
+
 Publication order and partial failure policy are explicit: PyPI is immutable and primary package
 publication; if GitHub release attachment fails after PyPI succeeds, do not rebuild/yank
 automatically. Resume same workflow using identical digests and report bounded incident status.
@@ -154,9 +164,11 @@ Yank/delete is a separate human incident process, never automatic rollback.
 ### Verify published bytes
 
 After registry/CDN availability with bounded retry, download artifacts from PyPI and GitHub into
-fresh Linux and macOS environments by exact version/filename. Verify hashes against evidence,
+fresh Linux and macOS environments by exact version/filename and fetch every schema/manifest URL
+from the published `/0.1/` tree. Verify hashes against evidence,
 metadata/resource manifest/SBOM/provenance, install with network denied from captured wheelhouse,
-run `version --json`, startup and strict-local smoke, and compare bytes to candidate. Only then does
+compare hosted schema bytes to the candidate and installed local registry, run `version --json`,
+startup and strict-local smoke, and compare package bytes to candidate. Only then does
 `release-required` succeed and the release become announceable.
 
 No workflow step sends announcement, email, Slack, issue, or social post; external communication is

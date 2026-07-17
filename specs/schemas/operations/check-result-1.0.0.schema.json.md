@@ -12,7 +12,7 @@ Describe the public result shape for `check`, including verdict, findings, and p
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/operations/check-result/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/operations/check-result-1.0.0.schema.json`.
 - Owning model: `CheckResultModel`.
 
 ## Behavior

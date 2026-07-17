@@ -11,7 +11,7 @@ Describe the payload for reattaching to an existing session route.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/events/session-resumed/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/session-resumed-1.0.0.schema.json`.
 - Owning model: `SessionResumedPayload`.
 
 ## Behavior

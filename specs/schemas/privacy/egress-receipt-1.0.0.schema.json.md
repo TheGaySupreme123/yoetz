@@ -15,7 +15,7 @@ content.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/privacy/egress-receipt/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/privacy/egress-receipt-1.0.0.schema.json`.
 - Media type: `application/vnd.yoetz.egress-receipt+json`.
 - Closed fields: `schema_version`, `receipt_id`, `request_id`, `privacy_proposal_id`, optional
   `authorization_id`, optional `dispatch_id`, `channel`, `outcome`, optional

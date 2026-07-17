@@ -11,7 +11,7 @@ Describe the frozen manifest of installed package, runtime, and resource identit
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/version/version-manifest/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/version/version-manifest-1.0.0.schema.json`.
 - Owning model: `VersionManifest`.
 
 ## Behavior

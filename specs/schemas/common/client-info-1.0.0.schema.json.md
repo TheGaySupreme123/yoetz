@@ -11,7 +11,7 @@ Describe the bounded client metadata attached to public requests for tracing and
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/common/client-info/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/common/client-info-1.0.0.schema.json`.
 - Owning model: `ClientInfoModel`.
 
 ## Behavior

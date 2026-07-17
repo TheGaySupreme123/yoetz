@@ -11,7 +11,7 @@ Describe the payload that records an attempted action.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/events/action-recorded/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/action-recorded-1.0.0.schema.json`.
 - Owning model: `ActionRecordedPayload`.
 
 ## Behavior

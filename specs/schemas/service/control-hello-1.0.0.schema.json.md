@@ -11,7 +11,7 @@ and service agree on protocol/resource identity before any method call.
 
 ## Public surface
 
-- Draft 2020-12, `$id` `https://schemas.yoetz.dev/0.1/service/control-hello/1.0.0`.
+- Draft 2020-12, `$id` `https://schemas.yoetz.dev/0.1/service/control-hello-1.0.0.schema.json`.
 - Closed required fields only: `protocol_version`, `client_kind`, `client_version`,
   `connection_nonce`, `schema_manifest_digest`.
 - `protocol_version` is const `1.0`; `client_kind` is `cli|mcp_bridge|ui`.

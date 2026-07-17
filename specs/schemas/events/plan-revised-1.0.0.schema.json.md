@@ -11,7 +11,7 @@ Describe the payload that revises an existing plan in place.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/events/plan-revised/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/plan-revised-1.0.0.schema.json`.
 - Owning model: `PlanRevisedPayload`.
 
 ## Behavior

@@ -11,7 +11,7 @@ Describe the frozen coverage object used to label evidence strength and honesty 
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/common/coverage/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/common/coverage-1.0.0.schema.json`.
 - Owning model: `Coverage`.
 
 ## Behavior

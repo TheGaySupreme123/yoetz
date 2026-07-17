@@ -11,7 +11,7 @@ Describe the request shape for atomically publishing a batch of event drafts.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/operations/publish-work-request/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/operations/publish-work-request-1.0.0.schema.json`.
 - Owning model: `PublishWorkRequestModel`.
 
 ## Behavior

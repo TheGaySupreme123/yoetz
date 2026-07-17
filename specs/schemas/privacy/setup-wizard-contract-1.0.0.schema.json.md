@@ -13,7 +13,7 @@ keeps CLI and future UI behavior equivalent while preserving Yoetz as the sole p
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/privacy/setup-wizard-contract/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/privacy/setup-wizard-contract-1.0.0.schema.json`.
 - Media type: `application/vnd.yoetz.privacy-setup+json`.
 - A closed discriminated union of client actions `begin|answer|review|propose|tighten|cancel` and
   service views `question|policy_review|decision_required|complete|cancelled|setup_error`.

@@ -12,7 +12,7 @@ Describe the payload that records a canonical receipt object in the ledger.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/events/receipt-recorded/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/receipt-recorded-1.0.0.schema.json`.
 - Owning model: `ReceiptRecordedPayload`.
 
 ## Behavior
@@ -27,7 +27,7 @@ Closed payload object with:
 - `redaction_profile`.
 
 `conclusion_code` uses the exact offline `$ref`
-`https://schemas.yoetz.dev/0.1/receipts/receipt-document/1.0.0#/$defs/receipt_conclusion`; this event
+`https://schemas.yoetz.dev/0.1/receipts/receipt-document-1.0.0.schema.json#/$defs/receipt_conclusion`; this event
 schema does not maintain a second conclusion vocabulary.
 
 The schema keeps the subject frontier exact and excludes any post-event result frontier from the

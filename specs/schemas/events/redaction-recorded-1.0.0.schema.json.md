@@ -11,7 +11,7 @@ Describe the payload that records logical redaction or object deletion.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/events/redaction-recorded/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/redaction-recorded-1.0.0.schema.json`.
 - Owning model: `RedactionRecordedPayload`.
 
 ## Behavior

@@ -11,7 +11,7 @@ Describe the public request shape for the `start` operation.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/operations/start-request/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/operations/start-request-1.0.0.schema.json`.
 - Owning model: `StartRequestModel`.
 
 ## Behavior

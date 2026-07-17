@@ -74,7 +74,9 @@ On a small Linux runner:
    ignored drafting inputs;
 3. run `scripts/generate_schemas.py --check`;
 4. run `scripts/verify_resource_manifest.py --check`;
-5. validate every public schema, canonical vector, migration, skill link, and manifest;
+5. validate every public schema, canonical vector, migration, skill link, and manifest; prove each
+   schema `$id` is the direct `/0.1/<relative-path>` static-host URL, resolve every `$ref` from the
+   local manifest with DNS/sockets denied, and verify root/package mirrors byte-for-byte;
 6. verify released event/migration/vector files are append-only against the protected-base export;
 7. run the public-boundary scanner on the checkout's public candidate inventory;
 8. run focused canonical/schema/protocol unit vectors under at least two hash seeds.

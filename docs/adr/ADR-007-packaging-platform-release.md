@@ -48,6 +48,13 @@ specs, packaging/capability tests, and release workflow/script specs.
    keyring entries.
 10. **Diagnostics:** `yoetz version --json` emits the full `VersionManifest`; startup safety
     validation is mandatory but the public `doctor` command stays v0.2.
+11. **Public schema hosting without runtime coupling:** the checked-in `schemas/` tree is mounted
+    byte-for-byte at `https://schemas.yoetz.dev/0.1/`; each `$id` is the direct URL formed by
+    appending its exact relative file path. Released versioned schema paths are immutable. The
+    manifest advances atomically with digest/ETag binding. PR/release gates resolve all refs from
+    the local manifest with network denied, and installed Yoetz always uses packaged mirrors;
+    hosted availability is independently verified release evidence, never an operational
+    dependency.
 
 ## Implementation-lock identities
 

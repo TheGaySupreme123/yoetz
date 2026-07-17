@@ -11,7 +11,7 @@ Describe the structural ledger envelope stored after acceptance.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/events/accepted-event/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/accepted-event-1.0.0.schema.json`.
 - Owning model: `AcceptedEvent`.
 
 ## Behavior

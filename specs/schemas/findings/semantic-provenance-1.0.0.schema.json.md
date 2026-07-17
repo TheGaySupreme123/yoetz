@@ -11,7 +11,7 @@ Describe the bounded audit trail for a semantic finding.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/findings/semantic-provenance/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/findings/semantic-provenance-1.0.0.schema.json`.
 - Owning model: `SemanticProvenance`.
 
 ## Behavior

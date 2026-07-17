@@ -11,7 +11,7 @@ Describe the response payload to a finding.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/events/response-recorded/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/events/response-recorded-1.0.0.schema.json`.
 - Owning model: `ResponseRecordedPayload`.
 
 ## Behavior

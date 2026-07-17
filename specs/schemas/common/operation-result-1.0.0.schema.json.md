@@ -14,7 +14,7 @@ privacy-projection definitions.
 ## Public surface
 
 - `$schema`: Draft 2020-12.
-- `$id`: `https://schemas.yoetz.dev/0.1/common/operation-result/1.0.0`.
+- `$id`: `https://schemas.yoetz.dev/0.1/common/operation-result-1.0.0.schema.json`.
 - Owning model: common result envelope helper.
 - Stable definitions: `$defs/failure_result`, `$defs/privacy_projection`, and
   `$defs/omitted_content`.
