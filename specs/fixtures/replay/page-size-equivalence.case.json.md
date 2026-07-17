@@ -12,7 +12,17 @@ One canonical strict-JSON fixture case with `fixture_schema: "yoetz.fixture-case
 
 ## Behavior
 
-The `input` section contains a sufficiently long mixed-event ledger replayed with page sizes 1, 2, 7, 50, 100, and 500 where only supported bounds are accepted. The `expected` section freezes identical public outputs for accepted sizes and INVALID_REQUEST for values above the public maximum. Every referenced identifier, timestamp, key, digest, nonce, provider response, and fault point is explicit test data; a test may not replace it with current time, randomness, network state, or host paths. Multi-variant cases evaluate each variant independently and declare the relationship between their outcomes.
+The `input` section contains a sufficiently long mixed-event ledger and two explicitly separate
+variant families. Internal replay variants inject test-only ledger chunk sizes `1`, `2`, `7`, `50`,
+`100`, and `500`; all are accepted by the adapter harness and produce byte-equivalent logical
+projections, while production fixes its internal `LEDGER_READ_PAGE_SIZE` to `500`. Public status
+query variants set `ProjectionQuery.limit` to `1`, `2`, `7`, `50`, and `100`, all accepted, then to
+`101` and `500`, both rejected as `INVALID_REQUEST` because `STATUS_PAGE_MAX=100` before any ledger
+read. The internal chunk-size hook is not a public request field, and `LedgerPort.load_events` has no
+caller-supplied page-size argument. Every referenced identifier, timestamp, key, digest, nonce,
+provider response, and fault point is explicit test data; a test may not replace it with current
+time, randomness, network state, or host paths. Multi-variant cases evaluate each variant
+independently and declare the relationship between their outcomes.
 
 ## Errors and edge cases
 

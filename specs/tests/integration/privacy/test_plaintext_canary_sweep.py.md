@@ -21,6 +21,9 @@ The test seeds unique canaries and sweeps every relevant surface after normal an
 It asserts:
 
 - application-controlled plaintext is absent from structural stores and logs;
+- `IMP-005` Codex commands/model text remain only in encrypted source/payload objects; shell
+  assignments, inline authorization/header flags, credential-bearing URLs, and chunk-split tokens
+  are absent from every structural surface and are blocked when selected for any disclosure sink;
 - ciphertext matches are not counted as plaintext leaks;
 - backup/export/recovery artifacts do not introduce new leaks;
 - any leak is a release failure, not a warning.
@@ -35,6 +38,7 @@ It asserts:
 1. Privacy checks cover success and fault paths.
 2. Ciphertext is not plaintext.
 3. Structural surfaces remain canary-free.
+4. Exact encrypted import retention is not a privacy-scan bypass at disclosure time.
 
 ## Tests
 

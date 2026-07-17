@@ -21,6 +21,8 @@ The harness compares request/result/event/projection/finding/receipt artifacts a
 asserts:
 
 - the same logical scenario produces the same public outcome;
+- a capped check with nonzero `suppressed_count` yields byte-identical latest-tested projection and
+  receipt `suppressed_finding_count` in memory and SQLite before and after rebuild;
 - private row shape differences are not part of the oracle;
 - supported failures map to the same public code and bounded details.
 

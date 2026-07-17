@@ -6,10 +6,12 @@
 
 ## Purpose
 
-Collects bounded first-install initialization, unlock, recovery, provider-credential, or
-reauthentication input from a foreground local human and sends exactly one accepted secret directly
-to the service's confidential ingress. It is the only CLI module that may handle these values and
-never exposes a normal argument/stdin/environment API.
+Collects bounded first-install initialization, unlock, recovery, provider-credential, security-
+policy authorization, or reauthentication input from a foreground local human and sends exactly
+one accepted secret directly to the service's confidential ingress when the selected ceremony
+requires one. It is the only CLI module that may handle these values and never exposes a normal
+argument/stdin/environment API for a secret or decision. Nonsecret closed ceremony targets may be
+supplied by their dedicated trusted-foreground command.
 
 ## Public surface
 
@@ -21,6 +23,12 @@ never exposes a normal argument/stdin/environment API.
 - `retry_keyring()` — zero-secret YZH1 action; and `set_provider_credential(binding)` /
   `rotate_provider_credential(binding)` — reauthenticate then collect one credential through exact
   service-minted bindings.
+- `change_idle_relock_policy(target: int | Literal["disabled"]) -> IdleRelockCliResult` — open the
+  exact `idle_relock_policy_change` human ceremony and return only the bounded structural outcome.
+- `IdleRelockCliPolicyValue` is exactly `{mode:"finite", seconds:<60..86400>}` or
+  `{mode:"disabled"}`. Frozen `IdleRelockCliResult` is exactly `outcome:applied|denied`,
+  `previous:IdleRelockCliPolicyValue`, `effective:IdleRelockCliPolicyValue`,
+  `scope:"service_generation"`, and positive canonical `service_generation`.
 - Private terminal guard/no-echo reader; no raw secret return.
 
 ## Behavior
@@ -31,7 +39,9 @@ the third same-UID human-control endpoint, open exactly one ceremony, verify/fre
 render its service-owned preview. Only then open
 `/dev/tty` directly; enter no-echo mode; read bounded bytes into `bytearray`; restore terminal in
 `finally`; send exactly once via `ConfidentialSecretClient`; overwrite local buffer in `finally`.
-Never read stdin, command args, environment, config, clipboard, file, shell substitution, or MCP.
+Never read a secret or human decision from stdin, command args, environment, config, clipboard,
+file, shell substitution, or MCP. Dedicated commands may pass only their documented closed,
+nonsecret ceremony target; YZH1 still supplies and freezes the authoritative preview/binding.
 
 `unlock_vault` opens YZH1 first. For locked OS-keyring mode it receives `next_phase=keyring_retry`
 and sends one typed zero-secret retry action on that connection; it never calls YZS1. For locked
@@ -68,6 +78,30 @@ receives a separate `provider_credential` binding and prompts for the credential
 only stored/rotated plus activation status. Any failure sends no credential or preserves the old
 record; no provider secret appears in normal CLI parsing/output.
 
+`change_idle_relock_policy` accepts only an already parsed canonical integer `60..86400` or the
+literal `disabled`, then opens the closed YZH1 target `{kind:"idle_relock_policy", operation:"set",
+seconds:N}` or `{kind:"idle_relock_policy", operation:"disable"}`. It verifies that the server
+preview repeats the exact proposed target and supplies a tagged current value, service generation,
+generation-only scope, and canonical target digest before rendering it on `/dev/tty`. It explicitly
+states that restart restores 900 seconds and that explicit, session-lock, suspend, and monitor-loss
+relock remain active even when idle relock is disabled.
+
+The helper accepts only the TTY choices `approve|deny`. Denial completes without YZS1; after the
+matching terminal server result it returns `IdleRelockCliResult(outcome="denied", ...)` using that
+result's exact previous/effective tagged values, scope, and generation. Approval follows the
+server's closed authorization phase: challenge-bound OS user presence, or
+`security_reauthentication` in established passphrase mode. Only the latter reads and sends one
+secret through YZS1 under the shared passphrase byte policy. After a matching terminal server
+result, the helper returns `outcome="applied"` with the server's exact previous/effective tagged
+values, scope, and generation. The CLI adds the `outcome` tag from the exact action plus matching
+terminal result; it never infers application from a connection close. A target race, relock,
+generation change, expiry, rejection, cancellation, or authorization failure returns no applied
+result and does not apply this request's proposed target.
+
+The target is nonsecret but grants no authority. There is no ordinary-control request, MCP method,
+config write, environment variable, reusable proof, or `--yes`/stdin decision path. The effective
+change is current-generation-only and is never reported as durable across service restart.
+
 A yes/boolean confirmation is not proof of human presence and cannot loosen privacy. That purpose
 requires the human to reauthenticate through the vault/OS user-presence ceremony and binds the
 result to an exact policy digest. TTY presence is an explicit ceremony but not cryptographic proof
@@ -82,6 +116,12 @@ If the service no longer proves pristine `uninitialized` state, initialization f
 prompt. An existing keyring/passphrase vault is never offered this command as unlock/reset fallback.
 Presence-capability failure is never rendered as a keyring corruption or as permission to auto-
 select passphrase mode.
+
+- Idle-relock target parsing occurs in `cli/app.md` before YZH1: anything other than canonical
+  `disabled|60..86400` exits `2` with no ceremony. A service not ready, unavailable presence/
+  passphrase authorization, stale target/generation, or expired binding fails closed without
+  changing the current policy. Ctrl-C exits `130`; an explicit `deny` exits `0` with the structural
+  denied outcome, and a confirmed applied result exits `0` with the structural applied outcome.
 
 ## Invariants
 
@@ -98,6 +138,9 @@ select passphrase mode.
    operation is frozen in the server-minted binding before collection.
 9. Setup-required keyring authority failure remains zero-secret until a human explicitly starts a
    new passphrase-initialization ceremony.
+10. Idle-relock change uses only `idle_relock_policy_change` plus, when required,
+    `security_reauthentication`; privacy/provider purposes, ordinary control, and TTY presence
+    alone cannot authorize it.
 
 ## Tests
 
@@ -107,6 +150,9 @@ select passphrase mode.
 - `tests/integration/service/test_secret_ingress.py` checks exact purpose/binding transfer.
 - Provider credential tests cover set/existing refusal, rotate/old-record preservation,
   reauthentication separation, and post-store adapter reconciliation.
+- `tests/subprocess/test_service_unlock_boundary.py` covers finite/disabled idle-relock target
+  grammar, exact preview, deny/no-YZS1, both authorization sources, structural applied outcome,
+  stale/cancel paths, restart disclaimer, and absence from ordinary/MCP control.
 
 ## Open questions
 

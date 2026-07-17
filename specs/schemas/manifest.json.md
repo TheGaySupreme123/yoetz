@@ -25,9 +25,27 @@ includes:
 - exact byte size;
 - SHA-256 digest;
 - owning Python boundary model;
-- artifact role (`MCP input`, `MCP output`, `persisted-envelope`, `configuration`,
-  `privacy-policy`, `outbound-case`, `privacy-audit`, `setup-contract`, `local-control`, or
-  `service-status`).
+- schema kind, one exact value from `request_result|event|config|version_manifest`;
+- artifact role, one exact value from `common-value|MCP input|MCP output|persisted-envelope|
+  event-envelope|event-payload|configuration|finding|semantic-provenance|receipt-document|privacy-policy|
+  outbound-case|privacy-audit|setup-contract|local-control|service-status|version-report`.
+
+The mapping is closed and path-derived: `common/*` is `common-value` except
+`common/operation-result-*`, which is `MCP output`; `operations/*-request-*` and
+`operations/*-result-*` are `MCP input` and `MCP output`; `events/accepted-event-*` is
+`persisted-envelope`, `events/event-draft-*` and `events/opaque-unknown-event-draft-*` are
+`event-envelope`, and all other `events/*` are `event-payload`; the two `findings/*` artifacts
+are `finding` and `semantic-provenance`; `config/*`, `receipts/*`, and `version/*` use
+`configuration`, `receipt-document`, and `version-report`; the four privacy artifacts use their
+four corresponding roles; control hello/request/result artifacts are `local-control`; and
+service-status is `service-status`. Every one of the 52 entries therefore has exactly one
+representable role; an unknown or path-incompatible role blocks generation.
+
+Schema kind uses a separate exhaustive path map: `events/*` is `event`, `config/*` is `config`,
+`version/*` is `version_manifest`, and `common/*|operations/*|findings/*|receipts/*|privacy/*|
+service/*` is `request_result`. Every entry records this value, and generation/loading re-derives
+it from the path; a mismatch or unknown prefix blocks release. Schema kind and artifact role are
+orthogonal and neither substitutes for the other.
 
 The v0.1 manifest lists exactly 52 `*.schema.json` members: the original 43 reviewed schemas plus
 four privacy and five local-service/control schemas. The manifest never lists itself.

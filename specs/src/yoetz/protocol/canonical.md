@@ -30,14 +30,16 @@ and does not enforce the profile).
 | `parse_canonical_integer_string(value: str, *, signed: bool = False) -> int` | strict inverse; raises `noncanonical_integer_string` |
 | `request_digest(identity: JsonValue) -> str` | publication-request identity digest with ledger-assigned-field fence |
 | `entry_digest(envelope: JsonValue) -> str` | accepted-entry digest of the structural envelope |
-| `MAX_CANONICAL_DEPTH` | `int = 64` — maximum container nesting accepted anywhere |
+| `MAX_JSON_DEPTH` | `int = 64` — the one shared maximum container nesting bound registered in `specs/INTERFACES.md` |
 
 ## Behavior
 
 ### `canonical_encode(value)`
 
 Recursive serializer over `JsonValue`; depth counter starts at 0 and any container at depth
-`MAX_CANONICAL_DEPTH` raises `nesting_too_deep`. Output is the UTF-8 encoding of:
+`MAX_JSON_DEPTH` raises `nesting_too_deep`. `protocol/canonical.py` owns and exports this one
+constant; `domain/values.py` imports it for `freeze_json` and MUST NOT define a mirror. Output is
+the UTF-8 encoding of:
 
 1. **Literals:** `None → null`, `True → true`, `False → false`. `bool` is checked before `int`
    (Python `bool` subclasses `int`).
@@ -107,7 +109,7 @@ The only permitted wire-JSON decoder in the digest path and at the CLI boundary.
      ±(2^53−1) → `integer_out_of_safe_range`;
    - `parse_constant` (NaN/Infinity/-Infinity) raises `float_forbidden`.
    Syntax errors, trailing bytes, and empty input map `json.JSONDecodeError` →
-   `malformed_json`. A `RecursionError` or depth beyond `MAX_CANONICAL_DEPTH` (checked in the
+   `malformed_json`. A `RecursionError` or depth beyond `MAX_JSON_DEPTH` (checked in the
    hooks via a decoder-local depth counter, or post-walk) → `nesting_too_deep`.
 5. Post-walk every string (keys and values) rejecting surrogate code points (`lone_surrogate` —
    Python's decoder accepts `"\ud800"` escapes) and U+0000 (`nul_byte_forbidden`, covering the

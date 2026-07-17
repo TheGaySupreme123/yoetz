@@ -12,7 +12,16 @@ One canonical strict-JSON fixture case with `fixture_schema: "yoetz.fixture-case
 
 ## Behavior
 
-The `input` section contains synthetic exact-version records for command, file change, MCP call, model message, plan update, web search, usage, and process exit. The `expected` section freezes fixed mapped event drafts, source offsets, counts, coverage, and immutable import report. Every referenced identifier, timestamp, key, digest, nonce, provider response, and fault point is explicit test data; a test may not replace it with current time, randomness, network state, or host paths. Multi-variant cases evaluate each variant independently and declare the relationship between their outcomes.
+The `input` section contains every exact-version wrapper/item shape, including command, file change,
+MCP/collaboration call, agent/reasoning message, todo/plan-shaped item, web search, top-level
+`turn.completed.usage` metadata, error, and process-exit report facts. Usage is report metadata from
+the wrapper, not a Yoetz event family; lifecycle/message/todo/error shapes that cannot justify a
+known family remain opaque plus declared gaps. The `expected` section freezes the supported mapped
+event drafts, opaque observations, source offsets, counts, coverage, and immutable import report.
+Every referenced identifier, timestamp, key, digest, nonce, provider response, and fault point is
+explicit test data; a test may not replace it with current time, randomness, network state, or host
+paths. Multi-variant cases evaluate each variant independently and declare the relationship between
+their outcomes.
 
 ## Errors and edge cases
 

@@ -19,6 +19,8 @@ cross-product before pristine mutation, distinct `vault_initialize`/
 `vault_unlock` handles, atomic passphrase envelope/sentinel/mode publication, create-once BMK,
 installation MAC derivation/purpose/domain handles, per-physical-attempt provider binding and
 one-shot transport callback, policy proof digest/expiry and relock invalidation.
+Freeze that vault verification runs only after a coordinator reservation, the vault never accesses
+the throttle store, and only the vault constructs provider/privacy/security authorization proofs.
 
 ## Errors and edge cases
 

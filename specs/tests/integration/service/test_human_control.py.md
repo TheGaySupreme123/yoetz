@@ -1,6 +1,7 @@
 # tests/integration/service/test_human_control.py — multi-phase confidential ceremony integration
 
-**Wave:** C/E | **ADRs:** ADR-008, ADR-009 | **Imports (spec-tree):** human-control/privacy policy/audit specs | **Imported by:** test runner
+**Wave:** C/E | **ADRs:** ADR-008, ADR-009 | **Imports (spec-tree):** human-control/privacy policy/
+lifecycle/audit specs | **Imported by:** test runner
 
 ## Purpose
 
@@ -9,7 +10,7 @@ that decisions/credential writes consume exact internal reauth proof atomically.
 
 ## Public surface
 
-All eight ceremony kinds, closed open/preview/next-phase/action/result frames, YZS1 binding handoff,
+All nine ceremony kinds, closed open/preview/next-phase/action/result frames, YZS1 binding handoff,
 keyring zero-secret retry, credential set/rotate, and generation/race matrix.
 
 ## Behavior
@@ -22,6 +23,10 @@ post-store provider reconciliation, privacy exact-digest decision, and no proof 
 approval ceremony with matching strong user presence, unavailable/cancelled/wrong-binding
 presence, and explicit purpose-specific secret reauthentication. Prove YZH1 TTY acknowledgement and
 same-UID peer identity alone never mint proof.
+Exercise finite and disabled idle-relock changes through both authorization sources, exact
+current/proposed digest races, proof replay, generation scope, restart default restoration, and
+continued explicit/session/suspend/monitor-loss relock. Prove wire `edit` is rejected and local edit
+requires cancel/close plus a new proposal/ceremony.
 
 ## Errors and edge cases
 
@@ -38,6 +43,8 @@ ready-local/external-fenced rather than setup-reset.
 3. Helpers cannot invent bindings; every YZS1 binding belongs to one live YZH1 ceremony.
 4. Presence and secret reauthentication converge only at a bound one-use internal proof; neither
    can authorize another target.
+5. `UnlockCoordinator` alone changes throttle state, `VaultService` alone mints the proof, and
+   `ServiceLifecycle` alone applies the idle policy.
 
 ## Tests
 

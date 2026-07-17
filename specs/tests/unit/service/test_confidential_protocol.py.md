@@ -11,8 +11,8 @@ shared byte validator without sockets, TTY, vault, keyring, randomness, or wall 
 
 ## Public surface
 
-Parameterized golden tests for all eight opens/previews, four action branches, two phases, five
-result branches, all bounded errors/close outcomes, and all six YZS1 purpose codes; malformed and
+Parameterized golden tests for all nine opens/previews, four action branches, four phases, six
+result branches, all bounded errors/close outcomes, and all seven YZS1 purpose codes; malformed and
 passphrase/provider-credential boundary matrices.
 
 ## Behavior
@@ -21,6 +21,11 @@ Load reviewed literal bytes and assert encode/decode equality, 64-lowercase-hex 
 step progression, closed targets/previews/actions/results, terminal close, and YZS1 header/binding
 bytes. Exercise passphrase 15/16/1,024/1,025, strict UTF-8, NUL/CR/LF, composed/decomposed
 distinction/no normalization; generic credentials 0/1/8,192/8,193 and NUL/CR/LF.
+Freeze `CEREMONY_EXPIRY_SECONDS = 60`, both tagged idle-policy targets, the exact absence of a wire
+`edit` action, and cross-purpose rejection for `security_reauthentication`. Freeze all four phase
+tags (`secret_required`, `authorization_required`, `keyring_retry`, `decision_required`) and the
+integer-only `expires_at_monotonic_ms` conversion/boundaries; reject float, negative, nonfinite,
+and unsafe-integer expiry representations.
 
 ## Errors and edge cases
 

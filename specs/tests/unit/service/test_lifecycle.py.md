@@ -8,11 +8,18 @@ Exhaustively verify legal transitions, admission accounting, idle relock, and bo
 
 ## Public surface
 
-State-table, fake-clock, admission-counter, signal/event, concurrent lock/stop, and deadline tests.
+State-table, fake-clock, admission-counter, signal/event, concurrent lock/stop, exact idle-policy
+target/proof, and deadline tests.
 
 ## Behavior
 
-Cover every state edge; quiescence excludes connected/in-flight/queued/leased/provider/secret work; wake never readies; monitor loss relocks.
+Cover every state edge; quiescence excludes connected/in-flight/queued/leased/provider/secret work;
+wake never readies; monitor loss relocks. Freeze the target-digest domain, accept finite 60..86400
+or explicit disabled only through a matching vault-minted proof, reject replay/race/wrong purpose,
+preserve explicit/session/suspend/monitor relock, and restore 900 seconds on simulated restart.
+Assert ready transitions require a positive vault generation, relock clears it, and proof
+consumption receives the exact current service/vault generations, `policy_generation=None`, and
+the one injected fake-clock sample.
 
 ## Errors and edge cases
 

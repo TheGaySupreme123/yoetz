@@ -17,6 +17,7 @@ keyring plus `human_authority_unavailable` setup status and no artifacts, existi
 ready-local without presence, keyring locked/unavailable, confidential no-echo
 local unlock, wrong/expired/cancelled unlock, relock, restart, MCP bridge before/after unlock, setup
 widening decision, inherited headless descriptor rejection (v0.1 has no acceptance path),
+explicit current-generation idle-relock set/disable through the confidential human ceremony,
 and stdout/stderr/transcript canaries.
 
 ## Behavior
@@ -33,6 +34,10 @@ and never returned. Confirm-every-request approval for an already-policy-authori
 foreground digest-bound TTY consent with no strong reauth and cannot widen policy; MCP/agent cannot
 complete it. A decision may survive only crash/resume before its one authorized attempt is consumed.
 Every later physical retry requires a fresh proposal, preview, and decision.
+Idle-relock set/disable uses a separate exact YZH1 preview and measured presence or the distinct
+passphrase-mode `security_reauthentication` purpose. Ordinary control/MCP cannot reach it; restart
+restores 900 seconds, and disabling idle relock never disables explicit/session/suspend/monitor-loss
+locking.
 AF_UNIX service control is allowed; AF_INET/AF_INET6, DNS, redirect, telemetry, crash, update,
 capability and external-provider probes remain governed independently.
 
@@ -51,6 +56,8 @@ shell history fixture, MCP output and agent context.
 4. Policy confirmation and vault unlock are separate authorities.
 5. Local control transport is not external egress.
 6. Setup-required status never starts a passphrase prompt; only the separate explicit command does.
+7. An idle-relock command-line target is not authority; only the matching generation-bound
+   confidential ceremony can apply it.
 
 ## Tests
 

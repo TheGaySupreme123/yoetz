@@ -1,7 +1,7 @@
 # schemas/events/check-recorded-1.0.0.schema.json — check-recorded payload schema
 
 **Wave:** D/E | **ADRs:** ADR-001, ADR-002, ADR-003, ADR-006 | **Imports (spec-tree):**
-`src/yoetz/domain/events.md`, `src/yoetz/domain/findings.md`
+`src/yoetz/domain/events.md`, `src/yoetz/domain/findings.md`, `src/yoetz/protocol/coverage.md`
 **Imported by:** check and replay tests
 
 ## Purpose
@@ -24,13 +24,15 @@ Closed payload object with:
 - `verdict`;
 - `returned_finding_ids`;
 - `suppressed_count`;
+- `coverage`;
 - `semantic_status`;
 - `semantic_reason`;
 - optional final `semantic_provenance` under the presence rules in `domain/events.md`;
 - `engine_version`;
 - `projection_version`.
 
-The schema keeps the selected findings and status/reason explicit and bounded. The
+The schema keeps the selected findings, component-wise weakest material `Coverage`, and
+status/reason explicit and bounded. The
 status/reason pair uses the closed matrix in `ports/semantic.md`; no free-form reason is allowed.
 Predispatch outcomes forbid provenance, while attempted outcomes may carry only receipt-finalized
 `SemanticProvenance`.
@@ -38,6 +40,7 @@ Predispatch outcomes forbid provenance, while attempted outcomes may carry only 
 ## Errors and edge cases
 
 - Unknown semantic status fails.
+- Missing, malformed, or stronger-than-the-checked-input coverage fails.
 - Unknown semantic reason, an invalid status/reason pair, or provisional/predispatch provenance fails.
 - Hidden or extra findings fail.
 
@@ -47,6 +50,7 @@ Predispatch outcomes forbid provenance, while attempted outcomes may carry only 
 2. Semantic status is closed.
 3. Extra keys are forbidden.
 4. Semantic incompleteness has one exact machine-readable cause.
+5. Recorded coverage is the conservative coverage summary consumed by replay/projections.
 
 ## Tests
 

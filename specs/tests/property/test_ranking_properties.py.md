@@ -12,10 +12,13 @@ input sets.
 
 ## Public surface
 
-- `test_permutation_invariance` — input order does not change the ranked prefix.
+- `test_permutation_invariance` — input order does not change the ordered selected set.
 - `test_cap_and_suppressed_count_properties` — the hard cap is honored exactly.
 - `test_tie_break_is_finding_id` — deterministic ID tie-break holds.
-- `test_verdict_tracks_visible_prefix` — verdict logic follows the selected findings only.
+- `test_verdict_tracks_selection_and_context` — verdict follows the exact selected findings plus
+  `RankingContext.completeness` precedence.
+- `test_suppression_never_strengthens_coverage` — result coverage always equals the full pre-cap
+  context coverage.
 
 ## Behavior
 
@@ -24,7 +27,8 @@ The property suite varies finding collections and proves:
 - stable ordering by the documented sort key;
 - exact suppressed-count accounting;
 - no duplicate ID leakage;
-- verdict consistency with the visible prefix.
+- verdict consistency with the ordered selection and explicit completeness context;
+- coverage invariance across cap sizes and semantic diversity replacement.
 
 ## Errors and edge cases
 
@@ -33,7 +37,7 @@ The property suite varies finding collections and proves:
 ## Invariants
 
 1. Ranking is pure and stable.
-2. The visible prefix is all that matters to the verdict.
+2. Only the ordered selection plus immutable `RankingContext` determine the verdict.
 3. Cap accounting is exact.
 
 ## Tests

@@ -18,11 +18,13 @@ assistant prose.
 |---|---|
 | `FindingKind` | enum of deterministic and semantic finding kinds from `specs/INTERFACES.md` |
 | `CheckVerdict` | enum: `action_required`, `no_issue_detected`, `insufficient_coverage`, `incomplete_check` |
+| `WaiverScope` | enum with the sole v0.1 value `finding_only` |
+| `FINDING_KIND_TRAITS` | immutable mapping `FindingKind -> (required_priority, actionable)` registered in `specs/INTERFACES.md` |
 | `CandidateFinding` | frozen ID-free value produced by pure deterministic/semantic post-validation |
 | `Finding` | frozen dataclass `(finding_id, kind, origin, priority, summary, detail, subject_refs, policy_id, policy_version, subject_frontier, coverage, provenance)` |
 | `DeterministicFinding` | alias of `Finding` for deterministic-origin findings |
 | `SemanticFinding` | alias of `Finding` for semantic-origin findings |
-| `RankedFindings` | frozen wrapper for ordered findings and suppressed-count metadata |
+| `RankedFindings` | frozen dataclass `(findings, suppressed_count, verdict, coverage)` |
 | `SemanticProvenance` | frozen provenance record for semantic findings |
 | `rank_key(finding)` | deterministic sort key helper |
 
@@ -42,6 +44,17 @@ findings. `FindingKind` describes the issue and never implies origin: the determ
 research-evidence pack and semantic reviewer may both produce an evidence-assessment kind. The same
 surface type is used for both because the CLI, MCP, and receipt layers need one common
 representation, but origin/provenance and policy fields record which path produced it.
+
+`FindingKind` is the closed fourteen-value inventory registered in `specs/INTERFACES.md`, including
+`action_without_result`. `FINDING_KIND_TRAITS` implements that registry table verbatim. A
+candidate's explicit `priority` MUST equal its kind's registered priority; a mismatch is invalid
+rather than a caller-selected reranking. The registered `actionable` boolean is derived from kind
+and is never another serialized finding field. This keeps both deterministic packs and
+post-validated semantic challenges on one ranking contract.
+
+`WaiverScope.finding_only` is the sole v0.1 waiver scope. It binds exactly the `finding_id` and
+`finding_frontier` carried by the response event; it cannot widen to a subject, obligation, task,
+or future instance of the same rule. An optional expiry may narrow this scope but never widen it.
 
 A deterministic finding's `summary` and `detail` are rule-templated prose that refer to their
 subjects by ID. They never quote, paraphrase, or embed the content behind a `subject_ref`: not an
@@ -94,13 +107,21 @@ durable.
 
 `RankedFindings` preserves:
 
-- the ordered list returned to the caller;
-- the number of suppressed lower-priority findings;
-- the final verdict implied by the set.
+- the ordered selection returned to the caller (not necessarily the ordinary top-N prefix because
+  the registered semantic diversity rule may reserve one slot);
+- the exact number of unselected findings after the cap/diversity rule (the displaced ordinary
+  top-N item also counts as suppressed);
+- the final verdict implied by the set; and
+- the application-supplied weakest material `Coverage` across the full checked case, policy and
+  semantic dependencies, explicit gaps, and all candidates before capping.
 
-`rank_key(finding)` returns a deterministic ordering tuple that sorts by materiality, actionability,
-evidence strength, and then finding ID as the final tie-break. That tie-break is the only reason two
-equal-priority findings render stably across runs.
+Those are exactly four stored facts: `findings: tuple[Finding, ...]`, `suppressed_count: int`,
+`verdict: CheckVerdict`, and `coverage: Coverage`. None is recomputed lazily from mutable state.
+Suppressing or diversity-replacing a finding never changes that coverage field.
+
+`rank_key(finding)` returns the exact deterministic ordering tuple owned by
+`kernel/ranking.md`: registered priority, registered actionability, evidence-strength bucket,
+coverage bucket, origin preference, and finally finding ID bytes. It never reads prose.
 
 ## Errors and edge cases
 
@@ -129,11 +150,14 @@ equal-priority findings render stably across runs.
 
 ## Tests
 
-- `tests/unit/domain/test_findings.py` — kind, priority, and provenance validation; deterministic
+- `tests/unit/domain/test_findings.py` — exhaustive fourteen-kind trait table, priority-mismatch
+  rejection, `WaiverScope.finding_only`, four-field `RankedFindings`, and provenance validation;
+  deterministic
   prose carries no content from behind its refs — fixtures whose obligation description, claim
   statement, and evidence bytes are distinctive marker strings produce `summary`/`detail` containing
   no marker, including when `subject_refs` span multiple writers.
-- `tests/unit/kernel/test_ranking.py` — ordering and suppression-count behavior.
+- `tests/unit/kernel/test_ranking.py` — every rank-key component, deterministic-before-semantic
+  full-fact ties, final ID-byte tie-break, and suppression-count behavior.
 - `tests/subprocess/test_cli_invocations.py` — three-item cap, stable ordering, suppressed count, and
   no-stronger-than-evidence human wording.
 

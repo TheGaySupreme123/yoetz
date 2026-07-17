@@ -354,8 +354,9 @@ does not finalize an `EgressReceipt`; the first receipt for that branch is a ter
 pre-dispatch failure or the terminal result of its physical attempt.
 
 `LocalDisclosureReceipt` uses the same structural fields but names a `LocalDisclosureSink`, has no
-`EgressChannel`, and records whether the sink was `local_model`, `agent_context`, or
-`trusted_human_control`. Both receipt types are persisted through one `PrivacyAuditPort`; neither is
+`EgressChannel`, and records whether the sink was `local_model`, `agent_context`,
+`local_human_view`, or `trusted_human_control`. Both receipt types are persisted through one
+`PrivacyAuditPort`; neither is
 a task event. Both enforce the protocol's same closed outcome/reason compatibility matrix:
 `completed` forbids a failure reason, while every other outcome requires exactly one reason valid
 for that outcome. `approval_expired` admits `authorization_expired|authorization_stale|

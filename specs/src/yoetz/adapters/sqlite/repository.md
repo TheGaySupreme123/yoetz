@@ -14,7 +14,8 @@
 The single durable implementation of `LedgerPort`. Everything the product promises about
 acknowledgement, idempotency, ordering, and replay is ultimately this file executing the ledger
 append and check/semantic lease lifecycle owned by `specs/src/yoetz/ports/ledger.md` against
-the schema owned by `specs/src/yoetz/resources/migrations/bundle/0001.sql.md`.
+the schema owned by canonical root `specs/migrations/bundle/0001.sql.md` and executed from its
+verified byte-identical installed resource.
 It is deliberately not a second semantic kernel: canonicalization, validation, and reducers are
 imported from `protocol/` and `kernel/`; this file only decides *when* they run relative to
 SQLite transaction boundaries and turns their outputs into durable rows.
@@ -26,17 +27,18 @@ SQLite transaction boundaries and turns their outputs into durable rows.
   - `append_batch(AppendCommand) -> AppendResult`
   - `load_events(session_id, after=0, through=None) -> AsyncIterator[AcceptedEvent]`
   - `load_projection(session_id, view) -> StoredProjection | None`
+  - `query_projection(query: ProjectionQuery) -> ProjectionPage`
   - `freeze_case(session_id, writer_id, expected_frontier, request_id, request_digest) -> FrozenCase`
   - `commit_check_if_current(frozen, findings, semantic_status, semantic_reason, semantic_provenance, request_id) -> CheckResult`
   - `lookup_operation(writer_id, operation_id) -> OperationRecord | None`
 - Check/semantic orchestration methods in the shared `LedgerPort` contract:
-  - `advance_check_phase(lease, expected_phase, next_phase, durable_object_ref?) -> OperationLease`
-  - `enqueue_semantic_job(lease, case_digest, case_object_ref) -> SemanticJobRecord`
-  - `claim_semantic_job(lease, job_id) -> SemanticAttemptHandle`
-  - `record_attempt_outcome(handle, outcome, result_object_ref?, terminal_code?) -> None`
-  - `select_attempt(lease, handle, selected_result_object_ref) -> SelectedAttempt`
-  - `renew_leases(lease) -> OperationLease`
-  - `reclaim_operation(writer_id, operation_id, request_digest) -> OperationLease | PendingVerdict`
+  - `advance_check_phase(lease: OperationLease, expected_phase: CheckPhase, next_phase: CheckPhase, durable_object_ref: ObjectRef | None = None) -> OperationLease`
+  - `enqueue_semantic_job(lease: OperationLease, case_digest: str, case_object_ref: ObjectRef) -> SemanticJobRecord`
+  - `claim_semantic_job(lease: OperationLease, job_id: str) -> SemanticAttemptHandle`
+  - `record_attempt_outcome(handle: SemanticAttemptHandle, outcome: AttemptOutcome, result_object_ref: ObjectRef | None = None, terminal_code: SemanticReason | None = None) -> None`
+  - `select_attempt(lease: OperationLease, handle: SemanticAttemptHandle, selected_result_object_ref: ObjectRef) -> SelectedAttempt`
+  - `renew_leases(lease: OperationLease) -> OperationLease`
+  - `reclaim_operation(writer_id: str, operation_id: str, request_digest: str) -> OperationLease | PendingVerdict`
 - `run_passive_checkpoint(wal_page_threshold) -> CheckpointReport` (registered shared result).
 - `rebuild_projection(projection_name) -> None` — generation-replay trigger owned with
   `specs/src/yoetz/kernel/projections.md`.
@@ -228,6 +230,21 @@ terminal job failure and weakens semantic coverage — it does not quarantine th
 leases. A new bundle owner generation invalidates every older operation/job lease immediately,
 regardless of wall clock.
 
+### `reclaim_operation`
+
+One `BEGIN IMMEDIATE` transaction reads `(writer_id, operation_id)` and applies the port's exact
+reclaim table. Absence returns `PendingVerdict(absent)` and creates nothing. A different digest
+rolls back with `IDEMPOTENCY_CONFLICT`. Complete/quarantined rows return their structural
+`terminal`/`quarantined` verdict and stored `OperationRecord`. A current-generation unexpired
+lease returns `live` with a bounded remaining-milliseconds hint. An expired or stale-generation
+pending check is reclaimed by one `UPDATE` whose `WHERE` names the old state, phase, owner
+generation, lease owner, lease generation, and expiry; it writes the current owner generation/
+nonce, increments lease generation exactly once, assigns the fresh bounded expiry, and returns
+the new `OperationLease`. Zero updated rows means the transaction rereads and returns the now-
+authoritative verdict; it never returns the speculative lease. A pending non-check row, illegal
+phase, invalid resume object, contradictory event range, or terminal result/digest disagreement
+is closed with the matching registered `OperationQuarantineCode`, not repaired in place.
+
 ### Reads
 
 `lookup_operation`: single indexed read; returns the `OperationRecord` (state, phase, digests,
@@ -254,6 +271,16 @@ load version V into empty tables, bounded pages ordered by `ingestion_seq <= F` 
 per-page digest/predecessor/payload verification and pure reducer application, persist
 `applied_through_seq` per page in one transaction, atomically switch the generation. A failed
 rebuild leaves the previous generation intact.
+
+`query_projection`: validates the typed filter/position and exact requested frontier, then uses
+the view's registered covering index and stable sort key to select at most `limit + 1` rows. It
+returns no more than `limit`, with an exclusive typed next position only when the extra row exists,
+plus requested/head/effective frontiers, lag, projection version, rebuild state, coverage, and
+sorted gaps. Each page is one bounded read transaction released before return. A cursor/query/
+version mismatch or future frontier is `INVALID_REQUEST`; absence is `SESSION_NOT_FOUND`; an exact
+historical frontier that cannot be represented fails or is served by bounded verified replay,
+never silently substituted. `candidate_findings` remains the registered `load_projection` + pure
+kernel exception and is rejected as a repository row-query view.
 
 ### `run_passive_checkpoint` (ADR-003 checkpoint ownership)
 

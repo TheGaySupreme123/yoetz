@@ -1,9 +1,10 @@
 # src/yoetz/protocol/coverage.py — coverage lattice and weakest-coverage helpers
 
 **Wave:** A/B | **ADRs:** ADR-002, ADR-004, ADR-006 | **Imports (spec-tree):**
-`protocol/models.md`, `domain/events.md`, `domain/findings.md`, `domain/receipts.md`,
-`kernel/ranking.md`, `kernel/receipt_builder.md`
-**Imported by:** checks, receipts, and renderers
+`protocol/errors.md`
+**Imported by:** `protocol/models.md`, `domain/events.md`, `domain/findings.md`,
+`domain/receipts.md`, `domain/values.md`, `kernel/ranking.md`, `kernel/receipt_builder.md`, checks,
+and renderers
 
 ## Purpose
 

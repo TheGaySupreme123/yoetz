@@ -2,12 +2,11 @@
 
 **Wave:** C | **ADRs:** ADR-003 | **Imports (spec-tree):**
 `specs/src/yoetz/adapters/sqlite/connection.md`,
-`specs/src/yoetz/adapters/sqlite/recovery.md` (backup sequence),
-`specs/src/yoetz/adapters/sqlite/maintenance.py.md`,
-`specs/src/yoetz/adapters/sqlite/importer.md`,
+`specs/src/yoetz/ports/maintenance.py.md` (`MaintenanceHandle` only),
 `specs/migrations/catalog/0001.sql.md`, `specs/migrations/bundle/0001.sql.md` | **Imported by:**
 `specs/src/yoetz/adapters/sqlite/start_catalog.md`,
-`specs/src/yoetz/adapters/sqlite/repository.md`, `specs/src/yoetz/application/start.md`
+`specs/src/yoetz/adapters/sqlite/repository.md`,
+`specs/src/yoetz/adapters/sqlite/maintenance.py.md`, `specs/src/yoetz/application/start.md`
 
 ## Purpose
 
@@ -27,7 +26,9 @@ unknown schemas, and the absolute rule that canonical event bytes are never rewr
 - `initialize_catalog(db) -> None`, `initialize_bundle(db, bundle_meta_seed) -> None` — run all
   registered migrations on a fresh (`uninitialized`) database.
 - `run_migrations(db, registry, *, maintenance: MaintenanceHandle) -> MigrationReport` — upgrade
-  an existing database to the current registered version.
+  an existing database to the current registered version; `MaintenanceHandle` is the neutral
+  service-internal authority value owned by `ports/maintenance.py`, not an import from the concrete
+  SQLite maintenance adapter.
 - `current_schema_version(registry) -> int`.
 
 Reviewable DDL lives in `specs/migrations/catalog/0001.sql.md` and
@@ -410,19 +411,20 @@ CREATE INDEX semantic_jobs_operation_state
 ON semantic_jobs(writer_id, operation_id, state);
 ```
 
-Migration `0001` also creates the versioned **projection tables** for projection generation 1
-(purpose-built typed tables from `specs/src/yoetz/kernel/projections.md` — obligations, claims, evidence
-edges, findings, responses, coverage; exact columns owned by
-`specs/src/yoetz/kernel/projections.md`, created here from that spec's DDL constant with a
-`p1_` generation prefix). Projection tables are disposable; dropping and replaying them is always
-legal.
+Migration `0001` also creates the versioned **projection tables** for projection generation 1. The
+canonical root `migrations/bundle/0001.sql` owns their exact `p1_` table/column/constraint/index
+bytes, and the installed migration resource is executed unchanged after manifest verification.
+`specs/src/yoetz/kernel/projections.md` owns the corresponding pure typed record families and
+derivation semantics only; this runner never concatenates a Python DDL constant or synthesizes SQL.
+Projection tables are disposable; dropping and replaying them through a later registered migration
+is always legal.
 
 Before projection tables, the same frozen bundle migration creates `import_jobs`,
 `import_request_aliases`, `import_batches`, and their bounded pending/status/next-batch indexes
 with the exact columns/CHECK/FK/uniqueness contract in
-`specs/migrations/bundle/0001.sql.md` and `adapters/sqlite/importer.md`. These are release schema,
-not lazy adapter-owned DDL. The runner's schema inventory rejects their absence or any normalized
-SQL/index mismatch.
+`specs/migrations/bundle/0001.sql.md`. These are release schema, not lazy adapter-owned DDL; the
+importer adapter conforms to them but neither supplies nor co-owns their DDL. The runner's schema
+inventory rejects their absence or any normalized SQL/index mismatch.
 
 ### `initialize_bundle(db, bundle_meta_seed)`
 
@@ -446,19 +448,21 @@ verification.)
 
 ### `run_migrations(db, registry, maintenance)` — migration runner rules
 
-1. Requires a `MaintenanceHandle` proving an **exclusive maintenance generation** acquired by
-   `specs/src/yoetz/adapters/sqlite/maintenance.py.md`; ordinary writes receive bounded
-   retryable `BUNDLE_BUSY` during migration. The corresponding catalog operation must be
-   `pending/migration` at the expected fenced phase.
+1. Requires the `ports/maintenance.py` `MaintenanceHandle` proving an **exclusive maintenance
+   generation**, acquired by `specs/src/yoetz/adapters/sqlite/maintenance.py.md`; ordinary writes
+   receive bounded retryable `BUNDLE_BUSY` during migration. The runner revalidates its task,
+   request, route, owner generation, lease generation, and plan digest against the corresponding
+   catalog operation, which must be `pending/migration` at the expected fenced phase. The handle is
+   never accepted on nominal type alone.
 2. `verify_schema_identity` first. `state="current"` → no-op report. `state="uninitialized"` →
    delegate to `initialize_*`. Newer unknown version → `StorageUnsafeError("schema_newer_than_
    binary")`, fail closed for writes (a payload-safe structural inspect may be offered only if
    explicitly tested). Unknown *older* version not in the registry → same failure with reason
    `schema_version_unknown`.
-3. **Backup first**: run the verified backup sequence in
-   `specs/src/yoetz/adapters/sqlite/maintenance.py.md` and
-   `specs/docs/runbooks/backup-restore.md.md`, then
-   record its manifest ID in the migration report. No backup, no migration.
+3. **Backup first**: require the same fenced catalog operation to be at `backup_ready` with a
+   completed, verified backup-manifest digest already committed by the owning maintenance adapter.
+   The runner records that manifest ID in the migration report. It never imports or recursively
+   calls the concrete maintenance adapter. No verified backup, no migration.
 4. Apply each pending migration inside one transaction where SQLite permits the DDL
    transactionally; bump `PRAGMA user_version` and the `storage_schema_version` /
    `catalog_meta.storage_schema_version` metadata **together in that same step**.

@@ -12,11 +12,16 @@ One canonical strict-JSON fixture case with `fixture_schema: "yoetz.fixture-case
 
 ## Behavior
 
-The `input` section contains fixed ledger inputs, the deterministic research-evidence assessment and
-its exact basis, plus accepted and rejected scripted semantic outputs. The semantic case separately
-allows frozen-frontier refs and the newly allocated local deterministic finding ref. The `expected`
-section freezes validated `evidence_does_not_support_claim`, a direct-agent challenge requesting
-better evidence or claim revision, and rejection of invented/out-of-case refs or basis mutation.
+The `input` section contains fixed ledger inputs plus three deterministic rule variants. A claim
+with absent/unavailable/stale typed support freezes `claim_without_admissible_evidence`; a claim with
+present typed support that structurally contradicts its closed outcome/state freezes
+`evidence_does_not_support_claim`; and comparable captured-versus-claimed state digests that differ
+freeze `diff_does_not_match_account`. Each has exact basis facts/refs plus a closest non-trigger.
+The scripted semantic case may independently return `evidence_does_not_support_claim` with explicit
+semantic origin; it separately allows frozen-frontier refs and the newly allocated local
+deterministic finding ref. The `expected` section freezes validated deterministic and semantic
+origins, a direct-agent challenge requesting better evidence or claim revision, and rejection of
+invented/out-of-case refs or basis mutation.
 Every referenced identifier, timestamp, key, digest, nonce, provider response, and fault point is
 explicit test data; a test may not replace it with current time, randomness, network state, or host
 paths. Multi-variant cases evaluate each variant independently and declare the relationship between

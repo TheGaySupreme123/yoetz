@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Verify all six purpose/consumer/bound/one-shot/redaction/overwrite semantics without overclaiming
+Verify all seven purpose/consumer/bound/one-shot/redaction/overwrite semantics without overclaiming
 zeroization.
 
 ## Public surface
@@ -16,14 +16,22 @@ stale generation, plus exact `ProviderAttemptAuthBinding` and custom-transport c
 
 Instrument buffers to prove source and allocation overwrite attempts on every path and truthful
 page-lock capability reporting. For provider credentials, prove one handle is bound to one
-provider/model/endpoint profile/version/purpose/dispatch/final-body digest/deadline/generation,
+provider/model/endpoint profile/version/purpose/authorization-scope digest/purpose digest/dispatch/
+final-body digest/deadline/generation,
 exposes its view only to the injected custom transport during header injection/request start, and
 is consumed before retry. SDK client/default headers see only the nonsecret sentinel.
+Reject a purpose token whose `canonical_digest({"purpose": purpose})` differs from the stored or
+attempt `purpose_digest`, and reject any shared credential/attempt binding mismatch before exposure.
+Prove `UserPresencePort.consume` returns no authority, only `VaultService` constructs
+`HumanAuthorizationProof`, and privacy/security reauthentication cannot substitute for each other.
+Freeze the proof's eight public field names, hidden `_consume_latch` exclusions, exact bound
+`consume(...)` validation, expiry, and concurrent one-winner consumption.
 
 ## Errors and edge cases
 
 Wrong purpose/consumer including initialize/unlock substitution, second consume, oversize, callback
-retention/exception/cancel, close/fork, body/profile/deadline mismatch, generic/stock transport,
+retention/exception/cancel, close/fork, body/profile/scope/purpose-digest/deadline mismatch,
+generic/stock transport,
 redirect, callback reuse, and relock during injection.
 
 ## Invariants

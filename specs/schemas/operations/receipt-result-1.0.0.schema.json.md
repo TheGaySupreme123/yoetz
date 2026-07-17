@@ -2,7 +2,7 @@
 
 **Wave:** D | **ADRs:** ADR-001, ADR-002, ADR-003, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
 `src/yoetz/application/receipt.md`, `src/yoetz/domain/receipts.md`,
-`src/yoetz/protocol/errors.md`
+`src/yoetz/protocol/errors.md`, `schemas/receipts/receipt-document-1.0.0.schema.json`
 **Imported by:** CLI, MCP, and parity tests
 
 ## Purpose
@@ -27,6 +27,10 @@ Union of success and public-error branches. The success branch carries:
 
 The schema must admit the canonical machine document and the bounded human derivative without
 changing the stored truth.
+
+The conclusion code is the exact offline `$ref`
+`https://schemas.yoetz.dev/0.1/receipts/receipt-document/1.0.0#/$defs/receipt_conclusion`; it is not
+a separately restated string enum.
 
 Receipt/task/session/object IDs, frontiers, conclusion/redaction enums, digests, counts, coverage,
 and version identities are structural. Claim/finding/evidence text, human wording, task labels, and

@@ -37,6 +37,7 @@ and provider implementations to vary without granting CLI/MCP/provider code dire
 - `class PrivacyClassifierPort(Protocol)`:
   - `classify(candidate: CandidateContext, policy: EffectivePrivacyPolicy) -> ClassifiedContext`
   - `minimize_and_scan(classified, decision: PrivacyDecision) -> PreparedOutboundCase`
+  - `scan_exact_bytes(data: bytes) -> tuple[ForbiddenDataKind, ...]`
 - `class HumanPrivacyControlPort(Protocol)`:
   - `async request_disclosure_decision(proposal: DisclosureProposal) -> HumanPrivacyDecision | PendingHumanDecision`
   - `async request_policy_decision(proposal: PolicyTransitionProposal) -> HumanPolicyDecision | PendingHumanDecision`
@@ -142,8 +143,14 @@ the proposal; a caller assertion cannot be upgraded into policy authority.
 labels, scope membership, the reviewed forbidden-source rules, and the versioned secret scanner.
 It does not call a model. `minimize_and_scan` chooses only policy-relevant fields, applies fixed
 redaction transforms, serializes canonical bounded bytes, and scans the exact bytes that would be
-sent. A forbidden match, uncertain classification, cap violation, or policy mismatch returns a
-blocked decision; no caller can request `ignore`.
+sent. `scan_exact_bytes` is the same immutable scanner entry point used for those prepared logical
+bytes and for a provider renderer's exact final application-body bytes. It returns only a canonical
+sorted tuple of closed `ForbiddenDataKind` values, one per match; duplicate kinds are retained so
+`len(result)` is the bounded finding count. It retains no input and exposes no matching substring.
+Runtime composition injects the same `PrivacyClassifierPort` instance into the coordinator and
+gateway; a scanner/ruleset change requires reconstruction and reconciliation rather than an
+in-place hot swap. A forbidden match, uncertain classification, cap violation, or policy mismatch
+returns a blocked decision; no caller can request `ignore`.
 
 ### Durable approval/audit state machine
 
@@ -294,7 +301,8 @@ verification `receipt` document.
 For external dispatch, the credential-free adapter deterministically renders the final application
 request body first. The gateway commits that exact body through its `privacy_audit` MAC handle,
 binds a fresh one-physical-attempt `ProviderCredentialHandle` to provider/model/endpoint profile+
-version, purpose, dispatch ID, body digest, service generation, and deadline, and places it only
+version, purpose, authorization-scope digest, purpose digest, dispatch ID, body digest, service
+generation, and deadline, and places it only
 inside the custom HTTP transport callback. The gateway then revalidates the unchanged binding and
 atomically consumes privacy authorization as the last authoritative transition before invoking
 that callback; a failed consumption invalidates the unused handle. Authentication-header injection cannot change the body;
@@ -333,6 +341,16 @@ of an otherwise unobserved mid-generation platform change. Restoration requires 
 composition/reconciliation.
 The other four network channels use the same composition fence if implemented. This is a safe
 capability restriction, not evidence that a human approved an individual request.
+
+The separation is deliberate and exact: `HumanAuthorityCapability` is a runtime fence for external
+network activation, provider-credential mutation, and privacy-policy widening; it is not a second
+per-call approval for a local disclosure already inside durable policy. Consequently
+`source=unavailable` does not by itself disable an already enabled, exact-profile local model. That
+local path still requires a policy row whose widening was committed through strong local-human
+reauthentication, the exact installed AF_UNIX profile, matching service/vault/policy generations,
+the full classifier/minimizer/never-send path, and atomic `consume_local` before the first write. An
+invalid or forged durable row fails policy/catalog validation; unavailable authority cannot create
+or widen one.
 
 ## Errors and edge cases
 
@@ -403,6 +421,9 @@ capability restriction, not evidence that a human approved an individual request
 15. A local sink receives bytes only after `consume_local`; agent-context completion is durable
     before serialization and local-model replay never repeats a consumed proposal.
 16. Structural privacy receipt inspection is CLI/UI-only and cannot dereference content.
+17. External human-authority capability and local-model disclosure authority are intentionally
+    non-interchangeable: unavailable external activation neither widens nor revokes a valid local
+    policy, and every local write remains policy-, profile-, generation-, scan-, and receipt-gated.
 
 ## Tests
 

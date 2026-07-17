@@ -20,8 +20,11 @@ authority/reservation, receipt, commitment, provider/profile/model, and bounded 
 predispatch blocked variant freezes an exact status/reason with no provenance and no semantic
 findings. Cross-paired reasons and provisional provenance are explicit rejection variants. The
 expected section also freezes coverage limits and wording that labels semantic conclusions
-advisory. Every referenced identifier, timestamp, key, digest, nonce, provider response, and fault
-point is explicit test data; a test may not replace it with current time, randomness, network
+advisory. Because the success variant's advisory findings remain unresolved at the frozen
+frontier, its exact receipt `conclusion` is `unresolved_findings_remain`; deterministic coverage is
+not upgraded merely because semantic evaluation succeeded. Every referenced identifier, timestamp,
+key, digest, nonce, provider response, and fault point is explicit test data; a test may not replace
+it with current time, randomness, network
 state, or host paths. Multi-variant cases evaluate each variant independently and declare the
 relationship between their outcomes.
 

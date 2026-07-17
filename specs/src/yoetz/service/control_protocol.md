@@ -22,7 +22,7 @@ calling Python objects directly or inventing a secret-bearing/private service me
 - `async server_handshake(stream, peer_identity, service_status) -> ControlSession`.
 - `validate_request(ControlRequest)`, `validate_result(ControlResult)`, and
   `schema_for_method(ControlMethod, direction)`, which selects only the reviewed branch compiled
-  from the control request/result artifacts (six offline operation `$ref`s plus seventeen inline
+  from the control request/result artifacts (six offline operation `$ref`s plus nineteen inline
   support `$defs`) and has no open-dict/default registry entry.
 - `@dataclass(frozen=True, slots=True) class ControlSession` — negotiated version, client kind,
   service instance/generation, and authenticated peer identity handle; nonserializable.

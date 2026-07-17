@@ -10,16 +10,23 @@ reused across a sibling, parent, unrelated workspace, or changed request.
 
 ## Public surface
 
-Canonical fixture `yoetz.fixture-case/1.0.0`, ID `PRIV-007`, with machine policy, workspace
-`wsp_alpha`, tasks `tsk_alpha_1`/`tsk_alpha_2`, workspace `wsp_beta`, and requests `req_alpha_a`/
-`req_alpha_b`. Exact authorizations bind one scope each.
+Canonical fixture `yoetz.fixture-case/1.0.0`, ID `PRIV-007`, with installation
+`ins_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa`, machine policy; workspace scope A
+commitment `hmac-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`;
+tasks `tsk_aaaaaaaa-1111-4111-8111-111111111111` and
+`tsk_aaaaaaaa-2222-4222-8222-222222222222`; workspace scope B commitment
+`hmac-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`; and
+requests `req_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1` and
+`req_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2`. Exact authorizations bind one scope each. The fixture
+contains no raw workspace ID or path.
 
 ## Behavior
 
-The `tsk_alpha_1` authorization approves only its selected case. Reuse for sibling task, workspace
-parent, `wsp_beta`, another request, broader category, endpoint or purpose returns `scope_mismatch`
-before adapter construction. Machine permission does not widen a narrower workspace/task denial;
-effective policy is intersection. Receipts record opaque scope refs/digest and never filesystem path.
+The first task authorization approves only its selected case. Reuse for the sibling task, workspace
+scope A parent, workspace scope B (proved by a different commitment), another request, broader
+category, endpoint, or purpose returns `scope_mismatch` before adapter construction. Machine
+permission does not widen a narrower workspace/task denial; effective policy is intersection.
+Receipts record opaque scope refs/digest and never a raw workspace identifier or filesystem path.
 
 ## Errors and edge cases
 

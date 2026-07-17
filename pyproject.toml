@@ -1,0 +1,63 @@
+[build-system]
+requires = ["uv_build>=0.11.29,<0.12"]
+build-backend = "uv_build"
+
+[project]
+name = "yoetz"
+version = "0.1.0"
+description = "A local-first evidence ledger and review engine for agent work"
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+license = "Apache-2.0"
+dependencies = [
+    "anyio==4.14.2",
+    "apsw==3.53.3.1",
+    "cryptography==49.0.0",
+    "jsonschema==4.26.0",
+    "keyring==25.7.0",
+    "mcp==1.28.1",
+    "platformdirs==4.10.0",
+    "pydantic==2.13.4",
+    "typer==0.27.0",
+]
+
+[project.optional-dependencies]
+portable-recovery = ["argon2-cffi==25.1.0"]
+semantic-openai = [
+    "httpx==0.28.1",
+    "openai==2.46.0",
+]
+
+[project.scripts]
+yoetz = "yoetz.cli.app:main"
+
+[dependency-groups]
+dev = [
+    "hypothesis==6.156.6",
+    "pytest==9.1.1",
+    "pytest-timeout==2.4.0",
+    "ruff==0.15.22",
+]
+
+[tool.uv]
+required-version = "==0.11.29"
+prerelease = "disallow"
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]
+
+[tool.pyright]
+include = ["src", "tests"]
+exclude = ["specs"]
+extraPaths = ["src", "tests"]
+pythonVersion = "3.14"
+typeCheckingMode = "strict"
+
+[tool.pytest.ini_options]
+addopts = ["--strict-config", "--strict-markers"]
+testpaths = ["tests"]

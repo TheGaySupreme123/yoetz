@@ -46,6 +46,13 @@ forbidden, unrelated, out-of-scope, or unclassified excerpt representable as app
 omission retains only its typed subject/category/reason; no withheld plaintext appears in the
 manifest or model prompt.
 
+Repeat every sink row with `IMP-005` imported Codex content. Import may preserve exact command/model
+bytes only in encrypted local objects and intentionally performs no content secret scan, but it
+grants no disclosure authority. Shell assignments, inline authorization/header flags,
+credential-bearing URLs, and JSON/UTF-8/chunk-split canaries must be rejected by the same
+classifier/scanner used for native content before external `llm_inference`, `local_model`,
+`agent_context`, or `local_human_view` serialization/I/O.
+
 ## Errors and edge cases
 
 Include encoding splits, nested values, misleading file types, wildcard policy, ambiguous scope,
@@ -67,6 +74,8 @@ zero prompt/authorization/network activity; tests never fabricate a receipt for 
 7. Terminal receipts never use pending `awaiting_human|approved|receipt_pending` or removed
    `dispatched` outcomes.
 8. No review-context profile or recipe weakens never-send, scope, classification, or byte caps.
+9. Imported encrypted content has no scanner exemption; disclosure-time fences are identical to
+   native content.
 
 ## Tests
 

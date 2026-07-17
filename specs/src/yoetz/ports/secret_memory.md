@@ -14,9 +14,10 @@ provider-policy contracts.
 ## Public surface
 
 - `enum SecretPurpose` — `vault_initialize`, `vault_unlock`, `portable_recovery`,
-  `provider_reauthentication`, `provider_credential`, `privacy_reauthentication`. Initialization,
-  later unlock, credential reauthentication, credential bytes, and privacy reauthentication are
-  distinct purposes and handles are never interchangeable.
+  `provider_reauthentication`, `provider_credential`, `privacy_reauthentication`,
+  `security_reauthentication`. Initialization, later unlock, credential reauthentication,
+  credential bytes, privacy reauthentication, and security-policy reauthentication are distinct
+  purposes and handles are never interchangeable.
 - `@dataclass(frozen=True, slots=True) class SecretMemoryCapability` — positive evidence for
   bounded mutable allocation, page locking, core-dump suppression, one-shot consumption, and
   best-effort overwrite; each field is `supported|active|unavailable`, never a claim inferred from
@@ -27,11 +28,12 @@ provider-policy contracts.
   `consume(consumer: SecretConsumer, fn)` exposes one bounded writable `memoryview` to an
   allowlisted service-internal consumer exactly once and overwrites/releases it in `finally`.
 - `enum SecretConsumer` — `vault_root`, `recovery_wrapper`, `provider_authorizer`,
-  `privacy_authorizer`.
+  `privacy_authorizer`, `security_authorizer`.
 - `@dataclass(frozen=True, slots=True) class ProviderAttemptAuthBinding` — exact `provider_id`,
-  `model_id`, `endpoint_profile_id`, `endpoint_profile_version`, `purpose`, `dispatch_id`,
-  `request_body_digest`, service generation, and absolute/monotonic deadline. It is internal,
-  nonsecret, and contains no URL/header/credential/body.
+  `model_id`, `endpoint_profile_id`, `endpoint_profile_version`, `purpose`,
+  `authorization_scope_digest`, `purpose_digest`, `dispatch_id`, `request_body_digest`, service
+  generation, and absolute/monotonic deadline. It is internal, nonsecret, and contains no
+  URL/header/credential/body.
 - `class ProviderAuthTransportCallback(Protocol[T])` — custom HTTP-transport-only
   `async inject_and_start(credential_view: memoryview) -> T`. It may use the view only to inject the
   exact bound authentication header and start that one request; it cannot alter the request body,
@@ -42,12 +44,20 @@ provider-policy contracts.
   body digest, dispatch, deadline, and service generation, invokes the custom transport callback
   once inside protected-memory consumption, and never returns reusable credential bytes.
 - `@dataclass(frozen=True, slots=True) class HumanAuthorizationProof` — non-secret proof ID,
-  exact purpose/policy digest, service generation, issued/expiry monotonic bounds, and one-use
-  state; only an exact approved OS-backed presence attestation or confidential reauthentication
-  can mint it. It is service-internal, immediately consumed with the pending decision, and never
-  serialized or returned to a helper/client.
+  with exact public fields `proof_id`, `purpose`, `target_digest`, `service_generation`,
+  `vault_generation`, `policy_generation: int | None`, `issued_at_monotonic: float`, and
+  `expires_at_monotonic: float`. Its private `_consume_latch` field is an internal mutable
+  one-shot latch declared `init=False, repr=False, compare=False` and excluded from copy, pickle,
+  and serialization; it is not a public constructor value. The service-internal
+  `consume(expected_purpose, expected_target_digest, service_generation, vault_generation,
+  policy_generation, now_monotonic) -> None` validates every binding/expiry field and flips that
+  latch exactly once or raises a bounded mismatch/expired/already-consumed error. `VaultService` is
+  the sole constructor/minting authority; an exact approved OS-backed presence attestation or
+  purpose-specific confidential reauthentication is its required input. The proof is immediately
+  consumed with the exact pending change and never serialized or returned to a helper/client.
 - `@dataclass(frozen=True, slots=True) class UserPresenceChallenge` — exact authorization purpose,
-  ceremony/target/display-summary digests, service/vault/policy generations, and monotonic expiry;
+  ceremony/target/display-summary digests, service/vault generation, optional policy generation,
+  and monotonic expiry;
   constructed only from a live human-control ceremony.
 - `class UserPresenceAttestation(Protocol)` — opaque nonserializable, nonconstructible outside the
   installed adapter, one-use result bound to every challenge field; never a generic boolean or
@@ -59,7 +69,9 @@ provider-policy contracts.
   authorizes runtime behavior.
 - `class UserPresencePort(Protocol)` with `capability() -> UserPresenceCapability`,
   `async assert_presence(challenge: UserPresenceChallenge) -> UserPresenceAttestation`,
-  `consume(attestation, challenge) -> HumanAuthorizationProof`, and `close()`.
+  `consume(attestation, challenge) -> None`, and `close()`. `consume` validates and invalidates the
+  exact opaque attestation or raises; it does not mint or return authority. `VaultService` invokes
+  it while minting the common proof.
 - `class SecretMemoryError(Exception)` with bounded reasons `size_invalid`, `purpose_mismatch`,
   `consumer_forbidden`, `already_consumed`, `memory_lock_failed`, `closed`,
   `provider_binding_mismatch`, `provider_body_digest_mismatch`, `provider_deadline_expired`,
@@ -81,7 +93,8 @@ Python internals may copy data outside the port's control; specs and UI must sta
 Provider credentials are stored encrypted in the service vault and materialized only as
 one fresh `ProviderCredentialHandle` per physical attempt. After deterministic adapter rendering,
 the gateway binds the handle to the exact provider/model/endpoint profile/version, purpose,
-dispatch ID, SHA-256 digest of the final request body, current service generation, and deadline.
+authorization-scope digest, purpose digest, dispatch ID, SHA-256 digest of the final request body,
+current service generation, and deadline.
 The handle cannot be reused for retry; a retry needs a new dispatch and handle.
 
 Only the injected custom HTTP transport callback can transiently receive the protected
@@ -116,14 +129,16 @@ It is not `UserPresenceAttestation`, does not prove that a human approved a curr
 cannot authorize policy widening, provider credential mutation, disclosure, recovery, or any later
 ceremony. Those actions still require a fresh exact challenge-bound attestation.
 
-For a durable authority change, if the port is absent, unavailable, cancelled, or cannot bind the
-exact action, human control does not downgrade to TTY acknowledgement. A committed passphrase vault
-may instead complete purpose-specific YZS1 reauthentication. A keyring vault has no passphrase
-alternative and fails closed/local-only; it never turns keyring access into human proof or enrolls
-a secret implicitly. Denial/cancel remains secret-free. `confirm_every_request` consent for one
-exact already-policy-authorized case is not a durable authority change and uses digest-bound
-foreground TTY approve/deny without minting this proof. Only `VaultService` consumes a matching
-attestation/passphrase and mints the common one-use proof.
+For a durable authority or security-policy change, if the port is absent, unavailable, cancelled,
+or cannot bind the exact action, human control does not downgrade to TTY acknowledgement. A
+committed passphrase vault may instead complete purpose-specific YZS1 reauthentication. A keyring
+vault has no passphrase alternative and fails closed/local-only; it never turns keyring access into
+human proof or enrolls a secret implicitly. Denial/cancel remains secret-free.
+`confirm_every_request` consent for one exact already-policy-authorized case is not a durable
+authority change and uses digest-bound foreground TTY approve/deny without minting this proof.
+Only `VaultService` invokes exact attestation consumption or consumes a matching
+purpose-specific reauthentication handle and mints the common one-use proof. The presence adapter,
+`UnlockCoordinator`, and `HumanControlService` never construct a proof.
 
 ## Errors and edge cases
 
@@ -154,7 +169,7 @@ attestation/passphrase and mints the common one-use proof.
 5. A future native vault subprocess can implement this port without changing higher layers.
 6. `vault_initialize` is consumable only by `vault_root` during the uninitialized-empty
    transition; an existing passphrase/keyring vault can consume only its established unlock path.
-7. Provider reauthentication can mint one internal credential-ceremony proof but cannot carry/store
+7. Provider reauthentication can supply one credential-ceremony proof input but cannot carry/store
    a credential; `provider_credential` cannot reauthenticate or authorize another binding.
 8. Every physical provider attempt consumes one endpoint/profile/body-digest/deadline-bound
    credential handle through the custom transport callback; no SDK object retains the real key.
@@ -164,10 +179,12 @@ attestation/passphrase and mints the common one-use proof.
     policy; that consent never becomes `HumanAuthorizationProof` or policy authority.
 11. Automatic pristine keyring creation requires exact artifact-bound active presence capability;
     capability evidence is neither a live attestation nor authority for any other operation.
+12. `privacy_reauthentication` and `security_reauthentication` are disjoint; disabling idle relock
+    cannot consume privacy authority, and neither proof can be rebound to another target.
 
 ## Tests
 
-- `tests/unit/service/test_secret_memory.py` covers all six purpose/consumer pairs, rejects
+- `tests/unit/service/test_secret_memory.py` covers all seven purpose/consumer pairs, rejects
   initialization/unlock substitution, and covers size/one-shot semantics,
   redacted representations, cancellation, callback retention, overwrite fault injection, exact
   provider-attempt binding, body/deadline mismatch, custom-transport identity, and retry reuse.

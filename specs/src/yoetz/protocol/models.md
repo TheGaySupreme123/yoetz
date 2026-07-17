@@ -8,7 +8,7 @@
 ## Purpose
 
 This file is the shared constant-and-boundary layer for the protocol. It keeps request/result
-schemas, transport caps, timestamp rules, and actor assertions consistent across the entire
+schemas, request/value bounds, timestamp rules, and actor assertions consistent across the entire
 implementation. It is also where the six public workflow operations agree on the shared envelope
 shape before any operation-specific fields are considered.
 
@@ -23,7 +23,6 @@ shape before any operation-specific fields are considered.
 | `MAX_FINDINGS_LIMIT` | `int = 10` |
 | `MAX_REASON_BYTES` | `int = 4_096` |
 | `MAX_OBJECT_PLAINTEXT_BYTES` | `int = 4_194_304` |
-| `MAX_JSON_FRAME_BYTES` | `int = 1_048_576` |
 | `GENESIS_PREDECESSOR_DIGEST` | `str = "genesis"` |
 | `ActorType` | enum of public actor kinds |
 | `PublicationChannel` | enum of observed publication channels |
@@ -50,9 +49,10 @@ schemas carry their own `schema_version` values, but the protocol family stays s
 until ADR-002 changes it. In v0.1 every public operation request/result schema uses
 `schema_version = "1.0.0"`.
 
-The numeric caps in this file are shared across request parsing, transport framing, validation, and
-receipt construction. They are not suggestions; the rest of the implementation must enforce them
-at the boundary where the data enters the system.
+The numeric caps in this file are shared across request parsing, validation, and receipt
+construction. They are not suggestions; the rest of the implementation must enforce them at the
+boundary where the data enters the system. Transport frame caps remain owned by their adapters and
+are not mirrored here.
 
 Boundary models import the one `IdKind` enum from `protocol/ids.py`; this file neither defines nor
 mirrors a second enum. Its exact wire values are `request`, `installation`, `task`, `session`,

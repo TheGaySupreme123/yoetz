@@ -13,12 +13,13 @@ revocation behavior identical across surfaces.
 
 ## Public surface
 
-- `async get_privacy_setup(app, request: GetPrivacySetupRequest) -> PrivacySetupView`.
-- `async propose_privacy_policy(app, request: ProposePrivacyPolicyRequest) -> PolicyProposalResult`.
+- `async privacy_get_setup(app, request: GetPrivacySetupRequest) -> PrivacySetupView`.
+- `async privacy_get_effective(app, scope: AuthorizationScope) -> EffectivePrivacyPolicy`.
+- `async privacy_propose_policy(app, request: ProposePrivacyPolicyRequest) -> PolicyProposalResult`.
 - `async decide_privacy_policy(app, request: DecidePrivacyPolicyRequest) -> PrivacyPolicyResult`.
-- `async tighten_privacy_policy(app, request: TightenPrivacyPolicyRequest) -> PrivacyPolicyResult`.
-- `async list_privacy_receipts(app, request: ListPrivacyReceiptsRequest) -> PrivacyReceiptPage`.
-- `async get_privacy_receipt(app, request: GetPrivacyReceiptRequest) -> PrivacyReceiptView`.
+- `async privacy_tighten_policy(app, request: TightenPrivacyPolicyRequest) -> PrivacyPolicyResult`.
+- `async privacy_receipts_list(app, request: ListPrivacyReceiptsRequest) -> PrivacyReceiptPage`.
+- `async privacy_receipts_get(app, request: GetPrivacyReceiptRequest) -> PrivacyReceiptView | None`.
 - Frozen setup values: `PrivacySetupView`, `ChannelSetupChoice`, `AllowedBlockedExample`,
   `ProviderDataUseSummary`, `ReviewRecipeView`, `PolicyProposalResult`, `PrivacyPolicyResult`.
 
@@ -27,15 +28,28 @@ not MCP tools. Their wire schemas belong to the trusted local control protocol, 
 workflow protocol.
 
 Receipt list/get is admitted only for authenticated CLI/UI ordinary control. It delegates to the
-bounded structural `PrivacyAuditPort` query, never dereferences proposal/object content, and is
+bounded structural `PrivacyAuditPort.list_receipts`/`PrivacyAuditPort.get_receipt` queries,
+respectively, never dereferences proposal/object content, and is
 explicitly local-projection/audit-exempt so inspecting receipts does not create receipts. `list`
 binds its cursor to one exact catalog audit snapshot generation and excludes records committed after
 that generation; page traversal is stable and non-self-mutating. `get` returns one exact structural
 view or bounded `not_found` without an existence oracle outside the local authenticated user.
 
+All six ordinary-control entrypoint names are intentionally identical to their registered wire
+method tokens: `privacy_get_setup`, `privacy_get_effective`, `privacy_propose_policy`,
+`privacy_tighten_policy`, `privacy_receipts_list`, and `privacy_receipts_get`. Daemon dispatch and
+the application facade do not maintain aliases. `PrivacyAuditPort.list_receipts` and
+`PrivacyAuditPort.get_receipt` remain internal port method names only.
+
+At the daemon's wire boundary, a `PrivacyReceiptPage` maps one-to-one to the
+`privacy_receipts_list` success body (`snapshot_generation`, `receipts`, optional `next_cursor`). A
+non-`None` `PrivacyReceiptView` maps to the `privacy_receipts_get` `outcome=found` branch; `None`
+maps to its `outcome=not_found` branch. No internal `None`, port method spelling, or alternate
+receipt wrapper crosses control serialization.
+
 ## Behavior
 
-`get_privacy_setup` returns the effective policy, ancestor ceilings, editable scope, explicit
+`privacy_get_setup` returns the effective policy, ancestor ceilings, editable scope, explicit
 `network_egress_permitted` global ceiling, exact five network-channel decisions and capability
 states, local-model decision, provider/model/endpoint binding, its current versioned
 `ProviderDataUseSummary`, editable `require_current_provider_data_use_evidence`,
@@ -56,9 +70,13 @@ Yoetz local-disclosure receipt cannot attest that host's later egress or retenti
 `trusted_human_control` previews may show exact scope-valid nonsecret content needed by the YZH1
 ceremony and are never configurable by an ordinary or MCP answer.
 
-`propose_privacy_policy` validates an exact target scope (`machine|workspace|task|request`), computes
+`privacy_get_effective` resolves the supplied exact `AuthorizationScope` through
+`PrivacyPolicyPort.effective_policy` and returns that closed structural policy without proposal,
+decision, receipt, or mutation side effects.
+
+`privacy_propose_policy` validates an exact target scope (`machine|workspace|task|request`), computes
 the effective before/after intersection and canonical diff, and classifies the transition. A pure
-tightening delegates to `tighten_privacy_policy`. Any possible expansion persists an encrypted
+tightening delegates to `privacy_tighten_policy`. Any possible expansion persists an encrypted
 proposal and requires trusted-control reauthentication; it cannot be committed by the proposing
 request.
 

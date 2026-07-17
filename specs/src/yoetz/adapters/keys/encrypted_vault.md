@@ -36,7 +36,8 @@ The vault internally derives nonexported `K_vault_locator` from IVK with HKDF-SH
 `b"yoetz/vault-internal-root/v1"`, info `b"yoetz/vault-record-locator/v1"`, length 32. `record_id`
 uses exact `binding_bytes = JCS({"kind": kind, "structural_binding": binding})`, where the closed
 binding union is: sentinel `{installation_id}`; bundle key `{task_id, key_slot}`; provider credential
-`{provider_id, endpoint_profile_id, endpoint_profile_version, authorization_scope_digest, purpose}`;
+`{provider_id, model_id, endpoint_profile_id, endpoint_profile_version,
+purpose, authorization_scope_digest, purpose_digest}`;
 recovery metadata `{task_id, recovery_artifact_digest}`. All values are validated bounded IDs/enums/
 digests; no provider URL, task title, raw scope/path, or credential is legal.
 `binding_digest` is `hmac-sha256:` plus lowercase

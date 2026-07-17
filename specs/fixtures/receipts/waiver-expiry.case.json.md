@@ -12,7 +12,17 @@ One canonical strict-JSON fixture case with `fixture_schema: "yoetz.fixture-case
 
 ## Behavior
 
-The `input` section contains active, expired, wrong-frontier, and noninteractive waiver variants. The `expected` section freezes suppression only for active exact-scope waiver and visible expiry/limitation in the receipt. Every referenced identifier, timestamp, key, digest, nonce, provider response, and fault point is explicit test data; a test may not replace it with current time, randomness, network state, or host paths. Multi-variant cases evaluate each variant independently and declare the relationship between their outcomes.
+The `input` section contains active, expired, wrong-frontier, and noninteractive waiver variants.
+The active, expired, and wrong-frontier variants begin with valid interactive-local-human
+`response_recorded` events; only the active exact-scope event suppresses, while expiry/scope
+limitations remain visible in the receipt. The noninteractive variant is an operation-level
+`respond(disposition=waived)` attempt from noninteractive CLI/MCP authority. It is rejected as
+`INVALID_REQUEST` before append, creates no `response_recorded` event, and therefore never reaches
+or mutates receipt-builder suppression state. This fixture does not fabricate an invalid stored
+waiver as a receipt input. Every referenced identifier, timestamp, key, digest, nonce, provider
+response, and fault point is explicit test data; a test may not replace it with current time,
+randomness, network state, or host paths. Multi-variant cases evaluate each variant independently
+and declare the relationship between their outcomes.
 
 ## Errors and edge cases
 

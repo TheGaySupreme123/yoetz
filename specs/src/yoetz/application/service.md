@@ -23,9 +23,10 @@ MCP, and future UI do not construct or import this facade; they use `ControlClie
 - Service-internal `async project_result_for_client(client_kind, method, result) ->
   ProjectedControlBody`, the only route by which an application/support result may become an
   ordinary CLI, MCP, or UI response.
-- Support methods `import_codex_jsonl`, `review`, `get_privacy_setup`,
-  `get_effective_privacy_policy`, `propose_privacy_policy`, `tighten_privacy_policy`,
-  `list_privacy_receipts`, and `get_privacy_receipt`; they are
+- Support methods `import_codex_jsonl`, `review`, `privacy_get_setup`,
+  `privacy_get_effective`, `privacy_propose_policy`, `privacy_tighten_policy`,
+  `privacy_receipts_list`, and `privacy_receipts_get`; the six `privacy_*` names are exactly the
+  ordinary-control `ControlMethod` wire tokens, with no facade alias or spelling translation. They are
   not extra workflow operations or MCP tools. Policy/disclosure decision completion is a separate
   service-internal call used only by `HumanControlService` with its consumed reauth proof.
 - `async close()` — idempotent ready-composition shutdown.
@@ -64,6 +65,14 @@ through the service-owned `BundleRuntimePort`, delegates once, releases its usag
 returns the internal result to the daemon only. The facade never imports SQLite, object files, keyring, local socket,
 MCP, Typer, or provider SDKs.
 
+For privacy support, daemon dispatch is an identity mapping from the six registered wire tokens to
+the six same-named facade methods. The two receipt methods then delegate internally to
+`PrivacyAuditPort.list_receipts` and `PrivacyAuditPort.get_receipt`, respectively; those port names
+are internal storage-query vocabulary and never become alternate control tokens. The remaining
+four methods delegate to the same-named functions in `application/privacy_policy.md`.
+The daemon serializes `PrivacyReceiptPage` directly into the list body and maps
+`PrivacyReceiptView | None` into the registered `found|not_found` get-result union.
+
 ### Service-owned client disclosure projection
 
 The daemon must call `project_result_for_client` after internal result validation and before any
@@ -73,14 +82,18 @@ one frozen client/sink matrix:
 | Source | Required sink |
 |---|---|
 | `mcp_bridge` workflow result | `agent_context` |
-| ordinary `cli` workflow/support result, including `--json`, redirected output, or a TTY | `agent_context` |
+| ordinary `cli` workflow/support result rendered human-readably on its attached controlling TTY | `local_human_view` |
+| ordinary `cli` workflow/support result requested as `--json`, redirected, piped, or non-TTY | `agent_context` |
 | ordinary `ui` workflow/support result | `agent_context` |
 | authenticated foreground YZH1 preview/policy-diff view | `trusted_human_control` |
 | local semantic runtime input | `local_model` |
 
-TTY presence, caller-supplied actor labels, output mode, or a client claim never upgrades an
-ordinary result to `trusted_human_control`. A future desktop UI obtains that sink only through the
-separate authenticated confidential human-control ceremony.
+The service resolves the two CLI branches fail-safe from the authenticated client kind plus the
+validated rendering mode and controlling-terminal state: any absent, contradictory, redirected,
+non-TTY, or machine-readable state is `agent_context`. A caller-supplied actor label or arbitrary
+sink claim never selects a branch, and ordinary TTY output never upgrades to
+`trusted_human_control`. A future desktop UI obtains that sink only through the separate
+authenticated confidential human-control ceremony.
 
 `protocol/models.md` owns a closed field-classification registry for every success/support result.
 IDs, enum codes, booleans, bounded counts, canonical digests, frontiers, policy/version identities,
@@ -109,11 +122,11 @@ the fixed retryable control error `privacy_projection_unavailable` before any co
 serialized. Same logical request/result/sink/policy digest replays the same projection and receipt;
 changed result bytes or policy require a new projection.
 
-The local receipt proves only what Yoetz released across its service-to-client `agent_context`
-boundary. It does not attest what an MCP host, CLI consumer, agent, external model, or local runtime
-does with approved bytes afterward. Setup and public docs must state that content authorized for
-`agent_context` may enter the host agent's model context and may then be governed by that host's
-separate retention/egress policy.
+The local receipt proves only what Yoetz released across its service-to-client
+`agent_context|local_human_view` boundary. It does not attest what an MCP host, CLI consumer,
+terminal environment, agent, external model, or local runtime does with approved bytes afterward.
+Setup and public docs must state that content authorized for `agent_context` may enter the host
+agent's model context and may then be governed by that host's separate retention/egress policy.
 
 Semantic evaluation receives only an already classified/minimized/policy-approved outbound case
 from the egress gateway. If semantic work is required but unavailable/refused/timed out/invalid,

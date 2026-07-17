@@ -1,7 +1,8 @@
 # src/yoetz/service/unlock.py — vault unlock and local-human reauthentication coordinator
 
 **Wave:** C/D | **ADRs:** ADR-004, ADR-008 | **Imports (spec-tree):** `service/vault.md`,
-`service/secret_ingress.md`, `service/lifecycle.md`, `ports/secret_memory.md`, `ports/clock.md`,
+`service/confidential_protocol.md`, `service/secret_ingress.md`, `service/lifecycle.md`,
+`ports/secret_memory.md`, `ports/clock.md`,
 `config/paths.md`, `protocol/canonical.md` |
 **Imported by:** `service/daemon.md`, confidential ingress tests
 
@@ -16,8 +17,10 @@ state, rate limits, generation binding, and ready-composition construction atomi
 
 - `class UnlockCoordinator` with async `retry_keyring`, `begin_passphrase_initialization`,
   `complete_passphrase_initialization`, `begin_passphrase_unlock`,
-  `complete_passphrase_unlock`, `begin_reauthentication`, `complete_reauthentication`, `cancel`,
-  and `close`.
+  `complete_passphrase_unlock`, `begin_reauthentication(purpose, target_digest)`,
+  `complete_reauthentication(source) -> HumanAuthorizationProof`, `cancel`, and `close`.
+  The returned proof is the exact object minted by `VaultService`, remains service-internal, and is
+  handed directly to `HumanControlService`; this coordinator never constructs one.
 - `@dataclass(frozen=True, slots=True) class UnlockChallenge` — one-use structural binding for the
   confidential ingress; no user/provider/key detail.
 - `@dataclass(frozen=True, slots=True) class UnlockResult` — state and bounded reason only.
@@ -43,7 +46,8 @@ creation, deletion, replacement, or fallback.
 `begin_passphrase_initialization` is available only when the service is locked, mode is exactly
 `uninitialized`, and `VaultService` has just re-proven a pristine installation: no committed mode,
 encrypted vault record/sentinel, keyring entry, or ambiguous staging artifact. It changes state to
-`unlocking` and returns a 60-second one-use challenge with purpose `vault_initialize`, bound to the
+`unlocking` and returns a one-use challenge expiring after
+`confidential_protocol.CEREMONY_EXPIRY_SECONDS` with purpose `vault_initialize`, bound to the
 service generation and a canonical first-install-state digest. It is not offered automatically
 after keyring failure; the foreground local human explicitly chooses the separate initialize-
 passphrase ceremony.
@@ -53,7 +57,10 @@ the same pristine proof can authorize an explicit passphrase choice.
 
 `complete_passphrase_initialization` accepts only the matching
 `SecretHandle(vault_initialize)`. It rechecks the identical pristine-state digest under singleton
-authority, consumes the handle once through `VaultService.initialize_passphrase`, and atomically
+authority, has `UnlockThrottleStore` stage the exact generation-1 zero-failure/no-active-attempt
+record, and passes only that record's digest with the handle to
+`VaultService.initialize_passphrase`. The coordinator remains sole owner of creating, publishing,
+repairing, and later mutating the throttle record. The vault call atomically
 commits the passphrase envelope, authenticated empty-vault sentinel/layout, and immutable
 `passphrase` mode. Only then does it run the full ready startup gate. If that outer gate fails after
 the vault commit, the new mode remains passphrase and the service returns locked with a bounded
@@ -63,24 +70,33 @@ tampered/failed and never deletes, overwrites, or guesses which state won.
 
 `begin_passphrase_unlock` is available only for explicit passphrase mode. It checks service
 generation, rate limit, no active attempt, and confidential endpoint readiness, then returns a
-60-second one-use challenge. `complete_passphrase_unlock` accepts only the matching
-`SecretHandle(vault_unlock)`, consumes it once through `VaultService`, runs the complete ready
+one-use challenge expiring after `confidential_protocol.CEREMONY_EXPIRY_SECONDS`.
+`complete_passphrase_unlock` accepts only the matching `SecretHandle(vault_unlock)`. The
+coordinator waits/reserves the durable throttle attempt before calling `VaultService.unlock`, then
+alone charges or resets that record from the bounded vault outcome. It runs the complete ready
 startup gate, and publishes ready only after application/runtime/provider policy composition is
 fully valid. Any failure closes partial state and returns locked. It never reveals wrong-secret
 versus tamper details to ordinary clients.
 
-Reauthentication follows the same confidential ceremony while ready, but produces one internal
-`HumanAuthorizationProof` bound to an exact pending privacy-policy/disclosure digest and short
-expiry. `HumanControlService` consumes it immediately with the exact pending decision; it is never
-returned or serialized. A
+Reauthentication follows the same confidential ceremony while ready. It is purpose- and target-
+bound for provider credential change, privacy-policy widening, or current-generation idle-relock
+policy change. `begin_reauthentication` freezes the corresponding challenge and expiry. For an OS
+presence source, `complete_reauthentication` delegates the exact opaque attestation and challenge
+to `VaultService.mint_human_authorization`. For a passphrase source it first applies the throttle
+gate/reservation, delegates the exact purpose-specific secret handle and challenge to that same
+vault method, and alone charges/resets the throttle from its result. In both branches the only
+returned object is the `HumanAuthorizationProof` constructed by `VaultService`, bound to the exact
+purpose/target digest/generations/expiry. `HumanControlService` consumes it immediately with the
+exact pending change; it is never returned or serialized outside the service. A
 boolean confirmation, CLI flag, MCP call, agent message, or normal control request cannot complete
 it. The proof is single-use and cannot unlock a vault or authorize another policy.
 
 ### Restart-safe passphrase throttle
 
-The throttle applies to `vault_unlock`, `provider_reauthentication`, and
-`privacy_reauthentication`; initialization and portable recovery have separate creation/artifact
-semantics. Its fixed owner-only record at `config.paths.unlock_throttle_path()` is canonical JSON:
+The throttle applies to `vault_unlock`, `provider_reauthentication`,
+`privacy_reauthentication`, and `security_reauthentication`; initialization and portable recovery
+have separate creation/artifact semantics. Its fixed owner-only record at
+`config.paths.unlock_throttle_path()` is canonical JSON:
 `{schema_version:"1", installation_id, vault_mode:"passphrase", record_generation,
 consecutive_failures, attempt_in_progress, last_failure_utc, last_writer_instance_id,
 record_digest}`. Generation is positive and monotonic; failures are capped at 63;
@@ -98,6 +114,12 @@ atomically increments/caps failures, clears in-progress, records wall-clock evid
 returns; a crash with in-progress is charged as one failure on restart before another attempt.
 Successful envelope+sentinel verification atomically resets failures/in-progress before ready or
 proof publication.
+
+`UnlockCoordinator` is the only caller of `UnlockThrottleStore` and the only owner of delay,
+reservation, charge, reset, restart re-arm, and repair. `VaultService` neither imports the store nor
+returns a rate-limit decision; it performs one requested verification only after the coordinator's
+reservation. Every vault verification outcome returns through the coordinator before ready/proof
+publication, so there is no uncharged passphrase path.
 
 Delay is exact: failures 0..2 => 0; for `n >= 3`,
 `min(300, 30 * 2**(n - 3))` seconds. Within a process it is armed only from fresh monotonic time.
@@ -145,6 +167,8 @@ can rewrite local files.
    restart/clock anomalies can only lengthen, never erase, the derived delay.
 9. Pristine keyring retry is a two-capability gate; existing keyring retry remains load-only and
    may reach ready-local without current presence.
+10. Throttling has one owner: `UnlockCoordinator`; proof minting has one owner: `VaultService`.
+    Neither duplicates the other's state transition.
 
 ## Tests
 

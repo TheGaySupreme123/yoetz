@@ -25,6 +25,8 @@ The suite checks:
 - the closest non-trigger does not produce a finding;
 - coverage weakens when evidence is only partial;
 - every candidate returns an exact `FindingBasis` with observed/missing facts and supporting refs;
+- all four research-evidence kinds use inline immutable trigger/closest-nontrigger values in this
+  test module; no runtime fixture generation or separate policy-resource lookup is permitted;
 - the pack never escalates into a probabilistic or semantic conclusion.
 
 ## Errors and edge cases

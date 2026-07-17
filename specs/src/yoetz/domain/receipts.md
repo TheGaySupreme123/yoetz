@@ -1,9 +1,8 @@
 # src/yoetz/domain/receipts.py — immutable receipt documents and rendered outcomes
 
 **Wave:** B | **ADRs:** ADR-002, ADR-004, ADR-006 | **Imports (spec-tree):**
-`protocol/coverage.md`, `protocol/errors.md`, `domain/values.md`, `domain/events.md`,
-`domain/findings.md`
-**Imported by:** `kernel/receipt_builder.md`, `application/receipt.md`, `cli/render.md`,
+`protocol/coverage.md`, `protocol/errors.md`, `domain/values.md`, `domain/findings.md`
+**Imported by:** `domain/events.md`, `kernel/receipt_builder.md`, `application/receipt.md`, `cli/render.md`,
 `adapters/sqlite/repository.md`
 
 ## Purpose
@@ -36,6 +35,8 @@ fields:
   builder runs and included in the canonical digest);
 - the `subject_frontier` being described;
 - the receipt conclusion;
+- `suppressed_finding_count: int`, the exact nonnegative count from the applicable latest check
+  (zero when none were suppressed); it never carries invented identities;
 - the active version slice used to build the receipt;
 - the weakest material coverage for the document as a whole;
 - the ordered findings that informed the conclusion;
@@ -51,6 +52,28 @@ correctness. The public vocabulary is intentionally small and stable:
 - `no_unresolved_deterministic_findings`;
 - `unresolved_findings_remain`;
 - `insufficient_coverage`.
+
+`ReceiptConclusion` and `CheckVerdict` are deliberately non-isomorphic: the former describes a
+durable projection at a frontier, while the latter also records whether one check execution was
+incomplete. A receipt builder derives its conclusion from the projection and coverage rather than
+copying a prior verdict. When a recorded check and a receipt describe the same unchanged subject
+frontier, the required correspondence is:
+
+| `CheckVerdict` | Required `ReceiptConclusion` |
+|---|---|
+| `action_required` | `unresolved_findings_remain` |
+| `no_issue_detected` | `no_unresolved_deterministic_findings` |
+| `insufficient_coverage` | `insufficient_coverage` |
+| `incomplete_check` | `unresolved_findings_remain` when the projection has any unresolved actionable finding at that frontier; otherwise `insufficient_coverage` |
+
+If projection facts changed after the check, the receipt describes its own supplied frontier and
+no cross-frontier equality is implied.
+
+An applicable latest check with `suppressed_count > 0` cannot support
+`no_unresolved_deterministic_findings`, because the projection intentionally lacks the omitted
+finding identities. While a visible actionable finding remains it yields
+`unresolved_findings_remain`; otherwise it yields `insufficient_coverage` until a newer applicable
+check records zero suppression. A receipt exposes the count, never invented suppressed IDs.
 
 `ReceiptSection` and `ReceiptRender` separate canonical content from presentation. `ReceiptSection`
 is the stable unit of presentation inside a document. It carries a section key, a short title, the
@@ -101,7 +124,9 @@ never outruns the evidence.
 ## Tests
 
 - `tests/unit/domain/test_receipts.py` — document validation and weakest-coverage computation.
-- `tests/unit/domain/test_receipts.py` — compact wording rules and no-stronger-than-evidence checks.
+- `tests/unit/domain/test_receipts.py` — compact wording rules, the exhaustive
+  `CheckVerdict`-to-`ReceiptConclusion` correspondence (including both `incomplete_check`
+  branches), and no-stronger-than-evidence checks.
 - `tests/conformance/operations/test_receipt_contract.py` — golden canonical receipt documents and
   compact text across public surfaces.
 

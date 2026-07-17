@@ -108,9 +108,11 @@ an arbitrary MCP-supplied path, populate a semantic-review packet, or prove who 
 the worktree cannot be bounded and hashed safely, the command fails without returning a state
 digest.
 
-A separately provisioned provider credential presents a necessary founder clarification: the
-working design permits a fresh one-attempt vault handle to emit that credential only as
-authentication metadata to the exact pinned TLS endpoint. It never enters the model body, context,
+Resolved decision F-012 permits a separately provisioned provider credential to leave the vault
+only through a fresh one-attempt handle as
+authentication metadata to the exact profile-bound HTTPS endpoint selected by the reviewed
+provider registry, with platform CA trust and hostname validation. v0.1 does not claim certificate
+or SPKI pinning. The credential never enters the model body, context,
 preview, receipt, log, environment, configuration, or reusable SDK state. Encryption, unlock, and
 recovery secrets have no such exception. Choosing literal zero credential egress would disable
 credentialed external providers.
@@ -122,9 +124,9 @@ never-send checks. Yoetz itself uses an exact AF_UNIX-only path and performs no 
 download, DNS, or IP networking. A separately running model process is nevertheless a trusted
 local disclosure sink unless its exact support cell proves enforceable no-network sandboxing.
 
-Durable policy widening and provider-credential changes require action-bound OS user presence or a
-separately designed confidential reauthentication mechanism. Ordinary MCP/agent schemas cannot
-grant that authority. Under the current working design, exact foreground approval may authorize one
+Durable policy widening and provider-credential changes require action-bound OS user presence or
+the purpose-specific YZH1/YZS1 confidential reauthentication path of an established passphrase
+vault. Ordinary MCP/agent schemas cannot grant that authority. Exact foreground approval may authorize one
 `confirm_every_request` case already inside durable policy; it cannot widen policy or create a
 reusable grant, and it is not cryptographic proof against arbitrary malicious same-UID code.
 
@@ -144,8 +146,9 @@ allocates a fresh installation identity, and may proceed when keyring is locked/
 claiming it proved entry absence; committed passphrase mode never later probes or uses keyring. An existing keyring vault may remain ready for local work when
 user-presence authority is measured unavailable at ready/recomposition, or when a human-control
 operation explicitly observes its failure; external activation and durable authority changes then
-stay fenced until fresh validation. v0.1 does not claim an asynchronous presence watcher. A separate
-admin-authorization secret or additional platform presence implementation remains a founder decision.
+stay fenced until fresh validation. v0.1 does not claim an asynchronous presence watcher and ships
+neither a separate admin-authorization secret nor an unverified platform-presence fallback. Adding
+either later requires an explicit ADR amendment.
 
 ## Local evidence and configuration
 
@@ -166,8 +169,8 @@ not remove these objects. Verified backups include their encrypted bytes plus a 
 sidecar; restore never revives pending approval or dispatch authority. LLM inference consent is
 independent of telemetry, crash diagnostics, update checks, and capability testing.
 
-The enforceable technical contract, setup behavior, schemas, fixtures, and unresolved founder
-choices are specified in:
+The enforceable technical contract, setup behavior, schemas, fixtures, and remaining empirical or
+independent-review release gates are specified in:
 
 - [`docs/adr/ADR-009-data-egress-privacy.md`](docs/adr/ADR-009-data-egress-privacy.md)
 - [`specs/docs/protocol/data-egress-and-privacy.md.md`](specs/docs/protocol/data-egress-and-privacy.md.md)

@@ -13,6 +13,8 @@ cancellation, and broken delivery without parsing tracebacks or user content.
 
 Parameterized cases cover exits `0,2,10,11,20,30,40,70,130`, human vs `--json`, warning/finding,
 TTY/non-TTY, broken stdout pipe, stderr pipe closure, SIGINT, and unexpected internal exception.
+The mapping parameterization enumerates every registered `PublicErrorCode`, not one representative
+per exit family, and asserts set equality with `PUBLIC_EXIT_CODES`.
 
 ## Behavior
 
@@ -23,6 +25,8 @@ CLI parsing exits `2`; operation conflicts/unavailable/busy/storage/internal/can
 frozen codes. Exit `30` is exercised only by a direct provider setup/probe/support operation with
 no completed deterministic result; every completed deterministic check with a semantic gap exits
 `0` and returns `incomplete_check`. SIGINT yields `130` without traceback.
+Read-only status with a future frontier exercises `INVALID_REQUEST`/`2`, never
+`FRONTIER_CONFLICT`/`10`.
 
 Close the reader before/during output to exercise broken pipe. Durable success before response loss
 is not reclassified as rollback; stderr states outcome unknown without payload, and same-request

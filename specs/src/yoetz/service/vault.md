@@ -2,7 +2,8 @@
 
 **Wave:** C | **ADRs:** ADR-004, ADR-008 | **Imports (spec-tree):** `ports/keys.md`,
 `ports/secret_memory.md`, `adapters/keys/os_keyring.md`, `adapters/keys/encrypted_vault.md`,
-`adapters/keys/vault_passphrase.md`, `resources/support/runtime-support.json.md` | **Imported by:** `service/daemon.md`,
+`adapters/keys/vault_passphrase.md`, `service/confidential_protocol.md`,
+`resources/support/runtime-support.json.md` | **Imported by:** `service/daemon.md`,
 `service/unlock.md`, ready-only runtime/provider composition
 
 ## Purpose
@@ -15,8 +16,10 @@ credential, or passphrase bytes.
 ## Public surface
 
 - `class VaultService` with async `initialize(user_presence_capability)`,
-  `initialize_passphrase`, `retry_keyring(user_presence_capability)`, `unlock`, `lock`,
-  `load_bundle_keys`, `create_bundle_keys`, `store_provider_credential`,
+  `initialize_passphrase(handle, throttle_record_digest)`,
+  `retry_keyring(user_presence_capability)`, `unlock`, `lock`,
+  `load_bundle_keys`, `create_bundle_keys`,
+  `store_provider_credential(action, binding, secret, proof, now_monotonic)`,
   `provider_credential(binding: ProviderAttemptAuthBinding)`, `wrap_recovery`,
   `mint_human_authorization`, and `close`, plus
   `installation_mac_handle(purpose: MacKeyPurpose) -> MacKeyHandle` for the three installation
@@ -25,13 +28,16 @@ credential, or passphrase bytes.
 - `enum VaultState` — `locked`, `unlocking`, `ready`, `closing`, `closed`.
 - `@dataclass(frozen=True, slots=True) class VaultStatus` — mode/state, format/version, bounded
   reason, secret-memory capability; no key IDs, provider names, record counts, paths, or times.
-- `@dataclass(frozen=True, slots=True) class ProviderCredentialBinding` — structural provider,
-  endpoint-profile, workspace/task scope, and purpose digests; never credential bytes.
+- `@dataclass(frozen=True, slots=True) class ProviderCredentialBinding` — exact structural
+  `provider_id`, `model_id`, `endpoint_profile_id`, `endpoint_profile_version`,
+  lower-kebab `purpose`, `authorization_scope_digest`, and `purpose_digest`; never credential
+  bytes. `purpose_digest` must equal the registered canonical digest of that exact purpose.
 - `class VaultError(Exception)` with bounded reasons `keyring_locked`, `keyring_unavailable`,
-  `human_authority_unavailable`, `vault_uninitialized`, `vault_locked`, `unlock_wrong`, `unlock_rate_limited`,
+  `human_authority_unavailable`, `vault_uninitialized`, `vault_locked`, `unlock_wrong`,
   `vault_tampered`, `record_missing`, `record_binding_mismatch`, `secret_purpose_mismatch`,
   `credential_invalid`, `initialization_forbidden`, `initialization_ambiguous`, `already_ready`,
-  `closed`.
+  `closed`. `unlock_rate_limited` is not a `VaultError`: only `UnlockCoordinator` exposes that
+  reason after consulting its throttle store.
 
 `VaultService` implements the service-internal `KeyStorePort`. It is never serialized, exposed by
 the application facade, or accepted as a control-protocol value.
@@ -85,7 +91,8 @@ any key. A missing half, mismatched correlation, multiple stages/entries, unreco
 inability to prove whether the keyring write occurred is `initialization_ambiguous`/`vault_tampered`
 and requires explicit repair outside v0.1. No automatic cleanup touches an ambiguous keyring entry.
 
-`initialize_passphrase(handle)` is the sole passphrase first-install mutation. It requires a
+`initialize_passphrase(handle, throttle_record_digest)` is the sole passphrase first-install vault
+mutation. It requires a
 one-shot `SecretHandle(purpose=vault_initialize)` and, under the service singleton, re-proves all of
 the following: mode is `uninitialized`; no committed installation identity, catalog, vault sentinel/
 record/ciphertext, mode marker, or partial/staging artifact exists. It allocates a fresh installation
@@ -96,10 +103,13 @@ state and newly allocated identity cannot be recovery/reset of an existing insta
 commit records the keyring probe outcome structurally. It generates a fresh 256-bit IVK in
 `SecretMemoryPort`, creates the passphrase-wrapped
 root envelope and authenticated empty-vault sentinel/layout in an owner-only staging location,
-fsyncs/verifies them, stages the generation-1 zero-failure unlock-throttle record and binds its
-digest into the authenticated layout, then commits the immutable `passphrase` mode marker as the single publication
+fsyncs/verifies them, validates and binds the coordinator-supplied digest of the already staged
+generation-1 zero-failure unlock-throttle record into the authenticated layout, then commits the
+immutable `passphrase` mode marker as the single publication
 point and fsyncs the parent. The handle is consumed once and all intermediate buffers are
-overwritten best-effort.
+overwritten best-effort. `VaultService` never creates, reads, delays from, charges, resets, repairs,
+or publishes the throttle record; `UnlockThrottleStore` and its coordinator own that complete
+state machine.
 
 Before the publication point, a clean crash may leave only recognizable incomplete staging, which
 startup quarantines/removes only when its exact noncommitted identity is proven and no mode/
@@ -119,7 +129,9 @@ cell. It runs the staged create-once protocol only after minting a fresh exact
 stays uninitialized/locked. For committed `os_keyring` mode it loads only the correlated existing entry,
 verifies the sentinel, and never calls creation. Passphrase mode, ambiguous staging, a non-pristine
 uninitialized state, or a committed keyring marker with a missing/mismatched entry rejects the
-retry without mutation. In passphrase mode `unlock` accepts one `SecretHandle` with purpose `vault_unlock`, rate-limits failures, unwraps
+retry without mutation. In passphrase mode `unlock` accepts one `SecretHandle` with purpose
+`vault_unlock` only after `UnlockCoordinator` has passed and durably reserved the throttle gate;
+it never reads or mutates throttle state. It unwraps
 the IVK through `vault_passphrase`, validates the encrypted vault sentinel, and becomes ready. The
 passphrase is consumed once and never retained. Before publishing `ready`, either route derives
 the exact installation `K_lookup`, `K_log`, and `K_audit` family from the IVK using the ADR-004
@@ -151,27 +163,46 @@ calling a handle with another purpose's domain fails closed. The service composi
 the catalog handle into start-catalog adapters, only the log handle into observability privacy, and
 only the audit handle into the privacy gateway/audit path. For each physical outbound attempt,
 `provider_credential(binding)` returns a fresh one-use `ProviderCredentialHandle` restricted to the
-exact provider/model/endpoint-profile/version, purpose, dispatch ID, final request-body digest,
-service generation, and deadline in `ProviderAttemptAuthBinding`. It can expose a protected view
+exact provider/model/endpoint-profile/version, purpose plus authorization-scope/purpose digests,
+dispatch ID, final request-body digest, service generation, and deadline in
+`ProviderAttemptAuthBinding`. Every provider/model/profile/scope/purpose field must match the
+stored `ProviderCredentialBinding` before minting. It can expose a protected view
 only inside the custom transport's header-injection callback, cannot reveal/reuse bytes or
 authorize another body/destination/attempt, and is invalid after that callback. A retry mints a new
-dispatch-bound handle. `store_provider_credential` accepts only a confidential-ingress
-`SecretHandle(purpose=provider_credential)` plus a locally reauthenticated structural binding. It
+dispatch-bound handle. `store_provider_credential` accepts exact
+`action: Literal["set", "rotate"]`, a confidential-ingress
+`SecretHandle(purpose=provider_credential)`, the frozen `ProviderCredentialBinding`, the unexported
+`HumanAuthorizationProof`, and explicit monotonic time. It requires the proof purpose
+`provider_credential_set` or `provider_credential_rotate` to match `action`, and validates the
+proof's exact target digest, service/vault generations, absent policy generation, expiry, and
+one-use state against the same ceremony/binding. It
 resolves the exact installed provider-profile validator from the closed bundled registry and runs
 that validator inside protected one-shot consumption before encryption. For the OpenAI profile this
 is `validate_openai_credential`'s 16..512-byte token68 rule. Invalid input yields only
 `credential_invalid`, consumes/overwrites the ingress handle, and writes no vault record, staging
 artifact, adapter state, length, offset, or diagnostic text; the vault never trims/normalizes it.
+After secret validation and storage preflight, the vault enters one non-interleavable mutation
+section, consumes that exact proof, rechecks the target/generations, and performs the set-or-rotate
+record-generation CAS. No record mutation can commit without proof consumption. Any failure after
+consumption leaves the proof spent and preserves the prior committed record; retry requires a new
+ceremony, proof, and credential handle.
 
-`mint_human_authorization` accepts exactly one matching internal authorization source: a consumed
-`UserPresenceAttestation` from the capability-tested `UserPresencePort`, or a
-`privacy_reauthentication` secret handle in committed passphrase mode. For the secret branch it
+`mint_human_authorization(source, challenge)` is the sole constructor of
+`HumanAuthorizationProof`. It accepts exactly one matching internal authorization source: an
+unconsumed `UserPresenceAttestation` from the capability-tested `UserPresencePort`, or a
+`provider_reauthentication`, `privacy_reauthentication`, or `security_reauthentication` secret
+handle in committed passphrase mode. For the attestation branch the vault invokes
+`UserPresencePort.consume(attestation, challenge)`, which returns no authority, then mints the
+proof itself. For a secret branch it
 re-runs the immutable envelope's exact Argon2id parameters, unwraps a candidate IVK into protected
 memory, verifies the candidate against the authenticated vault sentinel and current installation-
 key derivation domain, and constant-time compares only fixed commitments—not raw key/passphrase
-bytes. Wrong input/tamper has one bounded outcome, consumes the candidate, and participates in the
-shared passphrase throttle. Keyring mode has no secret branch. The method binds the proof to one exact proposed policy
-digest, ceremony/service/vault/policy generations, and short expiry, and never turns a CLI/TTY
+bytes. `UnlockCoordinator` must durably reserve the attempt before this method is called and is the
+only component that charges/resets the shared throttle after its bounded outcome; the vault does
+neither. Wrong input/tamper has one bounded outcome and consumes the candidate. Keyring mode has no
+secret branch. The method binds the proof to the challenge's exact authorization purpose and target
+digest, ceremony/service/vault/optional-policy generations, and
+`confidential_protocol.CEREMONY_EXPIRY_SECONDS`; it never turns a CLI/TTY
 boolean or same-UID assertion into authorization.
 
 For credential set/rotate, the same method consumes either an exact presence attestation or the
@@ -179,6 +210,11 @@ distinct `provider_reauthentication` purpose in passphrase mode, verifies it thr
 envelope/sentinel algorithm, and binds an internal one-use proof to the exact credential ceremony and
 `ProviderCredentialBinding`. That proof can authorize only the subsequent atomic credential write;
 it cannot approve privacy, unlock, or be returned to the helper.
+
+For a current-generation idle-relock change, it accepts only an exact presence attestation or the
+distinct `security_reauthentication` purpose and binds the proof to the exact current/proposed
+policy target digest. It cannot authorize provider or privacy work, and neither of those purposes
+can authorize disabling idle relock.
 
 ### Relock
 
@@ -235,6 +271,9 @@ client reconnection, config reload, or provider retry cannot reopen it.
 12. Pristine automatic keyring mode is impossible without a fresh exact
     `FirstInstallKeyringAuthority`; existing keyring-mode load remains allowed without current
     presence and is externally fenced by ready composition.
+13. `UnlockCoordinator` exclusively owns throttle admission and durable throttle transitions;
+    `VaultService` performs a requested cryptographic verification only after that gate and is the
+    sole minter of every `HumanAuthorizationProof`.
 
 ## Tests
 

@@ -12,7 +12,14 @@ One canonical strict-JSON fixture case with `fixture_schema: "yoetz.fixture-case
 
 ## Behavior
 
-The `input` section contains cooperative entries plus a successful bounded Codex import report with declared gaps. The `expected` section freezes import coverage/provenance, partial limitation, appropriate conclusion, and no claim that import observed all work. Every referenced identifier, timestamp, key, digest, nonce, provider response, and fault point is explicit test data; a test may not replace it with current time, randomness, network state, or host paths. Multi-variant cases evaluate each variant independently and declare the relationship between their outcomes.
+The `input` section contains cooperative entries plus a successful bounded Codex import report with
+declared gaps. The `expected` section freezes import coverage/provenance, the partial limitation,
+exact receipt `conclusion=insufficient_coverage`, and no claim that import observed all work. A
+successful bounded import means only that accepted source ranges were processed; its declared gaps
+prevent `no_unresolved_deterministic_findings`. Every referenced identifier, timestamp, key,
+digest, nonce, provider response, and fault point is explicit test data; a test may not replace it
+with current time, randomness, network state, or host paths. Multi-variant cases evaluate each
+variant independently and declare the relationship between their outcomes.
 
 ## Errors and edge cases
 

@@ -3,3 +3,35 @@
 
 # Local founder review plan and automated findings; not part of the public repository.
 /reviewing plan/
+
+# Python, pytest, lint, type-check, and property-test caches.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.pyright/
+.hypothesis/
+
+# Local environments and development-only npm installation.
+.venv/
+venv/
+/node_modules/
+
+# Build, distribution, and coverage output.
+/build/
+/dist/
+*.egg-info/
+.coverage
+coverage.xml
+/htmlcov/
+
+# Local environment and secret-bearing override files.
+.env
+.env.*
+!.env.example
+
+# OS/editor transients and project-local debug evidence.
+.DS_Store
+*.swp
+/.debug-mode/
+/.tmp/

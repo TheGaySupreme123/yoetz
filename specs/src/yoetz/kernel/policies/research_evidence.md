@@ -6,10 +6,10 @@
 
 ## Purpose
 
-This pack evaluates whether the evidence on the page, in the diff, or in the captured state really
-supports the claim being made. It is the deterministic policy that catches overconfident research
-summaries, unsupported claims, missing limitations, and findings that were rejected without a
-credible basis.
+This pack evaluates whether typed evidence links and exact captured-state identities are
+structurally consistent with a claim. It is the deterministic policy that catches contradictory
+result/state links, omitted typed limitations, and finding rejections without current admissible
+support; interpretation of prose belongs only to the semantic path.
 
 ## Public surface
 
@@ -30,14 +30,13 @@ machine-readable `FindingBasis`.
 
 The rule inventory is stable and intentionally small:
 
-- `evidence_does_not_support_claim` — the claim’s supporting refs do not actually justify the
-  statement being made.
-- `diff_does_not_match_account` — the captured diff or state reference does not match the written
-  account.
-- `material_limitation_omitted` — the claim or response omits a limitation that the recorded
-  evidence makes material.
-- `questionable_finding_rejection` — a deterministic finding was rejected or waived without a
-  strong enough explanation in the record.
+- `evidence_does_not_support_claim` — typed supporting refs structurally contradict the claim's
+  closed outcome/state fields.
+- `diff_does_not_match_account` — comparable captured and claimed state digests differ.
+- `material_limitation_omitted` — a completion claim's typed refs omit an exact recorded
+  failure/partial/unknown or gap record.
+- `questionable_finding_rejection` — a deterministic finding was rejected or waived without
+  current structurally admissible evidence refs.
 
 `RESEARCH_EVIDENCE_FACT_CODES` is exactly: `claim_support_present`,
 `claim_support_mismatch`, `captured_state_present`, `account_state_mismatch`,
@@ -45,20 +44,41 @@ The rule inventory is stable and intentionally small:
 `rejection_basis_insufficient`. A rule may use only these codes in its observed/missing tuples;
 adding or renaming one changes the pack version and its golden basis fixtures.
 
+The rule-to-fact crosswalk is exact:
+
+| Finding kind | Required `observed_facts` | Required missing facts |
+|---|---|---|
+| `evidence_does_not_support_claim` | `claim_support_present` + `claim_support_mismatch` | none |
+| `diff_does_not_match_account` | `captured_state_present` + `account_state_mismatch` | none |
+| `material_limitation_omitted` | `material_limitation_present` | `limitation_disclosure_absent` |
+| `questionable_finding_rejection` | `finding_rejection_present` | `rejection_basis_insufficient` |
+
+Codes in the third column are emitted in `FindingBasis.required_but_missing_facts`; all other
+listed codes are emitted in `observed_facts`. The comparison inputs are only typed IDs, closed
+enums, exact digests/frontiers, and ref presence. No claim, account, limitation, or response prose
+is parsed. Candidate priority and actionability come only from `FINDING_KIND_TRAITS` in
+`specs/INTERFACES.md`.
+
 Rule-level behavior is conservative and subject-bound:
 
 - `evidence_does_not_support_claim` triggers only when the supporting refs are actually present
-  and they fail to justify the claim being made. It does not trigger when the claim is merely
-  shorter than the evidence or when the evidence is irrelevant but harmless.
-- `diff_does_not_match_account` triggers only when the captured diff, digest, or described state is
-  materially inconsistent with the written account. It does not trigger for minor formatting drift
-  or a different but equivalent presentation.
+  but structurally contradict the typed claim state: a completion claim references a
+  `failure|partial|unknown` result, asserts an obligation that is still projected open, or carries
+  an exact comparable subject-state digest that differs from its support. Empty, unresolved,
+  redacted, or merely weak support routes to `claim_without_admissible_evidence` or a coverage
+  limitation instead. This rule never interprets whether evidence prose justifies claim prose.
+- `diff_does_not_match_account` triggers only when the captured structural state is
+  structurally comparable and its exact `diff_digest` or `tree_digest` differs from the claim's
+  corresponding digest. `described_state` and written-account prose are explanatory and ignored;
+  incomparable formats produce a coverage limitation instead of this mismatch kind.
 - `material_limitation_omitted` triggers only when the evidence itself makes a limitation material
-  to the claim and the claim or response leaves that limitation out. It does not trigger for
-  optional caveats.
+  through a closed structural fact (a linked `failure|partial|unknown` result, a redaction marker,
+  or a stale/incomparable state gap) and the completion claim's typed support refs omit the exact
+  limiting record. It never searches the statement for caveat language.
 - `questionable_finding_rejection` triggers only when a deterministic finding was rejected or
-  waived without a credible basis recorded in the case. It does not trigger when the rejection is
-  accompanied by a matching, bounded explanation and supporting refs.
+  waived without current, structurally admissible `evidence_refs` at the exact finding frontier.
+  It never grades the required reason string and does not trigger when matching typed support is
+  present.
 
 Like the work-integrity pack, each rule produces at most one finding per logical subject. The pack
 normalizes repeated symptoms so the caller sees the strongest record of the mismatch.
@@ -79,7 +99,7 @@ and reference metadata already present in the projection.
 
 The pack is conservative about completeness. If the projection lacks enough evidence to prove a
 claim wrong, the pack can still emit a limitation finding, but it must not invent a stronger
-refutation than the refs justify.
+structural mismatch than the refs justify.
 
 ## Errors and edge cases
 
@@ -99,9 +119,12 @@ refutation than the refs justify.
 
 ## Tests
 
-- `specs/tests/unit.md` — per-rule fixtures for claim/evidence mismatch, limitation omission, and
-  rejected-finding cases.
-- `fixtures/policies/research_evidence/` — golden cases and expected findings.
+- `specs/tests/unit/kernel/test_policy_research_evidence.py.md` — inline exact trigger and closest
+  non-trigger for every rule.
+- `specs/fixtures/README.md` maps the finite public research-evidence vectors to exact case files
+  `ADV-002-omitted-failed-test`, `ADV-004-irrelevant-evidence`, and
+  `ADV-009-wrong-semantic-finding-rejected`; no separate research-evidence fixture-resource
+  directory exists.
 
 ## Open questions
 

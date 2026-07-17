@@ -160,7 +160,9 @@ or appear in:
 
 Provider API credentials follow the same forbidden-channel list as content, with one necessary and
 narrow exception: for an already authorized physical attempt, the one-attempt custom transport may
-transmit the credential only as authentication metadata to the exact pinned TLS endpoint. It never
+transmit the credential only as authentication metadata to the exact profile-bound HTTPS endpoint
+selected by the reviewed provider registry, using platform CA trust and hostname validation. v0.1
+does not claim certificate or SPKI pinning. The credential never
 enters the candidate/model body, prompt/context, preview, receipt, log, trace, exception, config,
 environment, or reusable SDK/default-header state. That authentication transmission is not a claim
 that the provider credential never leaves the machine; it is a separately bound transport action.

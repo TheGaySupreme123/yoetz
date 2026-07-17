@@ -70,8 +70,13 @@ For known events, the reducer updates the projection collections as follows:
   may come from the engine or from an imported observation, but it never becomes stronger than its
   declared coverage.
 - `check_recorded`: preserve the returned finding set, update `latest_tested_state`, refresh the
-  freshness dimension, and attach the check’s coverage/gap summary. The reducer does not rerun the
-  policy pack; it only stores the already-evaluated check outcome.
+  freshness dimension, and copy `CheckRecordedPayload.coverage` plus its gaps into the latest-test
+  record. `latest_tested_state` retains the check event ID, subject frontier, verdict, exact
+  returned finding IDs, nonnegative suppressed count, and exact coverage; weakening the projection
+  uses those recorded facts rather than reconstructing them from visible finding IDs. A later
+  response does not clear the suppressed count. Only a newer recorded check at the applicable
+  frontier replaces it. The reducer does not rerun the policy pack; it only stores the
+  already-evaluated check outcome.
 - `receipt_recorded`: advance frontier and head digest; receipt history itself is handled by the
   receipt object store, not by the work projection. A receipt record changes projection freshness
   but does not re-rank findings.

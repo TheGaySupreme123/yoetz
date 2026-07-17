@@ -1,7 +1,7 @@
 # src/yoetz/domain/values.py — frozen domain value types
 
 **Wave:** B | **ADRs:** ADR-002, ADR-004 | **Imports (spec-tree):** `protocol/ids.md`,
-`protocol/errors.md`, `protocol/coverage.md` | **Imported by:** `domain/events.md`,
+`protocol/errors.md`, `protocol/coverage.md`, `protocol/canonical.md` | **Imported by:** `domain/events.md`,
 `domain/findings.md`, `domain/receipts.md`, `kernel/projections.md`, `kernel/reducers.md`,
 `kernel/deterministic_checks.md`, `kernel/ranking.md`, `kernel/receipt_builder.md`,
 `application/*`, `adapters/*`
@@ -17,7 +17,8 @@ would be unenforceable.
 
 This file contains **no Pydantic, MCP, SQLite, or provider imports**. It may import only the
 standard library plus `yoetz.protocol.ids` (ID validation), `yoetz.protocol.errors`
-(`ProtocolValueError`), and `yoetz.protocol.coverage` (the `AuthorshipAssurance` enum).
+(`ProtocolValueError`), `yoetz.protocol.coverage` (the `AuthorshipAssurance` enum), and
+`yoetz.protocol.canonical` (`MAX_JSON_DEPTH` only).
 
 ## Public surface
 
@@ -71,7 +72,7 @@ Recursively:
 3. `float` (and any other numeric type) raises `ProtocolValueError("float_forbidden")`.
 4. `list`/`tuple` recurse element-wise into a `tuple`.
 5. `dict`/`Mapping` requires every key to be `str`; recurses values and produces a `JsonObject`.
-   Non-string key: `ProtocolValueError("nonstring_object_key")`.
+   Non-string key: `ProtocolValueError("object_key_not_string")`.
 6. Any other type: `ProtocolValueError("unsupported_json_type")`.
 
 `JsonObject` is a small final class holding an internal `tuple[tuple[str, JsonValue], ...]` in
@@ -161,13 +162,15 @@ the result to SQLite's signed 64-bit range `0..9_223_372_036_854_775_807`
 
 - Every failure is `ProtocolValueError(reason_code)` with a bounded reason code from this file's
   fixed set: `duplicate_object_key`, `float_forbidden`, `integer_out_of_safe_range`,
-  `integer_out_of_sqlite_range`, `nonstring_object_key`, `unsupported_json_type`,
+  `integer_out_of_sqlite_range`, `object_key_not_string`, `unsupported_json_type`,
   `invalid_actor_id`, `invalid_timestamp`, `timestamp_not_utc`, `invalid_frontier`,
   `frontier_digest_mismatch`, `empty_subject_state`, `invalid_digest`, `invalid_commitment`,
-  `noncanonical_integer_string`, plus the codes raised through `protocol.ids.validate_id`.
+  `noncanonical_integer_string`, `nesting_too_deep`, plus the codes raised through
+  `protocol.ids.validate_id`.
 - Reason codes never embed caller input; no user text can leak through an exception message.
-- `freeze_json` on deeply nested input is bounded by the frozen `MAX_JSON_DEPTH = 64` levels,
-  `ProtocolValueError("json_too_deep")`) so hostile payloads cannot trigger recursion overflow.
+- `freeze_json` on deeply nested input is bounded by the frozen `MAX_JSON_DEPTH = 64` levels
+  imported from `protocol/canonical.py` (this module defines no mirror) and raises the owner's
+  `ProtocolValueError("nesting_too_deep")`, so hostile payloads cannot trigger recursion overflow.
 - `Timestamp` equality across identical instants with different spellings cannot occur: only the
   canonical spelling constructs.
 

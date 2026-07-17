@@ -12,8 +12,10 @@ everything locally available.
 
 ## Public surface
 
-Canonical multi-variant fixture `yoetz.fixture-case/1.0.0`, ID `PRIV-004`, workspace scope
-`wsp_44444444`, policy `pvy_44444444-4444-4444-8444-444444444444`, provider
+Canonical multi-variant fixture `yoetz.fixture-case/1.0.0`, ID `PRIV-004`, installation
+`ins_44444444-4444-4444-8444-444444444444`, workspace scope
+commitment `hmac-sha256:4444444444444444444444444444444444444444444444444444444444444444`,
+policy `pvy_44444444-4444-4444-8444-444444444444`, provider
 `provider.example`, endpoint `ep_trusted_v2`, model allowlist `model-example-2`, and purpose
 `selected-code-review`. The `assisted` variant uses a current recommendation-eligible data-use
 profile with training `prohibited`, retention `bounded`, and provider human access `restricted`;
@@ -30,8 +32,9 @@ variant adds one explicitly selected
 A fresh scoped local-human authorization commits each variant's exact listed categories and
 destination. The assisted policy then performs ordinary checks/retries without another prompt,
 while every physical attempt still gets a fresh authorization/receipt. The gateway includes only
-mechanically linked selected IDs within `wsp_44444444`; it blocks an otherwise readable raw
-database, unrelated workspace file, full transcript and environment entry. The adapter receives no
+mechanically linked selected IDs whose workspace scope establishes that exact keyed commitment; it
+blocks an otherwise readable raw database, unrelated workspace file, full transcript and
+environment entry. The adapter receives no
 repository/object-store handles. Receipt scope, consent, categories, counts, transformations and
 request commitment match the exact final application body bytes; auth metadata/framing are
 excluded. Same provider at a different endpoint/model/purpose is

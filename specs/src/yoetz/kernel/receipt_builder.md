@@ -68,14 +68,34 @@ The conclusion is conservative and derived from the state:
 
 - `no_unresolved_deterministic_findings` when there are no unresolved deterministic blockers and the
   coverage is strong enough to say so honestly;
-- `unresolved_findings_remain` when one or more findings remain open or materially disputed;
+- `unresolved_findings_remain` when one or more findings with registered `actionable=true` remain
+  open or materially disputed;
 - `insufficient_coverage` when the result cannot be stated honestly because the evidence is too weak,
   stale, redacted, or incomplete.
 
-If the findings are absent but the coverage is still too weak to support a strong statement, the
-builder prefers `insufficient_coverage` over a false sense of resolution. If the findings are
-present and materially unresolved, the builder prefers `unresolved_findings_remain` over a weaker
-neutral label.
+If no actionable finding remains but coverage is too weak to support a strong statement, including
+when the only visible finding is nonactionable `ledger_stale_or_incomplete`, the builder chooses
+`insufficient_coverage`. If an actionable finding remains materially unresolved, it chooses
+`unresolved_findings_remain` even when coverage is also weak.
+
+The same conservative rule covers capped checks. If the applicable `latest_tested_state` has
+`suppressed_count > 0`, the builder cannot recover or rerank the omitted identities. It therefore
+chooses `unresolved_findings_remain` while any visible actionable finding is unresolved, and
+otherwise `insufficient_coverage`; it may not emit
+`no_unresolved_deterministic_findings`. Responses never clear this structural uncertainty. Only a
+newer applicable `check_recorded` with `suppressed_count == 0` can support the strong conclusion.
+The canonical receipt copies the exact count into required `suppressed_finding_count` and may also
+render a bounded coverage note; it never fabricates finding IDs.
+
+The builder never copies `CheckVerdict`; the two enums are intentionally non-isomorphic. For an
+unchanged subject frontier it enforces the correspondence registered in `specs/INTERFACES.md` and
+owned in `domain/receipts.md`: `action_required` corresponds to
+`unresolved_findings_remain`, `no_issue_detected` to
+`no_unresolved_deterministic_findings`, and `insufficient_coverage` to
+`insufficient_coverage`; `incomplete_check` corresponds to `unresolved_findings_remain` when any
+actionable finding remains unresolved at that frontier and otherwise to `insufficient_coverage`. This is a
+consistency invariant over the same projection facts, not a request to rerun or import ranking
+inside the receipt builder.
 
 `redaction_profile` changes presentation, not the underlying truth. In `full_local`, the builder can
 carry the full allowed evidence and section detail. In `default_local_export`, it keeps the

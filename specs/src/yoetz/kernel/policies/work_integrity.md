@@ -42,9 +42,9 @@ The rule inventory is stable and intentionally narrow:
 - `requested_item_never_attempted` — a requested item recorded in the work trace was never attempted
   by any action or preserved by a valid waiver.
 - `failed_work_omitted` — the state contains a failure result that the current completion claim or
-  response fails to account for honestly.
-- `claim_without_admissible_evidence` — a claim is present but its support is too weak, missing, or
-  stale to justify it.
+  response omits from its typed supporting refs.
+- `claim_without_admissible_evidence` — a claim is present but its support refs are missing,
+  unavailable, structurally inadmissible, or stale.
 - `result_without_action` — a result appears without a recorded action that could have produced it.
 - `action_without_result` — a recorded attempt was left unresolved: no result links to it, and the
   case shows later work on a different subject.
@@ -68,45 +68,88 @@ The rule inventory is stable and intentionally narrow:
 observed/missing tuples; adding or renaming one changes the policy-pack version and its golden basis
 fixtures.
 
+The rule-to-fact crosswalk is exact. `+` means all listed codes are required; `one of` is the only
+OR in the table. Codes in the third column are emitted in
+`FindingBasis.required_but_missing_facts`; every other listed code is emitted in
+`observed_facts`. Subject refs on each fact are the exact IDs used by the structural comparison.
+
+| Finding kind | Required `observed_facts` | Required missing facts |
+|---|---|---|
+| `completion_with_open_obligations` | `completion_claim_present` + `open_obligation_present` | `valid_waiver_absent` |
+| `requested_item_never_attempted` | `requested_item_present` | `linked_attempt_absent` |
+| `failed_work_omitted` | `failed_result_present` | `failure_disclosure_absent` |
+| `claim_without_admissible_evidence` | `claim_present` | `admissible_evidence_absent` |
+| `result_without_action` | `result_present` | `linked_action_absent` |
+| `action_without_result` | `action_present` + `subsequent_unrelated_work_present` | `linked_result_absent` |
+| `stale_evidence_for_changed_state` | `state_comparison_available` + `state_changed` + `evidence_state_mismatch` | none |
+| `contradictory_claims_unresolved` | `contradictory_claims_present` | `resolution_absent` |
+| `ledger_stale_or_incomplete` | one of `unknown_event_present`, `redaction_gap_present`, `freshness_gap_present` | none |
+| `weak_or_stale_response` | `finding_response_present` and optionally `response_state_stale` when comparable frontiers differ | `response_basis_insufficient` when no admissible response support exists |
+
+No free-text field participates in deriving any code in this table. Candidate priority and
+actionability are the exact `FINDING_KIND_TRAITS` row registered in `specs/INTERFACES.md`; the pack
+does not choose them dynamically.
+
+For `action_without_result`, "later work on a different subject" has one exact structural rule.
+`action_subject_key(action)` returns the tagged sorted set `("obligations",
+action.obligation_refs)` when obligation refs are nonempty; otherwise it returns
+`("requested_items", action.attempted_items)` when attempted items are nonempty; otherwise it
+returns `None`. `SubjectStateRef` digests identify state, not subject, and never enter this key.
+Two keys are comparable only when their tags match, and are different only when their member sets
+are disjoint. Subsequent work means an action with a greater ledger ingestion sequence, or a result
+linked to such an action. The rule fires only when the unresolved action and one subsequent action
+have comparable disjoint keys; an unkeyed/incomparable pair, an overlapping set, or merely a newer
+state digest does not fire. This comparison order is fixed even when both actions carry requested
+items and obligation refs.
+
 Rule-level behavior is deterministic and conservative:
 
-- `completion_with_open_obligations` triggers only when the case contains an explicit completion
-  claim or terminal result and at least one matching obligation remains unresolved at the checked
+- `completion_with_open_obligations` triggers only when the case contains an explicit
+  `claim_kind=completion` claim and at least one ID in that claim's `obligation_refs` remains
+  projected open at the checked
   frontier. It does not trigger when the obligation was already resolved, waived in scope, or never
   material to the requested work.
 - `requested_item_never_attempted` triggers only when a requested item is present in the case,
-  there is no linked action/result for that item, and the item was not explicitly removed from
+  no `ActionRecordedPayload.attempted_items` contains the exact requested-item value, and the item
+  remains in the current projected plan rather than having been explicitly removed from
   scope. It does not trigger when the attempt exists but failed.
 - `failed_work_omitted` triggers only when the record says some work failed or was partial while the
-  claim or response omits that failure in a way that changes the meaning of the result. It does not
-  trigger when the failure is fully disclosed.
+  completion claim's typed `supporting_refs` omit that exact failure/partial `result_id`. It does
+  not parse the claim statement and does not trigger when the result ID is linked.
 - `claim_without_admissible_evidence` triggers only when the claim support refs are absent,
-  inadmissible, or too weak to carry the claim. It does not trigger when the claim is merely
-  concise.
+  unresolved, redacted/unavailable, or stale by exact comparable `SubjectStateRef` digests. For a
+  completion claim, a referenced `ResultRecordedPayload` with `failure|partial|unknown` is not
+  admissible completion evidence. It does not inspect claim prose or interpret evidence relevance,
+  and does not trigger when the claim is merely concise.
 - `result_without_action` triggers only when a result exists without a matching action or the
   action linkage is internally inconsistent. It does not trigger when the action exists but the
   result is still pending elsewhere.
 - `action_without_result` triggers only when a recorded action has no linked result and the case
-  also contains a later recorded action or result on a different subject. That later unrelated work
-  is the whole trigger: it is what separates an abandoned attempt from one still in flight. The most
-  recent recorded work therefore never fires this rule, because the frozen case cannot show whether
-  it has finished. The rule does not trigger when a result exists and reports failure, which is
-  `failed_work_omitted`'s subject, and it does not infer from a missing result that the attempt
-  failed, succeeded, or never happened — only that the record leaves it unresolved. It carries
+  also contains later recorded work satisfying the exact `action_subject_key` rule above. That
+  later structurally unrelated work is the whole trigger: it is what separates an abandoned
+  attempt from one still in flight. The most recent recorded work therefore never fires this rule,
+  because the frozen case cannot show whether it has finished. The rule does not trigger when a
+  result exists and reports failure, which is `failed_work_omitted`'s subject, and it does not infer
+  from a missing result that the attempt failed, succeeded, or never happened — only that the
+  record leaves it unresolved. It carries
   priority 3, so a completion-time check ranks material findings above it while a check run during
   the work surfaces it when nothing more material competes.
-- `stale_evidence_for_changed_state` triggers only when the evidence references a different state
-  than the one now being checked and that difference is material to the claim. It does not trigger
-  for unchanged state or trivial metadata drift.
-- `contradictory_claims_unresolved` triggers only when two or more claims in the same case cannot
-  be jointly true and there is no recorded resolution. It does not trigger when a later claim
-  supersedes an earlier one cleanly.
+- `stale_evidence_for_changed_state` triggers only when
+  `subject_state_relation(evidence_state, checked_state) == different`. In v0.1 that requires two
+  present, unequal `tree_digest` values; unequal `diff_digest` values remain `unknown`. The rule
+  does not read `described_state` or other prose and does not trigger for equal digests or
+  incomparable state formats.
+- `contradictory_claims_unresolved` triggers only from an explicit
+  `ClaimRecordedPayload.disputes_refs` edge whose referenced claim/event remains unresolved in the
+  projection. It never tries to decide whether two statement strings can be jointly true. It does
+  not trigger when a later structural resolution/supersession clears the edge.
 - `ledger_stale_or_incomplete` triggers only when unknown events, redaction gaps, or freshness
   limits make the record too weak for a current conclusion. It does not trigger when the history is
   complete and fresh.
 - `weak_or_stale_response` triggers only when a response rejects or waives a finding without a
-  sufficient recorded basis, or when the explanation itself is stale relative to the frontier. It
-  does not trigger for a well-supported acknowledgement or waiver.
+  structurally admissible typed `evidence_refs` basis, or when its exact finding frontier is stale
+  relative to the responded finding. It never grades the free-text reason and does not trigger for
+  a response with current admissible support.
 
 Each rule produces at most one finding per logical subject. The pack deduplicates repeated
 symptoms on the same subject so the caller sees the strongest single finding, not a pile of
@@ -149,10 +192,14 @@ be complete.
 
 ## Tests
 
-- `specs/tests/unit.md` — per-rule fixtures for open obligations, stale evidence, and result/action
-  mismatches; `action_without_result` fires for an unresolved attempt followed by later work on
-  another subject and stays silent for the most recent recorded action.
-- `fixtures/policies/work_integrity/` — golden cases and expected findings.
+- `specs/tests/unit/kernel/test_policy_work_integrity.py.md` — inline exact trigger and closest
+  non-trigger for every rule; `action_without_result` fires for an unresolved attempt followed by
+  later work on another subject and stays silent for the most recent recorded action.
+- `specs/fixtures/README.md` maps the finite public work-integrity vectors to exact case files
+  `ADV-001-abandoned-obligation`, `ADV-002-omitted-failed-test`, `ADV-003-stale-test-after-edit`,
+  `ADV-006-parent-subagent-contradiction`, `ADV-008-stale-redacted-ledger`, and
+  `ADV-009-wrong-semantic-finding-rejected`; no separate work-integrity fixture-resource directory
+  exists.
 
 ## Open questions
 

@@ -17,9 +17,17 @@ vault, or direct-execution fallback.
 - `async connect_service(client_kind: ControlClientKind) -> ServiceClient`.
 - Six exact async workflow methods matching `Application`: `start`, `publish_work`, `check`,
   `respond`, `status`, `receipt`.
-- Support methods matching the closed registry in `ControlMethod`.
-- CLI/UI-only `privacy_receipts_list` and `privacy_receipts_get` structural inspection methods;
-  neither is admitted for `mcp_bridge`.
+- Exact ordinary support methods `import_codex_jsonl`, `review`, `backup_preview`, `backup_execute`,
+  `restore_preview`, `restore_execute`, `migrate_preview`, `migrate_execute`,
+  `integration_preview`, `integration_execute`, `privacy_get_setup`, `privacy_get_effective`,
+  `privacy_propose_policy`, `privacy_tighten_policy`, `privacy_receipts_list`, and
+  `privacy_receipts_get`. These names are the wire tokens; the client performs no alias mapping.
+  The two receipt-inspection methods are CLI/UI-only and neither is admitted for `mcp_bridge`.
+  Their exact signatures are
+  `async privacy_receipts_list(ListPrivacyReceiptsRequest) -> PrivacyReceiptPage` and
+  `async privacy_receipts_get(GetPrivacyReceiptRequest) -> PrivacyReceiptGetResult`, where the
+  latter is the exact closed control result union `found(PrivacyReceiptView)|not_found`, never a
+  nullable wire value.
 - Structural lifecycle methods `service_status`, `lock`, `stop`, available only under the client-
   kind rules.
 - `async close()` — idempotent, cancels/awaits local receiver tasks without implying remote
@@ -53,8 +61,12 @@ vault, store provider credentials, mint human authorization, or loosen privacy p
 class.
 
 Privacy receipt inspection returns only the structural receipt view/page and snapshot cursor from
-`PrivacyAuditPort`; it never fetches an encrypted proposal object or creates a new local-disclosure
-receipt for the inspection itself.
+the server's internal `PrivacyAuditPort.list_receipts`/`get_receipt` methods; those internal names
+are not exposed as wire aliases. Inspection never fetches an encrypted proposal object or creates
+a new local-disclosure receipt for the inspection itself.
+The server maps the internal page fields one-to-one to `PrivacyReceiptPage`; it maps an internal
+`PrivacyReceiptView | None` to the client's closed `found|not_found` result. The client never
+collapses `not_found` into an empty view or exposes the internal optional directly.
 
 ## Errors and edge cases
 

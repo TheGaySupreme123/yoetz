@@ -23,7 +23,9 @@ The test uses adversarial fixtures and asserts:
 
 - public claims remain bounded by the evidence map;
 - bad inputs fail closed instead of upgrading wording;
-- minimized counterexamples map to named public claims.
+- minimized counterexamples map to named public claims;
+- the exact mapping in `fixtures/README.md` covers every registered `FindingKind`, with one trigger,
+  remediation, and closest non-trigger and no lookup of an undeclared policy-resource path.
 
 The semantic cases additionally lock:
 

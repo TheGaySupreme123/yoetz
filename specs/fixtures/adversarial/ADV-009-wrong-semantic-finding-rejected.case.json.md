@@ -15,8 +15,12 @@ One canonical strict-JSON fixture case with `fixture_schema: "yoetz.fixture-case
 The `input` section contains a scripted wrong direct-agent challenge, hollow rejection, supported
 evidence-backed rejection, accept/act, revised-claim, unresolved-limitation, and deterministic-
 control variants. The `expected` section freezes retained semantic provenance,
-`weak_or_stale_response` only for unsupported rejection, no deterministic upgrade, and a mandatory
-fresh check after any response/new evidence/revised claim. Every referenced identifier, timestamp,
+`weak_or_stale_response` for a response with no current admissible support and
+`questionable_finding_rejection` for rejection/waiver of an exact deterministic finding without
+current frontier-bound evidence refs. A combined hollow finding-rejection variant freezes both
+pack-owned deterministic results; the supported evidence-backed variant is the closest non-trigger
+for both. The case also freezes no deterministic upgrade and a mandatory fresh check after any
+response/new evidence/revised claim. Every referenced identifier, timestamp,
 key, digest, nonce, provider response, and fault point is explicit test data; a test may not replace
 it with current time, randomness, network state, or host paths. Multi-variant cases evaluate each
 variant independently and declare the relationship between their outcomes.

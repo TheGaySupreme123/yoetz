@@ -55,6 +55,15 @@ schema. The bundled adapter is trusted service code and receives no repository/s
 handles through composition; v0.1 does not claim in-process sandbox isolation from ambient OS
 authority.
 
+The runtime `HumanAuthorityCapability` snapshot is deliberately not an additional activation gate
+for this local sink. It fences external transports, provider-credential mutation, and policy
+widening; the durable `local_model_enabled` transition and exact profile selection already required
+strong local-human reauthentication when they were created. Thus an unavailable external snapshot
+does not silently revoke an otherwise valid local profile, but it also cannot enable, widen, or
+repair one. Exact policy/catalog validation, matching service/vault/policy generations,
+classifier/minimizer/never-send checks, socket-profile verification, and `consume_local` remain
+mandatory for every local call.
+
 The pre-existing model runtime is a separate trusted local disclosure sink. AF_UNIX proves only how
 Yoetz delivered the case, not that the runtime process lacks AF_INET or cannot exfiltrate. A support
 cell may claim runtime no-network isolation only when it binds verifiable sandbox/network-denial
@@ -98,6 +107,8 @@ config, privacy policy, CLI/MCP, environment, or model output is rejected.
    gate construction and each physical write.
 9. Local/external reviewers use the same basis/challenge/change-visibility semantics even though
    their transport and data-use recommendation rules differ.
+10. External human-authority unavailability is not local-model authority; it neither grants nor
+    revokes the independently durable local row, whose full local-disclosure gates still apply.
 
 ## Tests
 
@@ -106,7 +117,10 @@ peer/socket replacement, permissions/generation checks, schema/refusal/timeout/i
 AF_INET/AF_INET6/DNS/proxy/subprocess/download denial in the Yoetz adapter, honest runtime trust
 wording, no external fallback, and local disclosure receipt tests are required before advertising a
 local-model support cell. Runtime-wide no-network wording additionally requires exact sandbox
-evidence; adapter-only socket interception is insufficient.
+evidence; adapter-only socket interception is insufficient. The matrix also covers
+`HumanAuthorityCapability.source=unavailable`: a previously authorized exact local row continues
+through the local gates, while disabled/invalid/widened rows remain unavailable and external
+fallback stays impossible.
 
 ## Open questions
 

@@ -14,6 +14,8 @@ truth.
 - `test_missing_projection_rebuilds_from_ledger` — cache deletion is recoverable.
 - `test_corrupt_projection_digest_forces_rebuild` — digest mismatch blocks silent reuse.
 - `test_rebuild_matches_reference_snapshot` — rebuild equals the pure replay snapshot.
+- `test_rebuild_preserves_latest_check_suppression` — SQLite cache/rebuild keeps returned IDs and
+  nonzero suppressed count exactly.
 - `test_rebuild_does_not_mutate_ledger_history` — rebuild is a derived operation only.
 
 ## Behavior
@@ -22,6 +24,8 @@ The test deletes or corrupts the projection cache, then forces reload/rebuild. I
 
 - the rebuild uses accepted events only;
 - the rebuilt digest matches the pure projection digest;
+- `p1_projection_state` round-trips the latest check event/frontier/verdict/returned IDs/
+  suppressed count/coverage and rebuild reproduces them byte-for-byte;
 - ledger history is left untouched;
 - stale cache state is not trusted after digest mismatch.
 

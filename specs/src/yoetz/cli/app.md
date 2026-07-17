@@ -15,14 +15,17 @@ objects, or fall back to direct execution.
 
 - Typer `app`, `main()`, one `run_async` bridge.
 - `build_service_client(client_kind=cli) -> ServiceClient`.
-- Shared six-operation/status/receipt client commands.
-- Command tree: the six workflows; `mcp serve`; import/review/backup/restore/migrate/version;
+- Shared workflow client commands `start`, `publish-work`, `check`, `respond`, `status`, and
+  `receipt`.
+- Complete command tree: those six workflows; `mcp serve`;
+  `import`/`review`/`backup`/`restore`/`migrate`/`version`;
   local read-only `state capture --workspace PATH`;
   `integrate <harness> skill preview|install|status|remove`, where `<harness>` is an exact
   registered `HarnessId` (v0.1: exactly `codex`) that the user always names and the CLI never infers
   from cwd, environment, installed editors, or running processes;
-  `service run|status|lock|stop|unlock|initialize-passphrase`; and
-  `provider credential set|rotate` for foreground confidential provisioning; plus
+  `service run|status|lock|stop|unlock|initialize-passphrase` plus trusted-foreground
+  `service idle-relock <60..86400|disabled>`;
+  `provider credential set|rotate` for foreground confidential provisioning; and
   `privacy setup|show|propose|tighten` and `privacy receipts list|get` for transparent setup and
   bounded structural local audit inspection, and the trusted-human-only
   `privacy decide-policy|decide-disclosure`.
@@ -43,11 +46,30 @@ run` is the foreground daemon entrypoint; it must not be nested inside another C
 Native launchd/systemd-user install/start integration is deferred; an external user-selected
 supervisor may run this foreground command, but normal workflows never start it.
 `service lock` is CLI-only and drains/relocks; `service stop` drains/exits. Version may inspect
-installed public package metadata locally but no user/vault state. `privacy setup|show|propose|
-tighten` use least-authority ordinary control. `privacy decide-policy|decide-disclosure` delegate
+installed public package metadata locally but no user/vault state. `privacy setup|show|propose|tighten`
+use least-authority ordinary control. `privacy decide-policy|decide-disclosure` delegate
 to `cli/privacy_control.md`, never an ordinary decision method. `privacy receipts list|get` are
 CLI/UI-only structural reads, never MCP tools; they render no excerpts/request bodies/object refs and
 are local-projection/audit-exempt so inspection does not create a new receipt.
+
+Privacy ordinary-control dispatch is exact and alias-free: `privacy setup`, `show`, `propose`, and
+`tighten` call `privacy_get_setup`, `privacy_get_effective`, `privacy_propose_policy`, and
+`privacy_tighten_policy`; `privacy receipts list|get` call `privacy_receipts_list` and
+`privacy_receipts_get`, respectively. The trusted decision commands use YZH1 and are not
+`ControlMethod` branches.
+
+`service idle-relock TARGET` is a trusted foreground security ceremony, not an ordinary support
+call. `TARGET` is exactly ASCII `disabled` or a canonical unsigned base-10 integer in `60..86400`;
+signs, leading zeroes, whitespace, suffixes, floats, null/infinity aliases, and out-of-range values
+exit `2` before any connection or prompt. The raw argument token is validated before integer
+conversion. A valid target delegates only to
+`cli/unlock.change_idle_relock_policy`, which opens YZH1 ceremony
+`idle_relock_policy_change`; it never invokes `ServiceClient`, `ControlMethod`, MCP, config, or a
+normal workflow envelope. The TTY preview shows the current and proposed tagged values, current
+service generation, generation-only scope, restart reset to the 900-second default, and that
+explicit/session-lock/suspend/monitor-loss locking remains active. Approval requires the
+server-selected OS-presence or passphrase-mode `security_reauthentication` path. A typed denial is
+a successful no-mutation outcome.
 
 `state capture` is the sole client-local repository-read exception under ADR-011. It requires one
 explicit trusted workspace argument, lazily constructs only `GitSubjectStateAdapter`, performs no
@@ -96,9 +118,11 @@ the identical operation request ID.
 ## Errors and edge cases
 
 - Usage/input shape → exit 2; conflicts 10; pending 11; service/storage/vault unavailable 20;
-  provider 30; corruption 40; sanitized defect 70; interrupt 130.
+  provider 30; corruption 40; sanitized defect 70; interrupt 130, using the exhaustive per-code
+  table in `cli/exits.md`.
 - Non-TTY commands never prompt or hang. Unlock specifically opens the controlling TTY and rejects
-  absence; it never falls back to stdin.
+  absence; it never falls back to stdin. Idle-relock policy change has the same foreground/TTY
+  requirement and accepts no `--yes`, piped decision, ordinary JSON request, or MCP route.
 - Findings/incomplete semantic checks still exit 0 when deterministic operation completed.
 - `mcp serve` emits protocol frames only on stdout.
 - `state capture` rejects non-Git/unsafe/ambiguous/changed/over-limit input with no digest and never
@@ -116,6 +140,9 @@ the identical operation request ID.
    remains zero-egress until a user commits a different policy.
 7. The only ordinary client-local repository read is ADR-011 `state capture`; it is read-only,
    network-free, content-withholding, and imports no trusted service/application composition.
+8. Idle-relock mutation is reachable only as the exact `idle_relock_policy_change` YZH1/YZS1
+   ceremony; its nonsecret target argument grants no authority and is never an ordinary-control or
+   MCP method.
 
 ## Tests
 
@@ -123,6 +150,8 @@ the identical operation request ID.
 - Privacy CLI snapshots cover all five recipe expansions, exact thirteen-answer review, eligible/
   stale provider data-use posture, no-prompt assisted checks, and high-ceremony confirmation mode.
 - `tests/subprocess/test_service_unlock_boundary.py` covers TTY-only confidential input.
+- That suite also covers `service idle-relock` target grammar, preview, approve/deny,
+  OS-presence/passphrase authorization, generation scope, and forbidden ordinary/MCP routes.
 - `tests/conformance/surfaces/test_cli_mcp_parity.py` covers exact operation parity.
 - `tests/packaging/test_service_boundary_imports.py` covers import trust boundary.
 - `tests/subprocess/test_cli_invocations.py` covers state capture, dirty/staged/untracked changes,

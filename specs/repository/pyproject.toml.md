@@ -27,9 +27,9 @@ The file must define, at minimum:
 - runtime dependency declarations;
 - optional dependency groups for non-default capabilities;
 - console-script entry points and module invocation parity;
-- package-data inclusion for `py.typed` and every entry in the reviewed 69-file runtime resource
-  manifest: schemas, canonical fixtures, migrations, Codex skill files, and the runtime-support
-  allowlist;
+- package-data inclusion for `py.typed`, all 71 entries in the reviewed runtime resource manifest,
+  and the manifest itself (72 runtime resource files total): schemas, canonical fixtures,
+  migrations, Codex skill files, and the runtime-support allowlist;
 - tool configuration used by the release and test pipeline when that configuration is part of the
   public build contract.
 
@@ -49,15 +49,36 @@ The file must keep the build contract declarative:
 - the release artifact must exclude private planning docs, transcripts, tests, and other
   non-public authoring material.
 
-The dependency section must be consistent with the import graph in the spec tree. In particular,
-the runtime dependencies required by the public package, the optional capability groups, and the
-build/test tooling declared here must align with the behavior described in the application, CLI,
-adapter, and packaging specs.
+The dependency section must be consistent with the import graph in the spec tree. At the
+2026-07-17 implementation lock it has the following implementable shape (ordering is lexical):
+
+- `[build-system].requires = ["uv_build>=0.11.29,<0.12"]` and
+  `[build-system].build-backend = "uv_build"`;
+- `[project].requires-python = ">=3.14,<3.15"`;
+- `[project].dependencies` contains exactly `anyio==4.14.2`, `apsw==3.53.3.1`,
+  `cryptography==49.0.0`, `jsonschema==4.26.0`, `keyring==25.7.0`, `mcp==1.28.1`,
+  `platformdirs==4.10.0`, `pydantic==2.13.4`, and `typer==0.27.0`;
+- `[project.optional-dependencies].semantic-openai` contains exactly `httpx==0.28.1` and
+  `openai==2.46.0`;
+- `[project.optional-dependencies].portable-recovery` contains exactly
+  `argon2-cffi==25.1.0`;
+- `[dependency-groups].dev` contains exactly `hypothesis==6.156.6`, `pytest==9.1.1`,
+  `pytest-timeout==2.4.0`, and `ruff==0.15.22`;
+- `[tool.uv].required-version = "==0.11.29"` and `[tool.uv].prerelease = "disallow"`.
+
+The standard project table also declares the `yoetz = "yoetz.cli.app:main"` console script. The
+Ruff tables freeze line length 100, and `[tool.pyright]` freezes `pythonVersion = "3.14"` and
+`typeCheckingMode = "strict"`; the Pyright executable and version remain npm-owned. Dependency
+groups cannot be merged into one another, and exact pins cannot be weakened to compatible or
+minimum ranges. The runtime dependencies, optional capability groups, and build/test tooling
+declared here must align with the behavior described in the application, CLI, adapter, and
+packaging specs.
 
 The v0.1 standard runtime includes direct pinned `cryptography` for AES-GCM, RFC 3394 AES Key Wrap,
-HKDF and HMAC, plus the approved `keyring`/platform secure-backend stack. Exact versions refresh at
-E-001/release lock and every advertised wheel must support the frozen known-answer suite. Optional
-dependency groups are exactly `semantic-openai` and `portable-recovery`, as frozen by ADR-007.
+HKDF and HMAC, plus the approved `keyring`/platform secure-backend stack resolved in `uv.lock`.
+Exact versions refresh at E-001/release lock and every advertised wheel must support the frozen
+known-answer suite. Optional dependency groups are exactly `semantic-openai` and
+`portable-recovery`, as frozen by ADR-007.
 Python build/test/Ruff configuration lives in
 `pyproject.toml`; the development-only npm Pyright pin and invocation live in the separate root
 `package.json` and lock so Node never becomes a runtime dependency.
@@ -93,5 +114,6 @@ the build and test environment reproducible.
 
 ## Open questions
 
-None. Apache-2.0 and the development-only npm Pyright choice are frozen; E-001 remains the exact
-development-toolchain version gate.
+None. Apache-2.0 and the development-only npm Pyright choice are frozen. The direct identities
+above are the 2026-07-17 implementation lock; E-001 remains the exact release-refresh and
+toolchain-compatibility gate.

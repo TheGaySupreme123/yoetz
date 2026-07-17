@@ -40,6 +40,23 @@ The locked graph must remain compatible with the version and packaging manifests
 - hash mismatches or source drift must fail the release rather than being silently accepted;
 - no unreviewed transitive dependency may appear in a release build.
 
+The initial lock is generated on 2026-07-17 with `uv==0.11.29`, prereleases disallowed, and
+CPython `3.14.6`. Its reviewed direct roots are exactly:
+
+- runtime: `anyio==4.14.2`, `apsw==3.53.3.1`, `cryptography==49.0.0`,
+  `jsonschema==4.26.0`, `keyring==25.7.0`, `mcp==1.28.1`, `platformdirs==4.10.0`,
+  `pydantic==2.13.4`, and `typer==0.27.0`;
+- `semantic-openai`: `httpx==0.28.1` and `openai==2.46.0`;
+- `portable-recovery`: `argon2-cffi==25.1.0`;
+- development: `hypothesis==6.156.6`, `pytest==9.1.1`, `pytest-timeout==2.4.0`, and
+  `ruff==0.15.22`;
+- build: `uv_build>=0.11.29,<0.12`.
+
+The APSW candidate must report bundled SQLite `3.53.3`, amalgamation enabled, and exact SQLite
+source ID
+`2026-06-26 20:14:12 d4c0e51e4aeb96955b99185ab9cde75c339e2c29c3f3f12428d364a10d782c62`
+before it can enter a supported runtime cell. Lock resolution alone is not that evidence.
+
 The file may contain multiple target-specific resolution entries, but each target entry must be
 deterministic and tied to a reviewed support matrix. If a platform or Python patch level is not in
 scope, the lock should make that limitation explicit rather than pretending support.
@@ -75,4 +92,5 @@ v0.1 does not maintain per-mode lockfiles.
 
 None.
 
-E-001 is the sole central dependency-pin gate.
+The direct roots above are the implementation lock. E-001 is the sole central release-refresh
+gate and must regenerate the entire graph rather than hand-edit this file.

@@ -72,7 +72,9 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
   `MAX_OBJECT_PLAINTEXT_BYTES = 4_194_304` (4 MiB, ADR-004).
 - Event/value bounds: `MAX_TEXT_BYTES = 8_192`, `MAX_LABEL_BYTES = 256`,
   `MAX_REF_LIST = 64`, `MAX_CAUSAL_PARENTS = 32`, `MAX_REQUESTED_ITEMS = 64`,
-  `MAX_ALTERNATIVES = 16`, and `MAX_JSON_DEPTH = 64`.
+  `MAX_ALTERNATIVES = 16`, and `MAX_JSON_DEPTH = 64`. `protocol/canonical.py` owns and exports
+  the one depth constant; every other validator, including `domain/values.freeze_json`, imports it.
+  No second depth-cap symbol exists.
 - `STATUS_PAGE_DEFAULT = 50`; `STATUS_PAGE_MAX = 100`.
 - `LEDGER_READ_PAGE_SIZE = 500`; adapters paginate canonical event reads at this exact internal
   page size and release the read transaction between pages.
@@ -85,7 +87,8 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
   `MAX_REVIEW_CHANGE_OBSERVATIONS = 32`, `MAX_REVIEW_EXCERPTS = 16`,
   `MAX_REVIEW_OMISSIONS = 64`, and `MAX_REVIEW_CHALLENGES = 3`.
 - MCP transport cap (`adapters/mcp_stdio.py`): `MAX_JSON_FRAME_BYTES = 1_048_576` payload bytes
-  excluding the single LF.
+  excluding the single LF. This is adapter-owned and is not exported or mirrored by
+  `protocol/models.py`.
 - Local-service control framing (`service/control_protocol.py`):
   `MAX_CONTROL_FRAME_BYTES = 6_291_456` payload bytes excluding the four-byte length prefix, with
   `MAX_ORDINARY_CONTROL_FRAME_BYTES = 1_048_576` for every frame except the exact closed
@@ -108,7 +111,24 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
   floats/NaN/Infinity/-0, integers outside ±(2^53−1), lone surrogates.
 - `ProtocolValueError` reason codes include: `duplicate_object_key`, `float_forbidden`,
   `integer_out_of_safe_range`, `invalid_utf8`, `lone_surrogate`, `noncanonical_integer_string`,
-  `negative_zero_forbidden`, `unsorted_set_field`, `duplicate_set_member`.
+  `nesting_too_deep`, `unsorted_set_field`, `duplicate_set_member`.
+
+The schema catalog (`protocol/schemas.py`) has two orthogonal enums. `SchemaKind` is the broad
+runtime category `request_result|event|config|version_manifest`.
+`SchemaArtifactRole` is the exact release/packaging role:
+`common-value`, `MCP input`, `MCP output`, `persisted-envelope`, `event-envelope`,
+`event-payload`, `configuration`, `finding`, `semantic-provenance`, `receipt-document`,
+`privacy-policy`, `outbound-case`, `privacy-audit`, `setup-contract`, `local-control`,
+`service-status`, or `version-report`. `SchemaDocument` contains both `schema_kind` and
+`artifact_role: SchemaArtifactRole`; neither value is inferred from the other. The reviewed
+`schemas/manifest.json` owns the closed path-to-artifact-role mapping, and catalog loading fails
+closed on an unknown or path-incompatible role.
+
+The independent exhaustive path-to-`SchemaKind` map is: `events/* -> event`,
+`config/* -> config`, `version/* -> version_manifest`, and
+`common/*|operations/*|findings/*|receipts/*|privacy/*|service/* -> request_result`. The manifest
+records both typed values and the catalog re-derives each from its own map. These prefixes exhaust
+the 52 v0.1 schema artifacts; no `support_manifest` kind or support-manifest schema exists.
 
 ## 5. Coverage (`protocol/coverage.py`)
 
@@ -191,11 +211,20 @@ Waiver-only fields are forbidden on other dispositions. `finding_frontier` is al
 domain `Frontier`, even when the public request supplied only its canonical sequence string.
 
 `WaiverScope` has one v0.1 value, `finding_only`, and serializes with the exact finding ID/frontier
-already present on the response. Broader subject/obligation/project waivers are deferred. A waiver
+already present on the response. The nominal enum is owned by `domain/findings.py`; broader
+subject/obligation/project waivers are deferred. A waiver
 is accepted only from an interactive `local_cli` request constrained as a human and explicitly
 confirmed at the prompt; MCP, importer, noninteractive CLI, and model-backed actors may acknowledge
 or reject with evidence but may not waive. `waiver_expiry` may further narrow that one-finding
 scope. This is authorization policy, not a caller-asserted actor upgrade.
+
+`CheckMode`, owned by `domain/events.py`, is exactly `deterministic_only`,
+`semantic_if_configured`, or `semantic_required`. It is the one enum used by check requests,
+`CheckRecordedPayload`, application orchestration, and renderers.
+
+`CheckRecordedPayload` carries the exact required `coverage: Coverage` from the recorded
+`RankedFindings`; reducers retain it in `latest_tested_state` and MUST NOT infer it later from the
+visible finding IDs.
 
 `CheckRecordedPayload.semantic_status` uses the single shared `SemanticStatus` enum:
 `not_requested`, `not_configured`, `blocked_by_policy`, `blocked_forbidden_data`,
@@ -240,6 +269,7 @@ subject_frontier, coverage: Coverage, provenance: SemanticProvenance | None)`.
 Work-integrity finding kinds (`FindingKind`):
 `completion_with_open_obligations`, `requested_item_never_attempted`,
 `failed_work_omitted`, `claim_without_admissible_evidence`, `result_without_action`,
+`action_without_result`,
 `stale_evidence_for_changed_state`, `contradictory_claims_unresolved`,
 `ledger_stale_or_incomplete`, `weak_or_stale_response` (flags a hollow rejection/waiver).
 Research/evidence-assessment kinds: `evidence_does_not_support_claim`, `diff_does_not_match_account`,
@@ -250,14 +280,87 @@ the latter four deterministically, and a semantic reviewer may propose the same 
 alone distinguishes `deterministic` from `semantic_model_derived`; provenance rules follow origin,
 not the kind token.
 
+`FINDING_KIND_TRAITS` is the immutable exhaustive mapping below. The numeric priority is a
+required serialized fact and MUST equal the row for the kind; `actionable` is derived and is not a
+second wire field. `actionable=true` means the finding requests a concrete repair to the work or
+its account; false means it reports a coverage/ledger limitation whose remedy is not safely
+inferable from the frozen case.
+
+| `FindingKind` | Required priority | Actionable |
+|---|---:|:---:|
+| `completion_with_open_obligations` | 1 | true |
+| `requested_item_never_attempted` | 2 | true |
+| `failed_work_omitted` | 1 | true |
+| `claim_without_admissible_evidence` | 1 | true |
+| `result_without_action` | 2 | true |
+| `action_without_result` | 3 | true |
+| `stale_evidence_for_changed_state` | 2 | true |
+| `contradictory_claims_unresolved` | 1 | true |
+| `ledger_stale_or_incomplete` | 3 | false |
+| `weak_or_stale_response` | 2 | true |
+| `evidence_does_not_support_claim` | 1 | true |
+| `diff_does_not_match_account` | 1 | true |
+| `material_limitation_omitted` | 1 | true |
+| `questionable_finding_rejection` | 2 | true |
+
+Ranking uses no prose or implementation-defined scoring. The evidence-strength bucket is the
+lexicographic pair `(artifact_observation ordinal, evidence_immutability ordinal)` using the
+weakest-to-strongest zero-based orders in §5. The coverage bucket is the lexicographic sequence
+`(ledger_freshness ordinal, authorship_assurance ordinal, real_check_present)`, strongest first,
+followed by fewer `known_gaps` first; `real_check_present` is 1 when `check_types` contains
+`deterministic` or `semantic_model_derived`, otherwise 0. Publication-channel breadth and exact
+gap/check-type identities are not strength scores.
+
+The complete ascending `rank_key` is `(priority, -actionable, -artifact_ordinal,
+-immutability_ordinal, -freshness_ordinal, -authorship_ordinal, -real_check_present,
+known_gap_count, origin_ordinal, finding_id_bytes)`, where `origin_ordinal` is 0 for deterministic
+and 1 for semantic-model-derived. Thus deterministic precedes semantic only after all materiality,
+actionability, evidence, and coverage facts tie, and unsigned ASCII `finding_id` bytes are always
+the final tie-break.
+
+`kernel/ranking.py` owns `CheckCompleteness = complete|coverage_incomplete|required_incomplete`
+and `RankingContext(coverage: Coverage, completeness: CheckCompleteness)`. The application derives
+that context from terminal check facts before ranking. Its coverage is the component-wise weakest
+material coverage across the frozen case, every deterministic assessment/basis and candidate,
+semantic dependencies/outcomes, every explicit unknown/redaction/freshness gap, and all findings
+before capping. `required_incomplete` means a required deterministic pack failed or a material
+`semantic_required` path terminated without valid success; `coverage_incomplete` means required
+checks completed but material coverage is missing/redacted/unknown/stale or an optional requested
+semantic path yielded no usable evidence; `complete` means required packs completed with no
+material gap and semantic work succeeded or was not required/not material.
+
 Verdict enum (`CheckVerdict`): `action_required`, `no_issue_detected`, `insufficient_coverage`,
 `incomplete_check`. Never `pass`.
+
+`RankedFindings` is exactly the frozen four-field value
+`(findings: tuple[Finding, ...], suppressed_count: int, verdict: CheckVerdict,
+coverage: Coverage)`. `findings` is the ordered selected set after the optional one-slot semantic
+diversity rule, not necessarily the ordinary top-N prefix. `coverage` is always the full
+`RankingContext.coverage`; suppression or slot replacement never strengthens it. Verdict
+precedence is `required_incomplete -> incomplete_check`, else any selected actionable finding ->
+`action_required`, else `coverage_incomplete -> insufficient_coverage`, else
+`no_issue_detected` with an empty selection.
+
+`ReceiptConclusion`, owned by `domain/receipts.py`, is exactly
+`no_unresolved_deterministic_findings`, `unresolved_findings_remain`, or
+`insufficient_coverage`. It is deliberately non-isomorphic with `CheckVerdict`: receipts derive
+from projection facts and coverage rather than copying a prior check token. At the same unchanged
+subject frontier the required correspondence is `action_required -> unresolved_findings_remain`,
+`no_issue_detected -> no_unresolved_deterministic_findings`, and
+`insufficient_coverage -> insufficient_coverage`; `incomplete_check` maps to
+`unresolved_findings_remain` when any actionable finding remains unresolved at that frontier,
+otherwise to `insufficient_coverage`. An `insufficient_coverage` check has no selected actionable
+finding by the registered verdict precedence, so the receipt builder's actionable-first rule does
+not conflict with this correspondence.
 
 ## 9. Kernel (`kernel/`)
 
 - `ProjectionState` (frozen): `frontier`, `head_digest`, `plans`, `obligations`, `decisions`,
   `assignments`, `actions`, `results`, `evidence`, `claims`, `contradictions`, `findings`,
   `responses`, `latest_tested_state`, `freshness`, `unknown_event_count`, `coverage_gaps`.
+  `latest_tested_state` is exactly the source check event ID, subject frontier, verdict,
+  `returned_finding_ids`, `suppressed_count`, and recorded coverage. Suppression is durable
+  structural uncertainty: it is never reconstructed from visible finding IDs.
 - `reduce_event(state, event) -> ProjectionState` (pure); `replay(events) -> ProjectionState`.
 - `run_deterministic_policies(case: FrozenCase, policy: PolicyPack) -> DeterministicPolicyResult`.
   It is pure and never reads randomness. The result contains ordered
@@ -268,13 +371,14 @@ Verdict enum (`CheckVerdict`): `action_required`, `no_issue_detected`, `insuffic
   depends on a context profile or disclosure policy. The
   application allocates one `fnd_` ID per normalized candidate, persists the candidate-to-ID and
   basis map in the immutable local-result object, and reuses it after a crash.
-- `rank_findings(deterministic, semantic, policy, max_findings) -> RankedFindings`
-  (stable order: materiality desc, actionability desc, evidence strength desc, then ascending
-  `finding_id` bytes as final deterministic tie-break; suppressed count retained).
+- `rank_findings(deterministic, semantic, context: RankingContext, max_findings) -> RankedFindings`
+  (the exact stable `rank_key` is registered in §8; suppressed count, verdict, and the full
+  weakest-material coverage baseline are retained with the ordered selection).
 - `build_receipt(state, subject_frontier, receipt_id, task_id, session_id, generated_at, versions,
   redaction_profile, include) -> ReceiptDocument`. Every nondeterministic input is explicit; the
   builder reads no clock or ID source. `ReceiptDocument` contains its identity, generation time,
-  and subject frontier, but not the post-append result frontier (which would create a digest
+  subject frontier, and exact nonnegative `suppressed_finding_count` from the applicable latest
+  check, but not the post-append result frontier (which would create a digest
   self-reference). `ReceiptResult` carries both subject and post-commit result frontiers.
 - `PolicyPack` ids: `work-integrity/0.1.0`, `research-evidence/0.1.0`
   (`kernel/policies/work_integrity.py`, `kernel/policies/research_evidence.py`).
@@ -302,16 +406,46 @@ Verdict enum (`CheckVerdict`): `action_required`, `no_issue_detected`, `insuffic
 - `lookup_operation(writer_id, operation_id) -> OperationRecord | None`.
 
 The check orchestration methods are authority-bearing port methods, not SQLite extensions.
-`CheckPhase` is `reserved`, `local_ready`, `semantic_wait`, `ready_to_finalize`, `terminal`.
-`AttemptOutcome` is `response_durable`, `failed`, `expired`, `late`, `selected`. Shared frozen
-records are `OperationLease`, `SemanticJobRecord`, `SemanticAttemptHandle`, `SelectedAttempt`, and
-`PendingVerdict`; every record carries the IDs, owner generation, lease owner/generation, expiry,
-frontier, and dependency digest needed for a compare-and-swap. `advance_check_phase` binds the
-durable local-result/case object when that transition promises recoverability.
+`ports/ledger.py` owns the shared closed enums: `OperationKind` is
+`publish_work|check|respond|receipt`; `OperationState` is `pending|complete|quarantined`;
+`CheckPhase` is `reserved|local_ready|semantic_wait|ready_to_finalize|terminal`;
+`AttemptOutcome` is `response_durable|failed|expired|late|selected`;
+`PendingVerdictKind` is `absent|live|terminal|quarantined`; and `OperationQuarantineCode` is exactly
+`operation_kind_state_contradiction`, `operation_result_digest_mismatch`,
+`operation_event_range_mismatch`, `operation_resume_object_invalid`, or
+`operation_lease_shape_invalid`.
 
-`OperationRecord` contains an optional bounded `OperationResultLocator` with the accepted event
-range plus operation-kind-specific structural identifiers/object references. Receipt replay uses
-this locator; it never scans an unbounded ledger or rebuilds the receipt.
+The exact shared frozen records, also owned by `ports/ledger.py`, are:
+
+- `OperationLease(writer_id, operation_id, session_id, phase: CheckPhase, owner_generation,
+  lease_owner_id, lease_generation: positive int, lease_expires_at, frontier: Frontier,
+  dependency_digest)`;
+- `SemanticJobRecord(job_id, writer_id, operation_id, case_digest,
+  case_object_ref: ObjectRef, state: queued|leased|succeeded|failed|quarantined,
+  attempt_count: nonnegative int, active_attempt_id?, selected_attempt_id?, lease_owner_id?,
+  lease_generation?, lease_expires_at?, selected_result_object_ref?,
+  terminal_code: SemanticReason?, terminal_at?)`;
+- `SemanticAttemptHandle(job_id, attempt_id, attempt_ordinal: positive int,
+  provider_request_id, writer_id, operation_id, owner_generation, lease_owner_id,
+  lease_generation: positive int, lease_expires_at, frontier: Frontier, dependency_digest)`;
+- `SelectedAttempt(job_id, attempt_id, result_object_ref: ObjectRef, selected_at,
+  frontier: Frontier, dependency_digest)`; and
+- `PendingVerdict(kind: PendingVerdictKind, operation: OperationRecord | None,
+  retry_after_ms: int | None)`, where retry time is present only for `live` and is bounded by the
+  remaining lease lifetime.
+
+These field sets are closed: `OperationLease` and `SemanticAttemptHandle` carry the complete
+owner/lease/frontier/dependency compare-and-swap fence, while job, selected-attempt, and pending
+records carry only their listed durable state. `advance_check_phase` binds the durable
+local-result/case object when that transition promises recoverability.
+
+`OperationRecord` uses those exact `OperationKind`, `OperationState`, `CheckPhase`,
+`OperationQuarantineCode`, and locator types. Its optional bounded
+`OperationResultLocator(first_ingestion_sequence: int | None,
+last_ingestion_sequence: int | None, result_object_ref: ObjectRef | None,
+structural_ids: tuple[str, ...])` requires both sequence fields absent or both present and ordered;
+`structural_ids` is sorted unique and has at most `MAX_EVENTS_PER_BATCH + 1` members. Receipt
+replay uses this locator; it never scans an unbounded ledger or rebuilds the receipt.
 
 Pending-import exclusion is part of this ledger contract, not an importer-status read: for a new
 or resumed check, `freeze_case` and `commit_check_if_current` each require no pending import for
@@ -446,11 +580,22 @@ encoding, length prefix, hash prepass, normalization, or delimiter.
 CLI/UI-only `lock`/`stop`, and `close`. Shared closed types are `ControlClientKind`
 (`cli|mcp_bridge|ui`), `ControlMethod`, `ControlRequest`, `ControlResult`, `ServiceState`
 (`starting|locked|unlocking|ready|draining|failed`), and `ServiceStatus`. The method registry has
-the six workflow operations plus exact support/preview/execute, lifecycle, and CLI/UI-only
-`privacy_get_setup|privacy_get_effective|privacy_propose_policy|privacy_tighten_policy` methods.
+exactly twenty-five calls: the six workflow operations plus nineteen support/preview/execute,
+lifecycle, and CLI/UI-only methods. The privacy subset is exactly
+`privacy_get_setup|privacy_get_effective|privacy_propose_policy|privacy_tighten_policy|
+privacy_receipts_list|privacy_receipts_get`.
 It has no privacy decision, unlock, secret, credential, key-handle, decrypted-object,
 arbitrary-path, or policy-loosening field or method. `service_status` is available while locked;
 task operations are not. MCP cannot invoke lifecycle or privacy-control methods.
+
+`ports/privacy.py` owns the shared receipt-inspection values `PrivacyReceiptAudience`,
+`PrivacyReceiptQuery`, `PrivacyReceiptPage`, and the closed tagged union `PrivacyReceiptView`.
+The ordinary-control boundary models `ListPrivacyReceiptsRequest` and
+`GetPrivacyReceiptRequest` exactly from the corresponding closed control-request bodies;
+`service/client.py` owns schema-derived `PrivacyReceiptGetResult = found(PrivacyReceiptView) |
+not_found`. The daemon alone maps the internal `PrivacyReceiptView | None` query result to that
+wire union. No nullable result, port-method alias, plaintext, or object-dereference handle crosses
+the control boundary.
 
 `ServiceLifecycle` owns the one per-user instance and the exact
 `starting -> locked|ready|failed`, `locked -> unlocking|draining|failed`,
@@ -461,6 +606,13 @@ service constructs `Application`, `BundleRuntimePort`, storage/key/provider adap
 coordinator, and the outbound gateway. A service lock/suspend/session-lock transition first stops
 admission, resolves bounded shielded commits, closes provider/runtime handles, invalidates vault
 generations, then reports `locked`. Resume never implies ready.
+
+`ServiceLifecycle.change_idle_relock_policy(proposed, proof)` is the only idle-policy mutation
+path. `IdleRelockPolicy` defaults to 900 seconds, accepts finite `60..86400`, and may use its
+internal `seconds=None` disabled state only after this method atomically consumes the exact
+vault-minted proof. The exception is scoped to the current service generation, is not persisted,
+and restart restores 900 seconds. Explicit, session-lock, suspend, and monitor-loss relock remain
+enabled when idle relock is disabled.
 
 Shared lifecycle/control values are `ServiceInstance`, `Admission`, `SessionSecurityEvent`
 (`user_session_locked|system_suspend|user_session_unlocked|system_resume|monitor_lost`),
@@ -477,9 +629,10 @@ reveals credential or policy state.
 
 `SecretMemoryPort` exposes `capability`, `capture`, `allocate`, and `close` over opaque one-shot
 `SecretHandle` values. `SecretPurpose` is exactly `vault_initialize`, `vault_unlock`,
-`portable_recovery`, `provider_reauthentication`, `provider_credential`, or
-`privacy_reauthentication`; `SecretConsumer` is exactly `vault_root`,
-`recovery_wrapper`, `provider_authorizer`, or `privacy_authorizer`. Shared types are
+`portable_recovery`, `provider_reauthentication`, `provider_credential`,
+`privacy_reauthentication`, or `security_reauthentication`; `SecretConsumer` is exactly
+`vault_root`, `recovery_wrapper`, `provider_authorizer`, `privacy_authorizer`, or
+`security_authorizer`. Shared types are
 `SecretMemoryCapability`, `ProviderAttemptAuthBinding`, `ProviderAuthTransportCallback`,
 `ProviderCredentialHandle`, `HumanAuthorizationProof`, `UserPresenceChallenge`,
 `UserPresenceAttestation`, `UserPresenceCapability`, and `UserPresencePort`. Strong OS presence is
@@ -487,6 +640,29 @@ exact action/generation-bound and capability-tested; TTY/same-UID/unlocked-sessi
 implementations. Buffers are
 bounded mutable allocations with measured page-lock/no-core capability and best-effort overwrite;
 the contract explicitly makes no CPython zero-copy or perfect-zeroization claim.
+
+`HumanAuthorizationProof` has exactly `proof_id`, `purpose`, `target_digest`,
+`service_generation`, `vault_generation`, `policy_generation: int | None`,
+`issued_at_monotonic: float`, and `expires_at_monotonic: float`. Its sole additional member is the
+private `_consume_latch` with `init=False`, `repr=False`, `compare=False`, excluded from
+copy/pickle/serialization. Internal
+`consume(expected_purpose, expected_target_digest, service_generation, vault_generation,
+policy_generation, now_monotonic) -> None` validates every binding/expiry and atomically flips that
+latch. The proof is internal and never serialized. `UserPresencePort.consume` validates and
+invalidates an exact attestation/challenge and returns `None`; it cannot construct or return
+authority. `VaultService.mint_human_authorization` is the sole proof constructor for both a
+consumed exact OS-presence source and an admitted purpose-specific passphrase reauthentication
+source. `UnlockCoordinator` exclusively owns the durable passphrase throttle and calls the vault
+only after admission/reservation; `unlock_rate_limited` is therefore a coordinator outcome and not
+a `VaultError`.
+
+Provider mutation uses only
+`VaultService.store_provider_credential(action, binding, secret, proof, now_monotonic)`. The
+action is exact `set|rotate`; the secret is one `provider_credential` handle; and the proof purpose
+is the matching `provider_credential_set|provider_credential_rotate`, bound to the same target and
+service/vault generations with no policy generation. The vault consumes the proof in the same
+non-interleavable mutation section as its record-generation CAS. Human control cannot exchange a
+proof for a weaker reusable binding, and no credential record can commit without that exact proof.
 
 Pristine automatic keyring initialization requires both an approved create-if-absent/round-trip
 keyring probe and an installed `UserPresenceCapability` matching an active
@@ -498,8 +674,13 @@ pristine-state digest, and both evidence digests; `create_and_verify` requires i
 no stage, IVK, entry, or marker and returns `human_authority_unavailable`. This is not a live
 `UserPresenceAttestation`, and no caller-supplied capability or boolean is accepted.
 
-`ProviderAttemptAuthBinding` freezes exact provider/model/endpoint profile ID+version, purpose,
-dispatch ID, final request-body SHA-256 digest, service generation, and deadline.
+`ProviderCredentialBinding` freezes exact provider/model/endpoint profile ID+version, the exact
+bounded lower-kebab purpose token, authorization-scope digest, and purpose digest. The purpose
+digest is exactly `canonical_digest({"purpose": purpose})`; a mismatching pair is invalid before
+storage or handle minting. `ProviderAttemptAuthBinding` freezes those same fields plus dispatch ID,
+final request-body SHA-256 digest, service
+generation, and deadline. Minting a credential handle requires every shared field to match the
+stored credential binding; a scoped credential cannot authorize another model, scope, or purpose.
 `ProviderCredentialHandle.authorize_attempt(binding, inject_and_start)` is single-use: after exact
 binding/body/deadline validation it exposes a protected view only inside the injected custom HTTP
 transport callback for authentication-header injection and one request start, then releases it
@@ -508,7 +689,7 @@ receive or retain the real credential; HTTP/TLS internals may copy header bytes,
 zero-copy claim is made.
 
 Pure `service/confidential_protocol.py` owns both closed client-safe wire contracts. YZH1 is the
-multi-phase structural channel with `HUMAN_PROTOCOL_MAGIC`, version/cap, exact eight
+multi-phase structural channel with `HUMAN_PROTOCOL_MAGIC`, version/cap, exact nine
 `HumanCeremonyKind` values, `HumanOpenTarget`/`HumanPreview`/`HumanAction`/`HumanPhase`/
 `HumanResult` unions, ceremony/decision bindings, eight correlated envelope types, bounded errors,
 and terminal close. YZS1 is the one-secret binary channel with `SECRET_PROTOCOL_MAGIC`, version/
@@ -516,6 +697,34 @@ caps, `ConfidentialSecretPurpose` wire codes, and `SecretIngressBinding`. Shared
 16..1,024 strict UTF-8/no NUL-CR-LF/no normalization for passphrase purposes and a generic
 1..8,192/no NUL-CR-LF provider-credential transport cap followed by the exact installed profile
 validator.
+
+`HumanPhase` is exactly `secret_required|authorization_required|keyring_retry|decision_required`.
+Every serialized YZH1 ceremony/decision binding and YZS1 `SecretIngressBinding` carries
+`expires_at_monotonic_ms`, a nonnegative canonical JSON safe integer. The service captures
+`ClockPort.monotonic_seconds()` once, computes issue milliseconds as
+`floor(monotonic_seconds * 1000)`, rejects a nonfinite/negative/overflowing input, and adds exactly
+`CEREMONY_EXPIRY_SECONDS * 1000`; no float is serialized. Expiry comparison converts the current
+monotonic sample with the same floor rule.
+
+`HumanCeremonyKind` is exactly `vault_initialize`, `vault_unlock`, `keyring_retry`,
+`portable_recovery`, `provider_credential_set`, `provider_credential_rotate`,
+`privacy_policy_decision`, `privacy_disclosure_decision`, and `idle_relock_policy_change`.
+`CEREMONY_EXPIRY_SECONDS = 60` is the one YZH1/YZS1 challenge/binding expiry. The seven fixed
+`ConfidentialSecretPurpose` wire codes are `1=vault_initialize`, `2=vault_unlock`,
+`3=portable_recovery`, `4=provider_reauthentication`, `5=provider_credential`,
+`6=privacy_reauthentication`, and `7=security_reauthentication`.
+
+`HumanOpenTarget` has exactly five branches: `EmptyVaultTarget`, `PortableRecoveryTarget`,
+`ProviderCredentialTarget`, `PrivacyPendingTarget`, and `IdleRelockPolicyTarget`. The last is
+exactly `{kind:"idle_relock_policy", operation:"set", seconds:60..86400}` or
+`{kind:"idle_relock_policy", operation:"disable"}`; no null/infinity/string alias exists. The
+ninth `HumanPreview` branch carries tagged current/proposed finite-or-disabled values, service
+generation, and the canonical target digest. The sixth `HumanResult` branch carries previous and
+effective tagged values, `scope:"service_generation"`, and service generation. Policy expansion
+and idle-policy change accept `approve|deny`, then require
+`select_authorization_source=os_user_presence|secret_reauthentication` before mutation; there is
+no server-side `edit` action. Idle-policy secret reauthentication uses only wire purpose 7 and
+`SecretPurpose.security_reauthentication`/`SecretConsumer.security_authorizer`.
 
 `SecretIngressService` and `HumanControlService` are server authority. Client-safe
 `service/confidential_client.py` alone exports `HumanControlClient`, `HumanControlSession`, and
@@ -613,7 +822,9 @@ gateway, completes structural decision receipts for pre-dispatch terminal outcom
 one terminal structural attempt receipt per physical attempt, including taskless channels, and
 atomically consumes/completes receipt-bound local disclosures. Agent projection subjects contain
 only installation-keyed result/projection commitments and field decisions, never copied plaintext.
-Bounded CLI/UI-only `get_receipt`/`list_receipts` expose structural views; MCP has no access. Initial
+Internal `PrivacyAuditPort.get_receipt`/`list_receipts` queries project bounded structural views
+only through the ordinary CLI/UI control methods `privacy_receipts_get` and
+`privacy_receipts_list`; the port names are not wire aliases and MCP has no access. Initial
 reservation failure is the sole no-receipt exception and occurs before prompt/authorization/
 dispatch; `awaiting_human`, `approved`, and `receipt_pending` are nonterminal
 `PrivacyAuditState.status` values rather than receipt outcomes.
@@ -918,7 +1129,7 @@ submodule/redaction ADR and a separate port.
 
 Shared types are `MaintenanceLocation`, `MaintenanceKind` (`backup`, `restore`, `migration`),
 `BackupMode` (`machine_bound`, `portable_recovery`), `MaintenanceReason`, `MaintenanceError`,
-`MaintenancePin`, `BackupObjectEntry`, `PrivacyAuditBackupSnapshot`, `BackupManifest`,
+`MaintenanceHandle`, `MaintenancePin`, `BackupObjectEntry`, `PrivacyAuditBackupSnapshot`, `BackupManifest`,
 `BackupCommand`, `BackupPlan`,
 `BackupResult`, `RestoreCommand`, `RestorePlan`, `RestoreResult`, `MigrationCommand`,
 `MigrationPlan`, `MigrationResult`, `RecoveryOperation` (`create|restore`), and `RecoverySecret`.
@@ -936,8 +1147,11 @@ imports terminal audit evidence, expires pending/approved/authorized state, reso
 `receipt_pending` as `transport_failed/outcome_unknown`, and never restores live disclosure
 authority.
 
-`MaintenanceService` owns support request validation and explicit confirmation. Its shared values
-are `MaintenanceHandle`, maintenance request values, `Confirmation`, and `ConfirmationChannel`.
+`ports/maintenance.py` owns the service-internal `MaintenanceHandle`; the SQLite maintenance
+adapter is its sole concrete constructor after a durable generation CAS, and every consumer
+revalidates its task/request/route/generation/plan bindings. `MaintenanceService` owns support
+request validation and explicit confirmation. Its shared values are maintenance request values,
+`Confirmation`, and `ConfirmationChannel`.
 `ConfirmationChannel` is exactly `interactive|noninteractive_flag|release_automation`. Every
 channel requires the exact current plan digest plus explicit acceptance; a bare/general `--yes`
 never suffices. Portable-recovery execution additionally requires the foreground confidential
@@ -1041,7 +1255,9 @@ facade and are never MCP tools.
   `IMPORT_SCHEMA_VERSION=1` own durable generation/lease-fenced importer state and plan/batch/
   report resume. `adapters/memory/importer.py` exports the parity types `MemoryImporter`,
   `MemoryImportState`, `MemoryImportPolicy`, and `MemoryImportFaultPoint`.
-- `adapters/sqlite/maintenance.py`: implements `MaintenancePort` and catalog route-switch recovery.
+- `adapters/sqlite/maintenance.py`: implements `MaintenancePort`, constructs the neutral
+  `ports/maintenance.py` `MaintenanceHandle` after the catalog generation CAS, and owns catalog
+  route-switch recovery.
 - `adapters/sqlite/migrations.py`: owns frozen shared `Migration` and `MigrationReport` values;
   exact `CATALOG_MIGRATIONS` and `BUNDLE_MIGRATIONS` registries (each only migration `0001` in
   v0.1); and `initialize_catalog`, `initialize_bundle`, `run_migrations`, and

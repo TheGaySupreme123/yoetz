@@ -4,7 +4,8 @@
 `protocol/errors.md`, `protocol/ids.md`, `domain/values.md` (`Frontier`), `ports/keys.md`,
 `ports/objects.md`, `ports/privacy.md`,
 `version.md` | **Imported by:** `application/maintenance.py.md`,
-`adapters/sqlite/maintenance.py.md`, CLI composition and maintenance tests
+`adapters/sqlite/maintenance.py.md`, `adapters/sqlite/migrations.md`, CLI composition and
+maintenance tests
 
 ## Purpose
 
@@ -38,6 +39,12 @@ Yoetz values and raises typed bounded failures; no SQLite/APSW/`Path` type cross
 
 ### Shared values
 
+- `MaintenanceHandle` — frozen, slots-based, non-serializable service-internal nominal authority
+  passed only between the concrete maintenance adapter and the migration runner. Its private state
+  binds the exact task, maintenance kind, request, route identity, owner generation, lease
+  generation, and confirmed plan digest. Construction follows a successful catalog generation CAS;
+  every consumer revalidates those bindings against durable state, so possession alone is never
+  sufficient authority. It contains no SQLite connection, path, key, secret, or payload bytes.
 - `MaintenanceLocation(value: str)` — opaque, strict local-file location supplied by the support
   boundary. It is non-serializable in diagnostics and has a redacted representation. The adapter
   validates/normalizes it; no code infers it from cwd.

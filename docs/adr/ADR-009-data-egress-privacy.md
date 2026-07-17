@@ -65,6 +65,11 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    A local-model runtime receives plaintext and belongs to the trusted local computing base unless
    its exact artifact/profile supplies independently enforceable sandbox evidence; Yoetz's adapter
    makes no claim about another process's ambient network authority.
+   `HumanAuthorityCapability.source=unavailable` fences external-provider activation, credential
+   mutation, and durable policy widening; it is not a second use-time authorization gate for an
+   already reauthenticated exact local-model policy row. Local-model use remains independently
+   gated by deterministic classification, exact installed profile, service/vault/policy generation,
+   and one-shot `consume_local` authorization.
 
    **Revised 2026-07-16 (see ADR-010, F-018/F-019).** The original single `agent_context` sink
    conflated two audiences with different risk, and its structural-only default therefore withheld
@@ -166,9 +171,10 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    authentication fields are outside that commitment; provider credentials enter only through a
    separately bound vault handle at the transport boundary and cannot alter the approved body.
    Resolved decision F-012 permits this separately provisioned vault credential to leave only as
-   one-attempt authentication metadata to the exact pinned TLS
-   endpoint; candidate/user-discovered credentials remain never-send. Catalog-backed audit is
-   permitted; content-bearing task audit
+   one-attempt authentication metadata to the exact profile-bound HTTPS endpoint selected by the
+   reviewed registry, using platform CA trust and hostname validation; v0.1 does not claim
+   certificate or SPKI pinning. Candidate/user-discovered credentials remain never-send.
+   Catalog-backed audit is permitted; content-bearing task audit
    uses encrypted bundle objects referenced directly from the privacy catalog, while structural-only
    taskless audit requires no content object. No new task event family is required. A v0.1 non-LLM
    `channel_unavailable` decision is pre-dispatch: it has no dispatch

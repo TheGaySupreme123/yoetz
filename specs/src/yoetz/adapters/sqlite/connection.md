@@ -134,15 +134,17 @@ propagates it.
 
 ### `assert_active_bundle_generation(path)`
 
-Enforces ADR-001's ownership model. The authoritative record is the `owner_generation` value in
-`bundle_meta` (catalog: its own equivalent meta table), advanced only under `BEGIN IMMEDIATE`
-compare-and-swap; no filesystem lock is trusted for correctness.
+Enforces ADR-001's task-bundle ownership model. The authoritative task-writer record is the
+`owner_generation` plus owner nonce in that bundle's `bundle_meta`, advanced only under
+`BEGIN IMMEDIATE` compare-and-swap; a catalog route row never substitutes for this fence and no
+filesystem lock is trusted for correctness. The catalog writer has its separate catalog-meta fence.
 
-- The process runtime holds an `OwnershipHandle` (owner generation as canonical integer string,
-  owner nonce — an `ins_`-style random ID minted per acquisition as PID-reuse defense) produced by
-  `recovery.acquire_bundle_ownership` (see `recovery.md`).
+- The process runtime holds the registered `OwnershipFence` (service instance/generation,
+  positive bundle owner generation, opaque owner nonce) returned by
+  `recovery.acquire_bundle_ownership(state, verdict, service_instance_id,
+  service_generation, owner_nonce, now)` (see `recovery.md`).
 - This function opens a short-lived read connection, reads the ownership row, and asserts that
-  stored generation and nonce equal the handle's values. Mismatch raises
+  stored generation and nonce equal the fence's values. Mismatch raises
   `StorageUnsafeError("bundle_generation_lost")`: another process took over; this process must
   not open a writer, write, lease, or checkpoint again.
 - It never acquires ownership itself; acquisition/takeover is `recovery.md`'s job. Calling

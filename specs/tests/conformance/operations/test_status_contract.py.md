@@ -13,6 +13,8 @@ Prove status is read-only and returns the same canonical projection page across 
 - `test_status_request_result_parity` — structured pages match.
 - `test_status_is_read_only` — no state mutation occurs.
 - `test_status_frontier_and_pagination_parity` — lag, page size, and frontier are exact.
+- `test_future_frontier_is_invalid_request` — every surface maps a future read-only frontier to
+  `INVALID_REQUEST`, never `FRONTIER_CONFLICT`.
 
 ## Behavior
 
@@ -21,6 +23,7 @@ The test asserts:
 - status does not write events or mutate the projection;
 - requested/head/effective frontiers and page contents match;
 - latest/current vs lagged cache disclosure is surfaced honestly;
+- future-frontier input fails identically as `INVALID_REQUEST` without a write/conflict path;
 - CLI and MCP wrappers do not alter the page shape.
 
 ## Errors and edge cases

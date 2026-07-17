@@ -1,7 +1,7 @@
 # src/yoetz/service/secret_ingress.py — confidential local-human secret ingress
 
 **Wave:** C/D | **ADRs:** ADR-004, ADR-008 | **Imports (spec-tree):**
-`service/confidential_protocol.md`, `ports/secret_memory.md`, `service/lifecycle.md`,
+`service/confidential_protocol.md`, `ports/clock.md`, `ports/secret_memory.md`, `service/lifecycle.md`,
 `adapters/control/unix_socket.md` | **Imported by:** `service/daemon.md`, `service/unlock.md`,
 `service/human_control.md`
 
@@ -9,13 +9,14 @@
 
 Provides the only path by which a local human-control session can deliver first-install vault
 initialization, later vault unlock, portable-recovery, provider-credential, or
-privacy-reauthentication bytes to the trusted service. It is physically and
+privacy/security-reauthentication bytes to the trusted service. It is physically and
 type-wise separate from ordinary CLI/MCP control and never represents secrets as JSON, argv,
 environment, config, stdin, logs, or application values.
 
 ## Public surface
 
 - `class SecretIngressService` with async `serve`, `accept_once`, `cancel_pending`, and `close`.
+- Constructor dependency `ClockPort`; it is the sole current-time source for binding expiry.
 - `class SecretIngressError(Exception)` — bounded reasons `tty_required`, `peer_untrusted`,
   `purpose_forbidden`, `state_forbidden`, `binding_invalid`, `binding_expired`,
   `secret_too_large`, `partial_frame`, `rate_limited`, `cancelled`.
@@ -33,7 +34,9 @@ are checked before allocation; zero/oversize/extra/partial bytes fail and close.
 structural canonical data minted by the still-open matching human-control ceremony, previously
 presented to the human, includes the current
 service instance/generation and one-use challenge, and is authenticated by the same-UID endpoint
-session. Secret bytes are read directly into a bounded mutable allocation, captured immediately by
+session. Before allocation it samples the injected clock once, applies the registered
+floor-millisecond conversion, and rejects an expired/unsafe binding; no client or ambient clock is
+authority. Secret bytes are read directly into a bounded mutable allocation, captured immediately by
 `SecretMemoryPort`, and overwritten in the receive buffer in `finally`. They are never decoded as
 JSON or logged. Vault/recovery/reauthentication passphrases repeat the exact shared 16..1,024-byte
 strict-UTF-8/no-NUL-CR-LF/no-normalization validation inside their purpose consumer; provider
@@ -55,9 +58,11 @@ only a ready service and exact pending
 credential ceremony; `provider_credential` only that same ceremony after its fresh internal
 human-authorization proof, with exact provider/endpoint/scope/purpose binding;
 `privacy_reauthentication` only for an exact pending policy/disclosure digest presented through
-`service/human_control.md`. Challenges expire after 60
-seconds, are single-use, and at most one unlock attempt runs at a time. Failure rate limits use
-structural counters/timers and reveal no secret-derived detail.
+`service/human_control.md`; `security_reauthentication` only for an exact pending
+`idle_relock_policy_change` target digest. Challenges expire after exactly
+`confidential_protocol.CEREMONY_EXPIRY_SECONDS`, are single-use, and at most one passphrase
+verification runs at a time. This parser owns no counter or timer: it surfaces the bounded
+`rate_limited` result only when `UnlockCoordinator`, the sole throttle owner, rejects admission.
 
 YZS1 never creates/returns a challenge, preview, or keyring result. Zero-length secret frames remain
 invalid. Zero-secret keyring retry is a typed action on the YZH1 human-control endpoint; provider
@@ -102,7 +107,8 @@ set/rotate and privacy decisions also begin there before this parser can accept 
 - `tests/subprocess/test_service_secret_boundary.py` covers pipes/non-TTY rejection, framing,
   oversize/partial/extra bytes, same-UID checks, process metadata, logs, and transcript canaries.
 - `tests/integration/service/test_secret_ingress.py` covers every purpose/state/binding/generation/
-  expiry/rate-limit combination.
+  expiry/rate-limit combination, including the seventh `security_reauthentication` purpose and
+  cross-purpose rejection.
 - `tests/packaging/test_service_boundary_imports.py` proves MCP and ordinary client import graphs
   cannot reach this server; the confidential helper imports only `confidential_client.md`.
 

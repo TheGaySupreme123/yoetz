@@ -15,6 +15,7 @@ foreground PTY and never fall back to piped stdin.
 
 Pytest cases cover root/per-command help; `version`; six public operations; support commands
 `import`, `review`, `backup`, `restore`, `migrate`, `integrate`, and local read-only `state capture`;
+`service idle-relock <60..86400|disabled>` as a foreground confidential command;
 `privacy setup|show|propose|tighten` and `privacy receipts list|get`; input file/stdin/inline modes;
 and invalid invocation. Human-mode
 cases explicitly cover status gap wording, the three-finding display cap with stable ordering/
@@ -54,6 +55,12 @@ ordinary check/retry/respond/recheck invocations do not open a prompt; `confirm_
 policy widening, credential mutation, and waiver retain their separate foreground paths.
 The check snapshot includes one post-validated semantic finding and shows its bounded direct
 main-agent message, uncertainty, and requested next step without exposing omitted packet content.
+
+Idle-relock snapshots cover canonical finite boundaries and `disabled`, exact current/proposed
+generation-scoped preview, approve/deny, both supported authorization sources, applied/denied
+structural outcomes, and the 900-second restart reset disclaimer. Invalid target strings make no
+connection; non-TTY, `--yes`, stdin, ordinary-control, and MCP attempts fail closed. The disabled
+case proves explicit/session/suspend/monitor-loss relock remains enabled.
 
 The oracle includes exit, exact stdout/stderr bytes, bundle frontier before/after, created files,
 and network-denial observation. Findings do not make a successful operation fail. Invalid input

@@ -13,9 +13,10 @@ Same-UID socket/challenge/secret-memory/vault integration matrix.
 
 ## Behavior
 
-Exercise all six exact purpose/state/target/policy bindings, initialize/unlock and provider-reauth/
+Exercise all seven exact purpose/state/target/policy bindings, initialize/unlock and provider-reauth/
 credential non-substitution,
-portable recovery request+confirmed-plan binding, 60-second expiry, generation, rate limit,
+privacy/security reauthentication non-substitution, portable recovery request+confirmed-plan
+binding, exact `CEREMONY_EXPIRY_SECONDS`, generation, coordinator-owned rate limit,
 consume/overwrite and structural results.
 For every secret purpose, exercise its exact minimum/maximum and byte policy. Provider credentials
 cover generic 0/1/8,192/8,193 and NUL/CR/LF rejection plus selected-profile validator rejection

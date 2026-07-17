@@ -23,19 +23,24 @@ on policy tightening, and exposes neither clients nor credentials to application
 ## Behavior
 
 Construction receives verified credential-free factories, the privacy audit authority needed for
-atomic consumption, one opaque `MacKeyHandle(purpose=privacy_audit)`, and a narrow service-vault
-factory that can mint only exact `ProviderAttemptAuthBinding` handles; it does not read environment/
-config secrets or discover endpoints. `dispatch_external_semantic` requires the caller to pass the exact
+atomic consumption, the exact same `PrivacyClassifierPort` instance used by the application
+coordinator, one opaque `MacKeyHandle(purpose=privacy_audit)`, and a narrow service-vault factory
+that can mint only exact `ProviderAttemptAuthBinding` handles; it does not read environment/config
+secrets or discover endpoints. `dispatch_external_semantic` requires the caller to pass the exact
 still-valid, unconsumed authorization. It verifies authorization/case/channel/provider/model/
 endpoint/purpose/scope/policy/service generation/deadline, allocates the physical `dsp_` identity,
 and invokes only the matched credential-free factory to deterministically render the exact final
 application request body without I/O. The gateway verifies that rendering contains only the approved
-logical case plus fixed reviewed template/schema fields, applies the final exact-body secret scan,
-and rejects any finding before credential minting, authorization consumption, or network I/O. It
+logical case plus fixed reviewed template/schema fields, invokes that shared classifier's
+`scan_exact_bytes` on the final body, and rejects any finding before credential minting,
+authorization consumption, or network I/O. It
 computes the body SHA-256 and `privacy_request_commitment` exactly once over those final bytes,
-creates the exact provider/model/endpoint-profile/version/purpose/dispatch/body-digest/commitment/
-generation/deadline binding, mints one fresh credential handle, and constructs a one-attempt custom
-transport/evaluator carrying the immutable precomputed digest and commitment—never a MAC callback.
+creates the exact provider/model/endpoint-profile/version/purpose/authorization-scope-digest/
+purpose-digest/dispatch/body-digest/generation/deadline `ProviderAttemptAuthBinding`, mints one
+fresh credential handle, and constructs a
+one-attempt custom transport/evaluator carrying the immutable precomputed digest and, separately,
+the request commitment—never a MAC callback. The commitment is not a field of
+`ProviderAttemptAuthBinding`.
 It then revalidates the unchanged body/binding/policy/deadline and atomically consumes authority
 while recording the attempt-admission body digest/commitment through the audit port as the last
 authoritative transition before calling that transport. Only the transport can consume the
@@ -79,8 +84,14 @@ external sessions, and reports `human_authority_unavailable` without rewriting p
 credentials. Dispatch checks the same generation-static capability digest/service/vault generation
 immediately before privacy-authorization consumption. Restart/relock or an explicit human-control
 capability-unavailable result forces fresh reconciliation; v0.1 has no hidden asynchronous presence
-watcher. Restoration requires a fresh ready composition/reconciliation. Local-model dispatch is a separate
-local disclosure sink and does not inherit external activation.
+watcher. Restoration requires a fresh ready composition/reconciliation. Local-model dispatch is a
+separate local disclosure sink and does not inherit external activation. This is an intentional
+trust split, not an unguarded fallback: `HumanAuthorityCapability` fences external activation,
+credential mutation, and policy widening, while an already enabled local-model row was itself
+created only by strong local-human policy authority. Even when that capability snapshot is
+unavailable, local dispatch still requires the exact durable row/profile plus matching service,
+vault, and policy generations, the shared privacy classifier and never-send fence, and
+`consume_local` before AF_UNIX I/O; it can neither create nor widen local permission.
 
 ## Errors and edge cases
 
@@ -114,6 +125,12 @@ exception strings and response bytes never cross the gateway boundary.
    failure remains absent/incomplete and cannot roll back or bypass policy.
 7. Durable policy plus a stored credential is insufficient when current human-authority capability
    is unavailable; external registry and dispatch remain fenced.
+8. The coordinator's logical-case scan and gateway's final-body scan use the same injected
+   `PrivacyClassifierPort`; detector drift or an independently configured gateway scanner is
+   forbidden.
+9. Unavailable external human-authority capability neither creates nor revokes local-model policy;
+   an existing local permission remains independently profile/service/vault/policy-generation/
+   consume gated.
 
 ## Tests
 

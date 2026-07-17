@@ -123,7 +123,9 @@ Privacy claims are separate, directly tested entries:
 - `privacy.one_attempt_provider_credentials`: each physical provider attempt uses a fresh exact
   endpoint/profile/request-body-digest/deadline-bound credential callback in the custom transport;
   no SDK client/default-header object retains the real credential, while resolved decision F-012
-  permits its authentication header only to the exact pinned TLS endpoint.
+  permits its authentication header only to the exact profile-bound HTTPS endpoint selected by the
+  reviewed registry, using platform CA trust and hostname validation. v0.1 makes no certificate or
+  SPKI-pinning claim.
 - `support.structural_subject_state_capture`: for an exact E-015 passing Git/platform/artifact cell,
   `yoetz state capture` reads one explicitly named local worktree and returns only bounded versioned
   state digests and closed metadata, with no network, ledger write, path/source/filename output,

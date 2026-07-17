@@ -2,7 +2,7 @@
 
 **Wave:** E | **ADRs:** ADR-001, ADR-004, ADR-008 | **Imports (spec-tree):**
 `src/yoetz/service/lifecycle.md`, `service/control_protocol.md`, `service/vault.md`,
-`service/secret_ingress.md`, `cli/unlock.md` | **Imported by:** public README/privacy/security docs
+`service/secret_ingress.md`, `service/human_control.md`, `cli/unlock.md` | **Imported by:** public README/privacy/security docs
 
 ## Purpose
 
@@ -17,6 +17,7 @@ locked/ready behavior; CLI/MCP/UI client rules; ordinary, one-secret, and multi-
 local channels;
 forbidden secret surfaces; first-install keyring/passphrase initialization, later unlock, and
 recovery distinction; idle/session/suspend relock;
+exact human-reauthorized finite/disabled idle-policy change and generation-scoped restart behavior;
 same-UID/root/live-memory limitations; headless and native-vault status; troubleshooting reason
 codes; links to ADR-001/004/008, privacy protocol, key-recovery runbook, and security policy.
 
@@ -28,12 +29,17 @@ keyring success unlocks once and expected failure leaves a reachable locked serv
 passphrase-backed vault does not probe keyring and remains locked pending confidential unlock.
 TTY-only confidential input has no stdin/argv/env/config/MCP fallback.
 Wake does not unlock. Explain 15-minute quiescent default, explicit/session/suspend relock, and
-durable retry after drain/connection loss.
+durable retry after drain/connection loss. Explain that the only way to set 60..86400 seconds or
+disable idle relock is an exact YZH1 `idle_relock_policy_change` preview plus OS presence or the
+distinct passphrase-mode `security_reauthentication` purpose. The change applies only to the
+current service generation; restart restores 15 minutes, and explicit/session/suspend/monitor-loss
+locking remains active while idle relock is disabled.
 
 Describe the three fixed owner-only same-UID endpoints: ordinary YZ control; YZS1 one-secret
 ingress, which never creates a challenge; and YZH1 human control, which alone creates closed
 ceremonies/previews/bindings, performs zero-secret keyring retry, coordinates provider credential
-set/rotate, and accepts typed privacy decisions. Ordinary MCP/control schemas and import graphs
+set/rotate, accepts typed privacy decisions, and applies the explicit idle-relock-policy ceremony.
+Ordinary MCP/control schemas and import graphs
 expose no connector for the two human paths; arbitrary malicious same-UID code can still emulate a
 raw client and is an explicit threat-model limitation. Provider provisioning requires exact binding
 reauthentication, atomic set/rotate, and post-store policy reconciliation; secrets never enter
@@ -75,6 +81,8 @@ does not capture raw traceback content in plaintext or encrypted form, even to a
 any future encrypted diagnostic artifact requires a separate reviewed privacy-authorized feature.
 Also explain that external provider credentials are fresh per-physical-attempt transport callbacks
 bound to exact endpoint/profile/final-body digest/deadline and never long-lived SDK client state.
+Their one authentication-header transmission targets the exact profile-bound HTTPS endpoint using
+platform CA trust and hostname validation; v0.1 does not claim certificate or SPKI pinning.
 
 ## Errors and edge cases
 
@@ -86,6 +94,8 @@ passphrase/tamper failure.
 Never imply keyring storage success alone selects immutable mode or that
 `human_authority_unavailable` means keyring corruption. Setup must show explicit retry and
 passphrase-initialization choices without starting either automatically.
+Never imply an ordinary command/MCP/config value can disable idle relock, that a disabled idle
+deadline disables session/suspend/explicit locking, or that the exception survives restart.
 
 ## Invariants
 
@@ -97,6 +107,8 @@ passphrase-initialization choices without starting either automatically.
 6. The challenge creator and one-secret parser are distinct and reachable only through the trusted
    human helper flow.
 7. Pristine keyring initialization and existing-keyring ready-local load are visibly distinct.
+8. Idle-relock weakening is visibly an exact generation-scoped human ceremony, not a normal
+   control/config flag.
 
 ## Tests
 

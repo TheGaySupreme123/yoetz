@@ -88,8 +88,12 @@ schemas/
 
 `manifest.json` is itself canonical JSON and lists for each artifact: relative POSIX path,
 `$id`, schema version, media type, exact byte size, SHA-256 digest, owning Python boundary
-model, and its exact artifact role. Roles include MCP input/output, persisted envelope,
-configuration, privacy policy/case/audit/setup, local control, and service status.
+model, exact `SchemaKind`, and exact artifact role. Schema kind follows the complete independent
+path map in `protocol/schemas.py` (`events`, `config`, `version`, or the remaining
+`request_result` prefixes). The closed role vocabulary covers common values, MCP
+input/output, persisted envelopes, event envelopes/payloads, configuration, finding/provenance,
+receipt documents, privacy policy/case/audit/setup, local control, service status, and version
+reporting; `schemas/manifest.json` owns the exact tokens and path-to-role mapping.
 The manifest lists exactly 52 `*.schema.json` artifacts and never lists itself; therefore the
 `schemas/` directory's exact future-file inventory is 53 files including `manifest.json`.
 

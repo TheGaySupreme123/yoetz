@@ -37,7 +37,8 @@ clients, or an already-open database.
 3. Advance service generation in the separate owner-only nonsecret lifecycle store, bind the three
    owner-only ordinary, one-secret, and human-control local endpoints,
    start peer-authentication and session-event monitoring, then publish `starting` status.
-4. Construct `SecretMemoryPort`, the reviewed `UserPresencePort | None`, and `VaultService`; load
+4. Construct `SecretMemoryPort` and the reviewed `UserPresencePort | None`, then inject that same
+   presence port into `VaultService`, the sole proof minter; load
    and verify the packaged runtime-support allowlist, then measure the exact user-presence release
    cell before allowing any pristine keyring creation. No caller/config boolean supplies this
    result.
@@ -86,14 +87,20 @@ kind/method/state/admission policy, validates the method body, calls the one rea
 support service, and validates the internal result. For every ready content-capable workflow or
 support success it invokes `Application.project_result_for_client(client_kind, method, result)`,
 validates that projected body and its durable local-disclosure receipt binding, and only then
-serializes a control envelope. The exact exceptions are handshake, fixed control-error bodies, and
-the closed structural-only `service_status`, `service_lock`, and `service_stop` results; these must
-remain available while locked/draining or after the Application has closed and admit no user-content
-field. No logger, tracer, renderer, MCP bridge, or socket writer sees an unprojected content-capable result. Requests from all clients
+serializes a control envelope. The exact exceptions are handshake, fixed control-error bodies, the
+closed structural-only `service_status`, `service_lock`, and `service_stop` results, and the
+ready-only structural `privacy_receipts_list|privacy_receipts_get` inspection results. The first
+group must remain available while locked/draining or after the Application has closed and admits no
+user-content field. Receipt inspection is projection/audit-exempt only for authenticated ordinary
+CLI/UI while ready, because projecting an already-durable receipt view would recursively create
+another receipt. No logger, tracer, renderer, MCP bridge, or socket writer sees an unprojected
+content-capable result. Requests from all clients
 share runtime/task caches, writer queues, key handles, policy, and provider coordinator.
 
-Ordinary `cli`, `mcp_bridge`, and `ui` results all use the `agent_context` sink because any of them
-may be redirected into an agent. TTY detection and client assertions cannot upgrade that sink.
+Ordinary `mcp_bridge` and `ui` results use `agent_context`. An ordinary CLI result uses
+`local_human_view` only for validated human-readable rendering on an attached controlling terminal;
+`--json`, piped/redirected output, non-TTY use, or any absent/contradictory presentation state uses
+`agent_context`. Selection is server-side and fail-safe; a client cannot name an arbitrary sink.
 Only the separate authenticated foreground human-control endpoint can request
 `trusted_human_control`, and it never proxies an ordinary result back through MCP. Initial local-
 audit reservation failure produces `privacy_projection_unavailable` and no content-bearing bytes;
@@ -109,7 +116,8 @@ All confidential bindings/challenges originate from `HumanControlService` on the
 both server endpoints parse the one shared pure `confidential_protocol.md` contract. The client
 implementation lives separately in `confidential_client.md` and is never imported here.
 It coordinates zero-secret keyring retry, YZS1 secret phases, provider credential set/rotate, and
-privacy typed decisions. The ordinary dispatcher/MCP cannot connect or proxy to it. Successful
+privacy typed decisions, plus exact human-reauthorized current-generation idle-relock policy
+changes. The ordinary dispatcher/MCP cannot connect or proxy to it. Successful
 credential storage atomically preserves/rotates the encrypted record, then triggers provider-policy
 reconciliation before returning structural activation status.
 
@@ -119,10 +127,18 @@ daemon constructs ready composition. If the outer ready gate then fails, the dae
 in committed passphrase mode; it never repeats initialization, falls back from an existing keyring
 vault, or erases ambiguous first-install state.
 
-Ordinary privacy-control methods may read setup/effective policy, persist an inert proposal, or
-tighten. The daemon never dispatches policy/disclosure approval through ordinary control. Those
+Ordinary privacy-control methods may read setup/effective policy, persist an inert proposal, tighten,
+or list/get bounded structural privacy receipts. The two receipt reads use the exact exemption above.
+The daemon never dispatches policy/disclosure approval through ordinary control. Those
 decisions complete inside `HumanControlService` after foreground TTY preview and vault
 reauthentication; its internal proof is consumed without crossing back to the helper.
+
+Idle-relock mutation is likewise absent from ordinary control. The daemon starts every service
+generation with the 900-second policy, and only the exact `idle_relock_policy_change` human-control
+ceremony may apply a finite 60..86400-second value or disable idle relock for that generation. The
+proof is minted only by `VaultService`, applied/consumed only by `ServiceLifecycle`, and never
+persisted; restart restores 900 seconds. Explicit/session/suspend/monitor-loss relock remains active
+even while idle relock is disabled.
 
 ### Lock and shutdown
 
@@ -170,6 +186,8 @@ exits. KILL recovery depends on generations, not cleanup.
    externally fenced without presence.
 8. Ordinary response serialization is impossible without service-side local-disclosure projection;
    bridges cannot opt out or reconstruct omitted content.
+9. Throttle transitions belong only to `UnlockCoordinator`, proof minting only to `VaultService`,
+   and idle-relock policy application only to `ServiceLifecycle`.
 
 ## Tests
 

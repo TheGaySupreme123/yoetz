@@ -100,7 +100,8 @@ secret bytes.
 The service exposes three fixed owner-only same-UID endpoints: ordinary control; YZS1 one-secret
 ingress; and YZH1 multi-phase human control. YZH1 is the sole challenge/binding creator, returns
 bounded structural previews, supports zero-secret keyring retry, coordinates provider credential
-set/rotate, and accepts typed privacy decisions. Durable policy widening and credential changes
+set/rotate, accepts typed privacy decisions, and owns the exact ceremony for changing or disabling
+idle relock. Durable policy widening, credential changes, and idle-security weakening
 require internal strong reauthentication; a `confirm_every_request` decision already inside the
 durable policy uses exact foreground digest-bound consent and creates no reusable authority. YZS1
 accepts only a binding from one still-live YZH1 ceremony and never accepts a zero-length retry or
@@ -108,9 +109,11 @@ creates a challenge. Ordinary control/MCP schemas and their import graphs expose
 confidential client. This is not a claim that arbitrary malicious same-UID code with socket access
 cannot emulate a YZH1 client; that limitation is explicit below and in resolved decision F-011.
 
-The confidential secret-ingress channel is separately typed by a closed six-value `SecretPurpose`
+The confidential secret-ingress channel is separately typed by a closed seven-value `SecretPurpose`
 registry: `vault_initialize`, `vault_unlock`, `portable_recovery`,
-`provider_reauthentication`, `provider_credential`, and `privacy_reauthentication`. It accepts
+`provider_reauthentication`, `provider_credential`, `privacy_reauthentication`, and
+`security_reauthentication`. The seventh value is used only by an exact idle-relock-policy target;
+it cannot substitute for provider/privacy authority. The channel accepts
 only one-shot material for the exact live ceremony without placing bytes in the ordinary control
 envelope.
 Initialize is available only for a pristine uninitialized installation and accepts one passphrase
@@ -124,6 +127,13 @@ separately typed peer-authenticated connection; and erase mutable buffers best-e
 service consumes them. No MCP registry, `ServiceClient`, or public application method can reach
 this channel. Provider credentials become opaque adapter-scoped handles in the service vault;
 provider adapters and normal clients never receive reusable credential bytes.
+
+`UnlockCoordinator` solely owns the persistent passphrase throttle: admission delay, in-progress
+reservation, failure charge, success reset, crash re-arm, and repair. It calls cryptographic vault
+verification only after reserving the attempt. `VaultService` never reads or mutates that throttle
+and is the sole minter of `HumanAuthorizationProof`; presence adapters and coordinators can only
+supply an exact source/challenge for the vault to consume. This division applies equally to
+unlock, provider, privacy, and security reauthentication.
 
 Peer UID checks and owner-only filesystem permissions protect local transport from other users.
 They cannot distinguish a malicious process already running as the same user; that is outside the
@@ -226,6 +236,9 @@ vault before first release is the one materially stronger containment choice sti
     proves both the approved keyring cell and exact action-bound user-presence cell. Existing
     keyring vaults may unlock without current presence only into ready-local, externally fenced
     authority.
+11. Idle relock can be disabled only through a YZH1 `idle_relock_policy_change` ceremony and a
+    vault-minted proof for its exact current/proposed target; ordinary/MCP/config input cannot do
+    so.
 
 ## Locking and reauthorization lifecycle
 
@@ -236,8 +249,14 @@ vault before first release is the one materially stronger containment choice sti
   session unlock never changes the service to `ready`; the human/keyring ceremony runs again.
 - Idle relock is enabled by default only when there are no connected clients, in-flight requests,
   queued commits, leases, or provider calls for the complete configured interval. It never counts
-  a long-running operation as idle. Setting an infinite interval is an explicit local-human policy
-  choice, not an agent/MCP request.
+  a long-running operation as idle. The default is 900 seconds. The only v0.1 mutation path is a
+  foreground YZH1 `idle_relock_policy_change` preview over the exact current/proposed value,
+  followed by action-bound OS user presence or the distinct passphrase-mode
+  `security_reauthentication` purpose. It may select 60..86400 seconds or explicit `disabled`;
+  server-side `edit` does not exist. The service consumes the exact vault-minted proof atomically
+  with the change. The exception lasts only for the current service generation, is never persisted,
+  and restart restores 900 seconds. Disabling idle relock never disables explicit, session-lock,
+  suspend, or monitor-loss relock.
 - Privacy-policy loosening is not authorized by a boolean CLI flag or ordinary control request.
   It requires a fresh OS user-presence assertion or a confidential vault reauthentication proof
   bound to the exact proposed policy digest and expiry. MCP/LLMs may request more context but

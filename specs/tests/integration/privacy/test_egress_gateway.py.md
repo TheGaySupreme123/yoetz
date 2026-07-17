@@ -79,11 +79,14 @@ body bytes and assert the receipt MAC uses the byte-exact
 `b"yoetz/privacy-egress-request/v1\x00"` domain plus that body only. Mutating body bytes changes or
 invalidates the attempt; changing auth headers/TLS framing is outside the commitment and cannot
 change approved content. The gateway mints a fresh provider/model/endpoint-profile/version/purpose/
-dispatch/body-digest/precomputed-commitment/deadline-bound credential handle. Only the custom
-transport callback consumes it for one header injection after byte/digest/commitment equality;
+authorization-scope-digest/purpose-digest/dispatch/body-digest/service-generation/deadline-bound
+credential handle; the transport carries the
+precomputed request commitment separately. Only the custom transport callback consumes the handle
+for one header injection after byte/digest/commitment equality;
 the per-attempt SDK client/default headers retain no real credential, and retry uses a distinct
 handle/client/dispatch. Renderer-injected secret canaries fail the gateway's final-body scan before
-consumption or I/O.
+consumption or I/O. Identity assertions prove the coordinator and gateway call the same injected
+`PrivacyClassifierPort`/immutable ruleset rather than two independently configured scanners.
 The attempt receipt also requires `audit_store_version=1`, exact algorithm token
 `hmac-sha256/yoetz-privacy-egress-request-v1`, canonical commitment, and exact
 `counts.request_body_bytes`; `key_slot_ref` is rejected.
@@ -155,6 +158,10 @@ quarantines the semantic result, and recovery writes the real attempt outcome.
     task-ledger inventory row; route/GC races preserve or quarantine it but never sweep it.
 15. Context selection, disclosure authority, and provider recommendation evidence are separate
     gates; none can widen either of the others.
+16. `HumanAuthorityCapability.source=unavailable` empties the external registry but does not itself
+    disable a previously reauthenticated exact local-model row; the local case still traverses
+    exact profile/service/vault/policy-generation/shared-scan/`consume_local` gates, and no
+    unavailable snapshot can enable or widen it.
 
 ## Tests
 

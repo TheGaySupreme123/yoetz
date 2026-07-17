@@ -1,7 +1,8 @@
 # src/yoetz/domain/events.py — the 16 event families, drafts, and accepted envelopes
 
 **Wave:** B | **ADRs:** ADR-002, ADR-004 | **Imports (spec-tree):** `domain/values.md`,
-`domain/findings.md` (payload mirror for `finding_recorded`), `protocol/errors.md`,
+`domain/findings.md` (payload mirror for `finding_recorded`),
+`domain/receipts.md` (`ReceiptConclusion` only), `protocol/errors.md`,
 `protocol/coverage.md` | **Imported by:** `kernel/reducers.md`, `kernel/projections.md`,
 `kernel/deterministic_checks.md`, `application/*`, `adapters/memory/*`, `adapters/sqlite/*`,
 `adapters/importers/codex_jsonl.md`
@@ -38,7 +39,8 @@ the handle; storage and wire surfaces see only the ref.
   `ReceiptRecordedPayload`.
 - Support types: `RequestedItem`, `RequestedItemKind`, `ObligationStatus`, `ObligationChange`,
   `ObligationChangeKind`, `ActionKind`, `ResultOutcome`, `ClaimKind`, `RedactionMethod`,
-  `RedactionReasonCategory`, `EventSchema(name, version)`, `PayloadRef`, `RedactionState`.
+  `RedactionReasonCategory`, `CheckMode`, `EventSchema(name, version)`, `PayloadRef`,
+  `RedactionState`.
 - `EventPayload` — union alias of the 16 payload dataclasses.
 - `PAYLOAD_TYPES: Mapping[str, type[EventPayload]]` — schema name → dataclass for version `1.0.0`.
 - `decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload` — validating
@@ -272,12 +274,13 @@ redaction while the target remains readable is invalid.
 
 | Field | Type | Required |
 |---|---|---:|
-| `mode` | enum `deterministic_only\|semantic_if_configured\|semantic_required` | yes |
+| `mode` | `CheckMode ∈ {deterministic_only, semantic_if_configured, semantic_required}` | yes |
 | `policies` | tuple[(policy_id: str, policy_version: str)] ≤ 8, sorted by policy_id | yes |
 | `subject_frontier` | Frontier | yes — the frozen frontier checked |
 | `verdict` | `CheckVerdict` | yes |
 | `returned_finding_ids` | tuple[FindingId] ≤ `MAX_FINDINGS_LIMIT` | yes (may be empty) |
 | `suppressed_count` | int ≥ 0 | yes |
+| `coverage` | `Coverage` | yes — exact weakest material coverage carried by the recorded `RankedFindings` |
 | `semantic_status` | shared enum `not_requested\|not_configured\|blocked_by_policy\|blocked_forbidden_data\|classification_uncertain\|awaiting_human\|human_denied\|approval_expired\|succeeded\|refused\|timeout\|invalid\|unavailable\|late\|stale\|failed` | yes |
 | `semantic_reason` | shared closed `SemanticReason` | yes — must be one of the reasons allowed for `semantic_status` by `ports/semantic.md` |
 | `semantic_provenance` | `SemanticProvenance | None` | conditional — final receipt-bound attempt provenance only; forbidden for predispatch outcomes |
@@ -297,7 +300,7 @@ other predispatch outcome. `semantic_reason` remains sufficient to explain those
 | `subject_frontier` | Frontier | yes — the pre-receipt frontier, excluding this event itself, as owned by `specs/src/yoetz/application/receipt.md` |
 | `receipt_digest` | str (sha256 form) | yes — canonical digest of the ReceiptDocument |
 | `receipt_object_id` | ObjectId | yes — encrypted stored document |
-| `conclusion_code` | enum `no_unresolved_deterministic_findings\|unresolved_findings_remain\|insufficient_coverage` | yes |
+| `conclusion_code` | `ReceiptConclusion` (`domain/receipts.md`) | yes |
 | `redaction_profile` | enum `full_local\|default_local_export\|redacted_share` | yes |
 
 ### `EventDraft`

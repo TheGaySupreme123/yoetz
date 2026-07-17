@@ -178,8 +178,9 @@ check/kernel path and is not silently redefined by this spec.
 ## Errors and edge cases
 
 - Unknown view/filter, invalid filter combination, cursor mismatch/tampering/expiry policy,
-  invalid limit, or future frontier → `INVALID_REQUEST` (future/stale optimistic semantics may use
-  `FRONTIER_CONFLICT` only if the protocol registry chooses that uniformly).
+  invalid limit, or future frontier → `INVALID_REQUEST`. This mapping is frozen for v0.1: status is
+  a read-only query, so a requested sequence beyond the observed head is invalid query input and
+  never `FRONTIER_CONFLICT`. `FRONTIER_CONFLICT` remains for stale optimistic mutation guards.
 - Unknown session/route → `SESSION_NOT_FOUND`; writer/session mismatch → `SESSION_CONFLICT`.
   Canonical ledger/index/digest disagreement → `STORAGE_CORRUPT`; unsupported schema/build →
   `MIGRATION_REQUIRED`/`STORAGE_UNSAFE`.

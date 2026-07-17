@@ -22,11 +22,17 @@ consent without reauthentication. Neither is exposed to stdout, MCP, agents, or 
 
 Require foreground controlling `/dev/tty`, connect to the separately authenticated human-control
 YZH1 endpoint with `HumanControlClient`, open one exact pending-ID ceremony, receive/freeze the
-service-minted bounded preview/binding, render only on TTY, and collect approve/deny/edit. Policy-
-widening approval follows the server-selected strong OS-presence or established-passphrase phase.
+service-minted bounded preview/binding, render only on TTY, and collect approve/deny or the local
+edit convenience. Policy-widening approval follows the server-selected strong OS-presence or
+established-passphrase phase.
 Confirm-every-request disclosure must say `authorization_change=none`; its exact TTY approve/deny
 goes directly to the one-case audit decision with no reauthentication. The service commits
-internally and returns only structural outcome; edit exits to create a new proposal.
+internally and returns only structural outcome.
+
+`edit` is only a local CLI convenience shown beside approve/deny. Selecting it sends no YZH1
+`action=edit` (and no decision or proof): the helper cancels/closes the active ceremony, exits the
+decision command, and the user edits locally before creating a new proposal through ordinary
+`privacy_propose_policy`. Only `approve` or `deny` may be sent as server protocol decisions.
 
 ## Errors and edge cases
 

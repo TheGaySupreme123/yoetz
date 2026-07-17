@@ -17,6 +17,8 @@ non-trigger for each one.
 - `test_failed_work_omitted` — omitted failure disclosure is detected.
 - `test_claim_without_admissible_evidence` — weak or missing support is detected.
 - `test_result_without_action` — orphan results are detected.
+- `test_action_without_result` — an unresolved action followed by later work on another subject is
+  detected, while the most recent action remains a closest non-trigger.
 - `test_stale_evidence_for_changed_state` — state drift invalidates evidence.
 - `test_contradictory_claims_unresolved` — unresolved contradiction is detected.
 - `test_ledger_stale_or_incomplete` — unknown/redacted/stale history is detected.
@@ -33,6 +35,8 @@ The suite asserts for each rule:
 - coverage weakens when the source refs are partial;
 - each candidate has an exact `FindingBasis` naming observed/missing facts, refs, state relation,
   frozen-source availability, and coverage gaps;
+- all ten work-integrity kinds use inline immutable trigger/closest-nontrigger values in this test
+  module; no runtime fixture generation or separate policy-resource lookup is permitted;
 - each finding uses deterministic origin and the pack’s stable policy identity, while finding kind
   alone makes no provenance claim.
 

@@ -136,7 +136,10 @@ resume revalidates the object/row facts for the recorded phase before moving for
    all required jobs are terminal and none has a live lease, CAS
    `semantic_wait → ready_to_finalize`.
 9. **Rank and commit.** Revalidate candidate output against `F` and `D`, combine deterministic and
-   selected semantic findings, and call `rank_findings` with the request maximum. In the final
+   selected semantic findings, compute `RankingContext` from the terminal policy/semantic facts and
+   the component-wise weakest material coverage of the frozen case, every assessment/basis and
+   candidate, semantic dependencies/outcomes, explicit gaps, and all candidates before capping,
+   then call `rank_findings(deterministic, semantic, context, request.max_findings)`. In the final
    bounded atomic write, reverify the operation lease/current owner and material dependency
    revisions, repeat the no-pending-import predicate for this session, append one
    `check_recorded` plus one `finding_recorded` per returned finding, persist
@@ -158,14 +161,18 @@ resume revalidates the object/row facts for the recorded phase before moving for
 
 - Verdict is exactly `action_required`, `no_issue_detected`, `insufficient_coverage`, or
   `incomplete_check`; the token `pass` is forbidden.
-- `action_required` means at least one returned unresolved material finding requires action,
-  except that a terminal missing required semantic result takes precedence as `incomplete_check`.
+- `RankingContext.completeness` is derived exactly as registered in `INTERFACES.md`; it is never a
+  renderer/provider choice. `required_incomplete` takes precedence as `incomplete_check`.
+  Otherwise `action_required` means at least one returned finding has its registered
+  `actionable=true` trait.
   `no_issue_detected` means no unresolved deterministic completion-integrity issue was found at
   the recorded coverage, never that all work is correct. Missing/redacted/unknown material,
   semantic unavailability under optional mode, or stale dependencies may select
   `insufficient_coverage`. A required deterministic policy failure, or any terminal
   semantic/privacy failure under `semantic_required`, selects `incomplete_check`.
-- Coverage is the component-wise weakest material dependency plus sorted explicit gaps. Semantic
+- Coverage is the component-wise weakest material dependency plus sorted explicit gaps across the
+  full pre-cap check context. It is not recomputed from returned finding IDs, so suppressing or
+  diversity-replacing a weak finding cannot strengthen it. Semantic
   findings remain `semantic_model_derived`; deterministic post-validation never upgrades their
   origin.
 - Result includes policies run/skipped/failed, semantic status/reason, optional finalized attempt

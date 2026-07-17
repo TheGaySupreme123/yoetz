@@ -21,7 +21,7 @@ Protocol is const `1.0`; version is bounded SemVer, instance is canonical `svc_`
 generation is canonical positive decimal as in hello-result.
 `state` is `starting|locked|unlocking|ready|draining|failed`. `state_reason` is `none|
 keyring_locked|keyring_unavailable|human_authority_unavailable|vault_uninitialized|unlock_failed|explicit_lock|idle_relock|
-user_session_locked|system_suspend|session_monitor_lost|shutdown_requested|internal_error`.
+user_session_locked|system_suspend|monitor_lost|shutdown_requested|internal_error`.
 `vault_mode` is `uninitialized|os_keyring|passphrase`. `capabilities` is sorted unique from
 `workflow|maintenance|import_review|external_provider|confidential_ingress|
 session_event_monitor`. `session_monitor` is `active|unavailable|lost`. Native user-service-manager

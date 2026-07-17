@@ -1,8 +1,8 @@
 # src/yoetz/protocol/schemas.py — frozen JSON Schema catalog and version index
 
 **Wave:** A | **ADRs:** ADR-002, ADR-003, ADR-007 | **Imports (spec-tree):**
-`protocol/canonical.md`, `protocol/models.md`, `domain/events.md`, `config/models.md`,
-`version.md` | **Imported by:** `version.md`, package support-manifest checks, packaging tests,
+`protocol/canonical.md`, `protocol/models.md`, `domain/events.md`, `config/models.md` |
+**Imported by:** `version.md`, package schema-integrity checks, packaging tests,
 schema validation tooling
 
 ## Purpose
@@ -21,7 +21,8 @@ mechanism or a network-backed registry.
 
 | Name | Signature (natural language) |
 |---|---|
-| `SchemaKind` | enum of `request_result`, `event`, `config`, `version_manifest`, `support_manifest` |
+| `SchemaKind` | enum of `request_result`, `event`, `config`, `version_manifest` |
+| `SchemaArtifactRole` | closed 17-value release/packaging role enum registered in `specs/INTERFACES.md` |
 | `SchemaDocument` | frozen dataclass describing one committed schema artifact |
 | `SchemaCatalog` | frozen dataclass holding the full schema index and normalized version maps |
 | `SCHEMA_NAMESPACE` | `str = "https://schemas.yoetz.dev/0.1/"` |
@@ -35,9 +36,32 @@ mechanism or a network-backed registry.
 
 ## Behavior
 
-`SchemaDocument` is a frozen value object with at least these fields:
-`schema_kind`, `schema_name`, `schema_version`, `schema_id`, `relative_path`,
+`SchemaDocument` is a frozen value object with exactly these fields:
+`schema_kind`, `artifact_role`, `schema_name`, `schema_version`, `schema_id`, `relative_path`,
 `canonical_digest`, `schema_bytes`, and `json_schema`.
+
+`SchemaKind` and `SchemaArtifactRole` are orthogonal. `SchemaKind` is the broad runtime validation
+family used to build version maps and select validators. `SchemaArtifactRole` is the exact
+release/packaging purpose recorded by the reviewed schema manifest, including distinctions such as
+MCP input versus output and accepted envelope versus event payload. Neither enum is derived from
+the other. `specs/INTERFACES.md` registers the nominal role vocabulary; the reviewed
+`specs/schemas/manifest.json.md` owns the exact path-to-role assignment and must enumerate the same
+closed values. `SchemaDocument.artifact_role` uses the nominal enum, never an unchecked manifest
+string.
+
+`SchemaKind` is determined by a second complete path map, independently of artifact role:
+
+- `events/*` -> `event`;
+- `config/*` -> `config`;
+- `version/*` -> `version_manifest`; and
+- `common/*`, `operations/*`, `findings/*`, `receipts/*`, `privacy/*`, and `service/*` ->
+  `request_result`.
+
+Those prefixes exhaust all 52 v0.1 schema artifacts. Any other prefix is invalid. The manifest
+records the resulting `schema_kind` explicitly and the loader re-derives it from this map; there is
+no `support_manifest` kind or phantom support-manifest schema in v0.1. Runtime support is the
+separate reviewed JSON allowlist verified through the resource manifest, not part of this JSON
+Schema catalog.
 
 The catalog only includes schemas that are either:
 
@@ -51,8 +75,7 @@ ASCII-sorted maps. The expected bundle includes, at minimum:
 - request/result schemas for the public operations and helper request/result envelopes;
 - the 16 event-family schemas at version `1.0.0`;
 - the config schema;
-- the version-manifest schema;
-- the packaged support-manifest schema.
+- the version-manifest schema.
 
 `schema_uri(name, version)` returns the canonical URI form used by `$id` fields and manifest
 reporting. The URI is stable and namespaced; it must not depend on install paths, Git state, or
@@ -70,6 +93,8 @@ falls back to a nearest match or a generated substitute.
 checks catalog-wide invariants:
 
 - no duplicate `(schema_kind, schema_name, schema_version)` entries;
+- every manifest `artifact_role` parses as `SchemaArtifactRole` and equals the exact role required
+  for its relative path by the reviewed manifest mapping;
 - every version map is ASCII-sorted by schema name;
 - every `event_schema_versions` entry is exactly `1.0.0` in v0.1;
 - every request/result schema version is recorded as the exact SemVer string frozen in the bundle;
@@ -88,6 +113,8 @@ catalog sorts them before exposing them.
 - A missing schema file is a packaging failure, not a silent omission.
 - A duplicate schema name/version pair is a release-blocking inconsistency.
 - A `$id` outside the Yoetz namespace, a wrong schema draft, or a wrong schema version is invalid.
+- An unknown artifact role or a role incompatible with its manifest path is invalid even when the
+  schema bytes themselves validate.
 - A path that escapes `specs/schemas/` is rejected as unsafe before read.
 - A digest mismatch means the package is corrupt or stale and must fail closed.
 - This file never validates runtime payloads directly; it validates the schema artifacts that
@@ -100,6 +127,7 @@ catalog sorts them before exposing them.
 3. Packaged schema bytes are the authority for schema identity, not generated docs.
 4. No schema document may depend on runtime state, config files, or network discovery.
 5. Version-manifest reporting and schema bundle validation use the same normalized catalog.
+6. Broad `SchemaKind` classification never substitutes for the exact manifest artifact role.
 
 ## Tests
 

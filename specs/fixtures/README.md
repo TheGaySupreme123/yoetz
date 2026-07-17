@@ -252,12 +252,39 @@ transcript completeness.
 Each adversarial case embeds `trigger`, `remediation`, and `non_trigger` variants to measure both
 recall and harmful-nudge behavior without multiplying undeclared fixture files.
 
+### Policy-rule vectors without a hidden fixture directory
+
+No separate policy-fixture directory exists. The closed 48-file corpus keeps the rule-level public
+vectors inside the existing adversarial cases, while the two exact unit modules hold the smallest
+inline trigger/closest-nontrigger values. The exhaustive public mapping is:
+
+- `ADV-001`: `completion_with_open_obligations`, `requested_item_never_attempted`, and
+  `action_without_result`;
+- `ADV-002`: `failed_work_omitted`, `result_without_action`, and
+  `material_limitation_omitted`;
+- `ADV-003`: `stale_evidence_for_changed_state`;
+- `ADV-004`: `claim_without_admissible_evidence`, `evidence_does_not_support_claim`, and
+  `diff_does_not_match_account`;
+- `ADV-006`: `contradictory_claims_unresolved`;
+- `ADV-008`: `ledger_stale_or_incomplete`;
+- `ADV-009`: `weak_or_stale_response` and `questionable_finding_rejection`.
+
+Every mapped kind has an exact trigger, remediation, and closest non-trigger assertion, including
+its `FindingBasis` fact/ref tuple and origin. A semantic output may independently use an applicable
+kind only with explicit `origin=semantic_model_derived`; the deterministic vector remains separate.
+`tests/unit/kernel/test_policy_work_integrity.py` and
+`tests/unit/kernel/test_policy_research_evidence.py` own the minimal per-rule values and consume the
+same policy contracts. This mapping covers every v0.1 `FindingKind` without adding undeclared
+future files or changing the fixture-manifest count.
+
 ### Codex import corpus
 
-Recorded streams identify exact Codex version and capture command category, file change, MCP call,
-model message, plan update, web search, unknown/new source event, malformed JSON, invalid UTF-8, long
-line, partial EOF, and process exit. Fixtures use synthetic repositories and secrets/canaries only.
-Expected import reports distinguish mapped, quarantined, duplicate, truncated, and gap counts.
+Recorded streams identify exact Codex version and capture command category, file change, MCP and
+collaboration call, model/reasoning message, todo/plan-shaped item, web search, top-level usage
+metadata, unknown/new source event, malformed JSON, invalid UTF-8, long line, partial EOF, and
+process exit. Usage is bounded import-report metadata, not a mapped Yoetz event family. Fixtures use
+synthetic repositories and secrets/canaries only. Expected import reports distinguish mapped,
+quarantined, duplicate, truncated, and gap counts.
 
 ### Receipt corpus
 

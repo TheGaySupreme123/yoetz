@@ -74,8 +74,8 @@ content rule.
 
 ### Construction and profile validation
 
-`OpenAIProfile` is a nonsecret identity object. It is responsible for pinning the provider
-identity and the capability profile that Yoetz is willing to trust. At construction time the profile
+`OpenAIProfile` is a nonsecret identity object. It is responsible for binding the exact provider
+identity and capability profile that Yoetz is willing to trust. At construction time the profile
 must be validated for:
 
 - a non-empty exact provider/model name;
@@ -88,8 +88,9 @@ must be validated for:
   when bounded, provider-human access `prohibited|restricted|permitted|unknown`, review/expiry
   timestamps, and an
   artifact-bound evidence digest;
-- exact HTTPS scheme, DNS host, port, path, `POST` method, TLS hostname/SNI and certificate-
-  verification posture; no user/config-supplied URL, alternate address, proxy, or redirect;
+- exact HTTPS scheme, DNS host, port, path, `POST` method, platform CA trust, and hostname/SNI
+  verification; no user/config-supplied URL, alternate address, proxy, or redirect, and no v0.1
+  claim of certificate or SPKI pinning;
 - exact `max_output_tokens=2048`, raw response-body cap `1_048_576`, and identity-only content
   encoding.
 
@@ -184,13 +185,17 @@ Illustrative inputs differ only by approved packet content:
 The SDK request must carry body bytes exactly equal to `RenderedOpenAIRequest.body`. The custom
 transport inspects the prepared request before any DNS/connect/write and rejects a byte or digest,
 precomputed commitment, method, exact HTTPS scheme/host/port/path, endpoint profile/version,
-TLS/SNI/certificate-verification posture, dispatch, or deadline mismatch. It ignores poisoned
+platform-CA/hostname/SNI verification posture, dispatch, or deadline mismatch. It does not claim
+certificate or SPKI pinning. It ignores poisoned
 `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, netrc, credential, certificate, and transport
 environment/config; any proxy, redirect, URL rewrite, non-HTTPS destination, or alternate resolved
 request target fails before credential exposure. It strips the SDK's fixed nonsecret
 `Authorization` header, equality-checks the actual body SHA-256/bytes against the gateway's
-precomputed digest and commitment binding without recomputing HMAC, and calls
+precomputed digest and separately supplied request commitment without recomputing HMAC, and calls
 `ProviderCredentialHandle.authorize_attempt(binding, inject_and_start)`.
+That commitment belongs to the one-attempt transport state, not to the
+`ProviderAttemptAuthBinding`, whose closed fields include the exact authorization-scope and purpose
+digests and end at body digest, service generation, and deadline.
 
 Inside that callback only, the transport uses the protected credential view to inject the one bound
 authentication header and start the request. It may not place credentials in query/body/cookies,

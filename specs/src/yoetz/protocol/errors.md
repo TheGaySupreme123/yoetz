@@ -1,9 +1,9 @@
 # src/yoetz/protocol/errors.py — public error codes and bounded protocol errors
 
-**Wave:** A/B | **ADRs:** ADR-002, ADR-005, ADR-007 | **Imports (spec-tree):**
-`protocol/models.md`, `cli/exits.md`, `mcp/errors.md`, `application/service.md`,
-`adapters/sqlite/*`, `adapters/providers/*`
-**Imported by:** nearly every public adapter and application module
+**Wave:** A/B | **ADRs:** ADR-002, ADR-005, ADR-007 | **Imports (spec-tree):** none |
+**Imported by:** `protocol/models.md`, `protocol/canonical.md`, `protocol/coverage.md`,
+`cli/exits.md`, `mcp/errors.md`, `application/service.md`, `adapters/sqlite/*`,
+`adapters/providers/*`, and nearly every public adapter and application module
 
 ## Purpose
 

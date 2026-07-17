@@ -15,7 +15,7 @@ and semantic/privacy capability and conformance tests.
    authorization, outbound gateway, and privacy-audit path. A provider adapter receives only an immutable
    `ApprovedOutboundCase`; composition supplies no repository, bundle, transcript, environment,
    log, database, keyring, or application-state handle.
-2. **First external adapter:** official `openai` Python SDK (pinned `2.45.0`), Responses API with
+2. **First external adapter:** official `openai` Python SDK (pinned `2.46.0`), Responses API with
    structured outputs (`responses.parse` + frozen `ProviderJudgmentModel` schema). A release names
    an exact tested provider/model/endpoint-profile tuple. A generic or merely
    "OpenAI-compatible" URL is never trusted; an alternate endpoint requires its own exact,
@@ -30,12 +30,14 @@ and semantic/privacy capability and conformance tests.
    never enter provider configuration values, CLI/MCP arguments, environment variables, files,
    logs, traces, transcripts, prompts, or LLM context. For each physical dispatch, the gateway
    obtains a fresh service-issued `ProviderCredentialHandle` bound to exact provider/model/endpoint
-   profile+version, purpose, dispatch ID, final request-body digest, service generation, and
-   deadline. Only the custom HTTP transport may consume it through a one-shot header-injection
+   profile+version, purpose, authorization-scope digest, purpose digest, dispatch ID, final
+   request-body digest, service generation, and deadline. Only the custom HTTP transport may
+   consume it through a one-shot header-injection
    callback; the adapter and SDK never receive or retain reusable credential bytes. Under resolved
    decision F-012, the custom transport necessarily sends that separately
-   provisioned credential as one-attempt authentication metadata to the exact pinned TLS endpoint,
-   never as candidate/model content.
+   provisioned credential as one-attempt authentication metadata to the exact profile-bound HTTPS
+   endpoint selected by the reviewed registry, using platform CA trust and hostname validation,
+   never as candidate/model content. v0.1 does not claim certificate or SPKI pinning.
 5. **Client policy:** each physical attempt constructs and closes one
    `AsyncOpenAI(base_url=service-resolved exact profile endpoint, timeout=explicit,
    max_retries=0, api_key=fixed_nonsecret_sentinel, http_client=one_attempt_custom_transport)`.

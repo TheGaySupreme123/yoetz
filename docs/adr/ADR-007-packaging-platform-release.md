@@ -1,7 +1,7 @@
 # ADR-007 — Packaging, platforms, and release policy
 
-**Status:** Working decision for spec drafting (2026-07-13). Ratification requires clean-VM
-install/upgrade/uninstall evidence from built artifacts.
+**Status:** Implementation lock (2026-07-17). Release ratification still requires clean-VM
+install/upgrade/uninstall evidence from built artifacts and the E-001 release refresh.
 **Owning public specs:** repository-file specs, `specs/src/yoetz/version.md`, packaged resource
 specs, packaging/capability tests, and release workflow/script specs.
 
@@ -10,9 +10,10 @@ specs, packaging/capability tests, and release workflow/script specs.
 1. **Interpreter:** one exact CPython line, `>=3.14,<3.15` in metadata, tested/advertised patch
    `3.14.6` (refreshed at release lock). Writes gate on the exact tested
    patch/distribution/OS/ABI allowlist; import/`version`/read-only inspection work on any 3.14.
-2. **Project & build tooling:** `uv` (pinned `0.11.28` at lock) for env/lock/run/tool-install/
-   build; build backend `uv_build`; committed `uv.lock`; conventional `src/` layout.
-3. **CLI framework:** Typer (pinned `0.26.8`), `pretty_exceptions_enable=False`,
+2. **Project & build tooling:** `uv==0.11.29` for env/lock/run/tool-install/build; build backend
+   requirement `uv_build>=0.11.29,<0.12`; prereleases are disallowed; committed `uv.lock`;
+   conventional `src/` layout.
+3. **CLI framework:** Typer `0.27.0`, `pretty_exceptions_enable=False`,
    `no_args_is_help=True`; no Click-internal coupling. Async bridge: exactly one top-level
    `anyio.run(...)` per process entry (CLI command, MCP bridge, or foreground service); no nested
    event-loop helpers.
@@ -29,11 +30,13 @@ specs, packaging/capability tests, and release workflow/script specs.
    startup are v0.1 core behavior, not semantic extras. Optional extras are `semantic-openai` (openai) and
    `portable-recovery` (argon2-cffi). Explicit passphrase-backed vault setup also requires the
    reviewed Argon2id implementation; absence leaves the service locked rather than downgrading.
-7. **Type/lint stack and npm boundary:** Ruff `0.15.21` (format+lint, line length 100), official
-   npm Pyright `1.1.411` via dev-only private `package.json` + `npx --no-install pyright`, strict
-   mode. Node/npm are contributor and CI tools, not end-user runtime requirements. A public npm
-   package or `npx yoetz` launcher is a separate distribution surface and is deferred until it has
-   its own provenance, Python/uv delegation, upgrade, and platform contract.
+7. **Type/lint stack and npm boundary:** Ruff `0.15.22` (format+lint, line length 100), official
+   npm Pyright `1.1.411` via a development-only private `package.json`, strict mode. The locked
+   contributor/CI toolchain is Node `26.5.0` with npm `12.0.1`; `npm ci --ignore-scripts` followed
+   by `npm run typecheck` is the reproducible invocation. Node/npm are not end-user runtime
+   requirements. A public npm package or `npx yoetz` launcher is a separate distribution surface
+   and is deferred until it has its own provenance, Python/uv delegation, upgrade, and platform
+   contract.
 8. **Release artifacts:** sdist + wheel, SHA-256 checksums, CycloneDX SBOM via `uv export`,
    dependency lock, support matrix, conformance summary, known limitations, changelog, security
    policy. Sigstore signing deferred until a documented verification command exists (a signature
@@ -46,8 +49,29 @@ specs, packaging/capability tests, and release workflow/script specs.
 10. **Diagnostics:** `yoetz version --json` emits the full `VersionManifest`; startup safety
     validation is mandatory but the public `doctor` command stays v0.2.
 
+## Implementation-lock identities
+
+The 2026-07-17 implementation lock freezes the direct dependency declarations below. All are
+exact pins except the intentionally bounded build-backend requirement. The generated locks also
+freeze every transitive distribution, source, artifact hash, marker, and license.
+
+- Runtime: `anyio==4.14.2`, `apsw==3.53.3.1`, `cryptography==49.0.0`,
+  `jsonschema==4.26.0`, `keyring==25.7.0`, `mcp==1.28.1`, `platformdirs==4.10.0`,
+  `pydantic==2.13.4`, and `typer==0.27.0`.
+- `semantic-openai`: `httpx==0.28.1` and `openai==2.46.0`.
+- `portable-recovery`: `argon2-cffi==25.1.0`.
+- Development/test: `hypothesis==6.156.6`, `pytest==9.1.1`,
+  `pytest-timeout==2.4.0`, and `ruff==0.15.22`; Pyright remains npm-owned as above.
+- Runtime candidate: CPython `3.14.6`, APSW `3.53.3.1`, and SQLite `3.53.3` with exact source ID
+  `2026-06-26 20:14:12 d4c0e51e4aeb96955b99185ab9cde75c339e2c29c3f3f12428d364a10d782c62`.
+
+These identities select what implementation and capability testing exercise; they do not create
+a supported runtime cell. Only passing, artifact-bound release evidence may populate
+`runtime-support.json`.
+
 ## Consequences
 
 Every dependency update is a reviewed PR + package patch release rerunning contract/storage/
-packaging/capability matrices; version pins in the docs are refreshed at ADR acceptance and
-again at release lock.
+packaging/capability matrices. E-001 refreshes these implementation pins at release lock and must
+record whether each selected identity stayed fixed or changed; a newer version alone never widens
+the support allowlist.

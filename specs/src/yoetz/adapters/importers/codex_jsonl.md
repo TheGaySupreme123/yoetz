@@ -219,6 +219,24 @@ that multiple physical snapshots of one known item may point to the same folded 
 line outcome lists exactly the candidate indexes it supports. Every candidate and gap has at least
 one source range, and the union of line outcomes covers the exact physical source bytes.
 
+### Local retention and disclosure scanning
+
+Import does not run a content secret scanner or destructively redact the encrypted source/payload.
+That is deliberate: a command or model message is local retained evidence at this stage, and its
+future disclosure purpose, sink, scope, and policy do not yet exist. Exact source text remains only
+in encrypted source/payload objects; structural line outcomes, candidates, reports, diagnostics,
+and argv metadata remain allowlisted and plaintext-free as specified above.
+
+This is not an egress exemption. Every imported item has `DisclosureProvenance.imported`, and any
+later candidate for external `llm_inference`, `local_model`, `agent_context`, or `local_human_view`
+disclosure must traverse
+the same `PrivacyClassifierPort` source rules and `scan_exact_bytes` fence as native content. An
+external provider body also receives the gateway's second exact-body scan. The versioned scanner
+fixture set includes Codex-shaped shell assignments, inline authorization/header flags, bearer/API
+key forms, credential-bearing URLs, and values split across JSON/UTF-8/chunk boundaries. A match
+blocks the disclosure; import never promotes successful local encryption into permission to reveal
+the bytes.
+
 ### Argv sanitization
 
 `sanitize_codex_argv` is a pure allowlist, not secret-pattern guessing:
@@ -271,6 +289,8 @@ text itself.
 6. The module performs no IO, persistence, encryption, ID allocation, event append, model/network
    call, repository inspection, or review orchestration.
 7. Raw source/argv text and ordinary source digests never enter structural output or diagnostics.
+8. Import-time retention performs no content secret scan by design; every later disclosure of
+   imported content is independently classified and scanned at the single sink boundary.
 
 ## Tests
 
@@ -286,8 +306,9 @@ text itself.
 - `specs/fixtures/imports/codex/unknown-events.case.json.md` and
   `malformed-lines.case.json.md`: forward-unknown, extra-field, duplicate-key, invalid-UTF-8,
   oversized, and opaque-preservation vectors.
-- `specs/fixtures/imports/codex/truncated-stream.case.json.md` and
-  `secret-redaction.case.json.md`: missing terminal/final LF behavior and plaintext canary absence.
+- `specs/fixtures/imports/codex/truncated-stream.case.json.md`: missing terminal/final LF behavior.
+- `specs/fixtures/imports/codex/secret-redaction.case.json.md`: encrypted exact retention,
+  structural plaintext-canary absence, and disclosure-time rejection of Codex-shaped secret forms.
 
 ## Open questions
 

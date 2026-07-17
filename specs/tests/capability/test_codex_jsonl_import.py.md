@@ -26,6 +26,12 @@ raw source object/digest is retained, unknown/malformed/truncated input is quara
 import report counts/offsets/digests are deterministic. Compare a cooperative run with imported run;
 the intentionally omitted event must weaken coverage/be visible.
 
+`IMP-005` additionally proves the parser preserves Codex-shaped secret canaries only in encrypted
+source/payload objects and never in structural output. Import does not content-scan those local
+objects. When the same imported items are selected for each disclosure sink, the ordinary privacy
+classifier/scanner blocks shell assignments, inline authorization flags, credential-bearing URLs,
+and split-token variants before serialization or I/O; the importer has no exemption token.
+
 ## Errors and edge cases
 
 - Format change is unsupported/incomplete evidence, never guessed mapping.
@@ -39,6 +45,7 @@ the intentionally omitted event must weaken coverage/be visible.
 2. Mapping is conservative and version-scoped.
 3. Unknown/missing material weakens coverage.
 4. Harness-observed identity is not verified authorship.
+5. Local encrypted retention does not grant disclosure; imported content is scanned at every sink.
 
 ## Tests
 

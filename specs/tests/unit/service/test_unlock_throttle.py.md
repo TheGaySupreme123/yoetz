@@ -7,6 +7,8 @@
 
 Freeze the owner, record bytes/digest, atomic state transitions, exact delay table, and fresh-
 monotonic restart behavior for unlock and passphrase reauthentication throttling.
+The matrix covers `vault_unlock`, `provider_reauthentication`, `privacy_reauthentication`, and
+`security_reauthentication` and proves no vault/store access path bypasses the coordinator.
 
 ## Public surface
 
@@ -32,6 +34,8 @@ mode/type, count/generation overflow, and cancellation never yield an immediate 
 1. The record contains no secret, entered length, target, user/task content, or KDF output.
 2. Every KDF verification has a durable in-progress reservation first.
 3. Restart/clock/storage anomalies only preserve or lengthen delay.
+4. `UnlockCoordinator` is the sole store caller and reserves every passphrase KDF before vault
+   verification; `VaultService` owns no delay/counter transition.
 
 ## Tests
 

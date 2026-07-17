@@ -61,6 +61,15 @@ finding/event schemas.
 The `policy` argument is the loaded immutable pack from `kernel/policies/*`, not a dynamic rule
 source. The engine rejects an unknown or tampered policy pack rather than trying to approximate it.
 
+Each pack owns an exhaustive rule-to-`FindingFact` crosswalk. The engine MUST emit exactly the
+registered observed/missing fact codes for a firing rule, validate the candidate's priority against
+the kind's shared `FINDING_KIND_TRAITS` row, and derive actionability only from that row. It may not
+infer a fact from `statement`, `summary`, `description`, `reason`, `rationale`,
+`described_state`, or any other free-text field. Exact typed refs, closed enums, digest/frontier
+equality, exact `RequestedItem.value`/`attempted_items` token equality, and explicit
+`disputes_refs` edges are the complete deterministic input vocabulary. Requested-item tokens are
+compared byte-exactly and are never linguistically interpreted.
+
 The engine uses the current projection state to derive findings for the active pack:
 
 - the work-integrity pack looks for open obligations, unattempted requested items, missing action →
@@ -143,9 +152,11 @@ Rule-level expectations are:
 ## Tests
 
 - `specs/tests/conformance.md` — deterministic findings from memory and SQLite adapters match.
-- `specs/tests/unit.md` — rule-by-rule fixture coverage for each pack.
-- `fixtures/policies/` — frozen case fixtures that prove the required findings and no-spurious
-  findings cases.
+- `specs/tests/unit/kernel/test_policy_work_integrity.py.md` and
+  `test_policy_research_evidence.py.md` — smallest inline trigger and closest-nontrigger values for
+  every registered rule; these are test data inside the declared test files, not hidden resources.
+- `specs/fixtures/README.md` — the finite, file-by-file public
+  trigger/remediation/closest-nontrigger mapping; no separate policy-resource directory exists.
 - Basis fixtures freeze trigger/missing fact codes, state relation, source availability, coverage
   gaps, and byte-equivalent output across repeated runs. Marker-string fixtures prove no rule's
   rendered `summary`/`detail` carries content from behind a `subject_ref`.

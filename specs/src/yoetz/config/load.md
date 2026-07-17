@@ -69,8 +69,29 @@ sources.
 
 An environment variable with the `YOETZ_` prefix that matches no known key is a hard
 `ConfigError("unknown_config_env_var")` naming the variable (fail closed beats silent typo).
-Values are strings; strict model validation performs the only type conversion (base-10 ints for
-integer keys; anything else fails).
+Environment and service-override values arrive as strings. After name-only validation and per-leaf
+precedence selection, this loader explicitly parses the selected value into the owning strict model
+type: integer keys accept only a whole base-10 integer string and become `int`; path keys become
+`Path`; enum/string keys remain strings. It performs no float, boolean, whitespace, or generic
+Pydantic coercion. The strict models then validate those already typed values and their bounds.
+
+Environment validation is two-pass and binding. Before reading any environment *value*, the loader
+enumerates the supplied key names and sorts their exact strings by Unicode code point, then
+performs these checks in this exact order:
+
+1. reject a prefixed name matching the case-insensitive secret-name denylist
+   (`api_key|apikey|token|secret|password`, including historical provider-key spellings) as
+   `ConfigError("secret_env_forbidden")`; if several exist, report only the lexicographically first
+   exact key name;
+2. reject any remaining unknown `YOETZ_` name as
+   `ConfigError("unknown_config_env_var")`, again choosing the lexicographically first name;
+3. only after every supplied key name passes, read values for the known names, apply the
+   empty-string rule, select the winning value per leaf, explicitly parse that selected value as
+   above, and pass the already typed merged mapping to strict model validation.
+
+Secret-name rejection therefore wins even when the same environment also contains an unknown
+non-secret `YOETZ_` name. No value—including a forbidden value—is fetched, compared, logged, or
+echoed unless all name-only validation succeeds; either name failure performs zero value reads.
 
 ### TOML parsing
 
@@ -134,8 +155,11 @@ storage, key, provider, privacy, or endpoint authority.
 - Conflicting sources are not an error; precedence resolves them silently and
   `MinimalConfig.config_path_used` records which file (if any) was read for diagnostics.
 - Any prefixed credential/secret environment key, including historical provider-key spellings, is
-  rejected as `ConfigError("secret_env_forbidden")`; the value is never read, logged, or echoed.
+  rejected as `ConfigError("secret_env_forbidden")` during the first name-only pass; the value is
+  never read, logged, or echoed, and this rejection takes precedence over unknown-name rejection.
 - Empty-string environment values are treated as unset (documented; matches common tooling).
+- Strict Pydantic validation never performs string-to-integer or string-to-path coercion for
+  environment/service overrides; observing an unparsed selected value is a loader defect.
 
 ## Invariants
 

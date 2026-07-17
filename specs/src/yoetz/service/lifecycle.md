@@ -1,7 +1,8 @@
 # src/yoetz/service/lifecycle.py — service singleton, state machine, relock, and shutdown
 
 **Wave:** C | **ADRs:** ADR-001, ADR-004, ADR-008 | **Imports (spec-tree):** `ports/control.md`,
-`ports/diagnostics.md`, `ports/secret_memory.md`, `config/paths.md` | **Imported by:**
+`ports/clock.md`, `ports/diagnostics.md`, `ports/secret_memory.md`, `protocol/canonical.md`,
+`config/paths.md` | **Imported by:**
 `service/daemon.md`, `adapters/session_events.md`
 
 ## Purpose
@@ -14,7 +15,7 @@ explicit and automatic relock, session/suspend events, bounded drain, and endpoi
 
 - `class ServiceLifecycle` with async `acquire_singleton`, `publish_endpoint`, `transition`,
   `admit`, `release`, `request_lock`, `request_stop`, `on_session_event`, `note_activity`,
-  `run_idle_monitor`, and `close`.
+  `run_idle_monitor`, `change_idle_relock_policy`, and `close`.
 - Private `ServiceGenerationStore` — owner-only, nonsecret durable metadata with
   `advance(instance_id) -> positive canonical generation`; it is the sole generation source
   available while locked and contains no catalog route, task, user content, key, or credential.
@@ -25,10 +26,18 @@ explicit and automatic relock, session/suspend events, bounded drain, and endpoi
 - `enum SessionSecurityEvent` — `user_session_locked`, `system_suspend`, `user_session_unlocked`,
   `system_resume`, `monitor_lost`.
 - `@dataclass(frozen=True, slots=True) class IdleRelockPolicy` — default 900 seconds; valid
-  `60..86400`, or disabled only through fresh local-human reauthorization.
+  `60..86400`, or disabled only through fresh local-human reauthorization. The internal disabled
+  representation is `seconds=None`; wire targets/results use the explicit tagged form owned by
+  `service/confidential_protocol.md`, never JSON null/infinity.
 - Constants `LOCK_DRAIN_SECONDS = 5`, `STOP_DRAIN_SECONDS = 30`.
 - `class LifecycleError(Exception)` — bounded reasons including `service_already_running`,
-  `invalid_transition`, `vault_locked`, `service_draining`, `session_monitor_unavailable`.
+  `invalid_transition`, `vault_locked`, `service_draining`, `session_monitor_unavailable`,
+  `human_authorization_required`, `human_authorization_stale`.
+
+Construction requires one injected `ClockPort`; lifecycle never reads ambient monotonic time.
+Its private ready-state record carries `current_vault_generation: int | None`. The generation is
+required and positive on every transition into `ready`, is unchanged while ready, and is cleared
+before entering draining/locked/failed. It is internal proof-validation state, not service status.
 
 ## Behavior
 
@@ -110,6 +119,27 @@ long-running operation is not idle. Changing/turning off this policy requires an
 assertion or confidential reauthentication proof; an MCP request or boolean CLI confirmation is
 insufficient.
 
+`change_idle_relock_policy(proposed, proof)` is the only mutation path. It is service-internal,
+callable only by the still-live `idle_relock_policy_change` branch of `HumanControlService`, and
+requires state `ready`. Under the lifecycle mutex it snapshots the current policy and recomputes
+the exact target digest as
+`sha256("yoetz/idle-relock-policy-change/v1\0" || canonical_json({service_generation,
+current:<finite-or-disabled>, proposed:<finite-or-disabled>}))`. It requires an unexpired,
+unconsumed `HumanAuthorizationProof` with purpose `idle_relock_policy_change`, that exact digest,
+the current service generation, the required private current vault generation, and
+`policy_generation=None`. Under the same mutex it samples `clock.monotonic_seconds()` once and
+calls the proof's exact `consume` method with all those expected fields before swapping the policy.
+A missing/changed vault generation or invalid clock is stale authority. Any validation/race failure
+consumes no authority and leaves the prior policy unchanged.
+
+A finite policy arms a fresh full interval from policy application time when the service is truly
+quiescent; otherwise the interval begins only after every admission/activity counter becomes zero.
+Disabling cancels only the idle deadline and does not affect explicit, session-lock, suspend, or
+monitor-loss relock. The result and structural status omit `idle_relock_seconds` when disabled.
+This v0.1 change is intentionally scoped to the current service generation and is not written to
+config or any durable file; restart restores the safe 900-second default and requires a new human
+ceremony to disable it again.
+
 ## Errors and edge cases
 
 - Crash after lock acquisition but before endpoint publication leaves no discoverable service;
@@ -122,6 +152,8 @@ insufficient.
   operation results remain durably replayable.
 - `monitor_lost` is never ignored while ready.
 - Repeated/concurrent lock/stop requests coalesce on the one draining task and are idempotent.
+- An idle-policy proposal raced by lock/drain, another policy change, expiry, proof replay, or
+  service-generation change returns `human_authorization_stale` and preserves the prior policy.
 
 ## Invariants
 
@@ -134,11 +166,14 @@ insufficient.
 5. A relock deadline failure terminates the service; it never reports a false locked state.
 6. Service generation is durably advanced before endpoint publication without opening the
    encrypted catalog; it never changes during one service instance.
+7. Idle relock can be disabled only by consuming one exact vault-minted human-authorization proof;
+   the exception is generation-scoped and restart restores the 900-second default.
 
 ## Tests
 
 - `tests/unit/service/test_lifecycle.py` exhaustively covers allowed transitions, admission
-  counters, idle calculation, concurrent lock/stop, and deadline escalation.
+  counters, idle calculation, concurrent lock/stop, deadline escalation, exact target-digest/proof
+  validation, finite/disabled application, races/replay, and restart default restoration.
 - `tests/subprocess/test_service_daemon_lifecycle.py` races two daemons, kills each startup/drain
   point, validates endpoint cleanup, nonsecret generation atomicity/rollback rejection, and proves
   locked startup does not open the catalog.

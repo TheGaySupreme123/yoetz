@@ -135,7 +135,9 @@ profile cannot waive this set.
 
 Resolved decision F-012 distinguishes candidate/user-discovered credentials, which are always
 blocked from model content, from one separately provisioned service-vault credential used only as
-one-attempt authentication metadata to the exact pinned TLS endpoint.
+one-attempt authentication metadata to the exact profile-bound HTTPS endpoint selected by the
+reviewed provider registry, with platform CA trust and hostname validation. v0.1 does not claim
+certificate or SPKI pinning.
 That provider credential never enters body/context/preview/receipt/log/SDK state; it does necessarily
 leave the machine in the authentication header. The alternative is to forbid credentialed external
 providers.

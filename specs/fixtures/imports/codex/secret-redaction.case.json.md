@@ -12,7 +12,20 @@ One canonical strict-JSON fixture case with `fixture_schema: "yoetz.fixture-case
 
 ## Behavior
 
-The `input` section contains synthetic canaries in commands, paths, model text, environment-shaped values, and stderr bytes. The `expected` section freezes encrypted raw source only, allowlisted structural outputs, keyed commitments where allowed, and zero canary occurrences outside encrypted objects. Every referenced identifier, timestamp, key, digest, nonce, provider response, and fault point is explicit test data; a test may not replace it with current time, randomness, network state, or host paths. Multi-variant cases evaluate each variant independently and declare the relationship between their outcomes.
+The `input` section contains synthetic canaries in commands, paths, model text, environment-shaped
+values, and stderr bytes. Command variants include shell environment assignments, inline
+`Authorization`/header flags, bearer and API-key forms, credential-bearing URLs, and tokens split
+across JSON escapes, UTF-8 chunks, and scanner chunk boundaries. The import expectation freezes
+exact encrypted raw source/payload retention with no destructive import-time content scan,
+allowlisted structural outputs, keyed commitments where allowed, and zero canary occurrences
+outside encrypted objects. Disclosure variants then select each imported item for external
+`llm_inference`, `local_model`, `agent_context`, and `local_human_view` sinks: every variant
+traverses the ordinary classifier
+and exact-byte scanner, and every secret match is blocked before sink serialization/I/O. A clean
+imported control reaches only the independently policy-approved sink. Every referenced identifier,
+timestamp, key, digest, nonce, provider response, and fault point is explicit test data; a test may
+not replace it with current time, randomness, network state, or host paths. Multi-variant cases
+evaluate each variant independently and declare the relationship between their outcomes.
 
 ## Errors and edge cases
 
@@ -20,7 +33,10 @@ The loader rejects a wrong fixture ID/schema, undeclared field, float, duplicate
 
 ## Invariants
 
-The file is canonical JSON, self-contained, offline, synthetic, immutable after release, and has one unambiguous expected outcome per declared variant. It cannot strengthen coverage or assurance beyond the owning protocol and policy specs.
+The file is canonical JSON, self-contained, offline, synthetic, immutable after release, and has
+one unambiguous expected outcome per declared variant. It cannot strengthen coverage or assurance
+beyond the owning protocol and policy specs. Encrypted local retention is never treated as
+disclosure authority.
 
 ## Tests
 

@@ -1,7 +1,8 @@
 # schemas/events/receipt-recorded-1.0.0.schema.json — receipt-recorded payload schema
 
 **Wave:** D/F | **ADRs:** ADR-002, ADR-004, ADR-006, ADR-007 | **Imports (spec-tree):**
-`src/yoetz/domain/events.md`, `src/yoetz/domain/receipts.md`
+`src/yoetz/domain/events.md`, `src/yoetz/domain/receipts.md`,
+`schemas/receipts/receipt-document-1.0.0.schema.json`
 **Imported by:** receipt and replay tests
 
 ## Purpose
@@ -24,6 +25,10 @@ Closed payload object with:
 - `receipt_object_id`;
 - `conclusion_code`;
 - `redaction_profile`.
+
+`conclusion_code` uses the exact offline `$ref`
+`https://schemas.yoetz.dev/0.1/receipts/receipt-document/1.0.0#/$defs/receipt_conclusion`; this event
+schema does not maintain a second conclusion vocabulary.
 
 The schema keeps the subject frontier exact and excludes any post-event result frontier from the
 payload itself.

@@ -1,8 +1,7 @@
 # src/yoetz/adapters/objects/encrypted_files.py — encrypted object files and GC-safe publication
 
 **Wave:** C | **ADRs:** ADR-003, ADR-004 | **Imports (spec-tree):**
-`adapters/objects/envelope.md`, `ports/objects.md`, `adapters/sqlite/recovery.md`,
-`config/paths.md`
+`adapters/objects/envelope.md`, `ports/objects.md`, `config/paths.md`
 **Imported by:** `application/*`, `adapters/sqlite/repository.md`, `adapters/sqlite/recovery.md`
 
 ## Purpose

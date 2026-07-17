@@ -2,8 +2,8 @@
 
 **Wave:** C | **ADRs:** ADR-004, ADR-008, ADR-009 | **Imports (spec-tree):** control-request; six
 operation result schemas; importer, maintenance and integration result types; service-status,
-privacy policy/setup, version-manifest and public error boundaries | **Imported by:** local clients,
-MCP bridge/UI and control tests
+privacy policy/setup/egress-receipt, version-manifest and public error boundaries | **Imported by:**
+local clients, MCP bridge/UI and control tests
 
 ## Purpose
 
@@ -14,7 +14,7 @@ workflow results reuse their operation schemas; this artifact owns every support
 ## Public surface
 
 - Draft 2020-12, `$id` `https://schemas.yoetz.dev/0.1/service/control-result/1.0.0`.
-- A disjoint closed `oneOf` with one `ok` and one `error` branch for each of the exact twenty-three
+- A disjoint closed `oneOf` with one `ok` and one `error` branch for each of the exact twenty-five
   method constants. Every branch requires only `protocol_version`, `rpc_id`,
   `service_instance_id`, `service_generation`, `method`, `outcome`, and `body`.
 - `outcome` is branch-constant `ok|error`; `method` is branch-constant and selects the exact body.
@@ -44,7 +44,7 @@ These operation result schemas retain their own success/public-error union. Cont
 method dispatch completed and returned its reviewed public result; it does not rewrite a workflow
 error into a transport failure.
 
-### Seventeen support success branches
+### Nineteen support success branches
 
 This artifact owns the following exact closed success `$defs`; `v` means required
 `schema_version: "1.0.0"`. Bracketed fields are optional; all other fields are required.
@@ -68,6 +68,8 @@ This artifact owns the following exact closed success `$defs`; `v` means require
 | `privacy_get_effective` | Offline `$ref` to `privacy/privacy-policy-1.0.0`. |
 | `privacy_propose_policy` | Closed union: `{v, outcome:decision_required, proposal_id:ppr_, proposal_digest:sha256:<64 lowercase hex>, candidate_policy_digest:sha256:<64 lowercase hex>, expected_policy_version:positive-canonical-decimal, expires_at:timestamp}` or `{v, outcome:tightening_applied, policy:<privacy-policy $ref>, revoked_authorization_count:uint, closed_session_count:uint, provider_reconciliation:ProviderReconciliation}`. |
 | `privacy_tighten_policy` | `{v, outcome:tightening_applied, policy:<privacy-policy-1.0.0 $ref>, revoked_authorization_count:uint, closed_session_count:uint, provider_reconciliation:ProviderReconciliation}`. |
+| `privacy_receipts_list` | `{v, snapshot_generation:positive-canonical-decimal, receipts:PrivacyReceiptView[0..100], [next_cursor:authenticated-base64url[1..1024]]}`. Receipts are sorted `(finished_at, receipt_id)` descending, and the optional cursor is bound to the exact snapshot generation and request filters. |
+| `privacy_receipts_get` | Closed union: `{v, outcome:found, receipt:PrivacyReceiptView}` or `{v, outcome:not_found}`. |
 
 `IntegrationState` is exactly `absent|installed_exact|modified|partial|incompatible|unsafe`.
 `FileChange` is the closed record `{action:create|replace|remove|unchanged, relative_path,
@@ -79,9 +81,22 @@ bounded nonnegative JSON integers; `hmac-sha256` uses the frozen keyed-commitmen
 activated_count:uint, deactivated_count:uint,
 unavailable_binding_digests:sorted-unique-sha256[0..32]}`.
 
+`PrivacyReceiptView` is a closed tagged union. The `network_egress` branch is
+`{kind:network_egress, receipt:<privacy/egress-receipt-1.0.0 $ref>}`. The
+`local_disclosure` branch is `{kind:local_disclosure, receipt:LocalDisclosureReceipt}` where
+`LocalDisclosureReceipt` has the same closed structural identity, policy, scope, purpose,
+outcome/reason, category/count/transformation/scan, consent, finish-time, and
+`audit_store_version=1` fields as the egress receipt, substitutes required
+`sink:local_model|agent_context|local_human_view|trusted_human_control` for `channel`, and forbids
+`authorization_id`, `dispatch_id`, `dispatch_started_at`, `request_commitment`, provider/model/
+endpoint destination fields, and all plaintext/content/object-dereference fields. It uses the exact
+egress-receipt outcome/reason compatibility matrix. Both wrapper branches and both receipt shapes
+use `additionalProperties:false`; the list/get result cannot be used to retrieve proposal/object
+content.
+
 ### Control error branches
 
-For each of the twenty-three method constants there is a distinct `outcome=error` branch with the
+For each of the twenty-five method constants there is a distinct `outcome=error` branch with the
 same exact body `$def`: `{code, retryable}` and no message/details. `code` is
 `protocol_mismatch|frame_invalid|frame_too_large|request_cancelled|request_timeout|vault_locked|
 service_draining|method_forbidden|service_generation_changed|privacy_projection_unavailable|
@@ -93,13 +108,16 @@ new workflow error code.
 obtain its initial local-audit reservation; it is always retryable, contains no result body, and
 maps to public `SERVICE_UNAVAILABLE`.
 
-Handshake/fixed errors plus the closed structural `service_status`, `service_lock`, and `service_stop`
-success bodies are the only result branches exempt from `privacy_projection`: they are available
-while no unlocked `Application`/audit key exists and their schemas contain only allowlisted fixed
-state/version/generation/capability codes and booleans. All six workflow successes and every other
-ready support success require exactly one top-level common receipt-bound projection. `service_lock`
-is always structural/exempt and returns only its post-lock status after the application closes; it
-never depends on a local-audit call.
+Handshake/fixed errors plus the closed structural `service_status`, `service_lock`, and
+`service_stop` success bodies are exempt from `privacy_projection`: they are available while no
+unlocked `Application`/audit key exists and their schemas contain only allowlisted fixed
+state/version/generation/capability codes and booleans. `privacy_receipts_list` and
+`privacy_receipts_get` are also projection/audit-exempt, but only while ready and only for an
+authenticated ordinary CLI/UI caller; their bodies expose already-durable structural audit views,
+so creating another receipt for inspection would recurse. All six workflow successes and every
+other ready support success require exactly one top-level common receipt-bound projection.
+`service_lock` is always structural/exempt and returns only its post-lock status after the
+application closes; it never depends on a local-audit call.
 
 ## Errors and edge cases
 
@@ -112,7 +130,7 @@ uses only the fixed code. A control result for a cancel-frame RPC ID is invalid.
 
 1. Every result binds exact request, method, service instance and generation.
 2. Errors contain only fixed code and retryability.
-3. Every one of the twenty-three success bodies is closed here or by the exact named offline
+3. Every one of the twenty-five success bodies is closed here or by the exact named offline
    operation/schema `$ref`; no open-dict support result exists.
 4. Secret/confidential-ingress material has no result field.
 5. Backup preview/execute cannot omit or hide the privacy-audit sidecar/object subset inside the
@@ -120,7 +138,7 @@ uses only the fixed code. A control result for a cancel-frame RPC ID is invalid.
 
 ## Tests
 
-`tests/unit/protocol/test_service_control_schemas.py` enumerates all forty-six result branches,
+`tests/unit/protocol/test_service_control_schemas.py` enumerates all fifty result branches,
 cross-pairs every method/body, validates every nested support field gate (including required backup
 privacy-audit counts/digests), and rejects a cancel result. Subprocess frame tests and CLI/MCP
 conformance matrices cover transport mapping.

@@ -47,6 +47,23 @@ empirical/review gates.
 
 ## Open questions
 
+### Phase 0 implementation reconciliation — 2026-07-17
+
+The pre-code consistency pass rechecked the private P0–P4 review catalogue against the current
+public authorities and closed every still-live implementation ambiguity before materialization:
+
+| Review seam | Frozen resolution | Public authorities updated |
+|---|---|---|
+| P0-1 finding kind/origin and fixture ownership | `FindingKind` and `FindingOrigin` are independent; the exhaustive fourteen-kind trait table fixes priority/actionability, and the reviewed 48-file corpus covers every kind without inventing a `fixtures/policies/` family. | `INTERFACES.md`, finding/policy/fixture owner specs and conformance specs |
+| P0-2 verdict versus receipt conclusion | Checks retain four `CheckVerdict` values; receipts retain three `ReceiptConclusion` values, with one exact projection-derived correspondence and conservative precedence. | `INTERFACES.md`, ranking, receipt, event, schema, fixture and reducer specs |
+| P0-3 shared-registry drift | `INTERFACES.md` owns shared names and semantics. The pass reconciled ranking context/coverage, canonical depth, adapter-only frame caps, schema kind/role maps, control/privacy methods, operation recovery values, secret purposes and human-authority values. | `INTERFACES.md` and every affected owning spec |
+| P0-4 unsupported non-LLM channel fork | A proposal to enable an unavailable v0.1 non-LLM channel is rejected immediately as `channel_unavailable`, creates no pending consent or I/O, and a crafted/imported enabled row remains fenced while producing a structural no-dispatch receipt. | ADR-009, privacy policy/domain/fixture and gateway specs |
+| P1–P4 implementation gaps | Receipt reads, recorded coverage, memory/SQLite parity, catalog DDL ownership, keyed scope commitments, service-security ownership, idle-relock reachability, exact TLS wording, recovery contracts, CLI/error mappings and dangling names were reconciled. | Affected ADRs, owning specs, schemas, fixtures and test specs |
+| E-001 implementation lock | The build lock is frozen to the exact 2026-07-17 versions in ADR-007 and repository owner specs; this does not manufacture platform/provider support evidence. | ADR-007, repository owner specs and E-001 below |
+
+No founder-class implementation question remains. Empirical and independent-review gates below
+remain release blockers where stated; they do not block building the bounded v0.1 implementation.
+
 ### Founder decisions required before implementation freeze
 
 None. Every founder item formerly listed here is resolved below. Empirical release evidence and
@@ -57,7 +74,7 @@ that evidence.
 
 | ID | Evidence to freeze | Current posture | Owner/output |
 |---|---|---|---|
-| E-001 | Exact newest stable Python, uv, APSW/SQLite, dependency, Ruff, Pyright, npm/Node, MCP SDK, provider SDK pins | Candidate values in ADRs are drafting inputs; refresh at implementation lock and again at release lock. | Dependency refresh review, `uv.lock`, npm lock, version manifest. |
+| E-001 | Release refresh of the 2026-07-17 implementation-locked Python 3.14.6, uv/uv_build 0.11.29, APSW 3.53.3.1/SQLite 3.53.3, dependency, Ruff 0.15.22, Pyright 1.1.411, Node 26.5.0/npm 12.0.1, MCP 1.28.1, and provider SDK pins | Implementation identities are frozen in ADR-007 and the owning repository specs; re-evaluate newest stable versions at release lock without inferring support from a pin. | Dependency refresh review, regenerated `uv.lock` and npm lock, version manifest, exact runtime/capability evidence. |
 | E-002 | Exact supported Codex versions and protocol behavior | No continuous range is inferred; every advertised version must run the critical capability matrix. | ADR-005, capability evidence, support matrix. |
 | E-003 | Advertised OS/architecture/filesystem/keyring matrix | macOS arm64 and manylinux x86-64 are candidates only until clean-artifact jobs and restore drills pass. | ADR-003/007, platform capability evidence. |
 | E-004 | Ownership heartbeat/stale thresholds, operation/import/check lease durations, writer-queue depth, MCP idle-route cache | Preserve generation fencing regardless of measured durations; choose bounded values from fault/contention runs. | Runtime/storage conformance evidence. |
@@ -67,7 +84,7 @@ that evidence.
 | E-008 | Release build reproducibility, SBOM/checksum/provenance formats, artifact allowlist, and public-boundary detector vocabulary | No signing claim until a tested end-user verification command exists. | Packaging suite and release workflow evidence. |
 | E-009 | Codex skill materiality/activation examples | Freeze examples from bounded dogfood evidence; v0.1 must prefer explicit activation and avoid triggering on trivial work. | Skill fixtures and Codex capability evidence. |
 | E-010 | Local service endpoint, peer-credential, permission, lifecycle, keyring, memory-protection, and relock matrix | No platform support claim until a clean-profile service proves authenticated local attachment, locked/ready transitions, crash recovery, suspend/session-lock relock, and secret-canary absence. | Service/control capability evidence and platform matrix. |
-| E-011 | Privacy classifier, never-send scanner, minimizer/redactor, consent, endpoint binding, and receipt matrix | No “policy enforced” claim from configuration alone; every profile, channel, scope intersection, denial, and dispatch path must produce exact evidence. | ADR-009 privacy conformance, property, integration, and live-profile evidence. |
+| E-011 | Privacy classifier, never-send scanner, minimizer/redactor, consent, endpoint binding, and receipt matrix | No “policy enforced” claim from configuration alone; every profile, channel, scope intersection, denial, and dispatch path must produce exact evidence. Imported Codex command/model text is intentionally verbatim only in encrypted local objects and receives no import-time content scan; every later disclosure crosses the one authoritative classifier/secret scan, tested across shell assignments, inline auth/header flags, bearer/API-key forms, credential URLs, and JSON/UTF-8/chunk splits. | ADR-009 privacy conformance, property, integration, and live-profile evidence. |
 | E-012 | Public security, conduct, and support routes | Before public release, prove that private vulnerability reporting is enabled, `security@yoetz.dev` and `conduct@yoetz.dev` are monitored by maintainers, and the repository issue route is available for ordinary support. | Repository policy-link check plus dated maintainer delivery/response drill. |
 | E-013 | Exact harness lifecycle trigger points a trigger hook may bind to, context compaction among them | Codex `0.144.5` currently exposes `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, and `Stop`, but names alone are not support evidence. A v0.1 exact capability cell may declare a trigger-only hook only after an installed-artifact run freezes event, payload/privacy boundary, permitted action, coalescing/loop guard, and failure behavior. Unproven cells remain `None`; every v0.1 observation arm is absent. | ADR-010 installed-artifact capability evidence and exact harness support-matrix cell. |
 | E-014 | Publication-ceremony budget and work-package grouping examples | Dogfood must measure publications per work package, model-authored event bytes, token/latency overhead, abandoned or stale-ledger rate, skipped checks, and user-visible chatter. Large inventories must compare grouped work packages with per-file publication amplification; no threshold is inferred from file count alone. | Harness-neutral capability/conformance fixtures plus bounded dogfood evidence used to freeze guidance examples and budgets. |
@@ -159,14 +176,18 @@ that evidence.
   support and an action-bound `UserPresencePort` for the exact release cell. Otherwise Yoetz writes
   no immutable keyring-mode state and offers explicit passphrase initialization. Existing keyring
   vaults may unlock for permitted local work, but durable widening and credential mutation remain
-  fenced without strong presence.
+  fenced without strong presence. `HumanAuthorityCapability.source=unavailable` is not a second
+  authorization gate for an already reauthenticated exact local-model policy row; that row remains
+  independently fenced by classifier, exact profile, generation, and `consume_local` checks.
 - **F-011:** `confirm_every_request` uses a foreground exact prepared-case preview and one explicit
   decision for one physical attempt inside existing durable policy. Every retry needs a new decision;
   durable widening and credential mutation still require strong action-bound reauthentication.
 - **F-012:** Candidate/user/repository/config/transcript credentials remain non-overridable
   never-send data. A separately provisioned vault credential may be consumed only once as
-  authentication metadata for the exact pinned TLS endpoint and never enters model content,
-  previews, receipts, logs, config, environment, transcripts, or reusable SDK state.
+  authentication metadata for the exact profile-bound HTTPS endpoint selected by the reviewed
+  registry, using platform CA trust and hostname validation, and never enters model content,
+  previews, receipts, logs, config, environment, transcripts, or reusable SDK state. v0.1 does not
+  claim certificate or SPKI pinning.
 - **F-013:** Yoetz may connect only to an exact approved owner-only AF_UNIX local-model endpoint and
   does not launch/download the model or perform DNS/IP networking. The separate runtime receives
   plaintext and is therefore an explicitly trusted disclosure sink unless its exact support cell

@@ -2,7 +2,8 @@
 
 **Wave:** A/B | **ADRs:** ADR-002, ADR-004, ADR-006 | **Imports (spec-tree):**
 `src/yoetz/domain/events.md`, `src/yoetz/domain/findings.md`
-**Imported by:** action/result/evidence/claim schemas
+**Imported by:** exactly the action-recorded, result-recorded, evidence-recorded, and
+claim-recorded event payload schemas
 
 ## Purpose
 
@@ -25,6 +26,11 @@ Closed object with optional fields:
 At least one digest-like reference must be present when the owning contract requires a freshness
 anchor. The explanatory state text is optional and never participates in deterministic equality.
 Extra keys are forbidden.
+
+The four v0.1 event owners of this common freshness-anchor shape are exactly
+`action-recorded-1.0.0`, `result-recorded-1.0.0`, `evidence-recorded-1.0.0`, and
+`claim-recorded-1.0.0`. Other schemas may reference those events or compare their anchors, but no
+other event payload acquires a `subject_state` field implicitly through this common schema.
 
 ## Errors and edge cases
 

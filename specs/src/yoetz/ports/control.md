@@ -66,6 +66,11 @@ validates the matching closed result branch after receipt. The
 control envelope adds transport correlation and service generation; it never wraps or changes the
 operation's own request ID/idempotency meaning.
 
+The generic `call` surface accepts exactly all 25 registered `ControlMethod` tokens: six workflow
+methods and the nineteen support/lifecycle methods listed above. In particular,
+`privacy_receipts_list` and `privacy_receipts_get` are first-class generic-call branches rather than
+out-of-band client helpers. Client-kind admission still denies both to `mcp_bridge`.
+
 The client may retry a connection failure only by resending the identical `ControlRequest` and
 operation request ID. Cancellation is an explicit structural control frame; disconnect alone is
 not proof that the service cancelled a committing operation. `service_status` is available while

@@ -3,7 +3,7 @@
 **Wave:** B | **ADRs:** ADR-001, ADR-002, ADR-003 | **Imports (spec-tree):**
 `protocol/ids.md`, `protocol/errors.md`, `protocol/coverage.md`, `domain/events.md`,
 `domain/findings.md`, `domain/values.md` (`Frontier`), `kernel/projections.md`,
-`ports/objects.md` (ObjectRef type only) |
+`ports/objects.md` (ObjectRef type only), `ports/semantic.md` |
 **Imported by:** `application/service.md`, `application/publish_work.md`, `application/check.md`,
 `application/respond.md`, `application/status.md`, `application/receipt.md`,
 `application/import_review.md`, `adapters/sqlite/repository.md`, `adapters/memory/ledger.md`
@@ -17,7 +17,8 @@ this protocol. Without it, CLI/MCP adapters would talk to SQLite directly, the i
 adapter and SQLite adapter could diverge, and the conformance suite ("SQLite and an in-memory
 reference adapter implement the same protocol") would have no shared contract to run against.
 
-No SQLite, APSW, or transport type appears in any signature. All methods are `async`.
+No SQLite, APSW, or transport type appears in any signature. Effectful and point-query methods are
+`async`; `load_events` is the sole non-awaiting factory and returns an `AsyncIterator`.
 
 ## Public surface
 
@@ -27,7 +28,13 @@ No SQLite, APSW, or transport type appears in any signature. All methods are `as
   - `async def load_projection(self, session_id: SessionId, view: ProjectionView) -> StoredProjection | None`
   - `async def query_projection(self, query: ProjectionQuery) -> ProjectionPage`
   - `async def freeze_case(self, session_id: SessionId, writer_id: str, expected_frontier: int | None, request_id: str, request_digest: str) -> FrozenCase`
-  - the seven durable check-orchestration methods registered in `INTERFACES.md`;
+  - `async def advance_check_phase(self, lease: OperationLease, expected_phase: CheckPhase, next_phase: CheckPhase, durable_object_ref: ObjectRef | None = None) -> OperationLease`
+  - `async def enqueue_semantic_job(self, lease: OperationLease, case_digest: str, case_object_ref: ObjectRef) -> SemanticJobRecord`
+  - `async def claim_semantic_job(self, lease: OperationLease, job_id: str) -> SemanticAttemptHandle`
+  - `async def record_attempt_outcome(self, handle: SemanticAttemptHandle, outcome: AttemptOutcome, result_object_ref: ObjectRef | None = None, terminal_code: SemanticReason | None = None) -> None`
+  - `async def select_attempt(self, lease: OperationLease, handle: SemanticAttemptHandle, selected_result_object_ref: ObjectRef) -> SelectedAttempt`
+  - `async def renew_leases(self, lease: OperationLease) -> OperationLease`
+  - `async def reclaim_operation(self, writer_id: str, operation_id: str, request_digest: str) -> OperationLease | PendingVerdict`
   - `async def commit_check_if_current(self, frozen: FrozenCase, findings: RankedFindings, semantic_status: SemanticStatus, semantic_reason: SemanticReason, semantic_provenance: SemanticProvenance | None, request_id: str) -> CheckResult`
   - `async def lookup_operation(self, writer_id: str, operation_id: str) -> OperationRecord | None`
 - `@dataclass(frozen=True, slots=True) class AppendCommand`
@@ -38,10 +45,22 @@ No SQLite, APSW, or transport type appears in any signature. All methods are `as
   define a duplicate frontier type
 - `@dataclass(frozen=True, slots=True) class FrozenCase`
 - `@dataclass(frozen=True, slots=True) class OperationRecord`
+- `@dataclass(frozen=True, slots=True) class OperationLease`
+- `@dataclass(frozen=True, slots=True) class SemanticJobRecord`
+- `@dataclass(frozen=True, slots=True) class SemanticAttemptHandle`
+- `@dataclass(frozen=True, slots=True) class SelectedAttempt`
+- `@dataclass(frozen=True, slots=True) class PendingVerdict`
 - `@dataclass(frozen=True, slots=True) class StoredProjection`
+- `@dataclass(frozen=True, slots=True) class OperationResultLocator`
 - `enum ProjectionView` — `compact`, `assignment`, `obligations`, `findings`, `candidate_findings`, `evidence`, `history`, `versions`
 - `enum OperationKind` — `publish_work`, `check`, `respond`, `receipt`
 - `enum OperationState` — `pending`, `complete`, `quarantined`
+- `enum CheckPhase` — `reserved`, `local_ready`, `semantic_wait`, `ready_to_finalize`, `terminal`
+- `enum AttemptOutcome` — `response_durable`, `failed`, `expired`, `late`, `selected`
+- `enum OperationQuarantineCode` — `operation_kind_state_contradiction`,
+  `operation_result_digest_mismatch`, `operation_event_range_mismatch`,
+  `operation_resume_object_invalid`, `operation_lease_shape_invalid`
+- `enum PendingVerdictKind` — `absent`, `live`, `terminal`, `quarantined`
 - Type alias `SessionId = str` (validated `ses_` ID; opaque past validation).
 
 ## Behavior
@@ -100,13 +119,49 @@ No SQLite, APSW, or transport type appears in any signature. All methods are `as
 - `replayed_result: CheckResult | None` — non-`None` when the operation was already terminal for
   the identical request; the caller returns it without re-running anything.
 
-`OperationRecord` fields: `writer_id`, `operation_id`, `operation_kind`, `request_digest`,
-`state: OperationState`, `phase: Literal["reserved", "local_ready", "semantic_wait",
-"ready_to_finalize", "terminal"]`, `owner_generation: str | None`, `lease_owner_id: str | None`,
+`OperationRecord` fields: `writer_id`, `operation_id`, `operation_kind: OperationKind`,
+`request_digest`, `state: OperationState`, `phase: CheckPhase`,
+`owner_generation: str | None`, `lease_owner_id: str | None`,
 `lease_generation: int | None`, `lease_expires_at: datetime | None`,
+`resume_object_ref: ObjectRef | None`,
 `result_canonical: bytes | None` (structural terminal envelope; assigned IDs, sequences, digests,
-reason codes only), `result_digest: str | None`, `quarantine_code: str | None`,
-`terminal_at: datetime | None`.
+reason codes only), `result_digest: str | None`, `result_locator: OperationResultLocator | None`,
+`quarantine_code: OperationQuarantineCode | None`, `terminal_at: datetime | None`. The enum value,
+not free text, is serialized in `quarantine_code`. The five values are exhaustive for the
+task-ledger `operations` row; database-, object-, and bundle-wide corruption uses the storage
+recovery classification instead of inventing another operation code.
+
+`OperationResultLocator` fields are `first_ingestion_sequence: int | None`,
+`last_ingestion_sequence: int | None`, `result_object_ref: ObjectRef | None`, and
+`structural_ids: tuple[str, ...]` (sorted unique, at most `MAX_EVENTS_PER_BATCH + 1`). The two
+sequences are both absent or both present and ordered. It is sufficient to reconstruct a bounded
+terminal replay; replay never scans an unbounded ledger.
+
+`OperationLease` fields are `writer_id`, `operation_id`, `session_id`, `phase: CheckPhase`,
+`owner_generation`, `lease_owner_id`, positive `lease_generation`, `lease_expires_at: datetime`,
+`frontier: Frontier`, and `dependency_digest`. It is an immutable compare-and-swap capability;
+every lease-mutating method names all owner/lease fields plus the expected phase in its update.
+
+`SemanticJobRecord` fields are `job_id`, `writer_id`, `operation_id`, `case_digest`,
+`case_object_ref: ObjectRef`, `state: Literal["queued", "leased", "succeeded", "failed",
+"quarantined"]`, non-negative `attempt_count`, optional `active_attempt_id`, optional
+`selected_attempt_id`, optional lease owner/generation/expiry fields, optional
+`selected_result_object_ref`, optional `terminal_code: SemanticReason`, and optional
+`terminal_at`. Its legal nullability families are exactly those in bundle migration `0001`.
+
+`SemanticAttemptHandle` fields are `job_id`, `attempt_id`, positive `attempt_ordinal`,
+`provider_request_id`, `writer_id`, `operation_id`, `owner_generation`, `lease_owner_id`, positive
+`lease_generation`, `lease_expires_at`, `frontier`, and `dependency_digest`. It names the one
+attempt authorized by the currently leased job and is never accepted after its job/operation
+lease or dependency fence changes.
+
+`SelectedAttempt` fields are `job_id`, `attempt_id`, `result_object_ref: ObjectRef`,
+`selected_at: datetime`, `frontier`, and `dependency_digest`. It can be constructed only by the
+atomic `select_attempt` transition; `record_attempt_outcome(..., outcome=selected)` is rejected.
+
+`PendingVerdict` fields are `kind: PendingVerdictKind`, `operation: OperationRecord | None`, and
+`retry_after_ms: int | None`. `retry_after_ms` is present only for `live`, is clamped to the
+remaining lease lifetime, and is safe structural guidance rather than authority.
 
 `StoredProjection` fields: `view: ProjectionView`, `state: ProjectionState` (or the bounded typed
 view slice for list views), `frontier: Frontier` (the event frontier the cache represents),
@@ -197,6 +252,41 @@ Implements the freeze step used by `specs/src/yoetz/application/check.md`:
    owner generation, lease owner, lease generation `1`, and expiry; commit before any expensive
    work. The pending row stores only `resume_object_id` — no fabricated terminal response.
 
+### Durable check orchestration and `reclaim_operation`
+
+`advance_check_phase` permits only `reserved -> local_ready`, `local_ready -> semantic_wait`,
+`semantic_wait -> ready_to_finalize`, and the direct `local_ready -> ready_to_finalize` branch
+when no semantic job is needed. Only `commit_check_if_current` performs
+`ready_to_finalize -> terminal`. `durable_object_ref` is required for the transition that
+claims the local result/case is resumable and absent on transitions that do not bind a new object.
+The method compares every field in `lease`, the expected phase, and the current owner generation;
+zero rows changed is a lost lease, not success.
+
+`enqueue_semantic_job` is idempotent on `(writer_id, operation_id, case_digest)` and returns the
+existing byte-equal record on replay. `claim_semantic_job` can claim `queued` or fenced-expired
+work only while the parent operation is `pending/semantic_wait`. `record_attempt_outcome` accepts
+these exact shape pairs: `response_durable` requires `result_object_ref` and no terminal code;
+`failed`, `expired`, and `late` require a `terminal_code` and accept a result object only for
+`late`; `selected` is forbidden because `select_attempt` owns the atomic attempt/job selection.
+`select_attempt` requires a `response_durable` current attempt and atomically writes both the
+attempt's `selected` state and the job's identical selected result reference. `renew_leases`
+renews the parent first and live child jobs second, never beyond the parent's new expiry.
+
+`reclaim_operation` performs one bounded point lookup and returns exactly:
+
+| Durable row | Same `request_digest` behavior |
+|---|---|
+| absent | `PendingVerdict(kind=absent, operation=None, retry_after_ms=None)` |
+| complete | `PendingVerdict(kind=terminal, operation=row, retry_after_ms=None)` |
+| quarantined | `PendingVerdict(kind=quarantined, operation=row, retry_after_ms=None)` |
+| pending + current-generation unexpired lease | `PendingVerdict(kind=live, operation=row, retry_after_ms=bounded_remaining_ms)` |
+| pending + expired or stale-generation lease | fenced compare-and-swap reclaim and return the new `OperationLease` |
+
+A present row with a different request digest raises `IDEMPOTENCY_CONFLICT`. Any pending
+non-check row or illegal phase/lease shape is terminally quarantined with its exact
+`OperationQuarantineCode`; it is never repaired by guessing. The method never creates a new
+operation: `freeze_case` remains the only absent-to-pending check reservation path.
+
 ### `commit_check_if_current`
 
 Implements the final check commit used by `specs/src/yoetz/application/check.md`. In one
@@ -234,7 +324,12 @@ never mutates state and never extends or reclaims a lease.
   `append_batch`: `IDEMPOTENCY_CONFLICT`, `OPERATION_PENDING`, `FRONTIER_CONFLICT`,
   `EVENT_INVALID`, `LIMIT_EXCEEDED`, `BUNDLE_BUSY`, `STORAGE_UNSAFE`, `STORAGE_CORRUPT`,
   `MIGRATION_REQUIRED`; `freeze_case` adds `SESSION_NOT_FOUND`; `commit_check_if_current`:
-  `OPERATION_PENDING`, `STORAGE_*`; reads: `SESSION_NOT_FOUND`, `STORAGE_*`.
+  `OPERATION_PENDING`, `BUNDLE_BUSY`, `STORAGE_UNSAFE`, `STORAGE_CORRUPT`,
+  `MIGRATION_REQUIRED`; `reclaim_operation`: `IDEMPOTENCY_CONFLICT`, `BUNDLE_BUSY`,
+  `STORAGE_UNSAFE`, `STORAGE_CORRUPT`, `MIGRATION_REQUIRED`; `query_projection`:
+  `INVALID_REQUEST`, `SESSION_NOT_FOUND`, `BUNDLE_BUSY`, `STORAGE_UNSAFE`, `STORAGE_CORRUPT`,
+  `MIGRATION_REQUIRED`; other reads: `SESSION_NOT_FOUND`, `BUNDLE_BUSY`, `STORAGE_UNSAFE`,
+  `STORAGE_CORRUPT`, `MIGRATION_REQUIRED`.
 - A terminal same-digest check/receipt replay is returned before the pending-import predicate:
   replay performs no new freeze/append and remains stable even if a later import is pending.
 - `SQLITE_BUSY`-class contention that outlasts the bounded busy timeout is `BUNDLE_BUSY`

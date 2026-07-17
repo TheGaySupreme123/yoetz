@@ -16,8 +16,9 @@ manifest finalization, quarantine verification, migration composition, and the o
 route switch used by restore.
 
 It does not own ledger meaning, key cryptography, SQL DDL, public prompting, or arbitrary file copy.
-`recovery.py` classifies/reopens a bundle; `migrations.py` owns frozen DDL; this file orders them into
-operator-safe procedures.
+`recovery.py` classifies/reopens a bundle; canonical root migrations own frozen DDL and
+`migrations.py` verifies/executes their installed byte-identical resources; this file orders them
+into operator-safe procedures.
 
 ## Public surface
 
@@ -29,9 +30,10 @@ operator-safe procedures.
 - `build_backup_manifest(...) -> BackupManifest` — canonical structural builder.
 - `verify_backup_set(source, expected_task_id=None) -> VerifiedBackupSet` — read-only complete proof.
 - `verify_restored_target(staged, manifest, keys, handle) -> RestoredTargetEvidence`.
-- Internal records `MaintenanceHandle`, `VerifiedBackupSet`, and `RestoredTargetEvidence` are opaque
-  adapter values; only `MaintenanceHandle` crosses to `migrations.py` and should be registered as a
-  shared internal type.
+- `MaintenanceHandle` is the neutral service-internal authority value imported from
+  `ports/maintenance.py`; this adapter is its only concrete constructor after the durable catalog
+  generation CAS, and `migrations.py` is its only cross-module consumer.
+- Internal records `VerifiedBackupSet` and `RestoredTargetEvidence` are opaque adapter values.
 
 ## Behavior
 

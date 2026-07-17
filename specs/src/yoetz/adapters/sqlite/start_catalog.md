@@ -47,118 +47,13 @@ owned by `specs/src/yoetz/ports/start_catalog.md`, which receives it inside `Sta
 
 ## Behavior
 
-### Schema (migration `0001` of the catalog; DDL owned by `migrations.md`, reproduced here as the
-behavioral contract)
+### Schema (catalog migration `0001`)
 
-```sql
-PRAGMA user_version = 1;   -- plus PRAGMA application_id = 0x594F4554
-
-CREATE TABLE task_routes (
-    task_id TEXT PRIMARY KEY,
-    workspace_ref_commitment TEXT,
-    external_ref_commitment TEXT,
-    active_session_id TEXT NOT NULL UNIQUE,
-    bundle_relpath TEXT NOT NULL UNIQUE,
-    route_generation INTEGER NOT NULL CHECK (route_generation > 0),
-    active_route_identity_digest TEXT NOT NULL UNIQUE,
-    state TEXT NOT NULL CHECK (state IN ('initializing', 'active', 'quarantined')),
-    quarantine_code TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    CHECK (
-        (workspace_ref_commitment IS NULL AND external_ref_commitment IS NULL)
-        OR
-        (workspace_ref_commitment IS NOT NULL AND external_ref_commitment IS NOT NULL)
-    ),
-    CHECK (
-        (state IN ('initializing', 'active') AND quarantine_code IS NULL)
-        OR
-        (state = 'quarantined' AND quarantine_code IS NOT NULL)
-    )
-) STRICT, WITHOUT ROWID;
-
-CREATE UNIQUE INDEX task_routes_scoped_attachment
-ON task_routes(workspace_ref_commitment, external_ref_commitment)
-WHERE workspace_ref_commitment IS NOT NULL
-  AND external_ref_commitment IS NOT NULL;
-
-CREATE TABLE start_operations (
-    installation_id TEXT NOT NULL,
-    operation_id TEXT NOT NULL,
-    request_digest TEXT NOT NULL,
-    requested_mode TEXT NOT NULL
-        CHECK (requested_mode IN ('create', 'attach', 'create_or_attach')),
-    route_action TEXT NOT NULL CHECK (route_action IN ('created', 'attached')),
-    state TEXT NOT NULL CHECK (state IN ('pending', 'complete', 'quarantined')),
-    phase TEXT NOT NULL CHECK (phase IN (
-        'route_reserved',
-        'bundle_ready',
-        'lifecycle_committed',
-        'result_published',
-        'terminal'
-    )),
-    task_id TEXT NOT NULL REFERENCES task_routes(task_id),
-    session_id TEXT NOT NULL,
-    writer_id TEXT NOT NULL,
-    lifecycle_event_id TEXT NOT NULL,
-    route_generation INTEGER NOT NULL CHECK (route_generation > 0),
-    route_identity_digest TEXT NOT NULL,
-    owner_generation TEXT,
-    lease_owner_id TEXT,
-    lease_generation INTEGER CHECK (lease_generation > 0),
-    lease_expires_at TEXT,
-    response_object_id TEXT,
-    terminal_result_canonical BLOB,
-    terminal_result_digest TEXT,
-    quarantine_code TEXT,
-    terminal_at TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (installation_id, operation_id),
-    CHECK (
-        (
-            state = 'pending'
-            AND phase != 'terminal'
-            AND owner_generation IS NOT NULL
-            AND lease_owner_id IS NOT NULL
-            AND lease_generation IS NOT NULL
-            AND lease_expires_at IS NOT NULL
-            AND terminal_result_canonical IS NULL
-            AND terminal_result_digest IS NULL
-            AND quarantine_code IS NULL
-            AND terminal_at IS NULL
-            AND (phase != 'result_published' OR response_object_id IS NOT NULL)
-        )
-        OR
-        (
-            state = 'complete'
-            AND phase = 'terminal'
-            AND owner_generation IS NULL
-            AND lease_owner_id IS NULL
-            AND lease_generation IS NULL
-            AND lease_expires_at IS NULL
-            AND response_object_id IS NOT NULL
-            AND terminal_result_canonical IS NOT NULL
-            AND terminal_result_digest IS NOT NULL
-            AND quarantine_code IS NULL
-            AND terminal_at IS NOT NULL
-        )
-        OR
-        (
-            state = 'quarantined'
-            AND phase = 'terminal'
-            AND owner_generation IS NULL
-            AND lease_owner_id IS NULL
-            AND lease_generation IS NULL
-            AND lease_expires_at IS NULL
-            AND terminal_result_canonical IS NOT NULL
-            AND terminal_result_digest IS NOT NULL
-            AND quarantine_code IS NOT NULL
-            AND terminal_at IS NOT NULL
-        )
-    )
-) STRICT, WITHOUT ROWID;
-```
+`specs/migrations/catalog/0001.sql.md` is the sole owner of the literal catalog DDL, including
+`task_routes`, `task_routes_scoped_attachment`, and `start_operations`. This adapter imports the
+reviewed migration through `adapters/sqlite/migrations.py`; it neither reproduces nor synthesizes
+any table/index SQL. The installed package mirror is byte-identical to the root migration, and
+startup rejects any resource-digest or normalized-schema mismatch before route access.
 
 ### `resolve_route(session_id)`
 

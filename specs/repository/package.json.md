@@ -10,16 +10,28 @@ package, or production dependency into Yoetz.
 
 ## Public surface
 
-A private npm package manifest with `name: "yoetz-dev-tools"`, `private: true`, no publish
-configuration, one `typecheck` script invoking `pyright`, and exactly one development dependency:
-the ADR-007 Pyright version refreshed to the newest supported stable release at implementation lock.
+A private npm package manifest with the following exact 2026-07-17 implementation-lock shape:
+
+```json
+{
+  "name": "yoetz-dev-tools",
+  "private": true,
+  "packageManager": "npm@12.0.1",
+  "engines": { "node": "26.5.0", "npm": "12.0.1" },
+  "scripts": { "typecheck": "pyright" },
+  "devDependencies": { "pyright": "1.1.411" }
+}
+```
+
+There is no `version`, publish configuration, application `bin`, or dependency section.
 
 ## Behavior
 
-`npm ci` installs the checked lock exactly for development/CI. `npm run typecheck` checks the
-Python source and tests using the strict Pyright configuration owned by `pyproject.toml`; it does
-not generate files or access the network after dependencies are installed. There are no runtime
-dependencies, lifecycle hooks, workspaces, bundled files, or package publication fields.
+Node `26.5.0` and npm `12.0.1` run `npm ci --ignore-scripts` to install the checked lock exactly for
+development/CI. `npm run typecheck` checks the Python source and tests using the strict Pyright
+configuration owned by `pyproject.toml`; it does not generate files or access the network after
+dependencies are installed. There are no runtime dependencies, lifecycle hooks, workspaces,
+bundled files, or package publication fields.
 
 ## Errors and edge cases
 
@@ -41,5 +53,6 @@ toolchain, execute generated code, or alter released Python artifacts.
 
 ## Open questions
 
-None. F-005 is resolved in favor of the official development-only npm Pyright package; E-001
-freezes its exact supported release.
+None. F-005 is resolved in favor of the official development-only npm Pyright package. The exact
+implementation identities are Node `26.5.0`, npm `12.0.1`, and Pyright `1.1.411`; E-001 refreshes
+them at release lock.

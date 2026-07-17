@@ -12,7 +12,17 @@ One canonical strict-JSON fixture case with `fixture_schema: "yoetz.fixture-case
 
 ## Behavior
 
-The `input` section contains trigger, remediated, and non-trigger event sequences around two obligations. The `expected` section freezes the required deterministic findings and action_required verdict only for the trigger variant. Every referenced identifier, timestamp, key, digest, nonce, provider response, and fault point is explicit test data; a test may not replace it with current time, randomness, network state, or host paths. Multi-variant cases evaluate each variant independently and declare the relationship between their outcomes.
+The `input` section contains trigger, remediated, and closest-nontrigger event sequences around two
+obligations. Its completion variant freezes `completion_with_open_obligations` and
+`requested_item_never_attempted`. A separate unresolved-attempt variant records an action with no
+linked result followed by later work on a different subject and freezes `action_without_result`;
+the same unresolved action as the most recent work is the closest non-trigger. The `expected`
+section fixes each deterministic kind's exact `FindingBasis` facts/refs and the
+`action_required` verdict only where the shared ranking contract requires it. Every referenced
+identifier, timestamp, key, digest, nonce, provider response, and fault point is explicit test data;
+a test may not replace it with current time, randomness, network state, or host paths.
+Multi-variant cases evaluate each variant independently and declare the relationship between their
+outcomes.
 
 ## Errors and edge cases
 

@@ -20,6 +20,8 @@ local-human rendering.
 - `class ReviewSelectionRuleset` — immutable profile-specific timeline/relevance/excerpt ordering.
 - `class MinimizationRuleset` — immutable purpose-specific field ordering and byte/token ceilings.
 - `class SecretScanRuleset` — immutable detector-version identity.
+- `scan_exact_bytes(data: bytes) -> tuple[ForbiddenDataKind, ...]` — the port method shared by
+  logical-case preparation and gateway final-body validation; it returns kinds only.
 
 ## Behavior
 
@@ -69,13 +71,16 @@ data class, and neither weakens the never-send set. There is no path by which pr
 sink, or terminal presence admits a secret.
 
 `minimize_and_scan` removes nonrequired categories and lowest-priority items first, applies only
-versioned deterministic redactions, serializes the exact approved logical case bytes, and scans
-those bytes. It cannot claim to scan provider framing or headers that do not exist yet. The
-provider renderer/gateway later performs a second scan of the exact final application request body
-and verifies it contains only the approved logical case plus fixed reviewed template/schema fields;
-authentication metadata, HTTP framing, and TLS are outside both content scans. A forbidden source
-or scan finding at either stage blocks before network I/O with kind/count only. There is no model
-classifier, arbitrary regex from config, ignore flag, or provider-specific enrichment.
+versioned deterministic redactions, serializes the exact approved logical case bytes, and invokes
+`scan_exact_bytes` on those bytes. It cannot claim to scan provider framing or headers that do not
+exist yet. The provider renderer/gateway later invokes `scan_exact_bytes` on the exact final
+application request body through the same injected `LocalPrivacyEnforcer` instance and verifies it
+contains only the approved logical case plus fixed reviewed template/schema fields. The immutable
+`SecretScanRuleset` therefore cannot drift between the two scans during one composed runtime;
+changing it requires gateway/coordinator reconstruction and reconciliation. Authentication
+metadata, HTTP framing, and TLS are outside both content scans. A forbidden source or scan finding
+at either stage blocks before network I/O with kind/count only. There is no model classifier,
+arbitrary regex from config, ignore flag, or provider-specific enrichment.
 
 For semantic cases, `ReviewSelectionRuleset` runs before classification and is deterministic.
 `structural` selects only typed facts; `goal_aware` adds allowed intent/claim prose; `assisted`
@@ -123,6 +128,8 @@ errors or receipts.
    `ForbiddenDataKind`.
 9. `local_human_view` and `agent_context` are separate ceilings; neither inherits the other.
 10. Semantic findings are never self-authored.
+11. Logical-case and final-body scans use one immutable scanner instance and ruleset; a gateway
+    cannot construct an independent detector configuration.
 
 ## Tests
 

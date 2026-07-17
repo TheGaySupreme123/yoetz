@@ -2,7 +2,7 @@
 
 **Wave:** B | **ADRs:** ADR-002, ADR-003, ADR-004, ADR-006 | **Imports (spec-tree):**
 `domain/events.md`, `domain/findings.md`, `domain/receipts.md`, `protocol/coverage.md`,
-`protocol/canonical.md`, `ports/ledger.md`, `version.md` | **Imported by:**
+`protocol/canonical.md` | **Imported by:** `ports/ledger.md`,
 `kernel/reducers.md`, `kernel/ranking.md`, `kernel/receipt_builder.md`,
 `adapters/sqlite/migrations.md`, `adapters/sqlite/repository.md`
 
@@ -17,6 +17,8 @@ typed projection tables.
 The projection is not the ledger. It is a deterministic cache of meaning built from accepted
 events. Its job is to be replayable, small enough to inspect, and strict enough that a corrupted or
 stale projection can be discarded and rebuilt without changing the underlying event history.
+It is a pure upstream value module: it never imports `ports/ledger.py` or `version.py`.
+`ports/ledger.py` may name `ProjectionState` in boundary records, not the reverse.
 
 ## Public surface
 
@@ -24,7 +26,6 @@ stale projection can be discarded and rebuilt without changing the underlying ev
 |---|---|
 | `PROJECTION_VERSION` | `str = "yoetz/0.1.0"` |
 | `PROJECTION_GENERATION` | `int = 1` |
-| `PROJECTION_TABLES_DDL` | canonical DDL block for the generation-1 typed projection tables |
 | `ProjectionState` | frozen dataclass containing the derived work snapshot |
 | `empty_projection_state()` | construct the empty derived state for a new bundle or replay |
 | `projection_snapshot(state)` | canonical JSON-compatible view used for digesting and persistence |
@@ -36,6 +37,12 @@ stale projection can be discarded and rebuilt without changing the underlying ev
 `frontier`, `head_digest`, `plans`, `obligations`, `decisions`, `assignments`, `actions`,
 `results`, `evidence`, `claims`, `contradictions`, `findings`, `responses`,
 `latest_tested_state`, `freshness`, `unknown_event_count`, and `coverage_gaps`.
+
+`latest_tested_state`, when present, is the frozen latest-check record containing the source check
+event ID, its exact subject frontier, `CheckVerdict`, exact `returned_finding_ids`, nonnegative
+`suppressed_count`, and the `Coverage` carried by `CheckRecordedPayload`. Projection freshness and
+normalized gaps may weaken from that coverage but may never reconstruct a stronger value or infer
+suppressed identities from the returned finding IDs.
 
 Those collections are immutable mappings or tuples of current visible records, not live database
 rows. The mapping keys are stable logical IDs:
@@ -63,22 +70,24 @@ needed by rankers and receipt builders, and the coverage/freshness note that exp
 present. The projection does not store ambient object-store bytes, provider transcripts, or any
 open-ended JSON blob that would require a second interpretation step.
 
-`PROJECTION_TABLES_DDL` defines the generation-1 SQLite tables used by the durable adapters. The
-DDL is versioned, namespaced with a `p1_` prefix, and mirrors the public record shapes above. At a
-minimum it creates typed tables for obligations, claims, evidence edges, findings, responses, and
-coverage summaries, plus the projection-state metadata row consumed by migration and rebuild code.
-The DDL is intentionally centralized here so the durable adapters do not hand-author a second
-shape.
+This module owns the pure typed projection shape and derivation semantics, not executable SQL bytes.
+The canonical root migration `migrations/bundle/0001.sql` alone owns the exact generation-1 table,
+column, constraint, index, statement-order, and newline bytes; its installed resource is an opaque
+byte-identical copy. This module exports no DDL string, and migration/runtime code must not append,
+template, or synthesize projection SQL from Python. Schema-identity tests instead prove that the
+root migration's `p1_` tables can persist and reconstruct these exact frozen record families.
 
-The generation-1 typed tables are fixed for v0.1:
+The required generation-1 typed storage families are fixed for v0.1:
 
-- `p1_projection_state` for frontier, head digest, freshness, unknown-event count, and rebuild
+- `p1_projection_state` for frontier, head digest, latest-check event/frontier/verdict,
+  returned-finding IDs, suppressed count, coverage, freshness, unknown-event count, and rebuild
   metadata;
 - `p1_plans`, `p1_obligations`, `p1_decisions`, `p1_assignments`, `p1_actions`, `p1_results`,
   `p1_evidence`, `p1_claims`, `p1_contradictions`, `p1_findings`, and `p1_responses` for the
   derived records;
 - `p1_coverage_gaps` for normalized gap markers;
-- any helper edge table needed to preserve source references, supersession, or subject links.
+- only the helper edge tables explicitly frozen in the root migration for source references,
+  supersession, or subject links.
 
 Every durable row stores the stable logical key plus the minimum fields needed to reconstruct the
 frozen projection record. The adapter may store canonical JSON bytes for a body column, but it may
