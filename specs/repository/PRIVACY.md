@@ -1,6 +1,6 @@
 # PRIVACY.md — public privacy promise and user controls
 
-**Wave:** C/E/F | **ADRs:** ADR-004, ADR-006, ADR-008, ADR-009 | **Imports (spec-tree):**
+**Wave:** C/E/F | **ADRs:** ADR-004, ADR-006, ADR-008, ADR-009, ADR-011 | **Imports (spec-tree):**
 `docs/protocol/data-egress-and-privacy.md`, `docs/protocol/privacy-setup-wizard.md`,
 `schemas/privacy/privacy-policy-1.0.0.schema.json` | **Imported by:** repository readers,
 setup surfaces, public claim map, privacy conformance and packaging tests
@@ -24,10 +24,11 @@ The future root document has these stable sections:
 7. Setup and later policy changes
 8. Human involvement versus direct-to-agent review
 9. Per-request preview and approval
-10. Local egress receipts
-11. Encryption, locking, and confidential unlock
-12. Limitations and threat model
-13. How to inspect or report a privacy problem
+10. Local structural subject-state capture
+11. Local egress receipts
+12. Encryption, locking, and confidential unlock
+13. Limitations and threat model
+14. How to inspect or report a privacy problem
 
 Examples use synthetic content and show both an allowed and blocked disclosure. The document links
 to the exact technical protocol, policy schema, security policy, and evidence-bound public claims.
@@ -82,7 +83,16 @@ custom`; it only selects candidate material and cannot widen the privacy policy.
 goal/obligation/claim/decision/finding prose, a material timeline, deterministic finding bases,
 change/coverage facts, and bounded problem-local evidence/test/failure/diff/repository excerpts
 already recorded at the frozen frontier. It excludes sensitive/confidential and transcript content
-by default, and says plainly that v0.1 has no live Git/filesystem source broker.
+by default, and says plainly that v0.1 has no live Git/filesystem source broker for semantic cases.
+
+ADR-011's separate `yoetz state capture` support command is the sole narrow v0.1 exception to the
+ordinary client's no-repository-access rule. The local CLI accepts one explicit trusted worktree,
+uses the bounded structural Git adapter, performs no network I/O, and returns only a closed status,
+format/version metadata, counts, limitations, and state digests. It returns no source bytes, diff,
+path, filename, commit message, author, remote, branch, or credential-bearing Git configuration;
+the service and MCP surface receive no ambient repository handle. Capture does not populate a
+semantic-review case and cannot upgrade authorship, observation, or verification coverage. An
+unbounded, unsupported, racing, or unsafe worktree fails closed without a subject-state digest.
 
 Two local disclosures are deliberately separated from all of this. Ordinary human-readable output on
 your own terminal is the `local_human_view` sink: reading a finding you asked for, on a vault you
@@ -241,6 +251,8 @@ zero-knowledge, forensic erasure, or universal secret detection.
     finished outcome, and initial reservation failure is explicitly unreceipted and pre-dispatch.
 13. Review-context selection never grants disclosure, and absent/hidden code is never rendered as
     observed unchanged code.
+14. Structural subject-state capture is local, explicit, bounded, content-free, and non-networked;
+    it grants no repository authority to the service, MCP surface, or provider path.
 
 ## Tests
 
@@ -249,6 +261,9 @@ zero-knowledge, forensic erasure, or universal secret detection.
 - `tests/conformance/claims/test_public_claim_map.py`
 - `tests/packaging/test_privacy_docs_and_resources.py`
 - `tests/packaging/test_private_boundary_and_secret_scan.py`
+- `tests/subprocess/test_cli_invocations.py` proves the bounded local capture and its output/privacy
+  boundary; `tests/packaging/test_service_boundary_imports.py` proves the adapter is unreachable
+  from trusted service composition.
 
 ## Open questions
 

@@ -1,6 +1,6 @@
 # README.md — public project entry point and release overview
 
-**Wave:** F | **ADRs:** ADR-003, ADR-005, ADR-007 | **Imports (spec-tree):**
+**Wave:** F | **ADRs:** ADR-003, ADR-005, ADR-007, ADR-011 | **Imports (spec-tree):**
 `specs/README.md`, `src/yoetz/__init__.md`, `src/yoetz/version.md`,
 `tests/packaging.md`, `tests/subprocess.md`
 **Imported by:** people visiting the repository root, release notes, package metadata, and support
@@ -27,6 +27,9 @@ The file must contain, at minimum, these sections:
   reporting or `security@yoetz.dev` for security, and `conduct@yoetz.dev` for private conduct reports;
 - an explicit statement that the project is licensed under Apache-2.0;
 - a short command summary for the console script and `python -m yoetz`;
+- a clearly labeled optional `yoetz state capture --workspace PATH` support command that returns
+  only bounded structural Git state digests, performs no ledger write, and is not a seventh MCP
+  operation or a repository-content browser;
 - a support boundary note that points readers to the specs tree for implementer detail.
 
 ## Behavior
@@ -48,6 +51,11 @@ The README should describe the repository as:
 The document may mention the six public workflow operations by name, but it must not re-specify
 their behavior. It is allowed to point readers to `specs/README.md` and the relevant file-level
 specs for that detail.
+
+If the README advertises structural state capture, it says support is exact-cell capability gated,
+local/read-only/content-withholding, and does not establish authorship, artifact verification, or
+independent reproduction. It never describes the command as allowing the service or an MCP caller
+to inspect an arbitrary workspace.
 
 The README should keep the install story bounded:
 

@@ -1,6 +1,6 @@
 # src/yoetz/version.py — installed capability and version manifest
 
-**Wave:** F | **ADRs:** ADR-002, ADR-003, ADR-005, ADR-006, ADR-007 | **Imports (spec-tree):**
+**Wave:** F | **ADRs:** ADR-002, ADR-003, ADR-005, ADR-006, ADR-007, ADR-010, ADR-011 | **Imports (spec-tree):**
 `protocol/canonical.md`, `protocol/schemas.md` | **Imported by:** `__init__.md`, CLI `version`, MCP
 runtime startup, receipts, release/capability probes
 
@@ -60,6 +60,7 @@ startup diagnostics compare it with the reviewed packaged `runtime-support.json`
 | `provider_adapters` | tagged present/absent installed adapter identities; never credentials/endpoints |
 | `service_capabilities` | exact tested local-control, keyring, secret-memory, and session-monitor capability identities; no ready/locked history or secrets |
 | `codex_capability_profiles` | exact tested version/profile records from packaged runtime support; no range |
+| `subject_state_capabilities` | exact tagged structural-capture cells from packaged runtime support; no ambient probe or inferred range |
 | `resource_manifest_digest`, `resource_counts`, `resources` | source/wheel artifact identities; full list only in explicit resource rendering |
 | `build_identity` | reproducible release provenance identifier or `development-unavailable` |
 | `support_status` | `supported_write`, `read_only_unsupported`, or `development_unverified` |
@@ -103,9 +104,10 @@ names are absent.
 
 ### Resource parity
 
-The packaged resource manifest enumerates exactly the 69 reviewed resources frozen by its owning
+The packaged resource manifest enumerates exactly the 71 reviewed resources frozen by its owning
 spec: 52 JSON Schema artifacts, the schema inventory manifest, 9 canonical compatibility fixtures,
-2 migrations, 4 Codex skill files, and the runtime-support allowlist. For every entry:
+2 migrations, the Codex skill plus compatibility manifest, 4 harness-neutral guidance files, and
+the runtime-support allowlist. For every entry:
 
 1. read exact installed bytes;
 2. enforce expected size and SHA-256;

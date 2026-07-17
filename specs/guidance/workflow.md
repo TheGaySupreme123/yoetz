@@ -60,11 +60,18 @@ IDs, publications, checks, findings, or receipts.
 2. **Start or attach.** Call `start` with stable request identity and appropriate
    `create`/`attach`/`create_or_attach` semantics. Show active/degraded status.
 3. **Publish plan and obligations.** Publish a bounded plan, explicit requested outcomes,
-   acceptance/evidence expectations, and assignments. Do not paste the user's whole prompt.
+   acceptance/evidence expectations, and assignments. For a large inventory, migration, or
+   generated set, group obligations by independently reviewable work package or user-visible
+   outcome. Files are leaf evidence in a package manifest, not automatically one obligation each.
+   Do not paste the user's whole prompt or manufacture one obligation per file.
 4. **Delegate with context.** Give each subagent session/task/writer/assignment context and require
    concise typed material publications. Do not share or publish full transcripts.
-5. **Publish material work.** Batch decisions, attempts, results, evidence references, claims, and
-   plan revisions when they change what another participant or reviewer needs to know. When semantic
+5. **Publish material work.** Default to one bounded publication batch for each material work-package
+   transition: assignment/start, a decision or blocked attempt, an independently useful result, or
+   completion/revision. Routine reads, searches, formatting, generated-file writes, and other leaf
+   mechanics do not each earn an event. Batch decisions, attempts, results, evidence references,
+   claims, and plan revisions when they change what another participant or reviewer needs to know.
+   When semantic
    review would otherwise be blind, publish only the bounded problem-local changed hunk, enclosing
    symbol, linked test/failure excerpt, or directly supporting/contradicting evidence needed to
    evaluate the claim; label its source, state, and coverage honestly.
@@ -150,6 +157,9 @@ harness's own skill spec describes it, and never by editing this file.
   optional-server policy.
 - A finding whose prose is withheld by the agent-context ceiling is still a real finding: the agent
   reports the structural finding honestly and does not treat missing prose as absence of a problem.
+- A large file inventory has no coherent work-package boundary: pause before publication and define
+  bounded outcomes; do not fall back to one obligation/event per file merely because filenames are
+  enumerable.
 
 ## Invariants
 
@@ -163,6 +173,8 @@ harness's own skill spec describes it, and never by editing this file.
 7. The document is harness-neutral and names no harness, path, provider, or model.
 8. A candidate read is never presented as a check and never substitutes for one before a completion
    claim; it exists so the agent can correct itself during the work.
+9. Work-package transitions, not file count or tool-call count, are the publication unit; a manifest
+   may prove many leaf files without creating matching obligations or events.
 
 ## Tests
 
@@ -173,6 +185,9 @@ harness's own skill spec describes it, and never by editing this file.
   scripted model that reads `candidate_findings`, sees an empty list, and reports that it checked
   and found nothing fails; one that reads candidates, acts on an unresolved attempt, and then runs a
   recorded check before claiming completion passes.
+- A generated 100-file fixture is represented by coherent work-package obligations and one bounded
+  manifest evidence item per completed package. A model that emits 100 file-shaped obligations or
+  routine per-file events fails even if every event is otherwise schema-valid.
 - `specs/tests/packaging.md`: source/wheel/installed byte parity, size bound, and stable headings.
 - Adversarial fixtures: abandoned obligation, omitted failure, stale test, wrong semantic suggestion,
   and import-only missing event each produce the required response.

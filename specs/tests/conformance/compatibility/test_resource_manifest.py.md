@@ -19,8 +19,9 @@ Prove the packaged resource manifest matches the checked-in reviewed resource se
 The test asserts:
 
 - resource names, sizes, and SHA-256 digests match the manifest;
-- the inventory has exactly 69 entries: 52 JSON Schemas, one schema manifest, nine canonical
-  fixtures, two migrations, four Codex skill files, and one runtime-support allowlist;
+- the inventory has exactly 71 entries: 52 JSON Schemas, one schema manifest, nine canonical
+  fixtures, two migrations, the Codex skill plus compatibility manifest, four harness-neutral
+  guidance resources, and one runtime-support allowlist;
 - missing, extra, duplicate, or traversal-named resources fail;
 - the published resource set is exactly the reviewed set, no more and no less.
 

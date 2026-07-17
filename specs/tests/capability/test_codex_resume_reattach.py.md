@@ -1,7 +1,8 @@
 # tests/capability/test_codex_resume_reattach.py — Codex interruption/resume continuity
 
-**Wave:** D/F | **ADRs:** ADR-001, ADR-002, ADR-005 | **Imports (spec-tree):** capability evidence,
-start/status/idempotency specs | **Imported by:** resume support claim
+**Wave:** D/F | **ADRs:** ADR-001, ADR-002, ADR-005, ADR-010, ADR-011 | **Imports (spec-tree):**
+capability evidence, start/status/idempotency specs, subject-state capture | **Imported by:** resume
+support and trigger-hook claims
 
 ## Purpose
 
@@ -11,7 +12,8 @@ without allocating replacement task/session/writer identities or duplicating pri
 ## Public surface
 
 Scenarios: interrupt before/after publish commit, context compaction, clean exit/reopen, client crash,
-same supported resume token, missing/invalid resume token, and resume after server process restart.
+same supported resume token, missing/invalid resume token, resume after server process restart, and
+capability-proven trigger-hook re-grounding where the exact Codex profile supports it.
 
 ## Behavior
 
@@ -23,6 +25,17 @@ returns stored result; next new request advances once.
 Seed a post-commit/pre-response loss before interruption and prove resumed retry resolves one event.
 Compaction cannot turn unrecorded text into ledger evidence. Invalid/missing resume identity creates
 no attachment and reports bounded limitation.
+
+For an exact Codex profile whose E-013 cell proves a compaction trigger, fire the installed-artifact
+event and require one coalesced `start`/`status` re-grounding sequence. Duplicate lifecycle
+notifications do not duplicate attachment or publication. The trigger publishes no observation,
+changes no coverage, and does not block optional-host work if re-grounding fails. Profiles without
+passing trigger evidence select `hooks_by_capability_profile[profile_id]=None` and exercise the
+skill-driven manual recovery path.
+
+Around a material edit, invoke ADR-011 structural capture before the verification result and after
+the edit. The two comparable state digests survive resume and permit the stale-evidence policy to
+report the relationship without exposing paths/source or upgrading provenance.
 
 ## Errors and edge cases
 
@@ -37,6 +50,8 @@ no attachment and reports bounded limitation.
 2. Resume cannot duplicate an idempotent operation.
 3. Unrecorded/compacted content remains absent or an explicit coverage gap.
 4. Attachment failure never fuzzy-matches another task.
+5. A trigger hook causes re-grounding only and never earns observation coverage.
+6. Structural state capture remains content-withholding and comparable across resume.
 
 ## Tests
 

@@ -1,6 +1,6 @@
 # src/yoetz/resources/support/runtime-support.json — installed runtime support allowlist
 
-**Wave:** F | **ADRs:** ADR-003, ADR-005, ADR-006, ADR-007, ADR-008, ADR-009 | **Imports (spec-tree):**
+**Wave:** F | **ADRs:** ADR-003, ADR-005, ADR-006, ADR-007, ADR-008, ADR-009, ADR-010, ADR-011 | **Imports (spec-tree):**
 `support/runtime-support.json.md`, `resources/manifest.json.md` | **Imported by:** installed
 version/startup gates and packaging tests
 
@@ -14,7 +14,7 @@ supported.
 
 The future file is byte-identical to root `support/runtime-support.json` and has the complete
 `yoetz.runtime-support/1` shape, exact cell sets, evidence digests, limitations, and self-digest
-owned by that source spec.
+owned by that source spec, including exact trigger-hook and structural subject-state cells.
 
 ## Behavior
 

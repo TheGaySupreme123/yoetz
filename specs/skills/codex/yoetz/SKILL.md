@@ -15,7 +15,7 @@ This is the first harness adapter for guidance, not the owner of it (ADR-010). T
 publication policy, and coverage rules live under `guidance/` and are shared byte-for-byte with
 every other harness and with the MCP baseline. This file owns only what is genuinely Codex-shaped:
 
-- the required Codex skill frontmatter and its compatibility metadata;
+- the required Codex skill frontmatter and the separate Yoetz compatibility manifest;
 - when and how Codex activates the skill;
 - the `.agents/skills/yoetz/` install layout and how the shared members are laid out inside it;
 - the Codex capability profiles this skill is tested against.
@@ -36,11 +36,13 @@ installation into a trusted project.
 - A concise description that triggers on material, multi-step agent work where the user benefits
   from a durable obligation/evidence/completion record; it explicitly avoids trivial edits and
   ordinary questions.
-- Compatibility metadata: skill schema version, Yoetz protocol range, minimum/maximum-tested Codex
-  versions, and required MCP server name `yoetz`.
+- Optional `metadata.short-description` contains only a concise UI description.
+- No other frontmatter fields. Codex ignores Yoetz-private compatibility fields; skill schema
+  version, Yoetz protocol range, minimum/maximum-tested Codex versions, and required MCP server
+  name `yoetz` live in the adjacent compatibility manifest.
 - No secrets, installation-specific paths, provider/model names, or mutable network references.
 
-The frontmatter shape is the Codex-specific part of this file and must match
+The Codex-readable frontmatter shape is the Codex-specific part of this file and must match
 `HarnessProfile(codex).frontmatter_profile`. Another harness's skill spec owns its own header shape
 and shares none of these fields.
 
@@ -116,6 +118,12 @@ The canonical source, packaged resource, and installed copy are byte-identical. 
 The skill never silently edits Codex global/project configuration or registers MCP as a side effect.
 Those are separate previewed integration steps.
 
+Its compatibility manifest records the exact capability-profile ID selected by the installed
+artifact. That profile may advertise a trigger-only compaction recovery hook after E-013 passes, or
+an explicit absent value. This skill does not install/configure the hook and does not treat its
+presence as observation or stronger coverage; unsupported profiles continue through the shared
+manual resume/compaction guidance.
+
 ## Errors and edge cases
 
 Workflow-level degradation — publication failure, compaction, provider timeout, receipt failure — is
@@ -124,12 +132,16 @@ cases live here:
 
 - Skill/MCP version mismatch: capability check fails visibly; host work can continue only under the
   optional-server policy.
+- Another loaded skill also named `yoetz`: discovery is ambiguous and the capability/install flow
+  refuses to advertise `$yoetz` until the loaded skill set resolves uniquely to this managed path.
 - Codex discovers the skill but the `yoetz` MCP server is absent: the skill still loads and discloses
   that no live ledger or receipt will exist. Skill presence is never evidence of server availability.
 - The installed copy is modified: installation preserves it and refuses silent replacement; a
   modified skill is not silently trusted as the reviewed one.
 - The installed guidance members drift from `resources/guidance/`: byte parity fails and the skill is
   reported `modified`, never repaired in place.
+- The selected capability profile lacks passing trigger evidence or the trigger fails: use the
+  manual shared recovery path; do not infer support, block optional work, or claim observation.
 
 ## Invariants
 
@@ -141,12 +153,15 @@ cases live here:
    strengthens coverage.
 5. User/host policy — not Yoetz — owns any hard gate.
 6. Removing this skill removes no shared guidance owner and breaks no other harness.
+7. Trigger-hook presence is exact-profile capability evidence, never a version-range inference or
+   a coverage upgrade.
 
 ## Tests
 
 - `specs/tests/capability.md`: explicit and implicit Codex discovery, start/publish/check/respond/
   receipt workflow, parent/subagent attribution, resume/compaction, server unavailable optional vs
-  required, cancellation/retry, and modified-skill install protection.
+  required, trigger-present and trigger-absent recovery with equal coverage, cancellation/retry,
+  and modified-skill install protection.
 - `specs/tests/conformance.md`: a scripted model follows all ten steps and never publishes
   forbidden transcript/secret/per-read data; the final answer is no stronger than the fixture
   receipt. The same fixtures run against an unprofiled MCP host with no installed skill, proving the

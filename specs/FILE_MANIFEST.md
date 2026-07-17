@@ -8,8 +8,8 @@ This is the complete one-to-one ledger between the natural-language specificatio
 files planned for the public v0.1 repository. It is declarative: adding, removing, renaming, or
 splitting a future file requires changing this reviewed table and its owning spec together.
 
-The inventory contains 528 spec files: 514 exact future-file owners,
-10 directory indexes, and 4 coordination files. The 514 future paths are unique. The ten
+The inventory contains 530 spec files: 516 exact future-file owners,
+10 directory indexes, and 4 coordination files. The 516 future paths are unique. The eleven
 already-authored public ADRs are current decision authorities, not future-file candidates, so
 they are intentionally outside the mirrored ownership universe. Ignored local architecture/
 strategy inputs are neither inventoried nor authoritative.
@@ -188,6 +188,7 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/src/yoetz/adapters/__init__.md` | `future_file` | `src/yoetz/adapters/__init__.py` | `python_shorthand` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/control/__init__.md` | `future_file` | `src/yoetz/adapters/control/__init__.py` | `python_shorthand` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/control/unix_socket.md` | `future_file` | `src/yoetz/adapters/control/unix_socket.py` | `python_shorthand` | — | `C` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/adapters/git_subject_state.md` | `future_file` | `src/yoetz/adapters/git_subject_state.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/importers/__init__.md` | `future_file` | `src/yoetz/adapters/importers/__init__.py` | `python_shorthand` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/importers/codex_jsonl.md` | `future_file` | `src/yoetz/adapters/importers/codex_jsonl.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/integrations/__init__.md` | `future_file` | `src/yoetz/adapters/integrations/__init__.py` | `python_shorthand` | — | `F` | `draft` | Owns exactly this future public repository file. |
@@ -290,6 +291,7 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/src/yoetz/ports/secret_memory.md` | `future_file` | `src/yoetz/ports/secret_memory.py` | `python_shorthand` | — | `B` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/ports/semantic.md` | `future_file` | `src/yoetz/ports/semantic.py` | `python_shorthand` | — | `B (definition) / E (live use)` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/ports/start_catalog.md` | `future_file` | `src/yoetz/ports/start_catalog.py` | `python_shorthand` | — | `B` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/ports/subject_state.md` | `future_file` | `src/yoetz/ports/subject_state.py` | `python_shorthand` | — | `B/D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/protocol/__init__.md` | `future_file` | `src/yoetz/protocol/__init__.py` | `python_shorthand` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/protocol/canonical.md` | `future_file` | `src/yoetz/protocol/canonical.py` | `python_shorthand` | — | `B (vectors are Wave A artifacts)` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/protocol/coverage.md` | `future_file` | `src/yoetz/protocol/coverage.py` | `python_shorthand` | — | `A/B` | `draft` | Owns exactly this future public repository file. |

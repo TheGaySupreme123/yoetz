@@ -2,7 +2,8 @@
 
 **Wave:** D/F | **ADRs:** ADR-001, ADR-002, ADR-005, ADR-007, ADR-008 |
 **Imports (spec-tree):** `cli/render.md`, `cli/exits.md`, `cli/unlock.md`, `service/client.md`,
-`mcp/server.md` | **Imported by:** console/module entrypoints and CLI tests
+`mcp/server.md`, `ports/subject_state.md`, `adapters/git_subject_state.md` | **Imported by:**
+console/module entrypoints and CLI tests
 
 ## Purpose
 
@@ -16,6 +17,7 @@ objects, or fall back to direct execution.
 - `build_service_client(client_kind=cli) -> ServiceClient`.
 - Shared six-operation/status/receipt client commands.
 - Command tree: the six workflows; `mcp serve`; import/review/backup/restore/migrate/version;
+  local read-only `state capture --workspace PATH`;
   `integrate <harness> skill preview|install|status|remove`, where `<harness>` is an exact
   registered `HarnessId` (v0.1: exactly `codex`) that the user always names and the CLI never infers
   from cwd, environment, installed editors, or running processes;
@@ -29,9 +31,10 @@ objects, or fall back to direct execution.
 
 ## Behavior
 
-Every normal workflow/support command strictly parses its request, connects to the deterministic
-same-UID service endpoint, invokes the matching `ServiceClient` method, validates the returned
-result, and renders JSON/human output. Service absent reports bounded guidance; locked reports
+Except for the explicitly client-local ADR-011 `state capture` support command, every normal
+workflow/support command strictly parses its request, connects to the deterministic same-UID
+service endpoint, invokes the matching `ServiceClient` method, validates the returned result, and
+renders JSON/human output. Service absent reports bounded guidance; locked reports
 `vault_locked` and directs a local human to `service unlock`. Neither state triggers hidden spawn,
 direct runtime, prompt, or secret acceptance.
 
@@ -45,6 +48,14 @@ tighten` use least-authority ordinary control. `privacy decide-policy|decide-dis
 to `cli/privacy_control.md`, never an ordinary decision method. `privacy receipts list|get` are
 CLI/UI-only structural reads, never MCP tools; they render no excerpts/request bodies/object refs and
 are local-projection/audit-exempt so inspection does not create a new receipt.
+
+`state capture` is the sole client-local repository-read exception under ADR-011. It requires one
+explicit trusted workspace argument, lazily constructs only `GitSubjectStateAdapter`, performs no
+service connection or ledger write, and renders only the bounded structural capture result. JSON
+and human output contain format/status, the two final digests when complete, closed limitations,
+and bounded counts—never workspace path, filename, source/diff bytes, Git identity/output, or
+component digests. Supported untracked regular files are always included; exceeding the bound
+returns no comparable state rather than a stronger but partial tree claim.
 
 `privacy setup` is preset-first for convenience but answer-first for authority. It offers
 `private`, `metadata-only`, `assisted-review` (recommended only for an eligible exact endpoint),
@@ -90,6 +101,8 @@ the identical operation request ID.
   absence; it never falls back to stdin.
 - Findings/incomplete semantic checks still exit 0 when deterministic operation completed.
 - `mcp serve` emits protocol frames only on stdout.
+- `state capture` rejects non-Git/unsafe/ambiguous/changed/over-limit input with no digest and never
+  falls back to a described state or a previous result.
 
 ## Invariants
 
@@ -101,6 +114,8 @@ the identical operation request ID.
 5. No built-in service-manager install/start command or hidden spawn exists in v0.1.
 6. CLI presets are editable draft macros, not policy authority, and the fail-safe installation seed
    remains zero-egress until a user commits a different policy.
+7. The only ordinary client-local repository read is ADR-011 `state capture`; it is read-only,
+   network-free, content-withholding, and imports no trusted service/application composition.
 
 ## Tests
 
@@ -110,6 +125,8 @@ the identical operation request ID.
 - `tests/subprocess/test_service_unlock_boundary.py` covers TTY-only confidential input.
 - `tests/conformance/surfaces/test_cli_mcp_parity.py` covers exact operation parity.
 - `tests/packaging/test_service_boundary_imports.py` covers import trust boundary.
+- `tests/subprocess/test_cli_invocations.py` covers state capture, dirty/staged/untracked changes,
+  no-content/path output, caps, changing input, and zero Git/ledger mutation.
 
 ## Open questions
 

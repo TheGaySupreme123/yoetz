@@ -30,6 +30,9 @@ known.
 - `validate_extension_mapping(row)`, `validate_headings(row, bytes)`,
   `validate_index_coverage(row, bytes, manifest)`, and
   `validate_public_self_containment(row, bytes, repo_inventory)`.
+- `validate_coordination_counts(manifest, manifest_bytes, readme_bytes) -> tuple[SpecFinding, ...]`
+  — verifies that the manifest preamble and `specs/README.md` status board report the exact parsed
+  owner/index/coordination/scope counts rather than independently maintained arithmetic.
 - `main(argv: Sequence[str] | None = None) -> int`.
 
 Command contract:
@@ -97,6 +100,20 @@ files are legal only through `repository_projection` and its exact root-path rul
 Every discovered regular `specs/**/*.md` file, including the manifest and this script's spec, appears
 in exactly one row. No row names an absent spec. Ignore caches/editor/temp files only by rejecting
 them as unexpected inventory; `.gitignore` is not a classification mechanism.
+
+### Coordination-count consistency
+
+After parsing and validating the registry, compute exact counts by classification and by the
+reviewed repository-scope buckets rendered in `specs/README.md`. Parse the manifest preamble's
+owner/index/coordination/total statement and the README status-board summary/table; require each
+subtotal, each classification count, the future-owner total, and the final spec-file total to equal
+the registry-derived values. The table total is recomputed from its rows rather than trusted as a
+second input. A missing, duplicate, malformed, or mismatched summary emits
+`SUMMARY_COUNT_DRIFT` with only the coordination-file path and count category, never copied prose.
+
+This is validation, not generation: the script does not rewrite either Markdown file. A manifest
+change and its reviewed summary update land together, and CI prevents an arithmetic or stale-copy
+error from being described as an authoritative inventory.
 
 ### Extension mapping
 
@@ -194,7 +211,7 @@ locale/hash seed/platform.
 ## Errors and edge cases
 
 - Missing/unreadable/invalid manifest, absent/extra spec, unknown extension/classification/mapping,
-  unresolved index path or normative dependency is blocking.
+  unresolved index path or normative dependency, or coordination summary/count drift is blocking.
 - FILE_MANIFEST self-row is coordination and does not create recursion; parser reads its current bytes
   once, then validates its own row/path.
 - A manifest row cannot hide a symlink/case collision/ignored private spec.
@@ -213,6 +230,7 @@ locale/hash seed/platform.
 5. Every owner/index has the complete natural-language code template.
 6. Public implementation can proceed with private drafting inputs absent.
 7. Verification is deterministic and read-only.
+8. Every published inventory count is derived from and equal to the parsed registry.
 
 ## Tests
 
@@ -226,6 +244,9 @@ locale/hash seed/platform.
   coordination allowlist; symlink/NUL/CRLF.
 - Self-containment fixtures: ignored private-drafting link, absolute home, transcript/private canary,
   unresolved import/normative link, external standard as sole behavior, and clean public-only tree.
+- Coordination-count fixtures: exact owner/index/coordination totals; wrong scope subtotal; correct
+  subtotals with wrong grand total; manifest change without README update; malformed or duplicate
+  status board. Every mismatch returns `SUMMARY_COUNT_DRIFT` deterministically.
 - PR/release workflow tests assert the exact `--check` command runs before build/publication.
 
 ## Open questions

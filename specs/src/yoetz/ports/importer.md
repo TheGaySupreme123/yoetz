@@ -335,11 +335,16 @@ object/digest refs, and imported file-change observations already present at the
 An absent final content capture is an explicit coverage gap, never a reason to run Git/shell/files
 implicitly.
 
-Therefore no `ArtifactInspectionPort` is added for v0.1. Live Git/worktree/filesystem inspection is
-deferred until an ADR fixes consent, allowed roots, symlink/submodule behavior, command execution,
-size/redaction policy, subject-state digest semantics, and packaging tests. If later approved, that
-port captures evidence first; the deterministic review still consumes recorded evidence rather
-than ambient mutable state.
+Therefore no content-returning `ArtifactInspectionPort` is added for v0.1. ADR-011 separately owns
+one narrow client-local `SubjectStateCapturePort`: it hashes an explicitly selected Git worktree
+under fixed bounds and returns only a comparable `SubjectStateRef`, with no path, filename, source,
+diff, Git output, ledger mutation, or semantic fetch. That structural freshness helper is not an
+import-review capability and this port never invokes it implicitly.
+
+General live Git/worktree/filesystem evidence inspection remains deferred until another ADR fixes
+consent, allowed roots, symlink/submodule behavior, content return, size/redaction policy, and
+packaging tests. If later approved, that port captures evidence first; deterministic review still
+consumes recorded evidence rather than ambient mutable state.
 
 ## Errors and edge cases
 

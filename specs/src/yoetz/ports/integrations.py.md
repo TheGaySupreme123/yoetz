@@ -33,16 +33,23 @@ operations and the same guidance through the MCP baseline (`mcp/resources.md`).
 - `HarnessId` — closed enum; v0.1 membership is exactly `codex`. An unregistered value is
   `INVALID_REQUEST` at the boundary and never reaches an adapter.
 - `HarnessProfile(harness_id, skill_root, frontmatter_profile, capability_profile_ids,
-  supported_versions, hooks: HarnessHookProfile | None)` — the frozen per-harness descriptor. It is
+  supported_versions, hooks_by_capability_profile: Mapping[str, HarnessHookProfile | None])` — the
+  frozen per-harness descriptor. It is
   reviewed packaged data, not caller input: `skill_root` is the exact relative install directory
   (`.agents/skills/yoetz/` for `codex`), and `frontmatter_profile` is the harness's required
-  skill-header shape. `hooks` is `None` for every v0.1 harness, so no v0.1 integration emits the
-  `hook_observed` publication channel or artifact-observation class (ADR-005); the field exists so
-  that adding hooks is a profile capability rather than a second port.
-- `HarnessHookProfile` — the two-armed hook descriptor. It distinguishes **observation hooks**,
+  skill-header shape. `hooks_by_capability_profile` has exactly one explicit value for every
+  capability-profile ID and no other key. A v0.1 value may be trigger-only after E-013 passes or
+  `None`; no v0.1 value has an observation arm, so no v0.1 integration emits the `hook_observed`
+  publication channel or artifact-observation class (ADR-005).
+- `HarnessHookProfile(trigger_event, trigger_payload_profile_id, evidence_case_ids,
+  trigger_action="reground_status", duplicate_policy="coalesce", loop_policy="single_flight",
+  failure_policy="best_effort", observation_events=())` — the closed two-armed
+  hook descriptor. Event/payload/evidence identifiers are exact bounded values from one capability
+  cell; wildcard/range values are invalid. It distinguishes **observation hooks**,
   which report what the harness saw and are the only arm that would earn `hook_observed`, from
-  **trigger hooks**, which fire on a harness lifecycle event and prompt the agent to call `status`
-  and earn no coverage. v0.1 declares neither arm.
+  **trigger hooks**, which freeze one exact lifecycle event and the `reground_status` action,
+  prompt the agent to call `status`, and earn no coverage. A v0.1 exact capability cell may declare
+  only this trigger arm; the observation arm is always absent.
 - `IntegrationScope` — single v0.1 value `trusted_project`.
 - `IntegrationAction` — `install|replace|remove|noop`.
 - `IntegrationState` — `absent|installed_exact|modified|partial|incompatible|unsafe`.
@@ -168,10 +175,13 @@ An **observation hook** reports to Yoetz what the harness saw the agent do, and 
 that would earn the `hook_observed` publication channel or artifact-observation class (ADR-005). It
 remains deferred to v0.2.
 
-v0.1 declares neither arm: `hooks` is `None` for every v0.1 profile. Whether a specific harness
-exposes a usable compaction or lifecycle trigger point is capability evidence rather than a spec
-choice, and E-013 must freeze the exact trigger points a harness exposes before any trigger hook
-ships.
+Whether a specific harness exposes a usable compaction or lifecycle trigger point is capability
+evidence rather than a spec choice. E-013 must freeze the exact event, payload/privacy boundary,
+coalescing and loop guard, optional-host failure behavior, and installed-artifact case IDs before
+that exact v0.1 capability cell selects a trigger-only `HarnessHookProfile`. Every unproven cell
+selects `None`. The profile declaration itself performs no configuration mutation: this port still
+does not install hooks or edit host config, and the capability case must prove the reviewed
+host-native mechanism is present. Every v0.1 observation arm remains absent.
 
 ## Errors and edge cases
 
@@ -200,8 +210,8 @@ ships.
    adding a harness adds an adapter plus a `HarnessId` value only.
 8. Guidance content is identical across harnesses; only the header and layout may differ.
 9. No v0.1 profile declares observation hooks, so no integration strengthens coverage over the MCP
-   baseline. A trigger hook could not strengthen it either: it observes nothing and earns no
-   coverage.
+   baseline. A trigger-only exact profile cannot strengthen it either: it observes nothing and
+   earns no coverage.
 
 ## Tests
 
@@ -218,6 +228,9 @@ ships.
   other.
 - A second synthetic test-only harness profile exercises the port's neutrality without shipping a
   second real integration, proving the fork path needs no registry edit.
+- Exact-profile map tests reject missing/extra/inferred hook entries; passing trigger-only cells
+  coalesce duplicate lifecycle notifications, call `status`, avoid loops, and leave coverage
+  unchanged, while unsupported cells retain the manual recovery path.
 
 ## Open questions
 
@@ -226,9 +239,7 @@ None.
 Global/user skill scope is deferred to v0.2.
 
 Additional first-party `HarnessId` values are deferred to v0.2 and are additive by construction:
-they require an adapter and a profile, not a port or guidance change. Harness hooks are deferred
-with them and land on `HarnessProfile.hooks`, which distinguishes two arms. Observation hooks — the
-only integration capability that would earn `hook_observed` coverage — are deferred to v0.2. Trigger
-hooks, which fire on a harness lifecycle event and prompt the agent to call `status`, earn no
-coverage and are gated on the E-013 capability evidence for the exact lifecycle trigger points a
-harness exposes. v0.1 declares neither arm.
+they require an adapter and a profile, not a port or guidance change. Observation hooks — the only
+integration capability that would earn `hook_observed` coverage — are deferred to v0.2. A v0.1
+exact capability cell may declare a trigger-only profile after E-013 passes; it prompts recovery,
+earns no coverage, and grants no hook-install/configuration authority to this port.

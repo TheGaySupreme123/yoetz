@@ -1,6 +1,7 @@
 # ADR-010 — Harness integration is a port; Codex is the first adapter
 
-**Status:** Working decision for spec drafting (2026-07-16). Ratification requires the packaging
+**Status:** Working decision for spec drafting (2026-07-16; trigger-profile amendment 2026-07-17).
+Ratification requires the packaging
 byte-parity run plus a capability run proving an unprofiled MCP host completes the workflow from an
 installed artifact.
 **Owning public specs:** `specs/guidance/`, `specs/src/yoetz/ports/integrations.py.md`,
@@ -51,10 +52,13 @@ The through-line is that "Codex is first" had been encoded as "Codex is the only
    type, and no guidance. This is what makes the fork path real rather than aspirational, and it
    makes the shared registry smaller, not larger.
 
-3. **`HarnessProfile.hooks` is declared now and `None` for every v0.1 harness.** Observation hooks
-   are the only integration capability that would earn `hook_observed` coverage, and no harness
-   supplies them yet (consistent with ADR-005's "none of which exist pre-hooks"). Declaring the
-   field now means hooks arrive as a profile capability rather than a second port later.
+3. **Hook support is exact-profile capability data, not a release-wide boolean.**
+   `HarnessProfile.hooks_by_capability_profile` maps each advertised capability-profile ID to
+   `HarnessHookProfile | None`. A v0.1 cell may declare a trigger-only profile after E-013's
+   installed-artifact evidence passes; an unproven cell remains `None`. Observation hooks are the
+   only integration capability that would earn `hook_observed` coverage, and every v0.1 cell keeps
+   that arm absent. This lets a safe ergonomic ship without implying observation or inferring
+   support across neighboring host versions.
 
 4. **Three delivery tiers, with tier 0 self-sufficient.** Tier 0 is
    `guidance/agent-instructions.md`, served verbatim as the MCP initialize `instructions` string, and
@@ -92,7 +96,13 @@ The through-line is that "Codex is first" had been encoded as "Codex is the only
    earn `hook_observed`; it stays deferred to v0.2. Whether a specific harness exposes a usable
    compaction or lifecycle trigger point is capability evidence rather than a spec choice, so E-013
    must freeze the exact trigger points from an installed-artifact capability run before any trigger
-   hook ships. v0.1 declares neither arm.
+   hook ships. v0.1 may declare the trigger arm in an exact passing cell; the observation arm is
+   always absent.
+
+   The current Codex `0.144.5` capability candidate exposes `PreToolUse`, `PermissionRequest`,
+   `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, `SubagentStart`,
+   `SubagentStop`, and `Stop`. This inventory explains the deferral but does not freeze support:
+   E-013 still requires installed-artifact payload, privacy, and behavior evidence before use.
 
 ## Consequences
 
@@ -110,6 +120,11 @@ First-party integration therefore buys ergonomics, and — once observation hook
 coverage. It never buys a different public contract. "Codex first" now means "the first harness where
 we can deliver the guidance natively, and the first where we will be able to earn `hook_observed`",
 not "the only harness that works."
+
+A trigger-only v0.1 profile is one such ergonomic: it improves recovery reliability but leaves the
+coverage vector unchanged. Profile declaration is not installation authority; no adapter silently
+edits host configuration. The exact support cell must prove the trigger is already available through
+the reviewed host mechanism, or select `None` and retain manual re-grounding.
 
 The cost is one extra indirection for the single harness that exists today, and four guidance files
 whose ownership must be respected: a harness restating a shared rule instead of linking to it is a

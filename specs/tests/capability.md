@@ -79,13 +79,15 @@ tests/capability/test_user_presence.py
 ### Codex version matrix
 
 Test each candidate supported Codex version from the built release environment, beginning with
-observed local `0.139.0` and target/max-tested `0.144.3` until refreshed at release.
+observed local `0.139.0` and target/max-tested `0.144.5` until refreshed at release.
 Newest stable is re-probed before ADR acceptance/release. Do not infer intermediate support merely
 from endpoint versions; run the critical matrix for each advertised bound and representative range.
 
 ### Configuration and startup
 
 - user and trusted-project MCP registration with real supported config field shapes;
+- `codex mcp get yoetz --json` same-name preflight; an unrelated existing entry is preserved and
+  registration is refused because current `mcp add` replaces the same-name global entry;
 - exact command/env/cwd, optional `required=false` and required server policy;
 - cold/warm startup percentiles with margin below Codex default timeout;
 - schema/resource/startup diagnostic gate finishes before stdin;
@@ -109,17 +111,30 @@ do not claim access to hidden internal reasoning.
 ### Optional vs required failure
 
 Optional server failure lets Codex work continue and the skill discloses no live ledger/receipt.
-Required server failure blocks run initialization. Neither path invents Yoetz state or describes
-unperformed checks.
+Required server failure is tested separately for `codex exec`, interactive CLI, and every other
+advertised surface; only surfaces that empirically block are allowed that claim. Neither path
+invents Yoetz state or describes unperformed checks.
 
 ### Skill discovery and integration
 
 - explicit `$yoetz` discovery and, if advertised, implicit trigger on material task;
+- app-server `skills/list` (or the exact successor discovery API) resolves the managed path and
+  reports no load error; duplicate `yoetz` skills across project, ancestor, user, and plugin roots
+  make discovery ambiguous and fail the support cell rather than relying on load order;
 - trivial-task non-trigger;
 - source/wheel/installed skill/reference byte parity;
 - preview/consent/diff, modified local copy protection, status/remove;
 - ten-step workflow compliance and degraded wording;
 - skill/MCP compatible/incompatible version pairs.
+
+### Publication ceremony and large inventories
+
+Run an installed-artifact 100-file generated/migration task with at least three independently
+reviewable work packages. The conforming agent creates package/outcome obligations, publishes only
+material package transitions, and links bounded manifest evidence for leaf files. Reject a
+schema-valid comparison run that creates one obligation or routine publication per file. Record
+publications per work package, model-authored event bytes, token/latency overhead, skipped checks,
+stale/abandoned ledger state, and user-visible chatter for E-014; file count alone sets no budget.
 
 ### Parent, subagents, resume
 
@@ -134,6 +149,16 @@ Run a synthetic two-subagent task:
 Interrupt/compact/exit and resume by supported Codex mechanism. Reattach same task/session, query
 status, preserve request/writer sequences, and publish no duplicate event. If Codex cannot propagate
 MCP context to subagents in a version, record the exact limitation and narrow the claim.
+
+For each exact capability profile, verify the reviewed hook-map entry rather than inferring from a
+neighboring version. A trigger-present cell fires the frozen compaction event, coalesces duplicate
+notifications, runs one bounded re-grounding sequence, avoids recursive triggers, and leaves
+coverage unchanged. A trigger-absent cell follows the same manual resume guidance. Trigger failure
+does not block optional-host work, publishes no observation, and fabricates no successful attach.
+
+The same workflow captures ADR-011 structural subject state before and after one material edit.
+Installed-artifact output is path/content-free, bounded, comparable across resume, and unreachable
+from trusted service composition; unsupported/racing/over-cap cases return no state digest.
 
 ### JSONL import
 

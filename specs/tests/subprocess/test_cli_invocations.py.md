@@ -14,8 +14,9 @@ foreground PTY and never fall back to piped stdin.
 ## Public surface
 
 Pytest cases cover root/per-command help; `version`; six public operations; support commands
-`import`, `review`, `backup`, `restore`, `migrate`, `integrate`; `privacy setup|show|propose|tighten`
-and `privacy receipts list|get`; input file/stdin/inline modes; and invalid invocation. Human-mode
+`import`, `review`, `backup`, `restore`, `migrate`, `integrate`, and local read-only `state capture`;
+`privacy setup|show|propose|tighten` and `privacy receipts list|get`; input file/stdin/inline modes;
+and invalid invocation. Human-mode
 cases explicitly cover status gap wording, the three-finding display cap with stable ordering/
 suppressed count, receipt wording no stronger than its canonical document, and exact privacy recipe
 review. Parameter IDs are stable command/scenario labels.
@@ -35,6 +36,13 @@ snapshots show exactly the top three in canonical order plus the suppressed coun
 cannot strengthen coverage/conclusion or hide redaction/limitations from the JSON document. Support
 commands assert consent/dry-run/overwrite boundaries and that no hidden public
 `doctor`/release-probe command appears.
+
+`state capture` runs against synthetic clean, dirty, staged, unborn, and untracked Git worktrees.
+Same state returns the same digests; each supported material state change changes `tree_digest`.
+Non-Git, unsafe root, submodule, symlink/special-file, over-cap, malicious Git config/helper,
+timeout, cancellation, and changing-during-capture cases return no digest. Path/source/diff/Git
+identity canaries appear in neither stream, logs, ledger, nor created files, and the oracle proves
+the command performs no Git, service, or ledger mutation.
 
 Privacy CLI snapshots cover all five recipe expansions and all thirteen typed answers. They
 distinguish the fail-safe `local_only + structural` installation seed from the editable
@@ -71,6 +79,7 @@ cannot create/advance a catalog/bundle.
 5. Human rendering is a bounded projection of structured truth and never strengthens it.
 6. Presets are transparent editable draft macros, not consent, and assisted routine work is
    noninteractive after the standing policy is committed.
+7. Structural state capture is local/read-only/content-withholding and is not a seventh MCP tool.
 
 ## Tests
 

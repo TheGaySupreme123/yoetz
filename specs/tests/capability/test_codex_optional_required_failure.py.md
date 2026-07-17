@@ -17,8 +17,9 @@ locked key, incompatible protocol, immediate crash, and mid-session loss.
 
 Configure identical synthetic sessions differing only in required flag. For optional failure,
 observe Codex continues unrelated work and the skill states Yoetz unavailable/no live receipt; no
-Yoetz tool result or durable event exists. For required failure, observe run initialization blocks
-with bounded server-unavailable status and no task work starts.
+Yoetz tool result or durable event exists. For required failure, test `codex exec`, interactive CLI,
+and every other advertised surface independently. A surface may claim initialization blocking only
+when that exact capability cell observes bounded server-unavailable status and no task work starts.
 
 For mid-session loss, status is last-known only when backed by prior tool result; subsequent skill
 wording discloses unavailable/freshness limit. Restart/retry may reattach but cannot invent the
@@ -33,7 +34,8 @@ missed interval. Capture public transcript digest and filesystem/ledger absence/
 ## Invariants
 
 1. Optional failure preserves Codex work but makes no Yoetz claim.
-2. Required failure prevents the configured run.
+2. Required failure prevents the configured run only on surfaces whose version-scoped capability
+   evidence proves that behavior.
 3. No unavailable interval becomes verified history.
 4. Behavior is empirically version-scoped.
 

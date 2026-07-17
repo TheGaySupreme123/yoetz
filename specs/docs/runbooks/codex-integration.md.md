@@ -1,6 +1,6 @@
 # docs/runbooks/codex-integration.md — safe trusted-project Codex skill integration
 
-**Wave:** D/F | **ADRs:** ADR-005, ADR-007 | **Imports (spec-tree):** integration port/application/
+**Wave:** D/F | **ADRs:** ADR-005, ADR-007, ADR-010 | **Imports (spec-tree):** integration port/application/
 adapter, skill/reference, capability and compatibility specs | **Imported by:** CLI integration help,
 public install guide and support
 
@@ -89,7 +89,18 @@ skill recognized/version compatible and workflow guidance. Installation alone is
 
 MCP registration is separate. If configured optional and Yoetz unavailable, Codex work continues and
 skill must disclose no live ledger/check/receipt. If host/user configured required, server failure
-blocks run as that policy specifies. Never claim skill install changed config or produced a receipt.
+blocks only the Codex surfaces for which the tested capability profile proves that behavior. Before
+running `codex mcp add yoetz -- yoetz mcp serve`, run `codex mcp get yoetz --json`. Continue only
+when no entry exists; if an entry exists, preserve it and stop unless a separate reviewed operation
+proves it is the exact Yoetz-owned registration being intentionally replaced. Current Codex
+`mcp add` replaces a same-name global entry. Never claim skill install changed config or produced a
+receipt.
+
+The exact capability profile also reports the compaction-recovery trigger as present or absent. A
+present v0.1 trigger only prompts the agent to re-ground through `status`; it records no observation,
+changes no coverage, and remains optional. Skill installation does not configure the hook. If the
+profile is absent, the host mechanism is missing, or the trigger fails, use the ordinary manual
+resume/compaction procedure and do not infer support from another Codex version.
 
 ### Remove
 
@@ -103,8 +114,11 @@ status absent and manually manage any separate MCP config if desired.
 Decision table: target untrusted/unsafe → correct explicit root/permissions, no force; resource invalid
 → reinstall verified artifact; preview stale → status/new preview; modified/partial → preserve/review;
 incompatible → use supported package/Codex pair; write/swap interrupted → status, preserve staging;
-skill not discovered → check exact scope/trust/version/capability and Codex reload; MCP unavailable →
-separate config/startup diagnostics.
+skill not discovered or duplicate `$yoetz` names are loaded → check exact scope, loaded skill roots,
+managed path, trust/version/capability and Codex reload; MCP name already present → preserve it and
+review ownership rather than running `mcp add`; MCP unavailable → separate config/startup diagnostics.
+Trigger absent/failed → use manual re-grounding; do not edit hook config through this integration or
+claim that a trigger observed work.
 
 Never paste modified skill/repository content, paths, Codex config, transcript, prompts, keys, env or
 raw exceptions into public support. Share versions, state, source/installed/preview digests, bounded
@@ -132,6 +146,8 @@ reason and file-state names only.
 - Execute all examples against installed CLI with absent/exact/modified/partial/incompatible/unsafe
   fixtures and non-TTY mode.
 - Capability tests prove explicit discovery, optional/required behavior and exact tested versions.
+- Exact-profile tests prove trigger-present and trigger-absent compaction recovery have equal
+  coverage and no silent configuration mutation.
 - Kill/swap tests validate troubleshooting branch and modified preservation.
 - Docs lint rejects global/fuzzy scope, forced overwrite/remove, MCP-registration claim, secret/path/
   transcript examples and unsupported version ranges.

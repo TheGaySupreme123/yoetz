@@ -28,8 +28,9 @@ Git, stage/commit files, update `.gitignore`, download anything, or manage arbit
   `HarnessId.codex` and rejects any other harness value.
 - `CODEX_HARNESS_PROFILE: HarnessProfile` — the reviewed profile: `skill_root=.agents/skills/
   yoetz/`, the Codex frontmatter profile, the exact Codex capability-profile IDs, tested Codex
-  version bounds, and `hooks=None` (Codex observation hooks are deferred; no v0.1 harness earns
-  `hook_observed`).
+  version bounds, and an exact `hooks_by_capability_profile` map. Each value is `None` unless that
+  exact installed-artifact cell passes E-013; a passing v0.1 value is trigger-only and its
+  observation arm remains absent, so no v0.1 harness earns `hook_observed`.
 - `load_packaged_skill_source() -> SkillSource` — verifies installed resource manifest before
   returning the exact inventory, composed of the Codex skill header plus the neutral guidance
   members.
@@ -47,13 +48,21 @@ Git, stage/commit files, update `.gitignore`, download anything, or manage arbit
 Load only manifest entries for the Codex skill root `skills/codex/yoetz/` plus the neutral guidance
 root `guidance/`. Require the exact Codex `SKILL.md`, the exact guidance members named by
 `guidance/README.md`, the compatibility manifest, and no extra/collision. Verify size/SHA-256,
-UTF-8/LF/final newline, skill frontmatter/name/version/protocol/Codex tested set, link containment and
-public boundary. Read via package resources; no cwd/root source/network fallback. Source files are
-bounded and immutable for one adapter call.
+UTF-8/LF/final newline, the Codex-readable skill frontmatter/name, compatibility-manifest
+version/protocol/Codex tested set, link containment and public boundary. Unknown Yoetz-private
+compatibility fields in `SKILL.md` frontmatter are invalid rather than treated as runtime metadata.
+Read via package resources; no cwd/root source/network fallback. Source files are bounded and
+immutable for one adapter call.
 
 Guidance members are copied byte-for-byte from `guidance/` into the destination layout Codex
 expects; this adapter never rewrites, reflows, templates, merges, or per-harness edits their bytes,
 so the same member installed by any harness is identical. Only the skill header is Codex-shaped.
+
+The hook-profile map is support metadata, not an installer side effect. This adapter never edits
+Codex hook/config files. A trigger-only value may be advertised only when the exact capability run
+proves the reviewed host-native mechanism is already present and that its compaction event,
+payload/privacy boundary, loop guard, coalescing, and failure behavior match the profile. Otherwise
+the cell is `None` and the installed skill's manual resume/compaction instructions remain the path.
 
 ### Target validation
 
@@ -150,6 +159,8 @@ completed; ambiguity preserves it. Never force-delete modified/unmanaged content
 4. Modified/unmanaged content is never silently overwritten or removed.
 5. Crash leaves old/new complete or preserved ambiguity, never a falsely exact state.
 6. Adapter performs no network, Git, Codex config, MCP registration, or package mutation.
+7. A trigger-only profile is selected only from exact E-013 evidence, performs re-grounding only,
+   and cannot change coverage; every v0.1 observation arm is absent.
 
 ## Tests
 
@@ -157,7 +168,8 @@ completed; ambiguity preserves it. Never force-delete modified/unmanaged content
 - `specs/tests/integration.md`: absent/exact/unmanaged/modified/partial/incompatible/unsafe, every
   write/rename/fsync kill point, concurrent modification and conservative recovery.
 - `specs/tests/capability.md`: install into real isolated trusted Codex project, discovery, status,
-  modified protection and removal.
+  modified protection and removal; exact trigger-only/unsupported cells follow their respective
+  automatic/manual compaction-recovery paths with equal coverage.
 - `specs/tests/packaging.md`: source/package/install parity and public-boundary scan.
 
 ## Open questions

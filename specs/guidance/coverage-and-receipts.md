@@ -17,9 +17,10 @@ both are the same bytes.
 
 It is also where the coverage difference between hosts is explained honestly: an agent publishing
 over MCP earns `cooperative_mcp` with `self_asserted` authorship and `published_only` artifact
-observation, and no harness integration in v0.1 changes that. A harness that later supplies
-observation hooks can earn `hook_observed`; until then, a first-party integration buys ergonomics,
-never a stronger claim.
+observation, and no harness integration in v0.1 changes that. A capability-proven trigger hook may
+prompt the same `status` re-grounding an agent can initiate itself; it observes nothing and changes
+no coverage. A harness that later supplies observation hooks can earn `hook_observed`; until then,
+a first-party integration buys ergonomics, never a stronger claim.
 
 ## Public surface
 
@@ -69,8 +70,8 @@ redacted material as a real limitation.
   conclusion without recording one.
 - Missing or corrupt reference bytes must fail MCP resource registration and installed-skill
   validation.
-- Text implying that installing a first-party integration strengthens coverage is invalid while every
-  v0.1 `HarnessProfile.hooks` is `None`.
+- Text implying that installing a first-party integration or firing a v0.1 trigger-only hook
+  strengthens coverage is invalid; every v0.1 observation arm is absent.
 - Naming a harness, install path, provider, or model fails the public-boundary scan.
 
 ## Invariants

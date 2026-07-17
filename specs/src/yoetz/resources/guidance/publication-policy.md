@@ -24,8 +24,10 @@ copies do not exist, which is what makes drift structurally impossible rather th
 
 The installed copy matches the reviewed root guidance byte-for-byte. It teaches publication
 materiality, the 16 event-family cheat sheet, obligation/evidence/claim relationships,
-subject-state binding, batching/retry, multi-agent attribution, forbidden content, and the three
-mini-flows exactly as reviewed at source, including bounded problem-local excerpt guidance.
+subject-state binding, batching/retry, multi-agent attribution, forbidden content, and the four
+mini-flows exactly as reviewed at source, including
+bounded problem-local excerpt guidance. The large-inventory example makes work-package transitions
+the publication unit and treats leaf files as bounded manifest evidence.
 
 The runtime does not synthesize, rewrite, template, or per-harness adapt the guidance. Manifest
 verification checks byte size and SHA-256 before it is served or installed.

@@ -12,13 +12,17 @@ consent, copy, modification protection, status, and removal preserve user-owned 
 
 Cases: explicit `$yoetz`; material-task implicit trigger if claimed; trivial non-trigger;
 canonical source/wheel/install parity; preview/decline/accept; existing identical/modified copy;
-compatible/incompatible skill-MCP versions; status/remove.
+compatible/incompatible skill-MCP versions; exact managed-path resolution; duplicate `yoetz` names
+across loaded roots; status/remove.
 
 ## Behavior
 
 Use isolated trusted/untrusted synthetic repositories. Verify explicit discovery and ten-step
 workflow guidance against public observable actions, not hidden reasoning. If implicit activation is
 claimed, run positive material and negative trivial fixtures; otherwise record explicit-only.
+Query app-server `skills/list` or its exact tested successor and require one error-free `yoetz`
+entry resolving to the managed project path. Seed same-name ancestor, user, and plugin skills;
+ambiguity fails the capability cell and is never resolved by undocumented load order.
 
 Integration first renders deterministic diff and requires consent. Accepted copy equals canonical
 resource bytes/references/compatibility manifest. Identical copy is no-op; locally modified copy is

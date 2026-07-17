@@ -21,8 +21,8 @@ and compare package/tag/commit/release provenance; protocol/engine/projection/po
 migration/resource versions/digests; Python/platform; APSW/SQLite source/options; MCP SDK and optional
 provider adapter availability to independently probed candidate manifests.
 
-The default resource summary must report the exact 69-entry category counts and digest without
-enumerating entries; explicit `--resources` must enumerate exactly those same 69 reviewed identities
+The default resource summary must report the exact 71-entry category counts and digest without
+enumerating entries; explicit `--resources` must enumerate exactly those same 71 reviewed identities
 and no ambient package files.
 
 Differentiate built/tested/supported/available/not-installed/unknown. Do not infer Git state from

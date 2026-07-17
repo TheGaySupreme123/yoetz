@@ -1,6 +1,6 @@
 # docs/public-claims.json — evidence-bound public product claim map
 
-**Wave:** F | **ADRs:** ADR-004, ADR-005, ADR-007, ADR-008, ADR-009 |
+**Wave:** F | **ADRs:** ADR-004, ADR-005, ADR-007, ADR-008, ADR-009, ADR-010, ADR-011 |
 **Imports (spec-tree):** public README/privacy/protocol specs, capability/conformance/packaging
 tests, release evidence | **Imported by:** README claim lint, release evidence generation,
 public-claim conformance test
@@ -40,6 +40,8 @@ local encrypted payload storage with explicit threat limitations; generation-fen
 idempotent retry after ambiguous response loss; deterministic replay; coverage-bounded findings and
 receipts; exact-version Codex integration/import; machine-bound versus proven portable recovery;
 advertised platform/runtime cells; source/package resource parity; and no forensic-erasure claim.
+The exact-version Codex entry records trigger-hook support as present or absent per capability cell;
+a present trigger is recovery ergonomics only and carries no observation/coverage claim.
 
 Privacy claims are separate, directly tested entries:
 
@@ -122,6 +124,11 @@ Privacy claims are separate, directly tested entries:
   endpoint/profile/request-body-digest/deadline-bound credential callback in the custom transport;
   no SDK client/default-header object retains the real credential, while resolved decision F-012
   permits its authentication header only to the exact pinned TLS endpoint.
+- `support.structural_subject_state_capture`: for an exact E-015 passing Git/platform/artifact cell,
+  `yoetz state capture` reads one explicitly named local worktree and returns only bounded versioned
+  state digests and closed metadata, with no network, ledger write, path/source/filename output,
+  MCP exposure, service reachability, or provenance/verification upgrade; unsupported or unsafe
+  cells are not advertised and return no state digest.
 - `semantic.review_packet_and_agent_loop`: assisted semantic review receives the recorded goal,
   obligations, claims, material timeline, deterministic bases, change/coverage facts, and bounded
   problem-local recorded excerpts selected under policy; missing content is explicitly omitted,
@@ -168,6 +175,9 @@ Privacy entries additionally require `tests/conformance/privacy/test_privacy_pro
 `tests/packaging/test_privacy_docs_and_resources.py`. The no-traceback/credential-lifetime claims
 also require `tests/unit/observability/test_logging_allowlist.py` and
 `tests/subprocess/test_service_secret_boundary.py`.
+The structural subject-state claim additionally requires
+`tests/subprocess/test_cli_invocations.py`, `tests/packaging/test_service_boundary_imports.py`, and
+the exact E-015 capability cell.
 
 ## Open questions
 

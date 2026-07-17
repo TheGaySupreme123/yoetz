@@ -2,7 +2,7 @@
 
 **Wave:** A/F | **ADRs:** ADR-002, ADR-003, ADR-006, ADR-007, ADR-008, ADR-009 |
 **Imports (spec-tree):**
-root schema, migration, policy, fixture, and skill specs | **Imported by:** package startup/version,
+root schema, migration, policy, fixture, guidance, and skill specs | **Imported by:** package startup/version,
 `specs/scripts/verify_resource_manifest.py.md`, packaging and release workflows
 
 ## Purpose
@@ -49,7 +49,7 @@ field omitted; it is not a signature.
 
 ### Included inventory
 
-The v0.1 inventory contains exactly 69 entries:
+The v0.1 inventory contains exactly 71 entries:
 
 - all 52 installed JSON Schema artifacts required for six-operation input/output, durable events,
   configuration, receipts, findings, version reporting, local-service control, and privacy/egress,
@@ -65,7 +65,8 @@ The v0.1 inventory contains exactly 69 entries:
   `identifiers.case.json`,
   `object-envelope.case.json`;
 - `migrations/catalog/0001.sql` and `migrations/bundle/0001.sql`;
-- the canonical Codex `SKILL.md`, its two exact reference files, and its compatibility manifest;
+- the canonical Codex `SKILL.md`, its compatibility manifest, and all four harness-neutral
+  `guidance/` documents (which Codex installs byte-identically under `references/`);
 - `support/runtime-support.json` as the installed write/integration support allowlist.
 
 v0.1 deterministic policy rules and receipt rendering live in reviewed Python modules; there is no
@@ -82,7 +83,8 @@ The full adversarial, replay, import, receipt, and backward-read corpora remain 
 All paths are NFC-normalized UTF-8 POSIX relative paths. They cannot be empty, absolute, contain
 `.`/`..`, backslash, control character, repeated slash, leading/trailing slash, or a segment that
 changes under ASCII case folding relative to another path. `source_path` must be inside an
-allowlisted public source root (`schemas/`, `migrations/`, `skills/`, `fixtures/`, or `support/`).
+allowlisted public source root (`schemas/`, `migrations/`, `skills/`, `guidance/`, `fixtures/`, or
+`support/`).
 No other source root is valid in v0.1. It cannot point into ignored/local planning material,
 `.git`, editor state, temp
 directories, build outputs, transcripts, home paths, or a symlink.

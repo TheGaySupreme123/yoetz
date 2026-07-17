@@ -157,6 +157,12 @@ stale, redacted, unknown event, imported partial, no semantic/provider failure�
 conclusion becomes stronger. Lint structured and rendered outputs for forbidden unqualified
 “verified/proved/complete/authenticated/lossless” language.
 
+A scripted large-inventory case generates 100 leaf files across independently reviewable work
+packages. The conforming transcript creates obligations per package/outcome, publishes material
+package transitions, and attaches bounded manifest evidence. A schema-valid transcript that emits
+one obligation or routine event per file fails publication-policy conformance. Partial completion
+leaves only the affected package open and does not erase evidence from completed packages.
+
 ### Strict-local zero egress
 
 Under denial of every non-allowlisted OS/socket route and with provider credentials absent:

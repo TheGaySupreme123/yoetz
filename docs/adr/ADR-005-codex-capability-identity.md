@@ -8,12 +8,18 @@ skill specs, and `specs/tests/capability/`.
 
 ## Decisions
 
-1. **Supported Codex range:** target/maximum-tested `0.144.3`; minimum supported set by the
+1. **Supported Codex range:** target/maximum-tested `0.144.5`; minimum supported set by the
    capability run (candidate `0.139.0` as observed local fixture); anything newer than
    maximum-tested is "untested", not "supported". The release manifest records min/max/denied.
 2. **Integration posture:** Codex is the MCP client; Yoetz is a local stdio server registered via
-   `codex mcp add yoetz -- yoetz mcp serve`, default `required = false`. Skill installed
-   explicitly to `.agents/skills/yoetz/` with preview/consent.
+   `codex mcp add yoetz -- yoetz mcp serve`, default `required = false`, only after
+   `codex mcp get yoetz --json` confirms the global name is absent. A same-name entry is never
+   overwritten unless a separately reviewed flow proves it is the exact Yoetz-owned entry. Skill
+   installed explicitly to `.agents/skills/yoetz/` with preview/consent. Codex-readable
+   `SKILL.md` frontmatter is limited to `name`, `description`, and optional
+   `metadata.short-description`; Yoetz protocol/version compatibility remains in its private
+   manifest and is not represented as Codex-readable frontmatter. MCP registration remains a
+   separate previewed step, so v0.1 declares no `agents/openai.yaml` MCP dependency.
 3. **MCP protocol/SDK:** protocol negotiated (latest published `2025-11-25`, never assumed); SDK
    pinned `mcp==1.28.1`, low-level `Server` surface, `validate_input=False`, direct
    `CallToolResult`, Yoetz-side jsonschema Draft 2020-12 output validation, nested constant
@@ -29,15 +35,19 @@ skill specs, and `specs/tests/capability/`.
    null-ID frame, fallback is orderly transport termination. Never fabricate an ID.
 6. **Actor identity:** actor identity is caller-asserted; the server assigns at most
    `self_asserted` for MCP callers in v0.1 (`harness_observed` only via a justified observation
-   channel, none of which exist pre-hooks). No inference from display names or transcript
+   channel, none of which exist in v0.1; a trigger-only hook observes nothing). No inference from
+   display names or transcript
    fields.
-7. **Startup budget:** measured cold-start target < 2 s on reference hardware; hard requirement is
-   comfortable margin under Codex's 10 s MCP default; release binds to measured percentiles.
+7. **Startup budget:** measured cold-start target < 2 s on reference hardware; the release binds
+   the acceptable margin to the default observed in every advertised Codex capability cell rather
+   than assuming an invariant timeout.
 
 ## Capability matrix (must pass from the installed artifact, per pinned version)
 
-User & trusted-project MCP config; six tool calls (interactive + `codex exec`); optional-server
-failure disclosure; required-server startup failure; parent + subagents attribution; resume/
+User & trusted-project MCP config; same-name config preflight; six tool calls (interactive +
+`codex exec`); optional-server failure disclosure; required-server startup failure per supported
+Codex surface; duplicate skill-name discovery across loaded roots; parent + subagents attribution; resume/
 reattach without duplicates; `--json` JSONL import with unknown-event quarantine; skill discovery
-(explicit `$yoetz` and implicit); cancellation/timeout ambiguous-write retry; stdout purity
+(explicit `$yoetz` and implicit); E-013 trigger-only compaction recovery for exact passing profiles
+and manual recovery for absent profiles, with equal coverage; cancellation/timeout ambiguous-write retry; stdout purity
 under all of the above.

@@ -1,13 +1,14 @@
 # ADR-009 — Central privacy, disclosure, and data-egress control
 
-**Status:** Working decision revised 2026-07-16. Ratification requires an independent
+**Status:** Working decision revised 2026-07-17. Ratification requires an independent
 privacy/security review plus executable no-bypass, never-send, approval-resume, and zero-egress
 evidence.
 **Owning public specs:** `specs/src/yoetz/domain/privacy.md`,
 `specs/src/yoetz/application/egress.md`,
 `specs/src/yoetz/application/privacy_policy.md`,
 `specs/src/yoetz/ports/privacy.md`, privacy adapters/configuration/audit specs, ADR-006,
-`PRIVACY.md`, the technical privacy protocol, policy schemas, fixtures, and tests.
+ADR-011 structural subject-state capture, `PRIVACY.md`, the technical privacy protocol, policy
+schemas, fixtures, and tests.
 
 ## Context and trust boundary
 
@@ -232,6 +233,14 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     that standing workspace policy, checks, retries, reviewer challenges, agent responses, and
     rechecks run without per-request human prompts. `confirm_every_request` remains the optional
     high-ceremony alternative.
+15. **Structural subject-state hashing is a local non-disclosure support effect:** ADR-011 permits
+    one explicit trusted local CLI command to read bounded Git/worktree bytes only into streaming
+    hashers and return a versioned `SubjectStateRef`. It returns no source, diff, filename, path,
+    branch, remote, Git output, or component digest; writes no ledger/audit row; opens no network;
+    and cannot be invoked through MCP with an arbitrary path. Intermediate bytes are discarded
+    before rendering. This narrow content-withholding fingerprint is not a local disclosure sink,
+    does not authorize semantic/live artifact inspection, and does not weaken never-send. An
+    unsupported, partial, unsafe, changing, or over-limit capture returns no comparable state.
 
 ### Human involvement under the recommended recipe
 
@@ -261,3 +270,6 @@ recipe expansion, problem-local selection, agent-context delivery of reviewer fi
 provider data-use recommendation metadata, and automatic no-prompt behavior after standing policy
 authorization. A data-use record is evidence for recommendation wording, not technical proof of a
 provider's downstream behavior.
+ADR-011 capability evidence additionally proves structural capture is read-only, bounded,
+network-free, path/content withholding, fail-closed on ambiguity, and incapable of strengthening
+publication/authorship/artifact-observation coverage.

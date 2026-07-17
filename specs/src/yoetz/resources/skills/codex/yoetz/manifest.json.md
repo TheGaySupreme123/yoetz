@@ -1,6 +1,6 @@
 # src/yoetz/resources/skills/codex/yoetz/manifest.json — installed skill compatibility manifest copy
 
-**Wave:** D | **ADRs:** ADR-002, ADR-005, ADR-007 | **Imports (spec-tree):**
+**Wave:** D | **ADRs:** ADR-002, ADR-005, ADR-007, ADR-010 | **Imports (spec-tree):**
 `specs/skills/codex/yoetz/manifest.json.md`,
 `specs/src/yoetz/resources/manifest.json.md` | **Imported by:** package startup, packaging,
 and capability validation
@@ -16,13 +16,15 @@ paths.
 - Logical resource: `skills/codex/yoetz/manifest.json`.
 - Installed package path: `src/yoetz/resources/skills/codex/yoetz/manifest.json`.
 - Canonical JSON shape mirroring the reviewed source manifest with managed member names, sizes,
-  SHA-256 values, capability-profile IDs, and a self-digest.
+  SHA-256 values, capability-profile IDs, exact hook profile map, and a self-digest.
 
 ## Behavior
 
 The build copies the reviewed manifest byte-for-byte into the package resource tree. Startup and
 installation checks verify the managed-member list, member digests, and supported Codex
 capability-profile IDs before the skill is trusted.
+The hook map must have the same exact keys and values as the reviewed source manifest and packaged
+runtime-support cells.
 
 The installed manifest must not enumerate absolute checkout paths, home paths, or environment
 state. It only records logical member names and reviewed digests.
@@ -38,6 +40,7 @@ state. It only records logical member names and reviewed digests.
 1. Source and installed manifests are byte-identical.
 2. Managed members are explicit and path-agnostic.
 3. Capability-profile IDs stay frozen with the reviewed skill.
+4. Trigger-hook presence is exact-cell evidence; v0.1 observation arms are always absent.
 
 ## Tests
 

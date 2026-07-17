@@ -162,7 +162,7 @@ it never upgrades the assignee's future `authorship_assurance`, whose trust boun
 | `action_kind` | `ActionKind ∈ {command, edit, research, review, other}` | yes | INTERFACES §7 |
 | `description` | str ≤ `MAX_TEXT_BYTES` | yes | |
 | `command` | str ≤ `MAX_TEXT_BYTES` | no | Exact command line when `action_kind == command` |
-| `subject_state` | SubjectStateRef | no | Repository/artifact state the action started from or produced (an `edit` SHOULD publish the resulting state — this is what makes K6 freshness checkable) |
+| `subject_state` | SubjectStateRef | no | Repository/artifact state the action started from or produced (an `edit` SHOULD publish the resulting state — this is what makes K6 freshness checkable). A first-party local workflow SHOULD use ADR-011 structural capture when available rather than inventing/describing a digest. |
 | `obligation_refs` | tuple[ObligationId] ≤ `MAX_REF_LIST` | no | Obligations this action attempts |
 | `attempted_items` | tuple[str ≤ 1_024] ≤ `MAX_REQUESTED_ITEMS` | no | Exact `RequestedItem.value` strings this action attempted (K2 matching is exact-string) |
 
@@ -175,7 +175,7 @@ it never upgrades the assignee's future `authorship_assurance`, whose trust boun
 | `outcome` | `ResultOutcome ∈ {success, failure, partial, unknown}` | yes | |
 | `exit_status` | int in −(2^31)..2^31−1 | no | Process exit code when applicable |
 | `summary` | str ≤ `MAX_TEXT_BYTES` | no | |
-| `subject_state` | SubjectStateRef | no | State the result tested — the freshness anchor used for later state comparison |
+| `subject_state` | SubjectStateRef | no | State the result tested — the freshness anchor used for later state comparison. Material verification SHOULD use the same capture format as adjacent edit/claim state. |
 | `evidence_refs` | tuple[EvidenceId] ≤ `MAX_REF_LIST` | no | Captured evidence for this result |
 
 ### 9. `EvidenceRecordedPayload`
@@ -190,7 +190,7 @@ it never upgrades the assignee's future `authorship_assurance`, whose trust boun
 | `content_digest` | str (sha256 form) | conditional | Digest of captured/observed content |
 | `description` | str ≤ `MAX_TEXT_BYTES` | no | |
 | `observed_at` | Timestamp | yes | When observed (metadata, not order) |
-| `subject_state` | SubjectStateRef | no | State the evidence describes |
+| `subject_state` | SubjectStateRef | no | State the evidence describes; captured structural state does not upgrade the event's actual provenance/coverage. |
 
 Presence validation ties strength to substance: `mutable_reference` requires `reference`;
 `metadata_only` requires `description` or `reference`; `content_digest` requires
@@ -211,7 +211,7 @@ For `evidence_kind=import_report`, strength is exactly `immutable_snapshot`, bot
 | `claim_kind` | `ClaimKind ∈ {completion, material}` | yes | `completion` proposes the final account; `material` is any other checkable assertion |
 | `statement` | str ≤ `MAX_TEXT_BYTES` | yes | |
 | `supporting_refs` | tuple[EvidenceId \| ResultId \| ObligationId] ≤ `MAX_REF_LIST` | yes (may be empty — emptiness is exactly what K4 catches) | Mixed typed IDs, distinguished by prefix |
-| `subject_state` | SubjectStateRef | no | The exact state the claim is about |
+| `subject_state` | SubjectStateRef | no | The exact state the claim is about; omission or incomparable formats remain an explicit freshness limitation. |
 | `obligation_refs` | tuple[ObligationId] ≤ `MAX_REF_LIST` | no | Obligations the claim asserts satisfied |
 | `disputes_refs` | tuple[ClaimId \| EventId] ≤ 16 | no | Explicit contradiction assertion against earlier claims/events (feeds K7) |
 

@@ -24,6 +24,8 @@ The future file is canonical JSON with an exact reviewed shape. Its top-level co
   versions;
 - `capability_profile_ids` — the exact supported Codex capability-profile IDs frozen by the skill
   contract;
+- `hooks_by_capability_profile` — exact same-key map whose values are tagged absent or the
+  E-013-proven trigger-only descriptor; every v0.1 observation arm is absent;
 - `managed_members` — the exact managed files with logical member name, byte size, SHA-256, role,
   and `origin` (`harness_owned` or `shared_guidance`);
 - `member_digest` — SHA-256 over the canonical manifest content excluding the digest field.
@@ -42,16 +44,20 @@ in its harness-owned members and version bounds, and its `shared_guidance` diges
 
 The manifest is a review-time compatibility ledger, not a runtime bootstrap input. Source and
 packaged copies are byte-identical. Packaging and install checks verify the exact member list,
-member digests, version bounds, and supported capability-profile IDs before trusting the skill.
+member digests, version bounds, supported capability-profile IDs, and the exact same-key hook map
+before trusting the skill.
 
-The manifest does not invent compatibility beyond the frozen skill frontmatter. If the reviewed
-skill or any managed member changes, the manifest changes in lockstep or packaging fails.
+The manifest does not invent compatibility beyond installed-artifact capability evidence. Codex
+does not read it as skill frontmatter; it is Yoetz-owned compatibility and integrity data. If the
+reviewed skill or any managed member changes, the manifest changes in lockstep or packaging fails.
 
 ## Errors and edge cases
 
 - A missing, extra, duplicated, or digest-mismatched managed member fails packaging and
   installation checks.
 - Any local path leakage or capability-profile drift fails closed.
+- Missing/extra/inferred hook-map keys, a trigger without E-013 case IDs, or any v0.1 observation
+  arm makes the manifest invalid.
 - A manifest that is not canonical JSON or whose self-digest is wrong is invalid.
 - A `shared_guidance` member whose digest differs from the `guidance/<name>` resource it names fails
   packaging: that is a Codex-local fork of shared content, which the layering forbids.
@@ -65,6 +71,7 @@ skill or any managed member changes, the manifest changes in lockstep or packagi
 4. Capability-profile IDs match the reviewed skill contract exactly.
 5. Every `shared_guidance` member digest equals its `guidance/` resource digest.
 6. The manifest shape is harness-neutral; only its values are Codex-specific.
+7. Hook presence is exact-profile evidence and cannot be inferred from version bounds.
 
 ## Tests
 

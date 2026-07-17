@@ -32,7 +32,11 @@ The reference contains:
 - event batching, writer-sequence, expected-frontier, and retry examples;
 - multi-agent assignment and attribution rules;
 - forbidden-content guidance;
-- three worked mini-flows: code change, research task, and plan revision. The code-change flow shows
+- four worked mini-flows: code change, research task, plan revision, and a large generated or
+  migrated inventory. The inventory flow groups a 100-file result into independently reviewable
+  work-package obligations, publishes material package transitions, and uses one bounded manifest
+  evidence item for the leaf files in each completed package. It contrasts that with forbidden
+  one-obligation-per-file and routine per-file event streams. The code-change flow shows
   a bounded state-bound changed hunk/enclosing symbol plus linked test/failure evidence, and
   contrasts it with forbidden repository-wide or unrelated source publication;
 
@@ -48,6 +52,8 @@ The document does not widen the public workflow contract and does not introduce 
 - Naming a harness, install path, provider, or model fails the public-boundary scan; harness-specific
   ergonomics belong in that harness's own skill spec.
 - Exceeding the size bound fails packaging rather than shipping a document hosts will truncate.
+- Treating enumerable files or tool calls as the publication unit fails conformance; agents must be
+  able to name a coherent work package and its acceptance boundary.
 
 ## Invariants
 
@@ -57,12 +63,16 @@ The document does not widen the public workflow contract and does not introduce 
 4. Problem-local excerpts remain ordinary evidence in existing event families; they never create a
    source-browsing operation or imply independent observation.
 5. The document is harness-neutral and byte-identical wherever it is served.
+6. Work-package transitions are the normative batching unit; leaf files belong in bounded manifest
+   evidence and do not automatically become obligations or events.
 
 ## Tests
 
 - `specs/tests/capability.md` — including retrieval by an unprofiled MCP host with no installed
   skill.
 - `specs/tests/conformance.md`
+- The large-inventory fixture rejects per-file obligation/event amplification and accepts grouped
+  work packages with bounded manifests, partial-package status, and one final package transition.
 - `specs/tests/packaging.md` — byte parity across the resource and every harness install, plus the
   size bound.
 

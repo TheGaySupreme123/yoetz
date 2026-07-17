@@ -1,6 +1,6 @@
 # tests/unit/domain/test_values.py — canonical domain value conversions
 
-**Wave:** A/B | **ADRs:** ADR-002, ADR-003, ADR-005 | **Imports (spec-tree):**
+**Wave:** A/B | **ADRs:** ADR-002, ADR-003, ADR-005, ADR-011 | **Imports (spec-tree):**
 `src/yoetz/domain/values.md`, `src/yoetz/protocol/canonical.md`,
 `src/yoetz/protocol/models.md`
 **Imported by:** the domain unit suite
@@ -18,6 +18,8 @@ values without allowing lossy coercion.
 - `test_subject_state_ref_validation_is_strict` — subject-state references remain bounded and exact.
 - `test_subject_state_relation_full_matrix` — the complete absent/present tree-A/tree-B relation
   matrix, including the adversarial stale-after-edit vectors, follows the honesty rule.
+- `test_subject_state_capture_result_validation` — only a complete ADR-011 capture may carry
+  comparable digests; partial/unsupported/changing results carry none.
 - `test_generated_value_round_trips_are_idempotent` — Hypothesis covers wire sequences, UTC
   timestamps, and recursive safe JSON values across deterministic environment controls.
 

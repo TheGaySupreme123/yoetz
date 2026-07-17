@@ -30,7 +30,9 @@ a candidate read never does, exactly as reviewed at source.
 
 It also carries the honest statement of what a host does and does not earn: publishing over MCP
 yields `cooperative_mcp` with `self_asserted` authorship and `published_only` artifact observation,
-and no v0.1 harness integration changes that, because every v0.1 `HarnessProfile.hooks` is `None`.
+and no v0.1 harness integration changes that. An exact capability cell may carry a trigger-only hook
+that prompts `status`, but it observes nothing and leaves coverage unchanged; every v0.1
+observation arm is absent.
 
 The runtime does not synthesize, rewrite, template, or per-harness adapt the guidance. Manifest
 verification checks byte size and SHA-256 before it is served or installed.
@@ -44,8 +46,8 @@ a `LocalDisclosureSink` and creates no disclosure receipt.
 - A missing guidance file or manifest mismatch blocks both MCP resource registration and skill
   activation; a partial guidance set is never served.
 - A harness install whose copy differs from this resource fails byte parity.
-- Text implying that a first-party integration strengthens coverage is invalid while every v0.1
-  profile declares no hooks.
+- Text implying that a first-party integration or trigger-only hook strengthens coverage is invalid
+  while every v0.1 observation arm remains absent.
 - The file names no harness, install path, provider, or model.
 
 ## Invariants

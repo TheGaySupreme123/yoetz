@@ -166,6 +166,9 @@ v0.1 deliberately compares already recorded/captured artifact evidence only. It 
 artifact-inspection port or call Git, shell commands, or arbitrary filesystem reads. Live
 inspection is deferred until its own consent/root/symlink/submodule/execution/size/redaction/
 subject-state ADR; if later approved, it must publish captured evidence before deterministic review.
+ADR-011's content-withholding structural digest does not change this boundary: it may be published
+as a subject-state reference, but it supplies no source content and gives this service no live
+inspection capability.
 
 ### Port and schema prerequisites
 

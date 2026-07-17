@@ -1,6 +1,6 @@
 # docs/protocol/data-egress-and-privacy.md — privacy classification and outbound-egress protocol
 
-**Wave:** B/E/F | **ADRs:** ADR-004, ADR-006, ADR-007, ADR-008, ADR-009 | **Imports (spec-tree):**
+**Wave:** B/E/F | **ADRs:** ADR-004, ADR-006, ADR-007, ADR-008, ADR-009, ADR-011 | **Imports (spec-tree):**
 privacy schemas, egress fixtures, configuration/service/gateway/semantic port specs | **Imported by:**
 `PRIVACY.md`, provider adapters, setup surfaces, conformance and release evidence
 
@@ -99,6 +99,13 @@ needs category/class/scope/destination authority and the same minimization/never
 creates a live repository/filesystem handle. The omission manifest distinguishes `not_recorded`,
 `not_selected`, `withheld_by_policy`, and `redacted_never_send`; none is synonymous with an
 unchanged subject state.
+
+ADR-011 structural subject-state capture is outside the case-selector and disclosure pipeline. The
+explicit local CLI may stream one trusted worktree into bounded hashers and return only closed
+metadata plus versioned digests; the service, MCP caller, provider, and selector receive no path or
+repository handle. The operation is not a `LocalDisclosureSink`, performs no network or ledger
+write, and cannot weaken never-send or upgrade provenance. Failed, unsafe, changing, or over-limit
+capture returns no subject-state digest.
 
 The fail-safe seed is `local_only + structural + network false + all channels off`. The upstream
 CLI's *configured* recommendation is an inspectable standing workspace `trusted_provider +

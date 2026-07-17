@@ -804,6 +804,25 @@ including task `status`; key-independent `version`/help and the bounded `Service
 surface remain available. A future structural task-status mode requires its own public schema and
 threat review rather than an implicit partial read.
 
+### Structural subject-state capture
+
+`SubjectStateCapturePort.capture(command: SubjectStateCaptureCommand) ->
+SubjectStateCaptureResult` owns the optional local effect that produces comparable
+`SubjectStateRef` digests. Shared types are `SubjectStateCaptureCommand`,
+`SubjectStateCaptureResult`, `SubjectStateStatus`, `SubjectStateFormat`,
+`SubjectStateLimitation`, and the non-serializable `LocalWorkspaceHandle`.
+
+v0.1 format is `git_structural_v1`, implemented by `GitSubjectStateAdapter` under ADR-011. A
+complete result contains both `tree_digest` and `diff_digest`; every partial, changing, unsafe,
+unsupported, or over-limit capture returns no subject state and explicit closed limitations. The
+port returns no repository content, path, filename, branch, remote, Git output, or component
+digest. It is client-local support used before ordinary publication, not a seventh MCP/workflow
+operation, not service-owned ambient inspection, and not an `ArtifactInspectionPort`.
+
+Publishing a captured digest preserves the actual publication channel and authorship assurance. A
+complete capture may support `content_digest` evidence immutability, but never earns
+`harness_observed`, `hook_observed`, `artifact_verified`, or `independently_reproduced` by itself.
+
 ### Bundle runtime and exact routing
 
 `BundleRuntimePort` methods are:
@@ -930,7 +949,7 @@ maintenance may use either reviewed automation channel. MCP exposes no maintenan
 `IntegrationsPort` methods are `preview_skill`, `install_skill`, `status_skill`, and
 `remove_skill`, each taking an exact `HarnessId` plus its command value. The port names the
 capability, never one harness; Codex is the first adapter, not the definition (ADR-010).
-Shared types are `HarnessId`, `HarnessProfile`, `IntegrationScope` (only `trusted_project`),
+Shared types are `HarnessId`, `HarnessProfile`, `HarnessHookProfile`, `IntegrationScope` (only `trusted_project`),
 `IntegrationAction`, `IntegrationState`, `IntegrationReason`, `IntegrationTarget`, `SkillSource`,
 `IntegrationFile`, `SkillPreviewCommand`, `SkillApplyCommand`, `SkillStatusCommand`,
 `IntegrationPreview`, `IntegrationStatus`, `IntegrationResult`, and `IntegrationError`.
@@ -938,20 +957,28 @@ Shared types are `HarnessId`, `HarnessProfile`, `IntegrationScope` (only `truste
 `HarnessId` is a closed enum whose v0.1 membership is exactly `codex`. `HarnessProfile` is the
 frozen per-harness descriptor: `harness_id`, `skill_root` (the exact relative install directory),
 `frontmatter_profile` (the harness's required skill-header shape), `capability_profile_ids`,
-`supported_versions`, and `hooks: HarnessHookProfile | None`. `hooks` is declared now and is
-`None` for every v0.1 harness: no harness supplies observation hooks yet, so no v0.1 integration
-can emit the `hook_observed` publication channel or artifact-observation class (ADR-005). The field
-exists so that adding hooks is a profile capability rather than a second port.
+`supported_versions`, and `hooks_by_capability_profile: Mapping[str, HarnessHookProfile | None]`.
+The map has exactly the same keys as `capability_profile_ids`; missing, extra, wildcard, inherited,
+or range-derived entries are invalid. A v0.1 exact cell may select a trigger-only profile after
+E-013 passes, while an unsupported cell selects `None`. Every v0.1 observation arm is absent, so no
+v0.1 integration can emit the `hook_observed` publication channel or artifact-observation class
+(ADR-005).
 
-`HarnessHookProfile` distinguishes two arms. An **observation hook** reports what the harness saw
+`HarnessHookProfile` is the closed descriptor
+`(trigger_event, trigger_payload_profile_id, evidence_case_ids,
+trigger_action="reground_status", duplicate_policy="coalesce", loop_policy="single_flight",
+failure_policy="best_effort", observation_events=())`. `trigger_event`, payload profile, and evidence case IDs
+are exact nonempty bounded identifiers from the selected capability cell; no wildcard or version
+range is allowed. It distinguishes two arms. An **observation hook** reports what the harness saw
 the agent do and is the only arm that would earn `hook_observed`; it is deferred to v0.2. A
 **trigger hook** fires on a harness lifecycle event — context compaction is the motivating case —
 and prompts the agent to re-ground by calling `status`. A trigger hook earns no coverage: it
 observes nothing, and the `status` result it causes discloses only what that call would already
 have returned under the ordinary provenance rules and the `agent_context` ceiling ("Privacy policy,
 disclosure, and outbound gateway" above), so it touches no coverage lattice value and changes no
-honesty wording. v0.1 declares neither arm, and
-E-013 must freeze which lifecycle trigger points a harness exposes before any trigger hook ships.
+honesty wording. E-013 must freeze the exact event, payload/privacy boundary, coalescing/loop guard,
+and failure behavior before one exact v0.1 capability cell declares the trigger arm. Cells without
+that evidence remain `None`; every v0.1 observation arm remains absent.
 
 Adding a first-party harness is exactly one `HarnessId` value plus one adapter under
 `adapters/integrations/`; it requires no change to this port, to `IntegrationService`, or to any

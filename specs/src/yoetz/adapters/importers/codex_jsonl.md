@@ -70,7 +70,7 @@ installed-artifact capability run has frozen all of these facts:
 
 The baseline declaration is `codex-cli 0.139.0`, profile ID
 `codex-exec-jsonl/0.139.0/v1`, matching that release's public `exec_events` union. Target
-`0.144.3`, or any later version, receives its own profile only after the same installed-artifact
+`0.144.5`, or any later version, receives its own profile only after the same installed-artifact
 corpus passes; it is never inferred from 0.139.0, a minimum/maximum interval, SemVer compatibility,
 or successful parsing of one sample. The release build freezes `SUPPORTED_CODEX_PROFILES` and its
 digest in `VersionManifest`; absence is an internal `unsupported_codex_profile` result that the

@@ -1,6 +1,7 @@
 # tests/packaging/test_service_boundary_imports.py — installed trust-boundary import suite
 
-**Wave:** F | **ADRs:** ADR-008 | **Imports (spec-tree):** service/client/daemon/MCP/CLI package specs | **Imported by:** test runner
+**Wave:** F | **ADRs:** ADR-008, ADR-011 | **Imports (spec-tree):**
+service/client/daemon/MCP/CLI package specs, subject-state port/adapter | **Imported by:** test runner
 
 ## Purpose
 
@@ -12,7 +13,11 @@ Clean-interpreter import graph, optional-dependency absence, side-effect, and fo
 
 ## Behavior
 
-Import client/MCP/CLI normal modules under hooks that fail keyring/SQLite/cryptography/provider/filesystem access; import daemon separately and verify composition owner.
+Import client/MCP/CLI normal modules under hooks that fail keyring/SQLite/cryptography/provider/
+filesystem access; import daemon separately and verify composition owner. Exercise the exact
+`state capture` command path separately: it may lazily import only `ports.subject_state` and
+`adapters.git_subject_state`, and still fails any storage/key/provider/application/service import or
+write/network effect.
 
 ## Errors and edge cases
 
@@ -24,6 +29,8 @@ Lazy/dynamic imports, re-exports, TYPE_CHECKING behavior, missing optionals, for
 2. Only daemon imports ready composition in production.
 3. `HumanControlClient` and `ConfidentialSecretClient` are reachable only from trusted CLI helper
    modules and absent from MCP/ordinary service-client import graphs.
+4. ADR-011 state capture is the sole ordinary CLI repository-read exception; it is unreachable from
+   MCP/service graphs and imports no trusted composition.
 
 ## Tests
 

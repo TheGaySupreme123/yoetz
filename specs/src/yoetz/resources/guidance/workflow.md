@@ -25,7 +25,9 @@ The installed copy matches the reviewed root guidance byte-for-byte. It teaches 
 disclosure, the ten-step workflow, multi-agent attribution and handoff, resume and compaction
 recovery and staying next to the record during the work, finding response and recheck,
 receipt-bounded final wording, degraded behavior, and the safety and privacy rules, exactly as
-reviewed at source.
+reviewed at source. Its batching rule groups large inventories by coherent work package and keeps
+leaf-file inventories in bounded manifest evidence rather than creating per-file obligations or
+routine events.
 
 The runtime does not synthesize, rewrite, template, or per-harness adapt the guidance. Manifest
 verification checks byte size and SHA-256 before it is served or installed.

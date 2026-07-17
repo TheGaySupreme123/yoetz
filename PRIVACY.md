@@ -47,8 +47,11 @@ The recommended `assisted` packet includes goal, obligations, claims, decisions,
 deterministic finding bases, coverage and change-observation facts, plus bounded problem-local
 recorded evidence/test/failure/diff/source excerpts. It excludes sensitive/confidential content by
 default and carries an explicit omission reason when content was not recorded, selected, or allowed.
-Missing source never means “no code changed.” v0.1 does not browse live Git/filesystem to fill the
-packet; source must already be captured or agent-published in the frozen case.
+Missing source never means “no code changed.” v0.1 does not browse live Git/filesystem to fill a
+semantic-review packet; source must already be captured or agent-published in the frozen case.
+The separate ADR-011 `yoetz state capture` support command may read one explicitly named local Git
+worktree and return only bounded structural state digests. It neither returns source/path content
+nor gives the service, MCP clients, or review providers a repository handle.
 
 The upstream recommendation appears only for an exact installed endpoint whose current versioned
 data-use record states customer-content training `prohibited`, retention `none|bounded`, and
@@ -97,6 +100,13 @@ work, imported records, and a semantic reviewer's prose — stays gated until yo
 
 Authorship never unlocks a data class. Sensitive/confidential content and the never-send set above
 remain absolute at every sink, no matter who wrote what.
+
+The same boundary applies to structural subject-state capture. `yoetz state capture` is a local CLI
+operation: it hashes the explicitly selected worktree without networking and emits only closed
+metadata and digests to the invoking terminal. It does not persist file contents or names, inspect
+an arbitrary MCP-supplied path, populate a semantic-review packet, or prove who made a change. If
+the worktree cannot be bounded and hashed safely, the command fails without returning a state
+digest.
 
 A separately provisioned provider credential presents a necessary founder clarification: the
 working design permits a fresh one-attempt vault handle to emit that credential only as
