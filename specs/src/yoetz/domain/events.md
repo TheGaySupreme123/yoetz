@@ -73,6 +73,10 @@ are measured in UTF-8 bytes.
   (`("missing_payload_field")`).
 - Free-text fields never carry semantics for deterministic checks; only IDs, enums, digests,
   and `SubjectStateRef` values do.
+- `EventSchema.name` matches `^[a-z][a-z0-9_]{0,63}$`. `EventSchema.version` is stable SemVer with
+  exactly three canonical decimal components, no leading zeros, prerelease, or build metadata,
+  and at most 64 ASCII bytes. Known v0.1 families use exactly `1.0.0`; an otherwise bounded unknown
+  event version remains preservable but is never coerced to a known payload type.
 
 ### 1. `SessionOpenedPayload`
 

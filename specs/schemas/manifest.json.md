@@ -11,22 +11,23 @@ public release set. It is the inventory root for all schema bytes, IDs, sizes, a
 
 ## Public surface
 
-- `manifest.json` — canonical JSON object containing the reviewed schema inventory.
+- `manifest.json` — canonical JSON object with exact top-level fields
+  `manifest_schema: "yoetz.schema-manifest/1.0.0"`, `manifest_version: "1.0.0"`, and `members`.
 
 ## Behavior
 
-The manifest is canonical JSON and records one entry per released schema artifact. Each entry
-includes:
+The manifest is canonical JSON and records one entry per released schema artifact. Each entry has
+exactly these fields:
 
-- relative POSIX path;
-- `$id`;
-- schema version;
-- media type;
-- exact byte size;
-- SHA-256 digest;
-- owning Python boundary model;
-- schema kind, one exact value from `request_result|event|config|version_manifest`;
-- artifact role, one exact value from `common-value|MCP input|MCP output|persisted-envelope|
+- `path` — relative POSIX path;
+- `$id` — the exact static-file schema URL;
+- `schema_version`;
+- `media_type: "application/schema+json"`;
+- `byte_length` — exact raw-byte size;
+- `sha256` — lowercase SHA-256;
+- `owning_model` — the owning Python boundary model/helper name;
+- `schema_kind`, one exact value from `request_result|event|config|version_manifest`;
+- `artifact_role`, one exact value from `common-value|MCP input|MCP output|persisted-envelope|
   event-envelope|event-payload|configuration|finding|semantic-provenance|receipt-document|privacy-policy|
   outbound-case|privacy-audit|setup-contract|local-control|service-status|version-report`.
 

@@ -134,7 +134,6 @@ that evidence.
   install and tool runner; any npm launcher needs its own provenance, delegation, upgrade, and
   platform contract.
 - Sigstore or other signing claims until verification is documented and tested.
-- Hosted retrieval for public schema `$id` URLs; v0.1 resolves the frozen schema set offline.
 - A combined rendered skill handbook; v0.1 ships the two separately owned reference documents.
 - Global/user Codex skill installation scope; v0.1 mutates only one explicitly selected trusted
   project after preview and confirmation.
@@ -145,6 +144,11 @@ that evidence.
 
 - Ignored architecture/strategy files are private drafting inputs only; the committed ADRs,
   `INTERFACES.md`, and owning specs are self-contained public authority.
+- Public schema `$id` values are real immutable hosting routes below
+  `https://schemas.yoetz.dev/0.1/`. The checked-in `schemas/` tree deploys byte-for-byte at that
+  prefix, the local gate resolves the complete manifest with networking disabled, and the release
+  gate publishes then re-fetches the same bytes. Hosted availability never becomes a runtime
+  dependency.
 - **F-001:** Yoetz uses the unmodified official Apache License 2.0 text and the exact SPDX expression
   `Apache-2.0`. v0.1 does not invent or require a project-wide copyright-holder notice; applicable
   ownership and repository history remain intact.

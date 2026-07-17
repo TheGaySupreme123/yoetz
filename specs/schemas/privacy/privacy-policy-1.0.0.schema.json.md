@@ -14,6 +14,7 @@ that every surface and adapter must obey identically.
 
 - `$schema`: JSON Schema Draft 2020-12.
 - `$id`: `https://schemas.yoetz.dev/0.1/privacy/privacy-policy-1.0.0.schema.json`.
+- Owning model: `PrivacyPolicy`.
 - Media type: `application/vnd.yoetz.privacy-policy+json`.
 - Closed root fields: `schema_version`, `policy_id`, `version`, `policy_digest`, `profile`,
   `review_context_profile`, `review_selection`,

@@ -31,6 +31,26 @@ Optional capability entries are required tagged unions whose unavailable branch 
 is an exact sorted set of version/profile records, never minimum/maximum range fields. Extra
 properties are forbidden.
 
+The implementation-locked capability/resource wire records are closed:
+
+- version, source-ID, and digest components are `{status:"present", version|source_id|digest}` or
+  exactly `{status:"absent"}`;
+- provider adapters are `{name,status:"present",adapter_version,[sdk_distribution],[sdk_version]}`
+  or `{name,status:"absent"}`;
+- `CapabilitySet` is `{name,supported_versions,tested_versions,denied_versions}` with bounded
+  sorted-unique version sets; Codex profiles record exact version/profile identity, integration
+  modes, and trigger/observation status;
+- subject-state capability is `{status:"present",cells:[...]}` or exactly absent, with each cell
+  binding profile/platform/Git/capture-format identities and capability digest;
+- `ResourceIdentity` is `{name,media_type,size_bytes,sha256_digest}`, where size is a canonical
+  decimal string. Resource counts are exactly 53 schemas, 9 canonical vectors, 2 migrations,
+  2 skill resources, 4 guidance resources, and 1 runtime-support resource, totaling 71; the
+  resource list is either intentionally omitted-content empty or exactly 71 identities.
+
+The manifest carries exactly 31 request/result schema-version entries and 16 event entries, the
+two policy identities in canonical `research-evidence`, `work-integrity` order, and bounded
+collections (providers/service 16, Codex profiles 64, subject-state cells 32, limitations 64).
+
 ## Errors and edge cases
 
 - Missing required version or resource identity fails.

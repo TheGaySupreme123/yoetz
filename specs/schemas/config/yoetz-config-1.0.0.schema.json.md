@@ -43,6 +43,14 @@ The config loader first lets the owning strict model materialize defaults and th
 validates/serializes this required canonical shape; JSON Schema `default` is an annotation and is
 never treated as an authorization or an implicit validator mutation.
 
+The implementation-locked serialized seed is exactly the closed object
+`{profile:"local_only", review_context_profile:"structural", review_selection:<safe structural
+selector>, require_current_provider_data_use_evidence:false, network_egress_permitted:false,
+channel_policies:{llm_inference:false, product_telemetry:false, crash_diagnostics:false,
+update_checks:false, capability_testing:false}, local_model_enabled:false}`. The structural selector
+uses only the registered structural sections and zero excerpt/text ceilings. Channel names are
+fields, not an open string map; omission or `true` fails validation.
+
 Nested objects retain their own closed shapes and strict enums. Secret-like fields are forbidden.
 This schema is the service config contract and must not permit ad hoc keys. The seed is used only
 when no durable policy exists; changing config never tightens, widens, resets, or replaces a stored

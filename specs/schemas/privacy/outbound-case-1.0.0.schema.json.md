@@ -14,6 +14,7 @@ human authorization have completed before any adapter can perform I/O.
 
 - `$schema`: Draft 2020-12.
 - `$id`: `https://schemas.yoetz.dev/0.1/privacy/outbound-case-1.0.0.schema.json`.
+- Owning model: `ApprovedOutboundCase`.
 - Media type: `application/vnd.yoetz.outbound-case+json`.
 - Closed root fields: `schema_version`, `case_id`, `request_id`, `authorization_id`, `channel`,
   `purpose`, `scope`, `destination`, `policy`, `content_items`, `approved_categories`,
