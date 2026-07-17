@@ -24,7 +24,7 @@ exactly these fields:
 - `schema_version`;
 - `media_type: "application/schema+json"`;
 - `byte_length` — exact raw-byte size;
-- `sha256` — lowercase SHA-256;
+- `sha256` — `sha256:` followed by exactly 64 lowercase hexadecimal characters;
 - `owning_model` — the owning Python boundary model/helper name;
 - `schema_kind`, one exact value from `request_result|event|config|version_manifest`;
 - `artifact_role`, one exact value from `common-value|MCP input|MCP output|persisted-envelope|

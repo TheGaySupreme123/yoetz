@@ -8,7 +8,9 @@ Freeze the complete public v0.1 fixture file set and make additions, removals, o
 
 ## Public surface
 
-A canonical strict-JSON object with `manifest_schema`, `manifest_version`, and `members`. Each member has `path`, `fixture_id`, `media_type`, `byte_length`, and lowercase `sha256`.
+A canonical strict-JSON object with exact top-level fields
+`manifest_schema: "yoetz.fixture-manifest/1.0.0"`, `manifest_version: "1.0.0"`, and `members`.
+Each member has `path`, `fixture_id`, `media_type`, `byte_length`, and lowercase `sha256`.
 
 ## Behavior
 

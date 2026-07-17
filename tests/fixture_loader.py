@@ -13,6 +13,8 @@ type JsonScalar = str | int | bool | None
 type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
 
 _FIXTURE_MEDIA_TYPE: Final = "application/vnd.yoetz.fixture-case+json"
+_FIXTURE_MANIFEST_SCHEMA: Final = "yoetz.fixture-manifest/1.0.0"
+_FIXTURE_MANIFEST_VERSION: Final = "1.0.0"
 _SHA256_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{64}$")
 _MAX_JSON_DEPTH: Final = 64
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
@@ -64,11 +66,9 @@ class FixtureLoader:
         manifest = _strict_json(manifest_bytes)
         if not isinstance(manifest, dict) or frozenset(manifest) != _MANIFEST_FIELDS:
             raise ValueError("fixture_manifest_shape_invalid")
-        if not isinstance(manifest["manifest_schema"], str):
+        if manifest["manifest_schema"] != _FIXTURE_MANIFEST_SCHEMA:
             raise ValueError("fixture_manifest_schema_invalid")
-        if not isinstance(manifest["manifest_version"], str | int) or isinstance(
-            manifest["manifest_version"], bool
-        ):
+        if manifest["manifest_version"] != _FIXTURE_MANIFEST_VERSION:
             raise ValueError("fixture_manifest_version_invalid")
         raw_members = manifest["members"]
         if not isinstance(raw_members, list):
