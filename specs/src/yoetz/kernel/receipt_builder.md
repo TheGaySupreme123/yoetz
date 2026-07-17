@@ -30,7 +30,7 @@ stable sections and stable wording boundaries.
 - the preallocated receipt/task/session IDs and captured `generated_at` timestamp;
 - the loaded `VersionManifest` or equivalent version slice;
 - the requested redaction profile; and
-- the registered canonical `include` detail policy.
+- the registered canonical `include` detail policy: `summary`, `standard`, or `full`.
 
 It returns a `ReceiptDocument` with a stable ordering of sections and a stable conclusion code.
 
@@ -117,6 +117,11 @@ The builder also defines the stable section order. The intended order is:
 4. evidence and claim basis;
 5. limitations and coverage gaps;
 6. version and policy identity.
+
+`summary` retains the short summary plus required limitations/coverage and version-policy
+identity; `standard` additionally includes bounded outstanding-work and finding/disposition
+sections; `full` includes all six registered sections subject to the selected redaction profile.
+No include level may omit the conclusion, weakest coverage, material gaps, or limitations.
 
 Every section is bounded and purpose-specific. The summary section names the conclusion and frontier.
 The obligations section explains what is still open. The findings section lists the ranked blockers

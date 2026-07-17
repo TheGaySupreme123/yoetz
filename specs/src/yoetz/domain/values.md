@@ -118,8 +118,9 @@ order (binding invariant); it is metadata carried alongside events.
 `sequence >= 0`. When `sequence == 0`, `head_digest` MUST be `GENESIS_DIGEST`; when
 `sequence > 0`, `head_digest` MUST pass `validate_sha256_digest`. Violations raise
 `ProtocolValueError("invalid_frontier")`. `Frontier.genesis()` returns `Frontier(0, "genesis")`.
-`as_wire()` returns `JsonObject({"ingestion_sequence": render_wire_sequence(sequence),
-"digest": head_digest})`, the one `subject_frontier` shape registered by `specs/INTERFACES.md`.
+`as_wire()` returns `JsonObject({"sequence": render_wire_sequence(sequence),
+"head_digest": head_digest})`, the one closed frontier shape owned by
+`schemas/common/frontier-1.0.0.schema.json` and used for every `subject_frontier` value.
 Comparison
 operators compare `sequence` only; comparing two frontiers with equal sequence but different
 digests raises `ProtocolValueError("frontier_digest_mismatch")` from `__lt__`/`__le__` guards —

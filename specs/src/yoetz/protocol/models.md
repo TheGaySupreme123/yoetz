@@ -40,6 +40,7 @@ shape before any operation-specific fields are considered.
 | `RespondRequestModel` / `RespondResultModel` | public models for `respond` |
 | `StatusRequestModel` / `StatusResultModel` | public models for `status` |
 | `ReceiptRequestModel` / `ReceiptResultModel` | public models for `receipt` |
+| `ReceiptFormat` / `ReceiptInclude` / `ReceiptRedactionProfile` | closed receipt boundary enums |
 | `Timestamp` helpers | parse/format helpers for RFC 3339 UTC with three fractional digits |
 
 ## Behavior
@@ -109,7 +110,10 @@ application service:
 - `RespondRequestModel` / `RespondResultModel` carry one response to one finding;
 - `StatusRequestModel` / `StatusResultModel` carry the read-only projection query and page result;
 - `ReceiptRequestModel` / `ReceiptResultModel` carry the frozen-frontier receipt query and the
-  canonical receipt payload.
+  canonical receipt payload. Their exact closed tokens are `format=json|markdown|text`,
+  `include=summary|standard|full`, and
+  `redaction_profile=full_local|default_local_export|redacted_share`; no unknown token is
+  approximated.
 
 A post-validated `ReviewerChallenge` does not add a wire model. Its discrepancy is the semantic
 finding `summary`; its bounded direct main-agent message, alternative interpretation, uncertainty,

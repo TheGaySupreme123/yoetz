@@ -380,6 +380,10 @@ not conflict with this correspondence.
   subject frontier, and exact nonnegative `suppressed_finding_count` from the applicable latest
   check, but not the post-append result frontier (which would create a digest
   self-reference). `ReceiptResult` carries both subject and post-commit result frontiers.
+- Receipt boundary tokens are closed: `ReceiptFormat` is `json|markdown|text`, `ReceiptInclude`
+  is `summary|standard|full`, and `ReceiptRedactionProfile` is
+  `full_local|default_local_export|redacted_share`. `include` changes only the registered section
+  detail level; it never suppresses required conclusion, coverage, gap, or limitation material.
 - `PolicyPack` ids: `work-integrity/0.1.0`, `research-evidence/0.1.0`
   (`kernel/policies/work_integrity.py`, `kernel/policies/research_evidence.py`).
 

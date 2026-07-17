@@ -22,7 +22,8 @@ Closed request object with:
 - `subject_frontier` / `expected_frontier`;
 - `receipt_id` identity when the contract names it;
 - `task_id`, `session_id`, and actor/client metadata;
-- `format`, `include`, and `redaction_profile` closed enums.
+- `format` closed to `json|markdown|text`, `include` closed to `summary|standard|full`, and
+  `redaction_profile` closed to `full_local|default_local_export|redacted_share`.
 
 The schema forbids unknown format/include profiles and keeps the frontier exact. It does not permit
 the post-commit result frontier in the request body.

@@ -6,20 +6,27 @@
 
 ## Purpose
 
-Describe the common result wrapper used by every public operation result schema.
+Describe the closed reusable result definitions used by every public operation result schema.
+JSON Schema has no parameterized payload type, so each operation artifact owns its exact success
+union while this artifact owns the only operation-independent complete result and the shared
+privacy-projection definitions.
 
 ## Public surface
 
 - `$schema`: Draft 2020-12.
 - `$id`: `https://schemas.yoetz.dev/0.1/common/operation-result/1.0.0`.
 - Owning model: common result envelope helper.
+- Stable definitions: `$defs/failure_result`, `$defs/privacy_projection`, and
+  `$defs/omitted_content`.
+- The document root is exactly `$ref: "#/$defs/failure_result"`; it contains no permissive
+  generic-success instance shape.
 
 ## Behavior
 
-This wrapper is the shared union shape used by the six public operation results:
-
-- `ok: true` branch containing the operation-specific success payload.
-- `ok: false` branch containing the common public-error object.
+The six public operation result schemas each define their own closed `ok: true` branch and pair it
+with `$defs/failure_result`. This common document's root validates that complete `ok: false`
+public-error result. It does not attempt to model an unknown operation success: closing such a base
+would prevent composition, while leaving it open would violate the public boundary.
 
 The wrapper also owns the common local-disclosure projection definitions. Every ordinary success
 branch requires `privacy_projection` with sink `agent_context`, a canonical durable local-
@@ -38,9 +45,10 @@ requires `projection_commitment` in canonical `hmac-sha256:` form and forbids an
 internal-result/projection digest; arrays are sorted unique. A result that needs more content must use
 its operation's pagination rather than truncate after commit.
 
-The wrapper requires canonical request identity fields where the operation contract does so and must
-accept the last-resort `INTERNAL_ERROR` fallback used by MCP/CLI recovery paths. It is closed and
-rejects extra properties.
+`failure_result` requires canonical request identity fields where the public fallback permits them
+and accepts the last-resort `INTERNAL_ERROR` fallback used by MCP/CLI recovery paths. It is closed
+and rejects extra properties. Every operation-specific root references the exact definition, so
+all six still admit one byte-compatible error contract.
 
 ## Errors and edge cases
 

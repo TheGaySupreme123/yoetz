@@ -31,8 +31,9 @@ reword conclusions.
 ### Validate and freeze
 
 1. Resolve the validated session/writer pair to one active task runtime. Validate
-   `expected_frontier`, constrained actor/client, requested output `format`, `include` profile, and
-   `redaction_profile` as exact closed protocol enums. Query the task-scoped importer as an
+   `expected_frontier`, constrained actor/client, requested output `format` (`json|markdown|text`),
+   `include` profile (`summary|standard|full`), and `redaction_profile` as exact closed protocol
+   enums. Query the task-scoped importer as an
    optional bounded UX preflight; any observed pending import returns retryable
    `OPERATION_PENDING`. The authoritative receipt append repeats this predicate atomically. The
    three redaction profiles are
