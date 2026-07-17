@@ -50,6 +50,12 @@ orthogonal and neither substitutes for the other.
 The v0.1 manifest lists exactly 52 `*.schema.json` members: the original 43 reviewed schemas plus
 four privacy and five local-service/control schemas. The manifest never lists itself.
 
+For every member, `$id` is not merely namespace-prefixed: it must equal
+`https://schemas.yoetz.dev/0.1/` plus the exact relative `path`. Thus the manifest is also the
+closed static-host route table. `https://schemas.yoetz.dev/0.1/manifest.json` serves these same
+manifest bytes, while every gate and installed runtime resolves member IDs/refs from the local
+manifest and packaged files with network retrieval disabled.
+
 The manifest is the release-time source of truth for schema parity. It is produced from the reviewed
 checked-in artifacts, not from runtime generation. The manifest must remain stable across source,
 sdist, wheel, and installed copies.
@@ -58,6 +64,8 @@ sdist, wheel, and installed copies.
 
 - A missing or duplicate schema entry blocks release.
 - A path/digest mismatch blocks packaging parity.
+- A path/`$id` mismatch, unlisted absolute ref, unresolved local fragment, or ref resolution that
+  attempts DNS/HTTP blocks the local gate and release.
 - A manifest that is not canonical JSON fails the contract.
 
 ## Invariants

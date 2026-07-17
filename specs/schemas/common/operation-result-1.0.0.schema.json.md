@@ -45,10 +45,12 @@ requires `projection_commitment` in canonical `hmac-sha256:` form and forbids an
 internal-result/projection digest; arrays are sorted unique. A result that needs more content must use
 its operation's pagination rather than truncate after commit.
 
-`failure_result` requires canonical request identity fields where the public fallback permits them
-and accepts the last-resort `INTERNAL_ERROR` fallback used by MCP/CLI recovery paths. It is closed
-and rejects extra properties. Every operation-specific root references the exact definition, so
-all six still admit one byte-compatible error contract.
+`failure_result` requires `protocol_version: "0.1"`, `schema_version: "1.0.0"`, `ok: false`, and
+the closed public-error object. Its `request_id` is optional and, when present, is either a
+canonical request ID or `null`, which admits the request-independent last-resort `INTERNAL_ERROR`
+fallback used by MCP/CLI recovery paths. It is closed and rejects extra properties. Every
+operation-specific root references the exact definition, so all six still admit one
+byte-compatible error contract.
 
 ## Errors and edge cases
 

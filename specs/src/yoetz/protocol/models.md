@@ -179,12 +179,13 @@ The complete content map is:
 | `check` | `/findings/*/summary`, `/findings/*/detail` | `finding_summary` |
 | `respond` | `/response/reason` | `finding_summary` |
 | `respond` | `/response/evidence/*/description` | `evidence_excerpt` |
+| `status` compact view | `/page/items/*/task_title` | `task_description` |
+| `status` compact view | `/page/items/*/open_obligations/*/description`, `/page/items/*/open_obligations/*/evidence_expectation`, `/page/items/*/open_obligations/*/acceptance_criteria` | `obligation_text` |
+| `status` compact view | `/page/items/*/unresolved_findings/*/summary`, `/page/items/*/unresolved_findings/*/detail` | `finding_summary` |
 | `status` obligations view | `/page/items/*/description`, `/page/items/*/evidence_expectation`, `/page/items/*/acceptance_criteria` | `obligation_text` |
-| `status` decisions view | `/page/items/*/statement`, `/page/items/*/rationale`, `/page/items/*/alternatives/*` | `decision_excerpt` |
-| `status` actions/results view | `/page/items/*/description`, `/page/items/*/command`, `/page/items/*/summary` | `command_metadata` |
 | `status` evidence view | `/page/items/*/description`, `/page/items/*/reference` | `evidence_excerpt` |
-| `status` claims view | `/page/items/*/statement` | `claim_text` |
-| `status` findings/responses view | `/page/items/*/summary`, `/page/items/*/detail`, `/page/items/*/reason` | `finding_summary` |
+| `status` findings view | `/page/items/*/summary`, `/page/items/*/detail`, `/page/items/*/reason` | `finding_summary` |
+| `status` assignment/candidate_findings/history/versions views | none; their exact v0.1 schemas contain structural IDs, codes, rule-templated candidate prose, and bounded metadata only | — |
 | `receipt` | `/document/task/title` | `task_description` |
 | `receipt` | `/document/obligations/*/description`, `/document/obligations/*/evidence_expectation`, `/document/obligations/*/acceptance_criteria` | `obligation_text` |
 | `receipt` | `/document/claims/*/statement` | `claim_text` |

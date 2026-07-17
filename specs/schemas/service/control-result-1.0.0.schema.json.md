@@ -47,7 +47,10 @@ error into a transport failure.
 ### Nineteen support success branches
 
 This artifact owns the following exact closed success `$defs`; `v` means required
-`schema_version: "1.0.0"`. Bracketed fields are optional; all other fields are required.
+`schema_version: "1.0.0"`. Bracketed fields are optional; all other fields are required. Every
+support body below also requires the common body-level `privacy_projection` except the five
+explicit structural/audit-recursion exemptions `service_status`, `service_lock`, `service_stop`,
+`privacy_receipts_list`, and `privacy_receipts_get`.
 
 | Method constant | Exact closed `body` definition |
 |---|---|
@@ -64,8 +67,8 @@ This artifact owns the following exact closed success `$defs`; `v` means require
 | `service_status` | Offline `$ref` to `service/service-status-1.0.0`. |
 | `service_lock` | Offline `$ref` to `service/service-status-1.0.0`; returned state must be `locked` for a successful result. |
 | `service_stop` | `{v, state:draining, accepted:true}`; it never claims process exit before the connection closes. |
-| `privacy_get_setup` | Offline `$ref` to `privacy/setup-wizard-contract-1.0.0`, additionally constrained to service `message_type` `question\|policy_review\|decision_required\|complete\|cancelled\|setup_error`. |
-| `privacy_get_effective` | Offline `$ref` to `privacy/privacy-policy-1.0.0`. |
+| `privacy_get_setup` | `{v, setup:<setup-wizard-contract $ref additionally constrained to service message_type question\|policy_review\|decision_required\|complete\|cancelled\|setup_error>, privacy_projection}`. |
+| `privacy_get_effective` | `{v, policy:<privacy-policy-1.0.0 $ref>, privacy_projection}`. |
 | `privacy_propose_policy` | Closed union: `{v, outcome:decision_required, proposal_id:ppr_, proposal_digest:sha256:<64 lowercase hex>, candidate_policy_digest:sha256:<64 lowercase hex>, expected_policy_version:positive-canonical-decimal, expires_at:timestamp}` or `{v, outcome:tightening_applied, policy:<privacy-policy $ref>, revoked_authorization_count:uint, closed_session_count:uint, provider_reconciliation:ProviderReconciliation}`. |
 | `privacy_tighten_policy` | `{v, outcome:tightening_applied, policy:<privacy-policy-1.0.0 $ref>, revoked_authorization_count:uint, closed_session_count:uint, provider_reconciliation:ProviderReconciliation}`. |
 | `privacy_receipts_list` | `{v, snapshot_generation:positive-canonical-decimal, receipts:PrivacyReceiptView[0..100], [next_cursor:authenticated-base64url[1..1024]]}`. Receipts are sorted `(finished_at, receipt_id)` descending, and the optional cursor is bound to the exact snapshot generation and request filters. |
@@ -114,8 +117,12 @@ unlocked `Application`/audit key exists and their schemas contain only allowlist
 state/version/generation/capability codes and booleans. `privacy_receipts_list` and
 `privacy_receipts_get` are also projection/audit-exempt, but only while ready and only for an
 authenticated ordinary CLI/UI caller; their bodies expose already-durable structural audit views,
-so creating another receipt for inspection would recurse. All six workflow successes and every
-other ready support success require exactly one top-level common receipt-bound projection.
+so creating another receipt for inspection would recurse. All six workflow successes already
+carry their operation body projection, and every other ready non-exempt support success requires
+one body-level common receipt-bound projection. A nested previously projected public result such
+as `review.check_result` retains that historical nested projection while the outer review body
+records the current disclosure; the one-projection rule applies independently to each disclosed
+result layer.
 `service_lock` is always structural/exempt and returns only its post-lock status after the
 application closes; it never depends on a local-audit call.
 

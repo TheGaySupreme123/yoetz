@@ -341,7 +341,10 @@ as a payload gap, never guess content.
 `AcceptedEvent.canonical_envelope() -> JsonValue` renders the structural object registered in
 `specs/INTERFACES.md` (without
 `entry_digest`, without `payload`) whose JCS bytes are what `entry_digest` commits to. First
-event predecessor digests are the literal `"genesis"`.
+event predecessor digests are the literal `"genesis"`. The domain keeps writer/ledger sequences
+and payload sizes as validated Python integers, but this public/persisted JSON renderer emits every
+integer-like counter through the canonical decimal-string wire form; fixtures and JSON Schemas
+therefore use strings rather than JSON numbers for those fields.
 
 ### `UnknownEvent`
 
