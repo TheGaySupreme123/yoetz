@@ -151,6 +151,18 @@ _EXPECTED_SEMANTIC_STATUS_REASONS = {
     "stale": {"frontier_changed", "dependency_changed"},
     "failed": {"coordinator_failure"},
 }
+_REQUIRED_SEMANTIC_PROVENANCE_PAIRS = frozenset(
+    (status, reason)
+    for status in {"succeeded", "refused", "timeout", "invalid", "late", "stale"}
+    for reason in _EXPECTED_SEMANTIC_STATUS_REASONS[status]
+) | frozenset(
+    {
+        ("unavailable", "transport_unavailable"),
+        ("unavailable", "provider_rate_limited"),
+        ("unavailable", "provider_quota_exhausted"),
+    }
+)
+_OPTIONAL_SEMANTIC_PROVENANCE_PAIRS = frozenset({("failed", "coordinator_failure")})
 
 
 def _models_module() -> Any:
@@ -739,6 +751,41 @@ def _semantic_provenance_wire() -> dict[str, JsonValue]:
     return cast(dict[str, JsonValue], finding["provenance"])
 
 
+def _semantic_provenance_for(status: str, reason: str) -> dict[str, JsonValue]:
+    provenance = _semantic_provenance_wire()
+    provenance["status"] = status
+    provenance["reason"] = reason
+    return provenance
+
+
+def _all_event_families_fixture() -> dict[str, JsonValue]:
+    fixture_path = (
+        Path(__file__).resolve().parents[3] / "fixtures" / "replay" / "all-event-families.case.json"
+    )
+    return _plain_object(fixture_path.read_bytes())
+
+
+def _check_recorded_payload_wire() -> dict[str, JsonValue]:
+    fixture = _all_event_families_fixture()
+    fixture_input = cast(dict[str, JsonValue], fixture["input"])
+    entries = cast(list[JsonValue], fixture_input["accepted_entries"])
+    for raw_entry in entries:
+        entry = cast(dict[str, JsonValue], raw_entry)
+        envelope = cast(dict[str, JsonValue], entry["envelope"])
+        schema = cast(dict[str, JsonValue], envelope["schema"])
+        if schema["name"] == "check_recorded":
+            return cast(dict[str, JsonValue], entry["payload"])
+    raise AssertionError("check_recorded_fixture_missing")
+
+
+def _accepted_event_wire() -> dict[str, JsonValue]:
+    fixture = _all_event_families_fixture()
+    fixture_input = cast(dict[str, JsonValue], fixture["input"])
+    entries = cast(list[JsonValue], fixture_input["accepted_entries"])
+    first_entry = cast(dict[str, JsonValue], entries[0])
+    return cast(dict[str, JsonValue], first_entry["envelope"])
+
+
 def _receipt_result_wire() -> dict[str, JsonValue]:
     expected = _receipt_fixture_expected()
     document = cast(dict[str, JsonValue], expected["receipt_document"])
@@ -905,7 +952,7 @@ def test_protocol_models_public_exports_are_closed() -> None:
         StartRequest StartRequestModel StartResult StartResultModel StatusRequest
         StatusRequestModel StatusResult StatusResultModel SubjectStateRefModel
         VALID_SEMANTIC_REASONS classify_result_leaf public_model_to_wire
-        validate_semantic_outcome
+        validate_semantic_outcome validate_semantic_provenance_binding
         """.split()
     )
     exports = cast(list[str], getattr(models, "__all__"))
@@ -1106,11 +1153,25 @@ def test_check_semantic_status_reason_and_provenance_matrix() -> None:
             wire = _check_result_wire()
             wire["semantic_status"] = status
             wire["semantic_reason"] = reason
+            pair = (status, reason)
             wire["semantic_provenance"] = (
-                _semantic_provenance_wire() if status == "succeeded" else None
+                _semantic_provenance_for(status, reason)
+                if pair in _REQUIRED_SEMANTIC_PROVENANCE_PAIRS
+                else None
             )
             parsed = models.CheckResultModel.model_validate(wire)
             assert models.public_model_to_wire(parsed) == wire
+
+            if pair in _REQUIRED_SEMANTIC_PROVENANCE_PAIRS:
+                missing = dict(wire)
+                missing["semantic_provenance"] = None
+                with pytest.raises(ValidationError):
+                    models.CheckResultModel.model_validate(missing)
+            elif pair not in _OPTIONAL_SEMANTIC_PROVENANCE_PAIRS:
+                forbidden = dict(wire)
+                forbidden["semantic_provenance"] = _semantic_provenance_for(status, reason)
+                with pytest.raises(ValidationError):
+                    models.CheckResultModel.model_validate(forbidden)
 
     succeeded_without_provenance = _check_result_wire()
     succeeded_without_provenance["semantic_status"] = "succeeded"
@@ -1121,9 +1182,157 @@ def test_check_semantic_status_reason_and_provenance_matrix() -> None:
     failed_with_provenance = _check_result_wire()
     failed_with_provenance["semantic_status"] = "failed"
     failed_with_provenance["semantic_reason"] = "coordinator_failure"
-    failed_with_provenance["semantic_provenance"] = _semantic_provenance_wire()
+    failed_with_provenance["semantic_provenance"] = _semantic_provenance_for(
+        "failed", "coordinator_failure"
+    )
     parsed_failure = models.CheckResultModel.model_validate(failed_with_provenance)
     assert models.public_model_to_wire(parsed_failure) == failed_with_provenance
+
+    mismatched = _check_result_wire()
+    mismatched["semantic_status"] = "succeeded"
+    mismatched["semantic_reason"] = "semantic_completed"
+    mismatched["semantic_provenance"] = _semantic_provenance_for("refused", "provider_refused")
+    with pytest.raises(ValidationError):
+        models.CheckResultModel.model_validate(mismatched)
+
+    malformed_values: tuple[JsonValue, ...] = (
+        cast(JsonValue, []),
+        cast(JsonValue, {"status": "succeeded"}),
+        cast(JsonValue, {"reason": "semantic_completed"}),
+    )
+    for malformed in malformed_values:
+        malformed_wire = _check_result_wire()
+        malformed_wire["semantic_status"] = "succeeded"
+        malformed_wire["semantic_reason"] = "semantic_completed"
+        malformed_wire["semantic_provenance"] = malformed
+        with pytest.raises(ValidationError):
+            models.CheckResultModel.model_validate(malformed_wire)
+
+    status_enum = models.SemanticStatus
+    reason_enum = models.SemanticReason
+    with pytest.raises(ProtocolValueError) as exc_info:
+        models.validate_semantic_provenance_binding(
+            status_enum.SUCCEEDED,
+            reason_enum.SEMANTIC_COMPLETED,
+            None,
+            None,
+        )
+    _assert_reason(exc_info, "invalid_semantic_provenance")
+
+
+def test_frontier_model_enforces_genesis_cross_field_identity() -> None:
+    models = _models_module()
+    genesis = models.FrontierModel.model_validate({"sequence": "0", "head_digest": "genesis"})
+    assert genesis.sequence == "0"
+    positive = models.FrontierModel.model_validate(
+        {"sequence": "1", "head_digest": f"sha256:{'1' * 64}"}
+    )
+    assert positive.sequence == "1"
+
+    with pytest.raises(ValidationError):
+        models.FrontierModel.model_validate({"sequence": "0", "head_digest": f"sha256:{'1' * 64}"})
+    with pytest.raises(ValidationError):
+        models.FrontierModel.model_validate({"sequence": "1", "head_digest": "genesis"})
+
+
+def test_b1_prerequisite_event_and_receipt_schema_seams_are_exact() -> None:
+    session_payload: dict[str, JsonValue] = {
+        "task_title": "x" * 8_192,
+        "external_ref": "external-only",
+        "client_kind": "test_client",
+        "client_version": "0.1.0",
+        "integration": "local_cli",
+        "profile": "test-fake",
+    }
+    validate_schema_instance("session-opened", "1.0.0", session_payload)
+    for invalid_title in ("", "x" * 8_193):
+        invalid_session = dict(session_payload)
+        invalid_session["task_title"] = invalid_title
+        with pytest.raises(ProtocolValueError) as exc_info:
+            validate_schema_instance("session-opened", "1.0.0", invalid_session)
+        _assert_reason(exc_info, "schema_instance_invalid")
+
+    result_id = _test_id("res_")
+    draft: dict[str, JsonValue] = {
+        "event_id": _test_id("evt_"),
+        "schema": {"name": "session_opened", "version": "1.0.0"},
+        "occurred_at": "2026-07-18T12:34:56.789Z",
+        "causal_parents": [],
+        "payload": session_payload,
+        "artifact_refs": [],
+        "evidence_refs": [result_id],
+    }
+    validate_schema_instance("event-draft", "1.0.0", draft)
+
+    accepted = _accepted_event_wire()
+    accepted["evidence_refs"] = [result_id]
+    validate_schema_instance("accepted-event", "1.0.0", accepted)
+    for name, value in (("event-draft", draft), ("accepted-event", accepted)):
+        invalid_refs = dict(value)
+        invalid_refs["evidence_refs"] = [_test_id("act_")]
+        with pytest.raises(ProtocolValueError) as exc_info:
+            validate_schema_instance(name, "1.0.0", invalid_refs)
+        _assert_reason(exc_info, "schema_instance_invalid")
+
+    document = cast(dict[str, JsonValue], _receipt_fixture_expected()["receipt_document"])
+    document["responses"] = [
+        {
+            "finding_id": _test_id("fnd_"),
+            "finding_frontier": {"sequence": "0", "head_digest": "genesis"},
+            "disposition": "acknowledged",
+            "evidence_refs": [result_id],
+        }
+    ]
+    validate_schema_instance("receipt-document", "1.0.0", document)
+
+    missing_items_document = cast(
+        dict[str, JsonValue], _receipt_fixture_expected()["receipt_document"]
+    )
+    sections = cast(list[JsonValue], missing_items_document["sections"])
+    first_section = cast(dict[str, JsonValue], sections[0])
+    del first_section["items"]
+    with pytest.raises(ProtocolValueError) as exc_info:
+        validate_schema_instance("receipt-document", "1.0.0", missing_items_document)
+    _assert_reason(exc_info, "schema_instance_invalid")
+
+
+def test_check_recorded_schema_matches_final_semantic_provenance_identity() -> None:
+    for status, reasons in _EXPECTED_SEMANTIC_STATUS_REASONS.items():
+        for reason in reasons:
+            pair = (status, reason)
+            payload = _check_recorded_payload_wire()
+            payload["semantic_status"] = status
+            payload["semantic_reason"] = reason
+            if pair in _REQUIRED_SEMANTIC_PROVENANCE_PAIRS:
+                payload["semantic_provenance"] = _semantic_provenance_for(status, reason)
+            else:
+                payload.pop("semantic_provenance", None)
+            validate_schema_instance("check-recorded", "1.0.0", payload)
+
+            if pair in _REQUIRED_SEMANTIC_PROVENANCE_PAIRS:
+                payload.pop("semantic_provenance")
+                with pytest.raises(ProtocolValueError) as exc_info:
+                    validate_schema_instance("check-recorded", "1.0.0", payload)
+                _assert_reason(exc_info, "schema_instance_invalid")
+            elif pair not in _OPTIONAL_SEMANTIC_PROVENANCE_PAIRS:
+                payload["semantic_provenance"] = _semantic_provenance_for(status, reason)
+                with pytest.raises(ProtocolValueError) as exc_info:
+                    validate_schema_instance("check-recorded", "1.0.0", payload)
+                _assert_reason(exc_info, "schema_instance_invalid")
+
+    failed = _check_recorded_payload_wire()
+    failed["semantic_status"] = "failed"
+    failed["semantic_reason"] = "coordinator_failure"
+    failed["semantic_provenance"] = _semantic_provenance_for("failed", "coordinator_failure")
+    validate_schema_instance("check-recorded", "1.0.0", failed)
+
+    mismatched = _check_recorded_payload_wire()
+    mismatched["semantic_status"] = "succeeded"
+    mismatched["semantic_reason"] = "semantic_completed"
+    mismatched["semantic_provenance"] = _semantic_provenance_for("refused", "provider_refused")
+    with pytest.raises(ProtocolValueError) as exc_info:
+        validate_schema_instance("check-recorded", "1.0.0", mismatched)
+    _assert_reason(exc_info, "schema_instance_invalid")
 
 
 def test_actor_and_client_models_validate_shape_without_granting_assurance() -> None:
@@ -1964,7 +2173,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 1_253
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 1_269
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:

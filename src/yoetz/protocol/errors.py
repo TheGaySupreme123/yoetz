@@ -52,7 +52,6 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "accepted_record_shape_invalid",
     "actor_id_malformed",
     "actor_id_not_generated",
-    "attachment_key_incomplete",
     "byte_order_mark_forbidden",
     "commitment_only_object_kind",
     "dependency_changed",
@@ -63,6 +62,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "empty_subject_state",
     "engine_family_wrong_author",
     "entry_digest_mismatch",
+    "event_family_not_admitted",
     "event_integer_out_of_range",
     "event_text_out_of_bounds",
     "evidence_strength_unsupported",
@@ -82,6 +82,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "input_not_bytes",
     "integer_out_of_safe_range",
     "integer_out_of_sqlite_range",
+    "invalid_actor_type",
     "invalid_chain",
     "invalid_check_types",
     "invalid_commitment",
@@ -119,6 +120,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "invalid_semantic_outcome_type",
     "invalid_semantic_provenance",
     "invalid_semantic_status_reason_pair",
+    "invalid_subject_state",
     "invalid_timestamp",
     "invalid_token_usage",
     "invalid_utf8",
@@ -179,7 +181,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 127
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 129
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)

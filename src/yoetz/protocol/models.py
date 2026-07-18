@@ -18,6 +18,7 @@ from pydantic import (
     ConfigDict,
     Field,
     RootModel,
+    field_validator,
     model_validator,
 )
 
@@ -99,6 +100,7 @@ __all__ = [
     "classify_result_leaf",
     "public_model_to_wire",
     "validate_semantic_outcome",
+    "validate_semantic_provenance_binding",
 ]
 
 PROTOCOL_VERSION: Final = "0.1"
@@ -292,6 +294,46 @@ VALID_SEMANTIC_REASONS: Final[Mapping[SemanticStatus, frozenset[SemanticReason]]
 )
 
 
+_PREDISPATCH_SEMANTIC_STATUSES: Final[frozenset[SemanticStatus]] = frozenset(
+    {
+        SemanticStatus.NOT_REQUESTED,
+        SemanticStatus.NOT_CONFIGURED,
+        SemanticStatus.BLOCKED_BY_POLICY,
+        SemanticStatus.BLOCKED_FORBIDDEN_DATA,
+        SemanticStatus.CLASSIFICATION_UNCERTAIN,
+        SemanticStatus.AWAITING_HUMAN,
+        SemanticStatus.HUMAN_DENIED,
+        SemanticStatus.APPROVAL_EXPIRED,
+    }
+)
+_REQUIRED_SEMANTIC_PROVENANCE_STATUSES: Final[frozenset[SemanticStatus]] = frozenset(
+    {
+        SemanticStatus.SUCCEEDED,
+        SemanticStatus.REFUSED,
+        SemanticStatus.TIMEOUT,
+        SemanticStatus.INVALID,
+        SemanticStatus.LATE,
+        SemanticStatus.STALE,
+    }
+)
+_REQUIRED_UNAVAILABLE_PROVENANCE_REASONS: Final[frozenset[SemanticReason]] = frozenset(
+    {
+        SemanticReason.TRANSPORT_UNAVAILABLE,
+        SemanticReason.PROVIDER_RATE_LIMITED,
+        SemanticReason.PROVIDER_QUOTA_EXHAUSTED,
+    }
+)
+_FORBIDDEN_UNAVAILABLE_PROVENANCE_REASONS: Final[frozenset[SemanticReason]] = frozenset(
+    {
+        SemanticReason.CREDENTIAL_UNAVAILABLE,
+        SemanticReason.ENDPOINT_PROFILE_UNAVAILABLE,
+        SemanticReason.RETRY_BUDGET_EXHAUSTED,
+        SemanticReason.AUDIT_RESERVATION_UNAVAILABLE,
+        SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN,
+    }
+)
+
+
 def validate_semantic_outcome(status: SemanticStatus, reason: SemanticReason) -> None:
     """Validate one exact semantic status/reason pair without coercion."""
 
@@ -299,6 +341,46 @@ def validate_semantic_outcome(status: SemanticStatus, reason: SemanticReason) ->
         raise ProtocolValueError("invalid_semantic_outcome_type")
     if reason not in VALID_SEMANTIC_REASONS[status]:
         raise ProtocolValueError("invalid_semantic_status_reason_pair")
+
+
+def validate_semantic_provenance_binding(
+    status: SemanticStatus,
+    reason: SemanticReason,
+    provenance_status: SemanticStatus | None,
+    provenance_reason: SemanticReason | None,
+) -> None:
+    """Validate the closed provenance-presence and final-attempt identity partition."""
+
+    validate_semantic_outcome(status, reason)
+
+    if provenance_status is None and provenance_reason is None:
+        provenance_present = False
+    elif type(provenance_status) is SemanticStatus and type(provenance_reason) is SemanticReason:
+        provenance_present = True
+    else:
+        raise ProtocolValueError("invalid_semantic_provenance")
+
+    if provenance_present and (provenance_status is not status or provenance_reason is not reason):
+        raise ProtocolValueError("invalid_semantic_provenance")
+
+    if status in _PREDISPATCH_SEMANTIC_STATUSES:
+        provenance_required = False
+    elif status in _REQUIRED_SEMANTIC_PROVENANCE_STATUSES:
+        provenance_required = True
+    elif status is SemanticStatus.UNAVAILABLE:
+        if reason in _REQUIRED_UNAVAILABLE_PROVENANCE_REASONS:
+            provenance_required = True
+        elif reason in _FORBIDDEN_UNAVAILABLE_PROVENANCE_REASONS:
+            provenance_required = False
+        else:  # pragma: no cover - guarded by validate_semantic_outcome
+            raise ProtocolValueError("invalid_semantic_provenance")
+    elif status is SemanticStatus.FAILED:
+        return
+    else:  # pragma: no cover - the enum and status/reason registry are closed
+        raise ProtocolValueError("invalid_semantic_provenance")
+
+    if provenance_present is not provenance_required:
+        raise ProtocolValueError("invalid_semantic_provenance")
 
 
 _ORDINARY_CONFIG: Final = ConfigDict(
@@ -749,6 +831,12 @@ class PublicResultModel[T](RootModel[T]):
 class FrontierModel(_ClosedModel):
     sequence: CanonicalUInt64Wire
     head_digest: GenesisOrSha256Digest
+
+    @model_validator(mode="after")
+    def _validate_genesis_identity(self) -> FrontierModel:
+        if (self.sequence == "0") is not (self.head_digest == GENESIS_PREDECESSOR_DIGEST):
+            raise ProtocolValueError("invalid_frontier")
+        return self
 
 
 class CoverageModel(_ClosedModel):
@@ -1330,18 +1418,34 @@ class CheckVersionSliceModel(_ClosedModel):
         return self
 
 
-_PREDISPATCH_SEMANTIC_STATUSES: Final[frozenset[SemanticStatus]] = frozenset(
-    {
-        SemanticStatus.NOT_REQUESTED,
-        SemanticStatus.NOT_CONFIGURED,
-        SemanticStatus.BLOCKED_BY_POLICY,
-        SemanticStatus.BLOCKED_FORBIDDEN_DATA,
-        SemanticStatus.CLASSIFICATION_UNCERTAIN,
-        SemanticStatus.AWAITING_HUMAN,
-        SemanticStatus.HUMAN_DENIED,
-        SemanticStatus.APPROVAL_EXPIRED,
-    }
-)
+def _semantic_provenance_identity(
+    value: object,
+) -> tuple[SemanticStatus, SemanticReason]:
+    """Extract identity fields without invoking methods on caller-owned mappings."""
+
+    if type(value) is not dict:
+        raise ProtocolValueError("invalid_semantic_provenance")
+
+    missing = object()
+    status_token: object = missing
+    reason_token: object = missing
+    source = cast(dict[object, object], value)
+    for key, item in source.items():
+        if type(key) is not str:
+            continue
+        if key == "status":
+            status_token = item
+        elif key == "reason":
+            reason_token = item
+
+    if type(status_token) is not str or type(reason_token) is not str:
+        raise ProtocolValueError("invalid_semantic_provenance")
+    try:
+        status = SemanticStatus(status_token)
+        reason = SemanticReason(reason_token)
+    except ValueError as exc:
+        raise ProtocolValueError("invalid_semantic_provenance") from exc
+    return status, reason
 
 
 class CheckSuccessModel(_ClosedModel):
@@ -1367,6 +1471,13 @@ class CheckSuccessModel(_ClosedModel):
     versions: CheckVersionSliceModel
     privacy_projection: PrivacyProjectionModel
 
+    @field_validator("semantic_provenance", mode="before")
+    @classmethod
+    def _require_safe_semantic_provenance_identity(cls, value: object) -> object:
+        if value is not None:
+            _semantic_provenance_identity(value)
+        return value
+
     @model_validator(mode="after")
     def _validate_check_success(self) -> CheckSuccessModel:
         if len(self.findings) > MAX_FINDINGS_LIMIT:
@@ -1376,13 +1487,18 @@ class CheckSuccessModel(_ClosedModel):
         ):
             raise ValueError("policy_execution_count_invalid")
         validate_semantic_outcome(self.semantic_status, self.semantic_reason)
-        if (
-            self.semantic_status in _PREDISPATCH_SEMANTIC_STATUSES
-            and self.semantic_provenance is not None
-        ):
-            raise ValueError("predispatch_semantic_provenance_invalid")
-        if self.semantic_status is SemanticStatus.SUCCEEDED and self.semantic_provenance is None:
-            raise ValueError("semantic_success_provenance_missing")
+        provenance_status: SemanticStatus | None = None
+        provenance_reason: SemanticReason | None = None
+        if self.semantic_provenance is not None:
+            provenance_status, provenance_reason = _semantic_provenance_identity(
+                self.semantic_provenance
+            )
+        validate_semantic_provenance_binding(
+            self.semantic_status,
+            self.semantic_reason,
+            provenance_status,
+            provenance_reason,
+        )
         _validate_model_against_schema(self, "check-result")
         return self
 

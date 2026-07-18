@@ -8,6 +8,7 @@ from typing import cast
 import pytest
 
 import yoetz.protocol.coverage as coverage_module
+from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.coverage import (
     ARTIFACT_OBSERVATION_ORDER,
     AUTHORSHIP_ASSURANCE_ORDER,
@@ -22,6 +23,8 @@ from yoetz.protocol.coverage import (
     LedgerFreshness,
     PublicationChannel,
     coverage_for_channel,
+    coverage_from_json,
+    coverage_to_json,
     weakest,
 )
 from yoetz.protocol.errors import ProtocolValueError
@@ -160,6 +163,149 @@ def test_coverage_is_frozen_slotted_value_in_exact_field_order() -> None:
     assert tuple(field.name for field in fields(value)) == expected_fields
     with pytest.raises(FrozenInstanceError):
         setattr(value, "known_gaps", ("changed",))
+
+
+def test_coverage_json_round_trip_is_exact() -> None:
+    wire: dict[str, JsonValue] = {
+        "publication_channels": ["codex_jsonl_import", "local_cli"],
+        "authorship_assurance": "self_asserted",
+        "artifact_observation": "import_observed",
+        "evidence_immutability": "metadata_only",
+        "ledger_freshness": "partial",
+        "check_types": ["deterministic", "semantic_model_derived"],
+        "known_gaps": ["alpha_gap", "beta_gap"],
+    }
+    decoded = coverage_from_json(wire)
+    assert decoded == Coverage(
+        publication_channels=(
+            PublicationChannel.CODEX_JSONL_IMPORT,
+            PublicationChannel.LOCAL_CLI,
+        ),
+        authorship_assurance=AuthorshipAssurance.SELF_ASSERTED,
+        artifact_observation=ArtifactObservation.IMPORT_OBSERVED,
+        evidence_immutability=EvidenceImmutability.METADATA_ONLY,
+        ledger_freshness=LedgerFreshness.PARTIAL,
+        check_types=(CheckType.DETERMINISTIC, CheckType.SEMANTIC_MODEL_DERIVED),
+        known_gaps=("alpha_gap", "beta_gap"),
+    )
+    encoded = coverage_to_json(decoded)
+    assert encoded == wire
+    assert tuple(encoded) == (
+        "publication_channels",
+        "authorship_assurance",
+        "artifact_observation",
+        "evidence_immutability",
+        "ledger_freshness",
+        "check_types",
+        "known_gaps",
+    )
+    assert all(
+        type(encoded[key]) is list for key in ("publication_channels", "check_types", "known_gaps")
+    )
+    assert coverage_from_json(MappingProxyType(wire)) == decoded
+    tuple_wire: dict[str, JsonValue] = dict(wire)
+    tuple_wire["publication_channels"] = ("codex_jsonl_import", "local_cli")
+    tuple_wire["check_types"] = ("deterministic", "semantic_model_derived")
+    tuple_wire["known_gaps"] = ("alpha_gap", "beta_gap")
+    assert coverage_from_json(MappingProxyType(tuple_wire)) == decoded
+
+
+@pytest.mark.parametrize(
+    "wire",
+    (
+        None,
+        [],
+        {},
+        {
+            "publication_channels": ["local_cli"],
+            "authorship_assurance": "self_asserted",
+            "artifact_observation": "published_only",
+            "evidence_immutability": "metadata_only",
+            "ledger_freshness": "current",
+            "check_types": ["none"],
+            "known_gaps": [],
+            "extra": True,
+        },
+        {
+            "publication_channels": "local_cli",
+            "authorship_assurance": "self_asserted",
+            "artifact_observation": "published_only",
+            "evidence_immutability": "metadata_only",
+            "ledger_freshness": "current",
+            "check_types": ["none"],
+            "known_gaps": [],
+        },
+        {
+            "publication_channels": ["unknown"],
+            "authorship_assurance": "self_asserted",
+            "artifact_observation": "published_only",
+            "evidence_immutability": "metadata_only",
+            "ledger_freshness": "current",
+            "check_types": ["none"],
+            "known_gaps": [],
+        },
+        {
+            "publication_channels": ["local_cli"],
+            "authorship_assurance": _StringSubclass("self_asserted"),
+            "artifact_observation": "published_only",
+            "evidence_immutability": "metadata_only",
+            "ledger_freshness": "current",
+            "check_types": ["none"],
+            "known_gaps": [],
+        },
+    ),
+)
+def test_coverage_json_rejects_noncanonical_shapes(wire: object) -> None:
+    with pytest.raises(ProtocolValueError) as exc_info:
+        coverage_from_json(cast(JsonValue, wire))
+    _assert_reason(exc_info, "invalid_coverage_value")
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    (
+        ("publication_channels", ["local_cli", "local_cli"], "duplicate_set_member"),
+        (
+            "publication_channels",
+            ["local_cli", "cooperative_mcp"],
+            "unsorted_set_field",
+        ),
+        ("check_types", ["none", "none"], "duplicate_set_member"),
+        (
+            "check_types",
+            ["semantic_model_derived", "deterministic"],
+            "unsorted_set_field",
+        ),
+        ("known_gaps", ["Bad"], "invalid_known_gap"),
+        ("known_gaps", ["same_gap", "same_gap"], "duplicate_set_member"),
+        ("known_gaps", ["z_gap", "a_gap"], "unsorted_set_field"),
+    ),
+)
+def test_coverage_json_propagates_constructor_owned_set_reasons(
+    field: str,
+    value: object,
+    reason: str,
+) -> None:
+    wire: dict[str, object] = {
+        "publication_channels": ["local_cli"],
+        "authorship_assurance": "self_asserted",
+        "artifact_observation": "published_only",
+        "evidence_immutability": "metadata_only",
+        "ledger_freshness": "current",
+        "check_types": ["none"],
+        "known_gaps": [],
+    }
+    wire[field] = value
+    with pytest.raises(ProtocolValueError) as exc_info:
+        coverage_from_json(cast(JsonValue, wire))
+    _assert_reason(exc_info, reason)
+
+
+def test_coverage_json_encoder_rejects_foreign_runtime_types() -> None:
+    for invalid in ("coverage", _SpoofedCoverage()):
+        with pytest.raises(ProtocolValueError) as exc_info:
+            coverage_to_json(cast(Coverage, invalid))
+        _assert_reason(exc_info, "invalid_coverage_value")
 
 
 def test_weakest_merge_is_componentwise_and_lossless() -> None:

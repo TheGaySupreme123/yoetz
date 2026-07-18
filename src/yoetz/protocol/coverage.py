@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType, NotImplementedType
 from typing import Final, cast
 
+from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.errors import ProtocolValueError
 
 __all__ = [
@@ -23,7 +25,9 @@ __all__ = [
     "EvidenceImmutability",
     "LedgerFreshness",
     "PublicationChannel",
+    "coverage_from_json",
     "coverage_for_channel",
+    "coverage_to_json",
     "weakest",
 ]
 
@@ -154,6 +158,17 @@ _CHECK_TYPE_SHAPES: Final[frozenset[tuple[CheckType, ...]]] = frozenset(
         (CheckType.DETERMINISTIC, CheckType.SEMANTIC_MODEL_DERIVED),
     }
 )
+_COVERAGE_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "publication_channels",
+        "authorship_assurance",
+        "artifact_observation",
+        "evidence_immutability",
+        "ledger_freshness",
+        "check_types",
+        "known_gaps",
+    }
+)
 
 
 def _ordered_rank(value: _OrderedCoverageEnum) -> int:
@@ -252,6 +267,111 @@ class Coverage:
             raise ProtocolValueError("invalid_coverage_value")
         _validate_check_types(self.check_types)
         _validate_known_gaps(self.known_gaps)
+
+
+def _actual_mapping(value: object) -> bool:
+    try:
+        return issubclass(type(value), Mapping)
+    except BaseException:
+        return False
+
+
+def _coverage_json_object(value: object) -> Mapping[object, object]:
+    if not _actual_mapping(value):
+        raise ProtocolValueError("invalid_coverage_value")
+    source = cast(Mapping[object, object], value)
+    try:
+        keys = tuple(source)
+    except Exception as exc:
+        raise ProtocolValueError("invalid_coverage_value") from exc
+    if (
+        len(keys) != len(_COVERAGE_KEYS)
+        or any(type(key) is not str for key in keys)
+        or frozenset(cast(tuple[str, ...], keys)) != _COVERAGE_KEYS
+    ):
+        raise ProtocolValueError("invalid_coverage_value")
+    return source
+
+
+def _coverage_json_field(source: Mapping[object, object], key: str) -> object:
+    try:
+        return source[key]
+    except Exception as exc:
+        raise ProtocolValueError("invalid_coverage_value") from exc
+
+
+def _coverage_json_array(source: Mapping[object, object], key: str) -> tuple[object, ...]:
+    value = _coverage_json_field(source, key)
+    if type(value) is list:
+        return tuple(cast(list[object], value))
+    if type(value) is tuple:
+        return cast(tuple[object, ...], value)
+    raise ProtocolValueError("invalid_coverage_value")
+
+
+def _coverage_json_enum[T: Enum](value: object, enum_type: type[T]) -> T:
+    if type(value) is not str:
+        raise ProtocolValueError("invalid_coverage_value")
+    try:
+        return enum_type(value)
+    except (TypeError, ValueError) as exc:
+        raise ProtocolValueError("invalid_coverage_value") from exc
+
+
+def coverage_from_json(value: JsonValue) -> Coverage:
+    """Decode the exact closed coverage JSON object without normalizing its sets."""
+
+    source = _coverage_json_object(value)
+    channels = tuple(
+        _coverage_json_enum(member, PublicationChannel)
+        for member in _coverage_json_array(source, "publication_channels")
+    )
+    authorship = _coverage_json_enum(
+        _coverage_json_field(source, "authorship_assurance"),
+        AuthorshipAssurance,
+    )
+    observation = _coverage_json_enum(
+        _coverage_json_field(source, "artifact_observation"),
+        ArtifactObservation,
+    )
+    immutability = _coverage_json_enum(
+        _coverage_json_field(source, "evidence_immutability"),
+        EvidenceImmutability,
+    )
+    freshness = _coverage_json_enum(
+        _coverage_json_field(source, "ledger_freshness"),
+        LedgerFreshness,
+    )
+    checks = tuple(
+        _coverage_json_enum(member, CheckType)
+        for member in _coverage_json_array(source, "check_types")
+    )
+    gaps = _coverage_json_array(source, "known_gaps")
+    return Coverage(
+        publication_channels=channels,
+        authorship_assurance=authorship,
+        artifact_observation=observation,
+        evidence_immutability=immutability,
+        ledger_freshness=freshness,
+        check_types=checks,
+        known_gaps=cast(tuple[str, ...], gaps),
+    )
+
+
+def coverage_to_json(coverage: Coverage) -> dict[str, JsonValue]:
+    """Encode an exact coverage value as the closed schema object."""
+
+    if type(coverage) is not Coverage:
+        raise ProtocolValueError("invalid_coverage_value")
+    return {
+        "publication_channels": [member.value for member in coverage.publication_channels],
+        "authorship_assurance": coverage.authorship_assurance.value,
+        "artifact_observation": coverage.artifact_observation.value,
+        "evidence_immutability": coverage.evidence_immutability.value,
+        "ledger_freshness": coverage.ledger_freshness.value,
+        "check_types": [member.value for member in coverage.check_types],
+        "known_gaps": list(coverage.known_gaps),
+    }
 
 
 def _coverage(
