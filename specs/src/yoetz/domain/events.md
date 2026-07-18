@@ -649,9 +649,11 @@ whose value is `None` and optional collection members whose value is the empty t
 present nondefault optional members are emitted. Thus schema-valid `{optional_list: []}` and an
 otherwise identical object with that optional member absent decode to the same domain value and
 normalize to the absent form.
-Field decoding converts via `domain/values` constructors; every failure is `ProtocolValueError`
-with the offending bounded reason code and JSON-pointer-style field path built from schema
-constants only (never input text). `normalize_payload_json(schema, x)` is defined exactly as
+Field decoding converts via `domain/values` constructors; every failure is the shared
+`ProtocolValueError(reason_code)` with the offending bounded reason code only. The exception never
+retains an input-derived field path or payload fragment; any later boundary-safe location detail is
+owned by the operation boundary rather than this domain codec.
+`normalize_payload_json(schema, x)` is defined exactly as
 `encode_payload(decode_payload(schema, x))`; it is idempotent, and canonical encoding of the result
 is the codec identity used for payload digests. For every domain-valid JSON value `x`, decoding its
 normalized form and encoding again is byte-identical. Arbitrary schema-valid input need not be
