@@ -180,3 +180,20 @@ independent-review release gates are specified in:
 
 Until those decisions are ratified and their release evidence passes, public claims remain
 explicitly “not yet evidenced.”
+
+## How to inspect or report a privacy problem
+
+Everything Yoetz decides about your data is designed to be inspectable locally. Privacy policy
+answers are plain reviewed configuration you can read and edit; every terminal outbound decision
+and physical attempt leaves a local structural egress receipt; and the installation privacy
+catalog keeps encrypted proposal objects and their structural sidecars enumerable for the
+supported installation-data lifetime. No control surface is required to trust a summary: the
+receipts, catalog, and policy file are the evidence, and they live on your machine.
+
+If you believe Yoetz has disclosed, retained, or logged something these commitments forbid,
+treat it as a security report: use GitHub private vulnerability reporting or email
+`security@yoetz.dev`. Never open a public issue for a report that may itself contain sensitive
+content. Ordinary non-sensitive questions about privacy behavior belong in repository issues.
+The repository security policy ([`specs/repository/SECURITY.md`](specs/repository/SECURITY.md)
+until the public `SECURITY.md` ships) defines the private routes; they are verified before any
+release that advertises them.
