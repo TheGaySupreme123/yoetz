@@ -102,7 +102,11 @@ precondition.
 
 1. `type(kind) is IdKind` → else ordinary `TypeError("id_kind_wrong_type")`.
 2. For `IdKind.ACTOR`, return `validate_actor_id(value)` or propagate its registered reason.
-3. `value` is a `str` instance (bool/bytes/int are not) → else `id_wrong_type`.
+3. `value` is a `str` instance, including a `str` subclass (bool/bytes/int are not) → else
+   `id_wrong_type`. Validation invokes length/index/slice/match behavior through built-in `str`
+   descriptors so subclass overrides are never called, and it never coerces the value; after the
+   bounded checks below it returns that same object unchanged. Exact built-in type is intentionally
+   required only by hostile-path `safe_request_id_from`.
 4. Bounded-copy guard: `len(value) == ID_TOTAL_LENGTH` → else `id_wrong_length`. This runs before
    any character scan so oversized input is never iterated.
 5. Every code point is printable ASCII (`0x21..0x7E`) → else `id_not_ascii`.
@@ -122,7 +126,8 @@ ledger idempotency-digest rules, not rejected here.
 
 ### `validate_actor_id(value)`
 
-1. `str` instance → else `id_wrong_type`.
+1. `str` instance, including a `str` subclass, → else `id_wrong_type`; return the same object after
+   validation and never coerce it.
 2. `len(value) <= 128` before any regex work → else `id_wrong_length`.
 3. Full match against `ACTOR_ID_PATTERN` (ASCII letters, digits, `.`, `_`, `:`, `-`; length
    1–128) → else `actor_id_malformed`.

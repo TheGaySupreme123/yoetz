@@ -21,6 +21,9 @@ inputs.
   echo raw input.
 - `test_safe_request_id_requires_exact_builtin_str` — a `str` subclass, coercible object, raising
   mapping, and oversized value all return `None` without scanning/echoing hostile content.
+- `test_direct_validation_accepts_str_subclasses_without_coercion` — ordinary generated and actor
+  validators accept a valid `str` subclass as a string instance and return the identical object,
+  while the hostile request extractor still rejects it.
 - `test_actor_prefix_is_convention_only` — caller-asserted actor IDs are format-checked but not
   granted server assurance.
 - `test_wrong_kind_is_programmer_defect` — raw kind strings and foreign enums raise exactly
@@ -38,6 +41,9 @@ The suite exercises the full `IdKind` matrix and proves:
   the expected prefix, while `new_id(IdKind.ACTOR)` raises the exact registered
   `actor_id_not_generated` reason;
 - `validate_id` accepts only the target kind’s prefix and exact UUID spelling;
+- direct `validate_id`/`validate_actor_id` accept `str` subclasses by the documented
+  `isinstance(value, str)` contract, use only bounded built-in string operations, and return the
+  identical object without coercion; this is intentionally distinct from safe request extraction;
 - the nil UUID, short/long forms, upper-case forms, and non-ASCII forms are rejected;
 - `safe_request_id_from` returns either a valid request ID or `None` and never raises on hostile
   `Mapping` values; the duplicate-lookup case is a custom mapping whose `.get("request_id")`
