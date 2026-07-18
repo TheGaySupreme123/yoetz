@@ -410,6 +410,7 @@ The complete content map is:
 | `receipt` | `/document/decisions/*/statement`, `/document/decisions/*/rationale`, `/document/decisions/*/alternatives/*` | `decision_excerpt` |
 | `receipt` | `/document/evidence/*/description`, `/document/evidence/*/reference` | `evidence_excerpt` |
 | `receipt` | `/document/findings/*/summary`, `/document/findings/*/detail`, `/document/responses/*/reason`, `/human_text` | `finding_summary` |
+| `receipt` | `/document/sections/*/title`, `/document/sections/*/body`, `/document/sections/*/coverage_note`, `/document/sections/*/items/*` | `finding_summary` |
 | `review` | `/check_result/findings/*/summary`, `/check_result/findings/*/detail` | `finding_summary` |
 | `integration_preview` | `/file_changes/*/relative_path`, `/file_states/*/relative_path` | `repository_excerpt` |
 | `integration_execute` | `/changed_files/*` | `repository_excerpt` |
