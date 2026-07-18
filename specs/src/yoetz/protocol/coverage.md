@@ -54,11 +54,22 @@ The dimensions and orderings mirror the shared registry:
   `semantic_model_derived`; `none` is valid only by itself and is removed when a real kind is
   present
 
+Its stored field order is exactly `publication_channels`, `authorship_assurance`,
+`artifact_observation`, `evidence_immutability`, `ledger_freshness`, `check_types`, `known_gaps`.
+The three tuple fields must have exact built-in `tuple` type; enum fields and tuple members must
+have the exact corresponding enum type, and gap tokens must be exact built-in `str`. A subclass or
+an object whose `__class__` merely impersonates one of those types is invalid, so the frozen value
+cannot retain attacker-controlled representation, comparison, iteration, or encoding behavior.
+
 The four `*_ORDER` mappings assign zero-based ordinals in exactly the weakest-to-strongest orders
 above. Ordered enum values compare only with a member of their own enum; a cross-enum comparison
 returns `NotImplemented`. No enum's wire string or declaration order is used as its strength.
 
-`Coverage.__post_init__` validates, but never silently sorts, caller-constructed values:
+`Coverage.__post_init__` validates, but never silently sorts, caller-constructed values. Validation
+runs in the stored field order above and stops at the first failure: publication channels;
+authorship assurance; artifact observation; evidence immutability; ledger freshness; check types;
+known gaps. Within each tuple field it checks exact outer type, then emptiness/size bounds, then
+exact member/token type and grammar, then duplicate/order rules:
 
 - `publication_channels` is nonempty, contains `PublicationChannel` members, and is strictly
   ascending by unsigned ASCII bytes of `.value`;
@@ -69,7 +80,7 @@ returns `NotImplemented`. No enum's wire string or declaration order is used as 
   `^[a-z][a-z0-9_]{0,127}$`; and the tuple is strictly unsigned-ASCII sorted and duplicate-free;
 - ordered fields are members of their exact enum.
 
-The first failing rule raises the closed reasons `empty_publication_channels`,
+The first failing rule in that total order raises the closed reasons `empty_publication_channels`,
 `invalid_publication_channels`, `empty_check_types`, `invalid_check_types`,
 `invalid_known_gap`, or `invalid_coverage_value`. Set order/duplicate failures reuse the canonical
 owners `unsorted_set_field` and `duplicate_set_member`.
@@ -79,8 +90,10 @@ and whose channel/check-kind/gap fields are sorted unions. An individual accepte
 singular publication channel; `coverage_for_channel` places it in a singleton tuple. It does not
 average, score, or collapse coverage into a single scalar.
 
-`coverage_for_channel(channel)` accepts only a `PublicationChannel` enum member and returns the
-corresponding immutable row of `COVERAGE_DEFAULTS_BY_CHANNEL` below. Every row lists all seven
+`coverage_for_channel(channel)` accepts only an exact `PublicationChannel` enum member and returns
+the corresponding immutable row of `COVERAGE_DEFAULTS_BY_CHANNEL` below. Any other runtime type,
+including a raw token or spoofed `__class__`, raises `invalid_coverage_value`. Every row lists all
+seven
 fields; `channels` is the singleton tuple containing the table key and `checks` is `(none,)`.
 
 | Channel | Authorship | Artifact observation | Evidence immutability | Freshness | Checks | Known gaps |
@@ -109,6 +122,10 @@ than 64 distinct `known_gaps` in union, it raises
 gaps with a summary token. This makes the bounded wire value fail closed while preserving every gap
 on every successful merge. The overflow check is symmetric, so argument order cannot change the
 outcome.
+
+`weakest` requires exact `Coverage` inputs, checked left then right before reading either value's
+fields; any other runtime type raises `invalid_coverage_value`. This is a protocol-value helper,
+not a duck-typed extension point.
 
 ## Errors and edge cases
 

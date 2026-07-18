@@ -187,6 +187,10 @@ dimensions; set union for `publication_channels`, `check_types`, and gaps);
 accepted event still has one singular `publication_channel`; aggregation into `Coverage` uses a
 singleton tuple. The `none` check type is canonical only when it is the sole member and is removed
 when either real check kind is present.
+Coverage stores exact built-in tuples, exact enum members, and exact built-in gap strings;
+constructor validation is left-to-right in declared field order. The two helpers require exact
+`Coverage`/`PublicationChannel` inputs and map wrong runtime types to `invalid_coverage_value`
+rather than accepting spoofed `__class__` or duck-typed objects.
 No arithmetic averaging exists anywhere.
 
 ## 6. Actor and client types (`protocol/models.py` boundary; `domain/values.py` internal)

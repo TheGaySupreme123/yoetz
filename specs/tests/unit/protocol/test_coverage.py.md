@@ -32,6 +32,9 @@ The suite proves that:
 - constructors validate rather than sort: publication channels and check types are nonempty,
   ASCII-sorted, duplicate-free tuples; known gaps are at most 64 sorted unique lower-snake ASCII
   tokens of at most 128 bytes;
+- constructor validation follows exact stored-field order on mixed-invalid inputs, tuple containers
+  and enum/token members use actual exact runtime types, and spoofed `__class__` or hostile
+  subclasses cannot enter the frozen value;
 - all six defaults match `COVERAGE_DEFAULTS_BY_CHANNEL` byte-for-byte: cooperative MCP and local
   CLI are self-asserted/published-only/metadata-only/current; Codex import is
   self-asserted/import-observed/metadata-only/partial with
@@ -46,6 +49,8 @@ The suite proves that:
 - a gap union of at most 64 members is exact, while a larger union raises
   `ProtocolValueError("invalid_known_gap")` symmetrically before constructing a result; the test
   covers a 64-member boundary union, a 65-member union, and two disjoint valid 64-member inputs.
+- `coverage_for_channel` rejects every non-`PublicationChannel` input and `weakest` rejects a
+  non-`Coverage` left or right input with `invalid_coverage_value`, before duck-typed field access.
 
 ## Errors and edge cases
 
