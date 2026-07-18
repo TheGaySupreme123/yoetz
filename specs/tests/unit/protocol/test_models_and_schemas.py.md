@@ -94,7 +94,8 @@ The suite checks:
   malformed, missing, overlapping, or unmatched pointers with `invalid_json_pointer`; candidate
   finding summary/detail and receipt gap/section prose are content-bearing `finding_summary`, the
   private container shape is not API, and the four public projection bounds equal the owning model
-  contract;
+  contract; receipt JSON classification never implies that the digest-bound document admits
+  field-level omission markers;
 - actor/client models accept only the frozen enum/ID/bounded-string shapes, reject extras and
   coercion, keep caller assertion IDs distinct from durable `agt_` IDs, and never convert caller
   labels into server-assigned authentication or assurance;

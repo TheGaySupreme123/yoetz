@@ -33,11 +33,14 @@ The conclusion code is the exact offline `$ref`
 a separately restated string enum.
 
 Receipt/task/session/object IDs, frontiers, conclusion/redaction enums, digests, counts, coverage,
-and version identities are structural. Claim/finding/evidence text, human wording, task labels, and
-other user/task-derived receipt leaves are content-bearing and admit only their exact original type
-or the common omission marker. The success branch requires the common `agent_context` privacy
-projection and durable local-disclosure receipt. This verification `receipt` remains distinct from
-the privacy receipt named by the projection.
+and version identities are structural. Obligation summaries, finding/response/gap prose, canonical
+section prose, and human wording are content-bearing. `human_text` admits its exact string or the
+common omission marker. A JSON `document` remains the exact canonical stored ReceiptDocument:
+because `receipt_digest` binds those bytes, its in-document strings never admit field-level
+omission markers. The local-disclosure gate returns that whole document only when every present
+content category is authorized and otherwise fails before success serialization. The success
+branch requires the common `agent_context` privacy projection and durable local-disclosure receipt.
+This verification `receipt` remains distinct from the privacy receipt named by the projection.
 
 ## Errors and edge cases
 

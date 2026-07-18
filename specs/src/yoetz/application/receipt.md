@@ -91,6 +91,11 @@ reword conclusions.
    must carry the identical conclusion and limitations; it is never hashed as an alternative
    receipt. `include` controls only the registered canonical section/detail policy and cannot hide
    required coverage or limitation sections.
+4. Before ordinary-client serialization, the local-disclosure gate classifies every present JSON
+   document content leaf. It returns the exact whole canonical document only if every category is
+   authorized. If any document content leaf is blocked or unclassifiable, it fails the projection
+   before emitting a success result; it never rewrites the document and never returns bytes that do
+   not match `receipt_digest`. Markdown/text may use the ordinary `human_text` omission marker.
 
 ### Idempotent replay
 

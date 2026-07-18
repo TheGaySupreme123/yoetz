@@ -32,13 +32,12 @@ and other user/task-derived page leaves are content-bearing and admit only their
 type or the common omission marker. The success branch requires the common `agent_context` privacy
 projection and durable local-disclosure receipt.
 
-A `candidate_findings` page is the one exception to that split for finding prose, and the schema
-must encode it: deterministic candidate `summary`/`detail` are rule-templated and name their
-subjects by ID (`domain/findings.md`), so they are structural, not user/task-derived, and never
-reduce to the omission marker. A candidate whose prose were withheld would carry no information at
-all, since the rule and the IDs it fired on are the entire message. The same page carries no
-`finding_id` and no `CheckVerdict`: no status result of any view may contain a verdict, because only
-a recorded check produces one.
+Deterministic candidate `summary`/`detail` remain bounded finding prose rather than exact closed
+template tokens, so they are content-bearing `finding_summary` and admit either their original
+string or the common finding omission marker. The candidate's structural rule/basis and subject IDs
+remain available when prose is omitted. The same page carries no `finding_id` and no
+`CheckVerdict`: no status result of any view may contain a verdict, because only a recorded check
+produces one.
 
 ## Errors and edge cases
 

@@ -350,6 +350,16 @@ form. The projected form keeps fields classified by the frozen result-field regi
   `sink: agent_context`, canonical `local_disclosure_receipt_id`, policy ID/version/digest,
   sorted unique included/blocked categories, and sorted unique omitted JSON Pointers.
 
+The sole v0.1 replacement exception is `ReceiptSuccessModel.document` when `format="json"`.
+That value is the exact canonical stored `ReceiptDocument` bound by `receipt_digest`; replacing an
+in-document leaf would create a derivative that no longer matches the advertised digest. The local
+disclosure gate still classifies every document content leaf, but returns the exact whole document
+only when every present content category is authorized. If any present document content leaf is
+blocked or unclassifiable, projection fails closed before success serialization with
+`privacy_projection_unavailable`; it never emits a partly rewritten JSON receipt. Markdown/text
+`human_text` remains an ordinary replaceable content leaf because it is a deterministic derivative
+and is not what `receipt_digest` binds.
+
 `PrivacyProjectionModel` is the ordinary operation/support projection and its frozen wire sink is
 only `agent_context`. Authenticated `trusted_human_control` previews and policy diffs cross the
 separate confidential foreground control boundary and use that boundary's own projection and audit
