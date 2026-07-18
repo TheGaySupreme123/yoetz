@@ -142,6 +142,8 @@ _EVENT_SHAPES: Final[dict[EventFamily, _EventShape]] = {
         {
             "mode",
             "policies",
+            "scope",
+            "policy_executions",
             "subject_frontier",
             "verdict",
             "returned_finding_ids",
@@ -149,10 +151,10 @@ _EVENT_SHAPES: Final[dict[EventFamily, _EventShape]] = {
             "coverage",
             "semantic_status",
             "semantic_reason",
-            "semantic_provenance",
             "engine_version",
             "projection_version",
-        }
+        },
+        {"semantic_provenance"},
     ),
     "receipt_recorded": _shape(
         {
@@ -217,8 +219,6 @@ def _payload(family: EventFamily, fields: Mapping[str, JsonValue], /) -> dict[st
 
 
 def _validate_conditional_shape(family: EventFamily, fields: dict[str, JsonValue]) -> None:
-    if family == "session_opened" and (("external_ref" in fields) != ("workspace_ref" in fields)):
-        raise ValueError("attachment_key_incomplete")
     if family == "obligation_published":
         resolved = fields["status"] == "resolved"
         has_resolution = "resolution_evidence_refs" in fields
