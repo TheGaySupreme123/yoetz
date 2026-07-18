@@ -323,11 +323,40 @@ class _SyntheticTransitionZone(tzinfo):
         return "synthetic-transition"
 
 
+class _StatefulZeroThenNonzeroZone(tzinfo):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def utcoffset(self, dt: datetime | None) -> timedelta:
+        self.calls += 1
+        if self.calls == 1:
+            return timedelta(0)
+        return timedelta(hours=1)
+
+    def dst(self, dt: datetime | None) -> timedelta:
+        return timedelta(0)
+
+    def tzname(self, dt: datetime | None) -> str:
+        return "stateful-zone"
+
+
 def test_utc_duration_arithmetic_ignores_named_zone_transitions() -> None:
     local = datetime(2026, 1, 1, 23, 59, 59, tzinfo=_SyntheticTransitionZone())
     result = add_utc_milliseconds(local, 2_000)
     assert result == datetime(2026, 1, 2, 0, 0, 1, tzinfo=UTC)
     assert result.tzinfo is UTC
+
+    format_zone = _StatefulZeroThenNonzeroZone()
+    stateful = datetime(2026, 1, 1, 12, 0, tzinfo=format_zone)
+    assert format_rfc3339_millis(stateful) == "2026-01-01T12:00:00.000Z"
+    assert format_zone.calls == 1
+
+    add_zone = _StatefulZeroThenNonzeroZone()
+    stateful_for_add = datetime(2026, 1, 1, 12, 0, tzinfo=add_zone)
+    assert add_utc_milliseconds(stateful_for_add, 1_000) == datetime(
+        2026, 1, 1, 12, 0, 1, tzinfo=UTC
+    )
+    assert add_zone.calls == 1
 
 
 @pytest.mark.parametrize(

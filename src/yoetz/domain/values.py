@@ -389,10 +389,7 @@ def _validated_utc_datetime(value: object) -> datetime:
         raise ProtocolValueError("timestamp_not_utc")
     if dt.microsecond % 1000 != 0:
         raise ProtocolValueError("timestamp_submillisecond_precision")
-    try:
-        return dt.astimezone(UTC)
-    except Exception as exc:
-        raise ProtocolValueError("invalid_timestamp") from exc
+    return dt.replace(tzinfo=UTC)
 
 
 def format_rfc3339_millis(dt: object) -> str:
