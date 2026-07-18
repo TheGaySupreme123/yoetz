@@ -154,16 +154,16 @@ def receipt_id(seed: Seed, /) -> str:
     return build_id("receipt", seed)
 
 
-def entry_digest(canonical_envelope: bytes, /) -> str:
-    """Digest explicit canonical envelope bytes; ledger entries have no ID family."""
+def entry_digest(digest_preimage: bytes, /) -> str:
+    """Digest explicit caller-prepared preimage bytes; ledger entries have no ID family."""
 
-    envelope = _require_bytes(canonical_envelope)
-    if not envelope:
-        raise ValueError("canonical_envelope_empty")
-    return f"sha256:{hashlib.sha256(envelope).hexdigest()}"
+    preimage = _require_bytes(digest_preimage)
+    if not preimage:
+        raise ValueError("digest_preimage_empty")
+    return f"sha256:{hashlib.sha256(preimage).hexdigest()}"
 
 
 def _require_bytes(value: object) -> bytes:
     if not isinstance(value, bytes):
-        raise TypeError("canonical_envelope_wrong_type")
+        raise TypeError("digest_preimage_wrong_type")
     return value
