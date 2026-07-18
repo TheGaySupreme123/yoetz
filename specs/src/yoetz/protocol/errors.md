@@ -266,6 +266,13 @@ Within a mapping, each rejected value is omitted independently; if no entry surv
 that same empty shape. Every nonempty accepted subset is defensively copied and stored as a deeply
 immutable, ASCII-key-sorted `Mapping[str, SafeDetailValue]`.
 
+Constructor validation is left-to-right in stored-field order and is frozen: validate `code`
+type, then `message`, then exact-`bool` `retryable`, then a non-null `correlation_id`, and only then
+normalize `safe_details`. Mixed-invalid input raises the first failure in that order. The direct
+correlation checker accepts an `object`; every non-string value is invalid and both construction
+and `bind_correlation_id` raise
+`ProtocolValueError("public_error_invalid_correlation_id")` rather than a separate `TypeError`.
+
 ### Safe-detail normalization
 
 `SAFE_DETAIL_KEYS`, in exact ASCII order, is:
@@ -306,7 +313,10 @@ view
    `^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$`. `schema_name` accepts only the artifact-name grammar
    `^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`, at most 128 bytes. `field` accepts only an RFC 6901 pointer
    assembled by the caller from schema constants, at most 256 ASCII bytes; raw input names are not
-   passed here.
+   passed here. Its exact accepted form is the empty root pointer or a string beginning with `/`
+   whose tokens contain only printable ASCII (`0x20..0x7e`), with every `~` occurring only as
+   `~0` or `~1`. Empty tokens and repeated `/` are valid RFC 6901 tokens; a missing leading slash,
+   dangling/other tilde escape, control/DEL byte, non-ASCII code point, or 257th byte is rejected.
 7. A known key with a value outside its rule is omitted in full. Values are never truncated,
    coerced, recursively walked, or replaced with input-derived text. Output contains at most the 16
    keys above in ASCII order.

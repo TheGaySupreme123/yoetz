@@ -48,12 +48,17 @@ The suite proves:
 - non-enum `code` and non-boolean `retryable` constructor values raise the two exact programmer
   `TypeError` messages, while supplied correlation IDs use the direct canonical `err_` UUIDv4
   validator without importing `protocol.ids`;
+- mixed-invalid construction proves the exact `code` -> `message` -> `retryable` ->
+  `correlation_id` -> `safe_details` validation order, and non-string correlation values at either
+  construction or binding use `public_error_invalid_correlation_id` rather than `TypeError`;
 - safe details retain only the exact 16 keys and per-key value domains from `protocol/errors.md`;
   unknown keys are dropped without invoking their `__str__`, iterating nested structures, or
   echoing raw payloads, SQL, filesystem paths, or secrets;
 - integer details reject `bool`, negative values, and coercion; enum-like details accept only the
   named `Enum` values, not raw caller strings; `field`, version, schema-name, quarantine-code, and
-  reason-code validators are exercised at both sides of every bound;
+  reason-code validators are exercised at both sides of every bound; field-pointer vectors include
+  the empty root, `/`, empty tokens, `~0`/`~1`, and rejection of missing slash, invalid/dangling
+  tilde escape, control/DEL, non-ASCII, and 257-byte inputs;
 - deep errors may carry `correlation_id=None`, but public serialization fails with
   `public_error_missing_correlation_id` until a canonical `err_` UUIDv4 is bound; first binding
   returns a distinct frozen value, same-ID rebinding returns that exact object, and a different-ID
