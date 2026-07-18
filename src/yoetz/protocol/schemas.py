@@ -442,6 +442,15 @@ def _freeze_json(value: JsonValue) -> JsonValue:
     return value
 
 
+def _plain_validation_value(value: JsonValue) -> JsonValue:
+    if _actual_mapping(value):
+        source = cast(Mapping[str, JsonValue], value)
+        return {key: _plain_validation_value(item) for key, item in source.items()}
+    if type(value) is list or type(value) is tuple:
+        return [_plain_validation_value(item) for item in value]
+    return value
+
+
 def _walk_refs(value: JsonValue) -> Iterator[str]:
     if type(value) is dict:
         source = cast(dict[str, JsonValue], value)
@@ -725,7 +734,7 @@ def validate_schema_instance(name: str, version: str, value: JsonValue) -> None:
     )
     try:
         validator_api = cast(_ValidatorProtocol, cast(object, validator))
-        validator_api.validate(value)
+        validator_api.validate(_plain_validation_value(value))
     except ValidationError:
         raise ProtocolValueError("schema_instance_invalid") from None
     except BaseException:

@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import shutil
 import socket
 from collections.abc import Callable, Mapping
 from dataclasses import FrozenInstanceError, fields
 from importlib import resources
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
+from urllib.parse import urldefrag
 
 import pytest
+from pydantic import ValidationError
 
 import yoetz.protocol.schemas as schemas_module
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
@@ -44,6 +47,1395 @@ _VALID_COVERAGE: dict[str, JsonValue] = {
     "check_types": ["none"],
     "known_gaps": [],
 }
+_SCHEMA_RESOURCE_ROOT = resources.files("yoetz").joinpath("resources").joinpath("schemas")
+_EXPECTED_PROTOCOL_VERSION = "0.1"
+_EXPECTED_SCHEMA_VERSION = "1.0.0"
+_EXPECTED_MAX_EVENTS_PER_BATCH = 100
+_EXPECTED_MAX_CANONICAL_REQUEST_BYTES = 1_048_576
+_EXPECTED_MAX_FINDINGS_DEFAULT = 3
+_EXPECTED_MAX_FINDINGS_LIMIT = 10
+_EXPECTED_MAX_REASON_BYTES = 4_096
+_EXPECTED_MAX_OBJECT_PLAINTEXT_BYTES = 4_194_304
+_EXPECTED_GENESIS_PREDECESSOR_DIGEST = "genesis"
+_TEST_UUID = "00000000-0000-4000-8000-000000000001"
+
+_EXPECTED_ACTOR_TYPES = {
+    "delegated_subagent",
+    "harness",
+    "human",
+    "importer",
+    "logical_agent",
+    "model_backed_worker",
+    "yoetz_engine",
+}
+_EXPECTED_CLIENT_KINDS = {
+    "cooperative_agent",
+    "codex_cli",
+    "importer",
+    "test_client",
+    "yoetz_cli",
+}
+_EXPECTED_INTEGRATION_KINDS = {
+    "codex_jsonl_import",
+    "cooperative_mcp",
+    "local_cli",
+}
+_EXPECTED_DATA_CATEGORIES = {
+    "bounded_structural_metadata",
+    "declared_file_type",
+    "task_description",
+    "claim_text",
+    "obligation_text",
+    "decision_excerpt",
+    "evidence_excerpt",
+    "finding_summary",
+    "command_metadata",
+    "diff_metadata",
+    "repository_excerpt",
+    "transcript_excerpt",
+    "diagnostic_metadata",
+}
+_EXPECTED_SEMANTIC_STATUSES = {
+    "not_requested",
+    "not_configured",
+    "blocked_by_policy",
+    "blocked_forbidden_data",
+    "classification_uncertain",
+    "awaiting_human",
+    "human_denied",
+    "approval_expired",
+    "succeeded",
+    "refused",
+    "timeout",
+    "invalid",
+    "unavailable",
+    "late",
+    "stale",
+    "failed",
+}
+_EXPECTED_SEMANTIC_STATUS_REASONS = {
+    "not_requested": {"deterministic_mode", "no_material_semantic_case"},
+    "not_configured": {"provider_not_configured", "local_model_not_configured"},
+    "blocked_by_policy": {
+        "network_egress_denied",
+        "channel_disabled",
+        "provider_binding_not_authorized",
+        "scope_not_authorized",
+        "content_category_not_authorized",
+        "policy_generation_revoked",
+    },
+    "blocked_forbidden_data": {"never_send_detected", "secret_detected"},
+    "classification_uncertain": {"classification_uncertain"},
+    "awaiting_human": {"human_approval_required"},
+    "human_denied": {"human_denied"},
+    "approval_expired": {"human_approval_expired"},
+    "succeeded": {"semantic_completed"},
+    "refused": {"provider_refused"},
+    "timeout": {"provider_timeout"},
+    "invalid": {
+        "response_schema_invalid",
+        "response_content_invalid",
+        "semantic_judgment_rejected",
+    },
+    "unavailable": {
+        "credential_unavailable",
+        "endpoint_profile_unavailable",
+        "transport_unavailable",
+        "provider_rate_limited",
+        "provider_quota_exhausted",
+        "retry_budget_exhausted",
+        "audit_reservation_unavailable",
+        "receipt_persistence_unknown",
+    },
+    "late": {"deadline_authority_lost", "lease_authority_lost"},
+    "stale": {"frontier_changed", "dependency_changed"},
+    "failed": {"coordinator_failure"},
+}
+
+
+def _models_module() -> Any:
+    return importlib.import_module("yoetz.protocol.models")
+
+
+def _schema_resource(rel_path: str) -> Any:
+    return _SCHEMA_RESOURCE_ROOT.joinpath(*rel_path.split("/"))
+
+
+def _schema_object_fields(
+    rel_path: str, def_name: str | None = None
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    schema = _plain_object(_schema_resource(rel_path).read_bytes())
+    node: dict[str, JsonValue]
+    if def_name is None:
+        node = schema
+    else:
+        defs = cast(dict[str, JsonValue], schema["$defs"])
+        node = cast(dict[str, JsonValue], defs[def_name])
+    properties = node.get("properties")
+    if not isinstance(properties, dict):
+        raise AssertionError("schema_properties_missing")
+    required = node.get("required", [])
+    if not isinstance(required, list):
+        raise AssertionError("schema_required_missing")
+    return tuple(properties), tuple(cast(list[str], required))
+
+
+def _assert_model_contract(
+    model: Any,
+    rel_path: str,
+    def_name: str | None = None,
+) -> None:
+    expected_fields, expected_required = _schema_object_fields(rel_path, def_name)
+    assert set(model.model_fields) == set(expected_fields)
+    assert {name for name, field in model.model_fields.items() if field.is_required()} == set(
+        expected_required
+    )
+    config = model.model_config
+    assert config.get("frozen") is True
+    assert config.get("strict") is True
+    assert config.get("validate_default") is True
+    assert config.get("extra") == "forbid"
+
+
+_COMMON_MODEL_SPECS: tuple[tuple[str, str, str | None], ...] = (
+    ("ActorAssertionModel", "common/actor-assertion-1.0.0.schema.json", None),
+    ("ClientInfoModel", "common/client-info-1.0.0.schema.json", None),
+    ("CoverageModel", "common/coverage-1.0.0.schema.json", None),
+    ("FrontierModel", "common/frontier-1.0.0.schema.json", None),
+    ("PublicErrorModel", "common/public-error-1.0.0.schema.json", None),
+    ("SubjectStateRefModel", "common/subject-state-ref-1.0.0.schema.json", None),
+    ("OperationFailureModel", "common/operation-result-1.0.0.schema.json", "failure_result"),
+    ("OmittedContentModel", "common/operation-result-1.0.0.schema.json", "omitted_content"),
+    ("PrivacyProjectionModel", "common/operation-result-1.0.0.schema.json", "privacy_projection"),
+    ("CheckScopeModel", "operations/check-request-1.0.0.schema.json", "check_scope"),
+)
+
+_REQUEST_MODEL_SPECS: tuple[tuple[str, str], ...] = (
+    ("StartRequestModel", "operations/start-request-1.0.0.schema.json"),
+    ("PublishWorkRequestModel", "operations/publish-work-request-1.0.0.schema.json"),
+    ("CheckRequestModel", "operations/check-request-1.0.0.schema.json"),
+    ("RespondRequestModel", "operations/respond-request-1.0.0.schema.json"),
+    ("StatusRequestModel", "operations/status-request-1.0.0.schema.json"),
+    ("ReceiptRequestModel", "operations/receipt-request-1.0.0.schema.json"),
+)
+
+_REQUEST_SUPPORT_MODEL_SPECS: tuple[tuple[str, str, str], ...] = (
+    (
+        "StatusAssignmentFilterModel",
+        "operations/status-request-1.0.0.schema.json",
+        "assignment_filter",
+    ),
+    (
+        "StatusCandidateFindingsFilterModel",
+        "operations/status-request-1.0.0.schema.json",
+        "candidate_findings_filter",
+    ),
+    (
+        "StatusEvidenceFilterModel",
+        "operations/status-request-1.0.0.schema.json",
+        "evidence_filter",
+    ),
+    (
+        "StatusFindingsFilterModel",
+        "operations/status-request-1.0.0.schema.json",
+        "findings_filter",
+    ),
+    (
+        "StatusHistoryFilterModel",
+        "operations/status-request-1.0.0.schema.json",
+        "history_filter",
+    ),
+    (
+        "StatusObligationsFilterModel",
+        "operations/status-request-1.0.0.schema.json",
+        "obligations_filter",
+    ),
+)
+
+_ROOT_RESULT_MODEL_NAMES: tuple[str, ...] = (
+    "StartResultModel",
+    "PublishWorkResultModel",
+    "CheckResultModel",
+    "RespondResultModel",
+    "StatusResultModel",
+    "ReceiptResultModel",
+)
+
+_RESULT_SCHEMA_BY_METHOD_FOR_TEST: tuple[tuple[str, str], ...] = (
+    ("check", "check-result"),
+    ("publish_work", "publish-work-result"),
+    ("receipt", "receipt-result"),
+    ("respond", "respond-result"),
+    ("start", "start-result"),
+)
+_STATUS_PAGE_DEF_BY_VIEW_FOR_TEST: tuple[tuple[str, str], ...] = (
+    ("assignment", "assignment_page"),
+    ("candidate_findings", "candidate_findings_page"),
+    ("compact", "compact_page"),
+    ("evidence", "evidence_page"),
+    ("findings", "findings_page"),
+    ("history", "history_page"),
+    ("obligations", "obligations_page"),
+    ("versions", "versions_page"),
+)
+_EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
+    ("check", None): 127,
+    ("publish_work", None): 47,
+    ("receipt", None): 148,
+    ("respond", None): 53,
+    ("start", None): 35,
+    ("status", None): 41,
+    ("status", "assignment"): 6,
+    ("status", "candidate_findings"): 32,
+    ("status", "compact"): 43,
+    ("status", "evidence"): 18,
+    ("status", "findings"): 66,
+    ("status", "history"): 10,
+    ("status", "obligations"): 19,
+    ("status", "versions"): 12,
+}
+
+_RESULT_SUPPORT_MODEL_SPECS: tuple[tuple[str, str, str], ...] = (
+    ("StartSuccessModel", "operations/start-result-1.0.0.schema.json", "success"),
+    ("StartCompactViewModel", "operations/start-result-1.0.0.schema.json", "compact_view"),
+    ("StartVersionSliceModel", "operations/start-result-1.0.0.schema.json", "version_slice"),
+    (
+        "PublishWorkSuccessModel",
+        "operations/publish-work-result-1.0.0.schema.json",
+        "success",
+    ),
+    (
+        "PublishWorkAcceptedEventModel",
+        "operations/publish-work-result-1.0.0.schema.json",
+        "accepted_event",
+    ),
+    (
+        "PublishWorkVersionSliceModel",
+        "operations/publish-work-result-1.0.0.schema.json",
+        "version_slice",
+    ),
+    ("CheckSuccessModel", "operations/check-result-1.0.0.schema.json", "success"),
+    (
+        "CheckPolicyExecutionModel",
+        "operations/check-result-1.0.0.schema.json",
+        "policy_execution",
+    ),
+    (
+        "CheckProjectedFindingModel",
+        "operations/check-result-1.0.0.schema.json",
+        "projected_finding",
+    ),
+    ("CheckVersionSliceModel", "operations/check-result-1.0.0.schema.json", "version_slice"),
+    ("RespondSuccessModel", "operations/respond-result-1.0.0.schema.json", "success"),
+    (
+        "RespondAcceptedEventModel",
+        "operations/respond-result-1.0.0.schema.json",
+        "accepted_event",
+    ),
+    (
+        "RespondEvidenceSummaryModel",
+        "operations/respond-result-1.0.0.schema.json",
+        "evidence_summary",
+    ),
+    ("RespondResponseModel", "operations/respond-result-1.0.0.schema.json", "response"),
+    ("RespondVersionSliceModel", "operations/respond-result-1.0.0.schema.json", "version_slice"),
+    ("StatusSuccessModel", "operations/status-result-1.0.0.schema.json", "success"),
+    (
+        "StatusAssignmentItemModel",
+        "operations/status-result-1.0.0.schema.json",
+        "assignment_item",
+    ),
+    (
+        "StatusAssignmentPageModel",
+        "operations/status-result-1.0.0.schema.json",
+        "assignment_page",
+    ),
+    (
+        "StatusCandidateFindingItemModel",
+        "operations/status-result-1.0.0.schema.json",
+        "candidate_finding_item",
+    ),
+    (
+        "StatusCandidateFindingsPageModel",
+        "operations/status-result-1.0.0.schema.json",
+        "candidate_findings_page",
+    ),
+    ("StatusCompactFindingModel", "operations/status-result-1.0.0.schema.json", "compact_finding"),
+    ("StatusCompactItemModel", "operations/status-result-1.0.0.schema.json", "compact_item"),
+    (
+        "StatusCompactObligationModel",
+        "operations/status-result-1.0.0.schema.json",
+        "compact_obligation",
+    ),
+    ("StatusCompactPageModel", "operations/status-result-1.0.0.schema.json", "compact_page"),
+    ("StatusEvidenceItemModel", "operations/status-result-1.0.0.schema.json", "evidence_item"),
+    ("StatusEvidencePageModel", "operations/status-result-1.0.0.schema.json", "evidence_page"),
+    ("StatusFindingBasisModel", "operations/status-result-1.0.0.schema.json", "finding_basis"),
+    ("StatusFindingItemModel", "operations/status-result-1.0.0.schema.json", "finding_item"),
+    ("StatusFindingsPageModel", "operations/status-result-1.0.0.schema.json", "findings_page"),
+    ("StatusHistoryItemModel", "operations/status-result-1.0.0.schema.json", "history_item"),
+    ("StatusHistoryPageModel", "operations/status-result-1.0.0.schema.json", "history_page"),
+    ("StatusImportStatusModel", "operations/status-result-1.0.0.schema.json", "import_status"),
+    ("StatusObligationItemModel", "operations/status-result-1.0.0.schema.json", "obligation_item"),
+    (
+        "StatusObligationsPageModel",
+        "operations/status-result-1.0.0.schema.json",
+        "obligations_page",
+    ),
+    (
+        "StatusStructuralSubjectStateModel",
+        "operations/status-result-1.0.0.schema.json",
+        "structural_subject_state",
+    ),
+    ("StatusVersionSliceModel", "operations/status-result-1.0.0.schema.json", "version_slice"),
+    ("StatusVersionsPageModel", "operations/status-result-1.0.0.schema.json", "versions_page"),
+    ("ReceiptSuccessModel", "operations/receipt-result-1.0.0.schema.json", "success"),
+    ("ReceiptVersionSliceModel", "operations/receipt-result-1.0.0.schema.json", "version_slice"),
+)
+
+
+def _assert_enum_values(enum_type: Any, expected: set[str]) -> None:
+    assert {member.value for member in enum_type} == expected
+
+
+def _assert_semantic_reason_matrix(models: Any) -> None:
+    status_enum = models.SemanticStatus
+    reason_enum = models.SemanticReason
+    relation = models.VALID_SEMANTIC_REASONS
+    assert set(member.value for member in status_enum) == _EXPECTED_SEMANTIC_STATUSES
+    assert {member.value for member in relation} == _EXPECTED_SEMANTIC_STATUSES
+    observed_reasons: set[str] = set()
+    for status_value, expected_reasons in _EXPECTED_SEMANTIC_STATUS_REASONS.items():
+        status_member = status_enum(status_value)
+        matrix_reasons = relation[status_member]
+        observed_reasons.update(reason.value for reason in matrix_reasons)
+        assert {reason.value for reason in matrix_reasons} == expected_reasons
+        for reason_value in expected_reasons:
+            assert (
+                models.validate_semantic_outcome(status_member, reason_enum(reason_value)) is None
+            )
+    assert {member.value for member in reason_enum} == observed_reasons
+    with pytest.raises(ProtocolValueError) as exc_info:
+        models.validate_semantic_outcome(status_enum("failed"), reason_enum("semantic_completed"))
+    _assert_reason(exc_info, "invalid_semantic_status_reason_pair")
+
+
+def _test_id(prefix: str) -> str:
+    return f"{prefix}{_TEST_UUID}"
+
+
+def _actor_wire() -> dict[str, JsonValue]:
+    return {"actor_id": "harness:test", "actor_type": "harness"}
+
+
+def _client_wire() -> dict[str, JsonValue]:
+    return {"kind": "test_client", "version": "0.1.0", "integration": "local_cli"}
+
+
+def _coverage_wire() -> dict[str, JsonValue]:
+    return {
+        "publication_channels": ["cooperative_mcp"],
+        "authorship_assurance": "self_asserted",
+        "artifact_observation": "published_only",
+        "evidence_immutability": "content_digest",
+        "ledger_freshness": "current",
+        "check_types": ["none"],
+        "known_gaps": [],
+    }
+
+
+def _privacy_projection_wire() -> dict[str, JsonValue]:
+    return {
+        "sink": "agent_context",
+        "local_disclosure_receipt_id": _test_id("egr_"),
+        "policy_id": _test_id("pvy_"),
+        "policy_version": "1",
+        "policy_digest": f"sha256:{'0' * 64}",
+        "included_categories": [],
+        "blocked_categories": [],
+        "omitted_pointers": [],
+        "projection_commitment": f"hmac-sha256:{'1' * 64}",
+    }
+
+
+def _start_request_wire() -> dict[str, JsonValue]:
+    return {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": _test_id("req_"),
+        "actor": _actor_wire(),
+        "client": _client_wire(),
+        "mode": "create",
+        "task_title": "Materialize the protocol",
+        "requested_view": "compact",
+    }
+
+
+def _start_result_wire() -> dict[str, JsonValue]:
+    return {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": _test_id("req_"),
+        "ok": True,
+        "outcome": "created",
+        "task_id": _test_id("tsk_"),
+        "session_id": _test_id("ses_"),
+        "writer_id": _test_id("wri_"),
+        "frontier": {"sequence": "0", "head_digest": "genesis"},
+        "compact": {
+            "open_obligation_count": "0",
+            "unresolved_finding_count": "0",
+            "ledger_freshness": "current",
+            "coverage": _coverage_wire(),
+            "gaps": [],
+        },
+        "versions": {
+            "protocol_version": "0.1",
+            "engine_version": "0.1.0",
+            "projection_version": "0.1.0",
+            "policy_packs": [],
+        },
+        "privacy_projection": _privacy_projection_wire(),
+    }
+
+
+def _check_result_wire() -> dict[str, JsonValue]:
+    return {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": _test_id("req_"),
+        "ok": True,
+        "task_id": _test_id("tsk_"),
+        "session_id": _test_id("ses_"),
+        "writer_id": _test_id("wri_"),
+        "subject_frontier": {"sequence": "1", "head_digest": f"sha256:{'2' * 64}"},
+        "result_frontier": {"sequence": "1", "head_digest": f"sha256:{'2' * 64}"},
+        "verdict": "action_required",
+        "findings": [
+            {
+                "finding_id": _test_id("fnd_"),
+                "kind": "action_without_result",
+                "origin": "deterministic",
+                "priority": 1,
+                "summary": "An action has no result.",
+                "detail": "Record the terminal result.",
+                "subject_refs": [_test_id("act_")],
+                "policy_id": "work-integrity",
+                "policy_version": "0.1.0",
+                "subject_frontier": {
+                    "sequence": "1",
+                    "head_digest": f"sha256:{'2' * 64}",
+                },
+                "coverage": _coverage_wire(),
+                "provenance": None,
+            }
+        ],
+        "suppressed_count": "0",
+        "policy_executions": [
+            {
+                "policy_id": "work-integrity",
+                "policy_version": "0.1.0",
+                "outcome": "run",
+                "reason": "completed",
+            }
+        ],
+        "semantic_status": "not_requested",
+        "semantic_reason": "deterministic_mode",
+        "semantic_provenance": None,
+        "coverage": _coverage_wire(),
+        "versions": {
+            "protocol_version": "0.1",
+            "engine_version": "0.1.0",
+            "projection_version": "0.1.0",
+            "policy_packs": ["work-integrity/0.1.0"],
+        },
+        "privacy_projection": _privacy_projection_wire(),
+    }
+
+
+def _publish_result_wire() -> dict[str, JsonValue]:
+    return {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": _test_id("req_"),
+        "ok": True,
+        "outcome": "accepted",
+        "task_id": _test_id("tsk_"),
+        "session_id": _test_id("ses_"),
+        "writer_id": _test_id("wri_"),
+        "subject_frontier": {"sequence": "0", "head_digest": "genesis"},
+        "result_frontier": {"sequence": "1", "head_digest": f"sha256:{'2' * 64}"},
+        "accepted_events": [
+            {
+                "event_id": _test_id("evt_"),
+                "schema_name": "plan_published",
+                "schema_version": "1.0.0",
+                "writer_sequence": "1",
+                "ingestion_sequence": "1",
+                "accepted_at": "2026-07-18T12:34:56.789Z",
+                "predecessor_digest": "genesis",
+                "entry_digest": f"sha256:{'2' * 64}",
+                "projection_status": "projected",
+                "summary": "Materialize the protocol",
+            }
+        ],
+        "warning_codes": [],
+        "coverage": _coverage_wire(),
+        "gaps": [],
+        "versions": {
+            "protocol_version": "0.1",
+            "engine_version": "0.1.0",
+            "projection_version": "0.1.0",
+            "policy_packs": [],
+        },
+        "privacy_projection": _privacy_projection_wire(),
+    }
+
+
+def _status_result_wire() -> dict[str, JsonValue]:
+    frontier: dict[str, JsonValue] = {"sequence": "0", "head_digest": "genesis"}
+    return {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": _test_id("req_"),
+        "ok": True,
+        "task_id": _test_id("tsk_"),
+        "session_id": _test_id("ses_"),
+        "writer_id": _test_id("wri_"),
+        "view": "versions",
+        "requested_frontier": dict(frontier),
+        "head_frontier": dict(frontier),
+        "subject_frontier": dict(frontier),
+        "result_frontier": dict(frontier),
+        "projection_lag": "0",
+        "projection_version": "0.1.0",
+        "rebuild_state": "current",
+        "page": {"items": [], "next_cursor": None},
+        "coverage": _coverage_wire(),
+        "gaps": [],
+        "import_status": {
+            "pending_count": "0",
+            "terminal_count": "0",
+            "phase": None,
+            "report_evidence_id": None,
+            "source_identity_digest": None,
+        },
+        "privacy_projection": _privacy_projection_wire(),
+    }
+
+
+def _candidate_status_result_wire(*, omitted: bool = False) -> dict[str, JsonValue]:
+    result = _status_result_wire()
+    result["view"] = "candidate_findings"
+    content: JsonValue = (
+        {
+            "omitted": True,
+            "category": "finding_summary",
+            "reason": "local_disclosure_not_authorized",
+        }
+        if omitted
+        else "A deterministic candidate finding."
+    )
+    result["page"] = {
+        "items": [
+            {
+                "kind": "action_without_result",
+                "origin": "deterministic",
+                "priority": 1,
+                "summary": content,
+                "detail": content,
+                "subject_refs": [_test_id("act_")],
+                "policy_id": "work-integrity",
+                "policy_version": "0.1.0",
+                "subject_frontier": {"sequence": "0", "head_digest": "genesis"},
+                "coverage": _coverage_wire(),
+                "basis": {
+                    "rule_id": "action_without_result",
+                    "observed_fact_codes": ["action_recorded"],
+                    "observed_refs": [_test_id("act_")],
+                    "required_missing_fact_codes": ["result_recorded"],
+                    "subject_state_relation": "unknown",
+                    "frozen_source_availability": "available",
+                    "coverage_gaps": [],
+                    "evidence_refs": [],
+                },
+            }
+        ],
+        "next_cursor": None,
+    }
+    return result
+
+
+def _respond_result_wire() -> dict[str, JsonValue]:
+    return {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": _test_id("req_"),
+        "ok": True,
+        "task_id": _test_id("tsk_"),
+        "session_id": _test_id("ses_"),
+        "writer_id": _test_id("wri_"),
+        "subject_frontier": {"sequence": "1", "head_digest": f"sha256:{'2' * 64}"},
+        "result_frontier": {"sequence": "2", "head_digest": f"sha256:{'3' * 64}"},
+        "accepted_event": {
+            "event_id": _test_id("evt_"),
+            "writer_sequence": "2",
+            "ingestion_sequence": "2",
+            "accepted_at": "2026-07-18T12:34:56.789Z",
+            "entry_digest": f"sha256:{'3' * 64}",
+        },
+        "response": {
+            "response_event_id": _test_id("evt_"),
+            "finding_id": _test_id("fnd_"),
+            "finding_frontier": {"sequence": "1", "head_digest": f"sha256:{'2' * 64}"},
+            "disposition": "rejected",
+            "evidence": [
+                {
+                    "reference_id": _test_id("evd_"),
+                    "description": "The recorded evidence is insufficient.",
+                }
+            ],
+            "reason": "The finding remains valid.",
+        },
+        "coverage": _coverage_wire(),
+        "warning_codes": [],
+        "versions": {
+            "protocol_version": "0.1",
+            "engine_version": "0.1.0",
+            "projection_version": "0.1.0",
+            "policy_packs": ["work-integrity/0.1.0"],
+        },
+        "privacy_projection": _privacy_projection_wire(),
+    }
+
+
+def _receipt_fixture_expected() -> dict[str, JsonValue]:
+    fixture_path = (
+        Path(__file__).resolve().parents[3]
+        / "fixtures"
+        / "receipts"
+        / "deterministic-current.case.json"
+    )
+    fixture = _plain_object(fixture_path.read_bytes())
+    expected = cast(dict[str, JsonValue], fixture["expected"])
+    variants = cast(dict[str, JsonValue], expected["variants"])
+    return cast(dict[str, JsonValue], variants["current_complete"])
+
+
+def _semantic_provenance_wire() -> dict[str, JsonValue]:
+    fixture_path = (
+        Path(__file__).resolve().parents[3]
+        / "fixtures"
+        / "receipts"
+        / "semantic-advisory.case.json"
+    )
+    fixture = _plain_object(fixture_path.read_bytes())
+    expected = cast(dict[str, JsonValue], fixture["expected"])
+    variants = cast(dict[str, JsonValue], expected["variants"])
+    variant = cast(dict[str, JsonValue], variants["success_after_durable_receipt"])
+    document = cast(dict[str, JsonValue], variant["receipt_document"])
+    findings = cast(list[JsonValue], document["findings"])
+    finding = cast(dict[str, JsonValue], findings[0])
+    return cast(dict[str, JsonValue], finding["provenance"])
+
+
+def _receipt_result_wire() -> dict[str, JsonValue]:
+    expected = _receipt_fixture_expected()
+    document = cast(dict[str, JsonValue], expected["receipt_document"])
+    return {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": _test_id("req_"),
+        "ok": True,
+        "receipt_id": document["receipt_id"],
+        "task_id": document["task_id"],
+        "session_id": document["session_id"],
+        "subject_frontier": document["subject_frontier"],
+        "result_frontier": {"sequence": "13", "head_digest": f"sha256:{'3' * 64}"},
+        "receipt_object_id": _test_id("obj_"),
+        "receipt_digest": expected["canonical_receipt_digest"],
+        "conclusion": document["conclusion"],
+        "redaction_profile": "full_local",
+        "format": "json",
+        "include": "full",
+        "document": document,
+        "human_text": None,
+        "coverage": document["coverage"],
+        "suppressed_finding_count": document["suppressed_finding_count"],
+        "versions": {
+            "protocol_version": "0.1",
+            "engine_version": "0.1.0",
+            "projection_version": "0.1.0",
+            "object_format": "yoetz-object/1",
+            "storage_schema": "1",
+            "policy_packs": ["research-evidence/0.1.0", "work-integrity/0.1.0"],
+        },
+        "privacy_projection": _privacy_projection_wire(),
+    }
+
+
+def _failure_result_wire() -> dict[str, JsonValue]:
+    return {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": _test_id("req_"),
+        "ok": False,
+        "error": {
+            "code": "INVALID_REQUEST",
+            "message": "The request is invalid.",
+            "retryable": False,
+            "correlation_id": _test_id("err_"),
+        },
+    }
+
+
+def test_shared_protocol_constants_match_frozen_values() -> None:
+    models = _models_module()
+    assert models.PROTOCOL_VERSION == _EXPECTED_PROTOCOL_VERSION
+    assert models.MAX_EVENTS_PER_BATCH == _EXPECTED_MAX_EVENTS_PER_BATCH
+    assert models.MAX_CANONICAL_REQUEST_BYTES == _EXPECTED_MAX_CANONICAL_REQUEST_BYTES
+    assert models.MAX_FINDINGS_DEFAULT == _EXPECTED_MAX_FINDINGS_DEFAULT
+    assert models.MAX_FINDINGS_LIMIT == _EXPECTED_MAX_FINDINGS_LIMIT
+    assert models.MAX_REASON_BYTES == _EXPECTED_MAX_REASON_BYTES
+    assert models.MAX_OBJECT_PLAINTEXT_BYTES == _EXPECTED_MAX_OBJECT_PLAINTEXT_BYTES
+    assert models.GENESIS_PREDECESSOR_DIGEST == _EXPECTED_GENESIS_PREDECESSOR_DIGEST
+    _assert_enum_values(models.ActorType, _EXPECTED_ACTOR_TYPES)
+    _assert_enum_values(models.DataCategory, _EXPECTED_DATA_CATEGORIES)
+    _assert_enum_values(models.ClientKind, _EXPECTED_CLIENT_KINDS)
+    _assert_enum_values(models.IntegrationKind, _EXPECTED_INTEGRATION_KINDS)
+    _assert_semantic_reason_matrix(models)
+
+
+@pytest.mark.parametrize(
+    ("model_name", "schema_path", "def_name"),
+    _COMMON_MODEL_SPECS,
+)
+def test_common_models_match_frozen_schemas(
+    model_name: str,
+    schema_path: str,
+    def_name: str | None,
+) -> None:
+    models = _models_module()
+    _assert_model_contract(getattr(models, model_name), schema_path, def_name)
+
+
+@pytest.mark.parametrize(("model_name", "schema_path"), _REQUEST_MODEL_SPECS)
+def test_request_models_match_frozen_schemas(
+    model_name: str,
+    schema_path: str,
+) -> None:
+    models = _models_module()
+    _assert_model_contract(getattr(models, model_name), schema_path)
+
+
+@pytest.mark.parametrize(
+    ("model_name", "schema_path", "def_name"),
+    _REQUEST_SUPPORT_MODEL_SPECS,
+)
+def test_request_support_models_match_frozen_schemas(
+    model_name: str,
+    schema_path: str,
+    def_name: str,
+) -> None:
+    models = _models_module()
+    _assert_model_contract(getattr(models, model_name), schema_path, def_name)
+
+
+@pytest.mark.parametrize(
+    ("model_name", "schema_path", "def_name"),
+    _RESULT_SUPPORT_MODEL_SPECS,
+)
+def test_result_support_models_match_frozen_schemas(
+    model_name: str,
+    schema_path: str,
+    def_name: str,
+) -> None:
+    models = _models_module()
+    _assert_model_contract(getattr(models, model_name), schema_path, def_name)
+
+
+def test_result_roots_are_object_valued_root_models() -> None:
+    models = _models_module()
+    for model_name in _ROOT_RESULT_MODEL_NAMES:
+        model = getattr(models, model_name)
+        assert set(model.model_fields) == {"root"}
+        assert model.model_config.get("frozen") is True
+        assert model.model_config.get("strict") is True
+        assert model.model_config.get("validate_default") is True
+        assert model.model_config.get("extra") is None
+        assert getattr(model, "__pydantic_root_model__", False) is True
+
+
+def test_application_aliases_are_identity_aliases() -> None:
+    models = _models_module()
+    alias_pairs = (
+        ("StartRequest", "StartRequestModel"),
+        ("StartResult", "StartResultModel"),
+        ("PublishWorkRequest", "PublishWorkRequestModel"),
+        ("PublishWorkResult", "PublishWorkResultModel"),
+        ("CheckRequest", "CheckRequestModel"),
+        ("CheckResult", "CheckResultModel"),
+        ("RespondRequest", "RespondRequestModel"),
+        ("RespondResult", "RespondResultModel"),
+        ("StatusRequest", "StatusRequestModel"),
+        ("StatusResult", "StatusResultModel"),
+        ("ReceiptRequest", "ReceiptRequestModel"),
+        ("ReceiptResult", "ReceiptResultModel"),
+    )
+    for public_name, model_name in alias_pairs:
+        assert getattr(models, public_name) is getattr(models, model_name)
+
+
+def test_protocol_models_public_exports_are_closed() -> None:
+    models = _models_module()
+    expected = set(
+        """
+        GENESIS_PREDECESSOR_DIGEST MAX_CANONICAL_REQUEST_BYTES MAX_EVENTS_PER_BATCH
+        MAX_FINDINGS_DEFAULT MAX_FINDINGS_LIMIT MAX_INTERNAL_PROJECTABLE_RESULT_BYTES
+        MAX_OBJECT_PLAINTEXT_BYTES MAX_PROJECTED_RESULT_BYTES MAX_PROJECTION_CONTENT_LEAVES
+        MAX_PROJECTION_POINTER_BYTES MAX_REASON_BYTES PROTOCOL_VERSION ActorAssertionModel
+        ActorType CheckRequest CheckRequestModel CheckResult CheckResultModel CheckScopeModel
+        ClientInfoModel ClientKind CoverageModel DataCategory FrontierModel IntegrationKind
+        JsonValue OmittedContentModel OperationFailureModel PrivacyProjectionModel
+        PublicEnvelopeModel PublicErrorModel PublicRequestModel PublicResultModel
+        PublicationChannel PublishWorkRequest PublishWorkRequestModel PublishWorkResult
+        PublishWorkResultModel ReceiptFormat ReceiptInclude ReceiptRedactionProfile
+        ReceiptRequest ReceiptRequestModel ReceiptResult ReceiptResultModel RespondRequest
+        RespondRequestModel RespondResult RespondResultModel SemanticReason SemanticStatus
+        StartRequest StartRequestModel StartResult StartResultModel StatusRequest
+        StatusRequestModel StatusResult StatusResultModel SubjectStateRefModel
+        VALID_SEMANTIC_REASONS classify_result_leaf public_model_to_wire
+        validate_semantic_outcome
+        """.split()
+    )
+    exports = cast(list[str], getattr(models, "__all__"))
+    assert type(exports) is list
+    assert len(exports) == len(set(exports))
+    assert set(exports) == expected
+    assert all(hasattr(models, name) for name in exports)
+    assert not {"BaseModel", "SafeDetails", "datetime", "re", "types"} & set(exports)
+
+
+def test_operation_wire_round_trip_preserves_presence() -> None:
+    models = _models_module()
+    omitted = models.StartRequestModel.model_validate(_start_request_wire())
+    omitted_wire = models.public_model_to_wire(omitted)
+    assert "session_id" not in omitted_wire
+    assert "external_ref" not in omitted_wire
+    assert "workspace_ref" not in omitted_wire
+
+    explicit_null = {
+        **_start_request_wire(),
+        "session_id": None,
+    }
+    with pytest.raises(ValidationError):
+        models.StartRequestModel.model_validate(explicit_null)
+
+    status_wire = {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": _test_id("req_"),
+        "actor": _actor_wire(),
+        "client": _client_wire(),
+        "session_id": _test_id("ses_"),
+        "writer_id": _test_id("wri_"),
+        "view": "compact",
+        "limit": "10",
+        "at_frontier": None,
+        "cursor": None,
+    }
+    status = models.StatusRequestModel.model_validate(status_wire)
+    assert models.public_model_to_wire(status) == status_wire
+
+
+def test_public_model_to_wire_is_the_validated_boundary() -> None:
+    models = _models_module()
+    request = models.StartRequestModel.model_validate(_start_request_wire())
+    result = models.StartResultModel.model_validate(_start_result_wire())
+
+    first = models.public_model_to_wire(request)
+    second = models.public_model_to_wire(request)
+    assert first == second == _start_request_wire()
+    assert first is not second
+    first["mode"] = "attach"
+    assert models.public_model_to_wire(request)["mode"] == "create"
+
+    result_wire = models.public_model_to_wire(result)
+    assert result_wire == _start_result_wire()
+    assert "root" not in result_wire
+
+    with pytest.raises(TypeError, match="^public_model_wrong_type$"):
+        models.public_model_to_wire(models.ActorAssertionModel.model_validate(_actor_wire()))
+
+    class DerivedStartRequest(models.StartRequestModel):
+        pass
+
+    derived = DerivedStartRequest.model_validate(_start_request_wire())
+    with pytest.raises(TypeError, match="^public_model_wrong_type$"):
+        models.public_model_to_wire(derived)
+
+
+def test_all_result_roots_serialize_success_and_shared_failure_without_wrapper() -> None:
+    models = _models_module()
+    success_cases: tuple[tuple[str, Callable[[], dict[str, JsonValue]]], ...] = (
+        ("StartResultModel", _start_result_wire),
+        ("PublishWorkResultModel", _publish_result_wire),
+        ("CheckResultModel", _check_result_wire),
+        ("RespondResultModel", _respond_result_wire),
+        ("StatusResultModel", _status_result_wire),
+        ("ReceiptResultModel", _receipt_result_wire),
+    )
+    for model_name, wire_factory in success_cases:
+        wire = wire_factory()
+        parsed = getattr(models, model_name).model_validate(wire)
+        dumped = models.public_model_to_wire(parsed)
+        assert dumped == wire
+        assert "root" not in dumped
+
+    failure_wire = _failure_result_wire()
+    for model_name in _ROOT_RESULT_MODEL_NAMES:
+        parsed = getattr(models, model_name).model_validate(failure_wire)
+        dumped = models.public_model_to_wire(parsed)
+        assert dumped == failure_wire
+        assert "root" not in dumped
+
+
+def test_unknown_fields_and_result_discriminator_are_strict() -> None:
+    models = _models_module()
+    with pytest.raises(ValidationError):
+        models.StartRequestModel.model_validate({**_start_request_wire(), "extra": True})
+    with pytest.raises(ValidationError):
+        models.ActorAssertionModel.model_validate({**_actor_wire(), "extra": True})
+    for invalid_ok in (0, 1, "true", "false"):
+        with pytest.raises(ValidationError):
+            models.StartResultModel.model_validate({**_start_result_wire(), "ok": invalid_ok})
+
+
+def test_operation_cross_field_matrix() -> None:
+    models = _models_module()
+    missing_attachment = _start_request_wire()
+    missing_attachment["mode"] = "attach"
+    with pytest.raises(ValidationError):
+        models.StartRequestModel.model_validate(missing_attachment)
+    attached = {**missing_attachment, "session_id": _test_id("ses_")}
+    models.StartRequestModel.model_validate(attached)
+    partial_attachment = {**_start_request_wire(), "external_ref": "external"}
+    with pytest.raises(ValidationError):
+        models.StartRequestModel.model_validate(partial_attachment)
+
+    models.CheckResultModel.model_validate(_check_result_wire())
+
+    invalid_pair = _check_result_wire()
+    invalid_pair["semantic_reason"] = "semantic_completed"
+    with pytest.raises(ValidationError):
+        models.CheckResultModel.model_validate(invalid_pair)
+
+    predispatch_provenance = _check_result_wire()
+    predispatch_provenance["semantic_provenance"] = {}
+    with pytest.raises(ValidationError):
+        models.CheckResultModel.model_validate(predispatch_provenance)
+
+    versions_status = _status_result_wire()
+    page = cast(dict[str, JsonValue], versions_status["page"])
+    page["items"] = [
+        {
+            "protocol_version": "0.1",
+            "engine_version": "0.1.0",
+            "projection_version": "0.1.0",
+            "object_format": "yoetz-object/1",
+            "storage_schema": "1",
+            "python_version": "3.14.0",
+            "apsw_version": "3.51.0.0",
+            "sqlite_version": "3.51.0",
+            "sqlite_source_id": "sqlite-source-id",
+            "policy_packs": [],
+            "provider_profiles": [],
+        }
+    ]
+    models.StatusResultModel.model_validate(versions_status)
+    versions_status["view"] = "assignment"
+    with pytest.raises(ValidationError):
+        models.StatusResultModel.model_validate(versions_status)
+
+    models.StatusResultModel.model_validate(_candidate_status_result_wire())
+    models.StatusResultModel.model_validate(_candidate_status_result_wire(omitted=True))
+    wrong_candidate_omission = _candidate_status_result_wire(omitted=True)
+    candidate_page = cast(dict[str, JsonValue], wrong_candidate_omission["page"])
+    candidate_items = cast(list[JsonValue], candidate_page["items"])
+    candidate_item = cast(dict[str, JsonValue], candidate_items[0])
+    candidate_summary = cast(dict[str, JsonValue], candidate_item["summary"])
+    candidate_summary["category"] = "task_description"
+    with pytest.raises(ValidationError):
+        models.StatusResultModel.model_validate(wrong_candidate_omission)
+
+    models.RespondResultModel.model_validate(_respond_result_wire())
+    waived = _respond_result_wire()
+    waived_response = cast(dict[str, JsonValue], waived["response"])
+    waived_response["disposition"] = "waived"
+    waived_response["waiver_scope"] = "finding_only"
+    models.RespondResultModel.model_validate(waived)
+    invalid_acknowledgement = _respond_result_wire()
+    acknowledged_response = cast(dict[str, JsonValue], invalid_acknowledgement["response"])
+    acknowledged_response["disposition"] = "acknowledged"
+    acknowledged_response["waiver_scope"] = "finding_only"
+    with pytest.raises(ValidationError):
+        models.RespondResultModel.model_validate(invalid_acknowledgement)
+
+    models.ReceiptResultModel.model_validate(_receipt_result_wire())
+    markdown_receipt = _receipt_result_wire()
+    markdown_receipt["format"] = "markdown"
+    markdown_receipt["document"] = None
+    markdown_receipt["human_text"] = "A deterministic receipt rendering."
+    models.ReceiptResultModel.model_validate(markdown_receipt)
+    markdown_receipt["human_text"] = None
+    with pytest.raises(ValidationError):
+        models.ReceiptResultModel.model_validate(markdown_receipt)
+
+    invalid_timestamp = _publish_result_wire()
+    accepted_events = cast(list[JsonValue], invalid_timestamp["accepted_events"])
+    accepted_event = cast(dict[str, JsonValue], accepted_events[0])
+    accepted_event["accepted_at"] = "2026-02-30T12:34:56.789Z"
+    with pytest.raises(ValidationError):
+        models.PublishWorkResultModel.model_validate(invalid_timestamp)
+
+
+def test_check_semantic_status_reason_and_provenance_matrix() -> None:
+    models = _models_module()
+    for status, reasons in _EXPECTED_SEMANTIC_STATUS_REASONS.items():
+        for reason in reasons:
+            wire = _check_result_wire()
+            wire["semantic_status"] = status
+            wire["semantic_reason"] = reason
+            wire["semantic_provenance"] = (
+                _semantic_provenance_wire() if status == "succeeded" else None
+            )
+            parsed = models.CheckResultModel.model_validate(wire)
+            assert models.public_model_to_wire(parsed) == wire
+
+    succeeded_without_provenance = _check_result_wire()
+    succeeded_without_provenance["semantic_status"] = "succeeded"
+    succeeded_without_provenance["semantic_reason"] = "semantic_completed"
+    with pytest.raises(ValidationError):
+        models.CheckResultModel.model_validate(succeeded_without_provenance)
+
+    failed_with_provenance = _check_result_wire()
+    failed_with_provenance["semantic_status"] = "failed"
+    failed_with_provenance["semantic_reason"] = "coordinator_failure"
+    failed_with_provenance["semantic_provenance"] = _semantic_provenance_wire()
+    parsed_failure = models.CheckResultModel.model_validate(failed_with_provenance)
+    assert models.public_model_to_wire(parsed_failure) == failed_with_provenance
+
+
+def test_actor_and_client_models_validate_shape_without_granting_assurance() -> None:
+    models = _models_module()
+    actor_wire: dict[str, JsonValue] = {
+        "actor_id": "ci-bot.7",
+        "actor_type": "model_backed_worker",
+        "asserted_by": "local harness",
+        "display_name": "CI review worker",
+    }
+    actor = models.ActorAssertionModel.model_validate(actor_wire)
+    assert actor.model_dump(mode="json", exclude_unset=True) == actor_wire
+    assert actor.actor_id == "ci-bot.7"
+    actor_fields = cast(Mapping[str, object], getattr(models.ActorAssertionModel, "model_fields"))
+    assert set(actor_fields) == {
+        "actor_id",
+        "actor_type",
+        "asserted_by",
+        "display_name",
+    }
+    assert "authorship_assurance" not in actor_fields
+
+    convention_actor = models.ActorAssertionModel.model_validate(
+        {"actor_id": "agt_api_mapper", "actor_type": "logical_agent"}
+    )
+    assert convention_actor.actor_id == "agt_api_mapper"
+
+    client_wire = _client_wire()
+    client = models.ClientInfoModel.model_validate(client_wire)
+    assert client.model_dump(mode="json") == client_wire
+    client_fields = cast(Mapping[str, object], getattr(models.ClientInfoModel, "model_fields"))
+    assert set(client_fields) == {"kind", "version", "integration"}
+    assert "authorship_assurance" not in client_fields
+
+    invalid_actors: tuple[dict[str, JsonValue], ...] = (
+        {"actor_id": "", "actor_type": "harness"},
+        {"actor_id": "has a space", "actor_type": "harness"},
+        {"actor_id": "x" * 129, "actor_type": "harness"},
+        {"actor_id": "ci-bot.7", "actor_type": 1},
+        {"actor_id": "ci-bot.7", "actor_type": "unknown"},
+        {"actor_id": "ci-bot.7", "actor_type": "harness", "display_name": None},
+    )
+    for invalid_actor in invalid_actors:
+        with pytest.raises(ValidationError):
+            models.ActorAssertionModel.model_validate(invalid_actor)
+
+    invalid_clients: tuple[dict[str, JsonValue], ...] = (
+        {"kind": 1, "version": "0.1.0", "integration": "local_cli"},
+        {"kind": "unknown", "version": "0.1.0", "integration": "local_cli"},
+        {"kind": "test_client", "version": "", "integration": "local_cli"},
+        {"kind": "test_client", "version": "0.1.0", "integration": "unknown"},
+        {**client_wire, "authorship_assurance": "verified"},
+    )
+    for invalid_client in invalid_clients:
+        with pytest.raises(ValidationError):
+            models.ClientInfoModel.model_validate(invalid_client)
+
+
+def test_public_error_safe_details_accept_wire_arrays_without_coercion() -> None:
+    models = _models_module()
+    base: dict[str, JsonValue] = {
+        "code": "INVALID_REQUEST",
+        "message": "The request is invalid.",
+        "retryable": False,
+        "correlation_id": _test_id("err_"),
+    }
+    cases: tuple[JsonValue, ...] = (
+        {"items": ["value", 1, True], "empty": []},
+        [["value", 1, True], "tail"],
+    )
+    for safe_details in cases:
+        model = models.PublicErrorModel.model_validate({**base, "safe_details": safe_details})
+        assert model.model_dump(mode="json", exclude_unset=True)["safe_details"] == safe_details
+
+    for safe_details in ({"items": [1.5]}, [None], None):
+        with pytest.raises(ValidationError):
+            models.PublicErrorModel.model_validate(
+                {**base, "safe_details": cast(JsonValue, safe_details)}
+            )
+
+
+def test_result_field_classification_is_closed() -> None:
+    models = _models_module()
+    assert models.MAX_PROJECTION_CONTENT_LEAVES == 512
+    assert models.MAX_PROJECTION_POINTER_BYTES == 256
+    assert models.MAX_INTERNAL_PROJECTABLE_RESULT_BYTES == 524_288
+    assert models.MAX_PROJECTED_RESULT_BYTES == 1_048_576
+
+    start = models.public_model_to_wire(
+        models.StartResultModel.model_validate(_start_result_wire())
+    )
+    assert models.classify_result_leaf("start", start, "/outcome") == "public_structural"
+
+    check = models.public_model_to_wire(
+        models.CheckResultModel.model_validate(_check_result_wire())
+    )
+    assert (
+        models.classify_result_leaf("check", check, "/findings/0/summary")
+        is models.DataCategory.FINDING_SUMMARY
+    )
+    assert (
+        models.classify_result_leaf("check", check, "/findings/0/priority") == "public_structural"
+    )
+
+    publish = models.public_model_to_wire(
+        models.PublishWorkResultModel.model_validate(_publish_result_wire())
+    )
+    assert (
+        models.classify_result_leaf("publish_work", publish, "/accepted_events/0/summary")
+        is models.DataCategory.TASK_DESCRIPTION
+    )
+
+    opaque = _publish_result_wire()
+    opaque_events = cast(list[JsonValue], opaque["accepted_events"])
+    opaque_event = cast(dict[str, JsonValue], opaque_events[0])
+    opaque_event["schema_version"] = "1.0.1"
+    opaque_event["summary"] = "opaque_unknown"
+    opaque_wire = models.public_model_to_wire(models.PublishWorkResultModel.model_validate(opaque))
+    assert (
+        models.classify_result_leaf("publish_work", opaque_wire, "/accepted_events/0/summary")
+        == "public_structural"
+    )
+
+    respond = models.public_model_to_wire(
+        models.RespondResultModel.model_validate(_respond_result_wire())
+    )
+    assert (
+        models.classify_result_leaf("respond", respond, "/response/reason")
+        is models.DataCategory.FINDING_SUMMARY
+    )
+    assert (
+        models.classify_result_leaf("respond", respond, "/response/evidence/0/description")
+        is models.DataCategory.EVIDENCE_EXCERPT
+    )
+
+    status = models.public_model_to_wire(
+        models.StatusResultModel.model_validate(_candidate_status_result_wire())
+    )
+    assert (
+        models.classify_result_leaf("status", status, "/page/items/0/summary")
+        is models.DataCategory.FINDING_SUMMARY
+    )
+    omitted_status = models.public_model_to_wire(
+        models.StatusResultModel.model_validate(_candidate_status_result_wire(omitted=True))
+    )
+    for suffix in ("category", "omitted", "reason"):
+        assert (
+            models.classify_result_leaf(
+                "status",
+                omitted_status,
+                f"/page/items/0/summary/{suffix}",
+            )
+            == "public_structural"
+        )
+
+    receipt = models.public_model_to_wire(
+        models.ReceiptResultModel.model_validate(_receipt_result_wire())
+    )
+    assert (
+        models.classify_result_leaf("receipt", receipt, "/document/sections/0/body")
+        is models.DataCategory.FINDING_SUMMARY
+    )
+    assert models.classify_result_leaf("receipt", receipt, "/human_text") == "public_structural"
+
+    markdown_receipt = _receipt_result_wire()
+    markdown_receipt["format"] = "markdown"
+    markdown_receipt["document"] = None
+    markdown_receipt["human_text"] = "A deterministic receipt rendering."
+    markdown = models.public_model_to_wire(
+        models.ReceiptResultModel.model_validate(markdown_receipt)
+    )
+    assert (
+        models.classify_result_leaf("receipt", markdown, "/human_text")
+        is models.DataCategory.FINDING_SUMMARY
+    )
+
+    omitted_text_receipt = _receipt_result_wire()
+    omitted_text_receipt["format"] = "text"
+    omitted_text_receipt["document"] = None
+    omitted_text_receipt["human_text"] = {
+        "omitted": True,
+        "category": "finding_summary",
+        "reason": "local_disclosure_not_authorized",
+    }
+    omitted_text = models.public_model_to_wire(
+        models.ReceiptResultModel.model_validate(omitted_text_receipt)
+    )
+    for suffix in ("category", "omitted", "reason"):
+        assert (
+            models.classify_result_leaf("receipt", omitted_text, f"/human_text/{suffix}")
+            == "public_structural"
+        )
+
+    invalid_unknown = _publish_result_wire()
+    invalid_unknown_events = cast(list[JsonValue], invalid_unknown["accepted_events"])
+    invalid_unknown_event = cast(dict[str, JsonValue], invalid_unknown_events[0])
+    invalid_unknown_event["schema_version"] = "1.0.1"
+    with pytest.raises(ProtocolValueError) as schema_exc_info:
+        validate_schema_instance("publish-work-result", "1.0.0", invalid_unknown)
+    _assert_reason(schema_exc_info, "schema_instance_invalid")
+    with pytest.raises(ProtocolValueError) as exc_info:
+        models.classify_result_leaf("publish_work", invalid_unknown, "/accepted_events/0/summary")
+    _assert_reason(exc_info, "invalid_json_pointer")
+
+    for pointer in (
+        "/findings/00/summary",
+        "/findings/1/summary",
+        "/findings/0",
+        "/findings/0/~2bad",
+        "findings/0/summary",
+    ):
+        with pytest.raises(ProtocolValueError) as exc_info:
+            models.classify_result_leaf("check", check, pointer)
+        _assert_reason(exc_info, "invalid_json_pointer")
+
+    with pytest.raises(ProtocolValueError) as exc_info:
+        models.classify_result_leaf("unknown", check, "/findings/0/summary")
+    _assert_reason(exc_info, "invalid_json_pointer")
+
+
+def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
+    models = _models_module()
+    catalog = load_schema_catalog()
+    rules = cast(tuple[Any, ...], getattr(models, "_RESULT_LEAF_RULES"))
+
+    derived_patterns = _derived_result_success_patterns(catalog)
+    assert len(derived_patterns) == 657
+
+    derived_counts = {
+        context: sum(1 for method, view, _ in derived_patterns if (method, view) == context)
+        for context in _EXPECTED_RESULT_PATTERN_COUNTS
+    }
+    assert derived_counts == _EXPECTED_RESULT_PATTERN_COUNTS
+
+    assert type(rules) is tuple
+    assert len(rules) == 673
+    assert rules == tuple(sorted(rules, key=_test_rule_sort_key))
+
+    rule_keys = {
+        (rule.method, rule.status_view, rule.event_selector, rule.segments) for rule in rules
+    }
+    assert len(rule_keys) == len(rules)
+
+    registry_patterns = {(rule.method, rule.status_view, rule.segments) for rule in rules}
+    assert len(registry_patterns) == 657
+    assert registry_patterns == derived_patterns
+
+    content_rules = _expected_nonpublish_content_rules(models)
+    assert set(content_rules) <= derived_patterns
+
+    publish_summary_segments = ("accepted_events", "*", "summary")
+    publish_summary_rules = tuple(
+        rule
+        for rule in rules
+        if rule.method == "publish_work" and rule.segments == publish_summary_segments
+    )
+    assert len(publish_summary_rules) == 17
+    assert all(rule.status_view is None for rule in publish_summary_rules)
+
+    expected_publish = _expected_publish_summary_rules(models)
+    actual_publish = {rule.event_selector: rule.classification for rule in publish_summary_rules}
+    assert set(actual_publish) == set(expected_publish)
+    for selector, expected_classification in expected_publish.items():
+        actual_classification = actual_publish[selector]
+        if expected_classification == "public_structural":
+            assert actual_classification == "public_structural"
+        else:
+            assert actual_classification is expected_classification
+
+    for rule in rules:
+        pattern_key = (rule.method, rule.status_view, rule.segments)
+        if rule.method == "publish_work" and rule.segments == publish_summary_segments:
+            continue
+
+        assert rule.event_selector is None
+        expected_classification = content_rules.get(pattern_key, "public_structural")
+        if expected_classification == "public_structural":
+            assert rule.classification == "public_structural"
+        else:
+            assert rule.classification is expected_classification
+
+
+def test_tuple_backed_canonical_values_validate_and_classify_offline() -> None:
+    tuple_coverage = _coverage_wire()
+    tuple_coverage["publication_channels"] = ("cooperative_mcp",)
+    tuple_coverage["check_types"] = ("none",)
+    tuple_coverage["known_gaps"] = ()
+    validate_schema_instance("coverage", "1.0.0", tuple_coverage)
+
+    models = _models_module()
+    parsed = models.CheckResultModel.model_validate(_check_result_wire())
+    python_wire = cast(Mapping[str, JsonValue], parsed.model_dump(mode="python"))
+    assert type(python_wire["findings"]) is tuple
+    assert (
+        models.classify_result_leaf("check", python_wire, "/findings/0/summary")
+        is models.DataCategory.FINDING_SUMMARY
+    )
+
+
+def test_json_pointer_lone_surrogates_fail_with_the_bounded_reason() -> None:
+    models = _models_module()
+    check = models.public_model_to_wire(
+        models.CheckResultModel.model_validate(_check_result_wire())
+    )
+    with pytest.raises(ProtocolValueError) as exc_info:
+        models.classify_result_leaf("check", check, "/\ud800")
+    _assert_reason(exc_info, "invalid_json_pointer")
+
+    projection = _privacy_projection_wire()
+    projection["omitted_pointers"] = ["/\ud800"]
+    with pytest.raises(ValidationError):
+        models.PrivacyProjectionModel.model_validate(projection)
 
 
 def _assert_reason(exc_info: pytest.ExceptionInfo[ProtocolValueError], reason: str) -> None:
@@ -75,6 +1467,346 @@ def _count_refs(value: object) -> int:
     elif isinstance(value, tuple):
         count += sum(_count_refs(item) for item in cast(tuple[object, ...], value))
     return count
+
+
+def _schema_mapping(value: object) -> Mapping[str, JsonValue]:
+    if not isinstance(value, Mapping):
+        raise AssertionError("schema_node_not_object")
+    return cast(Mapping[str, JsonValue], value)
+
+
+def _schema_sequence(value: object) -> tuple[JsonValue, ...]:
+    if type(value) is not tuple and type(value) is not list:
+        raise AssertionError("schema_node_not_array")
+    return tuple(cast(tuple[JsonValue, ...] | list[JsonValue], value))
+
+
+def _resolve_test_schema_ref(
+    catalog: SchemaCatalog,
+    current_document: SchemaDocument,
+    ref: str,
+) -> tuple[SchemaDocument, Mapping[str, JsonValue], str]:
+    base, fragment = urldefrag(ref)
+    if base:
+        target_document = catalog.by_id.get(base)
+        if target_document is None:
+            raise AssertionError("schema_ref_target_missing")
+    else:
+        target_document = current_document
+
+    node: object = target_document.json_schema
+    if fragment:
+        if not fragment.startswith("/"):
+            raise AssertionError("schema_ref_fragment_invalid")
+        for raw_segment in fragment[1:].split("/"):
+            segment = raw_segment.replace("~1", "/").replace("~0", "~")
+            canonical = segment.replace("~", "~0").replace("/", "~1")
+            if canonical != raw_segment:
+                raise AssertionError("schema_ref_fragment_invalid")
+            mapping = _schema_mapping(node)
+            if segment not in mapping:
+                raise AssertionError("schema_ref_fragment_missing")
+            node = mapping[segment]
+
+    return target_document, _schema_mapping(node), fragment
+
+
+def _walk_schema_leaf_patterns(
+    catalog: SchemaCatalog,
+    document: SchemaDocument,
+    node: Mapping[str, JsonValue],
+    *,
+    prefix: tuple[str, ...] = (),
+    active_refs: frozenset[tuple[str, str]] = frozenset(),
+) -> frozenset[tuple[str, ...]]:
+    leaves: set[tuple[str, ...]] = set()
+
+    raw_ref = node.get("$ref")
+    if raw_ref is not None:
+        if type(raw_ref) is not str:
+            raise AssertionError("schema_ref_not_string")
+        target_document, target_node, fragment = _resolve_test_schema_ref(
+            catalog,
+            document,
+            raw_ref,
+        )
+        ref_key = (target_document.schema_id, fragment)
+        if ref_key not in active_refs:
+            leaves.update(
+                _walk_schema_leaf_patterns(
+                    catalog,
+                    target_document,
+                    target_node,
+                    prefix=prefix,
+                    active_refs=active_refs | {ref_key},
+                )
+            )
+
+    for keyword in ("allOf", "anyOf", "oneOf"):
+        raw_branches = node.get(keyword)
+        if raw_branches is None:
+            continue
+        for branch in _schema_sequence(raw_branches):
+            leaves.update(
+                _walk_schema_leaf_patterns(
+                    catalog,
+                    document,
+                    _schema_mapping(branch),
+                    prefix=prefix,
+                    active_refs=active_refs,
+                )
+            )
+
+    raw_properties = node.get("properties")
+    has_properties = isinstance(raw_properties, Mapping)
+    if has_properties:
+        properties = cast(Mapping[str, JsonValue], raw_properties)
+        for property_name, child in properties.items():
+            leaves.update(
+                _walk_schema_leaf_patterns(
+                    catalog,
+                    document,
+                    _schema_mapping(child),
+                    prefix=(*prefix, property_name),
+                    active_refs=active_refs,
+                )
+            )
+
+    schema_type = node.get("type")
+    is_array = schema_type == "array" or "items" in node or "prefixItems" in node
+    if is_array:
+        raw_items = node.get("items")
+        if isinstance(raw_items, Mapping):
+            leaves.update(
+                _walk_schema_leaf_patterns(
+                    catalog,
+                    document,
+                    cast(Mapping[str, JsonValue], raw_items),
+                    prefix=(*prefix, "*"),
+                    active_refs=active_refs,
+                )
+            )
+
+        raw_prefix_items = node.get("prefixItems")
+        if raw_prefix_items is not None:
+            for child in _schema_sequence(raw_prefix_items):
+                leaves.update(
+                    _walk_schema_leaf_patterns(
+                        catalog,
+                        document,
+                        _schema_mapping(child),
+                        prefix=(*prefix, "*"),
+                        active_refs=active_refs,
+                    )
+                )
+
+    is_scalar_type = type(schema_type) is str and schema_type in {
+        "boolean",
+        "integer",
+        "null",
+        "number",
+        "string",
+    }
+    is_untyped_scalar_token = (
+        not is_array and not has_properties and ("const" in node or "enum" in node)
+    )
+    if is_scalar_type or is_untyped_scalar_token:
+        leaves.add(prefix)
+
+    return frozenset(leaves)
+
+
+def _schema_success_definition(document: SchemaDocument) -> Mapping[str, JsonValue]:
+    definitions = _schema_mapping(document.json_schema.get("$defs"))
+    success = definitions.get("success")
+    if success is None:
+        raise AssertionError("schema_success_definition_missing")
+    return _schema_mapping(success)
+
+
+def _derived_result_success_patterns(
+    catalog: SchemaCatalog,
+) -> frozenset[tuple[str, str | None, tuple[str, ...]]]:
+    derived: set[tuple[str, str | None, tuple[str, ...]]] = set()
+
+    for method, schema_name in _RESULT_SCHEMA_BY_METHOD_FOR_TEST:
+        document = catalog.by_name_version[(schema_name, "1.0.0")]
+        patterns = _walk_schema_leaf_patterns(
+            catalog,
+            document,
+            _schema_success_definition(document),
+        )
+        derived.update((method, None, pattern) for pattern in patterns)
+
+    status_document = catalog.by_name_version[("status-result", "1.0.0")]
+    status_success = _schema_success_definition(status_document)
+    status_properties = dict(_schema_mapping(status_success.get("properties")))
+    if status_properties.pop("page", None) is None:
+        raise AssertionError("status_page_property_missing")
+
+    status_without_page: dict[str, JsonValue] = dict(status_success)
+    status_without_page["properties"] = cast(JsonValue, status_properties)
+    common_patterns = _walk_schema_leaf_patterns(
+        catalog,
+        status_document,
+        status_without_page,
+    )
+    derived.update(("status", None, pattern) for pattern in common_patterns)
+
+    status_definitions = _schema_mapping(status_document.json_schema.get("$defs"))
+    for view, definition_name in _STATUS_PAGE_DEF_BY_VIEW_FOR_TEST:
+        page_definition = status_definitions.get(definition_name)
+        if page_definition is None:
+            raise AssertionError("status_page_definition_missing")
+        page_patterns = _walk_schema_leaf_patterns(
+            catalog,
+            status_document,
+            _schema_mapping(page_definition),
+            prefix=("page",),
+        )
+        derived.update(("status", view, pattern) for pattern in page_patterns)
+
+    return frozenset(derived)
+
+
+def _test_pointer_segments(pointer: str) -> tuple[str, ...]:
+    if not pointer.startswith("/"):
+        raise AssertionError("test_pointer_invalid")
+    return tuple(pointer[1:].split("/"))
+
+
+def _expected_nonpublish_content_rules(
+    models: Any,
+) -> dict[tuple[str, str | None, tuple[str, ...]], object]:
+    finding_summary = models.DataCategory.FINDING_SUMMARY
+    evidence_excerpt = models.DataCategory.EVIDENCE_EXCERPT
+    obligation_text = models.DataCategory.OBLIGATION_TEXT
+    task_description = models.DataCategory.TASK_DESCRIPTION
+
+    rows: tuple[tuple[str, str | None, str, object], ...] = (
+        ("check", None, "/findings/*/detail", finding_summary),
+        ("check", None, "/findings/*/summary", finding_summary),
+        ("respond", None, "/response/evidence/*/description", evidence_excerpt),
+        ("respond", None, "/response/reason", finding_summary),
+        (
+            "status",
+            "candidate_findings",
+            "/page/items/*/detail",
+            finding_summary,
+        ),
+        (
+            "status",
+            "candidate_findings",
+            "/page/items/*/summary",
+            finding_summary,
+        ),
+        (
+            "status",
+            "compact",
+            "/page/items/*/open_obligations/*/acceptance_criteria",
+            obligation_text,
+        ),
+        (
+            "status",
+            "compact",
+            "/page/items/*/open_obligations/*/description",
+            obligation_text,
+        ),
+        (
+            "status",
+            "compact",
+            "/page/items/*/open_obligations/*/evidence_expectation",
+            obligation_text,
+        ),
+        ("status", "compact", "/page/items/*/task_title", task_description),
+        (
+            "status",
+            "compact",
+            "/page/items/*/unresolved_findings/*/detail",
+            finding_summary,
+        ),
+        (
+            "status",
+            "compact",
+            "/page/items/*/unresolved_findings/*/summary",
+            finding_summary,
+        ),
+        ("status", "evidence", "/page/items/*/description", evidence_excerpt),
+        ("status", "evidence", "/page/items/*/reference", evidence_excerpt),
+        ("status", "findings", "/page/items/*/detail", finding_summary),
+        ("status", "findings", "/page/items/*/reason", finding_summary),
+        ("status", "findings", "/page/items/*/summary", finding_summary),
+        (
+            "status",
+            "obligations",
+            "/page/items/*/acceptance_criteria",
+            obligation_text,
+        ),
+        (
+            "status",
+            "obligations",
+            "/page/items/*/description",
+            obligation_text,
+        ),
+        (
+            "status",
+            "obligations",
+            "/page/items/*/evidence_expectation",
+            obligation_text,
+        ),
+        ("receipt", None, "/document/findings/*/detail", finding_summary),
+        ("receipt", None, "/document/findings/*/summary", finding_summary),
+        ("receipt", None, "/document/gaps/*/detail", finding_summary),
+        ("receipt", None, "/document/obligations/*/summary", obligation_text),
+        ("receipt", None, "/document/responses/*/reason", finding_summary),
+        ("receipt", None, "/document/sections/*/body", finding_summary),
+        ("receipt", None, "/document/sections/*/coverage_note", finding_summary),
+        ("receipt", None, "/document/sections/*/items/*", finding_summary),
+        ("receipt", None, "/document/sections/*/title", finding_summary),
+        ("receipt", None, "/human_text", finding_summary),
+    )
+    return {
+        (method, view, _test_pointer_segments(pointer)): classification
+        for method, view, pointer, classification in rows
+    }
+
+
+def _expected_publish_summary_rules(models: Any) -> dict[object, object]:
+    return {
+        "<opaque>": "public_structural",
+        ("action_recorded", "1.0.0"): models.DataCategory.COMMAND_METADATA,
+        ("assignment_recorded", "1.0.0"): "public_structural",
+        ("check_recorded", "1.0.0"): "public_structural",
+        ("claim_recorded", "1.0.0"): models.DataCategory.FINDING_SUMMARY,
+        ("decision_recorded", "1.0.0"): models.DataCategory.DECISION_EXCERPT,
+        ("evidence_recorded", "1.0.0"): models.DataCategory.EVIDENCE_EXCERPT,
+        ("finding_recorded", "1.0.0"): models.DataCategory.FINDING_SUMMARY,
+        ("obligation_published", "1.0.0"): models.DataCategory.TASK_DESCRIPTION,
+        ("plan_published", "1.0.0"): models.DataCategory.TASK_DESCRIPTION,
+        ("plan_revised", "1.0.0"): models.DataCategory.TASK_DESCRIPTION,
+        ("receipt_recorded", "1.0.0"): "public_structural",
+        ("redaction_recorded", "1.0.0"): "public_structural",
+        ("response_recorded", "1.0.0"): models.DataCategory.FINDING_SUMMARY,
+        ("result_recorded", "1.0.0"): models.DataCategory.COMMAND_METADATA,
+        ("session_opened", "1.0.0"): "public_structural",
+        ("session_resumed", "1.0.0"): "public_structural",
+    }
+
+
+def _test_rule_sort_key(
+    rule: Any,
+) -> tuple[bytes, bytes, bytes, tuple[bytes, ...]]:
+    event_selector = rule.event_selector
+    if isinstance(event_selector, tuple):
+        selector_text = f"{event_selector[0]}@{event_selector[1]}"
+    else:
+        selector_text = event_selector or ""
+    return (
+        rule.method.encode("utf-8"),
+        (rule.status_view or "").encode("utf-8"),
+        selector_text.encode("utf-8"),
+        tuple(segment.encode("utf-8") for segment in rule.segments),
+    )
 
 
 def _plain_object(data: bytes) -> dict[str, JsonValue]:
@@ -232,7 +1964,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 1_251
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 1_253
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:
@@ -356,6 +2088,63 @@ def test_schema_manifest_failure_reason_matrix(
         add_unresolved_ref,
     )
     _load_tree_with_reason(unresolved, monkeypatch, "schema_reference_unresolved")
+
+    version_mismatch = _schema_tree(tmp_path, "version-mismatch")
+    manifest, members = _manifest_members(version_mismatch)
+    assert type(members[0]) is dict
+    cast(dict[str, JsonValue], members[0])["schema_version"] = "1.0.1"
+    _write_canonical(version_mismatch / "manifest.json", manifest)
+    _load_tree_with_reason(version_mismatch, monkeypatch, "schema_version_mismatch")
+
+    duplicate_identity = _schema_tree(tmp_path, "duplicate-identity")
+    original_identity = cast(
+        Callable[[str, str], tuple[str, str]],
+        getattr(schemas_module, "_derive_identity"),
+    )
+
+    def collide_identity(path: str, version: str) -> tuple[str, str]:
+        if path == "common/client-info-1.0.0.schema.json":
+            return original_identity("common/actor-assertion-1.0.0.schema.json", version)
+        return original_identity(path, version)
+
+    with monkeypatch.context() as case_patch:
+        case_patch.setattr(schemas_module, "_derive_identity", collide_identity)
+        _load_tree_with_reason(
+            duplicate_identity,
+            case_patch,
+            "schema_duplicate_identity",
+        )
+
+    incomplete = _schema_tree(tmp_path, "incomplete")
+    manifest, members = _manifest_members(incomplete)
+    target_path = "common/client-info-1.0.0.schema.json"
+    for raw_member in members:
+        assert type(raw_member) is dict
+        member = cast(dict[str, JsonValue], raw_member)
+        if member["path"] == target_path:
+            member["schema_kind"] = "config"
+            break
+    else:
+        raise AssertionError("schema_member_not_found")
+    _write_canonical(incomplete / "manifest.json", manifest)
+
+    original_kind = cast(
+        Callable[[str], SchemaKind],
+        getattr(schemas_module, "_derive_kind"),
+    )
+
+    def reclassify_kind(path: str) -> SchemaKind:
+        if path == target_path:
+            return SchemaKind.CONFIG
+        return original_kind(path)
+
+    with monkeypatch.context() as case_patch:
+        case_patch.setattr(schemas_module, "_derive_kind", reclassify_kind)
+        _load_tree_with_reason(
+            incomplete,
+            case_patch,
+            "schema_catalog_incomplete",
+        )
 
 
 def test_schema_instance_validation_is_closed_and_bounded(
