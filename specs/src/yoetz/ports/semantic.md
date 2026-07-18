@@ -180,6 +180,10 @@ recorded excerpts; `expanded` and `custom` use their exact compiled `ReviewSelec
 `coverage_gaps`, `supporting_refs`, and optional `summary_item_id` plus `detail_item_id`. The basis
 fields are the lossless projection of one internal `FindingBasis`; the outbound record does not
 embed the Python basis object. The two item IDs are both present or both absent.
+`source_availability` is the internal four-token value
+`available|not_recorded|unavailable_at_freeze|redacted_at_source`; the mapper preserves it exactly
+and never collapses frozen object/key unavailability into absence, redaction, or a later privacy
+decision.
 When present, they resolve respectively to `section=deterministic_summary|deterministic_detail`,
 `source_kind=finding`, category `finding_summary`, the same finding source/ref roots, and the exact
 bounded candidate summary/detail. They may be present only when `include_finding_prose=true` and

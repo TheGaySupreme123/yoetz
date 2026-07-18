@@ -137,9 +137,9 @@ correctness. The public vocabulary is intentionally small and stable:
 
 `ReceiptConclusion` and `CheckVerdict` are deliberately non-isomorphic: the former describes a
 durable projection at a frontier, while the latter also records whether one check execution was
-incomplete. A receipt builder derives its conclusion from the projection and coverage rather than
-copying a prior verdict. When a recorded check and a receipt describe the same unchanged subject
-frontier, the required correspondence is:
+incomplete. A receipt builder derives its conclusion from the application-supplied frozen
+projection/finding/check/coverage/gap context rather than copying a prior verdict. When a recorded
+check and a receipt describe the same unchanged subject frontier, the required correspondence is:
 
 | `CheckVerdict` | Required `ReceiptConclusion` |
 |---|---|
@@ -240,7 +240,9 @@ canonical-set validators propagate their owning reason unchanged.
 2. The compact render can be weaker than the document, never stronger.
 3. Receipt coverage is the weakest material coverage of the receipt’s supports.
 4. The receipt object itself does not perform I/O.
-5. Export/render details never change the canonical document.
+5. Export format and render-time truncation never change the canonical document. The receipt
+   request's `include` and redaction profile are canonical build inputs and may change it under the
+   frozen builder matrix.
 6. The canonical receipt digest commits to `receipt_id` and `generated_at`; neither is envelope-only
    metadata.
 

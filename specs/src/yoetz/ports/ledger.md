@@ -4,7 +4,8 @@
 `protocol/ids.md`, `protocol/errors.md`, `protocol/coverage.md`, `protocol/models.md`
 (`JsonValue`, `SemanticStatus`, `SemanticReason`, and status item models), `domain/events.md`,
 `domain/findings.md`, `domain/values.md` (`Frontier`), `kernel/projections.md`,
-`kernel/deterministic_checks.md` (`DeterministicCase`, `build_deterministic_case`),
+`kernel/deterministic_checks.md` (`CaseAvailabilityFacts`, `DeterministicCase`,
+`build_deterministic_case`),
 `ports/objects.md` (ObjectRef type only) |
 **Imported by:** `application/service.md`, `application/publish_work.md`, `application/check.md`,
 `application/respond.md`, `application/status.md`, `application/receipt.md`,
@@ -28,6 +29,7 @@ No SQLite, APSW, or transport type appears in any signature. Effectful and point
   - `async def append_batch(self, command: AppendCommand) -> AppendResult`
   - `def load_events(self, session_id: SessionId, *, after: int = 0, through: int | None = None) -> AsyncIterator[LedgerRecord]`
   - `async def load_projection(self, session_id: SessionId, view: ProjectionView) -> StoredProjection | None`
+  - `async def load_case_availability(self, session_id: SessionId, frontier: Frontier, projection: ProjectionState) -> CaseAvailabilityFacts`
   - `async def query_projection(self, query: ProjectionQuery) -> ProjectionPage`
   - `async def freeze_case(self, session_id: SessionId, writer_id: str, expected_frontier: int | None, request_id: str, request_digest: str) -> FrozenCase | CheckCommitResult`
   - `async def advance_check_phase(self, lease: OperationLease, expected_phase: CheckPhase, next_phase: CheckPhase, durable_object_ref: ObjectRef | None = None) -> OperationLease`
@@ -113,8 +115,9 @@ No SQLite, APSW, or transport type appears in any signature. Effectful and point
 
 - `case: DeterministicCase` — the pure kernel case at the frozen frontier (input to
   `run_deterministic_policies` and semantic-case minimization). Its `projection` is the exact
-  `ProjectionState`; its immutable `coverage_by_ref`, typed `gaps`, and `allowed_ids` are derived
-  by the one pure `build_deterministic_case` helper from the authoritative accepted-record prefix.
+  `ProjectionState`; its immutable `availability`, `coverage_by_ref`, typed `gaps`, and
+  `allowed_ids` are derived by the one pure `build_deterministic_case` helper from the authoritative
+  accepted-record prefix plus the exact `load_case_availability` snapshot.
 - `lease: OperationLease` — the **current** immutable authority returned by `freeze_case`,
   `advance_check_phase`, `renew_leases`, or `reclaim_operation`. Its `frontier` is subject frontier
   `F` and its `dependency_digest` is digest `D` over the material inputs (frontier head digest,
@@ -510,6 +513,32 @@ typed `next_position`; opaque cursor authentication/encoding is application work
 through `load_projection` plus the exact accepted-record prefix and is never smuggled through a
 row-query filter.
 
+### `load_case_availability`
+
+Returns the exact frozen `CaseAvailabilityFacts` for the supplied projection/frontier pair. The
+method first requires
+`frontier == Frontier(sequence=projection.frontier, head_digest=projection.head_digest)` and the
+projection identity to match the active or explicitly replayed generation at that frontier. It then
+checks only the bounded current material refs named by that projection: each current projection
+record's accepted payload object and each current evidence record's declared captured-content
+object. Reads are paged; no plaintext is returned or retained. A current event source with envelope
+`key_unavailable`, or `present` whose payload object/key is missing or locked, contributes its event
+ID. Envelope `logically_redacted|erased_claimed` and effective replay-index targets are excluded
+because recorded redaction owns those causes. A missing/locked captured object contributes
+`UnavailableCapturedObject(source_event_id, object_id)`. Available, stale-replaced, unknown-event,
+receipt, and resume/result objects are not emitted.
+An object that is present/readable but fails envelope authentication, commitment, or digest checks
+is `STORAGE_CORRUPT`, not an availability fact.
+
+Memory and SQLite adapters share this exact operation. The implementation also captures the
+structural object-inventory generation and key-availability generation used by the probe. Those
+generation values are not fields of `CaseAvailabilityFacts`; a durable `freeze_case` includes them,
+plus the canonical facts digest, in dependency digest `D` and revalidates the generations in its
+short reservations/commit fences. Candidate status has no durable authority and simply reports the
+one snapshot it read. The pure kernel helper proves the exact event tuple and captured-row
+association/redaction constraints against the accepted prefix; adapter conformance proves live
+captured-object probe completeness. The helper never performs a second probe.
+
 ### `freeze_case`
 
 Implements the freeze step used by `specs/src/yoetz/application/check.md`. The public method is one
@@ -531,14 +560,15 @@ be created before the case it contains:
 2. **Prepare an absent operation.** In a bounded snapshot section, repeat the absent idempotency
    decision; require the indexed no-pending-import predicate; verify `expected_frontier`; and
    capture head frontier `F`, the active projection generation/version/state digest at `F`, and
-   every version/config revision. After releasing the snapshot, canonicalize those captured
-   revisions to compute dependency digest `D`. The active projection
+   every version/config/object-inventory/key-availability revision. The active projection
    must already be current at `F`; projection catch-up/rebuild pure work is completed before this
    stage and is never hidden inside the reservation transaction. This stage inserts no operation,
    allocates no lease, and performs no object-store work.
 3. **Build, then publish.** With no write transaction or shared state lock held, page the verified
    authoritative `LedgerRecord` prefix through immutable `F`, replay/build the exact projection
-   at `F`, and call `build_deterministic_case(projection, records)`. Any missing source-envelope
+   at `F`, call `load_case_availability(session_id, F, projection)`, canonicalize the captured
+   revisions plus those exact facts to compute dependency digest `D`, and call
+   `build_deterministic_case(projection, records, availability)`. Any missing source-envelope
    coverage, malformed typed gap, or case/projection frontier mismatch is an internal
    storage-integrity failure; the adapter never supplies a publication-channel default. Only
    after that exact case exists, canonicalize a bounded resume envelope binding request identity,
@@ -549,7 +579,8 @@ be created before the case it contains:
 4. **Final reservation.** In one short atomic write, repeat idempotency and the no-pending-import
    predicate, require that head frontier is still exactly `F`, require that active projection
    generation/version/state digest still equals the prepared identity at `F`, compare every
-   current dependency revision byte-for-byte with the prepared inputs whose digest is `D`, and
+   current dependency revision including object-inventory/key-availability generations
+   byte-for-byte with the prepared inputs whose digest is `D`, and
    recheck `expected_frontier` and current bundle owner generation. The write transaction performs
    no case construction or object I/O; it only
    validates the already-finalized `ObjectRef` descriptor (`check_resume` kind, task/media/size,

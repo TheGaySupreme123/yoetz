@@ -85,7 +85,8 @@ The suite checks:
   a support model, branch model, subclass, or arbitrary object raises exactly
   `TypeError("public_model_wrong_type")`, and direct `model_dump` is not treated as a public boundary;
 - named data-object support models match the exact `$defs` property and required sets, including all
-  eight status page models and their outer `view` relation; every other named definition is covered
+  eight status page models and their outer `view` relation, plus the receipt policy/schema version
+  entry records and exact 11-field receipt version slice; every other named definition is covered
   once by the exact alias/omission/predicate classification and no open predicate is accidentally
   materialized as an `extra="forbid"` DTO;
 - result fallbacks remain admissible across the expected public-error branch;
@@ -122,7 +123,7 @@ The suite checks:
   `yoetz/resources/schemas` bytes rooted through `importlib.resources.files("yoetz")`, with
   sockets/DNS disabled; changing the current directory or removing the source tree cannot change
   resolution;
-- an uncached isolated-process pass statically checks all 1,251 current `$ref` occurrences, while
+- an uncached isolated-process pass statically checks all 1,276 current `$ref` occurrences, while
   mutations to external HTTPS, HTTP, `file`, relative, same-namespace-missing, query-bearing, and
   bad-fragment references all raise `schema_reference_unresolved` and a network sentinel records
   zero socket/URL calls;

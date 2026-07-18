@@ -12,7 +12,7 @@ One canonical strict-JSON fixture case with `fixture_schema: "yoetz.fixture-case
 
 ## Behavior
 
-The `input` section contains a fixed receipt subject with redacted, locked-key, and available-object variants. The `expected` section freezes conclusion insufficient_coverage with explicit structural gaps and no leaked content or strengthened Markdown. Every referenced identifier, timestamp, key, digest, nonce, provider response, and fault point is explicit test data; a test may not replace it with current time, randomness, network state, or host paths. Multi-variant cases evaluate each variant independently and declare the relationship between their outcomes.
+The `input` section contains a fixed receipt subject with redacted, locked-key, and available-object variants. The `expected` section freezes conclusion insufficient_coverage with explicit structural gaps and no leaked content or strengthened Markdown. The locked-key input keeps its synthetic key ID as adapter-side test data, but the expected receipt and compact render name only `captured_object_unavailable`, rooted at the evidence source event; the redacted variant names `redacted_object`, rooted at the causative redaction event. The key ID is an explicit forbidden-output marker because `CaseAvailabilityFacts` carries neither key identity nor adapter reason. Every referenced identifier, timestamp, key, digest, nonce, provider response, and fault point is explicit test data; a test may not replace it with current time, randomness, network state, or host paths. Multi-variant cases evaluate each variant independently and declare the relationship between their outcomes.
 
 ## Errors and edge cases
 

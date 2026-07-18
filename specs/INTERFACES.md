@@ -507,6 +507,13 @@ top-level known-gap set, and the fold must equal that top-level coverage.
   `latest_tested_state` is exactly the source check event ID, subject frontier, verdict,
   `returned_finding_ids`, `suppressed_count`, and recorded coverage. Suppression is durable
   structural uncertainty: it is never reconstructed from visible finding IDs.
+  `ProjectionRecord.redacted` is the generation-1 historical name for the common null-payload
+  tombstone bit: it is true exactly when that record's event payload is unavailable. It is not by
+  itself proof that a `redaction_recorded` event exists. An accepted-envelope state of
+  `logically_redacted|erased_claimed` or an effective `ReplayIndex` target proves recorded
+  redaction; `key_unavailable`, or `present` with an unreadable payload object, proves
+  non-redaction unavailability. The frozen case-availability facts below bind the latter snapshot
+  without changing the frozen projection/snapshot shape.
 - A projection contradiction is one explicit unresolved `ClaimRecordedPayload.disputes_refs`
   edge. Its internal key is `ContradictionKey(disputing_claim_id, disputed_ref)` and its canonical
   snapshot key is exactly `"<disputing_claim_id>|<disputed_ref>"`; `|` cannot occur in either
@@ -523,8 +530,22 @@ top-level known-gap set, and the fold must equal that top-level coverage.
   ProjectionState` is pure and requires the index through that exact event; `replay(events)` extends
   the index before each fold. An incremental adapter retains it or locally rebuilds it from accepted
   envelope/locator rows; it never opens payload objects.
-- `DeterministicCase` is the pure kernel input `(projection, frontier, allowed_ids,
-  coverage_by_ref, gaps)`. `coverage_by_ref` is an immutable exact ref-to-`Coverage` index derived
+- `UnavailableCapturedObject` is the frozen `(source_event_id, object_id)` identity of one current
+  evidence source whose declared captured-content object cannot be verified at the case snapshot.
+  `CaseAvailabilityFacts` is exactly `(unavailable_event_ids,
+  unavailable_captured_objects)`: the first member is a sorted-unique tuple of current accepted
+  source event IDs whose payload is null, whose envelope state is `present|key_unavailable`, and
+  which have no effective redaction target; the second is a sorted-unique tuple of
+  `UnavailableCapturedObject` values ordered by event-ID then object-ID bytes. These facts are
+  structural availability observations only; they contain no plaintext, path, key identifier, or
+  adapter exception. `LedgerPort.load_case_availability(session_id, frontier, projection)` is the one shared
+  memory/SQLite snapshot operation. `freeze_case` uses that same operation internally, and
+  `status(candidate_findings)` calls it explicitly. Its canonical digest is part of the check
+  dependency digest, so final commit cannot silently rely on availability that changed after
+  freeze.
+- `DeterministicCase` is the pure kernel input `(projection, frontier, availability, allowed_ids,
+  coverage_by_ref, gaps)`. `availability` is the exact `CaseAvailabilityFacts` value used to build
+  the case. `coverage_by_ref` is an immutable exact ref-to-`Coverage` index derived
   from authoritative accepted envelopes and current projection source links; it is never guessed
   from a publication channel. `CaseGap` is exactly `(marker, code, subject_refs)`. A gap may have
   empty `subject_refs` only when it is genuinely task/global; such a gap weakens coverage and
@@ -544,9 +565,21 @@ top-level known-gap set, and the fold must equal that top-level coverage.
   dimensions, caps freshness at `partial`, and adds `missing_ref`; an opaque event does the same and
   adds `unknown_event`. Every cap is a registered component-wise minimum, existing gaps are unioned
   and sorted, and overflow of the 64-token bound fails case freezing rather than truncating.
+- `FindingBasisRef` is exactly
+  `EventId|ObligationId|ClaimId|ActionId|ResultId|EvidenceId|FindingId`. `FindingFact.subject_refs`
+  and `FindingBasis.supporting_refs` use that nominal union, never raw unvalidated strings.
+  `FindingBasis.subject_state_relation` reuses the sole domain-owned `SubjectStateRelation` enum.
+  `FrozenSourceAvailability`, owned by `kernel/deterministic_checks.py`, is exactly
+  `available|not_recorded|unavailable_at_freeze|redacted_at_source`; the status projection maps the
+  latter two to `unavailable` and `redacted` respectively. Each policy owns one exhaustive rule
+  table that freezes the primary basis IDs, public candidate roots, observed/missing fact refs, and
+  supporting-ref union. Envelope `logically_redacted|erased_claimed` and effective replay-index
+  targets map to `redacted_at_source`; an explicit case-availability row maps to
+  `unavailable_at_freeze`. An `act|res|evd|fnd` primary ID maps to its current projection record's
+  `source_event_id`; `evt|obl|clm` maps to itself. There is no first-ref or prose-derived fallback.
 - `run_deterministic_policies(case: DeterministicCase, policy: PolicyPack) ->
   DeterministicPolicyResult`.
-  It is pure and never reads randomness. The result contains ordered
+  It is pure and never reads randomness. The result contains only ordered
   `DeterministicAssessment(candidate, basis)` pairs. `FindingBasis` is internal/encrypted and binds
   the exact rule ID, observed fact codes and refs, required-but-missing fact codes, three-valued
   subject-state relation, frozen-source availability, coverage gaps, and evidence refs. Later
@@ -554,11 +587,28 @@ top-level known-gap set, and the fold must equal that top-level coverage.
   depends on a context profile or disclosure policy. The
   application allocates one `fnd_` ID per normalized candidate, persists the candidate-to-ID and
   basis map in the immutable local-result object, and reuses it after a crash.
+  The kernel does not own run/skipped/failed accounting. The application creates the sole
+  port-owned `CheckPolicyExecution` once per selected pack: a pack excluded before invocation is
+  skipped, a completed invocation is run even when it returns no assessment, and an evaluation
+  failure is failed. Scope never enters the pure kernel call.
 - `rank_findings(deterministic, semantic, context: RankingContext, max_findings) -> RankedFindings`
   (the exact stable `rank_key` is registered in §8; suppressed count, verdict, and the full
   weakest-material coverage baseline are retained with the ordered selection).
-- `build_receipt(state, subject_frontier, receipt_id, task_id, session_id, generated_at, versions,
-  redaction_profile, include) -> ReceiptDocument`. Every nondeterministic input is explicit; the
+- `ReceiptFindingState`, owned by `kernel/receipt_builder.py`, is exactly
+  `(finding_id, resolved)`. The ordered tuple contains one latest current row per issue key; its
+  boolean is derived by the application from the shared check-scope/policy-execution applicability
+  rules: a same-issue successor replaces the old row and starts unresolved, while only a later
+  qualifying check resolves the current row. A response disposition never resolves it.
+  `ReceiptBuildContext` is exactly `(projection,
+  subject_frontier, availability, coverage, gaps, finding_states, applicable_check)`, where
+  `availability` is the current `CaseAvailabilityFacts`, `coverage` is the weakest material fold,
+  `gaps` is the exact sorted typed `CaseGap` tuple after check/semantic/availability accounting, and
+  `applicable_check` is the exact readable `CheckRecordedPayload` that still applies to this
+  material state or `None`. The application constructs this context; the builder never imports a
+  port type or re-derives applicability.
+- `build_receipt(context, receipt_id, task_id, session_id, generated_at,
+  versions: ReceiptVersionSlice, redaction_profile, include) -> ReceiptDocument`. Every
+  nondeterministic input is explicit; the
   builder reads no clock or ID source. `ReceiptDocument` contains its identity, generation time,
   subject frontier, and exact nonnegative `suppressed_finding_count` from the applicable latest
   check, but not the post-append result frontier (which would create a digest
@@ -567,6 +617,21 @@ top-level known-gap set, and the fold must equal that top-level coverage.
   is `summary|standard|full`, and `ReceiptRedactionProfile` is
   `full_local|default_local_export|redacted_share`. `include` changes only the registered section
   detail level; it never suppresses required conclusion, coverage, gap, or limitation material.
+  The top-level truth-bearing tuples are selected before presentation and are independent of
+  `include`; summary emits sections `(summary, limitations_and_coverage,
+  version_and_policy_identity)`, standard inserts `(outstanding_work,
+  findings_and_dispositions)`, and full additionally inserts `evidence_and_claim_basis` before
+  limitations. Profiles then apply the frozen field matrix: `full_local` retains every allowed
+  selected text field; `default_local_export` clears obligation summaries and receipt-gap details
+  but retains finding text and response reasons; `redacted_share` additionally omits semantic
+  finding rows and rejected/waived response rows while retaining deterministic ID-only findings,
+  acknowledged responses, structural IDs, conclusion, coverage, gaps, and versions. Every omitted
+  protected content leaf is counted once in the sorted `ReceiptRedaction` rows; omitted structural
+  IDs and enum/relation fields are not content-redaction counts. Sections are regenerated only
+  from retained structural values and fixed templates; they never copy omitted text. Therefore a
+  profile/include transform that changes selected fields or sections changes the canonical
+  document and digest; it is not a render-only rewrite. Conclusion, subject frontier, suppression,
+  weakest coverage, and material gap codes are invariant and may only stay equal or weaken.
 - `PolicyPack` is the frozen data-only selector `(policy_id, policy_version)`; it contains no
   callback or dynamic rule source. Its ids are `work-integrity/0.1.0`,
   `research-evidence/0.1.0`
@@ -582,6 +647,8 @@ top-level known-gap set, and the fold must equal that top-level coverage.
 - `append_batch(command: AppendCommand) -> AppendResult`;
 - `load_events(session_id, after=0, through=None) -> AsyncIterator[LedgerRecord]`;
 - `load_projection(session_id, view) -> StoredProjection | None` (cache/rebuild use);
+- `load_case_availability(session_id, frontier, projection) -> CaseAvailabilityFacts` (shared bounded
+  event/captured-object availability snapshot for case construction);
 - `query_projection(query: ProjectionQuery) -> ProjectionPage` (bounded public status use);
 - `freeze_case(session_id, writer_id, expected_frontier, request_id, request_digest) ->
   FrozenCase | CheckCommitResult`;
@@ -658,10 +725,11 @@ replay uses this locator; it never scans an unbounded ledger or rebuilds the rec
 `freeze_case` uses one closed ordering for both adapters. For an absent operation: (1) a bounded
 prepare snapshot establishes absent idempotency, no pending import, `expected_frontier`, head `F`,
 active projection identity, and exact dependency revisions; (2) outside every write transaction,
-the adapter derives `D`, pages the immutable accepted prefix through `F`, and builds the exact
-`DeterministicCase`;
-(3) only after the case exists, it canonicalizes, encrypts, and durably publishes the bound resume
-object; and (4) one short final reservation atomically repeats idempotency/no-import checks,
+the adapter snapshots `CaseAvailabilityFacts`, includes its canonical digest in `D`, pages the
+immutable accepted prefix through `F`, and builds the exact `DeterministicCase` from that same
+availability value; (3) only after the case exists, it canonicalizes, encrypts, and durably
+publishes the bound resume object; and (4) one short final reservation atomically repeats
+idempotency/no-import checks,
 revalidates head/projection/dependency/owner authority, and inserts `pending/reserved` referencing
 that already-durable object. Case/reducer work, hashing, encryption, filesystem I/O, and object
 opening are forbidden in the final write transaction. Failed revalidation writes no operation and
@@ -747,8 +815,9 @@ exact sorted unique known-gap tokens.
 
 `candidate_findings` is the one registered exception to that last rule, because a deterministic
 rule evaluates one whole frozen case and no repository can page a rule evaluation. It loads
-`ProjectionState` plus the authoritative accepted-record prefix through that frontier, calls the
-same `build_deterministic_case` used by check freeze, runs only the deterministic packs, and pages
+`ProjectionState` plus the authoritative accepted-record prefix through that frontier, calls
+`load_case_availability` and the same `build_deterministic_case` used by check freeze, runs only the
+deterministic packs, and pages
 the resulting tuple in pure application code. It never constructs a `ProjectionQuery`. The
 exception covers rule evaluation only; ordinary row filtering stays at the storage boundary. Its
 rows are `CandidateFinding` values ordered by the registered finding rank facts, with final ties

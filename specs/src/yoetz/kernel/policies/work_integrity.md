@@ -75,23 +75,34 @@ The rule inventory is stable and intentionally narrow:
 observed/missing tuples; adding or renaming one changes the policy-pack version and its golden basis
 fixtures.
 
-The rule-to-fact crosswalk is exact. `+` means all listed codes are required; `one of` is the only
-OR in the table. Codes in the third column are emitted in
-`FindingBasis.required_but_missing_facts`; every other listed code is emitted in
-`observed_facts`. Subject refs on each fact are the exact IDs used by the structural comparison.
+The rule-to-fact/root crosswalk is exact. In the table, `C/O/A/R/V/F/Q/D` mean a current
+claim/obligation/action/result/evidence/finding/response-event/disputed claim-or-event ID; `X` is the
+current action/result/claim ID owning the checked `SubjectStateRef`; `L` is a later structurally
+unrelated action ID; `G(code)` is the sorted union of nonempty `CaseGap.subject_refs` for that fact
+class; and `S(F)` is the responded finding's already-canonical public `subject_refs`. `E(id)` is the
+current projection record's source event for `act|res|evd|fnd`; public IDs `evt|obl|clm` remain
+themselves. Parenthesized values are exact sorted-unique tuples, not prose metavariables at runtime.
+Codes in the missing column enter `required_but_missing_facts`; all others enter `observed_facts`.
+For every row, `FindingBasis.supporting_refs` is exactly the union of the observed-fact ref tuples.
 
-| Finding kind | Required `observed_facts` | Required missing facts |
-|---|---|---|
-| `completion_with_open_obligations` | `completion_claim_present` + `open_obligation_present` | `valid_waiver_absent` |
-| `requested_item_never_attempted` | `requested_item_present` | `linked_attempt_absent` |
-| `failed_work_omitted` | `failed_result_present` | `failure_disclosure_absent` |
-| `claim_without_admissible_evidence` | `claim_present` | `admissible_evidence_absent` |
-| `result_without_action` | `result_present` | `linked_action_absent` |
-| `action_without_result` | `action_present` + `subsequent_unrelated_work_present` | `linked_result_absent` |
-| `stale_evidence_for_changed_state` | `state_comparison_available` + `state_changed` + `evidence_state_mismatch` | none |
-| `contradictory_claims_unresolved` | `contradictory_claims_present` | `resolution_absent` |
-| `ledger_stale_or_incomplete` | one of `unknown_event_present`, `redaction_gap_present`, `freshness_gap_present` | none |
-| `weak_or_stale_response` | `finding_response_present` and optionally `response_state_stale` when comparable frontiers differ | `response_basis_insufficient` when no admissible response support exists |
+| Finding kind | One raw trigger and exact candidate `subject_refs` | Exact observed fact refs | Exact missing fact refs |
+|---|---|---|---|
+| `completion_with_open_obligations` | primary `(C,O)` -> `(C,O)` | `completion_claim_present:(C)`; `open_obligation_present:(O)` | `valid_waiver_absent:(C,O)` |
+| `requested_item_never_attempted` | primary `(O)` -> `(O)`; all unmatched requested-item values on that obligation are grouped | `requested_item_present:(O)` | `linked_attempt_absent:(O)` |
+| `failed_work_omitted` | one omitted failure/partial pair `(C,R)` -> `(C,E(R))` | `failed_result_present:(R)` | `failure_disclosure_absent:(C,R)` |
+| `claim_without_admissible_evidence` | primary `(C)` -> `(C)` | `claim_present:(C)` | `admissible_evidence_absent:(C)` |
+| `result_without_action` | primary `(R)` -> `(E(R))` | `result_present:(R)` | `linked_action_absent:(R)`; the absent action ID is never inserted as an observed ref |
+| `action_without_result` | primary `(A)` -> `(E(A))`; every qualifying later action is grouped into `(L...)` | `action_present:(A)`; `subsequent_unrelated_work_present:(A,L...)` | `linked_result_absent:(A)` |
+| `stale_evidence_for_changed_state` | one comparison `(V,X)` -> sorted `(E(V), public_root(X))` | each of `state_comparison_available`, `state_changed`, and `evidence_state_mismatch` uses `(V,X)` | none |
+| `contradictory_claims_unresolved` | one explicit edge `(C,D)` -> `(C,D)` | `contradictory_claims_present:(C,D)` | `resolution_absent:(C,D)` |
+| `ledger_stale_or_incomplete` | `G = union(G(unknown),G(redaction),G(freshness))`; nonempty `G` -> `G` | each present code uses only its own `G(code)` tuple | none; rootless-only gaps emit no candidate |
+| `weak_or_stale_response` | primary `(F,Q)` -> `S(F)` | `finding_response_present:(F,Q,<sorted response evidence refs>)`; optional `response_state_stale:(F,Q)` | `response_basis_insufficient:(F,Q)` only when support is absent/inadmissible |
+
+`public_root(X)` follows the shared mapper: a claim stays `C`; an action/result becomes its source
+event. The stale-evidence comparison never chooses a state digest as a subject. For the ledger row,
+an over-`MAX_REF_LIST` union fails case validation instead of producing a truncated finding. For the
+response row, an unreadable/missing responded finding cannot supply `S(F)` and therefore produces a
+coverage gap rather than a replacement response finding.
 
 No free-text field participates in deriving any code in this table. Candidate priority and
 actionability are the exact `FINDING_KIND_TRAITS` row registered in `specs/INTERFACES.md`; the pack

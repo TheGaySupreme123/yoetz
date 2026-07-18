@@ -4,7 +4,8 @@
 
 ## Purpose
 
-Freeze frontier- and time-bounded effect of a confirmed local human waiver as synthetic, public, deterministic evidence before implementation.
+Freeze frontier- and time-bounded recording of a confirmed local human waiver without treating it
+as finding resolution, using synthetic, public, deterministic evidence before implementation.
 
 ## Public surface
 
@@ -14,11 +15,13 @@ One canonical strict-JSON fixture case with `fixture_schema: "yoetz.fixture-case
 
 The `input` section contains active, expired, wrong-frontier, and noninteractive waiver variants.
 The active, expired, and wrong-frontier variants begin with valid interactive-local-human
-`response_recorded` events; only the active exact-scope event suppresses, while expiry/scope
-limitations remain visible in the receipt. The noninteractive variant is an operation-level
+`response_recorded` events. All three remain dispositions only: they retain exact scope/expiry
+data, but never resolve or suppress the current finding. Compact wording may describe whether a
+recorded expiry is before the explicit receipt timestamp, but that comparison never changes
+resolution. The noninteractive variant is an operation-level
 `respond(disposition=waived)` attempt from noninteractive CLI/MCP authority. It is rejected as
 `INVALID_REQUEST` before append, creates no `response_recorded` event, and therefore never reaches
-or mutates receipt-builder suppression state. This fixture does not fabricate an invalid stored
+or mutates receipt-builder finding state. This fixture does not fabricate an invalid stored
 waiver as a receipt input. Every referenced identifier, timestamp, key, digest, nonce, provider
 response, and fault point is explicit test data; a test may not replace it with current time,
 randomness, network state, or host paths. Multi-variant cases evaluate each variant independently

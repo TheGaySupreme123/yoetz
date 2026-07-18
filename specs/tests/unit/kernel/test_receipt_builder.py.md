@@ -17,7 +17,15 @@ re-ranks, re-fetches, or strengthens the result.
 - `test_suppressed_findings_block_clear_conclusion_until_fresh_check` — capped identities are not
   forgotten after visible responses.
 - `test_section_order_is_canonical` — section ordering stays fixed.
-- `test_redaction_profiles_only_weaken_visibility` — redaction changes presentation, not truth.
+- `test_redaction_profiles_change_canonical_bytes_without_changing_truth` — the exact field matrix
+  changes document/digest while preserving conclusion/frontier/suppression and non-strengthening coverage.
+- `test_profile_by_include_matrix_is_exhaustive` — all nine combinations select exact top-level
+  fields, section keys, redaction rows, and fixed-template inputs.
+- `test_context_requires_explicit_availability_and_applicable_check` — no projection-only fallback
+  invents captured-object availability, resolution, or check accounting.
+- `test_receipt_version_slice_is_exact` — the builder accepts the exact 11-field
+  `ReceiptVersionSlice` (including `resource_manifest_digest`), not `VersionManifest` or a
+  mapping.
 - `test_builder_never_adds_new_findings_or_evidence` — the builder is a packaging step only.
 
 ## Behavior
@@ -27,10 +35,22 @@ The suite proves:
 - receipt assembly is pure;
 - the subject frontier and result frontier are explicit;
 - section order and version identity are stable;
-- redaction profiles weaken the visible text without changing the canonical document;
+- redaction profiles transform the canonical document before hashing; whenever the matrix removes a
+  field or changes a section/redaction row, canonical bytes and digest change;
+- conclusion, subject frontier, suppression count, material gap codes, and weakest coverage are
+  invariant or weaker across the same context's profile variants;
+- `include` changes only the exact section tuple and leaves selected top-level truth-bearing tuples
+  unchanged;
+- `full_local`, `default_local_export`, and `redacted_share` apply the exact finding/obligation/
+  response/gap matrix and merge redaction counts by `(category, reason)`;
 - the builder consumes existing findings and coverage only.
 - a nonzero latest suppressed count is retained as structural uncertainty until a newer zero-count
   check replaces it.
+- `ReceiptFindingState.resolved` and `applicable_check` are explicit context facts; response
+  disposition and `ProjectionState.latest_tested_state` alone cannot substitute for them.
+- `unavailable_at_freeze` and recorded redaction produce distinct typed gaps/redaction accounting.
+- receipt `versions` follows the local-catalog 11-field `ReceiptVersionSlice` contract, including
+  `resource_manifest_digest`, rather than a stripped `VersionManifest`.
 
 ## Errors and edge cases
 

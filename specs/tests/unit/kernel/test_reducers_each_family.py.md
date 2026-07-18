@@ -40,6 +40,8 @@ and exact through-record index into `reduce_event`, and asserts:
 - an object-only payload target tombstones its owning current record and removes only its source-
   owned effects, while an object-only captured-content target preserves the evidence body/digest
   and marks only the matching current `(evidence_id, source_event_id)` unavailable;
+- every null-payload record is stored with the generation-1 `redacted=True` tombstone bit, without
+  reducers inventing a redaction marker for ordinary object/key unavailability;
 - a second redaction of the same object preserves the first-by-ingestion public root;
 - reducer input values are not mutated.
 

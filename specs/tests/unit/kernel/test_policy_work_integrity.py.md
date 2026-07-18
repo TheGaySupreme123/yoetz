@@ -27,6 +27,8 @@ non-trigger for each one.
   `subject_state_relation=unknown`, never `same`.
 - `test_rule_groups_raw_triggers_by_complete_subject_tuple` — all raw triggers for one rule and
   exact complete canonical subject tuple are aggregated and evaluated once.
+- `test_rule_primary_root_and_fact_ref_table_is_exact` — every rule uses the frozen public-root,
+  observed/missing-ref, and supporting-union mapping.
 - `test_duplicate_emitted_key_is_rejected` — a second assessment with the same
   `(policy_id, rule_id, subject_refs)` is rejected as a policy-wiring defect.
 
@@ -48,6 +50,9 @@ The suite asserts for each rule:
   alone makes no provenance claim.
 - repeated raw triggers for one rule and complete canonical subject tuple produce one grouped rule
   evaluation and at most one assessment;
+- result/action/evidence/finding primary IDs map through current source events, contradiction edges
+  retain claim/event roots, rootless gaps emit no candidate, and response-review rules preserve the
+  responded finding's public roots;
 - duplicate emitted keys fail closed, while two different rule IDs may each emit one assessment
   for the same complete subject tuple;
 - the cardinality assertions leave the existing exact fixture output, deterministic templates,

@@ -18,6 +18,7 @@ checkpoint mechanics.
   - `append_batch(command: AppendCommand) -> AppendResult`
   - `load_events(session_id: SessionId, *, after: int = 0, through: int | None = None) -> AsyncIterator[LedgerRecord]`
   - `load_projection(session_id: SessionId, view: ProjectionView) -> StoredProjection | None`
+  - `load_case_availability(session_id: SessionId, frontier: Frontier, projection: ProjectionState) -> CaseAvailabilityFacts`
   - `query_projection(query: ProjectionQuery) -> ProjectionPage`
   - `freeze_case(session_id: SessionId, writer_id: str, expected_frontier: int | None, request_id: str, request_digest: str) -> FrozenCase | CheckCommitResult`
   - `advance_check_phase(lease: OperationLease, expected_phase: CheckPhase, next_phase: CheckPhase, durable_object_ref: ObjectRef | None = None) -> OperationLease`
@@ -69,6 +70,14 @@ or third handle type. It may page internally, but it never mutates the state whi
 `load_projection(session_id, view)` returns a snapshot object compatible with the port contract, or `None` if
 the projection has never been built.
 
+`load_case_availability(session_id, frontier, projection)` snapshots the same memory object map and
+key-availability generation used by `load_events`, probes only current projection payload/captured-
+content refs, and returns the exact sorted `CaseAvailabilityFacts`. Envelope
+`logically_redacted|erased_claimed` and effective replay-index targets are excluded;
+`key_unavailable` and unreadable-`present` current event sources are included. Present objects that
+fail authentication are storage corruption, never availability rows. The method swaps no state and
+is the implementation used both by candidate status and internally by `freeze_case`.
+
 `query_projection(query)` freezes the requested/head/effective frontiers under the shared lock,
 copies at most `query.limit + 1` matching typed rows in the view's registered stable order, and
 returns the same `ProjectionPage` fields and exclusive next typed position as SQLite. It validates
@@ -79,11 +88,12 @@ whole adapter merely to page one view, and it swaps no state. It rejects `candid
 `freeze_case(session_id, writer_id, expected_frontier, request_id, request_digest)` models the
 same prepare/build/publish/final-reservation ordering as SQLite. For an absent operation it first
 takes the shared lock only long enough to repeat idempotency/no-pending-import checks and snapshot
-`F`, the current projection identity, and dependency revisions; it then releases the lock, derives
-`D`, pages/copies the authoritative prefix, builds the exact `DeterministicCase`, canonicalizes it,
+`F`, the current projection identity, and dependency/object/key generations; it then releases the
+lock, pages/copies the authoritative prefix, snapshots `CaseAvailabilityFacts`, derives `D` from
+those facts plus the captured generations, builds the exact `DeterministicCase`, canonicalizes it,
 and publishes the encrypted resume object. Only after the case and object exist does it reacquire
 the lock and atomically revalidate idempotency, import state, expected/current head, projection
-identity, those exact dependency revisions, owner generation, and finalized object metadata before
+identity, those exact dependency/object/key generations, owner generation, and finalized object metadata before
 one copy-on-write swap inserts `pending/reserved`. Case building, canonicalization, encryption,
 hashing, clock/ID calls, and object-store calls never run under the shared lock. A failed final
 revalidation leaves only an unreferenced object and no operation.

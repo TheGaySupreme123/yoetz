@@ -27,6 +27,7 @@ SQLite transaction boundaries and turns their outputs into durable rows.
   - `append_batch(AppendCommand) -> AppendResult`
   - `load_events(session_id, after=0, through=None) -> AsyncIterator[LedgerRecord]`
   - `load_projection(session_id, view) -> StoredProjection | None`
+  - `load_case_availability(session_id, frontier, projection) -> CaseAvailabilityFacts`
   - `query_projection(query: ProjectionQuery) -> ProjectionPage`
   - `freeze_case(session_id, writer_id, expected_frontier, request_id, request_digest) -> FrozenCase | CheckCommitResult`
   - `commit_check_if_current(frozen, findings, policy_executions, semantic_status, semantic_reason, semantic_provenance, request_id) -> CheckCommitResult`
@@ -154,20 +155,23 @@ prepare/build/publish/reserve protocol, not one long `BEGIN IMMEDIATE`:
    `operation_resume_object_invalid` by a separate short CAS naming the reclaimed lease.
 2. For an absent operation, a bounded snapshot transaction repeats the idempotency decision and
    no-pending-import predicate, verifies `expected_frontier`, then captures `F`, the active
-   projection generation/version/state digest at `F`, and the exact dependency revisions. After
-   the snapshot closes, their canonical digest is `D`. The active projection must be current at
+   projection generation/version/state digest at `F`, and the exact
+   dependency/object-inventory/key-availability revisions. The active projection must be current at
    the head; any required
    replay/rebuild preparation completes before this snapshot rather than running inside the
    reservation write transaction. No `operations` row or lease exists yet.
 3. With no SQLite transaction held, page and verify the immutable accepted-record prefix through
-   `F`, replay/build the shared `DeterministicCase`, canonicalize the resume envelope that binds
+   `F`, call the shared `load_case_availability(session_id, F, projection)` probe, derive `D` from
+   the captured revisions plus its canonical facts, replay/build the shared `DeterministicCase`,
+   canonicalize the resume envelope that binds
    the request identity, `F`, `D`, prepared projection identity, and case digest, then encrypt and
    finalize that object (`stage` -> fsync -> atomic rename -> directory fsync). The case therefore
    necessarily exists before its resume object. A crash or losing race here leaves only an
    unreferenced encrypted object for bounded orphan GC.
 4. A final short `BEGIN IMMEDIATE` repeats idempotency and the indexed no-pending-import predicate;
    revalidates current owner generation, `expected_frontier`, head exactly `F`, active projection
-   generation/version/state digest, and every dependency revision contributing to `D`; and checks
+   generation/version/state digest, and every dependency/object/key revision contributing to `D`;
+   and checks
    only the finalized `ObjectRef` kind/task/media/size/commitment/envelope descriptor (no
    filesystem read). If all checks still match, it atomically inventories the object and inserts
    `operations` as `pending/reserved`,
@@ -307,6 +311,16 @@ load version V into empty tables, bounded pages ordered by `ingestion_seq <= F` 
 per-page digest/predecessor/payload verification and pure reducer application, persist
 `applied_through_seq` per page in one transaction, atomically switch the generation. A failed
 rebuild leaves the previous generation intact.
+
+`load_case_availability`: first verifies the supplied `Frontier` and `ProjectionState` identity,
+then pages only the current projection source payload refs and current evidence captured-content
+refs. After each short read transaction is released, it verifies object presence and key
+availability through the same encrypted-object reader used by `load_events`; it returns only the
+sorted ID/pair facts. Envelope `logically_redacted|erased_claimed` and effective replay-index
+targets are excluded; `key_unavailable` and unreadable-`present` current event sources are included.
+A present object with an invalid envelope/tag/commitment is storage corruption. The object-inventory and key-
+availability generations captured with the probe are the structural fence used by `freeze_case`;
+candidate status simply exposes the one read snapshot.
 
 `query_projection`: validates the typed filter/position and exact requested frontier, then uses
 the view's registered covering index and stable sort key to select at most `limit + 1` rows. It

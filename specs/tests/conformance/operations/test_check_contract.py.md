@@ -20,6 +20,10 @@ Prove check returns the same findings, verdicts, coverage, and safety boundaries
   provider/public prose.
 - `test_recorded_scope_and_policy_execution_parity` — the durable event carries the normalized
   request scope and the same exact policy accounting as the application/CLI/MCP result.
+- `test_application_owns_policy_execution_accounting` — kernel results contain assessments only;
+  application skip/invoke/failure paths emit the sole closed execution records.
+- `test_availability_snapshot_is_dependency_bound` — event/captured-object facts are frozen into the
+  case/dependency digest and a generation change is fenced before commit.
 
 ## Behavior
 
@@ -39,6 +43,8 @@ The test uses the same frozen case and policy settings across surfaces and asser
 - omitted and explicit-empty request scopes produce the same required empty/empty event scope;
   nonempty scope IDs are recorded in canonical order, and the event's nonempty `policies` and
   `policy_executions` match the result one-for-one by identity, version, order, outcome, and reason;
+- scope-excluded/not-applicable/material-unavailable packs are not invoked, normally returned empty
+  assessment tuples are `run/completed`, and raised evaluation is `failed/policy_failure`;
 - human summaries remain weaker than structured results.
 
 ## Errors and edge cases

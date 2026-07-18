@@ -32,6 +32,14 @@ The conclusion code is the exact offline `$ref`
 `https://schemas.yoetz.dev/0.1/receipts/receipt-document-1.0.0.schema.json#/$defs/receipt_conclusion`; it is not
 a separately restated string enum.
 
+The `versions` member is the exact 11-field `ReceiptVersionSlice` from the receipt-document
+schema. Its fields are `package_name`, `package_version`, `protocol_version`, `engine_version`,
+`projection_version`, `object_format_version`, `catalog_schema_version`, `bundle_schema_version`,
+`policy_versions`, `schema_versions`, and `resource_manifest_digest`. The receipt-result schema
+keeps the same closed definition in its local `$defs` and references it with
+`#/$defs/version_slice`; the two nested entry records are likewise exact. The externally referenced
+receipt document is resolved through the packaged catalog. Neither path performs DNS or HTTP.
+
 Receipt/task/session/object IDs, frontiers, conclusion/redaction enums, digests, counts, coverage,
 and version identities are structural. Obligation summaries, finding/response/gap prose, canonical
 section prose, and human wording are content-bearing. `human_text` admits its exact string or the

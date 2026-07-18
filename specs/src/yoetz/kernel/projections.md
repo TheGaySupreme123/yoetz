@@ -68,7 +68,13 @@ The common generic record is exactly
 `ProjectionRecord(payload: T | None, payload_digest: str, redacted: bool,
 source_event_id: EventId, source_frontier: int)`. `payload_digest` is the locator's canonical
 payload digest and remains after deletion. `payload is None` iff `redacted is True`; a tombstone
-therefore retains only its logical mapping key, digest, source event, and source frontier.
+therefore retains only its logical mapping key, digest, source event, and source frontier. The
+generation-1 field name is historical: `redacted=True` means the projected payload body is
+unavailable, not that a `redaction_recorded` event necessarily exists. Actual redaction is proved by
+accepted-envelope `logically_redacted|erased_claimed` or an effective `ReplayIndex` target;
+accepted-envelope `key_unavailable` and `present` with an unreadable object are non-redaction
+unavailability bound by the separate frozen `CaseAvailabilityFacts`. This clarification changes
+neither the record nor snapshot shape.
 `source_frontier` is a positive signed-int64 domain integer.
 
 Specialized records add only the fixture-owned optional structural fields:

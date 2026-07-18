@@ -143,7 +143,9 @@ four is stale, the entire value is stale.
   origin and final-ID tie-breaks, diversity-slot behavior, and suppressed-count coverage.
 - `specs/tests/conformance.md` — deterministic and semantic findings merge the same way in memory
   and SQLite runs.
-- `fixtures/findings/` — sort and verdict vectors.
+- `specs/tests/unit/kernel/test_ranking.py.md` — inline immutable sort/verdict vectors; no separate
+  finding-resource directory exists.
+- `specs/fixtures/README.md` — finite adversarial/receipt cases exercising public ranked outcomes.
 
 ## Open questions
 

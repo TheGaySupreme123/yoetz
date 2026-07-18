@@ -50,20 +50,27 @@ The rule inventory is stable and intentionally small:
 `rejection_basis_insufficient`. A rule may use only these codes in its observed/missing tuples;
 adding or renaming one changes the pack version and its golden basis fixtures.
 
-The rule-to-fact crosswalk is exact:
+The rule-to-fact/root crosswalk is exact. `C/X/F/Q` mean a current claim, compared support,
+finding, and response-event ID. `X` is an obligation/result/evidence ID for the first two rules and
+a single limiting result or gap root for the third. `S(F)` is the responded finding's canonical
+public `subject_refs`; `public_root(X)` leaves an obligation/event/claim unchanged and maps a
+result/evidence to its current source event. Each listed tuple is sorted unique. Missing-column
+codes enter `required_but_missing_facts`; all others enter `observed_facts`; supporting refs are the
+exact union of observed-fact refs.
 
-| Finding kind | Required `observed_facts` | Required missing facts |
-|---|---|---|
-| `evidence_does_not_support_claim` | `claim_support_present` + `claim_support_mismatch` | none |
-| `diff_does_not_match_account` | `captured_state_present` + `account_state_mismatch` | none |
-| `material_limitation_omitted` | `material_limitation_present` | `limitation_disclosure_absent` |
-| `questionable_finding_rejection` | `finding_rejection_present` | `rejection_basis_insufficient` |
+| Finding kind | One raw trigger and exact candidate `subject_refs` | Exact observed fact refs | Exact missing fact refs |
+|---|---|---|---|
+| `evidence_does_not_support_claim` | one structurally mismatching pair `(C,X)` -> `(C,public_root(X))` | `claim_support_present:(C,X)`; `claim_support_mismatch:(C,X)` | none |
+| `diff_does_not_match_account` | one comparable state pair `(C,X)` -> `(C,public_root(X))` | `captured_state_present:(C,X)`; `account_state_mismatch:(C,X)` | none |
+| `material_limitation_omitted` | one completion-claim/limitation pair `(C,X)` -> `(C,public_root(X))`; a rootless material gap uses `(C)` -> `(C)` | `material_limitation_present:(C,X)` or `(C)` for a rootless gap | `limitation_disclosure_absent` uses the identical tuple |
+| `questionable_finding_rejection` | primary `(F,Q)` -> `S(F)` | `finding_rejection_present:(F,Q,<sorted response evidence refs>)` | `rejection_basis_insufficient:(F,Q)` |
 
-Codes in the third column are emitted in `FindingBasis.required_but_missing_facts`; all other
-listed codes are emitted in `observed_facts`. The comparison inputs are only typed IDs, closed
-enums, exact digests/frontiers, and ref presence. No claim, account, limitation, or response prose
-is parsed. Candidate priority and actionability come only from `FINDING_KIND_TRAITS` in
-`specs/INTERFACES.md`.
+An unavailable or unresolved `X` does not fabricate a root: it routes to the work-integrity
+admissibility rule or a typed case gap as described below. An unreadable responded finding cannot
+supply `S(F)` and therefore yields only a coverage limitation. The comparison inputs are only typed
+IDs, closed enums, exact digests/frontiers, availability facts, and ref presence. No claim, account,
+limitation, or response prose is parsed. Candidate priority and actionability come only from
+`FINDING_KIND_TRAITS` in `specs/INTERFACES.md`.
 
 Rule-level behavior is conservative and subject-bound:
 

@@ -18,6 +18,8 @@ derived state.
   preserve the exact returned IDs/count.
 - `test_projection_record_and_snapshot_shapes_are_exact` — every common/specialized record,
   contradiction key, integer rendering, and top-level field matches the frozen fixture shape.
+- `test_null_payload_tombstone_bit_does_not_claim_redaction_cause` — both recorded redaction and
+  non-redaction object/key loss use the frozen bit while case facts distinguish their gap codes.
 - `test_redacted_payload_deletion_rebuilds_identically_from_locator` — deleting targeted payload
   objects and disposable projections still yields the same tombstones, gaps, digest, and secondary
   effects from accepted records plus durable locators.
@@ -41,6 +43,9 @@ The suite checks:
 - the 17-field snapshot uses decimal strings only for registered frontier/version fields, retains
   JSON integers for suppression/payload integers, and exposes no locator metadata;
 - common and specialized records preserve payload digests and exact null-payload tombstones;
+- the historical `redacted` field is exactly `payload is None`; envelope
+  `logically_redacted|erased_claimed` and replay-index targets select redacted gaps, while envelope
+  `key_unavailable` or `present` with explicit availability facts select unavailable gaps;
 - full replay after physical payload deletion equals the incremental pre-deletion/redaction path in
   REP-003, including plan/decision/claim/check secondary-effect removal;
 - a generated object-only stream separately targets (a) a current claim payload object, (b) a

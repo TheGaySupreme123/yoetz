@@ -27,18 +27,21 @@ and a recorded finding at the same frontier can never disagree.
 | Name | Signature (natural language) |
 |---|---|
 | `PolicyPack` | frozen data-only `(policy_id, policy_version)` selector |
-| `PolicyRunRecord` | frozen pack identity plus optional bounded machine reason |
+| `UnavailableCapturedObject` | frozen captured-object availability identity `(source_event_id, object_id)` |
+| `CaseAvailabilityFacts` | frozen, plaintext-free event/captured-object unavailability snapshot |
+| `FindingBasisRef` | exact typed internal ref union `evt|obl|clm|act|res|evd|fnd` |
+| `FrozenSourceAvailability` | enum `available`, `not_recorded`, `unavailable_at_freeze`, `redacted_at_source` |
 | `FindingFact` | frozen fact code plus exact sorted subject refs |
 | `FindingBasis` | internal frozen rule/fact/state/source-availability/coverage explanation for one candidate |
 | `DeterministicAssessment` | one `CandidateFinding` paired with its exact `FindingBasis` |
-| `DeterministicPolicyResult` | ordered assessments plus exact run/skipped/failed pack accounting |
+| `DeterministicPolicyResult` | frozen assessments-only result for one completed pack invocation |
 | `DeterministicFindingTemplate` | frozen `(summary, next_action)` text owned once for every deterministic kind |
 | `DETERMINISTIC_FINDING_TEMPLATES` | immutable complete `FindingKind -> DeterministicFindingTemplate` registry |
 | `render_deterministic_finding_text(kind, subject_refs)` | render the exact ID-only summary/detail pair |
 | `finding_basis_to_status_json(assessment)` | controlled projection to `status-result#/$defs/finding_basis` |
 | `CaseGap` | frozen typed projection/case gap `(marker, code, subject_refs)` |
-| `DeterministicCase` | pure frozen policy input with projection, frontier, allowed IDs, coverage index, and typed gaps |
-| `build_deterministic_case(projection, records)` | derive the pure case from one exact accepted-record prefix |
+| `DeterministicCase` | pure frozen policy input with projection, frontier, availability facts, allowed IDs, coverage index, and typed gaps |
+| `build_deterministic_case(projection, records, availability)` | derive the pure case from one exact accepted-record prefix and its frozen availability snapshot |
 | `run_deterministic_policies(case, policy)` | evaluate one `DeterministicCase` and return `DeterministicPolicyResult` |
 
 ## Behavior
@@ -48,25 +51,45 @@ a selector for one built-in pack, not a callback-bearing object or dynamic rules
 modules construct the only supported values. The engine rejects any other pair and verifies the
 selected module's exact exported constants before evaluation.
 
-`PolicyRunRecord` is exactly `(policy_id: str, policy_version: str, reason: str | None)`.
-`DeterministicPolicyResult` is exactly `(assessments: tuple[DeterministicAssessment, ...],
-ran_packs: tuple[PolicyRunRecord, ...], skipped_packs: tuple[PolicyRunRecord, ...], failed_packs:
-tuple[PolicyRunRecord, ...])`. Exactly one of the three accounting tuples has one entry for the
-single supplied pack. A ran entry has `reason=None`; a skipped or failed entry has a nonempty
-bounded machine reason and no assessments. The application concatenates these exact records when
-it runs both built-in packs. Unknown/tampered identities raise an internal policy-wiring error
-rather than returning a fabricated failed result.
+`DeterministicPolicyResult` is exactly
+`(assessments: tuple[DeterministicAssessment, ...])`. It is returned only after the selected pack
+completed normally; an empty tuple is a successful no-finding evaluation. It has no pack identity,
+outcome, reason, or ran/skipped/failed tuple. `application/check.py` owns whether a selected pack is
+invoked and creates the sole `ports.ledger.CheckPolicyExecution` record around that invocation.
+Unknown/tampered pack identities raise an internal policy-wiring error rather than returning a
+fabricated failed result.
 
-`CaseGap` is exactly `(marker: str, code: str, subject_refs: tuple[str, ...])`. `marker` is the
+`UnavailableCapturedObject` is exactly `(source_event_id: EventId, object_id: ObjectId)`.
+`CaseAvailabilityFacts` is exactly `(unavailable_event_ids: tuple[EventId, ...],
+unavailable_captured_objects: tuple[UnavailableCapturedObject, ...])`. The event tuple is sorted
+unique by unsigned ASCII ID bytes; captured-object rows are unique and sort by source-event bytes,
+then object-ID bytes. It contains no reason string: missing object, missing key, and locked key have
+the same deterministic meaning, while a recorded redaction remains a distinct ledger fact. The
+shared `LedgerPort.load_case_availability(session_id, frontier, projection)` operation obtains this immutable snapshot outside every
+write transaction. Durable check freeze and candidate status use that same operation, and the
+canonical availability digest participates in the durable check dependency digest.
+
+The event cause table is closed. A current source whose accepted envelope is
+`logically_redacted|erased_claimed`, or which is an effective replay-index redaction target, is
+recorded redaction and is excluded from `unavailable_event_ids`. A current source whose payload is
+null with envelope state `key_unavailable`, or with `present` because its object/key cannot be
+opened at the snapshot, is non-redaction unavailability and is included. A readable `present`
+source is excluded. No other combination is valid.
+
+`CaseGap` is exactly `(marker: str, code: str,
+subject_refs: tuple[EventId | ObligationId | ClaimId, ...])`. `marker` is the
 canonical projection marker or the exact case-only unavailable marker below; `code` is its bounded machine class;
 `subject_refs` is sorted unique and contains only public event/obligation/claim roots. Empty refs
 are allowed only for a genuine task/global limitation. A rootless gap weakens the check's material
 coverage and receipt but cannot create a finding because the public finding contract requires at
 least one real subject.
 
+`FindingBasisRef` is exactly
+`EventId | ObligationId | ClaimId | ActionId | ResultId | EvidenceId | FindingId`.
 `DeterministicCase` is exactly the frozen value `(projection: ProjectionState, frontier: Frontier,
-allowed_ids: frozenset[str], coverage_by_ref: immutable Mapping[str, Coverage], gaps:
-tuple[CaseGap, ...])`. `ProjectionState` deliberately stores its frontier as the separate pair
+availability: CaseAvailabilityFacts, allowed_ids: frozenset[FindingBasisRef], coverage_by_ref:
+immutable Mapping[FindingBasisRef, Coverage], gaps: tuple[CaseGap, ...])`. `ProjectionState`
+deliberately stores its frontier as the separate pair
 `frontier: int` and `head_digest: str`; it does not contain a nested `Frontier`. The one exact
 relation is therefore
 `case.frontier == Frontier(sequence=case.projection.frontier,
@@ -77,19 +100,22 @@ IDs needed as nonempty gap roots. Each value starts from the exact accepted-enve
 that source and is weakened by the closed component table below; no default is inferred from a
 channel or record kind.
 
-`build_deterministic_case(projection, records)` is pure. The caller supplies the authoritative
+`build_deterministic_case(projection, records, availability)` is pure. The caller supplies the authoritative
 ledger-ordered prefix whose final accepted record has `ingestion_sequence == projection.frontier`
 and `entry_digest == projection.head_digest`; the empty prefix is valid only for `(0, "genesis")`.
 The helper constructs the `Frontier` from that exact integer/digest pair, builds the same
 envelope-only `ReplayIndex` used by reducers, joins each current projection record's
 `source_event_id` to its accepted envelope, builds the exact coverage index, derives the allowed-ID
-set, and converts projection/case gap markers to typed `CaseGap` values. A prefix
+set, validates the frozen availability facts, and converts projection/case gap markers to typed
+`CaseGap` values. A prefix
 ending at the right integer with a different digest fails rather than being treated as the same
 case. The frozen marker grammar is:
 
 - `unknown_event:<event_id>:<schema>@<version>` -> code `unknown_event`, subject refs containing
   that unknown event ID;
-- `redacted_event:<event_id>` -> code `redacted_event`, subject refs containing the target event ID;
+- `redacted_event:<event_id>` -> code `redacted_event`, subject refs containing the source/target
+  event ID, for accepted-envelope `logically_redacted|erased_claimed` or an effective replay-index
+  event/object target;
 - `redacted_object:<object_id>` -> code `redacted_object`, subject refs containing exactly the
   causative redaction event with the lowest ledger ingestion sequence in the same prefix whose
   locator targets that object;
@@ -98,6 +124,18 @@ case. The frozen marker grammar is:
 - case-only `unavailable_captured_object:<source_event_id>:<object_id>` -> code
   `captured_object_unavailable`, rooted at the evidence source event, only when captured content is
   unavailable without a matching redaction marker.
+
+Availability validation is closed at the pure boundary. `unavailable_event_ids` must equal the
+current projection-source event IDs selected by the event cause table above; readable,
+non-current, unknown, or effectively redacted sources in that tuple are defects.
+Every `unavailable_captured_objects` row must resolve to the exact current evidence
+`(source_event_id, captured_object_id)` pair in `ReplayIndex.evidence_sources_by_object` and must
+have no effective object-redaction target. A row for evidence with no captured object, a stale or
+unknown source, the wrong object ID, or a redacted object is a defect. Because accepted records do
+not encode live captured-object readability, the pure helper cannot prove that an adapter omitted
+an unavailable pair or inserted an actually readable pair; exact probe completeness belongs to
+`LedgerPort.load_case_availability` conformance and its object/key-generation fence. The helper
+performs no probe, preserves the supplied canonical tuple exactly, and never fabricates a fact.
 
 An object-only payload deletion is an effective event target in the reducer index and therefore
 uses `redacted_event`, not `event_payload_unavailable`. Multiple redaction events targeting one
@@ -133,7 +171,10 @@ This sidecar deliberately does not add fields to `ProjectionState` or `projectio
 existing generation-1 golden snapshots remain byte-stable. The ledger head already commits the
 accepted envelopes from which the index is derived, and freeze/resume persists the complete case
 inside the authenticated encrypted resume object. Candidate-status and durable check paths MUST
-call this same helper over the same prefix.
+obtain the same availability shape and call this same helper over the same prefix. The common
+`ProjectionRecord.redacted` bit remains true for every null-payload tombstone for generation-1
+snapshot compatibility; actual redaction versus non-redaction unavailability is decided only by
+the envelope/index/availability equality above.
 
 `run_deterministic_policies(case, policy)` is pure. It inspects the `ProjectionState` contained in
 the supplied `DeterministicCase`, applies the selected built-in rule set, and returns ordered
@@ -147,13 +188,23 @@ types above are defined; `TYPE_CHECKING` imports are allowed. Each policy module
 types from this module. Directly importing either pack and importing this engine first are therefore
 both cycle-safe.
 
+`FrozenSourceAvailability` is the `str` enum `available`, `not_recorded`,
+`unavailable_at_freeze`, or `redacted_at_source`. For a rule comparison its exact precedence is:
+any material compared source with envelope `logically_redacted|erased_claimed` or an effective
+recorded redaction target -> `redacted_at_source`; else any
+material compared source in `CaseAvailabilityFacts` -> `unavailable_at_freeze`; else any required
+source ID or typed state absent from the frozen case -> `not_recorded`; else `available`. A basis
+with no source comparison uses `available`. This fact is about the frozen source, not later
+disclosure.
+
 `FindingBasis` contains only canonical, machine-readable facts already in the deterministic case. Its exact
 fields are: `rule_id: str`; `observed_facts: tuple[FindingFact, ...]`;
 `required_but_missing_facts: tuple[FindingFact, ...]`;
-`subject_state_relation: same|different|unknown`; `source_availability:
-available|not_recorded|redacted_at_source`; `coverage_gaps: tuple[str, ...]`; and
-`supporting_refs: tuple[str, ...]`. `FindingFact` is exactly `(fact_code: str,
-subject_refs: tuple[str, ...])`. `rule_id` is namespaced and must equal
+`subject_state_relation: SubjectStateRelation`; `source_availability:
+FrozenSourceAvailability`; `coverage_gaps: tuple[str, ...]`; and
+`supporting_refs: tuple[FindingBasisRef, ...]`. `SubjectStateRelation` is imported from
+`domain.values`; this module defines no parallel three-string type. `FindingFact` is exactly
+`(fact_code: str, subject_refs: tuple[FindingBasisRef, ...])`. `rule_id` is namespaced and must equal
 `f"{candidate.policy_id}/{candidate.kind.value}"`; the internal value is therefore for example
 `work-integrity/completion_with_open_obligations`, never the bare kind. `observed_facts` contains
 1..33 entries and `required_but_missing_facts` contains 0..33. Within each tuple a fact code occurs
@@ -175,20 +226,21 @@ basis. The mapping is exact:
 | `observed_refs` | sorted unique union of every `observed_facts[*].subject_refs` |
 | `required_missing_fact_codes` | sorted unique `fact_code` values from `required_but_missing_facts` |
 | `subject_state_relation` | the same enum value |
-| `frozen_source_availability` | `available -> available`, `not_recorded -> not_recorded`, `redacted_at_source -> redacted` |
+| `frozen_source_availability` | `available -> available`, `not_recorded -> not_recorded`, `unavailable_at_freeze -> unavailable`, `redacted_at_source -> redacted` |
 | `coverage_gaps` | the same sorted tuple |
 | `evidence_refs` | sorted unique `supporting_refs` whose canonical prefix is `evd_` or `res_` |
 
 The status basis is intentionally a controlled public projection, not a second internal basis:
 its schema flattens fact/ref associations and does not carry refs for absent facts. It is never
 decoded to resume a check or to construct an outbound review packet. The candidate item surrounding
-it carries `policy_id` and `kind`, so the public bare rule token is unambiguous. The status-only
-`frozen_source_availability=unavailable` token is reserved for other read projections and is never
-emitted by this mapper. Internal construction bounds the unions above, so the mapper never truncates
+it carries `policy_id` and `kind`, so the public bare rule token is unambiguous. The status
+`frozen_source_availability=unavailable` token is emitted only from an explicit frozen availability
+fact, never from a later disclosure decision. Internal construction bounds the unions above, so the mapper never truncates
 to the schema's 64-member ceilings.
 
 `source_availability` is intentionally earlier than disclosure visibility. It says only whether the
-frozen projection supplied comparable material or an already-redacted marker. The later case
+frozen projection supplied comparable material, an explicit availability fact, or an
+already-redacted marker. The later case
 builder/gateway derives `available|not_recorded|not_selected|withheld_by_policy|
 redacted_never_send` for each `ChangeObservation`/omission. A pure deterministic basis can never
 contain `not_selected` or `withheld_by_policy` because no review-context or egress policy has run.
@@ -206,6 +258,16 @@ infer a fact from `statement`, `summary`, `description`, `reason`, `rationale`,
 equality, exact `RequestedItem.value`/`attempted_items` token equality, and explicit
 `disputes_refs` edges are the complete deterministic input vocabulary. Requested-item tokens are
 compared byte-exactly and are never linguistically interpreted.
+
+Each policy table also names the complete primary basis tuple used for one raw trigger. Candidate
+public roots are derived exactly as follows: `evt|obl|clm` remains itself; `act|res|evd|fnd` resolves
+to the current projection record's `source_event_id`. The response-review rules explicitly use the
+responded finding's already-public `subject_refs`, rather than replacing them with the finding event.
+The sorted unique result is the candidate's complete `subject_refs`; an unresolved primary ID or an
+empty result is not repaired. Every fact gets the exact row-specific basis refs from the policy
+table, and `supporting_refs` is the sorted unique union of all `observed_facts[*].subject_refs`.
+Missing-fact anchors do not enter that union merely because the fact was absent. Over-bound unions
+fail case/policy validation rather than truncating or choosing a first ref.
 
 The engine uses the current projection state to derive findings for the active pack:
 
@@ -290,9 +352,9 @@ The packs themselves are rule books, not probabilistic scorers:
 - `research_evidence_findings(case)` depends only on the frozen projection, frontier, allowed IDs,
   and policy version. It does not inspect live network content or the raw user prompt.
 
-The engine keeps the pack results separate so that a caller can see whether a failure comes from
-work integrity, research evidence, or both. The separation matters because a project can have clean
-work integrity and still have weak evidence, or vice versa.
+The application keeps the two assessments-only pack results separate together with its own
+`CheckPolicyExecution` records, so it can distinguish work-integrity from research-evidence
+execution without duplicating accounting inside the pure kernel result.
 
 Rule-level expectations are:
 
@@ -300,8 +362,8 @@ Rule-level expectations are:
   were actually required and remain unresolved;
 - stale evidence produces findings only when the evidence refers to a materially different state
   than the one being checked;
-- a claim/evidence mismatch produces a finding only when the subject refs really fail to support
-  the statement, not merely when the statement is short;
+- a claim/evidence mismatch produces a finding only from the policy table's exact typed
+  result/obligation/state contradiction, never from interpreting whether prose supports prose;
 - a rejected or waived finding becomes a finding only when the waiver or rejection lacks a credible
   basis in the frozen record.
 

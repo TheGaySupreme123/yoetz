@@ -63,7 +63,8 @@ exact effective `ReviewSelectionPolicy`. `review_packet` is a closed canonical i
 - `deterministic_assessments` (0..64), each with the pinned deterministic `finding_ref`,
   `finding_kind`, `priority`, optional paired `summary_item_id` and `detail_item_id`, public root `subject_refs`,
   `rule_id`, sorted `observed_facts`, sorted `required_but_missing_facts`,
-  `subject_state_relation`, `source_availability: available|not_recorded|redacted_at_source`,
+  `subject_state_relation`,
+  `source_availability: available|not_recorded|unavailable_at_freeze|redacted_at_source`,
   sorted coverage-gap codes, and sorted supporting refs;
 - `change_observations` (0..32), each with sorted subject refs, `claimed_change`,
   `subject_state_relation`, `content_visibility`, and optional paired before/after state digests;

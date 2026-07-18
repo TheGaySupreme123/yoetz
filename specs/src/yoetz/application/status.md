@@ -156,14 +156,21 @@ therefore never erase unrelated uncertainty.
 ### The `candidate_findings` view
 
 The view resolves the exact frontier, obtains/replays the full `ProjectionState`, reads the
-authoritative accepted-record prefix through that same frontier, and calls
-`build_deterministic_case(projection, records)`. It then calls `run_deterministic_policies` against
+authoritative accepted-record prefix through that same frontier, calls
+`LedgerPort.load_case_availability(session_id, frontier, projection)`, and calls
+`build_deterministic_case(projection, records, availability)`. It then calls
+`run_deterministic_policies` against
 that pure `DeterministicCase`. A projection cache alone cannot supply or guess per-reference
 coverage. The helper is exactly the one used by `LedgerPort.freeze_case`, so status and check join
 the same current projection source links to the same accepted-envelope coverage and typed gaps.
 Both halves are pure after the bounded ledger read, so the result is a deterministic function of
 recorded evidence at an exact frontier. The view persists no resume-case object, reserves no
 operation, takes no lease, allocates no ID, and writes nothing.
+
+With implicit whole-case scope, the view uses the same structural `not_applicable` and
+`material_unavailable` pre-invocation predicates as `check`. It emits no `CheckPolicyExecution`
+because status is not a recorded check; skipped-pack uncertainty remains visible only through the
+same case coverage/gaps. Every pack it does invoke returns assessments only.
 
 Three properties keep it from becoming a second `check`:
 
@@ -213,8 +220,9 @@ frontier change; failure yields `privacy_projection_unavailable` before serializ
    from another query/session/version is `INVALID_REQUEST`; it never changes the requested query.
 2. For every view except `candidate_findings`, execute exactly one `ProjectionQuery` for the frozen
    frontier. For `candidate_findings`, execute no `ProjectionQuery`: load/replay the full
-   `ProjectionState`, stream the authoritative accepted prefix through the same frontier, build the
-   deterministic case, run both packs, apply the request's priority filter, and page the resulting
+   `ProjectionState`, stream the authoritative accepted prefix through the same frontier, snapshot
+   the exact case availability, build the deterministic case, run both applicable packs, apply the
+   request's priority filter, and page the resulting
    bounded tuple in application memory. In both branches execute one bounded
    `TaskRuntime.importer.status(session_id)` structural query. The repository reads the exact
    frontier from its replay-derived, interval-indexed structural query facts; it never decrypts an

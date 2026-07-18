@@ -69,11 +69,21 @@ stand in for a recorded scope match.
 The selected built-in pack set is always nonempty. Record one exact `CheckPolicyExecution` for
 each selected `PolicyVersion`, in canonical pack-ID order (`research-evidence` then
 `work-integrity` when both are present), even though deterministic finding emission continues to
-use its separately frozen work-integrity-then-research-evidence order. A pack with no rule root in
-the direct nonempty scope records `skipped/scope_excluded`; a pack that evaluated its applicable
-roots and found no issue still records `run/completed`. Other skipped and failed reasons use only
-the closed check-result matrix. Before finalization, require `policies` and `policy_executions` to
-have the same length, identity, version, and canonical order.
+use its separately frozen work-integrity-then-research-evidence order. Exact execution ownership is:
+
+- `skipped/scope_excluded` when a pack has no rule root in the direct nonempty scope;
+- `skipped/not_applicable` when whole-case selection has no current structural root consumed by any
+  rule in that pack;
+- `skipped/material_unavailable` when applicable roots exist but every root needed to enter that
+  pack is unavailable in the frozen `CaseAvailabilityFacts`/typed gaps, so the pack is not invoked;
+- `failed/policy_failure` when an invoked, identity-valid built-in pack raises during pure
+  evaluation; and
+- `run/completed` for every normally returned assessments-only kernel result, including an empty
+  result and a result whose other roots carry ordinary coverage gaps.
+
+The coordinator creates these `CheckPolicyExecution` values; the kernel returns no execution
+record and receives no scope. Before finalization, require `policies` and `policy_executions` to have
+the same length, identity, version, and canonical order.
 
 ### Durable ten-step coordinator
 
@@ -83,9 +93,11 @@ resume revalidates the object/row facts for the recorded phase before moving for
 1. **Freeze and reserve.** Call the port's bounded prepare/build/publish/final-reservation
    protocol. Its prepare snapshot repeats idempotency and the no-pending-import gate, verifies
    `expected_frontier`, and captures subject frontier `F`, active projection identity, and the exact
-   policy/config/engine/projection revisions. With no write transaction held, it derives dependency
-   digest `D`, pages the authoritative accepted-record prefix through `F`, and builds the exact
-   `DeterministicCase` (projection, allowed IDs, per-ref coverage, typed gaps), and only then
+   policy/config/engine/projection/object-inventory/key-availability revisions. With no write
+   transaction held, it snapshots exact `CaseAvailabilityFacts`, derives dependency digest `D`
+   including their canonical digest, pages the authoritative accepted-record prefix through `F`,
+   and builds the exact `DeterministicCase` (projection, availability, allowed IDs, per-ref coverage,
+   typed gaps), and only then
    canonicalizes, encrypts, and durably finalizes the bounded resume-case object. A final short
    atomic write repeats idempotency/import checks and atomically revalidates current head `F`,
    projection identity, `D`, `expected_frontier`, owner generation, and the already-durable object
@@ -97,9 +109,9 @@ resume revalidates the object/row facts for the recorded phase before moving for
    candidate.
 2. **Run local checks.** Outside a write transaction, run every applicable deterministic policy
    against `FrozenCase.case`, the immutable pure `DeterministicCase` at `F`, applying the direct
-   scope rule above before any candidate can enter ranking. Record exact
-   run/skipped/failed policy IDs and reasons,
-   concatenate assessment tuples in the exact `work-integrity` then `research-evidence` order,
+   scope and exact pre-invocation skip rules above before any candidate can enter ranking. Wrap each
+   invocation in the application-owned exact `CheckPolicyExecution`, then concatenate only the
+   returned assessment tuples in the exact `work-integrity` then `research-evidence` order,
    and verify the kernel's one-value-per `(policy_id, rule_id, complete subject_refs tuple)`
    cardinality. The coordinator performs no second prose-based deduplication and does not choose a
    "strongest" value for duplicate keys; a duplicate is an internal policy-wiring defect. Allocate

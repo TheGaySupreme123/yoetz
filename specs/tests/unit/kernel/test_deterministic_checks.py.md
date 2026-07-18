@@ -17,6 +17,7 @@ more, with one exact machine-readable basis for every candidate finding.
 - `test_unknown_pack_is_rejected` — tampered pack wiring does not approximate.
 - `test_findings_are_origin_deterministic` — deterministic findings never carry semantic provenance.
 - `test_pack_results_are_order_stable` — rule order and deduping remain stable.
+- `test_policy_result_is_assessments_only` — the kernel exposes no run/skipped/failed accounting.
 - `test_projection_frontier_uses_integer_and_head_pair` — case frontier equality checks both the
   projection's integer sequence and separate head digest.
 - `test_rule_subject_cardinality_and_order_are_exact` — one assessment exists per exact
@@ -27,12 +28,19 @@ more, with one exact machine-readable basis for every candidate finding.
   explanation and no orphan basis exists.
 - `test_basis_separates_state_relation_from_source_availability` — unrecorded source never means
   equal state or no change, and later privacy facts never enter the pure basis.
+- `test_basis_uses_nominal_subject_state_and_typed_refs` — the domain enum and exact seven-kind
+  `FindingBasisRef` union are reused without raw-string/parallel-enum substitutes.
+- `test_rule_root_and_fact_ref_tables_are_exact` — all fourteen rules use their frozen primary,
+  public-root, observed/missing, and supporting-ref mappings.
 - `test_status_basis_projection_is_controlled_and_exact` — namespaced rule IDs, fact/ref flattening,
   availability spelling, and evidence/result ref selection map exactly to the frozen status shape.
 - `test_redaction_and_unavailability_coverage_caps_are_componentwise` — all six kernel gap
   conditions preserve/cap/add exactly the registered fields and never strengthen a weaker base.
 - `test_redacted_object_root_is_first_cause_and_stable` — repeated object redactions yield one gap
   rooted at the earliest causative event by ledger sequence.
+- `test_case_availability_facts_are_explicit_and_exact` — envelope redaction-state mapping and the
+  unavailable-event tuple are exact; captured-object rows must be canonical, current, associated,
+  and non-redacted, while their probe completeness is tested at the ledger port.
 
 ## Behavior
 
@@ -44,6 +52,10 @@ The suite exercises:
 - exact subject refs, priority, policy identity, and coverage behavior;
 - exact `FindingBasis` rule ID, observed facts, required-but-missing facts, supporting refs,
   subject-state relation, frozen-source availability, and coverage gaps;
+- `FrozenSourceAvailability` covers exact available/not-recorded/unavailable-at-freeze/redacted
+  precedence and projects to the four frozen status tokens;
+- non-public `act|res|evd|fnd` primary refs map to their current source event, response rules retain
+  the responded finding's public roots, and missing IDs never become invented roots;
 - a projection state `(frontier: int, head_digest: str)` maps to exactly one equal `Frontier`, and a
   same-sequence/different-head prefix is rejected;
 - raw trigger records for one rule and complete subject tuple are aggregated before evaluation;
@@ -60,10 +72,16 @@ The suite exercises:
   channel/authorship/check tuples, and sorted union of respectively `redacted_event`,
   `event_payload_unavailable`, `redacted_object`, `captured_object_unavailable`, `missing_ref`, and
   `unknown_event`; combinations apply every cap and an over-64 gap union fails instead of truncating;
+- envelope `logically_redacted|erased_claimed` selects recorded-redaction coverage,
+  `key_unavailable` selects frozen unavailability, and `present` is available exactly when its
+  payload is readable; illegal state/payload/fact combinations fail;
 - object-only payload targeting adds both the object and effective-event tokens; captured-content
   targeting adds only the object token to that evidence ref; two or more causative redaction events
   keep the first-by-ingestion event as the exact one-member `CaseGap.subject_refs`, even when event-
   ID byte order differs.
+- candidate-status and durable-check builders supplied the same accepted prefix and
+  `CaseAvailabilityFacts` yield byte-equivalent `DeterministicCase` values; a changed availability
+  tuple changes the case/dependency digest without changing `ProjectionState` snapshots.
 
 ## Errors and edge cases
 

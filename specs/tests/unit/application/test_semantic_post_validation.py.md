@@ -54,6 +54,8 @@ The suite locks the post-validation boundary:
 - `project_review_assessment` verifies the internal `policy-id/kind` spelling and emits the bare
   candidate kind for both outbound `finding_kind` and `rule_id`; included projections preserve all
   observed/missing fact objects, gaps, support refs, relation, and availability;
+- each of the four source-availability tokens, including `unavailable_at_freeze`, survives that
+  projection unchanged; object/key unavailability is never rewritten as absence or redaction;
 - candidate refs, every observed-fact ref tuple, every missing-fact ref tuple, and supporting refs
   are tested at 16 and 17 members. Sixteen is included unchanged; seventeen returns the exact first-
   failing-field `ReviewAssessmentSkipped` plus a `bounded_structural_metadata/finding/not_selected`

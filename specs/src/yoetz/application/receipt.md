@@ -3,7 +3,8 @@
 **Wave:** D | **ADRs:** ADR-001, ADR-002, ADR-003, ADR-004, ADR-006, ADR-007 | **Imports
 (spec-tree):** `protocol/models.md`, `protocol/canonical.md`, `protocol/coverage.md`,
 `protocol/errors.md`, `domain/events.md`, `domain/receipts.md`, `domain/values.md`,
-`kernel/projections.md`, `kernel/receipt_builder.md`, `ports/ledger.md`, `ports/objects.md`,
+`kernel/projections.md`, `kernel/deterministic_checks.md`, `kernel/receipt_builder.md`,
+`ports/ledger.md`, `ports/objects.md`,
 `ports/clock.md`, `ports/ids.md`, `application/unit_of_work.md` | **Imported by:**
 `application/service.md`
 
@@ -49,24 +50,49 @@ reword conclusions.
    sequence and head digest and require projection lag zero at `F`. Unknown events, redactions,
    missing objects/keys, stale evidence, skipped/failed checks, and provider unavailability remain
    explicit inputs/gaps; the application never fills them from current conversation or later state.
+   Read the authoritative accepted prefix through `F`, call
+   `LedgerPort.load_case_availability(session_id, F, projection)`, and call the pure
+   `build_deterministic_case(projection, records, availability)` to obtain the same typed
+   availability/coverage/gap basis used by candidate status and check freeze.
+5. From the replay/query-index facts, select exactly one latest current row per finding issue key and
+   derive `ReceiptFindingState.resolved` with the shared scope/policy-execution/suppression/
+   freshness rules. Load the exact readable applicable `CheckRecordedPayload`, if one exists. Map
+   its skipped/failed policy and semantic terminal outcomes to registered root-bound or global
+   `CaseGap` codes and fold their coverage. A response disposition alone never resolves a row.
+   Construct the exact `ReceiptBuildContext`; the pure builder does not perform these reads or
+   applicability decisions.
 
 ### Build and publish immutable objects
 
 1. Allocate one `receipt_id` and capture `generated_at`, then call the pure
-   `build_receipt` contract with projection state, exact `F`, active version manifest, requested
-   redaction/include policy, receipt/task/session IDs, and captured timestamp. The builder returns one immutable
-   `ReceiptDocument` with stable section ordering and conclusion code.
-2. The document includes at minimum: receipt/task/session IDs and `F`; relevant protocol,
-   engine/policy/config/projection/object/storage/Python/SQLite/provider identities; obligations
-   including open/resolved/revised/waived state; findings by origin/disposition; supporting and
-   stale evidence; responses; attempted/skipped/failed/timed-out/unavailable checks; provider/model
-   provenance; weakest material coverage; unknown/redaction/unobserved/key gaps; and generation
-   metadata.
+   `build_receipt` contract with the complete context, exact domain `ReceiptVersionSlice` mapped by
+   the application from the active runtime manifest, requested redaction/include policy,
+   receipt/task/session IDs, and captured timestamp. The builder has no Wave-F `version.py`
+   dependency. It returns one immutable `ReceiptDocument` with stable section ordering and
+   conclusion code.
+   The mapper copies `package_name`, `package_version`, `protocol_version`, `engine_version`,
+   `projection_version`, `object_format_version`, `catalog_schema_version`,
+   `bundle_schema_version`, and `resource_manifest_digest` verbatim; converts the active built-in
+   policies to sorted `PolicyVersionEntry` values; and converts the exact finding/receipt schema
+   identities used by the document to sorted `SchemaVersionEntry` values. It ignores Python,
+   SQLite, provider, platform, and capability fields that are not members of
+   `ReceiptVersionSlice`; no stringified manifest blob enters the receipt.
+2. The document includes at minimum: receipt/task/session IDs and `F`; the complete exact
+   `ReceiptVersionSlice`, including its resource-manifest digest; current
+   obligations and findings; readable responses; typed claim/evidence refs; weakest material
+   coverage; unknown/redaction/unobserved/key/check gaps; redaction counts; and generation metadata.
+   Check execution and semantic/provider outcomes are represented by their closed event facts and
+   normalized gap/coverage effects; `ReceiptDocument` has no separate execution array or top-level
+   provider-provenance summary. A retained semantic `Finding` still carries its domain-owned
+   `SemanticProvenance` unchanged. The operation never hides accounting that is absent from those
+   typed fields in free-form section prose.
 3. Apply redaction while building the canonical document, not only while rendering. Removed
-   payload is replaced by an explicit gap and coverage reduction. `full_local` may carry all
-   locally allowed detail; `default_local_export` omits unnecessary protected text;
-   `redacted_share` minimizes further. No profile changes recorded truth or strengthens a
-   conclusion.
+   source fields are counted in exact `ReceiptRedaction` rows; source unavailability/redaction also
+   has the typed gap and coverage reduction supplied in context. `full_local`,
+   `default_local_export`, and `redacted_share` use the exact kernel profile x include matrix. The
+   resulting sections/redactions are part of canonical bytes, so a material transform changes the
+   document and digest. No profile removes conclusion/frontier/suppression/coverage/gap truth or
+   strengthens a conclusion.
 4. Canonically encode the `ReceiptDocument`, compute its unkeyed canonical `receipt_digest`, and
    stage/finalize it as an encrypted receipt object. Size/canary/key/object checks complete before
    any append transaction. A failure here emits no receipt event.

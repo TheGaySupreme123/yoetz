@@ -15,6 +15,8 @@ commit, and lookup operations.
 - `test_load_and_freeze_contract` — event loading and frozen-case construction match across backends.
 - `test_load_events_preserves_unknown_and_unavailable_records` — both variants retain every
   envelope field and use `payload=None` for redacted/key-unavailable objects.
+- `test_load_case_availability_contract` — both adapters return identical sorted event/captured-
+  object facts for the same frontier/projection and distinguish redaction from unavailability.
 - `test_append_warning_contract` — warnings are sorted-unique `AppendWarning` members and the sole
   v0.1 value is `unknown_event_schema_preserved`.
 - `test_projection_query_contract` — exact filters, positions, and page metadata match; both
@@ -48,6 +50,11 @@ IDs, and policy/provider scripts. It asserts:
   `outcome` or colliding with the public `CheckResult` alias;
 - known/unknown `LedgerRecord` values preserve ancestry/refs/digests and unavailable payloads are
   exactly `None`;
+- `load_case_availability` probes only current projection material, returns no plaintext/reasons,
+  rejects projection/frontier mismatch, maps `logically_redacted|erased_claimed` to redaction,
+  includes `key_unavailable` and unreadable-`present` current event sources, proves captured-object
+  probe completeness from the adapter's own object/key state, and maps present-but-invalid objects
+  to corruption;
 - projection pages compare their typed raw items, exact frontiers/lag/version/gaps, and exclusive
   typed next position; no cursor bytes or privacy projection enter the adapter oracle;
 - every optional filter subset, mixed-direction finding rank seek, ID/sequence seek, historical
@@ -57,9 +64,10 @@ IDs, and policy/provider scripts. It asserts:
   unopened, and arbitrary pages concatenate every renderable row exactly once;
 - check scope/policy-execution/suppression/coverage/semantic facts produce the same monotonic
   finding resolution in both adapters; response disposition and waiver expiry are irrelevant;
-- instrumented freeze hooks establish the strict order `prepare -> build_case ->
+- instrumented freeze hooks establish the strict order `prepare -> availability_snapshot -> build_case ->
   finalize_object -> final_reservation`; the final reservation repeats idempotency, pending-import,
-  head, projection identity, dependency digest, expected-frontier, and owner-generation checks;
+  head, projection identity, object/key generations, dependency digest, expected-frontier, and
+  owner-generation checks;
 - mutation of any revalidated fact between object finalization and reservation installs no
   object inventory or operation pointer, and two concurrent same-ID preparations can install at
   most one exact object reference (the other finalized object remains unreferenced);

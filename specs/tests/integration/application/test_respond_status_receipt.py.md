@@ -22,6 +22,9 @@ idempotent.
   resolution unchanged until a qualifying later check.
 - `test_scoped_check_applicability_is_durable` — normalized scope and policy executions in the
   check event distinguish a resolving recheck from skipped/non-overlapping work.
+- `test_receipt_build_context_is_complete` — current issue rows, applicable check payload,
+  availability facts, coverage/gaps, and exact version slice are application-normalized before the
+  pure builder runs.
 
 ## Behavior
 
@@ -37,6 +40,8 @@ The test asserts:
 - status never mutates task state and discloses lag honestly; its common service projection writes
   or replays exactly one privacy-audit receipt without changing the task frontier;
 - receipt text/JSON match the frozen frontier and the current findings/obligations;
+- receipt construction uses the same explicit object/key snapshot as case freezing; provider/policy
+  outcomes enter only through closed check facts and typed gaps supported by the receipt schema;
 - accepted reviewer challenges can be acknowledged and acted on, answered with evidence, followed
   by a superseding claim, rejected with matching evidence, or retained as an unresolved limitation;
 - the reviewer cannot submit a response or waiver, and every material agent branch is visible to a

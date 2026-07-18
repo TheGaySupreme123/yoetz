@@ -76,11 +76,18 @@ Every known `AcceptedEvent` carries the runtime-only `ProjectionLocator` capture
 acceptance. With a readable payload, the reducer re-encodes it and verifies the locator's schema,
 logical key, redaction targets, and canonical payload digest before applying the family rule. With
 `payload is None`, it never attempts decryption or invents a body: if the family owns a current
-projection record, it upserts the common null-payload tombstone at the locator key; if the family is
+projection record, it upserts the common null-payload tombstone with the generation-1
+`redacted=True` bit at the locator key; if the family is
 `check_recorded`, it leaves/clears `latest_tested_state` as described below; otherwise it advances
 only structural state. This is the same code path used by memory and SQLite full replay after
 physical object deletion. A missing/mismatched locator is durable corruption and aborts replay;
 it is not converted into a weaker successful projection.
+
+That common tombstone bit does not classify the cause. Reducers remain envelope/index-pure and
+record only explicit `redaction_recorded` markers. The later deterministic-case builder treats
+accepted-envelope `logically_redacted|erased_claimed` as recorded redaction too, treats
+`key_unavailable` or `present` plus an unreadable object as non-redaction unavailability, and
+combines those facts with the caller-supplied frozen `CaseAvailabilityFacts`.
 
 For known events, the reducer updates the projection collections as follows:
 

@@ -17,7 +17,8 @@ Prove status is read-only and returns the same canonical projection page across 
 - `test_future_frontier_is_invalid_request` — every surface maps a future read-only frontier to
   `INVALID_REQUEST`, never `FRONTIER_CONFLICT`.
 - `test_candidate_findings_uses_only_whole_case_path` — no `ProjectionQuery` is issued for the
-  candidate view and exactly one is issued for every other view.
+  candidate view; it uses one exact availability snapshot, while exactly one row query is issued for
+  every other view.
 - `test_candidate_parity_excludes_semantic_findings` — deterministic candidate identity matches a
   same-frontier check independently of capping, while semantic findings have no candidate row.
 - `test_finding_and_candidate_tie_breaks_are_distinct` — recorded ties end in finding ID and
@@ -46,6 +47,9 @@ The test asserts:
 - CLI and MCP wrappers do not alter the page shape.
 - candidate paging uses the rank prefix plus emission ordinal; row-query paging uses the exact
   port-owned typed positions and never accepts candidate view.
+- candidate status and same-frontier check use byte-equal `CaseAvailabilityFacts`; changing only a
+  captured-object/key availability fact changes candidate gaps/coverage without mutating the
+  projection snapshot;
 - assignment scope/resolution, obligation effective status/actor/revision edges, finding current
   response/resolution/rank, evidence availability/freshness, history summary codes, compact
   counters, and version identity match the exact port mapping field by field;

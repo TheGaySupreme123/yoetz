@@ -16,7 +16,10 @@ The `input` section contains cooperative entries plus a successful bounded Codex
 declared gaps. The `expected` section freezes import coverage/provenance, the partial limitation,
 exact receipt `conclusion=insufficient_coverage`, and no claim that import observed all work. A
 successful bounded import means only that accepted source ranges were processed; its declared gaps
-prevent `no_unresolved_deterministic_findings`. Every referenced identifier, timestamp, key,
+prevent `no_unresolved_deterministic_findings`. Exact source-record ranges and importer-profile
+versions remain typed fixture/import evidence; receipt sections use only retained receipt refs,
+gap codes, and `ReceiptVersionSlice` identities, so they do not smuggle those extra facts into
+free-form prose. Every referenced identifier, timestamp, key,
 digest, nonce, provider response, and fault point is explicit test data; a test may not replace it
 with current time, randomness, network state, or host paths. Multi-variant cases evaluate each
 variant independently and declare the relationship between their outcomes.
