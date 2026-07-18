@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import textwrap
 from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 from fractions import Fraction
-from typing import cast
+from itertools import product
+from pathlib import Path
+from typing import Final, cast
 
 import pytest
 from hypothesis import given
@@ -64,6 +70,29 @@ _DIGEST_B = "sha256:" + "b" * 64
 _COMMITMENT = "hmac-sha256:" + "c" * 64
 _MAX_SQLITE_INTEGER = 2**63 - 1
 _MAX_SAFE_INTEGER = 2**53 - 1
+_SRC_ROOT: Final = Path(__file__).resolve().parents[3] / "src"
+_VALUE_MATRIX_SCRIPT: Final = textwrap.dedent(
+    """
+    import os
+    import sys
+    import time
+    from datetime import UTC, datetime
+    from pathlib import Path
+
+    source_root = Path(sys.argv[1])
+    sys.path.insert(0, str(source_root))
+    if hasattr(time, "tzset"):
+        time.tzset()
+
+    from yoetz.domain.values import Frontier, freeze_json, timestamp_from_datetime
+    from yoetz.protocol.canonical import canonical_encode
+
+    frozen = freeze_json({"z": [3, 2, 1], "a": {"unicode": "Cafe\\u0301"}})
+    print(canonical_encode(frozen).hex())
+    print(timestamp_from_datetime(datetime(2026, 7, 13, 9, 14, 31, 10_000, tzinfo=UTC)).wire)
+    print(canonical_encode(Frontier.genesis().as_wire()).decode("utf-8"))
+    """
+).strip()
 
 
 def _assert_reason(reason: str, function: Callable[[], object]) -> None:
@@ -181,10 +210,13 @@ def test_freeze_json_rejects_noncanonical_strings_and_subclasses(
 
 
 def test_freeze_json_depth_is_bounded_by_the_canonical_owner() -> None:
-    value: object = 0
-    for _ in range(MAX_JSON_DEPTH + 1):
-        value = [value]
-    _assert_reason("nesting_too_deep", lambda: freeze_json(value))
+    accepted: object = 0
+    for _ in range(MAX_JSON_DEPTH):
+        accepted = [accepted]
+    assert freeze_json(accepted)
+
+    rejected = [accepted]
+    _assert_reason("nesting_too_deep", lambda: freeze_json(rejected))
 
 
 @pytest.mark.parametrize(
@@ -393,8 +425,20 @@ def test_frontier_json_codec_is_closed_and_invertible() -> None:
     )
     _assert_reason("invalid_frontier", lambda: frontier_from_json(_DuplicateYieldMapping()))
     _assert_reason(
+        "invalid_frontier",
+        lambda: frontier_from_json({"sequence": "0", "head_digest": 1}),
+    )
+    _assert_reason(
+        "invalid_frontier",
+        lambda: frontier_from_json({_StrSubclass("sequence"): "0", "head_digest": GENESIS_DIGEST}),
+    )
+    _assert_reason(
         "noncanonical_integer_string",
         lambda: frontier_from_json({"sequence": "01", "head_digest": GENESIS_DIGEST}),
+    )
+    _assert_reason(
+        "noncanonical_integer_string",
+        lambda: frontier_from_json({"sequence": "01", "head_digest": 1}),
     )
 
     assert Frontier(1, _DIGEST_A) < Frontier(2, _DIGEST_B)
@@ -425,21 +469,40 @@ def test_subject_state_ref_validation_is_strict() -> None:
 
 
 def test_subject_state_relation_full_matrix() -> None:
-    tree_a = SubjectStateRef(tree_digest=_DIGEST_A)
-    tree_a_labeled = SubjectStateRef(tree_digest=_DIGEST_A, described_state="other label")
-    tree_b = SubjectStateRef(tree_digest=_DIGEST_B)
-    diff_a = SubjectStateRef(diff_digest=_DIGEST_A)
-    diff_b = SubjectStateRef(diff_digest=_DIGEST_B)
-    label = SubjectStateRef(described_state="tree-A")
+    references: tuple[SubjectStateRef | None, ...] = (
+        None,
+        SubjectStateRef(described_state="label-only"),
+        SubjectStateRef(diff_digest=_DIGEST_A),
+        SubjectStateRef(diff_digest=_DIGEST_B),
+        SubjectStateRef(tree_digest=_DIGEST_A),
+        SubjectStateRef(tree_digest=_DIGEST_B),
+        SubjectStateRef(tree_digest=_DIGEST_A, diff_digest=_DIGEST_A),
+        SubjectStateRef(tree_digest=_DIGEST_A, diff_digest=_DIGEST_B),
+        SubjectStateRef(tree_digest=_DIGEST_B, diff_digest=_DIGEST_A),
+    )
 
-    assert subject_state_relation(None, tree_a) is SubjectStateRelation.UNKNOWN
-    assert subject_state_relation(tree_a, None) is SubjectStateRelation.UNKNOWN
-    assert subject_state_relation(tree_a, tree_a_labeled) is SubjectStateRelation.SAME
-    assert subject_state_relation(tree_a, tree_b) is SubjectStateRelation.DIFFERENT
-    assert subject_state_relation(diff_a, diff_a) is SubjectStateRelation.SAME
-    assert subject_state_relation(diff_a, diff_b) is SubjectStateRelation.UNKNOWN
-    assert subject_state_relation(tree_a, diff_a) is SubjectStateRelation.UNKNOWN
-    assert subject_state_relation(label, label) is SubjectStateRelation.UNKNOWN
+    def expected(
+        left: SubjectStateRef | None,
+        right: SubjectStateRef | None,
+    ) -> SubjectStateRelation:
+        if left is None or right is None:
+            return SubjectStateRelation.UNKNOWN
+        if left.tree_digest is not None and right.tree_digest is not None:
+            if left.tree_digest == right.tree_digest:
+                return SubjectStateRelation.SAME
+            return SubjectStateRelation.DIFFERENT
+        if left.diff_digest is not None and right.diff_digest is not None:
+            if left.diff_digest == right.diff_digest:
+                return SubjectStateRelation.SAME
+        return SubjectStateRelation.UNKNOWN
+
+    for left, right in product(references, repeat=2):
+        assert subject_state_relation(left, right) is expected(left, right)
+
+    same_tree_different_diff = references[6], references[7]
+    different_tree_same_diff = references[6], references[8]
+    assert subject_state_relation(*same_tree_different_diff) is SubjectStateRelation.SAME
+    assert subject_state_relation(*different_tree_same_diff) is SubjectStateRelation.DIFFERENT
 
 
 def test_digest_and_commitment_spelling_is_exact() -> None:
@@ -459,7 +522,9 @@ _SAFE_JSON = st.recursive(
     | st.integers(-_MAX_SAFE_INTEGER, _MAX_SAFE_INTEGER)
     | _CANONICAL_TEXT,
     lambda children: (
-        st.lists(children, max_size=4) | st.dictionaries(_CANONICAL_TEXT, children, max_size=4)
+        st.lists(children, max_size=4)
+        | st.lists(children, max_size=4).map(tuple)
+        | st.dictionaries(_CANONICAL_TEXT, children, max_size=4)
     ),
     max_leaves=20,
 )
@@ -470,9 +535,14 @@ def test_generated_wire_sequence_round_trip(value: int) -> None:
     assert parse_wire_sequence(render_wire_sequence(value)) == value
 
 
-@given(st.integers(0, 86_400_000 - 1))
-def test_generated_timestamp_round_trip(milliseconds: int) -> None:
-    value = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(milliseconds=milliseconds)
+@given(
+    st.datetimes(
+        min_value=datetime(1, 1, 1),
+        max_value=datetime(9999, 12, 31, 23, 59, 59, 999_999),
+        timezones=st.just(UTC),
+    ).map(lambda value: value.replace(microsecond=(value.microsecond // 1_000) * 1_000))
+)
+def test_generated_timestamp_round_trip(value: datetime) -> None:
     timestamp = timestamp_from_datetime(value)
     assert timestamp_from_string(timestamp.wire) == timestamp
     assert parse_rfc3339_millis(timestamp.wire) == value
@@ -484,4 +554,45 @@ def test_generated_value_round_trips_are_idempotent(value: object) -> None:
     assert freeze_json(frozen) == frozen
     assert canonical_encode(cast(CanonicalJsonValue, frozen)) == canonical_encode(
         cast(CanonicalJsonValue, freeze_json(frozen))
+    )
+
+
+@pytest.mark.parametrize(
+    ("hash_seed", "timezone_name", "locale_name"),
+    tuple(
+        product(
+            ("0", "1", "4294967295"),
+            ("UTC", "Pacific/Honolulu"),
+            ("C", "en_US.UTF-8"),
+        )
+    ),
+)
+def test_value_bytes_match_across_hash_locale_and_timezone(
+    hash_seed: str,
+    timezone_name: str,
+    locale_name: str,
+    tmp_path: Path,
+) -> None:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PYTHONHASHSEED": hash_seed,
+            "TZ": timezone_name,
+            "LC_ALL": locale_name,
+        }
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", _VALUE_MATRIX_SCRIPT, str(_SRC_ROOT)],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    assert result.stdout == (
+        "7b2261223a7b22756e69636f6465223a2243616665cc81227d2c227a223a5b332c322c315d7d\n"
+        "2026-07-13T09:14:31.010Z\n"
+        '{"head_digest":"genesis","sequence":"0"}\n'
     )

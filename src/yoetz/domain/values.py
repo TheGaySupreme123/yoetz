@@ -453,13 +453,13 @@ def add_utc_milliseconds(dt: object, milliseconds: object) -> datetime:
         raise ProtocolValueError("timestamp_out_of_range") from exc
 
 
-def validate_sha256_digest(value: object) -> str:
+def validate_sha256_digest(value: str) -> str:
     if type(value) is not str or _SHA256_PATTERN.fullmatch(value) is None:
         raise ProtocolValueError("invalid_digest")
     return value
 
 
-def validate_commitment(value: object) -> str:
+def validate_commitment(value: str) -> str:
     if type(value) is not str or _COMMITMENT_PATTERN.fullmatch(value) is None:
         raise ProtocolValueError("invalid_commitment")
     return value
@@ -545,7 +545,7 @@ def frontier_from_json(value: object) -> Frontier:
         raw_digest = mapping["head_digest"]
     except Exception as exc:
         raise ProtocolValueError("invalid_frontier") from exc
-    sequence = parse_wire_sequence(raw_sequence)
+    sequence = parse_wire_sequence(cast(str, raw_sequence))
     if type(raw_digest) is not str:
         raise ProtocolValueError("invalid_frontier")
     return Frontier(sequence, raw_digest)
@@ -592,8 +592,8 @@ def subject_state_relation(
     return SubjectStateRelation.UNKNOWN
 
 
-def parse_wire_sequence(value: object) -> int:
-    return parse_canonical_integer_string(cast(str, value))
+def parse_wire_sequence(value: str) -> int:
+    return parse_canonical_integer_string(value)
 
 
 def render_wire_sequence(value: int) -> str:
