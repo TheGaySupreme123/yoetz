@@ -2,6 +2,7 @@
 
 **Wave:** B | **ADRs:** ADR-002, ADR-006 | **Imports (spec-tree):** `protocol/coverage.md`,
 `protocol/errors.md`, `protocol/models.md` (`SemanticStatus`, `SemanticReason`, pair validator),
+`protocol/ids.md` (terminal semantic-attempt, privacy-receipt, authorization, and reservation IDs),
 `domain/values.md`
 **Imported by:** `kernel/ranking.md`, `kernel/deterministic_checks.md`, `domain/receipts.md`,
 `application/check.md`, `application/respond.md`, `cli/render.md`
