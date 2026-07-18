@@ -79,7 +79,8 @@ The suite covers all event families in the registry and checks:
   non-redaction family is invalid.
 - An evidence envelope with an extra/missing captured-object mirror, a redaction envelope whose
   artifact refs differ from object targets, a receipt envelope without its exact singleton document
-  mirror, or duplicate ownership of one payload object is invalid.
+  mirror is invalid at this value boundary. Duplicate ownership of one payload object is aggregate
+  `ReplayIndex` corruption and is exercised by the reducer suite that owns bundle-wide identity.
 - A generated strategy that omits a family or filters away boundary cases fails the suite.
 - A current check event cannot infer scope or execution from verdict, findings, or the legacy
   compatibility shape; released backward-read archive bytes are exercised only by the compatibility

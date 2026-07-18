@@ -424,7 +424,8 @@ For `evidence_kind=import_report`, strength is exactly `immutable_snapshot`, bot
 `ObligationChange = (obligation_id: ObligationId, change: ObligationChangeKind ∈ {superseded,
 waived, carried}, reason: str ≤ MAX_REASON_BYTES | None, replacement_obligation_ids:
 tuple[ObligationId] ≤ 8)` — `superseded`/`waived` require a non-empty `reason`;
-`replacement_obligation_ids` allowed only with `superseded`. New obligations arrive as
+`replacement_obligation_ids` is absent or contains `1..8` IDs and is allowed only with
+`superseded`; an explicit empty list is invalid. New obligations arrive as
 `obligation_published` events in the same atomic batch. This is fixture 5 (legitimate disclosed
 revision): a superseded obligation stops counting as open (K1 non-trigger) but stays in history.
 
@@ -645,10 +646,15 @@ Once the pair is recognized, any missing, extra, or invalid payload field is a k
 validation failure and must not be converted into an unknown event. `encode_payload` dispatches on
 the exact concrete payload type (with the explicit `Finding` alias) and emits that family's closed
 object. Required collection fields are always emitted, even when empty. Optional scalar members
-whose value is `None` and optional collection members whose value is the empty tuple are omitted;
-present nondefault optional members are emitted. Thus schema-valid `{optional_list: []}` and an
-otherwise identical object with that optional member absent decode to the same domain value and
-normalize to the absent form.
+whose value is `None` are omitted. Optional collection members whose presence has no conditional
+meaning are omitted when their value is the empty tuple; for those fields only, schema-valid
+`{optional_list: []}` and an otherwise identical object with that optional member absent decode to
+the same domain value and normalize to the absent form. A presence-sensitive collection must first
+satisfy its conditional schema: `resolution_evidence_refs` is forbidden for an open obligation and
+`replacement_obligation_ids`, when present on a superseded change, contains at least one ID.
+If normalization would make two members of a `uniqueItems` collection equal, decoding rejects the
+input with `ProtocolValueError("duplicate_set_member")`; it never emits a schema-invalid duplicate
+array or silently changes collection cardinality.
 Field decoding converts via `domain/values` constructors; every failure is the shared
 `ProtocolValueError(reason_code)` with the offending bounded reason code only. The exception never
 retains an input-derived field path or payload fragment; any later boundary-safe location detail is
@@ -658,7 +664,7 @@ owned by the operation boundary rather than this domain codec.
 is the codec identity used for payload digests. For every domain-valid JSON value `x`, decoding its
 normalized form and encoding again is byte-identical. Arbitrary schema-valid input need not be
 byte-identical before normalization because JSON Schema deliberately treats absent and empty
-optional arrays as equivalent inputs.
+non-presence-sensitive optional arrays as equivalent inputs.
 
 ## Errors and edge cases
 
