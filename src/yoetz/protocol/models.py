@@ -679,6 +679,29 @@ CodeWire = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,127}$", max_length=1
 VersionWire = Annotated[
     str, Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._+/-]{0,63}$")
 ]
+ReceiptVersionIdentityWire = Annotated[
+    str,
+    Field(min_length=1, max_length=256, pattern=r"^[0-9A-Za-z][0-9A-Za-z._/+:-]*$"),
+]
+ReceiptSchemaCounterVersionWire = Annotated[
+    str, Field(min_length=1, max_length=19, pattern=r"^[1-9][0-9]*$")
+]
+ReceiptPolicyIdWire = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$",
+    ),
+]
+ReceiptSchemaIdWire = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=256,
+        pattern=r"^[a-z][a-z0-9]*(?:[-_/][a-z0-9.]+)*$",
+    ),
+]
 SemverWire = Annotated[
     str,
     Field(
@@ -2100,17 +2123,47 @@ class StatusResultModel(PublicResultModel[StatusResultBranch]):
     pass
 
 
+class ReceiptPolicyVersionEntryModel(_ClosedModel):
+    policy_id: ReceiptPolicyIdWire
+    policy_version: ReceiptVersionIdentityWire
+
+
+class ReceiptSchemaVersionEntryModel(_ClosedModel):
+    schema_id: ReceiptSchemaIdWire
+    schema_version: ReceiptVersionIdentityWire
+
+
 class ReceiptVersionSliceModel(_ClosedModel):
-    protocol_version: Literal["0.1"]
-    engine_version: VersionWire
-    projection_version: VersionWire
-    object_format: Literal["yoetz-object/1"]
-    storage_schema: CanonicalUInt64Wire
-    policy_packs: tuple[Literal["research-evidence/0.1.0", "work-integrity/0.1.0"], ...]
+    package_name: Literal["yoetz"]
+    package_version: ReceiptVersionIdentityWire
+    protocol_version: ReceiptVersionIdentityWire
+    engine_version: ReceiptVersionIdentityWire
+    projection_version: ReceiptVersionIdentityWire
+    object_format_version: ReceiptVersionIdentityWire
+    catalog_schema_version: ReceiptSchemaCounterVersionWire
+    bundle_schema_version: ReceiptSchemaCounterVersionWire
+    policy_versions: Annotated[
+        tuple[ReceiptPolicyVersionEntryModel, ...], Field(min_length=1, max_length=16)
+    ]
+    schema_versions: Annotated[
+        tuple[ReceiptSchemaVersionEntryModel, ...], Field(min_length=1, max_length=64)
+    ]
+    resource_manifest_digest: Sha256Digest
 
     @model_validator(mode="after")
-    def _validate_receipt_version_packs(self) -> ReceiptVersionSliceModel:
-        _require_unique(self.policy_packs, limit=2)
+    def _validate_receipt_version_entries(self) -> ReceiptVersionSliceModel:
+        policy_keys = tuple(
+            f"{entry.policy_id}\x00{entry.policy_version}".encode("ascii")
+            for entry in self.policy_versions
+        )
+        schema_keys = tuple(
+            f"{entry.schema_id}\x00{entry.schema_version}".encode("ascii")
+            for entry in self.schema_versions
+        )
+        if policy_keys != tuple(sorted(set(policy_keys))):
+            raise ValueError("receipt_policy_versions_not_canonical")
+        if schema_keys != tuple(sorted(set(schema_keys))):
+            raise ValueError("receipt_schema_versions_not_canonical")
         return self
 
 
@@ -2314,12 +2367,19 @@ _SEMANTIC_PROVENANCE_LEAVES: Final = (
     "token_usage/total_tokens",
 )
 _RECEIPT_VERSION_LEAVES: Final = (
+    "bundle_schema_version",
+    "catalog_schema_version",
     "engine_version",
-    "object_format",
-    "policy_packs/*",
+    "object_format_version",
+    "package_name",
+    "package_version",
+    "policy_versions/*/policy_id",
+    "policy_versions/*/policy_version",
     "projection_version",
     "protocol_version",
-    "storage_schema",
+    "resource_manifest_digest",
+    "schema_versions/*/schema_id",
+    "schema_versions/*/schema_version",
 )
 _RECEIPT_DOCUMENT_VERSION_LEAVES: Final = (
     "bundle_schema_version",
@@ -2910,7 +2970,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 673:
+    if len(result) != 680:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

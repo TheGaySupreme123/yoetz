@@ -293,7 +293,7 @@ _STATUS_PAGE_DEF_BY_VIEW_FOR_TEST: tuple[tuple[str, str], ...] = (
 _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
     ("check", None): 127,
     ("publish_work", None): 47,
-    ("receipt", None): 148,
+    ("receipt", None): 155,
     ("respond", None): 53,
     ("start", None): 35,
     ("status", None): 41,
@@ -402,6 +402,16 @@ _RESULT_SUPPORT_MODEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("StatusVersionSliceModel", "operations/status-result-1.0.0.schema.json", "version_slice"),
     ("StatusVersionsPageModel", "operations/status-result-1.0.0.schema.json", "versions_page"),
     ("ReceiptSuccessModel", "operations/receipt-result-1.0.0.schema.json", "success"),
+    (
+        "ReceiptPolicyVersionEntryModel",
+        "operations/receipt-result-1.0.0.schema.json",
+        "policy_version_entry",
+    ),
+    (
+        "ReceiptSchemaVersionEntryModel",
+        "operations/receipt-result-1.0.0.schema.json",
+        "schema_version_entry",
+    ),
     ("ReceiptVersionSliceModel", "operations/receipt-result-1.0.0.schema.json", "version_slice"),
 )
 
@@ -809,14 +819,7 @@ def _receipt_result_wire() -> dict[str, JsonValue]:
         "human_text": None,
         "coverage": document["coverage"],
         "suppressed_finding_count": document["suppressed_finding_count"],
-        "versions": {
-            "protocol_version": "0.1",
-            "engine_version": "0.1.0",
-            "projection_version": "0.1.0",
-            "object_format": "yoetz-object/1",
-            "storage_schema": "1",
-            "policy_packs": ["research-evidence/0.1.0", "work-integrity/0.1.0"],
-        },
+        "versions": document["versions"],
         "privacy_projection": _privacy_projection_wire(),
     }
 
@@ -1144,6 +1147,47 @@ def test_operation_cross_field_matrix() -> None:
     accepted_event["accepted_at"] = "2026-02-30T12:34:56.789Z"
     with pytest.raises(ValidationError):
         models.PublishWorkResultModel.model_validate(invalid_timestamp)
+
+
+def test_receipt_version_slice_is_exact_and_canonical() -> None:
+    models = _models_module()
+    models.ReceiptResultModel.model_validate(_receipt_result_wire())
+
+    missing_digest = _receipt_result_wire()
+    missing_versions = cast(dict[str, JsonValue], missing_digest["versions"])
+    del missing_versions["resource_manifest_digest"]
+    with pytest.raises(ValidationError):
+        models.ReceiptResultModel.model_validate(missing_digest)
+
+    old_shape = _receipt_result_wire()
+    old_shape["versions"] = {
+        "protocol_version": "0.1",
+        "engine_version": "0.1.0",
+        "projection_version": "yoetz/0.1.0",
+        "object_format": "yoetz-object/1",
+        "storage_schema": "1",
+        "policy_packs": ["research-evidence/0.1.0", "work-integrity/0.1.0"],
+    }
+    with pytest.raises(ValidationError):
+        models.ReceiptResultModel.model_validate(old_shape)
+
+    unsorted_policies = _receipt_result_wire()
+    policy_versions = cast(
+        list[JsonValue],
+        cast(dict[str, JsonValue], unsorted_policies["versions"])["policy_versions"],
+    )
+    policy_versions.reverse()
+    with pytest.raises(ValidationError):
+        models.ReceiptResultModel.model_validate(unsorted_policies)
+
+    duplicate_schemas = _receipt_result_wire()
+    schema_versions = cast(
+        list[JsonValue],
+        cast(dict[str, JsonValue], duplicate_schemas["versions"])["schema_versions"],
+    )
+    schema_versions[1] = dict(cast(dict[str, JsonValue], schema_versions[0]))
+    with pytest.raises(ValidationError):
+        models.ReceiptResultModel.model_validate(duplicate_schemas)
 
 
 def test_check_semantic_status_reason_and_provenance_matrix() -> None:
@@ -1559,7 +1603,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     rules = cast(tuple[Any, ...], getattr(models, "_RESULT_LEAF_RULES"))
 
     derived_patterns = _derived_result_success_patterns(catalog)
-    assert len(derived_patterns) == 657
+    assert len(derived_patterns) == 664
 
     derived_counts = {
         context: sum(1 for method, view, _ in derived_patterns if (method, view) == context)
@@ -1568,7 +1612,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert derived_counts == _EXPECTED_RESULT_PATTERN_COUNTS
 
     assert type(rules) is tuple
-    assert len(rules) == 673
+    assert len(rules) == 680
     assert rules == tuple(sorted(rules, key=_test_rule_sort_key))
 
     rule_keys = {
@@ -1577,7 +1621,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert len(rule_keys) == len(rules)
 
     registry_patterns = {(rule.method, rule.status_view, rule.segments) for rule in rules}
-    assert len(registry_patterns) == 657
+    assert len(registry_patterns) == 664
     assert registry_patterns == derived_patterns
 
     content_rules = _expected_nonpublish_content_rules(models)
@@ -2173,7 +2217,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 1_269
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 1_276
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:
