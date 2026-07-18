@@ -57,6 +57,8 @@ exclude = ["specs"]
 extraPaths = ["src", "tests"]
 pythonVersion = "3.14"
 typeCheckingMode = "strict"
+venvPath = "."
+venv = ".venv"
 
 [tool.pytest.ini_options]
 addopts = ["--strict-config", "--strict-markers"]

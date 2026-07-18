@@ -67,12 +67,13 @@ The dependency section must be consistent with the import graph in the spec tree
 - `[tool.uv].required-version = "==0.11.29"` and `[tool.uv].prerelease = "disallow"`.
 
 The standard project table also declares the `yoetz = "yoetz.cli.app:main"` console script. The
-Ruff tables freeze line length 100, and `[tool.pyright]` freezes `pythonVersion = "3.14"` and
-`typeCheckingMode = "strict"`; the Pyright executable and version remain npm-owned. Dependency
-groups cannot be merged into one another, and exact pins cannot be weakened to compatible or
-minimum ranges. The runtime dependencies, optional capability groups, and build/test tooling
-declared here must align with the behavior described in the application, CLI, adapter, and
-packaging specs.
+Ruff tables freeze line length 100. `[tool.pyright]` freezes `pythonVersion = "3.14"`,
+`typeCheckingMode = "strict"`, `venvPath = "."`, and `venv = ".venv"` so the npm-owned Pyright
+process resolves the same uv-managed project and development dependencies exercised by pytest;
+the Pyright executable and version remain npm-owned. Dependency groups cannot be merged into one
+another, and exact pins cannot be weakened to compatible or minimum ranges. The runtime
+dependencies, optional capability groups, and build/test tooling declared here must align with the
+behavior described in the application, CLI, adapter, and packaging specs.
 
 The v0.1 standard runtime includes direct pinned `cryptography` for AES-GCM, RFC 3394 AES Key Wrap,
 HKDF and HMAC, plus the approved `keyring`/platform secure-backend stack resolved in `uv.lock`.
