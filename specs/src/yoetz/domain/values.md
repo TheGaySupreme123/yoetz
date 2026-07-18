@@ -28,8 +28,8 @@ standard library plus `yoetz.protocol.ids` (ID validation), `yoetz.protocol.erro
   insertion order; equality is order-insensitive key/value equality).
 - `freeze_json(value) -> JsonValue` — recursive validating converter from parsed JSON to the
   frozen profile.
-- ID newtypes: `TaskId`, `SessionId`, `WriterId`, `EventId`, `ObligationId`, `ClaimId`,
-  `ActionId`, `ResultId`, `EvidenceId`, `FindingId`, `ObjectId`, `ReceiptId`, `OperationId`,
+- ID newtypes: `RequestId`, `TaskId`, `SessionId`, `WriterId`, `EventId`, `ObligationId`, `ClaimId`,
+  `ActionId`, `ResultId`, `EvidenceId`, `FindingId`, `ObjectId`, `ReceiptId`,
   `ActorId` — each a `NewType` over `str`.
 - ID constructors: one lowercase-named function per newtype (`task_id(value) -> TaskId`,
   `event_id(value) -> EventId`, …, `actor_id(value) -> ActorId`) — validate then wrap.
@@ -39,12 +39,12 @@ standard library plus `yoetz.protocol.ids` (ID validation), `yoetz.protocol.erro
   assurance: AuthorshipAssurance)`.
 - `Timestamp` — frozen value wrapping the one canonical RFC 3339 UTC spelling.
   Constructors `timestamp_from_string(value) -> Timestamp`,
-  `timestamp_from_datetime(dt) -> Timestamp`. Property `wire: str`. Total order.
+  `timestamp_from_datetime(dt) -> Timestamp`. Property `wire: str`. Total chronological order.
 - `format_rfc3339_millis(dt) -> str`, `parse_rfc3339_millis(value) -> datetime`, and
   `add_utc_milliseconds(dt, milliseconds) -> datetime` — pure canonical time helpers used by the
   constructors and persisted lease calculations.
 - `Frontier` — frozen dataclass `(sequence: int, head_digest: str)` with
-  `Frontier.genesis()`, `as_wire() -> JsonObject`, and total order by `sequence`.
+  `Frontier.genesis()`, `as_wire() -> JsonObject`, and guarded sequence comparison.
 - `SubjectStateRef` — frozen dataclass `(tree_digest: str | None, diff_digest: str | None,
   described_state: str | None)`.
 - `SubjectStateRelation` — enum: `same`, `different`, `unknown`.
@@ -83,14 +83,16 @@ construction with `ProtocolValueError("duplicate_object_key")`. It never exposes
 ### ID newtypes and constructors
 
 Each constructor calls `protocol.ids.validate_id(kind, value)` with the matching `IdKind`
-(prefixes exactly per INTERFACES §1: `tsk_`, `ses_`, `wri_`, `evt_`, `obl_`, `clm_`, `act_`,
-`res_`, `evd_`, `fnd_`, `obj_`, `rcp_`, `req_`) and returns the validated string wrapped in the
+(prefixes exactly per INTERFACES §1: `req_`, `tsk_`, `ses_`, `wri_`, `evt_`, `obl_`, `clm_`, `act_`,
+`res_`, `evd_`, `fnd_`, `obj_`, `rcp_`) and returns the validated string wrapped in the
 newtype. `ActionId`/`ResultId`/`EvidenceId` use the payload-level client prefixes `act_`, `res_`,
 `evd_` exactly as registered in INTERFACES §1.
-`OperationId` validates the `req_` shape (a request ID reused as the durable operation ID, as
-registered in `specs/INTERFACES.md`). `actor_id` is the exception: it is caller-asserted convention,
+`RequestId` validates the `req_` shape and is also the type used by the accepted envelope's
+`operation_id`; there is no separate operation-specific nominal type. `actor_id` is the exception: it
+is caller-asserted convention,
 validated only against `^[A-Za-z0-9._:-]{1,128}$` — never against a UUID shape — and raises
-`ProtocolValueError("invalid_actor_id")` on mismatch. Constructors never lowercase, trim, or
+the ID owner's `ProtocolValueError("actor_id_malformed")` on a shape mismatch (wrong non-string
+type remains `id_wrong_type`). Constructors never lowercase, trim, or
 otherwise rewrite input; the input either already has the single canonical spelling or fails.
 
 ### `Actor`
@@ -106,25 +108,35 @@ Canonical wire form: RFC 3339 UTC, exactly three fractional digits, uppercase `Z
 (`2026-07-13T09:14:31.010Z`) — INTERFACES §3. `timestamp_from_string` validates with a strict
 regex (`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$`) plus a real calendar-validity check by
 round-tripping through `datetime.strptime`; leap seconds and offsets other than `Z` are rejected
-(`ProtocolValueError("invalid_timestamp")`). `timestamp_from_datetime` requires a tz-aware UTC
-datetime (any other tzinfo: `ProtocolValueError("timestamp_not_utc")`), truncates microseconds to
-milliseconds by integer floor division (`microsecond // 1000`), and renders the canonical string.
+(`ProtocolValueError("invalid_timestamp")`). `timestamp_from_datetime` requires an actual
+`datetime`, an aware instant whose UTC offset is exactly zero (otherwise
+`ProtocolValueError("timestamp_not_utc")`), and `microsecond % 1000 == 0`. Sub-millisecond input
+raises `ProtocolValueError("timestamp_submillisecond_precision")`; it is never rounded or
+truncated. `format_rfc3339_millis` applies the identical checks. A fixed-offset `+00:00` tzinfo is
+accepted because it denotes UTC, but the one rendered spelling remains `Z`.
 Ordering is plain string comparison — valid because the format is fixed-width UTC, so
 lexicographic order equals chronological order. `Timestamp` never establishes ledger or causal
 order (binding invariant); it is metadata carried alongside events.
 
+`add_utc_milliseconds` requires an exact-millisecond UTC `datetime` and an `int` milliseconds
+argument (not `bool`), performs exact integer arithmetic, and preserves millisecond precision.
+Calendar overflow raises `ProtocolValueError("timestamp_out_of_range")`; it is never clipped and
+no platform `OverflowError` escapes this value boundary.
+
 ### `Frontier`
 
-`sequence >= 0`. When `sequence == 0`, `head_digest` MUST be `GENESIS_DIGEST`; when
+`sequence` is an `int` but not `bool` in `0..9_223_372_036_854_775_807`. When `sequence == 0`,
+`head_digest` MUST be `GENESIS_DIGEST`; when
 `sequence > 0`, `head_digest` MUST pass `validate_sha256_digest`. Violations raise
 `ProtocolValueError("invalid_frontier")`. `Frontier.genesis()` returns `Frontier(0, "genesis")`.
 `as_wire()` returns `JsonObject({"sequence": render_wire_sequence(sequence),
 "head_digest": head_digest})`, the one closed frontier shape owned by
 `schemas/common/frontier-1.0.0.schema.json` and used for every `subject_frontier` value.
-Comparison
-operators compare `sequence` only; comparing two frontiers with equal sequence but different
-digests raises `ProtocolValueError("frontier_digest_mismatch")` from `__lt__`/`__le__` guards —
-that situation means two divergent histories and must never be silently ordered.
+Equality is structural over both fields. The four ordering operators compare `sequence`, but first
+raise `ProtocolValueError("frontier_digest_mismatch")` when two frontiers have the same sequence
+and different digests. A comparison with any non-`Frontier` returns `NotImplemented`. This is a
+guarded partial order, not a total order: divergent equal-height histories are never silently
+equal or ordered. The implementation must not use `@dataclass(order=True)`.
 
 ### `SubjectStateRef` and `subject_state_relation`
 
@@ -157,14 +169,16 @@ weak `evidence_immutability`.
 signs, whitespace all rejected with `ProtocolValueError("noncanonical_integer_string")`), bounds
 the result to SQLite's signed 64-bit range `0..9_223_372_036_854_775_807`
 (`ProtocolValueError("integer_out_of_sqlite_range")`), and returns `int`.
-`render_wire_sequence` is its exact inverse and rejects negatives.
+`render_wire_sequence` is its exact inverse and rejects `bool`, non-`int`, negatives, and values
+above the same signed-64-bit ceiling. The round trip holds over the complete accepted domain.
 
 ## Errors and edge cases
 
 - Every failure is `ProtocolValueError(reason_code)` with a bounded reason code from this file's
   fixed set: `duplicate_object_key`, `float_forbidden`, `integer_out_of_safe_range`,
   `integer_out_of_sqlite_range`, `object_key_not_string`, `unsupported_json_type`,
-  `invalid_actor_id`, `invalid_timestamp`, `timestamp_not_utc`, `invalid_frontier`,
+  `actor_id_malformed`, `invalid_timestamp`, `timestamp_not_utc`,
+  `timestamp_submillisecond_precision`, `timestamp_out_of_range`, `invalid_frontier`,
   `frontier_digest_mismatch`, `empty_subject_state`, `invalid_digest`, `invalid_commitment`,
   `noncanonical_integer_string`, `nesting_too_deep`, plus the codes raised through
   `protocol.ids.validate_id`.

@@ -12,7 +12,7 @@ One canonical strict-JSON fixture case with `fixture_schema: "yoetz.fixture-case
 
 ## Behavior
 
-The `input` section contains known entries surrounding one opaque unknown event with canonical bytes and fixed schema URI. The `expected` section freezes continued replay, exact unknown-event retention, a material projection gap, weakened coverage, and no invented interpretation. Every referenced identifier, timestamp, key, digest, nonce, provider response, and fault point is explicit test data; a test may not replace it with current time, randomness, network state, or host paths. Multi-variant cases evaluate each variant independently and declare the relationship between their outcomes.
+The `input` section contains known entries surrounding one opaque unknown event with canonical bytes and fixed schema URI. That future-version URI is an opaque fixture-declared identifier, not a current catalog member or host route: the loader, runtime, and every gate preserve it byte-exactly and must never dereference it through DNS, HTTP, the released-schema registry, or a filesystem lookup. The `expected` section freezes continued replay, exact unknown-event retention, a material projection gap, weakened coverage, and no invented interpretation. Every referenced identifier, timestamp, key, digest, nonce, provider response, and fault point is explicit test data; a test may not replace it with current time, randomness, network state, or host paths. Multi-variant cases evaluate each variant independently and declare the relationship between their outcomes.
 
 ## Errors and edge cases
 

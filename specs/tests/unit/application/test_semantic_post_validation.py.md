@@ -26,6 +26,18 @@ strengthen evidence beyond what was actually seen.
   “no change” conclusion.
 - `test_review_assessment_prose_refs_follow_profile_and_policy` — structural has no finding prose;
   richer authorized packets require a paired summary/detail mapping.
+- `test_review_assessment_mapper_uses_bare_kind_and_preserves_basis` — the namespaced internal rule
+  maps to the schema's bare `FindingKind` while every fact/ref association remains unchanged.
+- `test_review_assessment_policy_identity_is_derived_after_validation` — the final finding policy
+  identity comes from the accepted kind's unique owning pack, not reviewer output.
+- `test_review_assessment_ref_limit_skips_without_truncation` — every possible over-16 outbound ref
+  field skips the entire assessment with one exact structural omission and retains the local basis.
+- `test_malformed_review_assessment_is_rejected_not_omitted` — namespace/kind and canonical-ref
+  defects cannot masquerade as policy selection.
+- `test_deadline_requires_explicit_monotonic_sample` — frozen deadline methods accept the caller's
+  process-local sample and never source current time themselves.
+- `test_deadline_boundary_and_wall_clock_independence` — before/equal/after samples clamp exactly,
+  while changing the diagnostic UTC instant cannot change the monotonic result.
 
 ## Behavior
 
@@ -36,14 +48,25 @@ The suite locks the post-validation boundary:
 - coverage can weaken but not strengthen;
 - deterministic findings remain authoritative and are not rewritten by the semantic path;
 - deterministic `FindingBasis` values remain unchanged while an accepted `ReviewerChallenge` maps
-  only to an ordinary semantic finding summary/detail;
+  only to an ordinary semantic finding summary/detail and a later derived policy identity;
 - structural `ReviewAssessment` values omit summary/detail item refs, while an authorized
   goal-aware-or-richer packet requires the exact paired finding-prose refs;
+- `project_review_assessment` verifies the internal `policy-id/kind` spelling and emits the bare
+  candidate kind for both outbound `finding_kind` and `rule_id`; included projections preserve all
+  observed/missing fact objects, gaps, support refs, relation, and availability;
+- candidate refs, every observed-fact ref tuple, every missing-fact ref tuple, and supporting refs
+  are tested at 16 and 17 members. Sixteen is included unchanged; seventeen returns the exact first-
+  failing-field `ReviewAssessmentSkipped` plus a `bounded_structural_metadata/finding/not_selected`
+  omission keyed by the pinned finding ID. No 16-member prefix appears anywhere;
 - challenge refs are checked against the union of the two exact case allowlists, including
   deterministic finding IDs allocated after the frozen frontier;
 - every accepted challenge is useful to the main agent under the recorded omissions and requests
   exactly `act|provide_evidence|revise_claim|dispute_with_evidence|state_unresolved_limitation`;
 - stale or late results are not admitted into the final check.
+- `Deadline.remaining_seconds(now_monotonic)` returns the positive difference before the boundary
+  and `0.0` at/after it; `expired(now_monotonic)` is false before and true at/after it. Tests pass
+  every sample explicitly, reject invalid/nonfinite samples, prove the frozen value cannot mutate,
+  and monkeypatch ambient wall/monotonic APIs to fail if called.
 
 ## Errors and edge cases
 
@@ -51,6 +74,9 @@ The suite locks the post-validation boundary:
 - A result that upgrades coverage without evidence fails the test.
 - A challenge without a supported discrepancy/direct agent message, or one that treats
   `not_recorded|not_selected|withheld_by_policy|redacted_never_send` as unchanged state, fails.
+- An over-limit assessment that disappears without its structural skip/omission, strengthens packet
+  coverage after being skipped, or reaches the adapter with truncated refs fails.
+- A zero-argument deadline call, invalid monotonic sample, or hidden ambient-time read fails.
 
 ## Invariants
 
@@ -58,6 +84,7 @@ The suite locks the post-validation boundary:
 2. Case-bound refs are mandatory.
 3. Coverage only weakens after semantic validation.
 4. Reviewer advice cannot widen context, rewrite deterministic truth, or create waiver authority.
+5. Provider-budget decisions depend only on a frozen monotonic deadline and an explicit sample.
 
 ## Tests
 

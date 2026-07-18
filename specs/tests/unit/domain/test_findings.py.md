@@ -18,6 +18,8 @@ receipt rendering.
 - `test_coverage_never_exceeds_subject_support` — finding coverage stays conservative.
 - `test_finding_kind_is_independent_of_origin` — any allowed kind can be deterministic or semantic
   when its explicit provenance rules are satisfied.
+- `test_finding_policy_identity_is_derived_from_kind_owner` — the built-in pack partition is
+  exhaustive and disjoint; `semantic-review` never becomes a `Finding.policy_id`.
 - `test_reviewer_challenge_uses_existing_summary_and_detail` — accepted semantic advice needs no
   new public finding field.
 
@@ -31,6 +33,7 @@ The suite proves that findings:
 - preserve stable subject references without free text;
 - carry post-validated direct-agent challenge content only in the existing bounded semantic
   summary/detail fields;
+- derive policy identity from the accepted kind owner pack instead of reviewer prose;
 - never claim stronger coverage than the refs justify.
 
 ## Errors and edge cases

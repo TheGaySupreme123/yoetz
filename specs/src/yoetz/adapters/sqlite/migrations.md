@@ -336,6 +336,27 @@ CREATE TABLE events (
     session_id TEXT NOT NULL,
     schema_name TEXT NOT NULL,
     schema_version TEXT NOT NULL,
+    projection_status TEXT NOT NULL
+        CHECK (projection_status IN ('projected', 'unknown_unprojected')),
+    summary_code TEXT NOT NULL CHECK (summary_code IN (
+        'session_opened',
+        'session_resumed',
+        'plan_published',
+        'obligation_published',
+        'assignment_recorded',
+        'decision_recorded',
+        'action_recorded',
+        'result_recorded',
+        'evidence_recorded',
+        'claim_recorded',
+        'plan_revised',
+        'finding_recorded',
+        'response_recorded',
+        'redaction_recorded',
+        'check_recorded',
+        'receipt_recorded',
+        'opaque_unknown'
+    )),
     author_id TEXT NOT NULL,
     author_type TEXT NOT NULL,
     author_assurance TEXT NOT NULL,
@@ -350,10 +371,33 @@ CREATE TABLE events (
     payload_commitment TEXT NOT NULL,
     publication_channel TEXT NOT NULL,
     redaction_state TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
     accepted_at TEXT NOT NULL,
     UNIQUE (writer_id, writer_seq),
-    UNIQUE (writer_id, operation_id, event_id)
+    UNIQUE (writer_id, operation_id, event_id),
+    CHECK (
+        (
+            projection_status = 'unknown_unprojected'
+            AND summary_code = 'opaque_unknown'
+        )
+        OR
+        (
+            projection_status = 'projected'
+            AND summary_code = schema_name
+            AND summary_code <> 'opaque_unknown'
+        )
+    )
 ) STRICT;
+
+CREATE TABLE event_projection_locators (
+    event_id TEXT PRIMARY KEY REFERENCES events(event_id),
+    schema_name TEXT NOT NULL,
+    schema_version TEXT NOT NULL,
+    logical_key TEXT,
+    canonical_payload_digest TEXT NOT NULL,
+    redaction_target_event_ids BLOB NOT NULL,
+    redaction_target_object_ids BLOB NOT NULL
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE event_parents (
     child_event_id TEXT NOT NULL REFERENCES events(event_id),
@@ -370,11 +414,12 @@ CREATE TABLE event_refs (
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE projection_state (
-    projection_name TEXT PRIMARY KEY,
-    projection_version INTEGER NOT NULL,
+    projection_name TEXT PRIMARY KEY CHECK (projection_name = 'work'),
+    projection_version TEXT NOT NULL CHECK (projection_version = 'yoetz/0.1.0'),
+    projection_generation INTEGER NOT NULL CHECK (projection_generation = 1),
     applied_through_seq INTEGER NOT NULL CHECK (applied_through_seq >= 0),
     state_digest TEXT NOT NULL,
-    engine_version TEXT NOT NULL
+    engine_version TEXT NOT NULL CHECK (engine_version = '0.1.0')
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE maintenance_pins (
@@ -404,20 +449,76 @@ ON maintenance_pins(operation_id)
 WHERE state = 'active';
 
 CREATE INDEX events_session_seq ON events(session_id, ingestion_seq);
+CREATE INDEX events_session_schema_seq
+ON events(session_id, schema_name, ingestion_seq);
+CREATE INDEX events_session_author_seq
+ON events(session_id, author_id, ingestion_seq);
+CREATE INDEX events_session_schema_author_seq
+ON events(session_id, schema_name, author_id, ingestion_seq);
 CREATE INDEX events_schema_seq ON events(schema_name, ingestion_seq);
 CREATE INDEX events_writer_seq ON events(writer_id, writer_seq);
+CREATE UNIQUE INDEX events_payload_object ON events(payload_object_id);
 CREATE INDEX refs_target ON event_refs(ref_type, target_id);
 CREATE INDEX semantic_jobs_operation_state
 ON semantic_jobs(writer_id, operation_id, state);
+CREATE INDEX import_request_aliases_source
+ON import_request_aliases(source_identity_digest, requesting_writer_id, request_id);
+CREATE INDEX import_jobs_session_state
+ON import_jobs(session_id, state, source_identity_digest);
+CREATE INDEX import_jobs_session_terminal
+ON import_jobs(session_id, terminal_at, source_identity_digest);
+CREATE INDEX import_batches_next
+ON import_batches(source_identity_digest, state, batch_index);
 ```
 
 Migration `0001` also creates the versioned **projection tables** for projection generation 1. The
 canonical root `migrations/bundle/0001.sql` owns their exact `p1_` table/column/constraint/index
 bytes, and the installed migration resource is executed unchanged after manifest verification.
+`projection_state.projection_version` is text because the active identity is
+`yoetz/0.1.0`; the independent generation number is the integer `PROJECTION_GENERATION = 1` and
+is stored in its own constrained `projection_generation` integer column.
+The current-record inventory is `p1_projection_state`, `p1_plans`, `p1_obligations`,
+`p1_obligation_replacements`, `p1_decisions`, `p1_assignments`, `p1_actions`, `p1_results`,
+`p1_evidence`, `p1_claims`, `p1_contradictions`, `p1_findings`, `p1_responses`, and
+`p1_coverage_gaps`. The exact temporal query inventory is `p1_query_snapshots`,
+`p1_query_assignments`, `p1_query_assignment_obligations`, `p1_query_obligations`,
+`p1_query_obligation_source_refs`, `p1_query_obligation_evidence_refs`,
+`p1_query_obligation_actors`, `p1_query_findings`, `p1_query_finding_subject_refs`,
+`p1_query_finding_order`, `p1_query_responses`, `p1_query_response_evidence_refs`,
+`p1_query_checks`, `p1_query_check_scope_refs`, `p1_query_check_policy_executions`,
+`p1_query_check_returned_findings`, and `p1_query_evidence`, plus all named `p1_` indexes frozen
+beside those tables. Normalized
+`sqlite_schema.sql`, `PRAGMA table_xinfo`, foreign-key lists, index lists, and STRICT/WITHOUT-ROWID
+flags must match that root byte contract; a semantically similar lazy-created schema is not legal.
 `specs/src/yoetz/kernel/projections.md` owns the corresponding pure typed record families and
 derivation semantics only; this runner never concatenates a Python DDL constant or synthesizes SQL.
 Projection tables are disposable; dropping and replaying them through a later registered migration
 is always legal.
+
+No `p1_` table has a payload, body, open JSON, description, statement, reason, command, or summary
+column. A current record row follows `source_event_id` to the authenticated encrypted event
+payload object when the record is readable; a tombstone never opens that object. The only canonical
+structural blobs in projection storage are closed Coverage/gap/finding-ID values and complete
+finding issue keys. Query versions keep half-open frontier validity and nullable typed filter/rank
+facts; a redaction scrubs those facts and their edges/fanout from every old interval. The migration
+module treats the root SQL as opaque bytes and therefore cannot weaken this privacy boundary by
+generating an alternate projection table.
+
+The unique `events_payload_object` index is part of the same frozen schema identity. Combined with
+the indexed `event_refs` artifact mirror and canonical locator target arrays, it reconstructs all
+three non-plaintext `ReplayIndex` reverse mappings. A payload object reused by two event envelopes
+is rejected at insertion rather than left as iteration-order-dependent corruption.
+
+`event_projection_locators` is not a projection cache. It has exactly one row per accepted event,
+inserted in the same transaction as `events`. The two target blobs are JCS arrays of sorted typed
+IDs and are `[]` except for `redaction_recorded`; known-event `logical_key` follows the closed
+family mapping in `domain/events.md`, while an unknown event requires `NULL`. The digest is over
+the normalized canonical payload. Before binding, the
+repository validates every string/array/digest and proves schema identity and locator equality with
+the decoded/frozen payload when it is available. On load it joins the row into runtime-only
+`ProjectionLocator` metadata for either ledger-record variant. No
+payload text or open JSON object is permitted. Missing, extra, or mismatched locator rows fail
+integrity/rebuild rather than falling back to disposable `p1_` state.
 
 Before projection tables, the same frozen bundle migration creates `import_jobs`,
 `import_request_aliases`, `import_batches`, and their bounded pending/status/next-batch indexes
@@ -425,6 +526,29 @@ with the exact columns/CHECK/FK/uniqueness contract in
 `specs/migrations/bundle/0001.sql.md`. These are release schema, not lazy adapter-owned DDL; the
 importer adapter conforms to them but neither supplies nor co-owns their DDL. The runner's schema
 inventory rejects their absence or any normalized SQL/index mismatch.
+
+The exact importer index names and ordered columns are `import_request_aliases_source` on
+`(source_identity_digest, requesting_writer_id, request_id)`, `import_jobs_session_state` on
+`(session_id, state, source_identity_digest)`, `import_jobs_session_terminal` on
+`(session_id, terminal_at, source_identity_digest)`, and `import_batches_next` on
+`(source_identity_digest, state, batch_index)`. They are executed from the frozen migration bytes;
+the runner never creates a missing access path during open or first use.
+
+The history row-query paths are `events_session_seq(session_id, ingestion_seq)`,
+`events_session_schema_seq(session_id, schema_name, ingestion_seq)`,
+`events_session_author_seq(session_id, author_id, ingestion_seq)`, and
+`events_session_schema_author_seq(session_id, schema_name, author_id, ingestion_seq)`. The
+repository selects the one matching the supplied filter shape, applies `after_sequence` and the
+typed cursor as an exclusive range on `ingestion_seq`, and reads at most `limit + 1` rows without a
+temporary sort.
+
+The generation-1 query sidecars and all forty-six named `p1_` indexes execute only from the same
+frozen root migration bytes. The finite finding fanout is sixteen rows for an unresolved readable
+finding and eight for a resolved readable finding; tombstones own no fanout. Actor-filtered
+obligation SQL drives from `p1_query_obligation_actors` (fixed join order) and point-joins its
+owning version. Every other list filter shape selects its exact named covering index and applies
+the typed exclusive position before reading at most `limit + 1` candidate keys. The runner never
+creates, repairs, or analyzes an access path at open time.
 
 ### `initialize_bundle(db, bundle_meta_seed)`
 
@@ -445,6 +569,17 @@ for these two pragmas; if the platform build proves otherwise, the runner verifi
 after COMMIT and deletes the file on mismatch — a fresh initialize is always safely restartable
 because the caller creates the file in a staging path and renames it into place only after
 verification.)
+
+The same transaction inserts exactly one `projection_state` row
+`('work', 'yoetz/0.1.0', 1, 0,
+'sha256:0f8ec0c66f196bee631ef5447ef5c914e812fe530ee1f4b7477e24b22a9911c9', '0.1.0')` and one matching
+`p1_projection_state` row with frontier `0`, head `genesis`, NULL task-title/current-plan/status
+Coverage/gap fields, zero compact counters, all seven latest-check columns NULL, freshness
+`unknown`, and unknown-event count `0`. It also inserts one `p1_query_snapshots` genesis row with
+`valid_from_seq=0`, open-ended validity, head `genesis`, the same NULL source/Coverage/gap fields,
+zero counters, and `unknown` freshness. That digest is the frozen canonical encoding of
+the exact 17-key `projection_snapshot(empty_projection_state())`, verified by the projection vector
+tests; it is not computed from database row order. No other `p1_` row exists after initialization.
 
 ### `run_migrations(db, registry, maintenance)` — migration runner rules
 
@@ -518,6 +653,8 @@ Mixed-version writers are out of scope; upgrade is all-or-nothing per installati
 
 ## Open questions
 
-None.
+`specs/OPEN_QUESTIONS.md` gate `W-C-001` must close before this Wave C module is materialized. The
+runner will load and verify one standalone root bundle-migration resource; it may not concatenate
+the explanatory SQL fragment above with separate files or retain a divergent DDL copy.
 
 E-003 is the sole central platform-behavior gate.

@@ -16,10 +16,10 @@ checkpoint mechanics.
 
 - `MemoryLedgerAdapter` implements every method of `LedgerPort` with the exact port annotations:
   - `append_batch(command: AppendCommand) -> AppendResult`
-  - `load_events(session_id: SessionId, *, after: int = 0, through: int | None = None) -> AsyncIterator[AcceptedEvent]`
+  - `load_events(session_id: SessionId, *, after: int = 0, through: int | None = None) -> AsyncIterator[LedgerRecord]`
   - `load_projection(session_id: SessionId, view: ProjectionView) -> StoredProjection | None`
   - `query_projection(query: ProjectionQuery) -> ProjectionPage`
-  - `freeze_case(session_id: SessionId, writer_id: str, expected_frontier: int | None, request_id: str, request_digest: str) -> FrozenCase`
+  - `freeze_case(session_id: SessionId, writer_id: str, expected_frontier: int | None, request_id: str, request_digest: str) -> FrozenCase | CheckCommitResult`
   - `advance_check_phase(lease: OperationLease, expected_phase: CheckPhase, next_phase: CheckPhase, durable_object_ref: ObjectRef | None = None) -> OperationLease`
   - `enqueue_semantic_job(lease: OperationLease, case_digest: str, case_object_ref: ObjectRef) -> SemanticJobRecord`
   - `claim_semantic_job(lease: OperationLease, job_id: str) -> SemanticAttemptHandle`
@@ -27,7 +27,7 @@ checkpoint mechanics.
   - `select_attempt(lease: OperationLease, handle: SemanticAttemptHandle, selected_result_object_ref: ObjectRef) -> SelectedAttempt`
   - `renew_leases(lease: OperationLease) -> OperationLease`
   - `reclaim_operation(writer_id: str, operation_id: str, request_digest: str) -> OperationLease | PendingVerdict`
-  - `commit_check_if_current(frozen: FrozenCase, findings: RankedFindings, semantic_status: SemanticStatus, semantic_reason: SemanticReason, semantic_provenance: SemanticProvenance | None, request_id: str) -> CheckResult`
+  - `commit_check_if_current(frozen: FrozenCase, findings: RankedFindings, policy_executions: tuple[CheckPolicyExecution, ...], semantic_status: SemanticStatus, semantic_reason: SemanticReason, semantic_provenance: SemanticProvenance | None, request_id: str) -> CheckCommitResult`
   - `lookup_operation(writer_id: str, operation_id: str) -> OperationRecord | None`
 - `MemoryLedgerState` is the injected copy-on-write ledger/projection/operation/job/attempt state.
 
@@ -59,8 +59,12 @@ that `import_state` has no `pending` job for the command session. A hit returns 
 `OPERATION_PENDING` and swaps nothing; non-receipt publication, including import batches/report
 evidence, is unaffected.
 
-`load_events(session_id, after, through)` yields the accepted events for the given session in canonical order. It may page
-internally, but it never mutates the state while reading.
+`load_events(session_id, after, through)` yields complete `LedgerRecord` values for the given
+session in canonical ingestion order. Known available payloads are decoded `EventPayload` values;
+available unknown payloads are deeply frozen strict `JsonValue` and retain their canonical payload
+digest/status. Redacted, key-locked, key-missing, or otherwise unavailable authenticated objects
+yield the same complete `AcceptedEvent` or `UnknownEvent` with `payload=None`, never an empty value
+or third handle type. It may page internally, but it never mutates the state while reading.
 
 `load_projection(session_id, view)` returns a snapshot object compatible with the port contract, or `None` if
 the projection has never been built.
@@ -69,17 +73,42 @@ the projection has never been built.
 copies at most `query.limit + 1` matching typed rows in the view's registered stable order, and
 returns the same `ProjectionPage` fields and exclusive next typed position as SQLite. It validates
 the query-bound cursor position and projection version before reading. It never snapshots the
-whole adapter merely to page one view, and it swaps no state.
+whole adapter merely to page one view, and it swaps no state. It rejects `candidate_findings` as
+`INVALID_REQUEST`; only the application whole-case path may serve that view.
 
-`freeze_case(session_id, writer_id, expected_frontier, request_id, request_digest)` captures the current frontier and the admissible evidence set for a check. It is
-the reference model’s version of the durable case freeze. For a new/resumed nonterminal check it
-tests the same session's pending-import set under the shared lock before storing the freeze.
+`freeze_case(session_id, writer_id, expected_frontier, request_id, request_digest)` models the
+same prepare/build/publish/final-reservation ordering as SQLite. For an absent operation it first
+takes the shared lock only long enough to repeat idempotency/no-pending-import checks and snapshot
+`F`, the current projection identity, and dependency revisions; it then releases the lock, derives
+`D`, pages/copies the authoritative prefix, builds the exact `DeterministicCase`, canonicalizes it,
+and publishes the encrypted resume object. Only after the case and object exist does it reacquire
+the lock and atomically revalidate idempotency, import state, expected/current head, projection
+identity, those exact dependency revisions, owner generation, and finalized object metadata before
+one copy-on-write swap inserts `pending/reserved`. Case building, canonicalization, encryption,
+hashing, clock/ID calls, and object-store calls never run under the shared lock. A failed final
+revalidation leaves only an unreferenced object and no operation.
 
-`commit_check_if_current(frozen, findings, semantic_status, semantic_reason,
-semantic_provenance, request_id)` publishes findings only if the current frontier still matches the
-frozen one. If the frontier moved, the check result must weaken to a stale/conflict response rather
-than silently applying to the wrong state. It repeats the pending-import predicate in the same
-locked state swap that appends the check/finding events and terminal result.
+A pending expired/stale-generation operation instead is reclaimed under the shared lock after the
+same pending-import check, then loads and verifies the exact stored resume object outside the lock;
+it never rebuilds or republishes the case. A binding mismatch is fenced into
+`operation_resume_object_invalid`. A new/resumed operation returns exact
+`FrozenCase(case, lease)` with `case.frontier == lease.frontier`; terminal same-digest success
+returns `CheckCommitResult(outcome="replayed", ...)`, and terminal failure raises its stored public
+error. The reference adapter must expose hooks in tests at the prepare, object-finalized, and
+pre-reservation boundaries so the same races are driven against both backends.
+
+Every successful phase advance/renewal/reclaim returns a replacement lease; the reference caller
+rebuilds the two-field `FrozenCase` with that lease before its next step. A spent lease fails the
+same compare-and-swap check as SQLite.
+
+`commit_check_if_current(frozen, findings, policy_executions, semantic_status, semantic_reason,
+semantic_provenance, request_id)` publishes only with the current embedded
+`ready_to_finalize` lease and exact frozen frontier/dependency digest. If either changed, the same
+locked swap appends no event, stores the terminal `FRONTIER_CONFLICT` envelope with
+`frontier_changed|dependency_changed`, clears the lease, and raises it; same-ID replay returns the
+same failure. There is no memory-only stale-success branch. It repeats the pending-import predicate
+in the same locked state swap that appends the check/finding events and terminal
+`CheckCommitResult`.
 
 `lookup_operation(writer_id, operation_id)` returns the remembered operation record for idempotency and retry tests. It
 does not invent a durable history beyond the current process lifetime.
@@ -118,6 +147,7 @@ frontier, dependency digest, and object presence before one copy-on-write swap. 
 4. It remains side-effect free outside its own object instance.
 5. Check freeze/finalization and receipt append cannot commit while a pending import for the same
    session exists; the predicate and state mutation share one task lock.
+6. Frozen-case lease replacement and terminal dependency-conflict behavior match SQLite exactly.
 
 ## Tests
 

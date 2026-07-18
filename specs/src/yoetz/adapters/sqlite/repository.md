@@ -25,11 +25,11 @@ SQLite transaction boundaries and turns their outputs into durable rows.
 - `SqliteLedger` — implements the exact contract in
   `specs/src/yoetz/ports/ledger.md`:
   - `append_batch(AppendCommand) -> AppendResult`
-  - `load_events(session_id, after=0, through=None) -> AsyncIterator[AcceptedEvent]`
+  - `load_events(session_id, after=0, through=None) -> AsyncIterator[LedgerRecord]`
   - `load_projection(session_id, view) -> StoredProjection | None`
   - `query_projection(query: ProjectionQuery) -> ProjectionPage`
-  - `freeze_case(session_id, writer_id, expected_frontier, request_id, request_digest) -> FrozenCase`
-  - `commit_check_if_current(frozen, findings, semantic_status, semantic_reason, semantic_provenance, request_id) -> CheckResult`
+  - `freeze_case(session_id, writer_id, expected_frontier, request_id, request_digest) -> FrozenCase | CheckCommitResult`
+  - `commit_check_if_current(frozen, findings, policy_executions, semantic_status, semantic_reason, semantic_provenance, request_id) -> CheckCommitResult`
   - `lookup_operation(writer_id, operation_id) -> OperationRecord | None`
 - Check/semantic orchestration methods in the shared `LedgerPort` contract:
   - `advance_check_phase(lease: OperationLease, expected_phase: CheckPhase, next_phase: CheckPhase, durable_object_ref: ObjectRef | None = None) -> OperationLease`
@@ -142,17 +142,43 @@ the identical operation and the durable row decides.
 
 ### Check-operation lifecycle (`specs/src/yoetz/application/check.md`)
 
-`freeze_case(session_id, expected_frontier, request_id)`:
-in `BEGIN IMMEDIATE` — idempotency lookup (table above; a terminal row returns its envelope, a
-live-leased pending row returns `OPERATION_PENDING`, an expired/stale one is CAS-reclaimed and
-resumed at its recorded phase); for every new/resumed nonterminal check require the indexed
-`NOT EXISTS` pending-import predicate for the session; catch projections up if needed; capture frontier `F` (current
-head sequence + digest), dependency digest `D`, and policy/config/engine versions. The encrypted
-resume case object is durably published **first** (outside the transaction, before this
-transaction runs); then insert `operations` as `pending/reserved`, `operation_kind='check'`,
-`resume_object_id` set, with the current bundle owner generation, this runtime's lease owner
-nonce, `lease_generation=1`, and expiry. COMMIT before any expensive work. Returns `FrozenCase`
-carrying `F`, `D`, versions, and the `OperationLease`.
+`freeze_case(session_id, writer_id, expected_frontier, request_id, request_digest)` is a bounded
+prepare/build/publish/reserve protocol, not one long `BEGIN IMMEDIATE`:
+
+1. A short existing-row transaction applies the idempotency table. Terminal state replays; a live
+   lease returns `OPERATION_PENDING`; an expired/stale-generation pending check repeats the
+   no-pending-import predicate and is reclaimed by fenced CAS. After COMMIT, the adapter reads,
+   decrypts, and authenticates the exact object named by that row, verifies its request, session,
+   writer, `F`, `D`, and case-digest bindings, and returns it with the replacement lease. This path
+   never constructs or publishes a replacement object. Invalid stored bindings are quarantined as
+   `operation_resume_object_invalid` by a separate short CAS naming the reclaimed lease.
+2. For an absent operation, a bounded snapshot transaction repeats the idempotency decision and
+   no-pending-import predicate, verifies `expected_frontier`, then captures `F`, the active
+   projection generation/version/state digest at `F`, and the exact dependency revisions. After
+   the snapshot closes, their canonical digest is `D`. The active projection must be current at
+   the head; any required
+   replay/rebuild preparation completes before this snapshot rather than running inside the
+   reservation write transaction. No `operations` row or lease exists yet.
+3. With no SQLite transaction held, page and verify the immutable accepted-record prefix through
+   `F`, replay/build the shared `DeterministicCase`, canonicalize the resume envelope that binds
+   the request identity, `F`, `D`, prepared projection identity, and case digest, then encrypt and
+   finalize that object (`stage` -> fsync -> atomic rename -> directory fsync). The case therefore
+   necessarily exists before its resume object. A crash or losing race here leaves only an
+   unreferenced encrypted object for bounded orphan GC.
+4. A final short `BEGIN IMMEDIATE` repeats idempotency and the indexed no-pending-import predicate;
+   revalidates current owner generation, `expected_frontier`, head exactly `F`, active projection
+   generation/version/state digest, and every dependency revision contributing to `D`; and checks
+   only the finalized `ObjectRef` kind/task/media/size/commitment/envelope descriptor (no
+   filesystem read). If all checks still match, it atomically inventories the object and inserts
+   `operations` as `pending/reserved`,
+   `operation_kind='check'`, `resume_object_id` set, current bundle generation/lease owner,
+   `lease_generation=1`, and expiry. Any mismatch inserts neither row and never references the
+   candidate object. COMMIT, then return exact `FrozenCase(case, lease)` with
+   `case.frontier == lease.frontier` and `lease.dependency_digest == D`.
+
+Canonicalization, accepted-record paging, reducer/case construction, encryption, hashing, fsync,
+and object opening are forbidden inside `BEGIN IMMEDIATE`. If the final commit outcome is
+ambiguous, a retry resolves it from the operations row; it does not infer success from the object.
 
 Phase advancement (all via `advance_check_phase`, each a one-row CAS in a short
 `BEGIN IMMEDIATE`): `reserved → local_ready` after deterministic checks' immutable result object
@@ -165,7 +191,12 @@ Phases only move forward; on reclaim the recorded phase is a lower bound — the
 re-validates durable state for that phase before advancing and never assumes an external call
 completed.
 
-`commit_check_if_current(frozen, findings, semantic_status, semantic_reason,
+Every successful advance, renewal, or reclaim returns a replacement `OperationLease`; the prior
+value is spent. The application reconstructs the two-field `FrozenCase` with the returned current
+lease before finalization. The final transaction requires its embedded phase to be
+`ready_to_finalize` and compares every lease field.
+
+`commit_check_if_current(frozen, findings, policy_executions, semantic_status, semantic_reason,
 semantic_provenance, request_id)` — the final
 `BEGIN IMMEDIATE`: verify the operation lease (all four fields + current owner generation) and
 that material dependency revisions still match `D`; repeat the indexed no-pending-import
@@ -173,9 +204,10 @@ predicate for the frozen session; append the check/finding events (reusing
 steps 5–9 of the append transaction — checks append through the same machinery); store
 `result_canonical`/`result_digest`; set `state='complete'`, `phase='terminal'`, NULL lease
 fields, `terminal_at`; COMMIT; only then acknowledge. If `F`/`D` no longer match, the semantic
-result is labeled stale and cannot steer: the check still completes deterministically with
-weakened coverage or returns `FRONTIER_CONFLICT` per the application's policy — this adapter
-only enforces that a stale-fenced write never happens.
+result cannot steer and there is one outcome: append no check/finding event, store the stable
+terminal `FRONTIER_CONFLICT` failure with safe `reason_code=frontier_changed|dependency_changed`,
+clear leases, COMMIT, then raise it. Same-digest retry replays that failure; a check of the new
+state needs a new request ID. The repository never re-ranks or chooses a stale-success branch.
 
 ### Semantic jobs and attempts
 
@@ -257,8 +289,12 @@ required by `specs/src/yoetz/ports/ledger.md`. For every row returned it re-veri
 normalized `event_parents`/`event_refs` rows agree with the stored `canonical_entry` bytes, and
 that `entry_digest == canonical_digest(canonical_entry)`. Disagreement is canonical corruption:
 raise the internal corruption error mapped to `STORAGE_CORRUPT` and hand off to `recovery.md`
-(bundle quarantined for writes). Yields `AcceptedEvent` values decoded from the canonical bytes,
-never from the index columns.
+(bundle quarantined for writes). Yields `LedgerRecord` values decoded from the canonical bytes,
+never from the index columns. After releasing the page read transaction it opens/verifies each
+payload object: exact-known available payloads become decoded `EventPayload`; available unknown
+payloads become deeply frozen strict `JsonValue` with verified `canonical_payload_digest`;
+redacted/key-locked/key-missing/unavailable objects leave the otherwise complete variant at
+`payload=None`. It never emits an unavailable-handle surrogate or an empty payload.
 
 `load_projection`: reads the active generation's projection tables plus `projection_state`;
 returns `StoredProjection` including `applied_through_seq` and its lag versus the head, so
@@ -280,7 +316,9 @@ sorted gaps. Each page is one bounded read transaction released before return. A
 version mismatch or future frontier is `INVALID_REQUEST`; absence is `SESSION_NOT_FOUND`; an exact
 historical frontier that cannot be represented fails or is served by bounded verified replay,
 never silently substituted. `candidate_findings` remains the registered `load_projection` + pure
-kernel exception and is rejected as a repository row-query view.
+kernel exception and is rejected as a repository row-query view. The repository accepts/returns
+only the exact port-owned typed positions; cursor bytes and client privacy projection never enter
+this module.
 
 ### `run_passive_checkpoint` (ADR-003 checkpoint ownership)
 
@@ -324,6 +362,8 @@ checkpoint success.
 - Check freeze/finalization and new receipt append test pending importer rows inside their own
   transaction; a prior status read is never trusted for this gate.
 - Projection tables carry no truth that cannot be rebuilt from events.
+- Every returned frozen case contains the current lease; every phase/renew/reclaim spends its
+  predecessor, and final-currentness mismatch has only the terminal no-event conflict outcome.
 
 ## Tests
 

@@ -28,6 +28,20 @@ quarantined canonical data, incomplete migration, stale generation, and corrupt 
 states; inspecting an unchanged state repeatedly must return the same classification and bounded
 reason facts without mutation.
 
+Generated check transitions also assert the exact current `FrozenCase.lease` handoff and the one
+terminal final-currentness rule: changed frontier/dependency stores and replays
+`FRONTIER_CONFLICT`, clears the lease, and appends no check/finding event.
+
+Freeze generation injects crashes and competing writes at prepare, after case build, after object
+finalization, before `BEGIN IMMEDIATE`, and after ambiguous COMMIT. It asserts the case-build event
+strictly precedes object finalization; accepted-record paging/replay/canonicalization/encryption/
+fsync/object-open hooks are never called inside `BEGIN IMMEDIATE`; and the final reservation
+rechecks idempotency, import state, head, projection identity, dependencies, expected frontier,
+owner generation, and finalized object inventory before inserting one pointer. A failed check
+leaves no object inventory or operation row. Once a pointer commits, expiry/stale-generation
+reclaim opens and verifies that exact object while builder/publisher hooks are configured to fail
+if called.
+
 ## Errors and edge cases
 
 - A SQLite-only shortcut that violates the memory oracle fails.
@@ -39,6 +53,8 @@ reason facts without mutation.
 2. Durability rules remain explicit.
 3. Recovery is replayable.
 4. Recovery classification is a pure function of the inspected durable evidence.
+5. SQLite has no adapter-specific stale-success branch.
+6. SQLite never reserves a resume object before its exact frozen case exists.
 
 ## Tests
 

@@ -1,7 +1,7 @@
 # src/yoetz/domain/privacy.py — privacy policy, disclosure, authorization, and receipt values
 
 **Wave:** C–E | **ADRs:** ADR-006, ADR-008, ADR-009 | **Imports (spec-tree):**
-`domain/values.md`, `protocol/canonical.md`, `protocol/ids.md` | **Imported by:**
+`domain/values.md`, `protocol/canonical.md`, `protocol/ids.md`, `protocol/models.md` (`DataCategory`) | **Imported by:**
 `application/egress.md`, `application/privacy_policy.md`, `ports/privacy.md`,
 `config/privacy.md`, privacy/provider adapters, CLI/MCP disclosure rendering, tests
 
@@ -26,10 +26,11 @@ outbound request-body plaintext in structural audit records.
   asserted by a caller; it conditions the `agent_context` ceiling only.
 - `enum DataClass`: `public_structural`, `ordinary_user_content`, `sensitive_confidential`,
   `secret_or_cryptographic`.
-- `enum DataCategory`: `bounded_structural_metadata`, `declared_file_type`, `task_description`,
-  `claim_text`, `obligation_text`, `decision_excerpt`, `evidence_excerpt`, `finding_summary`,
-  `command_metadata`, `diff_metadata`, `repository_excerpt`, `transcript_excerpt`,
-  `diagnostic_metadata`.
+- imported/re-exported `DataCategory` from `protocol/models.py`: `bounded_structural_metadata`,
+  `declared_file_type`, `task_description`, `claim_text`, `obligation_text`, `decision_excerpt`,
+  `evidence_excerpt`, `finding_summary`, `command_metadata`, `diff_metadata`,
+  `repository_excerpt`, `transcript_excerpt`, `diagnostic_metadata`. This module does not define a
+  second enum.
 - `enum ForbiddenDataKind`: `encryption_key`, `recovery_or_unlock_secret`, `password`,
   `api_credential`, `authentication_token`, `cookie`, `private_certificate`, `keyring_content`,
   `unrelated_environment`, `credential_file`, `hidden_auth_configuration`, `raw_database`,

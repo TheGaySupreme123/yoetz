@@ -16,6 +16,10 @@ Lock the research-evidence policy pack with exact trigger and non-trigger fixtur
 - `test_questionable_finding_rejection` — unsupported rejection/waiver is detected.
 - `test_finding_kind_does_not_imply_semantic_origin` — research/evidence kinds remain valid for
   deterministic and semantic findings when their explicit `origin` is correct.
+- `test_rule_groups_raw_triggers_by_complete_subject_tuple` — all raw triggers for one rule and
+  exact complete canonical subject tuple are aggregated and evaluated once.
+- `test_duplicate_emitted_key_is_rejected` — a second assessment with the same
+  `(policy_id, rule_id, subject_refs)` is rejected as a policy-wiring defect.
 
 ## Behavior
 
@@ -24,15 +28,25 @@ The suite checks:
 - each rule triggers on the minimum supported mismatch;
 - the closest non-trigger does not produce a finding;
 - coverage weakens when evidence is only partial;
+- finding coverage folds the exact basis supporting refs, preserves all four ordered material
+  dimensions and gaps, adds only `engine_derived` and `deterministic`, removes `none`, and uses the
+  case frontier exactly;
 - every candidate returns an exact `FindingBasis` with observed/missing facts and supporting refs;
 - all four research-evidence kinds use inline immutable trigger/closest-nontrigger values in this
   test module; no runtime fixture generation or separate policy-resource lookup is permitted;
 - the pack never escalates into a probabilistic or semantic conclusion.
+- repeated raw triggers for one rule and complete canonical subject tuple produce one grouped rule
+  evaluation and at most one assessment;
+- duplicate emitted keys fail closed, while two different rule IDs may each emit one assessment
+  for the same complete subject tuple;
+- the cardinality assertions leave the existing exact fixture output, deterministic templates,
+  basis, and coverage unchanged.
 
 ## Errors and edge cases
 
 - A mere wording difference without a material mismatch fails the test.
 - A supported rejection/waiver must not be flagged.
+- Any path that accepts a duplicate emitted key fails the test.
 
 ## Invariants
 
@@ -40,6 +54,8 @@ The suite checks:
 2. Rule order is fixed.
 3. Pack identity is fixed.
 4. `origin`, not finding kind, owns provenance semantics.
+5. Cardinality is one evaluation and at most one emitted value per rule and complete subject
+   tuple.
 
 ## Tests
 

@@ -25,6 +25,15 @@ The in-memory state machine must model:
 - case freezing and check commitment;
 - receipt persistence and replay;
 - recovery behavior after failed or interrupted operations.
+- every successful phase/renew/reclaim spends the prior `FrozenCase.lease` and returns the one
+  replacement authority; and
+- generated mutations between prepare and final reservation prove that head, projection identity,
+  dependencies, import state, idempotency, and owner generation are all revalidated in the one
+  locked state swap; a mismatch stores no operation pointer;
+- instrumentation proves case construction and object finalization occur in that order outside the
+  shared lock, and reclaim reads the stored object with builder/publisher calls forbidden; and
+- a final frontier/dependency mismatch appends nothing and terminally replays the same
+  `FRONTIER_CONFLICT`, never a memory-only stale success.
 
 The model is the contract oracle. It does not copy SQLite code or depend on filesystem behavior.
 
@@ -37,6 +46,8 @@ The model is the contract oracle. It does not copy SQLite code or depend on file
 1. The memory model is pure and deterministic.
 2. Stateful transitions stay explicit.
 3. Recovery paths remain bounded.
+4. The state machine never holds a frozen case with absent or spent authority.
+5. The state swap can reference only an already-durable object built from the prepared exact case.
 
 ## Tests
 

@@ -107,6 +107,9 @@ The manifest lists exactly 52 `*.schema.json` artifacts and never lists itself; 
 - `$ref`: the absolute static-file `$id`, optionally followed by a fragment. Runtime, generators,
   and tests resolve it through the frozen local registry only; no gate or installed operation may
   issue DNS or HTTP merely because the identifier is an HTTPS URL.
+- URL-shaped fixture values that are not `$id` or `$ref` are ordinary opaque test data, not schema
+  routes. In particular REP-004's future-version schema URI is deliberately absent from the v0.1
+  catalog and is preserved without any registry, filesystem, DNS, or HTTP dereference.
 - `$defs`: stable lower-snake-case logical names; no generator-specific numeric suffixes.
 - `title` and `description` are documentation only and excluded from behavioral
   comparison only during candidate normalization; released bytes, including descriptions, remain
@@ -129,10 +132,12 @@ Hosting is a publication surface, never a runtime dependency. The local gate con
 URI-to-file registry from `schemas/manifest.json`, proves for every member that
 `$id == SCHEMA_NAMESPACE + relative_path`, resolves every fragment with network disabled, and
 compares the root bytes with `src/yoetz/resources/schemas/`. Release staging serves the same tree
-from a loopback static server and fetches every canonical URL path before publication. The tagged
-release publishes those already-tested bytes to the immutable `/0.1/` prefix and downloads them
-again for digest parity. A missing host, DNS failure, or CDN outage never prevents an installed
-Yoetz operation from validating locally; it blocks only a release claiming hosted availability.
+from a loopback static server with external network/DNS disabled and fetches every canonical URL
+path from those checked-in bytes before publication. The tagged release may later expose the same
+canonical paths at the immutable `/0.1/` prefix, but that hosted publication is separate from the
+runtime and gate-resolution path. A missing host, DNS failure, or CDN outage never prevents an
+installed Yoetz operation from validating locally; it blocks only a release claiming hosted
+availability.
 
 ### Exact future-file inventory
 
@@ -203,10 +208,18 @@ Every object uses `additionalProperties: false`; composed objects use
 fields exactly match the protocol models. Optional fields distinguish absent from explicit
 `null`; `null` is accepted only when the contract names it.
 
-Integer-like counters and frontiers that cross the public boundary are canonical decimal strings
-with the exact `"0" | [1-9][0-9]*` pattern and documented bounds. Digests, commitments, IDs,
-timestamps, enum values, and sorted unique set arrays have explicit patterns and item bounds. JSON
-`number` is absent from all truth-bearing schemas.
+Sequence/frontier/int64 identity fields that their owning schema explicitly declares as strings use
+canonical decimal spelling with the exact `"0" | [1-9][0-9]*` pattern and documented bounds.
+Bounded measurements and counts that are not identities remain JSON integers where the frozen
+schema says so: examples include `payload_ref.plaintext_size`, manifest `byte_length`, and request
+body byte counts. They reject booleans, strings, non-integral numbers, and values outside their
+schema bounds. Floats and integers outside the restricted canonical JSON safe range remain
+forbidden globally; the contract does not convert every safe bounded integer into a string.
+
+The accepted-event artifact validates the full persisted/schema record: it includes
+`entry_digest` and excludes the decoded in-memory `payload` handle. Entry-digest computation uses a
+separate preimage view that removes `entry_digest` as well; that intentionally incomplete view is
+canonicalized and hashed but is not itself validated as a full accepted-event document.
 
 `event-draft` has two disjoint branches:
 

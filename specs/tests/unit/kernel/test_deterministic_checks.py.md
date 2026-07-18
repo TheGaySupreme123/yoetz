@@ -17,10 +17,22 @@ more, with one exact machine-readable basis for every candidate finding.
 - `test_unknown_pack_is_rejected` — tampered pack wiring does not approximate.
 - `test_findings_are_origin_deterministic` — deterministic findings never carry semantic provenance.
 - `test_pack_results_are_order_stable` — rule order and deduping remain stable.
+- `test_projection_frontier_uses_integer_and_head_pair` — case frontier equality checks both the
+  projection's integer sequence and separate head digest.
+- `test_rule_subject_cardinality_and_order_are_exact` — one assessment exists per exact
+  `(policy, rule, complete subject-ref tuple)` and pack/rule/ref ordering is byte-stable.
+- `test_deterministic_templates_are_complete_and_exact` — all fourteen kinds use the single
+  registry and exact ID-only renderer.
 - `test_candidate_and_finding_basis_are_one_to_one` — every candidate has one stable rule/fact/ref
   explanation and no orphan basis exists.
 - `test_basis_separates_state_relation_from_source_availability` — unrecorded source never means
   equal state or no change, and later privacy facts never enter the pure basis.
+- `test_status_basis_projection_is_controlled_and_exact` — namespaced rule IDs, fact/ref flattening,
+  availability spelling, and evidence/result ref selection map exactly to the frozen status shape.
+- `test_redaction_and_unavailability_coverage_caps_are_componentwise` — all six kernel gap
+  conditions preserve/cap/add exactly the registered fields and never strengthen a weaker base.
+- `test_redacted_object_root_is_first_cause_and_stable` — repeated object redactions yield one gap
+  rooted at the earliest causative event by ledger sequence.
 
 ## Behavior
 
@@ -32,7 +44,26 @@ The suite exercises:
 - exact subject refs, priority, policy identity, and coverage behavior;
 - exact `FindingBasis` rule ID, observed facts, required-but-missing facts, supporting refs,
   subject-state relation, frozen-source availability, and coverage gaps;
-- deduplication of repeated logical findings.
+- a projection state `(frontier: int, head_digest: str)` maps to exactly one equal `Frontier`, and a
+  same-sequence/different-head prefix is rejected;
+- raw trigger records for one rule and complete subject tuple are aggregated before evaluation;
+  an emitted duplicate key is rejected, while a different rule on the same tuple remains distinct;
+- work-integrity precedes research-evidence, rule ordinals are frozen, and subject tuples break
+  rule-local ties by unsigned ASCII bytes;
+- all fourteen exact summary/next-action literals plus the exact `Subjects: ... Main agent: ...`
+  detail spelling;
+- status projection emits the bare kind as `rule_id`, unique observed code/ref unions, missing
+  codes, the exact availability translation, gaps, and only `evd_`/`res_` supporting refs; it never
+  mutates the internal fact/ref tuples or decodes the flattened public shape as an internal basis.
+- table-driven coverage cases for redacted/unavailable event payloads, redacted/unavailable
+  captured content, missing refs, and opaque events verify exact ordered-field caps, unchanged
+  channel/authorship/check tuples, and sorted union of respectively `redacted_event`,
+  `event_payload_unavailable`, `redacted_object`, `captured_object_unavailable`, `missing_ref`, and
+  `unknown_event`; combinations apply every cap and an over-64 gap union fails instead of truncating;
+- object-only payload targeting adds both the object and effective-event tokens; captured-content
+  targeting adds only the object token to that evidence ref; two or more causative redaction events
+  keep the first-by-ingestion event as the exact one-member `CaseGap.subject_refs`, even when event-
+  ID byte order differs.
 
 ## Errors and edge cases
 
@@ -40,6 +71,10 @@ The suite exercises:
 - A finding that appears with semantic provenance in the deterministic path fails the test.
 - Free-form model prose, provider output, or an unsupported state/visibility inference in a basis
   fails the test.
+- Taking only the integer half of a frontier, selecting a subjective strongest duplicate, or
+  copying a policy-owned template literal instead of the shared renderer fails the test.
+- Dropping a causative redaction root, strengthening `mutable_reference` to `metadata_only`, or
+  replacing/averaging channel and check-type sets fails the test.
 
 ## Invariants
 

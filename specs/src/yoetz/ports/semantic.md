@@ -1,8 +1,11 @@
 # src/yoetz/ports/semantic.py — SemanticEvaluatorPort protocol and semantic result types
 
 **Wave:** B (definition) / E (live use) | **ADRs:** ADR-006, ADR-009, ADR-002 | **Imports
-(spec-tree):** `protocol/errors.md`, `protocol/coverage.md`, `domain/findings.md`
-(SemanticProvenance), `domain/privacy.md`, `kernel/deterministic_checks.md` (`FindingBasis`) |
+(spec-tree):** `protocol/errors.md`, `protocol/coverage.md`, `protocol/models.md`
+(`SemanticStatus`, `SemanticReason`, `VALID_SEMANTIC_REASONS`, `DataCategory`), `domain/findings.md`
+(`FindingKind`, `SamplingParams`, `TokenUsage`, `CostFields`, `SemanticFailureClass`, finalized
+`SemanticProvenance`), type-checking-only names from `domain/privacy.md`,
+`kernel/deterministic_checks.md` (`FindingBasis`) |
 **Imported by:**
 `application/egress.md`, `adapters/privacy/gateway.md`, `adapters/providers/openai_responses.md`,
 `adapters/providers/fake.md`
@@ -28,18 +31,25 @@ durable attempt/privacy-receipt persistence is the coordinator/audit port's job,
   excerpt, and omission content selected under one `ReviewContextProfile`.
 - `@dataclass(frozen=True, slots=True) class ReviewAssessment` — one pinned deterministic finding
   and basis with an optional policy-selected pair of finding-prose item references.
+- `@dataclass(frozen=True, slots=True) class ReviewAssessmentSkipped` — local structural record for
+  one otherwise-valid assessment that cannot fit an outbound 16-ref field without loss.
+- `project_review_assessment(assessment, finding_ref, summary_item_id=None,
+  detail_item_id=None) -> ReviewAssessment | ReviewAssessmentSkipped` — the sole internal-basis to
+  frozen outbound-review projection.
 - `@dataclass(frozen=True, slots=True) class TargetedExcerptRef` and `ChangeObservation` — bounded
   recorded-excerpt binding and honest change/content-visibility facts.
-- `@dataclass(frozen=True, slots=True) class Deadline` — `expires_at: datetime` (UTC), method
-  `remaining_seconds() -> float` (clamped at 0.0).
+- `@dataclass(frozen=True, slots=True) class Deadline` — exact fields
+  `expires_at_utc: datetime` and `monotonic_deadline: float`; methods
+  `remaining_seconds(now_monotonic: float, /) -> float` (clamped at `0.0`) and
+  `expired(now_monotonic: float, /) -> bool`.
 - `SemanticResult` — a closed union (`type SemanticResult = SemanticResultSuccess |
   SemanticResultRefused | SemanticResultTimeout | SemanticResultInvalid | SemanticResultLate |
   SemanticResultUnavailable`),
   each a frozen dataclass sharing a provisional `provenance: ProviderAttemptProvenance` field.
 - `@dataclass(frozen=True, slots=True) class ProviderAttemptProvenance` — what one adapter can
   truthfully return before the coordinator has durably closed the privacy receipt.
-- `@dataclass(frozen=True, slots=True) class SemanticProvenance` — finalized attempt provenance,
-  constructed only after the matching privacy receipt is durable.
+- `SemanticProvenance` — finalized provenance imported from `domain/findings.py`; this port does
+  not define a second class.
 - `@dataclass(frozen=True, slots=True) class SemanticJudgment` — the parsed, schema-conforming
   raw model judgment carried by `SemanticResultSuccess` (closed conclusion plus zero to three
   `ReviewerChallenge` values), still untrusted until post-validation. Challenges are the sole
@@ -47,12 +57,12 @@ durable attempt/privacy-receipt persistence is the coordinator/audit port's job,
 - `@dataclass(frozen=True, slots=True) class ReviewerChallenge` — one case-bound discrepancy,
   alternative interpretation, direct main-agent message, smallest requested next step, and
   uncertainty statement.
-- `enum SemanticStatus` — `not_requested`, `not_configured`, `blocked_by_policy`,
+- `SemanticStatus` — imported and re-exported from `protocol/models.py`: `not_requested`, `not_configured`, `blocked_by_policy`,
   `blocked_forbidden_data`, `classification_uncertain`, `awaiting_human`, `human_denied`,
   `approval_expired`, `succeeded`, `refused`, `timeout`, `invalid`, `unavailable`, `late`, `stale`,
   `failed`. `late` means lease/deadline authority was lost; `stale` means frozen dependencies no
   longer match. Privacy statuses are supplied by `application/egress.md`, not provider adapters.
-- `enum SemanticReason` — the required machine-readable reason paired with every
+- `SemanticReason` — imported and re-exported from `protocol/models.py`; the required machine-readable reason paired with every
   `SemanticStatus`: `deterministic_mode`, `no_material_semantic_case`, `provider_not_configured`,
   `local_model_not_configured`, `network_egress_denied`, `channel_disabled`,
   `provider_binding_not_authorized`, `scope_not_authorized`,
@@ -66,6 +76,40 @@ durable attempt/privacy-receipt persistence is the coordinator/audit port's job,
   `lease_authority_lost`, `frontier_changed`, `dependency_changed`, `coordinator_failure`.
 
 ## Behavior
+
+This Wave B module has no runtime dependency on the later-wave privacy domain. It uses
+`from __future__ import annotations`; `ApprovedProviderCase`, `ReviewContextProfile`, and
+`ReviewSelectionPolicy` are imported only under `TYPE_CHECKING` and appear only in postponed
+annotations. Runtime `DataCategory` comes from its B0 owner, `protocol/models.py`. Constructors do
+not call `get_type_hints`, `isinstance`, or any privacy-domain constructor. The Wave D/E egress
+coordinator supplies the already-validated nominal privacy values and performs the final conversion
+to `ApprovedProviderCase`. Thus importing `yoetz.ports.semantic` in a Wave B-only installation does
+not import or require `yoetz.domain.privacy`.
+
+### `Deadline` — explicit process-local budget
+
+`Deadline` is a frozen, slotted value and contains no clock, callback, lazy default, or mutable
+state. `expires_at_utc` is a timezone-aware diagnostic instant whose UTC offset is exactly zero.
+`monotonic_deadline` is a finite, nonnegative process-local monotonic reading. Construction rejects
+a non-`datetime`, a naive or nonzero-offset datetime, or a monotonic value whose exact type is not
+`float` (including `bool`), is NaN/infinite, or is negative as an internal caller defect. The value
+is never serialized, persisted, or reused after a process restart.
+
+Both methods require an explicit exact-`float`, finite, nonnegative `now_monotonic` sample; neither
+method imports or calls `datetime.now`, `time.time`, `time.monotonic`, an event-loop clock, or
+`ClockPort`.
+`remaining_seconds(now_monotonic)` returns exactly
+`max(0.0, monotonic_deadline - now_monotonic)`. `expired(now_monotonic)` returns exactly
+`now_monotonic >= monotonic_deadline`; equality is expired. Invalid samples are internal caller
+defects and raise before a provider call. `expires_at_utc` never participates in either result, so
+wall-clock jumps cannot change an existing provider budget.
+
+The coordinator constructs the pair from separately captured readings: it captures one
+`clock.now_utc()` value for the diagnostic expiry and one `clock.monotonic_seconds()` value for the
+process-local budget, then adds the same configured duration to each in its own time domain. It
+does not derive a monotonic deadline by subtracting wall-clock datetimes. Every provider adapter is
+constructed with an injected `ClockPort`; immediately before its one physical attempt it captures
+`now_monotonic = clock.monotonic_seconds()` and passes that exact value to the deadline methods.
 
 ### `SemanticCase` — pre-egress candidate contract
 
@@ -114,7 +158,8 @@ most `MAX_SEMANTIC_ITEM_BYTES`; all item content plus structured packet bytes re
   (0..32), `decision_item_ids` (0..16), and `timeline_item_ids`
   (0..`MAX_REVIEW_TIMELINE_ITEMS`);
 - `deterministic_assessments: tuple[ReviewAssessment, ...]`
-  (0..`MAX_REVIEW_ASSESSMENTS`), ordered by pack/rule/subject/candidate canonical bytes;
+  (0..`MAX_REVIEW_ASSESSMENTS`), ordered by work-integrity then research-evidence, each pack's
+  frozen rule ordinal, then the complete candidate subject-ref tuple's unsigned ASCII bytes;
 - `change_observations: tuple[ChangeObservation, ...]`
   (0..`MAX_REVIEW_CHANGE_OBSERVATIONS`), sorted by subject refs;
 - `coverage: Coverage`;
@@ -129,9 +174,12 @@ assessment summary/detail field, or one targeted excerpt. Every targeted excerpt
 facts/codes; `goal_aware` adds allowed intent/claim/finding prose; `assisted` adds problem-local
 recorded excerpts; `expanded` and `custom` use their exact compiled `ReviewSelectionPolicy`.
 
-`ReviewAssessment` contains exactly `finding_ref` from `local_check_refs`, `finding_kind`,
-`priority`, sorted public-root `subject_refs` within `frontier_refs`, one `FindingBasis`, and
-optional `summary_item_id` plus `detail_item_id`. The two item IDs are both present or both absent.
+`ReviewAssessment` contains exactly the outbound fields `finding_ref` from `local_check_refs`,
+`finding_kind`, `priority`, sorted public-root `subject_refs` within `frontier_refs`, `rule_id`,
+`observed_facts`, `required_but_missing_facts`, `subject_state_relation`, `source_availability`,
+`coverage_gaps`, `supporting_refs`, and optional `summary_item_id` plus `detail_item_id`. The basis
+fields are the lossless projection of one internal `FindingBasis`; the outbound record does not
+embed the Python basis object. The two item IDs are both present or both absent.
 When present, they resolve respectively to `section=deterministic_summary|deterministic_detail`,
 `source_kind=finding`, category `finding_summary`, the same finding source/ref roots, and the exact
 bounded candidate summary/detail. They may be present only when `include_finding_prose=true` and
@@ -139,6 +187,63 @@ the independent category/class policy admits them. Under `structural` they are
 absent, leaving only the typed kind/priority/roots/basis; this is how the profile sends useful
 deterministic facts without prose. The check coordinator derives this value one-to-one from the
 pinned `DeterministicAssessment`; neither provider output nor privacy code may mutate the basis.
+
+The phrase "one basis" above names the internal source, not an instruction to serialize its Python
+dataclass unchanged. `project_review_assessment` is the sole mapper to the frozen
+`outbound-case#/$defs/review_assessment` shape. It first requires
+`basis.rule_id == f"{candidate.policy_id}/{candidate.kind.value}"`, a deterministic origin, a pinned
+`finding_ref`, and canonical allowed refs. It then maps fields exactly:
+
+This mapper never chooses or emits a public finding policy identity. The check coordinator derives
+`Finding.policy_id` / `Finding.policy_version` later from the final accepted `FindingKind`'s unique
+owning built-in pack, so a semantic reviewer cannot introduce a third `semantic-review` pack or
+override the derived identity by prose.
+
+| Outbound field | Source |
+|---|---|
+| `finding_ref` | the durable ID pinned to this exact assessment |
+| `finding_kind` | bare `candidate.kind.value` |
+| `priority` | `candidate.priority` |
+| `subject_refs` | the complete `candidate.subject_refs` tuple |
+| `rule_id` | bare `candidate.kind.value`, not the internal `policy-id/kind` spelling |
+| `observed_facts` | every internal `(fact_code, subject_refs)` entry unchanged and in canonical order |
+| `required_but_missing_facts` | every internal entry unchanged and in canonical order |
+| `subject_state_relation` | unchanged |
+| `source_availability` | unchanged |
+| `coverage_gaps` | unchanged |
+| `supporting_refs` | unchanged |
+| `summary_item_id`, `detail_item_id` | the supplied pair, both present or both absent |
+
+This mapping is lossless for an included assessment: fact/ref associations are preserved, and the
+pinned local-result map recovers the policy identity behind the deliberately bare schema rule token.
+It never uses the flattened status-result basis projection.
+
+The internal basis permits up to 64 refs while each outbound `subject_refs`, fact `subject_refs`,
+and `supporting_refs` field permits at most 16. The mapper MUST NOT take a prefix, split a fact,
+drop a ref, or rewrite the basis. It checks, in exact order, the candidate `subject_refs`, each
+`observed_facts` entry in canonical tuple order, each `required_but_missing_facts` entry in
+canonical tuple order, then `supporting_refs`. If the first over-limit field is found, it returns
+`ReviewAssessmentSkipped(finding_ref, limit_field, actual_count, omission)` where `limit_field` is
+exactly `subject_refs|observed_fact_subject_refs|required_missing_fact_subject_refs|supporting_refs`,
+`actual_count` is the unmodified tuple length, and `omission` is exactly
+`ReviewOmission(subject_ref=finding_ref, category=DataCategory.bounded_structural_metadata,
+source_kind="finding", reason="not_selected")`. No assessment content item is created for that
+finding. The encrypted local result retains the complete assessment, the packet's coverage fold
+still includes it, and the structural skip record remains coordinator audit data. Remaining
+representable assessments proceed in their original deterministic order. If no provider-renderable
+semantic material remains, the existing `no_material_semantic_case` path is used; an over-limit
+assessment is never silently described as having been reviewed.
+
+`ReviewAssessmentSkipped` is exactly the frozen local value `(finding_ref: FindingId,
+limit_field: Literal["subject_refs", "observed_fact_subject_refs",
+"required_missing_fact_subject_refs", "supporting_refs"], actual_count: int,
+omission: ReviewOmission)`. `actual_count` is an `int` but not `bool` in 17..64. This value has no
+outbound serializer; only its schema-valid `omission` enters the approved packet.
+
+A namespace/kind mismatch, invalid ID kind, unsorted/duplicate tuple, empty required ref tuple, or
+unknown fact code is a malformed internal assessment and rejects semantic-case construction. It is
+not converted to `not_selected`, because the skip branch is reserved only for a valid internal
+assessment that exceeds the narrower outbound bound.
 
 `TargetedExcerptRef` fields are `excerpt_item_id`, `source_kind:
 evidence|test|failure|diff|command|repository`, `linked_subject_refs` (1..16 allowed refs),
@@ -195,8 +300,10 @@ fetch round, decide a waiver, or converse directly with the provider after retur
 ### `evaluate`
 
 1. The gateway has already consumed exact privacy authorization. The adapter renders only the
-   approved bytes into its exact provider profile's request shape, sets an explicit
-   timeout of `deadline.remaining_seconds()` minus its fixed safety margin, and makes exactly one
+   approved bytes into its exact provider profile's request shape, captures
+   `now_monotonic = clock.monotonic_seconds()` from its injected `ClockPort`, computes
+   `remaining = deadline.remaining_seconds(now_monotonic)`, sets an explicit timeout from
+   `remaining` minus its fixed safety margin (clamped at zero), and makes exactly one
    physical provider attempt per call. The retry budget (≤ 2 retries, only timeout/connection/429
    classes, jittered backoff, one total deadline — ADR-006 decision 5) is owned by the *coordinator*,
    which records one durable `semantic_attempts` row per physical call; the adapter never retries
@@ -225,7 +332,8 @@ fetch round, decide a waiver, or converse directly with the provider after retur
 
 `SemanticReason` is not prose and is never inferred by a renderer. Every completed check stores
 exactly one `(semantic_status, semantic_reason)` pair, including success and not-requested cases.
-The valid pairs are closed:
+The enum objects, exhaustive mapping, and validator are owned by `protocol/models.py`; the table
+below mirrors that authority so the port's outcome mapping remains reviewable:
 
 | Status | Allowed reasons |
 |---|---|
@@ -246,6 +354,10 @@ The valid pairs are closed:
 | `stale` | `frontier_changed`, `dependency_changed` |
 | `failed` | `coordinator_failure` |
 
+This module must import `VALID_SEMANTIC_REASONS` and call the shared validator; it must not rebuild
+the table as a second runtime mapping. It owns only the conversion from evaluator/privacy/
+coordinator outcomes to a shared pair.
+
 `ProviderAttemptProvenance` has only facts available to the adapter at return time:
 `provider`, `endpoint_profile_id`, `endpoint_profile_version`, `model`, optional bounded
 `provider_request_id`, `sdk_version`, `prompt_digest`, `schema_digest`, `policy_digest`,
@@ -254,8 +366,35 @@ The valid pairs are closed:
 outcome `status`. It has no semantic-attempt, authorization, reservation, or receipt identifier
 and is not serializable as final finding provenance.
 
+Its exact frozen dataclass shape is:
+
+```text
+ProviderAttemptProvenance(provider: str,
+                          endpoint_profile_id: str,
+                          endpoint_profile_version: str,
+                          model: str,
+                          sdk_version: str,
+                          prompt_digest: str,
+                          schema_digest: str,
+                          policy_digest: str,
+                          privacy_policy_digest: str,
+                          sampling_params: SamplingParams,
+                          latency_ms: int,
+                          status: SemanticStatus,
+                          provider_request_id: str | None = None,
+                          token_usage: TokenUsage | None = None,
+                          cost_fields: CostFields | None = None,
+                          failure_class: SemanticFailureClass | None = None)
+```
+
+Its `status` is limited to evaluator-returnable `succeeded|refused|timeout|invalid|unavailable|
+late`. It has no `reason`; the coordinator chooses the shared reason after classifying the exact
+outcome. It reuses the finalized provenance component types so decimal-string and bound validation
+cannot drift, but it is intentionally not accepted by the finalized provenance codec.
+
 After the gateway returns and the matching terminal `EgressReceipt` or
-`LocalDisclosureReceipt` is durable, the coordinator constructs `SemanticProvenance` by adding
+`LocalDisclosureReceipt` is durable, the coordinator constructs the
+`domain.findings.SemanticProvenance` by adding
 `semantic_attempt_id`, `dispatch_kind: external|local_model`, `egress_authorization_id: str |
 None`, `local_disclosure_reservation_id: str | None`, `privacy_receipt_id`,
 `request_commitment: str | None`, and the final `status` and `reason`. External dispatch requires
@@ -266,6 +405,15 @@ external attempt and absent for a local disclosure. Predispatch outcomes have no
 Model output is always labeled `semantic_model_derived`; provenance never claims deterministic
 status.
 
+The application coordinator, not this port or a provider adapter, owns the two exact provenance
+stage failures. Passing a `ProviderAttemptProvenance` into a finding/event/result finalization path
+raises `ProtocolValueError("provider_attempt_provenance_is_not_final")`. Attempting to construct
+final `SemanticProvenance` before the matching terminal `EgressReceipt` or
+`LocalDisclosureReceipt` is durably readable and identity-matched raises
+`ProtocolValueError("privacy_receipt_not_durable")`. These are coordinator-boundary defects, never
+provider outcomes or public provider exception text; `application/check.md` owns their transaction
+and recovery behavior.
+
 ## Errors and edge cases
 
 - No approved adapter/capability is a returned `unavailable` semantic status. Under
@@ -274,7 +422,9 @@ status.
 - Refusal, timeout, invalid, unavailable, privacy block/denial/expiry, late, and stale output are
   returned/recorded, not raised. Under `semantic_required` they complete with deterministic
   findings, no semantic findings, `incomplete_check`, and an exact valid `SemanticReason`.
-- `deadline.remaining_seconds() == 0` on entry → return `SemanticResultTimeout` immediately
+- `deadline.expired(now_monotonic)` (equivalently
+  `deadline.remaining_seconds(now_monotonic) == 0.0`) on entry → return
+  `SemanticResultTimeout` immediately
   without any network call.
 - Cancellation (`anyio` cancelled exception) is re-raised, never converted; the coordinator's
   durable attempt row resolves the ambiguity.

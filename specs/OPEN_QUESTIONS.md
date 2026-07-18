@@ -50,7 +50,9 @@ empirical/review gates.
 ### Phase 0 implementation reconciliation — 2026-07-17
 
 The pre-code consistency pass rechecked the private P0–P4 review catalogue against the current
-public authorities and closed every still-live implementation ambiguity before materialization:
+public authorities and closed every still-live implementation ambiguity required by the next
+materialization boundary. Later-wave byte-identity gates remain explicit below and must close
+before their owning modules are coded:
 
 | Review seam | Frozen resolution | Public authorities updated |
 |---|---|---|
@@ -60,6 +62,15 @@ public authorities and closed every still-live implementation ambiguity before m
 | P0-4 unsupported non-LLM channel fork | A proposal to enable an unavailable v0.1 non-LLM channel is rejected immediately as `channel_unavailable`, creates no pending consent or I/O, and a crafted/imported enabled row remains fenced while producing a structural no-dispatch receipt. | ADR-009, privacy policy/domain/fixture and gateway specs |
 | P1–P4 implementation gaps | Receipt reads, recorded coverage, memory/SQLite parity, catalog DDL ownership, keyed scope commitments, service-security ownership, idle-relock reachability, exact TLS wording, recovery contracts, CLI/error mappings and dangling names were reconciled. | Affected ADRs, owning specs, schemas, fixtures and test specs |
 | E-001 implementation lock | The build lock is frozen to the exact 2026-07-17 versions in ADR-007 and repository owner specs; this does not manufacture platform/provider support evidence. | ADR-007, repository owner specs and E-001 below |
+| Wave B implementation lock (2026-07-18) | B0 now has one closed 127-reason registry, implementable Pydantic 2.13 root/presence semantics, deeply immutable package-only schema loading, and a 52-route schema bundle whose gates resolve entirely from local resources. | `INTERFACES.md`, protocol/model/schema owner specs, coverage schema and manifests |
+| Wave B replay/policy lock (2026-07-18) | Redaction-safe full replay uses one nonplaintext durable projection locator per accepted event; projection records/gaps and contradiction lifecycles are exact. Deterministic bases have explicit status/outbound mappers, complete subject cardinality/order/templates, and fixture-aligned coverage/frontiers. | Event/projection/reducer/migration, deterministic/policy/semantic specs, REP/ADV fixtures and tests |
+| Wave B port/status lock (2026-07-18) | Frozen checks always carry the current lease, replay has a distinct internal commit result, dependency staleness has one terminal conflict outcome, row queries own typed positions, and candidate status is the deterministic whole-case exception. | Ledger/memory/SQLite/status/check specs, `INTERFACES.md`, conformance/property/integration tests |
+
+### Later-wave pre-code gate
+
+| ID | Required freeze | Current posture | Exit evidence |
+|---|---|---|---|
+| W-C-001 | Freeze `migrations/bundle/0001.sql` as one standalone byte-exact fresh-database migration, including exact `import_jobs`, `import_request_aliases`, and `import_batches` column order, declarations, compound row checks, and publication-request uniqueness mechanism. | The generation-1 projection/query sidecars and their bounded access paths are frozen and execute against the reviewed base/import harness, but the importer specs currently own only a behavioral table contract. No Wave C migration or importer code may be materialized by concatenating partial SQL fences or inventing the missing importer DDL. This does not block B0–B3, which neither imports nor executes bundle migrations. | One owning root SQL fence and byte-identical installed resource; the runner contains no divergent DDL copy; fresh SQLite execution with foreign keys and trusted schema controls; exact table/index/FK inventory; importer state/constraint probes; the frozen 21-shape projection-query plan matrix. |
 
 No founder-class implementation question remains. Empirical and independent-review gates below
 remain release blockers where stated; they do not block building the bounded v0.1 implementation.

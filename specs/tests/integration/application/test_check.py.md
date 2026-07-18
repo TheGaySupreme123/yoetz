@@ -20,7 +20,16 @@ admits semantic results only after post-validation.
 - `test_assisted_packet_carries_bases_timeline_excerpts_and_omissions` — useful context is built
   from the frozen case without ambient source access.
 - `test_reviewer_challenge_reaches_agent_as_existing_finding` — no new operation/event/result field
-  is required for the reviewer-to-agent loop.
+  is required for the reviewer-to-agent loop, and the final finding identity still comes from the
+  accepted kind's owning built-in pack.
+- `test_overbound_assessment_is_omitted_without_ref_truncation` — semantic selection may skip a
+  valid 64-ref local basis but can never serialize a lossy 16-ref prefix.
+- `test_semantic_provenance_requires_durable_matching_receipt` — provisional provenance and a
+  missing/nonterminal/mismatched receipt fail at the coordinator with their exact registered reasons.
+- `test_freeze_reservation_race_and_resume` — a final-reservation race installs no stale case and
+  a reclaimed check resumes from the exact stored case object without rebuilding it.
+- `test_direct_scope_and_durable_policy_accounting` — selected claim/obligation roots constrain
+  candidates directly while required dependency material does not expand the recorded scope.
 
 ## Behavior
 
@@ -34,20 +43,42 @@ The test freezes a case and then asserts:
   material timeline, assessment, change, coverage, targeted-excerpt, and omission sections;
 - late, invented, or coverage-upgrading semantic results are rejected;
 - an accepted challenge becomes an ordinary semantic finding whose projected summary/detail can be
-  consumed by the main agent; hidden/unrecorded source never becomes an unchanged-state fact;
+  consumed by the main agent; hidden/unrecorded source never becomes an unchanged-state fact, and
+  the resulting finding policy identity is derived after validation from the chosen kind owner;
 - the final check result respects the frozen frontier and returned findings.
+- omitted scope normalizes to empty/empty whole-case; a nonempty scope admits only candidates whose
+  complete subject refs directly intersect an explicitly selected claim/obligation ID. Dependency
+  traversal may supply evaluation facts but never promotes another root. A pack with no direct
+  applicable root records `skipped/scope_excluded`, while an applicable clean evaluation records
+  `run/completed`; the committed event and result preserve the same nonempty canonical execution
+  tuple.
 - every terminal path selects the exact `SemanticReason`; provider/policy failures in
   `semantic_required` preserve deterministic findings and produce no semantic findings;
 - provider adapters return provisional attempt provenance, while only the coordinator may publish
-  receipt-finalized provenance after the terminal privacy receipt is durable.
+  receipt-finalized provenance after the terminal privacy receipt is durable;
+- passing `ProviderAttemptProvenance` to finalization raises
+  `provider_attempt_provenance_is_not_final`, while finalizing before a durably readable,
+  identity-matched terminal egress/local-disclosure receipt raises `privacy_receipt_not_durable`;
+  neither path converts the defect into a provider outcome or discards deterministic findings;
+- a 17-ref assessment creates one exact `not_selected` finding omission, remains in the full
+  coverage fold and encrypted local result, and supplies no content item or truncated assessment to
+  the fake adapter.
+- pausing after resume-object finalization and then changing the head, projection identity,
+  dependency revision, import state, or idempotency row makes final reservation fail without an
+  operation pointer; after a successful reservation, restart/reclaim opens the exact stored case
+  while the case builder and object publisher are fail-on-call.
 
 ## Errors and edge cases
 
 - A semantic result that rewrites deterministic findings fails.
 - A stale frontier that still steers the result fails.
 - Missing/mismatched reason or provenance published before receipt durability fails.
+- Retrying receipt verification may resume `privacy_receipt_not_durable`; provisional provenance is
+  a programmer defect and may never be retried as though it were provider unavailability.
 - Browsing Git/filesystem during case construction, or returning a challenge with refs outside the
   split allowlists, fails.
+- A transitive-only scope match, missing execution row, policy/execution mismatch, or reordered
+  execution tuple fails before commit.
 
 ## Invariants
 
@@ -55,6 +86,7 @@ The test freezes a case and then asserts:
 2. Semantic work is optional or required by mode.
 3. Post-validation is mandatory.
 4. Rich semantic context remains frozen, bounded, privacy-selected, and problem-local.
+5. Resume durability never inverts case-build, object-publication, and reservation order.
 
 ## Tests
 

@@ -31,10 +31,20 @@ The accepted event never embeds plaintext payload bytes. A decoded payload handl
 nonserializable domain convenience and is expressly absent from this public/persisted schema; a
 field attempting to encode one is an extra property and fails closed.
 
+This hosted document is the complete **structural JSON shape**, not a substitute for ledger
+acceptance. The local `domain/events.py` gate additionally enforces writer/ledger sequence 1 versus
+`genesis`, later-sequence predecessor digests, unsigned-ASCII ordering of set-valued ID arrays, and
+payload-family author/channel/ref mirrors; several require payload or prior-ledger context that is
+intentionally absent from this plaintext-free envelope. Both schema validation and those semantic
+checks run from packaged local resources with no URL retrieval. A valid schema-only document is not
+therefore accepted into a ledger until the local semantic gate also passes.
+
 ## Errors and edge cases
 
 - Missing ledger-chain identity fails.
 - Plaintext payload embedding fails.
+- A schema-valid record with an invalid predecessor relation, noncanonical set ordering, or
+  payload/envelope authorization mismatch still fails the local accepted-record gate.
 
 ## Invariants
 

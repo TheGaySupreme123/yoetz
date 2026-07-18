@@ -1,7 +1,8 @@
 # src/yoetz/kernel/policies/work_integrity.py — deterministic work-integrity policy pack
 
 **Wave:** B | **ADRs:** ADR-002, ADR-004, ADR-006 | **Imports (spec-tree):**
-`kernel/projections.md`, `domain/findings.md`, `protocol/coverage.md`, `protocol/errors.md` |
+`kernel/deterministic_checks.md`, `kernel/projections.md`, `domain/findings.md`,
+`protocol/coverage.md`, `protocol/errors.md` |
 **Imported by:** `kernel/deterministic_checks.md`, `kernel/ranking.md`
 
 ## Purpose
@@ -27,13 +28,19 @@ weak to say.” That distinction keeps receipts and checks honest.
 | `WORK_INTEGRITY_POLICY_VERSION` | `str = "0.1.0"` |
 | `WORK_INTEGRITY_POLICY_PACK` | frozen `PolicyPack` instance for this rule set |
 | `WORK_INTEGRITY_FACT_CODES` | frozen exact fact-code registry for every rule basis |
-| `work_integrity_findings(case)` | run the pack and return deterministic assessments |
+| `work_integrity_findings(case: DeterministicCase)` | run the pack and return `tuple[DeterministicAssessment, ...]` |
 
 ## Behavior
 
-The pack examines the frozen projection state in a case and emits deterministic assessments for
-work that is incomplete, stale, unsupported, or contradicted. Each assessment pairs the candidate
-finding with the exact internal `FindingBasis` owned by `deterministic_checks.md`.
+The pack imports `PolicyPack`, `DeterministicCase`, `FindingFact`, `FindingBasis`, and
+`DeterministicAssessment` from `kernel/deterministic_checks.py`. That owning module has no
+module-import-time dependency back to this pack; engine dispatch imports this module locally only
+after the shared types exist.
+
+The pack examines the frozen projection state in a deterministic case and emits deterministic
+assessments for work that is incomplete, stale, unsupported, or contradicted. Each assessment pairs
+the candidate finding with the exact internal `FindingBasis` owned by
+`deterministic_checks.md`.
 
 The rule inventory is stable and intentionally narrow:
 
@@ -145,15 +152,24 @@ Rule-level behavior is deterministic and conservative:
   not trigger when a later structural resolution/supersession clears the edge.
 - `ledger_stale_or_incomplete` triggers only when unknown events, redaction gaps, or freshness
   limits make the record too weak for a current conclusion. It does not trigger when the history is
-  complete and fresh.
+  complete and fresh. It uses the sorted union of the triggering `CaseGap.subject_refs`; if that
+  union is empty because every material gap is task/global, it emits no candidate and leaves the
+  gap to weaken the caller's `RankingContext` and receipt. It never invents a subject ref merely to
+  satisfy the public finding schema.
 - `weak_or_stale_response` triggers only when a response rejects or waives a finding without a
   structurally admissible typed `evidence_refs` basis, or when its exact finding frontier is stale
   relative to the responded finding. It never grades the free-text reason and does not trigger for
   a response with current admissible support.
 
-Each rule produces at most one finding per logical subject. The pack deduplicates repeated
-symptoms on the same subject so the caller sees the strongest single finding, not a pile of
-duplicates.
+Policy cardinality follows the engine contract exactly. For each rule, the logical subject key is
+the candidate's complete canonical `subject_refs` tuple. The pack groups every raw structural
+trigger input for that exact tuple before rule evaluation, evaluates the grouped input exactly
+once, and emits zero or one assessment for the emitted-key identity
+`(WORK_INTEGRITY_POLICY_ID, rule_id, subject_refs)`. Repeated raw triggers are therefore inputs to
+one evaluation. If pack wiring nevertheless emits the same key twice, the engine rejects the
+duplicate as a policy-wiring defect; no duplicate-assessment reconciliation path exists. Different
+work-integrity rules may still emit separate assessments for the same subject tuple because their
+`rule_id` members differ.
 
 Every rule also emits canonical trigger/missing fact codes and subject refs. Rules involving
 edits/tests set the basis relation from `subject_state_relation` and frozen
@@ -168,9 +184,18 @@ allowed IDs, and the current policy version. It never reads provider output and 
 SQLite. Findings are emitted with `origin = deterministic`, `provenance = None`, and the exact
 policy identity from this pack.
 
-The pack’s coverage for each finding is the weakest coverage of the refs that support the rule
-trigger. If the evidence is only partially available, the finding weakens rather than pretending to
-be complete.
+The pack derives each finding's coverage in two exact steps. First it folds `coverage.weakest`
+over `case.coverage_by_ref[ref]` for every ref in the assessment's exact sorted
+`FindingBasis.supporting_refs`. The tuple is nonempty for every emitted finding, and a missing
+index entry is a malformed case, never permission to choose a channel default. Second it constructs
+a new `Coverage` that preserves the folded `authorship_assurance`, `artifact_observation`,
+`evidence_immutability`, `ledger_freshness`, and `known_gaps` byte-for-byte; adds
+`engine_derived` to the folded sorted-unique `publication_channels`; and adds `deterministic` to
+the folded `check_types`, removing `none` when present. This derived-finding step changes only the
+two set-valued provenance dimensions. It never calls `weakest` with the `engine_derived` channel
+default and never strengthens or otherwise rewrites an ordered material dimension. The candidate's
+`subject_frontier` is exactly `case.frontier`. If supporting evidence is partial, stale, or
+redacted, the finding therefore retains that weakness instead of pretending to be complete.
 
 ## Errors and edge cases
 
@@ -189,6 +214,8 @@ be complete.
 6. Candidate and basis are generated by the same pure rule evaluation and cannot contradict.
 7. An absent result is never evidence of an outcome. `action_without_result` reports only that the
    record leaves an attempt unresolved, never that it succeeded, failed, or never happened.
+8. All raw triggers for one rule and complete subject tuple are evaluated once, and duplicate
+   emitted keys are rejected rather than reconciled.
 
 ## Tests
 

@@ -2,7 +2,7 @@
 
 **Wave:** A/B | **ADRs:** ADR-002, ADR-005, ADR-007, ADR-008, ADR-009 | **Imports (spec-tree):**
 `protocol/errors.md`, `protocol/ids.md`, `protocol/canonical.md`, `protocol/coverage.md`,
-`domain/values.md`
+`protocol/schemas.md`
 **Imported by:** most protocol, domain, application, CLI, and MCP modules
 
 ## Purpose
@@ -27,11 +27,12 @@ shape before any operation-specific fields are considered.
 | `ActorType` | enum of public actor kinds |
 | `PublicationChannel` | enum of observed publication channels |
 | `JsonValue` | recursive alias of strict JSON-compatible values |
-| `PublicEnvelopeModel` | shared request/result envelope base with schema and request identity |
+| `PublicEnvelopeModel` | shared fixed protocol/schema-version base for ordinary object models |
 | `PublicRequestModel` | abstract base for operation requests |
 | `PublicResultModel` | abstract base for operation results |
 | `OmittedContentModel` | exact field-level marker for content blocked by local-disclosure policy |
 | `PrivacyProjectionModel` | receipt-bound metadata attached to every ordinary projected result |
+| `DataCategory` | shared closed content-category enum used by result projection and later privacy policy |
 | `ActorAssertionModel` | caller-asserted actor boundary model |
 | `ClientInfoModel` | caller-asserted client boundary model |
 | `StartRequestModel` / `StartResultModel` | public models for the `start` operation |
@@ -40,7 +41,12 @@ shape before any operation-specific fields are considered.
 | `RespondRequestModel` / `RespondResultModel` | public models for `respond` |
 | `StatusRequestModel` / `StatusResultModel` | public models for `status` |
 | `ReceiptRequestModel` / `ReceiptResultModel` | public models for `receipt` |
+| `StartRequest` / `StartResult`, etc. | application-facing aliases of the twelve public models; no second dataclass family |
+| `public_model_to_wire(model: object) -> dict[str, JsonValue]` | exact twelve-model dump, local schema-validation, and copy boundary |
 | `ReceiptFormat` / `ReceiptInclude` / `ReceiptRedactionProfile` | closed receipt boundary enums |
+| `SemanticStatus` / `SemanticReason` | the one shared semantic outcome vocabulary |
+| `VALID_SEMANTIC_REASONS` | immutable exhaustive status-to-reason relation |
+| `validate_semantic_outcome(status, reason)` | reject a status/reason pair outside that relation |
 | `Timestamp` helpers | parse/format helpers for RFC 3339 UTC with three fractional digits |
 
 ## Behavior
@@ -63,10 +69,13 @@ mirrors a second enum. Its exact wire values are `request`, `installation`, `tas
 `outbound_case`, `egress_authorization`, `egress_dispatch`, `egress_receipt`, and `actor`, as owned
 by `protocol/ids.py`.
 
-`ActorType` is the boundary-facing actor classification used in request envelopes and imported
-observations. It must stay broad enough to represent humans, harnesses, subagents, imported runs,
-and Yoetz-engine-authored internal events, but it must not pretend to establish authentication by
-itself.
+`ActorType` is owned and defined in this B0 boundary module. It is the boundary-facing actor
+classification used in request envelopes and imported observations. It must stay broad enough to
+represent humans, harnesses, subagents, imported runs, and Yoetz-engine-authored internal events,
+but it must not pretend to establish authentication by itself. The later B1 `domain/values.py`
+defines its own pure-domain actor enum and converts an already validated boundary member by exact
+wire value; this module never imports a domain module, and the domain module never needs to import
+Pydantic through this boundary.
 
 `PublicationChannel` names how an event or observation entered the ledger. The ordering and
 specific members are owned by `protocol/coverage.md`; this file only exposes the boundary model
@@ -76,19 +85,12 @@ needed by request and event envelopes.
 includes only JSON primitives, arrays, and objects with string keys. It excludes Python-specific
 containers, datetimes, decimals, and any non-JSON coercion path.
 
-`PublicEnvelopeModel` is the minimal strict envelope shared by all request/result models. It
-requires:
+`PublicEnvelopeModel` is the minimal closed base containing the two fixed protocol/schema version
+fields. `PublicRequestModel` extends that base with request identity and actor/client assertions.
+`PublicResultModel` is instead the generic root base for one success/failure union; it does not
+inherit request-only fields. The exact class architecture and fields are frozen below.
 
-- a `schema_version` string;
-- a stable `request_id` when the operation uses one;
-- strict extra-field rejection;
-- bounded primitive content only;
-- no hidden fallback to environment state.
-
-`PublicRequestModel` and `PublicResultModel` are the abstract Pydantic boundary shapes that the
-CLI and MCP adapters convert into and out of domain values. The operation-specific subclasses add
-the fields for one public workflow operation at a time, but all of them must preserve the same
-strict boundary rules. They enforce:
+These boundary shapes enforce:
 
 - schema versions are explicit and validated, not inferred;
 - IDs are validated against the registry prefix and canonical lowercase UUID form;
@@ -105,8 +107,8 @@ application service:
 - `PublishWorkRequestModel` / `PublishWorkResultModel` carry one ordered batch of event drafts and
   the acceptance summary for that batch;
 - `CheckRequestModel` / `CheckResultModel` carry the frozen case, returned finding set, required
-  closed `semantic_status`/`semantic_reason` pair, and optional receipt-finalized semantic
-  provenance; a predispatch outcome always has null/absent provenance;
+  closed `semantic_status`/`semantic_reason` pair, and required-nullable receipt-finalized semantic
+  provenance; a predispatch success always carries explicit null provenance;
 - `RespondRequestModel` / `RespondResultModel` carry one response to one finding;
 - `StatusRequestModel` / `StatusResultModel` carry the read-only projection query and page result;
 - `ReceiptRequestModel` / `ReceiptResultModel` carry the frozen-frontier receipt query and the
@@ -114,6 +116,205 @@ application service:
   `include=summary|standard|full`, and
   `redaction_profile=full_local|default_local_export|redacted_share`; no unknown token is
   approximated.
+
+### Exact Pydantic v2 operation-model contract
+
+The committed Draft 2020-12 documents are normative for field spelling, requiredness, scalar
+constraints, array bounds, `uniqueItems`, and conditional validation. The Python models are a
+typed rendering of those documents, not a looser convenience DTO. Every ordinary nested data
+object in the closed support-model inventory below is a closed Pydantic model. In the signatures
+below, `Ref(uri#pointer)` means the exact schema-backed value at that packaged schema node; it never
+means an unchecked `dict`. A data-object definition named `x_y` in that inventory becomes
+`<Operation>XYModel` (for example, `status-result#/$defs/finding_item` becomes
+`StatusFindingItemModel`). The fixed naming exceptions are
+`success -> <Operation>SuccessModel`, `check_scope -> CheckScopeModel`, and the common definitions
+named below. External refs use their owning boundary model or an exact schema-backed root model
+when the owner is a domain codec.
+
+Ordinary `BaseModel` object models share
+`ConfigDict(extra="forbid", frozen=True, strict=True, validate_default=True)`. Generic and concrete
+`RootModel` classes instead use exactly
+`ConfigDict(frozen=True, strict=True, validate_default=True)`: Pydantic 2.13 rejects an `extra`
+setting on a root model, while the root's success/failure branch models already reject extra keys.
+Wire enum adapters
+accept only an actual string containing one registered token; ID, integer-string, timestamp,
+digest, commitment, bounded-string, and bounded-array aliases apply the exact constraints at the
+referenced schema node without trimming, normalization, or general Python coercion. A field marked
+`?` below is omittable but does **not** admit JSON `null` unless its declared wire type also contains
+`None`. Internally every such field is annotated `T | None = None` so omission is compatible with
+`validate_default=True`. Each owning model declares its exact
+`ClassVar[frozenset[str]]` of optional-non-null field names, and one inherited
+`model_validator(mode="before")` rejects a mapping that explicitly contains any named key with a
+`None` value. `exclude_unset=True` then preserves omission. Required-nullable fields are absent from
+that set and remain required. No model has a catch-all field or uses a mutable/magic missing
+sentinel.
+
+`PublicEnvelopeModel` is the closed `BaseModel` containing only
+`protocol_version: Literal["0.1"]` and `schema_version: Literal["1.0.0"]`.
+`PublicRequestModel` extends it with only `request_id`, `actor`, and `client`.
+`PublicResultModel[T]` is the generic `RootModel[T]` base and declares no ordinary fields; its six
+concrete type arguments are the discriminated unions below. Thus no result inherits request-only
+actor/client fields and no root wrapper can leak onto the wire.
+
+This module also owns `ActorType`, `DataCategory`, `ClientKind`, and `IntegrationKind` because
+ordinary operation models need those boundary enums in B0. Their exact members are registered in
+`specs/INTERFACES.md`. The later `domain/privacy.py` imports and re-exports `DataCategory`, and
+`domain/events.py` imports and re-exports the client enums. `domain/values.py` keeps the distinct
+pure-domain `ActorType` described above. No B0 protocol module imports a later domain module, and no
+later module creates an early protocol-to-domain dependency.
+
+The common closed models are exactly:
+
+```text
+ActorAssertionModel(actor_id: ActorAssertionIdWire, actor_type: ActorType,
+                    asserted_by: String1To256? = None,
+                    display_name: String1To256? = None)
+ClientInfoModel(kind: ClientKind, version: String1To256, integration: IntegrationKind)
+FrontierModel(sequence: CanonicalUInt64Wire, head_digest: GenesisOrSha256Digest)
+CoverageModel(publication_channels, authorship_assurance, artifact_observation,
+              evidence_immutability, ledger_freshness, check_types, known_gaps)
+SubjectStateRefModel(tree_digest: Sha256Digest? = None,
+                     diff_digest: Sha256Digest? = None,
+                     described_state: String1To256? = None)
+PublicErrorModel(code: PublicErrorCode, message: String1To4096, retryable: bool,
+                 correlation_id: CorrelationIdWire, safe_details: SafeDetails? = None)
+OmittedContentModel(omitted: Literal[True], category: DataCategory,
+                    reason: Literal["local_disclosure_not_authorized",
+                                    "never_send_redacted"])
+PrivacyProjectionModel(sink: Literal["agent_context"],
+                       local_disclosure_receipt_id: EgressReceiptIdWire,
+                       policy_id: PrivacyPolicyIdWire,
+                       policy_version: CanonicalPositiveUInt64Wire,
+                       policy_digest: Sha256Digest,
+                       included_categories: tuple[DataCategory, ...],
+                       blocked_categories: tuple[DataCategory, ...],
+                       omitted_pointers: tuple[JsonPointer, ...],
+                       projection_commitment: HmacSha256Commitment)
+OperationFailureModel(protocol_version: Literal["0.1"],
+                      schema_version: Literal["1.0.0"], ok: Literal[False],
+                      error: PublicErrorModel, request_id: RequestIdWire | None = None)
+```
+
+`ActorAssertionIdWire` is the schema's caller-asserted ASCII token
+`^[A-Za-z0-9._:-]{1,128}$`; it is deliberately not the durable `agt_` `ActorId` type and does not
+grant assurance. Every other `*IdWire` name above uses the exact prefix-bound canonical UUID type
+owned by `protocol/ids.py`.
+
+`CoverageModel` is exactly `common/coverage-1.0.0`: its publication-channel tuple must be one of
+the 63 explicitly enumerated nonempty canonical combinations, its check-type tuple must be one of
+the four explicitly enumerated combinations, and its other fields and `known_gaps` use that
+schema's exact enums and bounds. `SubjectStateRefModel` requires at least one non-null member.
+`SafeDetails` is exactly the object-or-array union in `common/public-error-1.0.0`, including safe
+integer, key, string, item, and property bounds. The privacy arrays use the exact common-schema
+bounds and uniqueness rules.
+
+Every request model inherits `protocol_version: Literal["0.1"]`,
+`schema_version: Literal["1.0.0"]`, `request_id: RequestIdWire`,
+`actor: ActorAssertionModel`, and `client: ClientInfoModel`. Its remaining exact fields are:
+
+| Model | Additional fields (all required unless marked `?`) |
+|---|---|
+| `StartRequestModel` | `mode: Literal["attach","create","create_or_attach"]`; `task_title: String1To8192`; `requested_view: Literal["compact"]`; `session_id: SessionIdWire?`; `external_ref: String1To8192?`; `workspace_ref: String1To8192?` |
+| `PublishWorkRequestModel` | `session_id: SessionIdWire`; `writer_id: WriterIdWire`; `expected_frontier: FrontierModel | None` (required and nullable); `event_drafts: tuple[Ref(event-draft-1.0.0), ...]` with `1..100` members, order preserved and duplicates permitted |
+| `CheckRequestModel` | `session_id: SessionIdWire`; `writer_id: WriterIdWire`; `expected_frontier: FrontierModel`; `mode: Literal["deterministic_only","semantic_if_configured","semantic_required"]`; `scope: CheckScopeModel?`; `max_findings: Literal["1",...,"10"]?`; `policy_packs: tuple[Literal["research-evidence/0.1.0","work-integrity/0.1.0"], ...]?` with `1..2` unique members |
+| `RespondRequestModel` | `session_id: SessionIdWire`; `writer_id: WriterIdWire`; `expected_frontier: FrontierModel`; `finding_id: FindingIdWire`; `finding_frontier: FrontierModel`; `disposition: Literal["acknowledged","rejected","waived"]`; `reason: String1To4096?`; `waiver_scope: Literal["finding_only"]?`; `waiver_expiry: TimestampWire?`; `evidence_refs: tuple[EvidenceIdWire | ResultIdWire, ...]?` with `0..64` unique members |
+| `StatusRequestModel` | `session_id: SessionIdWire`; `writer_id: WriterIdWire`; `view: Literal["assignment","candidate_findings","compact","evidence","findings","history","obligations","versions"]`; `limit: CanonicalPageLimitWire` (`"1".."100"`); `filter: StatusFilter?`; `at_frontier: CanonicalUInt64Wire | None = None`; `cursor: CursorWire | None = None` |
+| `ReceiptRequestModel` | `task_id: TaskIdWire`; `session_id: SessionIdWire`; `writer_id: WriterIdWire`; `expected_frontier: FrontierModel`; `format: ReceiptFormat`; `include: ReceiptInclude`; `redaction_profile: ReceiptRedactionProfile` |
+
+`CheckScopeModel` has required `claim_ids` and `obligation_ids`, each a `0..64` unique tuple
+of its matching typed ID. `StatusFilter` is the union of the six exact closed `$defs` filter
+models in `status-request-1.0.0`; each member's fields, enum values, integer bounds, and
+requiredness come directly from that node. A status filter, when present, must match `view`;
+`compact` and `versions` forbid it. Start enforces both-or-neither attachment refs and requires
+`session_id` or both refs for `attach`. Respond enforces the three disposition branches exactly:
+acknowledgement forbids waiver fields, rejection requires `reason` and forbids waiver fields, and
+waiver requires `reason` plus `waiver_scope` (expiry remains optional).
+
+Each success branch is a normal closed `BaseModel`; every field in the table is required and no
+other field exists:
+
+| Success model | Exact fields |
+|---|---|
+| `StartSuccessModel` | `protocol_version`, `schema_version`, `request_id`, `ok: Literal[True]`, `outcome: Literal["attached","created","replayed"]`, `task_id`, `session_id`, `writer_id`, `frontier: FrontierModel`, `compact: StartCompactViewModel`, `versions: StartVersionSliceModel`, `privacy_projection` |
+| `PublishWorkSuccessModel` | `protocol_version`, `schema_version`, `request_id`, `ok: Literal[True]`, `outcome: Literal["accepted","replayed"]`, `task_id`, `session_id`, `writer_id`, `subject_frontier`, `result_frontier`, `accepted_events: tuple[PublishWorkAcceptedEventModel, ...]` (`1..100`, order preserved), `warning_codes`, `coverage`, `gaps`, `versions: PublishWorkVersionSliceModel`, `privacy_projection` |
+| `CheckSuccessModel` | `protocol_version`, `schema_version`, `request_id`, `ok: Literal[True]`, `task_id`, `session_id`, `writer_id`, `subject_frontier`, `result_frontier`, `verdict`, `findings: tuple[CheckProjectedFindingModel, ...]` (`0..10`), `suppressed_count: CanonicalUInt64Wire`, `policy_executions: tuple[CheckPolicyExecutionModel, ...]` (`1..2`, unique), `semantic_status`, `semantic_reason`, `semantic_provenance: Ref(semantic-provenance) | None` (required and nullable), `coverage`, `versions: CheckVersionSliceModel`, `privacy_projection` |
+| `RespondSuccessModel` | `protocol_version`, `schema_version`, `request_id`, `ok: Literal[True]`, `task_id`, `session_id`, `writer_id`, `subject_frontier`, `result_frontier`, `accepted_event: RespondAcceptedEventModel`, `response: RespondResponseModel`, `coverage`, `warning_codes`, `versions: RespondVersionSliceModel`, `privacy_projection` |
+| `StatusSuccessModel` | `protocol_version`, `schema_version`, `request_id`, `ok: Literal[True]`, `task_id`, `session_id`, `writer_id`, `view`, `requested_frontier`, `head_frontier`, `subject_frontier`, `result_frontier`, `projection_lag: CanonicalUInt64Wire`, `projection_version`, `rebuild_state`, `page: StatusPage`, `coverage`, `gaps`, `import_status: StatusImportStatusModel`, `privacy_projection` |
+| `ReceiptSuccessModel` | `protocol_version`, `schema_version`, `request_id`, `ok: Literal[True]`, `receipt_id`, `task_id`, `session_id`, `subject_frontier`, `result_frontier`, `receipt_object_id`, `receipt_digest`, `conclusion`, `redaction_profile`, `format`, `include`, `document: Ref(receipt-document) | None` (required and nullable), `human_text: String1To32768 | finding-summary omission | None` (required and nullable), `coverage`, `suppressed_finding_count: int` (`0..2**53-1`, bool forbidden), `versions: ReceiptVersionSliceModel`, `privacy_projection` |
+
+The remaining result **data-object** support-model inventory is closed and exact: start has `compact_view` and
+`version_slice`; publish-work has `accepted_event` and `version_slice`; check has
+`policy_execution`, `projected_finding`, and `version_slice`; respond has `accepted_event`,
+`evidence_summary`, `response`, and `version_slice`; receipt has `version_slice`; status has
+`assignment_item/page`, `candidate_finding_item/candidate_findings_page`, `compact_finding/item/
+obligation/page`, `evidence_item/page`, `finding_basis`, `finding_item/findings_page`,
+`history_item/page`, `import_status`, `obligation_item/obligations_page`,
+`structural_subject_state`, `version_slice`, and `versions_page`. Their Python fields are exactly
+the properties at the same `$defs` node, with the same required list; the parity test compares
+`model_fields` against those properties and therefore forbids an omitted, renamed, or invented
+field.
+
+Every named `$defs` entry outside that inventory has exactly one of three non-DTO roles and does not
+produce a standalone `BaseModel`: primitive/string/ID definitions become constrained aliases;
+`*_omission` definitions become literal-narrowed aliases of the common omission model and are
+enforced by their owning outer field; and identity, `semantic_pair_*`, or `view_*` definitions are
+schema predicates enforced by the corresponding outer model validator. In particular
+`task_summary_event_identity`, `known_event_identity`, the specialized omission definitions,
+`semantic_pair_*`, and `view_*` are not closed records: some intentionally admit surrounding
+properties so they cannot inherit `extra="forbid"`. The schema-parity test maintains the complete
+classification of every current named `$defs` key and fails if a new definition is neither in the
+data-object inventory nor assigned one of these exact alias/predicate roles.
+
+`StatusPage` is the union of exactly the eight page models. `StatusSuccessModel` validates the
+outer `view`/`page` relation: each view admits only its corresponding page; compact and versions
+pages require `next_cursor is None`. Check validates the semantic status/reason relation and the
+provenance conditions in the frozen schema. Publish accepted-event summaries, projected finding
+omissions, response disposition fields, finding provenance, and receipt `format` versus
+`document`/`human_text` enforce their schema's `if`/`then` branches without repair or defaults.
+
+Results are object-valued Pydantic `RootModel`s, never `BaseModel`s with a `root` wire property:
+
+```text
+StartResultBranch = Annotated[StartSuccessModel | OperationFailureModel,
+                              Field(discriminator="ok")]
+class StartResultModel(PublicResultModel[StartResultBranch]): ...
+```
+
+The identical construction applies to `PublishWorkResultModel`, `CheckResultModel`,
+`RespondResultModel`, `StatusResultModel`, and `ReceiptResultModel`. A shared root
+`model_validator(mode="before")` requires a mapping with `type(value.get("ok")) is bool` before
+Pydantic's discriminator runs; this is required because strict Pydantic 2.13 still permits integer
+`0` for `Literal[False]`. Thus `ok` must be the JSON boolean `true` or `false`; integers and strings
+do not select a branch. Dumping a result root produces the branch object itself, with no
+`{ "root": ... }` wrapper. The application-facing names are exact
+aliases, not subclasses or parallel dataclasses:
+
+```text
+StartRequest = StartRequestModel                 StartResult = StartResultModel
+PublishWorkRequest = PublishWorkRequestModel     PublishWorkResult = PublishWorkResultModel
+CheckRequest = CheckRequestModel                 CheckResult = CheckResultModel
+RespondRequest = RespondRequestModel             RespondResult = RespondResultModel
+StatusRequest = StatusRequestModel               StatusResult = StatusResultModel
+ReceiptRequest = ReceiptRequestModel             ReceiptResult = ReceiptResultModel
+```
+
+`public_model_to_wire(model)` is the only public wire-dump boundary. `type(model)` must be exactly
+one of the twelve concrete request/result model classes; a support model, branch model, subclass, or
+arbitrary object raises ordinary `TypeError("public_model_wrong_type")`. An immutable exact-type map
+selects the matching `start|publish-work|check|respond|status|receipt` request/result schema name and
+version `1.0.0`; no class-name parsing or nearest-schema lookup exists. The helper dumps with exactly
+`mode="json", by_alias=True, exclude_unset=True, exclude_none=False`, requires the result to be an
+ordinary dictionary, calls `protocol.schemas.validate_schema_instance(schema_name, "1.0.0",
+dumped)`, and returns a newly allocated ordinary `dict[str, JsonValue]` only after that succeeds.
+The helper preserves absent versus explicitly-null optional fields and arrays remain arrays.
+
+Direct Pydantic `model_dump` remains an implementation primitive and is not an authorized CLI/MCP/
+control serialization boundary. Canonical boundary bytes are
+`canonical_encode(public_model_to_wire(model))`, not Pydantic's formatting. For every valid wire
+value, parse then boundary-dump then parse is value-identical, and a result root round-trips as one
+object. Schema resolution for this validation is local-only through the packaged catalog; no URL is
+fetched. A model/schema drift failure is the bounded
+`ProtocolValueError("schema_instance_invalid")` and no invalid dictionary is returned.
 
 A post-validated `ReviewerChallenge` does not add a wire model. Its discrepancy is the semantic
 finding `summary`; its bounded direct main-agent message, alternative interpretation, uncertainty,
@@ -145,11 +346,13 @@ form. The projected form keeps fields classified by the frozen result-field regi
   `sink: agent_context`, canonical `local_disclosure_receipt_id`, policy ID/version/digest,
   sorted unique included/blocked categories, and sorted unique omitted JSON Pointers.
 
-`trusted_human_control` projections use the same model only on the confidential foreground control
-protocol; ordinary operation schemas accept `agent_context` only. The registry enumerates every
-content-bearing leaf for all six operations and every support result. Adding a result field without
-an explicit `public_structural` or `DataCategory` classification is a release-blocking schema
-error and prevents serialization at runtime.
+`PrivacyProjectionModel` is the ordinary operation/support projection and its frozen wire sink is
+only `agent_context`. Authenticated `trusted_human_control` previews and policy diffs cross the
+separate confidential foreground control boundary and use that boundary's own projection and audit
+records; they never serialize this model. The registry enumerates every content-bearing leaf for
+all six operations and every support result. Adding a result field without an explicit
+`public_structural` or `DataCategory` classification is a release-blocking schema error and
+prevents serialization at runtime.
 
 ### Frozen result-field registry and projection bounds
 
@@ -217,7 +420,47 @@ JCS({method, canonical_internal_result, sink, policy_digest, field_decisions, re
 Neither an unkeyed internal-result digest nor a plaintext-derived unkeyed projection digest is
 public/catalog-visible. Replay validates the commitment before returning the same receipt/projection.
 
-`CheckResultModel` validates the status/reason matrix from `ports/semantic.md`. A
+### Shared semantic outcome vocabulary
+
+This module is the nominal owner of `SemanticStatus`, `SemanticReason`, and their closed relation.
+It must define them before the domain and port layers, so `domain/findings.py`,
+`domain/events.py`, `ports/semantic.py`, and the public check models all import the same enum
+objects instead of defining lookalike values in opposite dependency directions.
+
+`SemanticStatus` is exactly `not_requested`, `not_configured`, `blocked_by_policy`,
+`blocked_forbidden_data`, `classification_uncertain`, `awaiting_human`, `human_denied`,
+`approval_expired`, `succeeded`, `refused`, `timeout`, `invalid`, `unavailable`, `late`, `stale`,
+or `failed`. `SemanticReason` is exactly the reason inventory registered in
+`specs/INTERFACES.md` section 7. `VALID_SEMANTIC_REASONS` is a read-only mapping whose keys exhaust
+`SemanticStatus` and whose frozen value sets are:
+
+| Status | Allowed reasons |
+|---|---|
+| `not_requested` | `deterministic_mode`, `no_material_semantic_case` |
+| `not_configured` | `provider_not_configured`, `local_model_not_configured` |
+| `blocked_by_policy` | `network_egress_denied`, `channel_disabled`, `provider_binding_not_authorized`, `scope_not_authorized`, `content_category_not_authorized`, `policy_generation_revoked` |
+| `blocked_forbidden_data` | `never_send_detected`, `secret_detected` |
+| `classification_uncertain` | `classification_uncertain` |
+| `awaiting_human` | `human_approval_required` |
+| `human_denied` | `human_denied` |
+| `approval_expired` | `human_approval_expired` |
+| `succeeded` | `semantic_completed` |
+| `refused` | `provider_refused` |
+| `timeout` | `provider_timeout` |
+| `invalid` | `response_schema_invalid`, `response_content_invalid`, `semantic_judgment_rejected` |
+| `unavailable` | `credential_unavailable`, `endpoint_profile_unavailable`, `transport_unavailable`, `provider_rate_limited`, `provider_quota_exhausted`, `retry_budget_exhausted`, `audit_reservation_unavailable`, `receipt_persistence_unknown` |
+| `late` | `deadline_authority_lost`, `lease_authority_lost` |
+| `stale` | `frontier_changed`, `dependency_changed` |
+| `failed` | `coordinator_failure` |
+
+`validate_semantic_outcome(status, reason)` accepts enum instances only and returns `None` for an
+allowed pair. A value of the wrong enum type raises
+`ProtocolValueError("invalid_semantic_outcome_type")`; a disallowed pair raises
+`ProtocolValueError("invalid_semantic_status_reason_pair")`. It never coerces strings. The
+mapping and validator contain no provider dispatch logic; `ports/semantic.py` owns how a concrete
+outcome reaches one of these already-registered pairs.
+
+`CheckResultModel` validates this locally owned matrix. A
 `semantic_required` gap is an ordinary successful result envelope with
 `verdict=incomplete_check`, preserved deterministic findings, no semantic findings, and the exact
 reason code. The model never asks a client to infer semantic incompleteness from a generic warning
@@ -238,6 +481,10 @@ spellings, and any lossy coercion that would alter the exact string round trip.
   and strict-field discipline.
 - An omission marker in a structural field, an unclassified result field, a projection without a
   durable receipt, or a receipt/sink/policy mismatch is invalid.
+- A malformed, noncanonical, oversized, overlapping, or unmatched result-registry JSON Pointer
+  raises `ProtocolValueError("invalid_json_pointer")`; this module owns that registered reason.
+- An unknown semantic enum or disallowed semantic status/reason pair is invalid; no renderer or
+  adapter may repair it.
 
 ## Invariants
 

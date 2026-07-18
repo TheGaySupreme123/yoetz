@@ -1,7 +1,8 @@
 # src/yoetz/domain/findings.py — canonical finding values and ranking inputs
 
 **Wave:** B | **ADRs:** ADR-002, ADR-006 | **Imports (spec-tree):** `protocol/coverage.md`,
-`protocol/errors.md`, `domain/values.md`
+`protocol/errors.md`, `protocol/models.md` (`SemanticStatus`, `SemanticReason`, pair validator),
+`domain/values.md`
 **Imported by:** `kernel/ranking.md`, `kernel/deterministic_checks.md`, `domain/receipts.md`,
 `application/check.md`, `application/respond.md`, `cli/render.md`
 
@@ -17,8 +18,10 @@ assistant prose.
 | Name | Signature (natural language) |
 |---|---|
 | `FindingKind` | enum of deterministic and semantic finding kinds from `specs/INTERFACES.md` |
+| `FindingOrigin` | enum: `deterministic`, `semantic_model_derived` |
 | `CheckVerdict` | enum: `action_required`, `no_issue_detected`, `insufficient_coverage`, `incomplete_check` |
 | `WaiverScope` | enum with the sole v0.1 value `finding_only` |
+| `ResponseDisposition` | enum: `acknowledged`, `rejected`, `waived` |
 | `FINDING_KIND_TRAITS` | immutable mapping `FindingKind -> (required_priority, actionable)` registered in `specs/INTERFACES.md` |
 | `CandidateFinding` | frozen ID-free value produced by pure deterministic/semantic post-validation |
 | `Finding` | frozen dataclass `(finding_id, kind, origin, priority, summary, detail, subject_refs, policy_id, policy_version, subject_frontier, coverage, provenance)` |
@@ -26,9 +29,116 @@ assistant prose.
 | `SemanticFinding` | alias of `Finding` for semantic-origin findings |
 | `RankedFindings` | frozen dataclass `(findings, suppressed_count, verdict, coverage)` |
 | `SemanticProvenance` | frozen provenance record for semantic findings |
+| `SamplingParams` / `TokenUsage` / `CostFields` | frozen schema-shaped provenance components |
+| `SemanticDispatchKind` / `SemanticFailureClass` | closed finalized-provenance enums |
+| `finding_from_json(value)` / `finding_to_json(finding)` | exact finding schema codecs |
+| `semantic_provenance_from_json(value)` / `semantic_provenance_to_json(value)` | exact finalized-provenance codecs |
 | `rank_key(finding)` | deterministic sort key helper |
 
 ## Behavior
+
+### Nominal values and exact record shapes
+
+Every enum in this file is a `str`-valued enum and every record below is
+`@dataclass(frozen=True, slots=True)`. `FindingOrigin`, `FindingKind`, `CheckVerdict`,
+`WaiverScope`, and `ResponseDisposition` are the nominal values imported by events, receipts,
+ranking, and renderers; those consumers do not define parallel enums.
+
+`CandidateFinding` has exactly these fields, in constructor order:
+
+```text
+kind: FindingKind
+origin: FindingOrigin
+priority: int
+summary: str
+detail: str
+subject_refs: tuple[EventId | ObligationId | ClaimId, ...]
+policy_id: str
+policy_version: str
+subject_frontier: Frontier
+coverage: Coverage
+provenance: SemanticProvenance | None = None
+```
+
+`Finding` has the same fields with one leading
+`finding_id: FindingId`. `RankedFindings` is exactly
+`findings: tuple[Finding, ...]`, `suppressed_count: int`, `verdict: CheckVerdict`, and
+`coverage: Coverage`. `priority` is an `int` but not `bool`; `suppressed_count` is an `int` but not
+`bool` in `0..2**53-1`. Subject refs are 1..64, sorted by unsigned ASCII bytes, duplicate-free,
+and limited to the three registered ID kinds. Text and policy identities use the bounds and
+patterns in `schemas/findings/finding-1.0.0.schema.json`.
+
+The `policy_id` / `policy_version` pair on `Finding` is derived from the finding kind's unique
+owning built-in pack after validation. The partition is frozen and disjoint: the ten work-integrity
+kinds map to `work-integrity/0.1.0`, the four research-evidence kinds map to
+`research-evidence/0.1.0`, and `semantic-review` is only a review-context recipe label. A
+`ReviewerChallenge` carries no policy identity and cannot choose or override this derived field.
+
+Final semantic provenance uses these supporting values:
+
+```text
+SemanticDispatchKind = external | local_model
+SemanticFailureClass = authentication | authorization | provider_outage | quota_exhausted |
+                       rate_limited | response_schema | timeout | transport |
+                       unsupported_profile
+
+SamplingParams(max_output_tokens: int,
+               temperature: str | None = None,
+               top_p: str | None = None,
+               seed: int | None = None)
+TokenUsage(input_tokens: int, output_tokens: int, total_tokens: int)
+CostFields(currency: str, input_microunits: int,
+           output_microunits: int, total_microunits: int)
+```
+
+The integer fields above are domain integers. Their provenance wire form is the canonical unsigned
+decimal string required by the schema; they are never floats or `Decimal`. Usage, cost, seed, and
+latency values are in `0..2**53-1`; `max_output_tokens` is in `1..8192`. Temperature and `top_p`
+remain the schema's exact fixed-decimal strings, so decoding and re-encoding cannot change their
+spelling.
+
+`SemanticProvenance` has exactly these fields (required fields first only to make the Python
+constructor unambiguous; canonical JSON key order is independent):
+
+```text
+provider: str
+endpoint_profile_id: str
+endpoint_profile_version: str
+model: str
+sdk_version: str
+prompt_digest: str
+schema_digest: str
+policy_digest: str
+privacy_policy_digest: str
+sampling_params: SamplingParams
+latency_ms: int
+semantic_attempt_id: str                  # att_ ID
+dispatch_kind: SemanticDispatchKind
+privacy_receipt_id: str                   # egr_ ID
+status: SemanticStatus
+reason: SemanticReason
+provider_request_id: str | None = None
+token_usage: TokenUsage | None = None
+cost_fields: CostFields | None = None
+failure_class: SemanticFailureClass | None = None
+egress_authorization_id: str | None = None # aut_ ID
+local_disclosure_reservation_id: str | None = None # ppr_ ID
+request_commitment: str | None = None
+```
+
+Construction calls `protocol.models.validate_semantic_outcome`. Final provenance permits only the
+terminal statuses represented by its schema: `succeeded`, `refused`, `timeout`, `invalid`,
+`unavailable`, `late`, `stale`, and `failed`. `external` requires
+`egress_authorization_id` and `request_commitment` and forbids
+`local_disclosure_reservation_id`; `local_model` requires the local reservation and forbids both
+external fields. `privacy_receipt_id` is required in both branches. All IDs, digests, commitments,
+identities, fixed decimals, and optional fields are validated exactly as
+`schemas/findings/semantic-provenance-1.0.0.schema.json`; no provisional adapter object satisfies
+this type.
+
+`SemanticStatus`, `SemanticReason`, `VALID_SEMANTIC_REASONS`, and their validator are nominally
+owned by `protocol/models.py`. This module imports them; it does not redeclare or re-export a
+lookalike enum. `ports/semantic.py` may re-export those same objects for port consumers.
 
 `CandidateFinding` has every logical `Finding` field except `finding_id`. Pure policy functions
 return candidates so they remain deterministic and cannot read ambient randomness. The application
@@ -105,6 +215,22 @@ not an external log lookup. A provider adapter's provisional `ProviderAttemptPro
 valid here; the coordinator may construct this value only after the matching privacy receipt is
 durable.
 
+### JSON codecs
+
+`semantic_provenance_from_json(value)` requires a `JsonObject` with exactly the schema's keys,
+constructs all nested records and nominal enums, converts canonical unsigned-decimal strings to
+domain integers, and rejects unknown/missing/conditionally invalid fields with bounded
+`ProtocolValueError` reasons. `semantic_provenance_to_json(value)` emits the inverse closed object,
+omitting every `None` optional and rendering all wire-decimal fields canonically.
+
+`finding_from_json(value)` and `finding_to_json(finding)` are the sole finding codecs. They use the
+coverage codec owned by `protocol/coverage.py`, `Frontier.as_wire()` and the corresponding strict
+frontier decoder, and the provenance codecs above. A semantic origin requires provenance; a
+deterministic origin forbids it. They preserve sorted tuples and reject unknown keys. For every
+valid schema value `x`, canonical encoding of `finding_to_json(finding_from_json(x))` equals the
+canonical encoding of `x`; no Pydantic dump, adapter dict, or event-specific duplicate serializer
+is permitted.
+
 `RankedFindings` preserves:
 
 - the ordered selection returned to the caller (not necessarily the ordinary top-N prefix because
@@ -124,6 +250,16 @@ Suppressing or diversity-replacing a finding never changes that coverage field.
 coverage bucket, origin preference, and finally finding ID bytes. It never reads prose.
 
 ## Errors and edge cases
+
+The exact `ProtocolValueError` reasons first raised by this module are:
+`invalid_finding_origin`, `invalid_finding_kind`, `finding_priority_mismatch`,
+`invalid_finding_subject_refs`, `invalid_finding_policy_identity`,
+`invalid_finding_provenance`, `invalid_ranked_findings`, `invalid_sampling_params`,
+`invalid_token_usage`, `invalid_cost_fields`, `invalid_semantic_dispatch_kind`,
+`invalid_semantic_failure_class`, `invalid_semantic_provenance`,
+`finding_json_shape_invalid`, and `semantic_provenance_json_shape_invalid`. This closed inventory
+must appear in `protocol.errors.PROTOCOL_REASON_CODES`. Imported ID, digest, commitment, frontier,
+coverage, canonical-set, and semantic-pair validators propagate their owning reason unchanged.
 
 - Unknown finding kinds are invalid at the boundary.
 - A semantic finding without finalized provenance is invalid. An imported semantic observation

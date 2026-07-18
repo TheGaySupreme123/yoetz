@@ -20,16 +20,16 @@ and does not enforce the profile).
 
 | Name | Signature (natural language) |
 |---|---|
-| `JsonValue` | type alias: `None | bool | int | str | Sequence[JsonValue] | Mapping[str, JsonValue]` (re-exported for callers; floats are not a member) |
+| `JsonValue` | exact recursive type alias: `None | bool | int | str | list[JsonValue] | tuple[JsonValue, ...] | Mapping[str, JsonValue]` (re-exported for callers; no other `Sequence` and no float is a member) |
 | `canonical_encode(value: JsonValue) -> bytes` | restricted-JCS UTF-8 bytes; raises `ProtocolValueError` |
 | `canonical_digest(value: JsonValue) -> str` | `"sha256:" + sha256(canonical_encode(value)).hexdigest()` |
-| `strict_json_parse(data: bytes) -> JsonValue` | strict profile-enforcing JSON decode; raises `ProtocolValueError` |
+| `strict_json_parse(data: bytes | bytearray) -> JsonValue` | strict profile-enforcing JSON decode over an immutable input snapshot; raises `ProtocolValueError` |
 | `ensure_canonical_value(value: JsonValue) -> None` | walk an already-parsed value (e.g. from the MCP SDK) and enforce the full profile without encoding |
-| `ensure_canonical_set(values: Sequence[str]) -> None` | enforce set-valued-field rules (ASCII, ascending unsigned byte order, no duplicates) |
+| `ensure_canonical_set(values: list[str] | tuple[str, ...]) -> None` | enforce set-valued-field rules (ASCII, ascending unsigned byte order, no duplicates) |
 | `canonical_integer_string(value: int) -> str` | render a nonnegative int ≤ 2^63−1 as `0|[1-9][0-9]*`; raises on range |
 | `parse_canonical_integer_string(value: str, *, signed: bool = False) -> int` | strict inverse; raises `noncanonical_integer_string` |
 | `request_digest(identity: JsonValue) -> str` | publication-request identity digest with ledger-assigned-field fence |
-| `entry_digest(envelope: JsonValue) -> str` | accepted-entry digest of the structural envelope |
+| `entry_digest(preimage: JsonValue) -> str` | accepted-entry digest of the schema-shaped digest-preimage view |
 | `MAX_JSON_DEPTH` | `int = 64` — the one shared maximum container nesting bound registered in `specs/INTERFACES.md` |
 
 ## Behavior
@@ -95,8 +95,10 @@ digest `sha256:06efd62f5b85ba6f06b14beb4939be5733c4d75d2ea344d1dbeca87c9cb07912`
 
 The only permitted wire-JSON decoder in the digest path and at the CLI boundary.
 
-1. `data` must be `bytes`/`bytearray` → else `input_not_bytes`.
-2. Decode UTF-8 with `errors="strict"` → failure raises `invalid_utf8`.
+1. `data` must be `bytes`/`bytearray` → else `input_not_bytes`. A `bytearray` is copied once to
+   immutable `bytes` before any decode, inspection, or parse; every later step uses only that
+   snapshot, so caller mutation cannot change the value being validated.
+2. Decode the immutable bytes as UTF-8 with `errors="strict"` → failure raises `invalid_utf8`.
 3. Reject a leading U+FEFF with `byte_order_mark_forbidden` (a BOM decodes cleanly, so this is an
    explicit check, not a decode failure).
 4. Parse with a `json.JSONDecoder` configured so the profile is enforced *during* parse:
@@ -129,12 +131,14 @@ same reason codes.
 
 ### `ensure_canonical_set(values)`
 
-For protocol-`0.1` set-valued fields (`causal_parents`, reference arrays, `known_gaps`): every
-member must be `str` and pure ASCII (`set_member_not_ascii`); members must be strictly ascending
-by unsigned byte comparison of their ASCII bytes — an equal neighbor raises
-`duplicate_set_member`, a descending neighbor raises `unsorted_set_field`. Empty sequences pass.
-This validates; it never silently sorts (the client must send canonical order — normalization at
-the boundary would create two accepted spellings of the same request bytes and break
+For protocol-`0.1` set-valued fields (`causal_parents`, reference arrays, `known_gaps`), the outer
+value must satisfy `isinstance(values, (list, tuple))`; every other outer type, including `str`,
+`bytes`, another `Sequence`, or an iterator, raises `unsupported_json_type`. Every member must be
+`str` and pure ASCII; a non-string or non-ASCII member raises `set_member_not_ascii`. Members must
+be strictly ascending by unsigned byte comparison of their ASCII bytes — an equal neighbor raises
+`duplicate_set_member`, a descending neighbor raises `unsorted_set_field`. Empty lists and tuples
+pass. This validates; it never silently sorts (the client must send canonical order — normalization
+at the boundary would create two accepted spellings of the same request bytes and break
 idempotency-digest equality).
 
 ### Integer-string helpers
@@ -159,12 +163,25 @@ any failure → `noncanonical_integer_string`. `"01"`, `"+1"`, `"1 "`, `"-0"`, `
   `application/publish_work.md` (and `application/start.md` for the catalog); this helper owns
   only bytes + fence. Result string is stored as `request_digest` under
   `(writer_id, operation_id)` / `(installation_id, operation_id)`.
-- **`entry_digest(envelope)`** — SHA-256 over the canonical bytes of the accepted structural
-  `AcceptedEvent` envelope in `specs/src/yoetz/domain/events.md` *after* the ledger assigns
-  order and predecessors. Requires the
-  value be a mapping with `envelope["protocol"] == "yoetz.event"` → else
-  `not_an_accepted_envelope`. The digest is stored **beside** the bytes, never embedded in the
-  bytes it hashes. Empty predecessor is the literal string `"genesis"`, never `null`.
+- **`entry_digest(preimage)`** — SHA-256 over the canonical bytes of the accepted structural
+  `AcceptedEvent` **digest-preimage view** from `accepted_record_digest_preimage()` in
+  `specs/src/yoetz/domain/events.md`, after the ledger assigns order and predecessors. The input
+  must be a `Mapping`, must have `preimage["protocol"] == "yoetz.event"`, and its keys must be
+  exactly `artifact_refs`, `author`, `causal_parents`, `coverage`, `event_id`, `evidence_refs`,
+  `ledger`, `occurred_at`, `operation_id`, `payload_ref`, `protocol`, `protocol_version`,
+  `publication_channel`, `redaction`, `schema`, `session_id`, `task_id`, and `writer`. Thus it has
+  neither a top-level `entry_digest` nor a top-level decoded `payload`. A non-mapping input, wrong
+  protocol token, missing top-level field, or extra top-level field raises
+  `ProtocolValueError("not_an_accepted_envelope")` before canonical encoding. After that exact
+  top-level gate, ordinary canonical-value validation owns types, integer bounds, strings, keys,
+  and depth and propagates its own registered reason. This helper deliberately does **not** perform
+  deep accepted-event schema or domain validation; `domain/events.py` and the frozen accepted-event
+  schema own those checks before producing this preimage. The view contains every other field in
+  the persisted accepted record, including `payload_ref`, and is exactly the full schema-shaped
+  record with `entry_digest` removed. The full record (which includes `entry_digest` and excludes
+  decoded `payload`) is what the accepted-event JSON Schema validates; that schema is not applied
+  to the deliberately incomplete preimage. Empty predecessor is the literal string `"genesis"`,
+  never `null`.
 
 Both return `sha256:<64 lowercase hex>`. `event_id` (logical name), `payload.commitment` (keyed
 payload identity), `entry_digest` (ledger-entry identity), and `operation_id` (retryable API
@@ -179,8 +196,11 @@ fixture and must agree byte-for-byte; profile-rejection fixtures are asserted Py
 (full JCS accepts floats the profile rejects). The gate blocks release on any mismatch. Fixtures
 include: all RFC 8785 vectors applicable to the profile, the verified negative-zero erratum,
 UTF-16 ordering cases (Hebrew, emoji, combining marks, the `𝌆`/`ﬀ` inversion above), NFC/NFD
-distinctness, and fuzz-discovered cases (each promoted to a frozen vector). This module requires
-100% branch coverage — it is consensus-critical code.
+distinctness, and fuzz-discovered cases (each promoted to a frozen vector). Complete branch
+coverage and independent-oracle parity are behavioral release obligations because this module is
+consensus-critical. Their measurement harness, locked second-language tool, and CI wiring belong
+to the named Wave F `pr-ci.yml`/`release.yml` workflow and repository-tooling owners; B0 does not
+add an otherwise unused runtime or development dependency merely to measure them early.
 
 ## Errors and edge cases
 
@@ -208,21 +228,34 @@ Reason codes owned here (registered in `PROTOCOL_REASON_CODES`): `input_not_byte
    strings (INTERFACES §3).
 4. No Unicode normalization, ever; strings are preserved exactly.
 5. `request_digest` input excludes plaintext payloads, object IDs, nonces, and all
-   ledger-assigned fields; `entry_digest` input is the full structural envelope excluding the
-   digest itself.
+   ledger-assigned fields. Accepted entries have two explicit views: the full persisted/schema
+   record includes `entry_digest` and excludes decoded `payload`; the digest preimage excludes
+   both `entry_digest` and decoded `payload` and otherwise contains the same structural fields.
 6. No key material, HMAC computation, or secret enters this module (ADR-004 boundary).
 
 ## Tests
 
-- `fixtures/canonical/` golden vectors (positive, rejection, request-digest, entry-digest,
-  integer-string, set-field) — permanent compatibility obligations once released.
+- Root `fixtures/canonical/` golden vectors, loaded only through the manifest-bound
+  `tests/fixture_loader.py` (positive, rejection, request-digest, entry-digest, integer-string,
+  set-field) — permanent compatibility obligations once released. Tests never parse the Markdown
+  fixture-spec shadows and never fall back to an installed mirror.
 - `specs/tests/unit.md` → `tests/unit/protocol/test_canonical_vectors.py`: every vector; every
   reason code; idempotent round-trip; the two worked vectors above byte-exact.
+- Inline unit vectors cover rejection paths that cannot be represented as JSON fixture values:
+  `input_not_bytes`, `integer_out_of_sqlite_range`, `object_key_not_string`,
+  `unsupported_json_type`, and `not_an_accepted_envelope` (including embedded `entry_digest` and
+  embedded decoded `payload`).
 - `specs/tests/property.md`: Hypothesis — encode/parse round-trip, permutation of object key
   insertion order never changes bytes, array order always preserved, `ensure_canonical_set`
   accepts exactly the sorted-unique ASCII permutation.
-- CI oracle job (`.github/workflows/`): second-language byte parity on all positive vectors.
-- Determinism matrix: repeat vector suite under varied `PYTHONHASHSEED`, locale, TZ, `-O`.
+- Installed canonical-fixture mirror byte identity is owned by
+  `tests/packaging/test_resource_byte_parity.py`; canonical unit/property tests own fixture
+  semantics from the reviewed root corpus.
+- Wave F CI oracle job (`pr-ci.yml`/`release.yml`): second-language byte parity on all positive
+  vectors.
+- Determinism matrix: the 12 exact subprocess cells formed by `PYTHONHASHSEED` `0`, `1`, and
+  `4294967295`; `TZ="UTC"` and `TZ="Pacific/Honolulu"`; `LC_ALL="C"`; and normal versus `-O`
+  interpreter mode.
 
 ## Open questions
 

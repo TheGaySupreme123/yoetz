@@ -1,7 +1,8 @@
 # src/yoetz/domain/receipts.py — immutable receipt documents and rendered outcomes
 
 **Wave:** B | **ADRs:** ADR-002, ADR-004, ADR-006 | **Imports (spec-tree):**
-`protocol/coverage.md`, `protocol/errors.md`, `domain/values.md`, `domain/findings.md`
+`protocol/coverage.md`, `protocol/errors.md`, `protocol/models.md` (`ReceiptRedactionProfile`),
+`domain/values.md`, `domain/findings.md`
 **Imported by:** `domain/events.md`, `kernel/receipt_builder.md`, `application/receipt.md`, `cli/render.md`,
 `adapters/sqlite/repository.md`
 
@@ -18,12 +19,93 @@ record of evidence, gaps, limitations, and version provenance.
 |---|---|
 | `ReceiptConclusion` | enum of the public receipt conclusion vocabulary |
 | `ReceiptDocument` | frozen dataclass holding the canonical receipt payload |
-| `ReceiptSection` | frozen section wrapper used for rendering |
-| `ReceiptRender` | frozen output structure for compact/human views |
-| `render_receipt_compact(document)` | bounded text summary for CLI/MCP |
+| `ReceiptVersionSlice`, `PolicyVersionEntry`, `SchemaVersionEntry` | frozen version provenance records |
+| `ReceiptObligation`, `ReceiptResponse`, `ReceiptGap`, `ReceiptRedaction` | frozen canonical support records |
+| `ReceiptSection` | frozen canonical section record |
+| `receipt_document_from_json(value)` / `receipt_document_to_json(document)` | exact receipt schema codecs |
+| `render_receipt_compact(document) -> str` | bounded compact text for CLI/MCP |
 | `receipt_weakest_coverage(document)` | computes the weakest material coverage across the receipt |
 
 ## Behavior
+
+### Exact schema-shaped records
+
+Every enum here is `str`-valued and every record is `@dataclass(frozen=True, slots=True)`. The
+nominal enums owned by this module are `ReceiptConclusion`, `ReceiptObligationStatus`
+(`open|resolved|superseded|waived`), `ReceiptRedactionCategory`
+(`claim_text|evidence_content|finding_detail|obligation_text|repository_content|transcript_content`),
+`ReceiptRedactionReason`
+(`include_profile_omitted|never_send_redacted|policy_redacted|source_redacted`), and
+`ReceiptSectionKey` (`summary|outstanding_work|findings_and_dispositions|
+evidence_and_claim_basis|limitations_and_coverage|version_and_policy_identity`).
+`ResponseDisposition` and `WaiverScope` come from `domain/findings.py`;
+`ReceiptRedactionProfile` comes from `protocol/models.py`.
+
+The nested canonical records have exactly these fields:
+
+```text
+PolicyVersionEntry(policy_id: str, policy_version: str)
+SchemaVersionEntry(schema_id: str, schema_version: str)
+ReceiptVersionSlice(package_name: Literal["yoetz"], package_version: str,
+                    protocol_version: str, engine_version: str,
+                    projection_version: str, object_format_version: str,
+                    catalog_schema_version: str, bundle_schema_version: str,
+                    policy_versions: tuple[PolicyVersionEntry, ...],
+                    schema_versions: tuple[SchemaVersionEntry, ...],
+                    resource_manifest_digest: str)
+ReceiptObligation(obligation_id: ObligationId, status: ReceiptObligationStatus,
+                  source_refs: tuple[EventId | ObligationId | ClaimId, ...],
+                  summary: str | None = None)
+ReceiptResponse(finding_id: FindingId, finding_frontier: Frontier,
+                disposition: ResponseDisposition,
+                evidence_refs: tuple[EvidenceId, ...],
+                reason: str | None = None,
+                waiver_scope: WaiverScope | None = None,
+                waiver_expiry: Timestamp | None = None)
+ReceiptGap(code: str,
+           subject_refs: tuple[EventId | ObligationId | ClaimId, ...],
+           detail: str | None = None)
+ReceiptRedaction(category: ReceiptRedactionCategory,
+                  reason: ReceiptRedactionReason,
+                  count: int)
+ReceiptSection(key: ReceiptSectionKey, title: str, body: str,
+               items: tuple[str, ...] = (), coverage_note: str | None = None)
+```
+
+`ReceiptDocument` has exactly these fields:
+
+```text
+schema_version: Literal["1.0.0"]                # init=False
+receipt_id: ReceiptId
+task_id: TaskId
+session_id: SessionId
+generated_at: Timestamp
+subject_frontier: Frontier
+conclusion: ReceiptConclusion
+suppressed_finding_count: int
+versions: ReceiptVersionSlice
+coverage: Coverage
+findings: tuple[Finding, ...]
+obligations: tuple[ReceiptObligation, ...]
+responses: tuple[ReceiptResponse, ...]
+claim_refs: tuple[ClaimId, ...]
+evidence_refs: tuple[EvidenceId, ...]
+gaps: tuple[ReceiptGap, ...]
+redactions: tuple[ReceiptRedaction, ...]
+sections: tuple[ReceiptSection, ...]
+```
+
+All tuple ordering, uniqueness, sizes, text limits, conditional response fields, section shapes,
+version identities, and conclusion/suppression constraints match
+`schemas/receipts/receipt-document-1.0.0.schema.json`. Domain counts are `int` but not `bool`.
+`suppressed_finding_count` remains a JSON integer; `ReceiptRedaction.count` is rendered as the
+schema's canonical unsigned-decimal string. Frontier sequences remain decimal strings.
+
+Section keys must be exactly one of the three registered sequences: summary include =
+`(summary, limitations_and_coverage, version_and_policy_identity)`; standard =
+`(summary, outstanding_work, findings_and_dispositions, limitations_and_coverage,
+version_and_policy_identity)`; full adds `evidence_and_claim_basis` between findings and
+limitations. There is no arbitrary section order or duplicate key.
 
 `ReceiptDocument` is the canonical immutable record written by the receipt builder and stored as an
 encrypted object. It contains the fixed frontier, protocol/engine/policy/version provenance, the
@@ -75,14 +157,29 @@ finding identities. While a visible actionable finding remains it yields
 `unresolved_findings_remain`; otherwise it yields `insufficient_coverage` until a newer applicable
 check records zero suppression. A receipt exposes the count, never invented suppressed IDs.
 
-`ReceiptSection` and `ReceiptRender` separate canonical content from presentation. `ReceiptSection`
-is the stable unit of presentation inside a document. It carries a section key, a short title, the
-bounded human-readable body, optional bullet items, and the section’s local coverage note when the
-body is redacted or derived from weak evidence. `ReceiptRender` is the presentation wrapper returned
-by the compact renderer; it may hold the final headline, section list, truncation metadata, and a
-redaction flag, but it does not change the canonical document.
+`ReceiptSection` is canonical document content, not a separate presentation wrapper. It carries its
+registered key, short title, bounded body, optional bullet items, and optional local coverage note.
+There is no `ReceiptRender` type in v0.1: it had no schema, no stable fields, and no consumer that
+needed a second object graph.
 
-`render_receipt_compact(document)` produces a short, bounded English-only summary in v0.1. It must
+### JSON codecs
+
+`receipt_document_from_json(value)` accepts only the closed object frozen by
+`receipt-document-1.0.0.schema.json`, constructs every nested nominal record, parses frontier and
+redaction-count decimal strings, and rejects all missing, extra, conditionally invalid, unsorted,
+or duplicate values. `receipt_document_to_json(document)` is its exact inverse, omits only optional
+members whose value is `None`, and delegates findings and coverage to their one owning codecs. It
+does not serialize adapters, Pydantic models, datetimes, or mutable containers.
+
+For each valid schema value `x`, canonical encoding of
+`receipt_document_to_json(receipt_document_from_json(x))` equals canonical encoding of `x`. The
+receipt digest is the digest of this canonical document object; `receipt_id` and `generated_at`
+remain inside it.
+
+`render_receipt_compact(document) -> str` produces one newline-free, bounded English-only summary
+in v0.1. It returns the string itself, not a wrapper, tuple, section list, or bytes. The exact
+sentence templates and their precedence are frozen by `fixtures/receipts/*`.
+It must
 not invent stronger wording than the underlying receipt document supports. The compact view may
 mention:
 
@@ -93,13 +190,28 @@ mention:
 - whether semantic evaluation was unavailable or not requested.
 
 The compact render is intentionally weaker than the underlying document when the document carries
-more detail than the chosen surface needs.
+more detail than the chosen surface needs. It is presentation only and is never hashed as the
+receipt document.
 
-`receipt_weakest_coverage(document)` computes the component-wise weakest material coverage from the
-document’s supporting facts. It is used by the CLI, MCP, and tests to ensure the rendered wording
-never outruns the evidence.
+`receipt_weakest_coverage(document)` is the exact left fold of `protocol.coverage.weakest`, starting
+with `document.coverage` and then visiting `document.findings` in stored order using each
+`finding.coverage`. With no findings it returns `document.coverage`. It never derives coverage
+from prose, section presence, a conclusion token, or list length. Construction also requires every
+`ReceiptGap.code` to occur in `document.coverage.known_gaps` and requires
+`receipt_weakest_coverage(document) == document.coverage`; therefore a top-level coverage value
+cannot be stronger than a carried finding and no explicit gap can disappear from the coverage
+summary.
 
 ## Errors and edge cases
+
+The exact `ProtocolValueError` reasons first raised by this module are:
+`invalid_receipt_conclusion`, `invalid_receipt_version_slice`,
+`invalid_receipt_obligation`, `invalid_receipt_response`, `invalid_receipt_gap`,
+`invalid_receipt_redaction`, `invalid_receipt_section`, `invalid_receipt_section_order`,
+`invalid_receipt_document`, `receipt_coverage_mismatch`, `receipt_gap_not_in_coverage`, and
+`receipt_json_shape_invalid`. This closed inventory must appear in
+`protocol.errors.PROTOCOL_REASON_CODES`. Imported ID, timestamp, frontier, finding, coverage, and
+canonical-set validators propagate their owning reason unchanged.
 
 - A receipt that lacks its receipt/task/session identity, generation time, subject frontier,
   version provenance, or coverage summary is invalid.

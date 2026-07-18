@@ -2,7 +2,7 @@
 
 **Wave:** B | **ADRs:** ADR-002 (identifier encoding), ADR-005 §6 (actor identity) |
 **Imports (spec-tree):** `protocol/errors.md` (`ProtocolValueError`) |
-**Imported by:** `protocol/models.md`, `protocol/errors.md` (correlation IDs), `ports/ids.md`,
+**Imported by:** `protocol/models.md`, `ports/ids.md`,
 `mcp/server.md`, `adapters/sqlite/*`, `application/*`
 
 ## Purpose
@@ -14,6 +14,10 @@ oversized strings. Per ADR-002 §3: typed prefix + `_` + lowercase canonical RFC
 the OS CSPRNG; the server verifies spelling/version/variant/length and never claims to measure
 caller entropy.
 
+`protocol/errors.py` is the dependency root: it validates canonical `err_` correlation-ID spelling
+directly and never imports this module. The dependency edge therefore points from `ids.py` to
+`errors.py` only.
+
 ## Public surface
 
 | Name | Signature (natural language) |
@@ -23,10 +27,17 @@ caller entropy.
 | `ID_TOTAL_LENGTH` | `int = 40` — prefix (4) + canonical UUID (36) |
 | `ACTOR_ID_PATTERN` | `str = r"^[A-Za-z0-9._:-]{1,128}$"` — the only actor-ID rule |
 | `new_id(kind: IdKind) -> str` | generate a fresh ID; raises for `IdKind.ACTOR` |
-| `validate_id(kind: IdKind, value: object) -> str` | full validation; returns `value`; raises `ProtocolValueError` |
-| `is_valid_id(kind: IdKind, value: object) -> bool` | non-raising boolean wrapper over `validate_id` |
+| `validate_id(kind: IdKind, value: object) -> str` | full validation; returns `value`; raises `ProtocolValueError` for a protocol-invalid value |
+| `is_valid_id(kind: IdKind, value: object) -> bool` | boolean wrapper over `validate_id`; catches only `ProtocolValueError` |
 | `validate_actor_id(value: object) -> str` | format-only actor-ID validation; raises `ProtocolValueError` |
 | `safe_request_id_from(arguments: object) -> str | None` | non-raising, bounded extraction of a `req_` ID from an untrusted MCP arguments mapping |
+
+Every `kind` parameter has an exact programmer-owned type precondition: if
+`type(kind) is not IdKind`, including when a caller passes the raw wire token such as
+`"request"` or a member of another enum, the function raises ordinary
+`TypeError("id_kind_wrong_type")`. This is not a protocol reason code. No public `parse_id`,
+reverse-prefix lookup, or kind-from-ID accessor exists; callers retain the expected kind and
+validate against it.
 
 `IdKind` members and values (values are the wire-facing kind tokens; members are the upper-case
 spellings):
@@ -66,14 +77,16 @@ spellings):
 
 ### `new_id(kind)`
 
-1. If `kind is IdKind.ACTOR`: raise `ProtocolValueError("actor_id_not_generated")`. Actor IDs are
+1. If `type(kind) is not IdKind`: raise ordinary `TypeError("id_kind_wrong_type")` before reading
+   randomness or performing any mapping lookup.
+2. If `kind is IdKind.ACTOR`: raise `ProtocolValueError("actor_id_not_generated")`. Actor IDs are
    caller-asserted (INTERFACES §1); Yoetz never mints them.
-2. Read exactly 16 bytes from the OS CSPRNG (`os.urandom(16)`; CPython's `uuid.uuid4()` is an
+3. Read exactly 16 bytes from the OS CSPRNG (`os.urandom(16)`; CPython's `uuid.uuid4()` is an
    acceptable implementation because it uses `os.urandom`, but the spec requirement is the OS
    CSPRNG, not any particular helper).
-3. Force RFC 4122 version 4: `byte[6] = (byte[6] & 0x0F) | 0x40`; force variant 10xx:
+4. Force RFC 4122 version 4: `byte[6] = (byte[6] & 0x0F) | 0x40`; force variant 10xx:
    `byte[8] = (byte[8] & 0x3F) | 0x80`. 122 random bits remain.
-4. Render the canonical lowercase hyphenated form `8-4-4-4-12` and return
+5. Render the canonical lowercase hyphenated form `8-4-4-4-12` and return
    `PREFIX_BY_KIND[kind] + uuid_text`. Result length is always `ID_TOTAL_LENGTH` (40).
 
 `new_id` has no other side effects: no logging, no caching, no clock access. Deterministic tests
@@ -82,23 +95,27 @@ function; `protocol/ids.py` itself stays importable with zero configuration.
 
 ### `validate_id(kind, value)`
 
-Checks run in this fixed order; the first failure raises `ProtocolValueError(reason)` and no later
-check runs. For `kind is IdKind.ACTOR` the function delegates entirely to `validate_actor_id`.
+Checks run in this fixed order and no later check runs after a failure. The kind precondition is a
+programmer-defect `TypeError`; value-shape failures use `ProtocolValueError(reason)`. For
+`kind is IdKind.ACTOR` the function delegates entirely to `validate_actor_id` after the kind
+precondition.
 
-1. `value` is a `str` instance (bool/bytes/int are not) → else `id_wrong_type`.
-2. Bounded-copy guard: `len(value) == ID_TOTAL_LENGTH` → else `id_wrong_length`. This runs before
+1. `type(kind) is IdKind` → else ordinary `TypeError("id_kind_wrong_type")`.
+2. For `IdKind.ACTOR`, return `validate_actor_id(value)` or propagate its registered reason.
+3. `value` is a `str` instance (bool/bytes/int are not) → else `id_wrong_type`.
+4. Bounded-copy guard: `len(value) == ID_TOTAL_LENGTH` → else `id_wrong_length`. This runs before
    any character scan so oversized input is never iterated.
-3. Every code point is printable ASCII (`0x21..0x7E`) → else `id_not_ascii`.
-4. `value[:4] == PREFIX_BY_KIND[kind]` → else `id_wrong_prefix`. (A valid ID of another kind fails
+5. Every code point is printable ASCII (`0x21..0x7E`) → else `id_not_ascii`.
+6. `value[:4] == PREFIX_BY_KIND[kind]` → else `id_wrong_prefix`. (A valid ID of another kind fails
    here; there is no cross-kind acceptance.)
-5. The 36-char remainder matches canonical UUID spelling: lowercase hex `[0-9a-f]` in groups
+7. The 36-char remainder matches canonical UUID spelling: lowercase hex `[0-9a-f]` in groups
    8-4-4-4-12 with `-` at offsets 8, 13, 18, 23 → else `id_malformed_uuid`. Uppercase hex fails
    here; `specs/src/yoetz/protocol/canonical.md` requires one lowercase spelling only.
-6. Version nibble: char at UUID offset 14 (first char of the third group) `== "4"` → else
+8. Version nibble: char at UUID offset 14 (first char of the third group) `== "4"` → else
    `id_uuid_not_version_4`.
-7. Variant char: char at UUID offset 19 (first char of the fourth group) `in {"8","9","a","b"}` →
+9. Variant char: char at UUID offset 19 (first char of the fourth group) `in {"8","9","a","b"}` →
    else `id_uuid_wrong_variant`.
-8. Return `value` unchanged (never a normalized copy — there is exactly one accepted spelling).
+10. Return `value` unchanged (never a normalized copy — there is exactly one accepted spelling).
 
 The function never inspects randomness quality: a repeated ID is handled by the application and
 ledger idempotency-digest rules, not rejected here.
@@ -118,19 +135,20 @@ No assurance, authentication, or uniqueness meaning is attached here (ADR-005 §
 ### `is_valid_id(kind, value)`
 
 Returns `True` iff `validate_id(kind, value)` does not raise. Catches only `ProtocolValueError`;
-any other exception propagates (there should be none).
+the exact wrong-kind programmer defect therefore propagates as `TypeError("id_kind_wrong_type")`.
 
 ### `safe_request_id_from(arguments)`
 
 Non-raising by construction; used on the untrusted MCP error path owned by
 `specs/src/yoetz/mcp/server.md`. Behavior:
 
-1. If `arguments` is not a `Mapping` → return `None` (defensive: signature says `dict`, but this
-   function must survive anything).
+1. If `arguments` is not a `Mapping` → return `None`; the public signature deliberately accepts an
+   arbitrary `object` so this boundary can survive anything.
 2. `candidate = arguments.get("request_id")` guarded so a raising `__getitem__`/`get` on an exotic
    mapping cannot escape (wrap the lookup in a broad `except Exception: return None`; this is the
    one place a broad catch is correct, because the function's contract is "never raises").
-3. If `candidate` is not exactly a `str` → `None`.
+3. If `type(candidate) is not str` → `None`. In particular, a user-defined `str` subclass is not
+   accepted on this hostile error path.
 4. Bounded copy: if `len(candidate) != ID_TOTAL_LENGTH` → `None`. No slice, scan, or copy of an
    oversized string ever occurs.
 5. If `is_valid_id(IdKind.REQUEST, candidate)` → return `candidate`; else `None`.
@@ -153,19 +171,29 @@ Bounded `ProtocolValueError` reason codes owned by this file (registered in the
 `id_wrong_type`, `id_wrong_length`, `id_not_ascii`, `id_wrong_prefix`, `id_malformed_uuid`,
 `id_uuid_not_version_4`, `id_uuid_wrong_variant`, `actor_id_malformed`.
 
+This list is an exact subset of the central immutable registry. `ids.py` never registers reasons
+at import time, and its behavior cannot depend on whether another protocol module has already been
+imported. Consumers preserve these exact reasons: in particular, `actor_id_malformed` is never
+translated to the distinct or invented spelling `invalid_actor_id`.
+
+`id_kind_wrong_type` is deliberately absent from that registry: it is the fixed message on an
+ordinary `TypeError` for a programmer-owned API misuse, not a client-input protocol failure.
+
 - Reason codes never embed the offending value; the raising site's caller decides whether a safe
   field path may be reported (`INVALID_REQUEST` mapping happens in `protocol/errors.md`).
 - `os.urandom` failure (theoretical) propagates as-is; it is an internal defect surface, never
   converted to a client-blame error.
-- Empty string, `None`, non-string, surrogate-bearing strings, and NUL-bearing strings all fail at
-  steps 1–3 without deeper processing.
+- For non-actor kinds, empty strings, `None`, non-strings, surrogate-bearing strings, and
+  NUL-bearing strings all fail at value-shape steps 3–5 without deeper processing; actor inputs
+  fail at the corresponding bounded checks in `validate_actor_id`.
 
 ## Invariants
 
 1. Every Yoetz-generated public ID is prefix + lowercase canonical UUIDv4, 40 chars, ASCII, from
    the OS CSPRNG; there is exactly one accepted spelling per ID.
 2. IDs are opaque: nothing in the codebase may parse them for order, time, or meaning
-   (INTERFACES §1); this module exposes no accessor that would encourage it.
+   (INTERFACES §1); specifically, this module exposes no `parse_id`, reverse-prefix lookup, or
+   kind-from-ID accessor.
 3. Actor IDs are caller-asserted and format-validated only; validation here never upgrades,
    authenticates, or normalizes them.
 4. `safe_request_id_from` never raises, never logs, and never returns an unvalidated or oversized
@@ -186,6 +214,10 @@ Bounded `ProtocolValueError` reason codes owned by this file (registered in the
   `specs/tests/property/test_id_properties.py.md`: `safe_request_id_from` receives non-dict,
   raising-mapping, oversized-string, and surrogate-bearing inputs and must return `None`, never
   raise.
+- Wrong-kind tests pass a raw wire token and a foreign enum to `new_id`, `validate_id`, and
+  `is_valid_id`; each must raise exactly `TypeError("id_kind_wrong_type")` rather than manufacture
+  a protocol reason.
+- Surface tests assert that no `parse_id` or equivalent reverse-prefix accessor is exported.
 - Property test (Hypothesis): random strings never validate unless constructed canonically;
   `is_valid_id(k, new_id(k))` always true for all non-actor kinds.
 

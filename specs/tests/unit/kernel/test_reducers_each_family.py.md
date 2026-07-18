@@ -23,21 +23,32 @@ Lock one deterministic transition suite per event family so every reducer branch
   tested state, and freshness.
 - `test_unknown_event_preserves_gap_metadata` — unknown events increment gap accounting without
   inventing facts.
+- `test_each_transition_uses_exact_prefix_replay_index` — genesis/extension and reducer frontier
+  identities stay synchronized for every family.
+- `test_object_only_redaction_resolves_both_envelope_associations` — payload-object ownership and
+  evidence captured-object ownership take their distinct exact transition paths.
 
 ## Behavior
 
-The suite feeds one accepted record family at a time into `reduce_event` and asserts:
+The suite extends `ReplayIndex` with one accepted record family at a time, feeds the state, record,
+and exact through-record index into `reduce_event`, and asserts:
 
 - the correct projection map is updated;
 - unrelated maps remain unchanged;
 - source metadata and frontier advance exactly once;
 - redaction and unknown events weaken coverage rather than erasing history;
+- an object-only payload target tombstones its owning current record and removes only its source-
+  owned effects, while an object-only captured-content target preserves the evidence body/digest
+  and marks only the matching current `(evidence_id, source_event_id)` unavailable;
+- a second redaction of the same object preserves the first-by-ingestion public root;
 - reducer input values are not mutated.
 
 ## Errors and edge cases
 
 - A family update that touches the wrong projection map fails the test.
 - A reducer that mutates input state or event fails the test.
+- A reducer that accepts a stale/future index, guesses an evidence association from a deleted body,
+  or chooses a repeated-redaction root by event-ID order fails the test.
 
 ## Invariants
 

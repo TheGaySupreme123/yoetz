@@ -1,7 +1,7 @@
 # src/yoetz/adapters/providers/openai_responses.py — native OpenAI Responses semantic adapter
 
 **Wave:** E | **ADRs:** ADR-006, ADR-007, ADR-008, ADR-009 | **Imports (spec-tree):**
-`ports/semantic.md`, `ports/secret_memory.md`, `domain/privacy.md`, `domain/findings.md`,
+`ports/semantic.md`, `ports/clock.md`, `ports/secret_memory.md`, `domain/privacy.md`, `domain/findings.md`,
 `protocol/errors.md`
 **Imported by:** `adapters/privacy/gateway.md` and semantic capability tests
 
@@ -33,7 +33,8 @@ normalizes it into Yoetz’s closed semantic-result union with provisional
 ## Behavior
 
 `OpenAIResponsesEvaluator` is constructed only behind the privacy gateway for one physical
-attempt. The gateway supplies the approved case plus a `OneAttemptCredentialTransport` already
+attempt. The gateway supplies the approved case, an injected `ClockPort`, plus a
+`OneAttemptCredentialTransport` already
 holding a fresh opaque `ProviderCredentialHandle` and the gateway-precomputed final-body SHA-256
 and privacy commitment; the evaluator API exposes neither handle, and the reviewed bundled implementation does
 not introspect the transport. This is the in-process F-009 trust boundary, not resistance to
@@ -284,7 +285,14 @@ The adapter must respect:
 - the caller’s absolute deadline;
 - the configured safety margin before deadline expiry;
 - the maximum input/output sizes;
-- the fact that `timeout.remaining_seconds() <= 0` means no network call should occur.
+- the exact entry sequence: capture
+  `now_monotonic = clock.monotonic_seconds()` once, compute
+  `remaining = deadline.remaining_seconds(now_monotonic)`, and make no network call when
+  `deadline.expired(now_monotonic)` or the safety-margin-adjusted remaining budget is `0.0`.
+
+The adapter never reads `time.monotonic()`, an event-loop clock, wall time, or the deadline's
+diagnostic `expires_at_utc` to enforce the request budget. The same injected monotonic domain used
+to construct `deadline.monotonic_deadline` supplies the current sample.
 
 `render_case(case)` emits the minimized semantic prompt/input payload. It includes only the items
 allowed by the semantic port:
@@ -339,7 +347,8 @@ The module must never:
 - Refusal, invalid output, timeout, and late results are returned, not raised.
 - Expected transport/auth/capability failures return `SemanticResultUnavailable`; native errors
   and their text never escape the adapter.
-- A zero-second deadline immediately returns a timeout result.
+- An explicit monotonic sample at or after `deadline.monotonic_deadline` immediately returns a
+  timeout result without network I/O.
 - Provider output that invents IDs, widens coverage, or exceeds the permitted schema is invalid.
 - The adapter never writes to SQLite and never reads the ledger directly.
 - The adapter must treat truncated or partially streamed provider output as invalid unless the
@@ -376,6 +385,8 @@ The module must never:
     protected view.
 11. Provider data-use posture controls upstream recommendation eligibility and is never presented
     as technical proof of downstream provider behavior.
+12. Request-budget decisions use only the injected monotonic clock and the frozen deadline; wall
+    time and ambient clock APIs cannot affect them.
 
 ## Tests
 

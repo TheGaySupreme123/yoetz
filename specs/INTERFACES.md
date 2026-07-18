@@ -46,12 +46,20 @@ retry reuses them rather than allocating replacements. No ID is derived from a d
 timestamp, provider value, or database row ID.
 
 Key functions: `new_id(kind: IdKind) -> str`; `validate_id(kind, value) -> str` (raises
-`ProtocolValueError`); `safe_request_id_from(arguments: dict) -> str | None` (non-raising,
-bounded, used by MCP error paths).
+`ProtocolValueError` for a protocol-invalid value); `safe_request_id_from(arguments: object) ->
+str | None` (accepts only `Mapping` values, non-raising and bounded, used by MCP error paths).
+Every kind parameter requires `type(kind) is IdKind`; a raw wire token or other enum is a
+programmer defect and raises ordinary `TypeError("id_kind_wrong_type")`, including through
+`is_valid_id`. `new_id(IdKind.ACTOR)` is the sole per-kind generation exception and raises
+`ProtocolValueError("actor_id_not_generated")`. Safe extraction contains a hostile mapping's
+raising `.get`, accepts only an exact built-in `str`, checks length before scanning, and returns
+only a validated request ID or `None`. There is no `parse_id`, reverse-prefix lookup, or
+kind-from-ID public API.
 
 ## 2. Public error codes (`protocol/errors.py`)
 
-Enum `PublicErrorCode`, exactly this frozen public vocabulary:
+`PublicErrorCode` is declared exactly as `class PublicErrorCode(str, Enum)`, with explicit string
+values equal to the member spellings and this frozen order:
 `INVALID_REQUEST`, `PROTOCOL_VERSION_UNSUPPORTED`, `SESSION_NOT_FOUND`, `SESSION_CONFLICT`,
 `IDEMPOTENCY_CONFLICT`, `OPERATION_PENDING`, `FRONTIER_CONFLICT`, `EVENT_INVALID`,
 `LIMIT_EXCEEDED`, `BUNDLE_BUSY`, `STORAGE_UNSAFE`, `STORAGE_CORRUPT`, `MIGRATION_REQUIRED`,
@@ -59,7 +67,16 @@ Enum `PublicErrorCode`, exactly this frozen public vocabulary:
 `PROVIDER_UNAVAILABLE`, `PROVIDER_REFUSED`, `PROVIDER_TIMEOUT`, `SEMANTIC_RESULT_INVALID`,
 `CANCELLED`, `INTERNAL_ERROR`.
 
-Exception type: `PublicOperationError(code, message, retryable, correlation_id, safe_details)`.
+`type SafeDetailValue = str | int`; `bool` is excluded on every runtime path despite being an
+`int` subclass. Exception type:
+`PublicOperationError(code, message, retryable, correlation_id=None, safe_details=None)`, a frozen,
+slotted exception/dataclass. After validation its `Exception.args` is exactly `(message,)`,
+`str(error) == message`, and its deterministic dataclass representation contains only its five
+already-safe normalized stored fields. First correlation binding returns a new value, same-ID
+binding returns `self`, and different-ID binding is invalid. `as_public_dict()` returns a new
+ordinary dictionary with exactly `code`, `message`, `retryable`, and bound `correlation_id`; it
+adds `safe_details` only when nonempty, as a new ordinary dictionary in ASCII key order. The frozen
+public-error JSON Schema remains a structural superset of this exact mapping-only runtime emitter.
 Internal-only value error: `ProtocolValueError(reason_code: str)` — bounded reason codes, never
 free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from codes in
 `cli/exits.py` only.
@@ -95,7 +112,12 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
   `import_codex_jsonl` call. That one branch may exceed the ordinary cap only when its canonical
   base64 decodes to at most `MAX_IMPORT_SOURCE_BYTES`; no other method inherits the larger bound.
 - Digests render as `sha256:<64 lowercase hex>`; commitments as `hmac-sha256:<64 lowercase hex>`.
-- Sequences/frontiers cross the wire as canonical base-10 integer strings (`"0" | [1-9][0-9]*`).
+- Writer/ledger sequences and frontier sequences cross the wire as canonical base-10 integer
+  strings (`"0" | [1-9][0-9]*`, with writer/ledger sequences positive). This is not a blanket
+  rule for every count or byte length: fields whose frozen schema type is integer remain JSON
+  integers. In particular `AcceptedEvent.payload_ref.plaintext_size` is a JSON integer in
+  `0..4_194_304`, and finding/receipt suppression counts and plan versions remain their registered
+  JSON integer types.
 - Timestamps: RFC 3339 UTC, exactly three fractional digits, `Z` suffix.
 - Genesis predecessor digest: literal string `"genesis"`.
 - Canonical Yoetz JSON media types are `application/vnd.yoetz.<schema_name>+json`, where
@@ -105,10 +127,22 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
 
 ## 4. Canonicalization (`protocol/canonical.py`)
 
+- `JsonValue` is exactly the recursive alias `None | bool | int | str | list[JsonValue] |
+  tuple[JsonValue, ...] | Mapping[str, JsonValue]`; arbitrary `Sequence` implementations are not
+  protocol arrays.
 - `canonical_encode(value: JsonValue) -> bytes` — restricted-JCS bytes (ADR-002).
 - `canonical_digest(value) -> str` — `"sha256:" + hex(sha256(canonical_encode(value)))`.
-- `strict_json_parse(data: bytes) -> JsonValue` — strict UTF-8, rejects BOM/NUL, duplicate keys,
-  floats/NaN/Infinity/-0, integers outside ±(2^53−1), lone surrogates.
+- `strict_json_parse(data: bytes | bytearray) -> JsonValue` — snapshots a `bytearray` once to
+  immutable bytes, then performs strict UTF-8 parsing and rejects BOM/NUL, duplicate keys,
+  floats/NaN/Infinity/-0, integers outside ±(2^53−1), and lone surrogates.
+- `ensure_canonical_set(values: list[str] | tuple[str, ...]) -> None` — the outer value must satisfy
+  `isinstance(values, (list, tuple))`; every other type raises `unsupported_json_type`;
+  non-string or non-ASCII members raise
+  `set_member_not_ascii`; equal/descending neighbors raise `duplicate_set_member`/
+  `unsorted_set_field` without normalization.
+- `entry_digest(preimage)` owns only the exact 18-key top-level accepted-record-preimage gate,
+  `protocol == "yoetz.event"`, and canonical-value validation. Deep accepted-event schema/domain
+  validation remains with the frozen schema and `domain/events.py`.
 - `ProtocolValueError` reason codes include: `duplicate_object_key`, `float_forbidden`,
   `integer_out_of_safe_range`, `invalid_utf8`, `lone_surrogate`, `noncanonical_integer_string`,
   `nesting_too_deep`, `unsorted_set_field`, `duplicate_set_member`.
@@ -186,7 +220,41 @@ Shared domain types: `EventDraft` (client-shaped, pre-acceptance), `AcceptedEven
 structural envelope frozen by `domain/events.py` plus decoded payload handle), `UnknownEvent`
 (opaque preserved,
 `projection_status = "unknown_unprojected"`). Payload dataclasses are named
-`<FamilyPascal>Payload`, e.g. `ObligationPublishedPayload`.
+`<FamilyPascal>Payload`, e.g. `ObligationPublishedPayload`, except
+`FindingRecordedPayload = Finding`, the explicit alias that prevents a second finding codec.
+
+`domain/events.py` also owns the exact support records `RequestedItem`, `ObligationChange`,
+`PolicyVersion`, `EventSchema`, `WriterChain`, `LedgerChain`, `PayloadRef`, and
+`ProjectionLocator`, plus the event-only enums listed in that file. `ProjectionLocator` is the
+runtime-only non-plaintext replay record `(schema, logical_key, canonical_payload_digest,
+redaction_target_event_ids, redaction_target_object_ids)` captured atomically beside every
+accepted event and never serialized into the 19-field accepted wire record. Known schemas use the
+closed family key mapping; an unknown schema uses `logical_key=None`, empty target tuples, and the
+same digest exposed on `UnknownEvent`. The durable SQLite sidecar has one row per accepted event;
+schema identity, logical-key mapping, payload digest, and redaction targets must match the accepted payload or replay fails with
+`invalid_projection_locator`. `WriterChain.sequence` and `LedgerChain.ingestion_sequence` are
+positive signed-64-bit domain integers rendered as decimal strings. `PayloadRef.plaintext_size` is
+a bounded domain integer rendered as a JSON integer, not a decimal string.
+
+Object-only replay uses the existing accepted-envelope fields; it does not widen that locator or
+wire record. Every `payload_ref.object_id` identifies its envelope's event ID. For exact-known
+`evidence_recorded`, `artifact_refs` is exactly empty when `captured_object_id` is absent and exactly
+the singleton `(captured_object_id,)` when present. For `redaction_recorded`, `artifact_refs` is
+exactly the payload/locator target-object tuple. These typed-ID mirrors plus locator logical keys
+are sufficient to rebuild the pure reverse `ReplayIndex` after payload deletion without retaining
+content, paths, URLs, or human redaction text.
+
+The supported payload dispatch map is keyed by the complete `EventSchema`; only the sixteen exact
+`(family, "1.0.0")` pairs decode. Every other syntactically valid pair, including a registered name
+at another patch, minor, or major version, is preserved as `UnknownEvent`. A malformed payload for
+an exact supported pair is invalid and never falls back to opaque handling.
+
+Both ledger-record variants carry the complete accepted-envelope fields. `UnknownEvent` replaces
+the typed handle with `JsonValue | None` and adds `canonical_payload_digest` plus the fixed
+projection-status token; it does not omit causal parents, redaction, artifact refs, or evidence
+refs. Full accepted-record JSON includes `entry_digest` and matches the accepted-event schema.
+The entry-digest preimage is that exact record with only `entry_digest` removed; decoded payload
+handles and unknown-only adjacent metadata appear in neither JSON view.
 
 Key payload fields (minimum; full shapes in `specs/src/yoetz/domain/events.md`):
 
@@ -217,6 +285,8 @@ is accepted only from an interactive `local_cli` request constrained as a human 
 confirmed at the prompt; MCP, importer, noninteractive CLI, and model-backed actors may acknowledge
 or reject with evidence but may not waive. `waiver_expiry` may further narrow that one-finding
 scope. This is authorization policy, not a caller-asserted actor upgrade.
+`ResponseDisposition` is likewise nominally owned by `domain/findings.py` and reused by event and
+receipt records.
 
 `CheckMode`, owned by `domain/events.py`, is exactly `deterministic_only`,
 `semantic_if_configured`, or `semantic_required`. It is the one enum used by check requests,
@@ -246,8 +316,16 @@ Every status is paired with one required closed `SemanticReason`, never prose or
 `provider_rate_limited`, `provider_quota_exhausted`, `retry_budget_exhausted`,
 `audit_reservation_unavailable`, `receipt_persistence_unknown`, `deadline_authority_lost`,
 `lease_authority_lost`, `frontier_changed`, `dependency_changed`, `coordinator_failure`.
-`ports/semantic.md` owns the closed status/reason relation. `CheckRecordedPayload` and
+`protocol/models.py` owns both enum objects, the immutable exhaustive status/reason relation, and
+its validator. `domain/events.py`, `domain/findings.py`, and `ports/semantic.py` import those same
+objects; the port owns only outcome conversion and may re-export them. `CheckRecordedPayload` and
 `CheckResultModel` require the pair; predispatch outcomes carry no attempt provenance.
+
+`protocol/models.py` also nominally owns `ClientKind`
+(`codex_cli|cooperative_agent|yoetz_cli|test_client|importer`) and `IntegrationKind`
+(`cooperative_mcp|local_cli|codex_jsonl_import`) because `ClientInfoModel` is a dependency-root
+boundary model. `domain/events.py` imports and re-exports those identical enum objects; it does not
+redeclare them or create a protocol/domain import cycle.
 
 `EvidenceKind` is `artifact`, `command_output`, `test_result`, `research_source`,
 `import_report`, or `other`. A completed import publishes one ordinary `evidence_recorded` event
@@ -266,6 +344,26 @@ provenance)` is the ID-free pure-kernel value. `Finding` adds exactly one server
 summary, detail, subject_refs: tuple[event/obligation/claim ids], policy_id, policy_version,
 subject_frontier, coverage: Coverage, provenance: SemanticProvenance | None)`.
 
+`FindingOrigin` is the nominal enum `deterministic|semantic_model_derived` and
+`ResponseDisposition` is the nominal enum `acknowledged|rejected|waived`; both are owned here.
+`domain/findings.py` also solely owns the finalized, receipt-bound `SemanticProvenance` and its
+schema-shaped `SamplingParams`, `TokenUsage`, `CostFields`, `SemanticDispatchKind`, and
+`SemanticFailureClass` values. It imports the shared status/reason enums and validator from
+`protocol/models.py`. `ports/semantic.py` owns only provisional provider-attempt provenance and
+imports/re-exports the final type; it does not define another `SemanticProvenance`.
+
+The exact final provenance fields are provider/profile/version/model identities; prompt, schema,
+policy, and privacy-policy digests; sampling parameters; latency; optional provider request,
+usage, cost, and failure facts; semantic-attempt ID; dispatch kind; exactly one external
+authorization or local-disclosure reservation; durable privacy-receipt ID; external request
+commitment when applicable; and the validated terminal status/reason pair. The exact Python fields
+and wire conversions are frozen in `domain/findings.md` and
+`semantic-provenance-1.0.0.schema.json`.
+
+`finding_from_json`/`finding_to_json` and
+`semantic_provenance_from_json`/`semantic_provenance_to_json` are the sole codecs. The finding
+event alias delegates to them; no event, port, Pydantic model, or adapter owns a parallel dump.
+
 Work-integrity finding kinds (`FindingKind`):
 `completion_with_open_obligations`, `requested_item_never_attempted`,
 `failed_work_omitted`, `claim_without_admissible_evidence`, `result_without_action`,
@@ -274,6 +372,11 @@ Work-integrity finding kinds (`FindingKind`):
 `ledger_stale_or_incomplete`, `weak_or_stale_response` (flags a hollow rejection/waiver).
 Research/evidence-assessment kinds: `evidence_does_not_support_claim`, `diff_does_not_match_account`,
 `material_limitation_omitted`, `questionable_finding_rejection`.
+
+The ownership partition is exhaustive and disjoint: the first ten kinds belong to the built-in
+`work-integrity/0.1.0` pack, and the latter four belong to the built-in
+`research-evidence/0.1.0` pack. `semantic-review` is only a review-context / recipe label; it is
+not a `PolicyPack` value and it never appears as `Finding.policy_id`.
 
 Finding kind identifies the problem, not who detected it. The research-evidence pack may produce
 the latter four deterministically, and a semantic reviewer may propose the same kinds. `origin`
@@ -353,6 +456,19 @@ otherwise to `insufficient_coverage`. An `insufficient_coverage` check has no se
 finding by the registered verdict precedence, so the receipt builder's actionable-first rule does
 not conflict with this correspondence.
 
+`domain/receipts.py` owns the exact schema-shaped `ReceiptDocument`, `ReceiptVersionSlice`,
+policy/schema version entries, obligation/response/gap/redaction records, and canonical sections.
+It owns receipt-only enums; response disposition and waiver scope reuse `domain/findings.py`, and
+the boundary `ReceiptRedactionProfile` reuses `protocol/models.py`. The document field inventory
+is exactly the receipt-document schema, including `suppressed_finding_count`, and it has no
+post-append result frontier.
+
+`receipt_document_from_json`/`receipt_document_to_json` are the sole document codecs.
+`render_receipt_compact(document) -> str` returns one bounded string; there is no v0.1
+`ReceiptRender` wrapper. `receipt_weakest_coverage` folds the top-level coverage with every carried
+finding coverage using `coverage.weakest`; every explicit receipt-gap code must also occur in the
+top-level known-gap set, and the fold must equal that top-level coverage.
+
 ## 9. Kernel (`kernel/`)
 
 - `ProjectionState` (frozen): `frontier`, `head_digest`, `plans`, `obligations`, `decisions`,
@@ -361,8 +477,45 @@ not conflict with this correspondence.
   `latest_tested_state` is exactly the source check event ID, subject frontier, verdict,
   `returned_finding_ids`, `suppressed_count`, and recorded coverage. Suppression is durable
   structural uncertainty: it is never reconstructed from visible finding IDs.
-- `reduce_event(state, event) -> ProjectionState` (pure); `replay(events) -> ProjectionState`.
-- `run_deterministic_policies(case: FrozenCase, policy: PolicyPack) -> DeterministicPolicyResult`.
+- A projection contradiction is one explicit unresolved `ClaimRecordedPayload.disputes_refs`
+  edge. Its internal key is `ContradictionKey(disputing_claim_id, disputed_ref)` and its canonical
+  snapshot key is exactly `"<disputing_claim_id>|<disputed_ref>"`; `|` cannot occur in either
+  registered ID grammar. `ContradictionRecord` is exactly `(disputing_claim_id, disputed_ref,
+  source_event_id, source_frontier)`. Re-publishing the same `claim_id` replaces all contradiction
+  edges previously asserted by that claim with its new exact `disputes_refs`; a decision alone does
+  not clear an edge. Orphan action/result links remain their visible record plus a coverage gap and
+  policy input, not a second contradiction family.
+- `EvidenceObjectSource` is the frozen `(evidence_id, source_event_id)` pair. `ReplayIndex` is the
+  frozen non-plaintext `(frontier, head_digest, payload_event_by_object,
+  evidence_sources_by_object, redaction_root_by_object)` reverse index derived solely from the
+  accepted envelope/locator prefix. `empty_replay_index()` and `extend_replay_index(index, event)`
+  own its exact contiguous construction. `reduce_event(state, event, replay_index) ->
+  ProjectionState` is pure and requires the index through that exact event; `replay(events)` extends
+  the index before each fold. An incremental adapter retains it or locally rebuilds it from accepted
+  envelope/locator rows; it never opens payload objects.
+- `DeterministicCase` is the pure kernel input `(projection, frontier, allowed_ids,
+  coverage_by_ref, gaps)`. `coverage_by_ref` is an immutable exact ref-to-`Coverage` index derived
+  from authoritative accepted envelopes and current projection source links; it is never guessed
+  from a publication channel. `CaseGap` is exactly `(marker, code, subject_refs)`. A gap may have
+  empty `subject_refs` only when it is genuinely task/global; such a gap weakens coverage and
+  receipts but cannot fabricate a public `Finding`, whose subject refs remain nonempty.
+  `redacted_object:<object_id>` has exactly one root: the causative redaction event with the lowest
+  ledger ingestion sequence. Repeated redactions remain visible in the ledger but cannot replace
+  that first-cause public root. Object-only payload deletion also creates the effective
+  `redacted_event:<event_id>` marker; captured-content deletion marks only the matching current
+  evidence source unavailable. Missing causative roots are corruption.
+
+  Per-ref weakening preserves publication channels, authorship, and check types. Redacted or
+  otherwise unavailable event payloads cap artifact observation at `published_only`, immutability
+  at `metadata_only`, and freshness at `redacted_gap`, adding respectively `redacted_event` or
+  `event_payload_unavailable`. Redacted or otherwise unavailable captured content uses the same
+  artifact/freshness caps but caps immutability at `content_digest`, adding respectively
+  `redacted_object` or `captured_object_unavailable`. An unresolved typed ref preserves all other
+  dimensions, caps freshness at `partial`, and adds `missing_ref`; an opaque event does the same and
+  adds `unknown_event`. Every cap is a registered component-wise minimum, existing gaps are unioned
+  and sorted, and overflow of the 64-token bound fails case freezing rather than truncating.
+- `run_deterministic_policies(case: DeterministicCase, policy: PolicyPack) ->
+  DeterministicPolicyResult`.
   It is pure and never reads randomness. The result contains ordered
   `DeterministicAssessment(candidate, basis)` pairs. `FindingBasis` is internal/encrypted and binds
   the exact rule ID, observed fact codes and refs, required-but-missing fact codes, three-valued
@@ -384,8 +537,11 @@ not conflict with this correspondence.
   is `summary|standard|full`, and `ReceiptRedactionProfile` is
   `full_local|default_local_export|redacted_share`. `include` changes only the registered section
   detail level; it never suppresses required conclusion, coverage, gap, or limitation material.
-- `PolicyPack` ids: `work-integrity/0.1.0`, `research-evidence/0.1.0`
+- `PolicyPack` is the frozen data-only selector `(policy_id, policy_version)`; it contains no
+  callback or dynamic rule source. Its ids are `work-integrity/0.1.0`,
+  `research-evidence/0.1.0`
   (`kernel/policies/work_integrity.py`, `kernel/policies/research_evidence.py`).
+  No third `semantic-review` pack exists.
 
 ## 10. Ports (`ports/`)
 
@@ -394,10 +550,11 @@ not conflict with this correspondence.
 `LedgerPort` is the shared memory/SQLite contract. Its methods are:
 
 - `append_batch(command: AppendCommand) -> AppendResult`;
-- `load_events(session_id, after=0, through=None) -> AsyncIterator[AcceptedEvent]`;
+- `load_events(session_id, after=0, through=None) -> AsyncIterator[LedgerRecord]`;
 - `load_projection(session_id, view) -> StoredProjection | None` (cache/rebuild use);
 - `query_projection(query: ProjectionQuery) -> ProjectionPage` (bounded public status use);
-- `freeze_case(session_id, writer_id, expected_frontier, request_id, request_digest) -> FrozenCase`;
+- `freeze_case(session_id, writer_id, expected_frontier, request_id, request_digest) ->
+  FrozenCase | CheckCommitResult`;
 - `advance_check_phase(lease, expected_phase, next_phase, durable_object_ref?) -> OperationLease`;
 - `enqueue_semantic_job(lease, case_digest, case_object_ref) -> SemanticJobRecord`;
 - `claim_semantic_job(lease, job_id) -> SemanticAttemptHandle`;
@@ -405,8 +562,8 @@ not conflict with this correspondence.
 - `select_attempt(lease, handle, selected_result_object_ref) -> SelectedAttempt`;
 - `renew_leases(lease) -> OperationLease`;
 - `reclaim_operation(writer_id, operation_id, request_digest) -> OperationLease | PendingVerdict`;
-- `commit_check_if_current(frozen, findings, semantic_status, semantic_reason,
-  semantic_provenance, request_id) -> CheckResult`;
+- `commit_check_if_current(frozen, findings, policy_executions, semantic_status, semantic_reason,
+  semantic_provenance, request_id) -> CheckCommitResult`;
 - `lookup_operation(writer_id, operation_id) -> OperationRecord | None`.
 
 The check orchestration methods are authority-bearing port methods, not SQLite extensions.
@@ -414,6 +571,7 @@ The check orchestration methods are authority-bearing port methods, not SQLite e
 `publish_work|check|respond|receipt`; `OperationState` is `pending|complete|quarantined`;
 `CheckPhase` is `reserved|local_ready|semantic_wait|ready_to_finalize|terminal`;
 `AttemptOutcome` is `response_durable|failed|expired|late|selected`;
+`AppendWarning` is exactly `unknown_event_schema_preserved`;
 `PendingVerdictKind` is `absent|live|terminal|quarantined`; and `OperationQuarantineCode` is exactly
 `operation_kind_state_contradiction`, `operation_result_digest_mismatch`,
 `operation_event_range_mismatch`, `operation_resume_object_invalid`, or
@@ -421,6 +579,19 @@ The check orchestration methods are authority-bearing port methods, not SQLite e
 
 The exact shared frozen records, also owned by `ports/ledger.py`, are:
 
+- `FrozenCase(case: DeterministicCase, lease: OperationLease)`, with exactly those two fields and
+  `case.frontier == lease.frontier`; terminal same-digest replay is the distinct
+  `CheckCommitResult`, never a nullable/fake lease or replay side channel;
+- `CheckPolicyExecution(policy_id, policy_version, outcome: run|skipped|failed,
+  reason: completed|material_unavailable|not_applicable|policy_failure|scope_excluded)`, constrained
+  to the frozen schema's legal outcome/reason pairs and canonical pack order;
+- `CheckVersionSlice(protocol_version="0.1", engine_version, projection_version, policy_packs)`,
+  where policy packs are the nonempty sorted-unique registered subset bound into the dependency
+  digest;
+- `CheckCommitResult(outcome: committed|replayed, task_id, session_id, writer_id, request_id,
+  subject_frontier, result_frontier, verdict, findings, suppressed_count, policy_executions,
+  semantic_status, semantic_reason, semantic_provenance, coverage, versions)`, the internal durable
+  result mapped later to the public `CheckResultModel` tree;
 - `OperationLease(writer_id, operation_id, session_id, phase: CheckPhase, owner_generation,
   lease_owner_id, lease_generation: positive int, lease_expires_at, frontier: Frontier,
   dependency_digest)`;
@@ -441,7 +612,10 @@ The exact shared frozen records, also owned by `ports/ledger.py`, are:
 These field sets are closed: `OperationLease` and `SemanticAttemptHandle` carry the complete
 owner/lease/frontier/dependency compare-and-swap fence, while job, selected-attempt, and pending
 records carry only their listed durable state. `advance_check_phase` binds the durable
-local-result/case object when that transition promises recoverability.
+local-result/case object when that transition promises recoverability. Every successful phase
+advance, renewal, or reclaim returns a replacement current lease; the prior lease is spent and the
+application reconstructs `FrozenCase` with the unchanged case and replacement lease before the
+next step.
 
 `OperationRecord` uses those exact `OperationKind`, `OperationState`, `CheckPhase`,
 `OperationQuarantineCode`, and locator types. Its optional bounded
@@ -451,30 +625,109 @@ structural_ids: tuple[str, ...])` requires both sequence fields absent or both p
 `structural_ids` is sorted unique and has at most `MAX_EVENTS_PER_BATCH + 1` members. Receipt
 replay uses this locator; it never scans an unbounded ledger or rebuilds the receipt.
 
+`freeze_case` uses one closed ordering for both adapters. For an absent operation: (1) a bounded
+prepare snapshot establishes absent idempotency, no pending import, `expected_frontier`, head `F`,
+active projection identity, and exact dependency revisions; (2) outside every write transaction,
+the adapter derives `D`, pages the immutable accepted prefix through `F`, and builds the exact
+`DeterministicCase`;
+(3) only after the case exists, it canonicalizes, encrypts, and durably publishes the bound resume
+object; and (4) one short final reservation atomically repeats idempotency/no-import checks,
+revalidates head/projection/dependency/owner authority, and inserts `pending/reserved` referencing
+that already-durable object. Case/reducer work, hashing, encryption, filesystem I/O, and object
+opening are forbidden in the final write transaction. Failed revalidation writes no operation and
+leaves only an unreferenced orphan-GC candidate. An expired/stale pending row instead is reclaimed
+by CAS and resumes from its stored authenticated object; rebuilding or republishing a case under
+that existing row is forbidden.
+
 Pending-import exclusion is part of this ledger contract, not an importer-status read: for a new
-or resumed check, `freeze_case` and `commit_check_if_current` each require no pending import for
-the session inside their authoritative transaction; `append_batch` does the same for a new
+check, `freeze_case` requires no pending import in its final reservation; for a resumed check it
+requires the same predicate in the reclaim CAS. `commit_check_if_current` repeats it in its final
+commit, and `append_batch` does the same for a new
 `operation_kind=receipt`. Terminal same-digest replay precedes this predicate because it commits
 nothing. SQLite uses the co-located importer rows; memory uses one shared task-state lock.
 
 `ProjectionView` is `compact`, `assignment`, `obligations`, `findings`, `candidate_findings`,
-`evidence`, `history`, or `versions`. `ProjectionQuery(session_id, view, filter, at_frontier, limit,
-cursor)` uses one typed `ProjectionFilter` variant per view. `ProjectionCursor` is a versioned
-opaque encoding bound to the session, query digest, frontier, projection version, and last stable
-sort key. `ProjectionPage` contains typed rows (or one typed singleton), requested/head/effective
-frontiers, projection lag, next cursor, coverage, and gaps. Adapters filter and page at the
+`evidence`, `history`, or `versions`. The port-owned row-query view excludes
+`candidate_findings` and is exactly
+`compact|assignment|obligations|findings|evidence|history|versions`.
+`ProjectionQuery(session_id, view, filter, requested_frontier, limit, position,
+expected_projection_version)` uses the exact typed filter and repository-position variants frozen
+in `ports/ledger.md`; `limit` is `1..100`, the expected version is absent on a first page, and
+filter/position must match the view. `ProjectionPage(view, items, requested_frontier,
+head_frontier, effective_frontier, lag, projection_version, rebuild_state, coverage, gaps,
+next_position)` contains at most the requested count of pre-client-projection typed rows. It never
+contains opaque cursor bytes, a request envelope, import status, result frontier, or privacy
+projection. The application alone authenticates/decodes a versioned opaque `ProjectionCursor`
+into a typed position and encodes `next_position` back. Adapters filter and page at the
 storage/projection boundary; application code MUST NOT materialize an unbounded `ProjectionState`
-merely to answer `status`.
+merely to answer an ordinary row-query status view.
 
-`candidate_findings` is the one registered exception to that last rule, because a deterministic rule
-evaluates one whole frozen case and no repository can page a rule evaluation. It loads
-`ProjectionState` through `load_projection`, runs the deterministic packs, and pages the resulting
-tuple. The exception covers rule evaluation only and never row filtering, which stays at the
-storage boundary for every view including this one's inputs. Its rows are `CandidateFinding` values,
-which use the same registered stable finding order as the `findings` view but break ties on the
-engine's canonical emission ordinal, having no `finding_id`. The view returns no `CheckVerdict` and allocates no ID: only a recorded `check` produces
-either, so nothing the view returns can be responded to, waived, or cited in a receipt
-(`application/status.md`, `application/check.md`).
+The seven queryable raw-item mappings are closed. Assignment returns exact actor/obligation IDs,
+uses the same obligation tuple as v0.1 `scope_refs`, and resolves only by a later handoff chain or
+when every referenced obligation is effectively resolved. Obligation effective status is accepted
+`resolved` or plan-change `superseded|waived`; `carried` preserves accepted status. Its assigned
+actors come from non-handoff-superseded assignment branches, and revision is the latest same-ID
+republication/plan-change event. Finding-owned fields are exact; disposition is the latest response
+or `none`, and recorded waiver expiry is never evaluated against wall clock for ordering,
+filtering, or resolution. Evidence strength is exact, availability concerns only declared captured
+content (never a path/URL probe), and freshness is the weaker source-envelope/projection freshness
+capped at `redacted_gap` for unavailable captured content. History is accepted-envelope metadata;
+versions is one verified runtime manifest; compact uses exact structural counters and bounded
+summaries.
+
+Finding response does not resolve. The issue key is `(origin, policy_id, policy_version, kind,
+complete canonical subject_refs)`. A later same-key row supersedes the old and starts unresolved.
+A later check resolves an old row only if its recorded subject frontier includes that finding, its
+matching policy execution is `run/completed`, suppression is zero, freshness is current with no
+gaps, and normalized scope is whole-case or directly intersects a selected claim/obligation
+subject ref. Semantic findings additionally require `succeeded/semantic_completed`. Weak,
+skipped, failed, capped, stale, and non-overlapping checks do nothing and never reopen resolution
+while its proof remains visible; redaction may remove that proof and conservatively reopen the row
+with an explicit gap.
+Therefore `CheckRecordedPayload` adds required normalized `scope` (both tuples empty means whole
+case) and required exact `policy_executions`; policies/frontier/returned IDs alone cannot prove
+applicability.
+
+`include_resolved` absent/false adds `resolved=false`, while true removes only that predicate;
+`include_unavailable` has the identical rule for `available=true`. Filters are otherwise ANDed.
+Assignment/obligation/evidence IDs sort ascending; findings use the complete mixed-direction
+ten-part rank order; history uses ingestion sequence. The repository selects at most `limit + 1`
+indexed structural candidates and hydrates only the first `limit`; an unreadable selected row is
+omitted without backfill while its cursor position advances, and lookahead is never decrypted.
+
+Adapters maintain a finite replay-derived nonplaintext query index: frontier validity intervals;
+compact title/plan locators, counters, coverage, and gaps; assignment/obligation actor/ref/status/
+revision edges; complete finding issue/rank/response/check-scope/policy-execution/returned-ID facts;
+evidence strength/freshness/object/state-digest facts; and accepted-history metadata. Required
+indexes cover every closed filter plus the declared order and both directions of ID edges. No
+title, description, scope prose, finding prose/reason, evidence reference/description, provider
+text, payload JSON, or arbitrary metadata is stored in those columns.
+
+Redaction globally scrubs payload-derived query columns/edges and leaves only minimal tombstone
+identity, including for older frontier intervals. Tombstoned assignment/obligation/finding/
+evidence rows are omitted with `redacted_event`; non-redacted selected rows whose event/response
+payload cannot open are omitted with `event_payload_unavailable` when the item requires hydration.
+Non-redacted assignment and all history/version items remain structurally renderable.
+`include_unavailable` applies only to captured evidence objects. Compact still counts every
+obligation tombstone as open and every finding tombstone as unresolved, omits unreadable bounded
+summaries without backfill, and omits the singleton if task title is unreadable. History/versions
+remain structural. Page coverage is `coverage.weakest` over every accepted envelope through the
+effective frontier plus all projection/object/read caps, independent of filter/page; gaps are its
+exact sorted unique known-gap tokens.
+
+`candidate_findings` is the one registered exception to that last rule, because a deterministic
+rule evaluates one whole frozen case and no repository can page a rule evaluation. It loads
+`ProjectionState` plus the authoritative accepted-record prefix through that frontier, calls the
+same `build_deterministic_case` used by check freeze, runs only the deterministic packs, and pages
+the resulting tuple in pure application code. It never constructs a `ProjectionQuery`. The
+exception covers rule evaluation only; ordinary row filtering stays at the storage boundary. Its
+rows are `CandidateFinding` values ordered by the registered finding rank facts, with final ties
+broken by canonical policy/rule/complete-subject emission order because candidates have no
+`finding_id`. The durable `findings` view instead uses canonical `finding_id` bytes for its final
+tie. Candidate parity covers only deterministic findings; a recorded check may independently add
+validated semantic findings. The view returns no `CheckVerdict` and allocates no ID: only a
+recorded `check` produces either, so nothing the view returns can be responded to, waived, or cited
+in a receipt (`application/status.md`, `application/check.md`).
 
 ### Start catalog
 
@@ -772,7 +1025,8 @@ The closed privacy enums are:
   unlock TTY contract, not a claimed cryptographic exclusion;
 - `DataClass`: `public_structural`, `ordinary_user_content`, `sensitive_confidential`,
   `secret_or_cryptographic`;
-- `DataCategory`: `bounded_structural_metadata`, `declared_file_type`, `task_description`,
+- `DataCategory` (owned by `protocol/models.py`, imported and re-exported by
+  `domain/privacy.py`): `bounded_structural_metadata`, `declared_file_type`, `task_description`,
   `claim_text`, `obligation_text`, `decision_excerpt`, `evidence_excerpt`, `finding_summary`,
   `command_metadata`, `diff_metadata`, `repository_excerpt`, `transcript_excerpt`,
   `diagnostic_metadata`;
@@ -992,8 +1246,14 @@ an ordinary operation error.
 ### Time, IDs, and diagnostics
 
 `ClockPort` has `now_utc() -> datetime` for persisted metadata and `monotonic_seconds() -> float`
-for in-process deadline math. `Deadline(expires_at_utc, monotonic_deadline)` computes remaining
-time only from a supplied monotonic reading. `format_rfc3339_millis` and
+for in-process deadline math. `monotonic_seconds()` returns a finite, nonnegative, nondecreasing
+process-local sample that is never persisted. The exact frozen semantic value is
+`Deadline(expires_at_utc: datetime, monotonic_deadline: float)`, with
+`remaining_seconds(now_monotonic: float, /) -> float` and
+`expired(now_monotonic: float, /) -> bool`. Remaining time is exactly
+`max(0.0, monotonic_deadline - now_monotonic)` and equality is expired. Both methods require the
+current sample explicitly and never read ambient time; `expires_at_utc` is diagnostic only and
+cannot affect the budget. Deadlines never cross a process restart. `format_rfc3339_millis` and
 `parse_rfc3339_millis`, and `add_utc_milliseconds` are pure helpers owned by
 `domain/values.py`, not a clock adapter.
 

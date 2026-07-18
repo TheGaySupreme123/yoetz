@@ -24,11 +24,13 @@ Closed object with required fields:
 - `evidence_immutability`
 - `ledger_freshness`
 - `check_types`
-- `known_gaps` (array of bounded strings, possibly empty)
+- `known_gaps` (0..64 lower-snake ASCII tokens matching `^[a-z][a-z0-9_]{0,127}$`)
 
 The ordered dimensions must use the published enum values from the coverage registry.
-`publication_channels`, `check_types`, and `known_gaps` are canonical sorted-unique arrays; the
-first two are nonempty exactly when the owning coverage model requires an observed channel/check.
+`CoverageModel` always requires nonempty canonical `publication_channels` and `check_types`.
+`publication_channels`, `check_types`, and `known_gaps` are canonical sorted-unique arrays; JSON
+Schema enforces nonempty/unique membership while the runtime canonical-value gate enforces exact
+ordering/shape, which standard Draft 2020-12 cannot express.
 No numeric scoring or averaging is allowed.
 
 ## Errors and edge cases

@@ -1,7 +1,8 @@
 # src/yoetz/kernel/policies/research_evidence.py — deterministic research-evidence policy pack
 
 **Wave:** B | **ADRs:** ADR-002, ADR-004, ADR-006 | **Imports (spec-tree):**
-`kernel/projections.md`, `domain/findings.md`, `protocol/coverage.md`, `protocol/errors.md` |
+`kernel/deterministic_checks.md`, `kernel/projections.md`, `domain/findings.md`,
+`protocol/coverage.md`, `protocol/errors.md` |
 **Imported by:** `kernel/deterministic_checks.md`, `kernel/ranking.md`
 
 ## Purpose
@@ -19,11 +20,16 @@ support; interpretation of prose belongs only to the semantic path.
 | `RESEARCH_EVIDENCE_POLICY_VERSION` | `str = "0.1.0"` |
 | `RESEARCH_EVIDENCE_POLICY_PACK` | frozen `PolicyPack` instance for this rule set |
 | `RESEARCH_EVIDENCE_FACT_CODES` | frozen exact fact-code registry for every rule basis |
-| `research_evidence_findings(case)` | run the pack and return deterministic assessments |
+| `research_evidence_findings(case: DeterministicCase)` | run the pack and return `tuple[DeterministicAssessment, ...]` |
 
 ## Behavior
 
-The pack examines the frozen case’s claims, evidence refs, subject-state references, and any
+The pack imports `PolicyPack`, `DeterministicCase`, `FindingFact`, `FindingBasis`, and
+`DeterministicAssessment` from `kernel/deterministic_checks.py`. That owning module has no
+module-import-time dependency back to this pack; engine dispatch imports this module locally only
+after the shared types exist.
+
+The pack examines the deterministic case's claims, evidence refs, subject-state references, and any
 captured diff or command metadata preserved in the projection. It emits deterministic assessments
 when the evidence story and the claim story diverge, pairing every candidate with a stable
 machine-readable `FindingBasis`.
@@ -80,8 +86,15 @@ Rule-level behavior is conservative and subject-bound:
   It never grades the required reason string and does not trigger when matching typed support is
   present.
 
-Like the work-integrity pack, each rule produces at most one finding per logical subject. The pack
-normalizes repeated symptoms so the caller sees the strongest record of the mismatch.
+Policy cardinality follows the engine contract exactly. For each rule, the logical subject key is
+the candidate's complete canonical `subject_refs` tuple. The pack groups every raw structural
+trigger input for that exact tuple before rule evaluation, evaluates the grouped input exactly
+once, and emits zero or one assessment for the emitted-key identity
+`(RESEARCH_EVIDENCE_POLICY_ID, rule_id, subject_refs)`. Repeated raw triggers are therefore inputs
+to one evaluation. If pack wiring nevertheless emits the same key twice, the engine rejects the
+duplicate as a policy-wiring defect; no duplicate-assessment reconciliation path exists. Different
+research-evidence rules may still emit separate assessments for the same subject tuple because
+their `rule_id` members differ.
 
 The four kind tokens in this pack describe evidence problems, not semantic origin. This pack emits
 them with `origin=deterministic`; a model may independently propose the same kind with
@@ -101,6 +114,17 @@ The pack is conservative about completeness. If the projection lacks enough evid
 claim wrong, the pack can still emit a limitation finding, but it must not invent a stronger
 structural mismatch than the refs justify.
 
+Every candidate's coverage uses the same exact derived-finding transformation as the
+work-integrity pack. The pack first folds `coverage.weakest` over
+`case.coverage_by_ref[ref]` for every ref in the assessment's exact sorted
+`FindingBasis.supporting_refs`; the tuple is nonempty for every emitted finding, and any missing
+entry makes the case malformed. It then preserves the folded `authorship_assurance`,
+`artifact_observation`, `evidence_immutability`, `ledger_freshness`, and `known_gaps` byte-for-byte,
+adds `engine_derived` to the sorted-unique publication channels, and adds `deterministic` to the
+check types while removing `none`. It never applies the `engine_derived` channel default to the
+ordered dimensions and never strengthens or otherwise rewrites them. The candidate's
+`subject_frontier` is exactly `case.frontier`.
+
 ## Errors and edge cases
 
 - Missing or contradictory subject-state references are treated as evidence gaps, not as silent
@@ -116,6 +140,8 @@ structural mismatch than the refs justify.
 4. The pack never strengthens coverage beyond the available evidence refs.
 5. The pack ID and version are stable release identities.
 6. Evidence problem kind never implies semantic provenance; the origin field remains authoritative.
+7. All raw triggers for one rule and complete subject tuple are evaluated once, and duplicate
+   emitted keys are rejected rather than reconciled.
 
 ## Tests
 

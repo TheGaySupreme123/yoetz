@@ -36,6 +36,20 @@ boundary; this module contains no mutable global clock.
 4. A clock value is metadata. SQLite counters assign ingestion order, explicit event IDs/parents
    carry identity/causality, and policy output depends only on recorded canonical values.
 
+### `monotonic_seconds`
+
+1. Return a finite, nonnegative `float` from one process-local monotonic time domain. Successive
+   samples from one clock instance are nondecreasing. The value has no UTC meaning and is never
+   serialized or persisted.
+2. Production is the sole boundary allowed to read the operating-system monotonic clock. Tests
+   inject a scripted implementation; application, domain, kernel, and provider-adapter code do not
+   call `time.monotonic()`, an event-loop clock, or another ambient source directly.
+3. Callers capture one sample per decision and pass it explicitly to process-local values such as
+   `Deadline.remaining_seconds(now_monotonic)` and `Deadline.expired(now_monotonic)`. Those values
+   never obtain a current time themselves.
+4. A restarted process begins a new monotonic domain. It reconstructs any in-process budget from
+   current durable authority and a fresh sample; no `Deadline` crosses the restart boundary.
+
 ### Canonical timestamp helpers (owned by `domain/values.py`)
 
 1. Require a timezone-aware `datetime`; a naive value raises
@@ -58,10 +72,16 @@ boundary; this module contains no mutable global clock.
 - Wall-clock reversal may conservatively delay expiry but can never restore a stale generation or
   alter accepted ordering. Large forward jumps may expire work early; recovery resumes from the
   durable phase rather than assuming an external side effect failed.
-- Provider call timeouts and in-process cancellation budgets SHOULD use the async runtime's
-  monotonic reading. `Deadline` stores a monotonic deadline plus diagnostic UTC expiry and computes
-  remaining time against `clock.monotonic_seconds()`. A test advances this source explicitly; no
-  implementation consults `time.monotonic()` behind the injected boundary.
+- Provider call timeouts and in-process cancellation budgets MUST use the injected
+  `ClockPort.monotonic_seconds()` domain. `ports/semantic.py` owns the frozen
+  `Deadline(expires_at_utc, monotonic_deadline)` value. Its exact methods are
+  `remaining_seconds(now_monotonic: float, /) -> float` and
+  `expired(now_monotonic: float, /) -> bool`; the caller supplies the captured sample. A test
+  advances this source explicitly; no deadline method or adapter consults ambient time.
+- The coordinator creates a deadline by capturing wall and monotonic values separately and adding
+  the same configured duration within each domain. `expires_at_utc` is diagnostic only. It is not
+  subtracted from wall time to enforce the budget, and no wall-clock change alters an existing
+  monotonic deadline.
 
 ## Errors and edge cases
 
@@ -71,6 +91,8 @@ boundary; this module contains no mutable global clock.
   timezone name is exposed.
 - Duplicate or decreasing timestamps are legal metadata and do not reject an otherwise valid
   event. They never change ingestion order.
+- A nonfinite, negative, non-`float`, or decreasing monotonic sample is an internal clock-adapter
+  defect. It is never coerced into a duration or exposed as a public provider failure.
 - Daylight-saving and local timezone configuration are irrelevant because values are converted to
   UTC before persistence.
 
@@ -83,11 +105,14 @@ boundary; this module contains no mutable global clock.
 5. Tests can reproduce every time-dependent branch without sleeping or patching global modules.
 6. Wall-clock adjustment cannot extend or shorten an already-created in-process provider budget;
    monotonic time never becomes persisted ledger order.
+7. Deadline evaluation is a pure function of its frozen monotonic deadline and the explicit current
+   monotonic sample; diagnostic UTC expiry cannot affect it.
 
 ## Tests
 
 - `specs/tests/unit.md`: UTC/non-UTC/naive inputs, truncation at microsecond boundaries, year
-  bounds, locale/TZ invariance, checked duration arithmetic.
+  bounds, locale/TZ invariance, checked duration arithmetic, explicit monotonic deadline
+  before/equal/after boundaries, and invalid monotonic samples.
 - `specs/tests/property.md`: arbitrary aware datetimes render to exactly one accepted spelling;
   decreasing/duplicate scripted times never change sequence or replay output.
 - `specs/tests/conformance.md`: expired, unexpired, stale-generation, and wall-clock-reversal lease
