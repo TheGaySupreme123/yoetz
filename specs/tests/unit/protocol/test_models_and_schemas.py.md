@@ -107,7 +107,7 @@ The suite checks:
   `yoetz/resources/schemas` bytes rooted through `importlib.resources.files("yoetz")`, with
   sockets/DNS disabled; changing the current directory or removing the source tree cannot change
   resolution;
-- an uncached isolated-process pass statically checks all 1,239 current `$ref` occurrences, while
+- an uncached isolated-process pass statically checks all 1,251 current `$ref` occurrences, while
   mutations to external HTTPS, HTTP, `file`, relative, same-namespace-missing, query-bearing, and
   bad-fragment references all raise `schema_reference_unresolved` and a network sentinel records
   zero socket/URL calls;
