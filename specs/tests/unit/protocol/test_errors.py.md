@@ -30,7 +30,8 @@ user-visible failures never leak implementation internals.
 The suite proves:
 
 - `PublicErrorCode` has exact bases `(str, Enum)`, explicit values equal to its 22 member names, and
-  exact order; `SafeDetailValue` is exactly `str | int` and every runtime path excludes `bool`;
+  exact order; `SafeDetailValue` is exactly `str | int`, while every emitted runtime scalar is an
+  exact built-in `str`/`int` and excludes `bool` or scalar subclasses;
 - public codes and protocol reason codes exactly match their two closed registries;
 - the registry includes `privacy_receipt_not_durable` and
   `provider_attempt_provenance_is_not_final`, and includes the schema-instance boundary reason
@@ -45,18 +46,24 @@ The suite proves:
 - its deterministic dataclass representation contains the five already-safe stored fields and
   never contains the original details object, unknown-key values, rejected values, or another
   exception string;
-- non-enum `code` and non-boolean `retryable` constructor values raise the two exact programmer
-  `TypeError` messages, while supplied correlation IDs use the direct canonical `err_` UUIDv4
-  validator without importing `protocol.ids`;
+- a `code` must have actual runtime type `PublicErrorCode`, not merely a spoofed `__class__`, and
+  non-enum `code` and non-boolean `retryable` constructor values raise the two exact programmer
+  `TypeError` messages, while supplied correlation IDs use exact built-in strings and the direct
+  canonical `err_` UUIDv4 validator without importing `protocol.ids`;
 - mixed-invalid construction proves the exact `code` -> `message` -> `retryable` ->
   `correlation_id` -> `safe_details` validation order, and non-string correlation values at either
   construction or binding use `public_error_invalid_correlation_id` rather than `TypeError`;
 - safe details retain only the exact 16 keys and per-key value domains from `protocol/errors.md`;
   unknown keys are dropped without invoking their `__str__`, iterating nested structures, or
   echoing raw payloads, SQL, filesystem paths, or secrets;
+- a raising or spoofed `__class__` fails closed, a non-`Mapping` impersonator is not read as a
+  mapping, a non-`Enum` impersonator is not accepted as a structural enum, and an accepted Enum's
+  `.value` is snapshotted exactly once;
 - integer details reject `bool`, negative values, and coercion; enum-like details accept only the
-  named `Enum` values, not raw caller strings; `field`, version, schema-name, quarantine-code, and
-  reason-code validators are exercised at both sides of every bound; field-pointer vectors include
+  named actual `Enum` values, not raw caller strings; all emitted scalar values are exact built-in
+  `str`/`int`, so hostile scalar subclasses are rejected rather than retained or coerced; `field`,
+  version, schema-name, quarantine-code, and reason-code validators are exercised at both sides of
+  every bound; field-pointer vectors include
   the empty root, `/`, empty tokens, `~0`/`~1`, and rejection of missing slash, invalid/dangling
   tilde escape, control/DEL, non-ASCII, and 257-byte inputs;
 - deep errors may carry `correlation_id=None`, but public serialization fails with

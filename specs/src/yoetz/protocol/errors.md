@@ -17,7 +17,7 @@ logs, and receipts.
 | Name | Signature (natural language) |
 |---|---|
 | `PublicErrorCode` | `class PublicErrorCode(str, Enum)` with the 22 public error codes in `specs/INTERFACES.md` |
-| `SafeDetailValue` | exact type alias `str | int`; `bool` is excluded despite being an `int` subclass |
+| `SafeDetailValue` | exact type alias `str | int`; emitted scalar values are exact built-in `str`/`int`, and `bool` or scalar subclasses are excluded |
 | `PROTOCOL_REASON_CODES` | immutable closed set of the Wave B protocol/domain reason codes listed below |
 | `SAFE_DETAIL_KEYS` | immutable closed tuple of safe-detail keys listed below |
 | `PublicOperationError` | frozen, slotted exception/dataclass with exact constructor `(code, message, retryable, correlation_id=None, safe_details=None)` |
@@ -54,8 +54,10 @@ registry:
 - `CANCELLED`
 - `INTERNAL_ERROR`
 
-`SafeDetailValue` is the exact public type alias `str | int`. Because `bool` is an `int` subclass in
-Python, every runtime integer check additionally requires `not isinstance(value, bool)`; no
+`SafeDetailValue` is the exact public type alias `str | int`. Every emitted runtime value is an
+exact built-in `str` or `int`; `bool` and scalar subclasses are rejected rather than retained or
+coerced. This keeps the frozen error representation and returned dictionaries independent of
+attacker-controlled `__repr__`, equality, hashing, encoding, or numeric behavior. No
 `SafeDetailValue` position accepts `bool` in v0.1.
 
 `PublicOperationError` is the structured failure object used across application, CLI, and MCP. It
@@ -223,7 +225,8 @@ The tuple used to construct the frozenset is written in the ASCII order above an
 assertions require no duplicate and `^[a-z][a-z0-9_]{0,63}$` for every member. A later module may
 raise a new `ProtocolValueError` only after its reason is added here in the same reviewed change.
 There is no runtime registration function, plugin extension, or import-order-dependent mutation.
-Constructing `ProtocolValueError` with a nonmember is a programmer defect and raises ordinary
+Constructing `ProtocolValueError` with anything other than an exact built-in `str` member,
+including an equal `str` subclass, is a programmer defect and raises ordinary
 `ValueError("unregistered_protocol_reason_code")`; it never creates a public client-blame error.
 `privacy_receipt_not_durable` and `provider_attempt_provenance_is_not_final` are registered here so
 the dependency-root exception can carry them, but their first-raiser and recovery semantics are
@@ -251,17 +254,23 @@ value is a newly allocated ordinary `dict[str, SafeDetailValue]` whose insertion
 ASCII order as the stored mapping; it is never the internal immutable mapping. No exception args,
 dataclass metadata, empty `safe_details`, or other field is serialized.
 
-`message` is boundary-authored safe text, 1..4,096 UTF-8 bytes, contains no NUL or C0/DEL control,
+`message` is an exact built-in `str` containing boundary-authored safe text, 1..4,096 UTF-8 bytes,
+contains no NUL or C0/DEL control,
 and is never derived from `str(exception)` or caller/provider content. Failure raises
-`public_error_invalid_message`. `code` must be a `PublicErrorCode` instance and `retryable` must be
-exactly `bool`; those are programmer-owned constructor contracts, so wrong types raise ordinary
+`public_error_invalid_message`. `code` must have exact runtime type `PublicErrorCode` and
+`retryable` must be exactly `bool`; those are programmer-owned constructor contracts, so wrong
+types raise ordinary
 `TypeError("public_error_code_wrong_type")` and
 `TypeError("public_error_retryable_wrong_type")` respectively rather than adding client-facing
 protocol reasons. A supplied non-null `correlation_id` is validated by the same direct canonical
 `err_` UUIDv4 checker used by `bind_correlation_id` and otherwise raises
 `public_error_invalid_correlation_id`. This dependency-root module performs the prefix/version/
 variant/lowercase check directly and does not import `protocol/ids.py`, preserving the import DAG.
-`safe_details=None` and every non-`Mapping` input normalize to the same empty immutable mapping.
+`code` is checked by actual runtime type, not spoofable `__class__`; because a populated Enum
+cannot be subclassed, only the exact `PublicErrorCode` class is accepted. Correlation IDs likewise
+must be exact built-in strings. `safe_details=None` and every input whose actual runtime class is
+not a `Mapping` subclass normalize to the same empty immutable mapping; spoofing `__class__` does
+not grant mapping authority.
 Within a mapping, each rejected value is omitted independently; if no entry survives, the result is
 that same empty shape. Every nonempty accepted subset is defensively copied and stored as a deeply
 immutable, ASCII-key-sorted `Mapping[str, SafeDetailValue]`.
@@ -298,18 +307,22 @@ view
 
 `normalize_safe_details(value)` is total and non-raising for every input object:
 
-1. A non-`Mapping` returns the empty immutable mapping. Unknown keys are omitted without reading or
-   converting their values. Keys are never stringified.
-2. `count`, `limit`, and `retry_after_ms` accept only `int` but not `bool`, in
+1. An input whose actual runtime class is not a `Mapping` subclass returns the empty immutable
+   mapping. Unknown keys are omitted without reading or converting their values. Keys are never
+   stringified, and a spoofed or raising `__class__` fails closed.
+2. `count`, `limit`, and `retry_after_ms` accept only exact built-in `int`, not `bool` or an `int`
+   subclass, in
    `0..9_007_199_254_740_991`.
 3. `reason_code` accepts only a member of `PROTOCOL_REASON_CODES`.
 4. `quarantine_code` accepts only `operation_kind_state_contradiction`,
    `operation_result_digest_mismatch`, `operation_event_range_mismatch`,
    `operation_resume_object_invalid`, or `operation_lease_shape_invalid`.
-5. `component`, `method`, `operation`, `phase`, `state`, `status`, and `view` accept an `Enum`
-   instance whose `.value` is a lower-snake token matching `^[a-z][a-z0-9_]{0,63}$`; a raw string
-   is rejected so arbitrary input cannot masquerade as a trusted structural enum.
-6. `actual_version` and `expected_version` accept only an ASCII string matching
+5. `component`, `method`, `operation`, `phase`, `state`, `status`, and `view` accept an actual
+   `Enum` instance, determined from its runtime class rather than spoofable `__class__`, whose
+   `.value` is snapshotted once and is an exact built-in `str` lower-snake token matching
+   `^[a-z][a-z0-9_]{0,63}$`; a raw string or impersonator is rejected so arbitrary input cannot
+   masquerade as a trusted structural enum.
+6. `actual_version` and `expected_version` accept only an exact built-in ASCII string matching
    `^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$`. `schema_name` accepts only the artifact-name grammar
    `^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`, at most 128 bytes. `field` accepts only an RFC 6901 pointer
    assembled by the caller from schema constants, at most 256 ASCII bytes; raw input names are not
@@ -317,6 +330,7 @@ view
    whose tokens contain only printable ASCII (`0x20..0x7e`), with every `~` occurring only as
    `~0` or `~1`. Empty tokens and repeated `/` are valid RFC 6901 tokens; a missing leading slash,
    dangling/other tilde escape, control/DEL byte, non-ASCII code point, or 257th byte is rejected.
+   All other accepted string domains in this normalizer likewise require exact built-in `str`.
 7. A known key with a value outside its rule is omitted in full. Values are never truncated,
    coerced, recursively walked, or replaced with input-derived text. Output contains at most the 16
    keys above in ASCII order.

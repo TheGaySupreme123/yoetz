@@ -67,8 +67,10 @@ values equal to the member spellings and this frozen order:
 `PROVIDER_UNAVAILABLE`, `PROVIDER_REFUSED`, `PROVIDER_TIMEOUT`, `SEMANTIC_RESULT_INVALID`,
 `CANCELLED`, `INTERNAL_ERROR`.
 
-`type SafeDetailValue = str | int`; `bool` is excluded on every runtime path despite being an
-`int` subclass. Exception type:
+`type SafeDetailValue = str | int`; emitted values are exact built-in `str`/`int`, so `bool` and
+hostile scalar subclasses are excluded on every runtime path. Error codes, mappings, and trusted
+Enum details are recognized from their actual runtime classes rather than spoofable `__class__`.
+Exception type:
 `PublicOperationError(code, message, retryable, correlation_id=None, safe_details=None)`, a frozen,
 slotted exception/dataclass. After validation its `Exception.args` is exactly `(message,)`,
 `str(error) == message`, and its deterministic dataclass representation contains only its five
