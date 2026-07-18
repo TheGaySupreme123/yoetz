@@ -115,8 +115,9 @@ The only permitted wire-JSON decoder in the digest path and at the CLI boundary.
    hooks via a decoder-local depth counter, or post-walk) → `nesting_too_deep`.
 5. Post-walk every string (keys and values) rejecting surrogate code points (`lone_surrogate` —
    Python's decoder accepts `"\ud800"` escapes) and U+0000 (`nul_byte_forbidden`, covering the
-   escaped `\u0000` form; raw NUL bytes already fail JSON syntax outside strings and this check
-   inside them).
+   escaped `\u0000` form; a raw NUL byte anywhere in the input is rejected earlier with the
+   same `nul_byte_forbidden` by an explicit pre-decode check on the immutable byte snapshot,
+   before UTF-8 decoding or JSON syntax classification).
 6. Return the value. Property: for any bytes `b` accepted by `strict_json_parse`,
    `canonical_encode(strict_json_parse(b))` succeeds, and if `b` was already canonical,
    round-trips byte-identically (idempotence: `canonical_encode(strict_json_parse(

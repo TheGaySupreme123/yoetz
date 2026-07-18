@@ -246,22 +246,28 @@ def _is_ascii_digits(value: str) -> bool:
 
 
 def _reject_ledger_assigned_fields(value: JsonValue) -> None:
-    def _walk(node: JsonValue) -> None:
+    def _walk(node: JsonValue, depth: int) -> None:
         if _is_actual_mapping(node):
+            if depth >= MAX_JSON_DEPTH:
+                raise ProtocolValueError("nesting_too_deep")
             source = cast(Mapping[str, JsonValue], node)
             for key, item in source.items():
                 if type(key) is str and key in _REQUEST_DIGEST_FENCE_KEYS:
                     raise ProtocolValueError("ledger_assigned_field_in_request_identity")
-                _walk(item)
+                _walk(item, depth + 1)
             return
         if type(node) is list:
+            if depth >= MAX_JSON_DEPTH:
+                raise ProtocolValueError("nesting_too_deep")
             for item in node:
-                _walk(cast(JsonValue, item))
+                _walk(cast(JsonValue, item), depth + 1)
         elif type(node) is tuple:
+            if depth >= MAX_JSON_DEPTH:
+                raise ProtocolValueError("nesting_too_deep")
             for item in node:
-                _walk(cast(JsonValue, item))
+                _walk(cast(JsonValue, item), depth + 1)
 
-    _walk(value)
+    _walk(value, 0)
 
 
 def _canonical_text(value: JsonValue, *, depth: int = 0) -> str:
