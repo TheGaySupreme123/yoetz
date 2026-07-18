@@ -98,13 +98,15 @@ LatestTestedState(source_check_event_id: EventId, subject_frontier: Frontier,
 ```
 
 `plan_change_reason` is present exactly when the applied `PlanRevisedPayload.ObligationChange`
-carried a reason; `superseded_by_obligation_ids` is emitted only when nonempty. Evidence has
+carried a reason. `superseded_by_obligation_ids` is emitted whenever `plan_change` is present,
+including as the exact empty array for a non-replacement change, and is omitted only when no plan
+change applies. Evidence has
 `redacted_object_id` exactly when the reducer's envelope-derived `ReplayIndex` proves that the
 current record's source event mirrored that one now-unavailable captured object. This remains
 derivable even if that event payload is subsequently deleted; no payload prose is retained to make
 the association. The common record fields always appear in snapshots, including `payload: null`
-for a tombstone; optional specialized members are omitted when `None`/empty. No other record member
-is permitted.
+for a tombstone. Optional specialized members are omitted when `None`; the obligation replacement
+tuple follows the explicit plan-change presence rule above. No other record member is permitted.
 
 `latest_tested_state`, when present, contains exactly the fields above. Projection freshness and
 normalized gaps may weaken from its recorded coverage but may never reconstruct a stronger value
