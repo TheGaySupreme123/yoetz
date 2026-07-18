@@ -40,6 +40,8 @@ after those B1 owners exist. B0 neither imports a later-wave domain module nor s
   branches disjoint.
 - `test_shared_protocol_constants_match_frozen_values` — protocol/schema versions, byte/count caps,
   finding limits, and the genesis predecessor match the central registry exactly.
+- `test_result_field_classification_is_closed` — every current result leaf classifies exactly once;
+  content categories, discriminants, pointer rejection, and the four projection bounds are exact.
 - `test_actor_and_client_models_validate_shape_without_granting_assurance` — caller assertions stay
   bounded, strict, and non-authoritative.
 - `test_schema_catalog_reports_complete_registry` — the schema catalog exposes the reviewed set.
@@ -86,6 +88,11 @@ The suite checks:
   contract;
 - every shared constant has one exact value and is imported rather than duplicated by operation
   models or surfaces;
+- `classify_result_leaf` keeps its private registry immutable, classifies every leaf of every
+  current schema-valid result exactly once, uses the enclosing status view and publish-work event
+  schema discriminants, gives exact-pointer rules precedence over one-index patterns, and rejects
+  malformed, missing, overlapping, or unmatched pointers with `invalid_json_pointer`; the private
+  container shape is not API and the four public projection bounds equal the owning model contract;
 - actor/client models accept only the frozen enum/ID/bounded-string shapes, reject extras and
   coercion, keep caller assertion IDs distinct from durable `agt_` IDs, and never convert caller
   labels into server-assigned authentication or assurance;

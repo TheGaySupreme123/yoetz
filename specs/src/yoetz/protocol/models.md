@@ -47,7 +47,11 @@ shape before any operation-specific fields are considered.
 | `SemanticStatus` / `SemanticReason` | the one shared semantic outcome vocabulary |
 | `VALID_SEMANTIC_REASONS` | immutable exhaustive status-to-reason relation |
 | `validate_semantic_outcome(status, reason)` | reject a status/reason pair outside that relation |
-| `Timestamp` helpers | parse/format helpers for RFC 3339 UTC with three fractional digits |
+| `classify_result_leaf(method, validated_result, pointer)` | classify one validated result leaf as `public_structural` or its exact `DataCategory` |
+| `MAX_PROJECTION_CONTENT_LEAVES` | `int = 512` |
+| `MAX_PROJECTION_POINTER_BYTES` | `int = 256` |
+| `MAX_INTERNAL_PROJECTABLE_RESULT_BYTES` | `int = 524_288` |
+| `MAX_PROJECTED_RESULT_BYTES` | `int = 1_048_576` |
 
 ## Behavior
 
@@ -356,13 +360,24 @@ prevents serialization at runtime.
 
 ### Frozen result-field registry and projection bounds
 
-`RESULT_FIELD_REGISTRY` is an executable closed registry in this future file. It matches exact
-method + JSON Pointer patterns; `*` matches one array index and `**` is forbidden. A pointer is NFC,
-RFC 6901 escaped, begins with `/`, is at most 256 UTF-8 bytes, and is evaluated against the already
-validated result tree. One leaf must match exactly one entry. Precedence is exact pointer, then one-
-index pattern; overlap, absence, or a new schema path fails generation/tests and the whole
-projection with bounded `privacy_projection_unavailable` before any content serialization. There
-is no category guess or omission marker for an unknown field.
+This module owns a private executable closed result-field registry. Its private representation is
+an immutable, unsigned-UTF-8-sorted tuple of frozen, slotted rule records; there is no public
+container, entry class, mapping/list view, or runtime registration/mutation API. A rule contains an
+exact method, optional exact status view, JSON Pointer pattern, and classification. Its
+classification is exactly `Literal["public_structural"] | DataCategory`. `*` matches one canonical
+non-negative array-index segment and `**` is forbidden.
+
+The only public access is
+`classify_result_leaf(method: str, validated_result: Mapping[str, JsonValue], pointer: str) ->
+Literal["public_structural"] | DataCategory`. The complete already-schema-validated result lets the
+resolver derive the exact status `view` and publish-work event `schema_name` discriminants without
+adding parallel selector arguments. The pointer must be NFC, RFC 6901 escaped, begin with `/`, be at
+most 256 UTF-8 bytes, and identify a leaf in `validated_result`. Resolution precedence is exact
+pointer, then one-index pattern. A malformed pointer, missing leaf, invalid rule, overlap at the
+same precedence, or unmatched leaf raises `ProtocolValueError("invalid_json_pointer")`; the
+service maps that fail-closed condition to `privacy_projection_unavailable` before any content
+serialization. One leaf must match exactly one entry. There is no category guess or omission
+marker for an unknown field.
 
 The following typed leaves are structural for every method, wherever the exact result schema
 places them: protocol/schema/version identifiers; typed Yoetz IDs; `Frontier`; enum/reason/policy/
@@ -466,9 +481,13 @@ outcome reaches one of these already-registered pairs.
 reason code. The model never asks a client to infer semantic incompleteness from a generic warning
 or coverage string.
 
-Timestamp helpers emit and parse RFC 3339 UTC with exactly three fractional digits and a trailing
-`Z`. The implementation must reject locale-specific formats, offsets other than UTC, leap-second
-spellings, and any lossy coercion that would alter the exact string round trip.
+Timestamp-shaped wire fields in this module use one private constrained alias that accepts only RFC
+3339 UTC with exactly three fractional digits and a trailing `Z`. It rejects locale-specific
+formats, offsets other than UTC, leap-second spellings, and any coercion. This module deliberately
+does not expose a second timestamp parser/formatter: the public `Timestamp`,
+`timestamp_from_string`, `timestamp_from_datetime`, `format_rfc3339_millis`,
+`parse_rfc3339_millis`, and `add_utc_milliseconds` helpers are owned by B1
+`domain/values.py`, as also stated by `INTERFACES.md` and `ports/clock.md`.
 
 ## Errors and edge cases
 
