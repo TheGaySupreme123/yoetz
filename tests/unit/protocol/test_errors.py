@@ -624,6 +624,17 @@ def test_correlation_binding_lifecycle() -> None:
     with pytest.raises(ProtocolValueError) as type_exc:
         unbound.bind_correlation_id(cast(str, 1))
     _assert_reason(type_exc, "public_error_invalid_correlation_id")
+    enum_detailed = PublicOperationError(
+        PublicErrorCode.INTERNAL_ERROR,
+        "Component failed",
+        False,
+        None,
+        {"component": _SafeEnum.READY, "count": 3},
+    )
+    assert enum_detailed.safe_details == {"component": "ready", "count": 3}
+    enum_bound = enum_detailed.bind_correlation_id(_VALID_CORRELATION_ID)
+    assert enum_bound.safe_details == enum_detailed.safe_details
+    assert enum_bound.correlation_id == _VALID_CORRELATION_ID
 
 
 def test_public_dict_shape_and_copy_are_exact() -> None:

@@ -21,7 +21,8 @@ user-visible failures never leak implementation internals.
 - `test_safe_details_allowlist_and_types_are_exact` — all allowed keys/types survive and every
   unknown, invalid, recursive, coercion-only, or oversized value is omitted.
 - `test_correlation_binding_lifecycle` — internal `None`, first binding, same-ID rebinding,
-  different-ID rejection, and public serialization-before-binding have exact behavior.
+  different-ID rejection, and public serialization-before-binding have exact behavior; binding
+  preserves already-normalized `safe_details` verbatim, including enum-derived entries.
 - `test_public_dict_shape_and_copy_are_exact` — required fields, conditional `safe_details`, enum
   serialization, ordinary dictionary copies, and insertion order are exact.
 

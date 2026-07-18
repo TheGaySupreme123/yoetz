@@ -389,13 +389,17 @@ class PublicOperationError(Exception):
             return self
         if self.correlation_id is not None:
             raise ProtocolValueError("public_error_invalid_correlation_id")
-        return PublicOperationError(
-            self.code,
-            self.message,
-            self.retryable,
-            value,
-            self.safe_details,
-        )
+        # Copy stored fields verbatim instead of re-running __init__: normalization is not
+        # idempotent (enum-keyed details were already collapsed to plain strings, which the
+        # enum branch would reject), and binding must change only the correlation ID.
+        bound = PublicOperationError.__new__(PublicOperationError)
+        object.__setattr__(bound, "code", self.code)
+        object.__setattr__(bound, "message", self.message)
+        object.__setattr__(bound, "retryable", self.retryable)
+        object.__setattr__(bound, "correlation_id", value)
+        object.__setattr__(bound, "safe_details", self.safe_details)
+        Exception.__init__(bound, self.message)
+        return bound
 
     def as_public_dict(self) -> dict[str, object]:
         if self.correlation_id is None:
