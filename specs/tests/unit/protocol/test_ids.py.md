@@ -41,13 +41,15 @@ The suite exercises the full `IdKind` matrix and proves:
   the expected prefix, while `new_id(IdKind.ACTOR)` raises the exact registered
   `actor_id_not_generated` reason;
 - `validate_id` accepts only the target kind’s prefix and exact UUID spelling;
-- direct `validate_id`/`validate_actor_id` accept `str` subclasses by the documented
-  `isinstance(value, str)` contract, use only bounded built-in string operations, and return the
-  identical object without coercion; this is intentionally distinct from safe request extraction;
+- direct `validate_id`/`validate_actor_id` accept real `str` subclasses by inspecting the actual
+  runtime class, reject spoofed or raising `__class__`, use only bounded built-in string
+  operations, and return the identical object without coercion; this is intentionally distinct
+  from safe request extraction;
 - the nil UUID, short/long forms, upper-case forms, and non-ASCII forms are rejected;
 - `safe_request_id_from` returns either a valid request ID or `None` and never raises on hostile
-  `Mapping` values; the duplicate-lookup case is a custom mapping whose `.get("request_id")`
-  raises, because a Python `dict` cannot contain duplicate equal keys; only
+  `Mapping` values, a spoofed/raising `__class__`, or lookup failure including `BaseException`; the
+  duplicate-lookup case is a custom mapping whose `.get("request_id")` raises, because a Python
+  `dict` cannot contain duplicate equal keys; only
   `type(candidate) is str` can pass, so hostile subclasses cannot override
   behavior on the public error path;
 - a non-`IdKind` kind is an ordinary programmer defect: `new_id`, `validate_id`, and

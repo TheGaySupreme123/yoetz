@@ -26,7 +26,8 @@ The property suite checks:
   are validation-only caller assertions;
 - one-defect mutations fail in the expected way;
 - request-id extraction stays bounded and non-raising for arbitrary objects, ordinary mappings,
-  and custom mappings whose `.get("request_id")` raises;
+  spoofed or raising `__class__`, and custom mappings whose `.get("request_id")` raises any
+  exception family;
 - the duplicate/ambiguous source-key property uses only that hostile custom `Mapping`; it never
   claims that a Python `dict` can retain duplicate equal keys or introduces a parser API;
 - wrong-kind objects propagate the exact programmer-defect `TypeError` and are never converted to

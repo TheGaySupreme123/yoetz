@@ -52,9 +52,11 @@ Every kind parameter requires `type(kind) is IdKind`; a raw wire token or other 
 programmer defect and raises ordinary `TypeError("id_kind_wrong_type")`, including through
 `is_valid_id`. `new_id(IdKind.ACTOR)` is the sole per-kind generation exception and raises
 `ProtocolValueError("actor_id_not_generated")`. Safe extraction contains a hostile mapping's
-raising `.get`, accepts only an exact built-in `str`, checks length before scanning, and returns
-only a validated request ID or `None`. There is no `parse_id`, reverse-prefix lookup, or
-kind-from-ID public API.
+raising `.get`, recognizes mappings by actual runtime class rather than spoofable `__class__`,
+accepts only an exact built-in `str`, checks length before scanning, and returns only a validated
+request ID or `None`. Direct validators accept real `str` subclasses through built-in `str`
+descriptors while rejecting non-string impersonators. There is no `parse_id`, reverse-prefix
+lookup, or kind-from-ID public API.
 
 ## 2. Public error codes (`protocol/errors.py`)
 

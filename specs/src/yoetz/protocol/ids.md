@@ -102,11 +102,12 @@ precondition.
 
 1. `type(kind) is IdKind` → else ordinary `TypeError("id_kind_wrong_type")`.
 2. For `IdKind.ACTOR`, return `validate_actor_id(value)` or propagate its registered reason.
-3. `value` is a `str` instance, including a `str` subclass (bool/bytes/int are not) → else
-   `id_wrong_type`. Validation invokes length/index/slice/match behavior through built-in `str`
-   descriptors so subclass overrides are never called, and it never coerces the value; after the
-   bounded checks below it returns that same object unchanged. Exact built-in type is intentionally
-   required only by hostile-path `safe_request_id_from`.
+3. The actual runtime class of `value` is `str` or a real `str` subclass (bool/bytes/int and an
+   object whose `__class__` merely impersonates `str` are not) → else `id_wrong_type`. Validation
+   invokes length/index/slice/match behavior through built-in `str` descriptors so subclass
+   overrides are never called, and it never coerces the value; after the bounded checks below it
+   returns that same object unchanged. Exact built-in type is intentionally required only by
+   hostile-path `safe_request_id_from`.
 4. Bounded-copy guard: `len(value) == ID_TOTAL_LENGTH` → else `id_wrong_length`. This runs before
    any character scan so oversized input is never iterated.
 5. Every code point is printable ASCII (`0x21..0x7E`) → else `id_not_ascii`.
@@ -126,8 +127,8 @@ ledger idempotency-digest rules, not rejected here.
 
 ### `validate_actor_id(value)`
 
-1. `str` instance, including a `str` subclass, → else `id_wrong_type`; return the same object after
-   validation and never coerce it.
+1. Actual runtime class `str` or a real `str` subclass, never a spoofed `__class__`, → else
+   `id_wrong_type`; return the same object after validation and never coerce it.
 2. `len(value) <= 128` before any regex work → else `id_wrong_length`.
 3. Full match against `ACTOR_ID_PATTERN` (ASCII letters, digits, `.`, `_`, `:`, `-`; length
    1–128) → else `actor_id_malformed`.
@@ -147,11 +148,13 @@ the exact wrong-kind programmer defect therefore propagates as `TypeError("id_ki
 Non-raising by construction; used on the untrusted MCP error path owned by
 `specs/src/yoetz/mcp/server.md`. Behavior:
 
-1. If `arguments` is not a `Mapping` → return `None`; the public signature deliberately accepts an
-   arbitrary `object` so this boundary can survive anything.
-2. `candidate = arguments.get("request_id")` guarded so a raising `__getitem__`/`get` on an exotic
-   mapping cannot escape (wrap the lookup in a broad `except Exception: return None`; this is the
-   one place a broad catch is correct, because the function's contract is "never raises").
+1. If the actual runtime class of `arguments` is not a `Mapping` subclass → return `None`; the
+   public signature deliberately accepts an arbitrary `object` so this boundary can survive
+   anything. A spoofed or raising `__class__` fails closed rather than granting mapping authority.
+2. `candidate = arguments.get("request_id")` is guarded so a raising `__getitem__`/`get` on an
+   exotic mapping cannot escape. Classification and lookup catch `BaseException` and return
+   `None`; this narrow hostile error-path helper has the exact contract "never raises" and does
+   not reclassify or log the failure.
 3. If `type(candidate) is not str` → `None`. In particular, a user-defined `str` subclass is not
    accepted on this hostile error path.
 4. Bounded copy: if `len(candidate) != ID_TOTAL_LENGTH` → `None`. No slice, scan, or copy of an
