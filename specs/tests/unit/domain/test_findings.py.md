@@ -13,7 +13,11 @@ receipt rendering.
 
 - `test_finding_requires_bounded_subject_refs` — subject refs are exact and canonical.
 - `test_priority_and_origin_validation` — the shared priority/origin scheme is enforced.
-- `test_semantic_provenance_is_required_when_semantic` — semantic findings must carry audit trail.
+- `test_semantic_finding_requires_successful_final_provenance` — semantic findings require the
+  exact `succeeded/semantic_completed` finalized attempt in both `CandidateFinding` and `Finding`;
+  other terminal attempt records are not finding provenance.
+- `test_deterministic_finding_forbids_provenance` — deterministic findings never carry semantic
+  attempt accounting.
 - `test_rank_key_is_deterministic` — ordering input is stable and tie-broken by ID.
 - `test_coverage_never_exceeds_subject_support` — finding coverage stays conservative.
 - `test_finding_kind_is_independent_of_origin` — any allowed kind can be deterministic or semantic
@@ -28,7 +32,8 @@ receipt rendering.
 The suite proves that findings:
 
 - remain frozen and bounded;
-- carry explicit origin and provenance;
+- carry explicit origin and the exact origin/provenance matrix: semantic requires finalized
+  `succeeded/semantic_completed`, while deterministic forbids provenance;
 - use the shared priority scheme;
 - preserve stable subject references without free text;
 - carry post-validated direct-agent challenge content only in the existing bounded semantic
@@ -38,8 +43,9 @@ The suite proves that findings:
 
 ## Errors and edge cases
 
-- A semantic finding without receipt-finalized provenance is invalid; provisional adapter
-  provenance and a receipt ID not yet durable are invalid.
+- A semantic finding without receipt-finalized `succeeded/semantic_completed` provenance is
+  invalid; provisional adapter provenance, a receipt ID not yet durable, and finalized refused,
+  timeout, invalid, unavailable, late, stale, or failed attempts are invalid finding provenance.
 - An unknown finding kind fails at the boundary.
 - A semantic challenge that claims deterministic origin, or a deterministic finding whose kind is
   incorrectly used to infer semantic provenance, fails.
@@ -47,7 +53,8 @@ The suite proves that findings:
 ## Invariants
 
 1. Findings are sparse, bounded, and auditable.
-2. Origin and provenance remain explicit.
+2. Origin and provenance remain explicit; broad terminal attempt accounting cannot be mistaken for
+   a successful semantic finding.
 3. Stable IDs and refs drive ordering, not prose.
 
 ## Tests

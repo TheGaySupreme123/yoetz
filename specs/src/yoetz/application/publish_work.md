@@ -35,13 +35,27 @@ idempotency, and the final commit.
    `codex_jsonl_import`) rather than trusting a caller-supplied coverage value. Normalize the actor
    assertion and clamp assurance to what the channel proves; MCP is `self_asserted`, importer at
    most `harness_observed` where the recorded source justifies it.
-4. Preserve input event order. Require event IDs unique within the batch; causal parents and
+4. Enforce the exact application/channel family admission matrix before staging any object:
+   - ordinary `cooperative_mcp` and `local_cli` publication admits only `plan_published`,
+     `obligation_published`, `assignment_recorded`, `decision_recorded`, `action_recorded`,
+     `result_recorded`, `evidence_recorded`, `claim_recorded`, and `plan_revised`;
+   - the trusted `codex_jsonl_import` path admits only its frozen mapping families
+     `action_recorded`, `result_recorded`, `evidence_recorded`, plus bounded opaque unknown events;
+   - `session_opened|session_resumed`, `finding_recorded|check_recorded`, `response_recorded`, and
+     `receipt_recorded` are admitted only through `start`, `check`, `respond`, and `receipt`
+     respectively; `redaction_recorded` is reserved to the trusted object-maintenance/redaction
+     path and has no public caller route in v0.1.
+   A caller-supplied actor/client token never proves importer, engine, or maintenance authority.
+   A known family outside the applicable row rejects the whole batch as `EVENT_INVALID` with
+   reason `event_family_not_admitted`. Opaque unknown events remain projection-inert and therefore
+   do not inherit authority from a future-looking name inside their payload.
+5. Preserve input event order. Require event IDs unique within the batch; causal parents and
    reference sets sorted/unique. A parent may be an earlier accepted event or an earlier event in
    this same ordered batch, never a future/cross-task event.
-5. For a known schema/version, decode the exact payload dataclass, enforce all family/state/ref
+6. For a known schema/version, decode the exact payload dataclass, enforce all family/state/ref
    mirror rules, and reject unknown fields. For an unknown bounded schema/version, preserve frozen
    canonical payload bytes and set `projection_status="unknown_unprojected"`; do not interpret it.
-6. Server-side state-sensitive validation (plan version, resolution refs, finding/event existence)
+7. Server-side state-sensitive validation (plan version, resolution refs, finding/event existence)
    uses the projection/frontier seen by the final append. `expected_frontier=None` is allowed only
    for intentionally append-only semantics; a state-sensitive batch requires it.
 
@@ -87,6 +101,8 @@ returns the original assigned sequences/digests even if retry created different 
 
 - Invalid known payload/ref/state → `EVENT_INVALID`; request/batch/size bound →
   `INVALID_REQUEST`/`LIMIT_EXCEEDED`; duplicate/reused event IDs are never silently dropped.
+- A valid known family presented through the wrong operation/channel is `EVENT_INVALID` with
+  `event_family_not_admitted`; authorization is checked before payload object staging.
 - Stale required frontier → `FRONTIER_CONFLICT`; same request ID with different logical identity →
   `IDEMPOTENCY_CONFLICT`; writer/session mismatch → `SESSION_CONFLICT` or `SESSION_NOT_FOUND`.
 - Object key/path/I/O failures occur before append and map through their typed storage/key failures;
@@ -110,7 +126,7 @@ returns the original assigned sequences/digests even if retry created different 
 ## Tests
 
 - `specs/tests/unit.md`: known/unknown routing, state-sensitive frontier requirement, ref mirrors,
-  channel/assurance clamping, request-identity exclusions.
+  channel/assurance clamping, the complete family-admission matrix, request-identity exclusions.
 - `specs/tests/conformance.md`: 1/100/101 boundaries, atomic invalid member, same-ID replay,
   different-digest conflict, unknown preservation, memory/SQLite byte parity.
 - `specs/tests/subprocess.md`: kill/object/commit/response points; same-ID retry; no partial batch.

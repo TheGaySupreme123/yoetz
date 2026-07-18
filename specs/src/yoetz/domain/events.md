@@ -157,12 +157,13 @@ unknown schema, `logical_key=None`, empty target tuples, and the same digest exp
 variant's adjacent `canonical_payload_digest`; it is never interpreted into a family key.
 
 The locator is deliberately not a second object-reference inventory. The immutable 19-field
-accepted envelope already supplies the two non-plaintext associations needed by object-only
-redaction replay: `payload_ref.object_id` identifies that event's payload object, and an exact-known
-`evidence_recorded` envelope's `artifact_refs` identifies its optional captured-content object.
-Reducers derive their reverse `ReplayIndex` only from those envelope fields plus the locator's
-schema/logical key and redaction target tuples. No deleted payload body, object-store lookup, path,
-URL, description, or `remaining_gap` text participates in that index.
+accepted envelope already supplies the non-plaintext associations needed by object-only redaction
+replay: `payload_ref.object_id` identifies that event's payload object; an exact-known
+`evidence_recorded` envelope's `artifact_refs` identifies its optional captured-content object; and
+an exact-known `receipt_recorded` envelope's singleton `artifact_refs` identifies its encrypted
+receipt document. Reducers derive their reverse `ReplayIndex` only from those envelope fields plus
+the locator's schema/logical key and redaction target tuples. No deleted payload body, object-store
+lookup, path, URL, description, or `remaining_gap` text participates in that index.
 
 `ClientKind` and `IntegrationKind` are imported from `protocol/models.py` and re-exported here;
 `ResponseDisposition` and `WaiverScope` are imported from `domain/findings.py`;
@@ -267,9 +268,9 @@ to bypass those rules.
 
 | Field | Type | Required | Semantics |
 |---|---|---:|---|
-| `task_title` | str ≤ `MAX_LABEL_BYTES` | yes | User content; lives only in the encrypted payload object owned by `specs/src/yoetz/ports/objects.md` |
-| `external_ref` | str ≤ `MAX_LABEL_BYTES` | no | Raw task identity as supplied to `start`; catalog keeps only its keyed commitment |
-| `workspace_ref` | str ≤ `MAX_LABEL_BYTES` | no | Raw workspace identity; same commitment rule |
+| `task_title` | nonempty str ≤ `MAX_TEXT_BYTES` | yes | User content copied losslessly from `StartRequestModel`; lives only in the encrypted payload object owned by `specs/src/yoetz/ports/objects.md` |
+| `external_ref` | nonempty str ≤ `MAX_TEXT_BYTES` | no | Raw task identity as supplied to `start`; catalog keeps only its keyed commitment |
+| `workspace_ref` | nonempty str ≤ `MAX_TEXT_BYTES` | no | Raw workspace identity; same commitment rule |
 | `client_kind` | enum `codex_cli\|cooperative_agent\|yoetz_cli\|test_client\|importer` | yes | From `ClientInfoModel`; provenance only, never an assurance input |
 | `client_version` | str ≤ `MAX_LABEL_BYTES` | yes | |
 | `integration` | enum `cooperative_mcp\|local_cli\|codex_jsonl_import` | yes | |
@@ -497,12 +498,18 @@ order as `policies`; an execution cannot be inserted, omitted, reordered, or att
 pack. Policy finding-emission order remains a separate kernel rule and does not alter this
 canonical accounting order.
 
-`semantic_provenance` is required for `succeeded` and for any provider/local-model attempt whose
-terminal receipt is available; it is forbidden for `not_requested`, `not_configured`, policy/data
-blocks, classification uncertainty, waiting/denial/expiry, audit-reservation failure, and any
-other predispatch outcome. `semantic_reason` remains sufficient to explain those no-attempt cases.
-The complete status/reason/provenance branch validator is the one owned by `protocol/models.py`;
-this payload calls it and adds no broader branch. A one-member policy tuple is exactly either
+`semantic_provenance` is required for `succeeded`, `refused`, `timeout`, `invalid`, `late`, `stale`,
+and unavailable reasons `transport_unavailable`, `provider_rate_limited`, and
+`provider_quota_exhausted`. It is forbidden for `not_requested`, `not_configured`, policy/data
+blocks, classification uncertainty, waiting/denial/expiry, and unavailable reasons
+`credential_unavailable`, `endpoint_profile_unavailable`, `retry_budget_exhausted`,
+`audit_reservation_unavailable`, and `receipt_persistence_unknown`; `failed/coordinator_failure`
+permits it only when a finalized receipt-bound attempt exists. `semantic_reason` remains sufficient
+to explain the no-provenance cases.
+When provenance is present, its nested status/reason equals this payload's top-level selected/final
+pair. Earlier late/non-selected attempts remain attempt-audit rows only. The complete
+status/reason/provenance identity validator is the one owned by `protocol/models.py`; this payload
+calls it and adds no broader branch. A one-member policy tuple is exactly either
 `PolicyVersion("research-evidence", "0.1.0")` or
 `PolicyVersion("work-integrity", "0.1.0")`; the two-member tuple has those entries in that exact
 order. No empty selection, other policy identity/version, or other order is schema-valid in the
@@ -528,7 +535,7 @@ Client-shaped pre-acceptance value produced from a validated `publish_work` item
 `EventDraft(event_id: EventId, schema: EventSchema, occurred_at: Timestamp,
 causal_parents: tuple[EventId] ≤ MAX_CAUSAL_PARENTS (sorted unique),
 payload: EventPayload | JsonValue, artifact_refs: tuple[ObjectId] ≤ MAX_REF_LIST,
-evidence_refs: tuple[EvidenceId] ≤ MAX_REF_LIST)`.
+evidence_refs: tuple[EvidenceId | ResultId] ≤ MAX_REF_LIST)`.
 
 For a known schema, `payload` is the decoded dataclass; for an unknown bounded schema it remains
 frozen `JsonValue` and the draft routes to the unknown path. There are no `author_seq` or
@@ -536,11 +543,14 @@ frozen `JsonValue` and the draft routes to the unknown path. There are no `autho
 `artifact_refs`. Note: envelope-level `evidence_refs` are the indexable
 reference copy (ledger `event_refs` table); the payload keeps its own typed refs — both must
 agree at validation (`EVENT_INVALID`, reason `ref_mirror_mismatch`) for families whose payload
-declares `evidence_refs`. `EvidenceRecordedPayload.captured_object_id` has an exact mirror:
+declares `evidence_refs`, including preserving each `evd_` versus `res_` kind.
+`EvidenceRecordedPayload.captured_object_id` has an exact mirror:
 `artifact_refs == ()` when it is absent and `artifact_refs == (captured_object_id,)` when it is
 present. For `redaction_recorded`, `artifact_refs` is exactly `target_object_ids`. These closed
 mirrors make object-only redaction replay possible after either object is deleted and prevent an
-unrelated artifact ref from being mistaken for captured evidence.
+unrelated artifact ref from being mistaken for captured evidence. For `receipt_recorded`,
+`artifact_refs` is exactly `(receipt_object_id,)`; the encrypted receipt document cannot be omitted,
+reordered, or accompanied by an unrelated object.
 
 ### `AcceptedEvent`
 
@@ -564,7 +574,7 @@ coverage: Coverage
 payload_ref: PayloadRef
 redaction: RedactionState
 artifact_refs: tuple[ObjectId, ...]
-evidence_refs: tuple[EvidenceId, ...]
+evidence_refs: tuple[EvidenceId | ResultId, ...]
 entry_digest: str
 payload: EventPayload | None
 projection_locator: ProjectionLocator
@@ -579,11 +589,13 @@ excludes both runtime-only fields but includes `entry_digest`, matching
 `schemas/events/accepted-event-1.0.0.schema.json` exactly.
 
 The replay association is therefore exact without widening that wire shape:
-`payload_ref.object_id -> event_id` for every accepted record and, only for an exact-known
-`evidence_recorded` record, `artifact_refs[0] -> (logical evidence_id, source event_id)`. Payload
+`payload_ref.object_id -> event_id` for every accepted record; only for an exact-known
+`evidence_recorded` record, `artifact_refs[0] -> (logical evidence_id, source event_id)`; and only
+for an exact-known `receipt_recorded` record, `artifact_refs[0] -> source receipt event`. Payload
 object IDs are unique within a bundle; reusing one for two accepted payload envelopes is
 corruption. A captured object may support multiple evidence events, so that reverse association is
-a sorted tuple rather than a guessed singleton.
+a sorted tuple rather than a guessed singleton; a receipt document mirror is the exact singleton
+owned by its one receipt event.
 
 There are two deliberately distinct views:
 
@@ -652,7 +664,7 @@ The exact `ProtocolValueError` reasons first raised by this module are:
 `invalid_event_value_type`, `event_text_out_of_bounds`, `event_integer_out_of_range`,
 `invalid_event_enum`, `invalid_event_schema`, `invalid_chain`, `invalid_payload_ref`,
 `unknown_payload_field`, `missing_payload_field`, `unsorted_set_field`,
-`duplicate_set_member`, `attachment_key_incomplete`, `obligation_resolution_invalid`,
+`duplicate_set_member`, `obligation_resolution_invalid`,
 `evidence_strength_unsupported`, `import_report_invalid`, `obligation_change_invalid`,
 `response_fields_invalid`, `redaction_target_required`, `unknown_event_schema`,
 `unsupported_payload_type`, `payload_redaction_mismatch`, `entry_digest_mismatch`,
@@ -672,10 +684,9 @@ validation propagates the reason owned by its imported module and is not rewrapp
   references are deterministic check material (K5), not append errors.
 - `plan_version` continuity violations (`plan_published` not `+1`, `plan_revised` superseding a
   non-current version): rejected pre-append with `EVENT_INVALID` reason `plan_version_conflict`.
-- A `FindingRecordedPayload` or `CheckRecordedPayload` authored by anyone other than
-  `yoetz_engine` via cooperative channels is rejected (`EVENT_INVALID`,
-  `engine_family_wrong_author`); import channels may carry them as observations with importer
-  authorship and `import_observed` channel.
+- Operation/channel family admission is owned by `application/publish_work.md`, not this payload
+  codec. A known payload may be valid domain history while still being forbidden through the public
+  operation that presented it; no caller-selected author or integration widens that authority.
 - Redacted payloads (`payload is None`) are legal in either ledger-record variant; anything that
   needs the payload must degrade coverage instead of failing.
 - A supported exact schema pair with an invalid payload is `EVENT_INVALID`, never an opaque

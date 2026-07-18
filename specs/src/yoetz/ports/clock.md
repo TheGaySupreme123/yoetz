@@ -19,16 +19,19 @@ repeatable and prevents reducers from reading ambient time.
 - `class ClockPort(Protocol)` with `def now_utc(self) -> datetime` and
   `def monotonic_seconds(self) -> float` (INTERFACES §10).
 
-Pure `format_rfc3339_millis`, `parse_rfc3339_millis`, and checked UTC duration arithmetic belong to
-`domain/values.py`. Production and test clock implementations live at the composition/test
-boundary; this module contains no mutable global clock.
+Pure `format_rfc3339_millis`, `parse_rfc3339_millis`, and
+`add_utc_milliseconds` belong to `domain/values.py`. Production and test clock implementations live
+at the composition/test boundary; this module contains no mutable global clock and defines no
+second duration-addition helper.
 
 ## Behavior
 
 ### `now_utc`
 
-1. Return a timezone-aware `datetime` denoting UTC. A non-UTC offset is not returned by a conforming
-   implementation; callers still normalize defensively through `format_rfc3339_millis`.
+1. Return an exact built-in `datetime` with a present zero UTC offset and exact millisecond
+   precision. A naive, nonzero-offset, subclassed, or sub-millisecond value is not returned by a
+   conforming implementation. Callers validate through the `domain/values.py` helpers; they do not
+   repair, truncate, or accept an invalid clock sample.
 2. Each application operation captures `now = clock.now_utc()` once per logical decision or
    transaction input. It does not call the clock repeatedly while comparing one lease.
 3. Production uses the operating-system wall clock. Tests supply a scripted clock whose values
@@ -52,20 +55,25 @@ boundary; this module contains no mutable global clock.
 
 ### Canonical timestamp helpers (owned by `domain/values.py`)
 
-1. Require a timezone-aware `datetime`; a naive value raises
-   `ProtocolValueError("timestamp_timezone_missing")`.
-2. Convert the instant to UTC, truncate (never round) microseconds to whole milliseconds, and
-   render `YYYY-MM-DDTHH:MM:SS.mmmZ` with exactly three fractional digits and an uppercase `Z`.
-3. Reject years outside `0001..9999` and any value the standard calendar cannot represent with
-   `ProtocolValueError("timestamp_out_of_range")`.
-4. Rendering is locale independent. It never accepts or emits a leap-second spelling; parsing and
-   validation of caller strings remain in `domain/values.py`.
+1. Require `type(dt) is datetime`; a subclass or other value raises
+   `ProtocolValueError("invalid_timestamp")`. A naive value raises
+   `timestamp_timezone_missing`, a nonzero offset raises `timestamp_not_utc`, and a microsecond not
+   divisible by 1000 raises `timestamp_submillisecond_precision`, in that order.
+2. Normalize an accepted zero-offset instant to `timezone.utc` and render
+   `YYYY-MM-DDTHH:MM:SS.mmmZ` with exactly three fractional digits and an uppercase `Z`. The helper
+   never rounds or truncates.
+3. `add_utc_milliseconds` applies the same datetime validation, then requires an exact built-in
+   `int` in `1..9_007_199_254_740_991`; every other duration raises `invalid_duration`.
+   `timedelta`/calendar overflow raises `timestamp_out_of_range` and is never clipped.
+4. Rendering and arithmetic are locale independent. Neither accepts or emits a leap-second
+   spelling; parsing and validation of caller strings remain in `domain/values.py`. Normalization
+   before arithmetic makes an original named timezone's later offset transition irrelevant.
 
 ### Lease and deadline use
 
-- Persisted lease expiry is `add_duration(captured_now, configured_duration)`, formatted once.
-  `milliseconds` must be a positive bounded integer; otherwise
-  `ProtocolValueError("invalid_duration")`.
+- Persisted lease expiry is
+  `add_utc_milliseconds(captured_now, configured_duration_milliseconds)`, formatted once. There is
+  no `add_duration` alias or second duration domain.
 - A lease is valid only when its owner generation is current **and** its stored expiry is after the
   captured `now`. An expired lease may be reclaimed; a stale generation is invalid immediately,
   even if its wall-clock expiry is in the future.
@@ -85,16 +93,18 @@ boundary; this module contains no mutable global clock.
 
 ## Errors and edge cases
 
-- A naive, unrepresentable, or non-`datetime` value is an internal clock-adapter defect at runtime;
-  request-boundary timestamp errors are `INVALID_REQUEST` before the application sees them.
+- A naive, nonzero-offset, sub-millisecond, unrepresentable, subclassed, or non-`datetime` value is
+  an internal clock-adapter defect at runtime; request-boundary timestamp errors are
+  `INVALID_REQUEST` before the application sees them.
 - A production clock failure is sanitized as `INTERNAL_ERROR`; no raw platform exception or local
   timezone name is exposed.
 - Duplicate or decreasing timestamps are legal metadata and do not reject an otherwise valid
   event. They never change ingestion order.
 - A nonfinite, negative, non-`float`, or decreasing monotonic sample is an internal clock-adapter
   defect. It is never coerced into a duration or exposed as a public provider failure.
-- Daylight-saving and local timezone configuration are irrelevant because values are converted to
-  UTC before persistence.
+- Daylight-saving and local timezone configuration are irrelevant because only zero-offset samples
+  are accepted and each accepted instant is normalized to `timezone.utc` before arithmetic and
+  persistence.
 
 ## Invariants
 
@@ -110,11 +120,13 @@ boundary; this module contains no mutable global clock.
 
 ## Tests
 
-- `specs/tests/unit.md`: UTC/non-UTC/naive inputs, truncation at microsecond boundaries, year
-  bounds, locale/TZ invariance, checked duration arithmetic, explicit monotonic deadline
+- `specs/tests/unit.md`: exact UTC/non-UTC/naive/subclass inputs, rejection (not truncation) at
+  sub-millisecond boundaries, year bounds, locale/TZ invariance, checked duration bounds and
+  overflow, zero-offset named-zone transition arithmetic, explicit monotonic deadline
   before/equal/after boundaries, and invalid monotonic samples.
-- `specs/tests/property.md`: arbitrary aware datetimes render to exactly one accepted spelling;
-  decreasing/duplicate scripted times never change sequence or replay output.
+- `specs/tests/property.md`: arbitrary exact-millisecond zero-offset datetimes render to exactly one
+  accepted spelling, while other aware offsets reject; decreasing/duplicate scripted times never
+  change sequence or replay output.
 - `specs/tests/conformance.md`: expired, unexpired, stale-generation, and wall-clock-reversal lease
   cases behave identically in memory and SQLite adapters.
 

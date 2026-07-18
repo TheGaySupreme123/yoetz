@@ -31,9 +31,15 @@ The schema must admit deterministic-only, semantic-optional, semantic-required, 
 error paths without widening the public contract.
 
 `semantic_reason` is the `SemanticReason` enum owned by `ports/semantic.md` and is validated with
-`semantic_status` as a closed pair. `semantic_provenance` is `null`/absent for all predispatch
-outcomes and otherwise, when present, must validate against
-`findings/semantic-provenance-1.0.0`. A `semantic_required` provider/policy failure is still this
+`semantic_status` as a closed pair. `semantic_provenance` is `null` for all predispatch outcomes
+and for unavailable reasons `credential_unavailable`, `endpoint_profile_unavailable`,
+`retry_budget_exhausted`, `audit_reservation_unavailable`, and `receipt_persistence_unknown`.
+It is required for `succeeded`, `refused`, `timeout`, `invalid`, `late`, `stale`, and unavailable
+reasons `transport_unavailable`, `provider_rate_limited`, and `provider_quota_exhausted`; it is
+optional only for `failed/coordinator_failure`. When present it must validate against
+`findings/semantic-provenance-1.0.0`, and its nested status/reason must equal the top-level selected
+final pair; earlier late/non-selected attempts remain audit rows and never appear here. A
+`semantic_required` provider/policy failure is still this
 success branch: it contains the deterministic findings, no semantic findings,
 `verdict=incomplete_check`, and the exact status/reason. It is not a public error branch.
 
@@ -46,7 +52,8 @@ projection and durable local-disclosure receipt; omission never removes the sema
 ## Errors and edge cases
 
 - A success branch that omits verdict, coverage, semantic status, or semantic reason fails.
-- An invalid status/reason pair, provisional provenance, or predispatch provenance fails.
+- An invalid status/reason pair, provisional provenance, predispatch provenance, or nested/top-level
+  provenance identity mismatch fails.
 - A fallback branch that is not shared fails.
 
 ## Invariants

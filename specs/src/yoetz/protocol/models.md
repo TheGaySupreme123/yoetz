@@ -47,6 +47,7 @@ shape before any operation-specific fields are considered.
 | `SemanticStatus` / `SemanticReason` | the one shared semantic outcome vocabulary |
 | `VALID_SEMANTIC_REASONS` | immutable exhaustive status-to-reason relation |
 | `validate_semantic_outcome(status, reason)` | reject a status/reason pair outside that relation |
+| `validate_semantic_provenance_binding(status, reason, provenance_status, provenance_reason)` | enforce provenance presence and exact final-attempt identity |
 | `classify_result_leaf(method, validated_result, pointer)` | classify one validated result leaf as `public_structural` or its exact `DataCategory` |
 | `MAX_PROJECTION_CONTENT_LEAVES` | `int = 512` |
 | `MAX_PROJECTION_POINTER_BYTES` | `int = 256` |
@@ -483,6 +484,38 @@ allowed pair. A value of the wrong enum type raises
 `ProtocolValueError("invalid_semantic_status_reason_pair")`. It never coerces strings. The
 mapping and validator contain no provider dispatch logic; `ports/semantic.py` owns how a concrete
 outcome reaches one of these already-registered pairs.
+
+`validate_semantic_provenance_binding(status, reason, provenance_status, provenance_reason)` first
+applies that pair validator, then requires the two provenance identity arguments to be either both
+`None` or exact shared enum members. The provenance-presence partition is closed:
+
+- all eight non-`unavailable` predispatch statuses require both absent;
+- `unavailable/credential_unavailable`, `unavailable/endpoint_profile_unavailable`,
+  `unavailable/retry_budget_exhausted`, `unavailable/audit_reservation_unavailable`, and
+  `unavailable/receipt_persistence_unknown` require both absent;
+- `succeeded`, `refused`, `timeout`, `invalid`, `late`, and `stale` require both present;
+- `unavailable/transport_unavailable`, `unavailable/provider_rate_limited`, and
+  `unavailable/provider_quota_exhausted` require both present; and
+- `failed/coordinator_failure` permits both absent or both present because the coordinator can fail
+  before or after a dispatch.
+
+Whenever provenance is present, its nested status and reason must equal the top-level status and
+reason exactly. A missing, partial, forbidden, wrong-type, or mismatched provenance identity raises
+`ProtocolValueError("invalid_semantic_provenance")`. The helper validates identity only; the
+semantic-provenance schema/domain codec remains responsible for the rest of that closed record.
+
+`FrontierModel` additionally enforces the shared genesis cross-field invariant at construction:
+sequence `"0"` requires `head_digest="genesis"`, and every positive sequence requires a SHA-256
+digest. Direct model validation cannot defer either inversion to a later dump/schema gate.
+
+`CheckSuccessModel` first validates its top-level pair. For a non-null provenance value it then
+requires an exact built-in `dict` with exact built-in `"status"` and `"reason"` string values,
+converts those two tokens through the shared enums, and calls
+`validate_semantic_provenance_binding`; missing/non-object/wrong-token input fails with
+`invalid_semantic_provenance` without invoking caller callbacks. The remaining closed provenance
+shape is checked by the packaged schema gate. Its top-level pair therefore describes only the
+selected/final attempt. Earlier late or non-selected attempts remain durable attempt-audit rows and
+can never be substituted into the public result provenance.
 
 `CheckResultModel` validates this locally owned matrix. A
 `semantic_required` gap is an ordinary successful result envelope with

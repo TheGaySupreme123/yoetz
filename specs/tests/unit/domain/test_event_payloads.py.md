@@ -34,6 +34,13 @@ immutable.
   locator extension.
 - `test_check_payload_records_normalized_scope_and_policy_executions` — the current write shape
   requires a normalized direct scope and one exact execution record per selected built-in pack.
+- `test_session_opened_preserves_full_start_content_and_independent_history_refs` — all three raw
+  identity strings preserve the 8,192-code-point request bound and imported history may carry one
+  optional ref, while the Start application separately enforces both-or-neither.
+- `test_check_payload_provenance_matches_selected_final_outcome` — any present finalized
+  provenance repeats the top-level status/reason and earlier attempt outcomes cannot replace it.
+- `test_envelope_evidence_refs_preserve_evidence_and_result_ids` — response/result mirrors retain
+  the exact sorted-unique `EvidenceId | ResultId` union in drafts and accepted records.
 
 ## Behavior
 
@@ -51,8 +58,9 @@ The suite covers all event families in the registry and checks:
   matching, and rejection via `invalid_projection_locator` without retaining payload prose;
 - every payload object maps through `payload_ref.object_id`; exact-known evidence uses only
   `artifact_refs == ()|(captured_object_id,)`; redaction uses
-  `artifact_refs == target_object_ids`; unknown/non-evidence artifact refs never enter the evidence
-  reverse index; and the accepted JSON field count remains exactly 19;
+  `artifact_refs == target_object_ids`; receipts use exactly
+  `artifact_refs == (receipt_object_id,)`; unknown/non-evidence artifact refs never enter the
+  evidence reverse index; and the accepted JSON field count remains exactly 19;
 - generated **domain** payload encode/decode/re-encode identity for every family, including Unicode and
   boundary sizes, under multiple `PYTHONHASHSEED`, locale, and timezone controls.
 - `check_recorded` requires nonempty canonical `policies`, a required scope whose two typed ID
@@ -70,7 +78,8 @@ The suite covers all event families in the registry and checks:
 - A locator containing free text, the wrong logical key/schema/digest, or redaction targets on a
   non-redaction family is invalid.
 - An evidence envelope with an extra/missing captured-object mirror, a redaction envelope whose
-  artifact refs differ from object targets, or duplicate ownership of one payload object is invalid.
+  artifact refs differ from object targets, a receipt envelope without its exact singleton document
+  mirror, or duplicate ownership of one payload object is invalid.
 - A generated strategy that omits a family or filters away boundary cases fails the suite.
 - A current check event cannot infer scope or execution from verdict, findings, or the legacy
   compatibility shape; released backward-read archive bytes are exercised only by the compatibility

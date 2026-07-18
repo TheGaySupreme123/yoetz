@@ -30,6 +30,11 @@ Closed object with required fields:
 - findings, obligations, responses, claims/evidence refs, gaps/redactions;
 - section list / render structure where the contract stores it.
 
+Each response preserves its sorted-unique evidence references as the exact
+`evidence_id|result_id` union accepted by `response_recorded`; no result support is discarded during
+receipt projection. Every receipt section requires an `items` array, including an explicit empty
+array, so the domain codec remains an exact inverse rather than collapsing absent and empty forms.
+
 `conclusion` references the exact local `$defs/receipt_conclusion` enum:
 `no_unresolved_deterministic_findings|unresolved_findings_remain|insufficient_coverage`. This
 fragment is the sole schema definition of `ReceiptConclusion`; receipt operation/event schemas
@@ -45,6 +50,7 @@ result and would create a self-reference. Extra properties are forbidden.
 - A conclusion outside the three-value domain enum fails.
 - A missing, negative, noninteger, or count inconsistent with the projection fails.
 - Any stronger-than-evidence conclusion shape fails.
+- A response ref outside the evidence/result union or a section missing `items` fails.
 
 ## Invariants
 

@@ -18,6 +18,9 @@ and no helper accidentally computes an average.
   union raise `invalid_known_gap` in either argument order and never truncate.
 - `test_six_channel_defaults_are_exact` — each publication channel maps to the frozen seven-field
   default, including its exact known-gap tuple.
+- `test_coverage_json_round_trip_is_exact` — JSON codecs preserve the exact closed object shape.
+- `test_coverage_json_rejects_noncanonical_shapes` — missing/extra keys, wrong container types,
+  and wrong enum/token shapes fail with `invalid_coverage_value`.
 - `test_coverage_constructor_rejects_noncanonical_sets` — empty/duplicate/descending publication
   channels and check types, bad check-type shapes, and invalid known-gap tokens use exact reasons.
 - `test_no_averaging_or_strengthening_exists` — no helper strengthens coverage without proof.
@@ -35,6 +38,8 @@ The suite proves that:
 - constructor validation follows exact stored-field order on mixed-invalid inputs, tuple containers
   and enum/token members use actual exact runtime types, and spoofed `__class__` or hostile
   subclasses cannot enter the frozen value;
+- JSON codecs accept only exact coverage-shaped mappings, preserve the seven closed keys and the
+  list-backed field spelling, and round-trip through schema-valid wire values without coercion;
 - all six defaults match `COVERAGE_DEFAULTS_BY_CHANNEL` byte-for-byte: cooperative MCP and local
   CLI are self-asserted/published-only/metadata-only/current; Codex import is
   self-asserted/import-observed/metadata-only/partial with
@@ -58,9 +63,11 @@ The suite proves that:
 - A gap union that preserves duplicates fails the test.
 - A gap union that truncates, chooses argument-order-dependent survivors, or emits an invalid
   over-cap `Coverage` fails the test.
+- A codec round-trip that loses key order, enum spelling, or tuple/list structure fails the test.
 - Exact reasons are asserted for `empty_publication_channels`, `invalid_publication_channels`,
   `empty_check_types`, `invalid_check_types`, `invalid_known_gap`, and
-  `invalid_coverage_value`.
+  `invalid_coverage_value`; codec shape failures use `invalid_coverage_value` and propagate the
+  constructor-owned duplicate/unsorted/invalid-gap reasons unchanged.
 
 ## Invariants
 

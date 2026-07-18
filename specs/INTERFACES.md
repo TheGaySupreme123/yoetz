@@ -183,7 +183,8 @@ Frozen dataclass `Coverage` with six dimensions + `known_gaps: tuple[str, ...]`:
 
 Functions: `weakest(a: Coverage, b: Coverage) -> Coverage` (component-wise minimum for ordered
 dimensions; set union for `publication_channels`, `check_types`, and gaps);
-`coverage_for_channel(channel) -> Coverage` (conservative singleton defaults). An individual
+`coverage_for_channel(channel) -> Coverage` (conservative singleton defaults), plus the sole
+closed `coverage_from_json`/`coverage_to_json` codecs. An individual
 accepted event still has one singular `publication_channel`; aggregation into `Coverage` uses a
 singleton tuple. The `none` check type is canonical only when it is the sole member and is removed
 when either real check kind is present.
@@ -212,7 +213,8 @@ No arithmetic averaging exists anywhere.
   `Frontier(0, "genesis")`. Boundary models serialize only the sequence string where the public
   schema intentionally does so; the application resolves that sequence to its unique accepted head
   digest before creating a domain value. Ports MUST import this type and MUST NOT define a second
-  `Frontier` with renamed fields.
+  `Frontier` with renamed fields. `frontier_from_json` and `Frontier.as_wire` are its sole closed
+  object codecs; both enforce the zero/genesis and positive/SHA-256 identity.
 - `SubjectStateRef(tree_digest?, diff_digest?, described_state?)` binds a claim/action/result to
   observed artifact state. `described_state` is explanatory only and never participates in
   deterministic equality, freshness identity, or request commitments.
@@ -223,6 +225,15 @@ No arithmetic averaging exists anywhere.
 `assignment_recorded`, `decision_recorded`, `action_recorded`, `result_recorded`,
 `evidence_recorded`, `claim_recorded`, `plan_revised`, `finding_recorded`, `response_recorded`,
 `redaction_recorded`, `check_recorded`, `receipt_recorded`.
+
+The shared event-draft schema is a structural union, not an authorization grant. Ordinary
+`cooperative_mcp|local_cli` `publish_work` admits only plan, obligation, assignment, decision,
+action, result, evidence, claim, and plan-revision work families. The trusted Codex import path
+admits only its mapped action/result/evidence families plus opaque unknown events. Lifecycle,
+finding/check, response, and receipt families enter through `start`, `check`, `respond`, and
+`receipt`; redaction is reserved to the trusted maintenance path. A known family outside its row
+fails before object staging with `event_family_not_admitted`; caller actor/client tokens never
+widen the matrix.
 
 Shared domain types: `EventDraft` (client-shaped, pre-acceptance), `AcceptedEvent` (the canonical
 structural envelope frozen by `domain/events.py` plus decoded payload handle), `UnknownEvent`
@@ -248,7 +259,8 @@ Object-only replay uses the existing accepted-envelope fields; it does not widen
 wire record. Every `payload_ref.object_id` identifies its envelope's event ID. For exact-known
 `evidence_recorded`, `artifact_refs` is exactly empty when `captured_object_id` is absent and exactly
 the singleton `(captured_object_id,)` when present. For `redaction_recorded`, `artifact_refs` is
-exactly the payload/locator target-object tuple. These typed-ID mirrors plus locator logical keys
+exactly the payload/locator target-object tuple. For `receipt_recorded`, `artifact_refs` is exactly
+the singleton `(receipt_object_id,)`. These typed-ID mirrors plus locator logical keys
 are sufficient to rebuild the pure reverse `ReplayIndex` after payload deletion without retaining
 content, paths, URLs, or human redaction text.
 
@@ -260,7 +272,10 @@ an exact supported pair is invalid and never falls back to opaque handling.
 Both ledger-record variants carry the complete accepted-envelope fields. `UnknownEvent` replaces
 the typed handle with `JsonValue | None` and adds `canonical_payload_digest` plus the fixed
 projection-status token; it does not omit causal parents, redaction, artifact refs, or evidence
-refs. Full accepted-record JSON includes `entry_digest` and matches the accepted-event schema.
+refs. The envelope's historically named `evidence_refs` field is the exact sorted-unique
+`EvidenceId | ResultId` union used by response/result mirrors; each ID kind remains distinguishable
+by its canonical prefix and by the durable `event_refs` index. Full accepted-record JSON includes
+`entry_digest` and matches the accepted-event schema.
 The entry-digest preimage is that exact record with only `entry_digest` removed; decoded payload
 handles and unknown-only adjacent metadata appear in neither JSON view.
 
@@ -325,9 +340,11 @@ Every status is paired with one required closed `SemanticReason`, never prose or
 `audit_reservation_unavailable`, `receipt_persistence_unknown`, `deadline_authority_lost`,
 `lease_authority_lost`, `frontier_changed`, `dependency_changed`, `coordinator_failure`.
 `protocol/models.py` owns both enum objects, the immutable exhaustive status/reason relation, and
-its validator. `domain/events.py`, `domain/findings.py`, and `ports/semantic.py` import those same
+its pair and final-provenance-binding validators. `domain/events.py`, `domain/findings.py`, and `ports/semantic.py` import those same
 objects; the port owns only outcome conversion and may re-export them. `CheckRecordedPayload` and
-`CheckResultModel` require the pair; predispatch outcomes carry no attempt provenance.
+`CheckResultModel` require the pair; predispatch outcomes carry no attempt provenance. A present
+provenance record always repeats that same selected/final status and reason. Earlier late or
+non-selected attempts remain attempt-audit rows and never replace the selected provenance.
 
 `protocol/models.py` also nominally owns `ClientKind`
 (`codex_cli|cooperative_agent|yoetz_cli|test_client|importer`) and `IntegrationKind`
@@ -367,6 +384,11 @@ authorization or local-disclosure reservation; durable privacy-receipt ID; exter
 commitment when applicable; and the validated terminal status/reason pair. The exact Python fields
 and wire conversions are frozen in `domain/findings.md` and
 `semantic-provenance-1.0.0.schema.json`.
+
+A deterministic candidate/finding forbids provenance. A semantic-model-derived candidate/finding
+requires receipt-finalized provenance whose status/reason is exactly
+`succeeded/semantic_completed`; failed, refused, stale, late, invalid, timeout, or unavailable
+attempt provenance remains valid check accounting but can never justify a semantic finding.
 
 `finding_from_json`/`finding_to_json` and
 `semantic_provenance_from_json`/`semantic_provenance_to_json` are the sole codecs. The finding

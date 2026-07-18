@@ -26,6 +26,11 @@ admits semantic results only after post-validation.
   valid 64-ref local basis but can never serialize a lossy 16-ref prefix.
 - `test_semantic_provenance_requires_durable_matching_receipt` — provisional provenance and a
   missing/nonterminal/mismatched receipt fail at the coordinator with their exact registered reasons.
+- `test_selected_semantic_ids_are_pinned_before_ranking` — selected semantic candidates receive
+  durable resume-stable `fnd_` IDs before the ranker is called.
+- `test_final_semantic_provenance_matches_selected_attempt` — top-level status/reason and optional
+  final provenance describe the same selected attempt; earlier late/nonselected attempts remain
+  audit-only.
 - `test_freeze_reservation_race_and_resume` — a final-reservation race installs no stale case and
   a reclaimed check resumes from the exact stored case object without rebuilding it.
 - `test_direct_scope_and_durable_policy_accounting` — selected claim/obligation roots constrain
@@ -56,6 +61,12 @@ The test freezes a case and then asserts:
   `semantic_required` preserve deterministic findings and produce no semantic findings;
 - provider adapters return provisional attempt provenance, while only the coordinator may publish
   receipt-finalized provenance after the terminal privacy receipt is durable;
+- after post-validation and attempt selection, every accepted semantic candidate receives a
+  durably pinned ID before ranking; crash/retry reuses the same map, and the ranker is never called
+  with an identity-less semantic candidate;
+- the final event/result semantic status and reason describe only the selected/final attempt;
+  whenever provenance is present its nested pair is identical, while an earlier late or nonselected
+  attempt remains in attempt audit storage and never replaces the selected provenance;
 - passing `ProviderAttemptProvenance` to finalization raises
   `provider_attempt_provenance_is_not_final`, while finalizing before a durably readable,
   identity-matched terminal egress/local-disclosure receipt raises `privacy_receipt_not_durable`;
@@ -73,6 +84,10 @@ The test freezes a case and then asserts:
 - A semantic result that rewrites deterministic findings fails.
 - A stale frontier that still steers the result fails.
 - Missing/mismatched reason or provenance published before receipt durability fails.
+- A top-level semantic pair that differs from present nested provenance fails, as does exposing an
+  earlier late/nonselected attempt as the final provenance after a successful retry.
+- Ranking before selected semantic candidate IDs are durably pinned fails; resume must not allocate
+  replacements.
 - Retrying receipt verification may resume `privacy_receipt_not_durable`; provisional provenance is
   a programmer defect and may never be retried as though it were provider unavailability.
 - Browsing Git/filesystem during case construction, or returning a challenge with refs outside the
@@ -87,6 +102,8 @@ The test freezes a case and then asserts:
 3. Post-validation is mandatory.
 4. Rich semantic context remains frozen, bounded, privacy-selected, and problem-local.
 5. Resume durability never inverts case-build, object-publication, and reservation order.
+6. Ranking sees only durably identified deterministic and selected-semantic findings.
+7. Final provenance, when present, has the selected attempt's exact top-level status/reason pair.
 
 ## Tests
 

@@ -408,7 +408,7 @@ CREATE TABLE event_parents (
 
 CREATE TABLE event_refs (
     event_id TEXT NOT NULL REFERENCES events(event_id),
-    ref_type TEXT NOT NULL CHECK (ref_type IN ('artifact', 'evidence', 'finding', 'claim')),
+    ref_type TEXT NOT NULL CHECK (ref_type IN ('artifact', 'evidence', 'result', 'finding', 'claim')),
     target_id TEXT NOT NULL,
     PRIMARY KEY (event_id, ref_type, target_id)
 ) STRICT, WITHOUT ROWID;

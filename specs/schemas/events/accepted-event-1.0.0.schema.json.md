@@ -24,7 +24,7 @@ Closed object with the structural envelope fields from the ledger contract, incl
 - publication channel;
 - coverage;
 - payload reference and redaction state;
-- artifact/evidence refs;
+- artifact refs and the sorted-unique `evidence_id|result_id` envelope-ref union;
 - entry digest.
 
 The accepted event never embeds plaintext payload bytes. A decoded payload handle is an internal,

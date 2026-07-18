@@ -172,7 +172,11 @@ resume revalidates the object/row facts for the recorded phase before moving for
    built-in pack owner, never from reviewer prose.
    Select an attempt only in a short CAS that still matches the operation and job generations,
    active attempt, `F`, and `D`. At most one attempt is selected; late/non-selected objects remain
-   audit data and cannot steer.
+   audit data and cannot steer. After that selection, normalize the accepted semantic candidates in
+   their deterministic post-validation order, allocate one `fnd_` ID per candidate through `IdPort`,
+   and durably pin the candidate-to-ID map with the selected semantic result. Resume reopens this map
+   and never reallocates an ID. This conversion completes before ranking; no identity-less semantic
+   `CandidateFinding` may enter `rank_findings`.
 7. **Renew in authority order.** When renewal is needed, renew the parent operation first and its
    live job lease(s) in the same transaction. A new bundle-owner generation immediately invalidates
    both regardless of clock time. Losing authority aborts local steering/finalization; the
@@ -186,8 +190,9 @@ resume revalidates the object/row facts for the recorded phase before moving for
    public check. Under `semantic_required` it forces `incomplete_check`. Once
    all required jobs are terminal and none has a live lease, CAS
    `semantic_wait → ready_to_finalize`.
-9. **Rank and commit.** Revalidate candidate output against `F` and `D`, combine deterministic and
-   selected semantic findings, compute `RankingContext` from the terminal policy/semantic facts and
+9. **Rank and commit.** Revalidate candidate output against `F` and `D`, reopen the durably pinned
+   deterministic and selected-semantic `Finding` values, combine them, and compute `RankingContext`
+   from the terminal policy/semantic facts and
    the component-wise weakest material coverage of `FrozenCase.case.coverage_by_ref`, every
    assessment/basis and candidate, semantic dependencies/outcomes, every typed case gap (including
    rootless/global gaps), and all candidates before capping,
@@ -198,7 +203,8 @@ resume revalidates the object/row facts for the recorded phase before moving for
    operation lease/current owner and material dependency
    revisions, repeat the no-pending-import predicate for this session, append one
    `check_recorded` plus one `finding_recorded` per returned finding, persist
-   exact coverage/status/reason/versions, finalized optional attempt provenance, and suppressed count, store the canonical structural result,
+   exact coverage/status/reason/versions, selected/final optional attempt provenance, and suppressed
+   count, store the canonical structural result,
    set `complete/terminal`, clear leases, and commit. If `F` or `D` is no longer current, that same
    transaction appends no event, stores one terminal `FRONTIER_CONFLICT` failure with the exact
    `frontier_changed|dependency_changed` safe reason, clears leases, and commits; same-ID replay
@@ -240,19 +246,28 @@ resume revalidates the object/row facts for the recorded phase before moving for
   findings remain `semantic_model_derived`; deterministic post-validation never upgrades their
   origin.
 - Result includes exact `CheckPolicyExecution` records in canonical requested-pack order, semantic
-  status/reason, optional finalized attempt provenance, subject and result
+  status/reason, optional selected/final-attempt provenance, subject and result
   frontiers, returned findings, suppressed count, coverage, and relevant versions. It never hides
   lower-priority suppression or a failed/skipped check.
-- The coordinator and `CheckRecordedPayload` use the same `SemanticStatus` spelling. A solely
-  late/non-selected provider attempt is `late`; an attempt rejected against its authorized
-  frontier/dependency is `stale`. A change to the final frozen case's `F` or `D` instead terminally
-  fails the operation with `FRONTIER_CONFLICT` and appends no check event.
-  A late earlier attempt followed by a selected valid retry leaves the overall event status
-  `succeeded` while attempt provenance retains the earlier `late` outcome.
+- The coordinator and `CheckRecordedPayload` use the same `SemanticStatus` spelling. A final
+  provider attempt that loses authority is `late`; a final attempt rejected against its
+  authorized frontier/dependency is `stale`. A change to the final frozen case's `F` or `D` instead
+  terminally fails the operation with `FRONTIER_CONFLICT` and appends no check event.
+  A late earlier attempt followed by a selected valid retry leaves the overall event/result status
+  `succeeded` and its optional provenance describes the selected successful retry. The earlier
+  `late` outcome remains only in its immutable attempt audit row; it is never emitted as final
+  provenance.
 - `semantic_reason` is always present and must be valid for `semantic_status`. Predispatch outcomes
-  have `semantic_provenance=None`; an attempted provider/local-model outcome may expose only final
-  provenance whose receipt is already durable. No renderer or MCP client derives a reason from
-  prose, generic coverage gaps, or provider exception text.
+  have `semantic_provenance=None`. The existing matrix requires finalized provenance for
+  `succeeded`, `refused`, `timeout`, `invalid`, `late`, `stale`, and the post-dispatch unavailable
+  reasons `transport_unavailable`, `provider_rate_limited`, and `provider_quota_exhausted`.
+  Unavailable reasons `credential_unavailable`, `endpoint_profile_unavailable`,
+  `retry_budget_exhausted`, `audit_reservation_unavailable`, and `receipt_persistence_unknown`
+  carry none; `failed/coordinator_failure` permits optional finalized provenance.
+  Whenever provenance is present, its nested `status` and `reason` exactly equal the top-level
+  selected/final `semantic_status` and `semantic_reason`, and its receipt is already durable. No
+  renderer or MCP client derives a reason from prose, generic coverage gaps, or provider exception
+  text.
 
 ### Port contract
 

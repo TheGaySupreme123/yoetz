@@ -56,7 +56,12 @@ after those B1 owners exist. B0 neither imports a later-wave domain module nor s
 - `test_schema_instance_validation_is_closed_and_bounded` — valid instances pass; structural,
   conditional, and checked-format failures use one bounded reason with zero retrieval attempts.
 - `test_check_semantic_status_reason_and_provenance_matrix` — the B0 check-result model and schema
-  admit every registered pair, reject cross-pairs, and enforce provenance stage.
+  admit every registered pair, reject cross-pairs, enforce provenance stage, and require any
+  nested provenance status/reason to equal the selected top-level pair. The table explicitly covers
+  every `unavailable` reason's required/forbidden branch plus optional pre/post-dispatch
+  `failed/coordinator_failure`, and malformed non-object/missing identity input fails boundedly.
+- `test_frontier_model_enforces_genesis_cross_field_identity` — direct model validation rejects
+  sequence zero with a digest and a positive sequence with `genesis` before serialization.
 - `test_finding_policy_identity_partition_is_exhaustive` — semantic-review never appears as a
   policy token; final finding identity is derived from the chosen kind's owning built-in pack.
 
@@ -134,8 +139,10 @@ The suite checks:
   networking denied loads all 52 members through the regular `yoetz` package anchor;
 - B0 `CheckResultModel` requires the exact semantic status/reason pair and policy-execution
   outcome/reason shape; predispatch cases forbid provenance and attempted cases admit only
-  receipt-finalized provenance. Parity with B1 `CheckRecordedPayload`, including normalized scope
-  and policy/execution identity/order, is deferred to the B1 domain event-payload test.
+  receipt-finalized provenance whose nested status/reason equal the selected final pair. Earlier
+  non-selected attempt outcomes never enter that field. Parity with B1 `CheckRecordedPayload`,
+  including normalized scope and policy/execution identity/order, is deferred to the B1 domain
+  event-payload test.
 - The finding policy partition is fixed, disjoint, and derived from kind ownership rather than
   reviewer output.
 

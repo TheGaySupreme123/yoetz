@@ -40,8 +40,13 @@ exactly `run/completed`, `skipped/material_unavailable|not_applicable|scope_excl
 their normalized unsigned-ASCII ordering, and both empty means whole-case. The schema keeps the
 selected findings, component-wise weakest material `Coverage`, and status/reason explicit and bounded. The
 status/reason pair uses the closed matrix in `ports/semantic.md`; no free-form reason is allowed.
-Predispatch outcomes forbid provenance, while attempted outcomes may carry only receipt-finalized
-`SemanticProvenance`.
+Predispatch outcomes forbid provenance. The unavailable reasons `credential_unavailable`,
+`endpoint_profile_unavailable`, `retry_budget_exhausted`, `audit_reservation_unavailable`, and
+`receipt_persistence_unknown` also forbid it; `transport_unavailable`, `provider_rate_limited`, and
+`provider_quota_exhausted` require it. The other attempted terminal statuses require only
+receipt-finalized `SemanticProvenance`, except `failed/coordinator_failure`, where it is optional.
+A present provenance record repeats the top-level selected/final status/reason exactly; earlier
+non-selected attempt outcomes are not event fields.
 
 ## Errors and edge cases
 
@@ -49,7 +54,8 @@ Predispatch outcomes forbid provenance, while attempted outcomes may carry only 
 - Missing scope/executions, empty policies, policy/execution count/identity/order mismatch, or an
   illegal execution outcome/reason pair fails.
 - Missing, malformed, or stronger-than-the-checked-input coverage fails.
-- Unknown semantic reason, an invalid status/reason pair, or provisional/predispatch provenance fails.
+- Unknown semantic reason, an invalid status/reason pair, provisional/predispatch provenance, or a
+  nested/top-level selected-outcome mismatch fails.
 - Hidden or extra findings fail.
 
 ## Invariants

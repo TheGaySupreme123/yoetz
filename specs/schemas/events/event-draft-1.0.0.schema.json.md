@@ -24,7 +24,7 @@ Closed object with:
 - `causal_parents`;
 - `payload` as known family payload or opaque JSON for unknown families;
 - `artifact_refs`;
-- `evidence_refs`.
+- `evidence_refs`, a sorted-unique `evidence_id|result_id` union preserving the payload mirror.
 
 Known and unknown branches are disjoint; unknown-family payloads remain opaque and do not widen the
 known family schema. Extra properties are forbidden.
@@ -32,6 +32,7 @@ known family schema. Extra properties are forbidden.
 ## Errors and edge cases
 
 - Duplicate parents fail.
+- An evidence ref outside the exact evidence/result ID union fails.
 - Unknown family collisions fail.
 - Extra keys fail.
 

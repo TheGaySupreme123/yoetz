@@ -26,18 +26,22 @@ Closed payload object with:
 - `integration`;
 - `profile`.
 
-The external/workspace refs must be both present or both absent. This is the atomic attachment
-identity for the start catalog.
+`task_title`, `external_ref`, and `workspace_ref` use the same nonempty 8,192-code-point content
+bound as the public start request so lifecycle publication is lossless. The two optional refs are
+independent in this history schema. The Start request/application applies the stricter
+both-or-neither attachment-key rule before it constructs a new lifecycle event; imported
+schema-valid history is not rejected by an unstated event-only rule.
 
 ## Errors and edge cases
 
-- One of the attachment refs without the other fails.
+- Empty or over-8,192-code-point raw identity content fails.
 - Invalid profile/integration values fail.
 
 ## Invariants
 
 1. Start identity is explicit.
-2. Both-or-neither attachment refs are required.
+2. New Start operations enforce both-or-neither before this schema boundary; the event history
+   schema preserves either optional ref independently.
 3. Extra keys are forbidden.
 
 ## Tests

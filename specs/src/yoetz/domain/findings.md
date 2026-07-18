@@ -136,15 +136,31 @@ identities, fixed decimals, and optional fields are validated exactly as
 `schemas/findings/semantic-provenance-1.0.0.schema.json`; no provisional adapter object satisfies
 this type.
 
+That broad status inventory exists because `SemanticProvenance` is also the finalized accounting
+record for a terminal provider/local-model attempt. It does not mean every such attempt may produce
+a semantic finding. `CandidateFinding` and `Finding` enforce the stricter origin/provenance matrix:
+
+- `semantic_model_derived` requires finalized provenance whose exact pair is
+  `succeeded/semantic_completed`;
+- `deterministic` requires `provenance is None`.
+
+A semantic candidate/finding carrying refused, timeout, invalid, unavailable, late, stale, or failed
+provenance raises `ProtocolValueError("invalid_finding_provenance")`. Those outcomes remain valid
+attempt accounting for the overall check, but they never become semantic findings.
+
 `SemanticStatus`, `SemanticReason`, `VALID_SEMANTIC_REASONS`, and their validator are nominally
 owned by `protocol/models.py`. This module imports them; it does not redeclare or re-export a
 lookalike enum. `ports/semantic.py` may re-export those same objects for port consumers.
 
-`CandidateFinding` has every logical `Finding` field except `finding_id`. Pure policy functions
-return candidates so they remain deterministic and cannot read ambient randomness. The application
-normalizes candidates, allocates one OS-CSPRNG `fnd_` ID for each, persists that map in the durable
-local-result object, and constructs immutable `Finding` values. A crash/retry reopens the map and
-never allocates replacement IDs.
+`CandidateFinding` has every logical `Finding` field except `finding_id`. Pure policy functions and
+semantic post-validation return candidates so they cannot read ambient randomness. The application
+must convert every candidate into an immutable `Finding` before ranking. Deterministic candidate IDs
+are allocated in registered policy-emission order and pinned with the durable local-result object.
+After semantic output is post-validated and its attempt is selected, accepted semantic candidates
+are normalized into their deterministic order, allocated one OS-CSPRNG `fnd_` ID each, and pinned
+with the selected semantic result before they enter ranking. A crash/retry reopens the relevant
+candidate-to-ID map and never allocates replacement IDs. `rank_findings` never receives an
+identity-less `CandidateFinding`.
 
 `Finding` is a frozen value object. It must never depend on mutable provider SDK output, logging
 context, or database rows after construction.
@@ -225,11 +241,11 @@ omitting every `None` optional and rendering all wire-decimal fields canonically
 
 `finding_from_json(value)` and `finding_to_json(finding)` are the sole finding codecs. They use the
 coverage codec owned by `protocol/coverage.py`, `Frontier.as_wire()` and the corresponding strict
-frontier decoder, and the provenance codecs above. A semantic origin requires provenance; a
-deterministic origin forbids it. They preserve sorted tuples and reject unknown keys. For every
-valid schema value `x`, canonical encoding of `finding_to_json(finding_from_json(x))` equals the
-canonical encoding of `x`; no Pydantic dump, adapter dict, or event-specific duplicate serializer
-is permitted.
+frontier decoder, and the provenance codecs above. A semantic origin requires finalized
+`succeeded/semantic_completed` provenance; a deterministic origin forbids provenance. They preserve
+sorted tuples and reject unknown keys. For every valid schema value `x`, canonical encoding of
+`finding_to_json(finding_from_json(x))` equals the canonical encoding of `x`; no Pydantic dump,
+adapter dict, or event-specific duplicate serializer is permitted.
 
 `RankedFindings` preserves:
 
@@ -262,9 +278,11 @@ must appear in `protocol.errors.PROTOCOL_REASON_CODES`. Imported ID, digest, com
 coverage, canonical-set, and semantic-pair validators propagate their owning reason unchanged.
 
 - Unknown finding kinds are invalid at the boundary.
-- A semantic finding without finalized provenance is invalid. An imported semantic observation
-  preserves its original finalized provenance or remains an opaque/import-gap observation; it may
-  not fabricate a current semantic finding.
+- A semantic finding without finalized `succeeded/semantic_completed` provenance is invalid. A
+  finalized failed/non-success attempt remains check-attempt accounting and cannot be attached to a
+  semantic finding. An imported semantic observation preserves a successful original finalized
+  provenance or remains an opaque/import-gap observation; it may not fabricate a current semantic
+  finding.
 - Findings never expose more than three items by default at the CLI surface, even if more are stored.
 - `CheckVerdict` never has a value named `pass`.
 - A finding cannot claim stronger coverage than its subject frontier or supporting refs justify.
@@ -283,6 +301,8 @@ coverage, canonical-set, and semantic-pair validators propagate their owning rea
 9. Deterministic finding prose is rule-templated and names its subjects by ID: no content from
    behind a `subject_ref` reaches `summary` or `detail`, so a deterministic finding discloses
    nothing about material the requesting writer did not author, whatever writers its refs span.
+10. Ranking receives only `Finding` values with durably pinned IDs; an identity-less semantic
+    candidate cannot reach the rank-key tie-break.
 
 ## Tests
 

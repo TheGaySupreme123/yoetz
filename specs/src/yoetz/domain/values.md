@@ -18,7 +18,9 @@ would be unenforceable.
 This file contains **no Pydantic, MCP, SQLite, or provider imports**. It may import only the
 standard library plus `yoetz.protocol.ids` (ID validation), `yoetz.protocol.errors`
 (`ProtocolValueError`), `yoetz.protocol.coverage` (the `AuthorshipAssurance` enum), and
-`yoetz.protocol.canonical` (`MAX_JSON_DEPTH` only).
+`yoetz.protocol.canonical` (`MAX_JSON_DEPTH`, `ensure_canonical_value`,
+`canonical_integer_string`, and `parse_canonical_integer_string`). It defines no mirror of a
+canonical depth, integer-string, or Unicode-validation rule.
 
 ## Public surface
 
@@ -45,6 +47,8 @@ standard library plus `yoetz.protocol.ids` (ID validation), `yoetz.protocol.erro
   constructors and persisted lease calculations.
 - `Frontier` — frozen dataclass `(sequence: int, head_digest: str)` with
   `Frontier.genesis()`, `as_wire() -> JsonObject`, and guarded sequence comparison.
+- `frontier_from_json(value) -> Frontier` — strict inverse of `Frontier.as_wire()` over the one
+  closed frontier object.
 - `SubjectStateRef` — frozen dataclass `(tree_digest: str | None, diff_digest: str | None,
   described_state: str | None)`.
 - `SubjectStateRelation` — enum: `same`, `different`, `unknown`.
@@ -62,23 +66,43 @@ All dataclasses are declared `@dataclass(frozen=True, slots=True)`.
 
 ### `freeze_json(value)`
 
-Input: the output of `protocol.canonical.strict_json_parse` or an already-frozen value.
-Recursively:
+Input: the output of `protocol.canonical.strict_json_parse` or an already-frozen value. Scalar and
+array inputs must be exact built-in JSON-profile types; subclasses are not extension points.
+Mappings may be a parsed plain `dict`, an already-frozen `JsonObject`, or another actual
+`Mapping`. Recursively, in this exact dispatch order:
 
-1. `None`, `bool`, `str` pass through. `bool` is checked **before** `int`
-   (`isinstance(True, int)` is true in Python; booleans must remain booleans).
-2. `int` must satisfy `-(2**53 - 1) <= value <= 2**53 - 1`; otherwise
+1. `None` and exact `bool` pass through. `bool` is checked **before** `int` so booleans never enter
+   the integer branch.
+2. Exact `int` must satisfy `-(2**53 - 1) <= value <= 2**53 - 1`; otherwise
    `ProtocolValueError("integer_out_of_safe_range")`.
-3. `float` (and any other numeric type) raises `ProtocolValueError("float_forbidden")`.
-4. `list`/`tuple` recurse element-wise into a `tuple`.
-5. `dict`/`Mapping` requires every key to be `str`; recurses values and produces a `JsonObject`.
-   Non-string key: `ProtocolValueError("object_key_not_string")`.
-6. Any other type: `ProtocolValueError("unsupported_json_type")`.
+3. An actual `float` or real `float` subclass raises `ProtocolValueError("float_forbidden")`.
+   Other numeric classes such as `Decimal`, `Fraction`, and `complex`, and an `int` subclass, are
+   unsupported objects and reach `unsupported_json_type`; they are never coerced or mislabeled as
+   wire floats.
+4. Exact built-in `str` is validated through `ensure_canonical_value` and then passes through.
+   NUL and lone-surrogate code points therefore raise the canonical owner's
+   `nul_byte_forbidden` and `lone_surrogate` reasons. A `str` subclass is not accepted as a scalar.
+5. An exact `JsonObject` passes through; its constructor has already applied this same recursive
+   validation.
+6. Exact built-in `list`/`tuple` recurse element-wise into a built-in `tuple` after enforcing the
+   shared `MAX_JSON_DEPTH` container bound.
+7. An actual `Mapping` requires every key to be an exact built-in `str`, validates each key through
+   `ensure_canonical_value`, recurses values, and produces a `JsonObject`. A non-string or `str`
+   subclass key raises `ProtocolValueError("object_key_not_string")` before its value is read.
+8. Any other type, including scalar/container subclasses not admitted above, raises
+   `ProtocolValueError("unsupported_json_type")`.
 
 `JsonObject` is a small final class holding an internal `tuple[tuple[str, JsonValue], ...]` in
-insertion order plus a frozen key index. It implements `Mapping[str, JsonValue]`, `__hash__`
-(over the sorted item tuple), `__eq__` (order-insensitive), and rejects duplicate keys at
-construction with `ProtocolValueError("duplicate_object_key")`. It never exposes a mutable view.
+insertion order plus a frozen key index. Its constructor accepts either an actual `Mapping` or an
+exact built-in `list`/`tuple` of exact two-item built-in `tuple` pairs. The pair form is the sole
+duplicate-capable input; the mapping form preserves its iteration order but cannot represent a
+duplicate key. It implements `Mapping[str, JsonValue]`, `__hash__` (over the sorted item tuple),
+`__eq__` (order-insensitive), and rejects duplicate pair-form keys at construction with
+`ProtocolValueError("duplicate_object_key")`. Direct construction applies the same exact-key,
+canonical-string, recursive-freeze, and depth rules as `freeze_json`; it never exposes a mutable
+view. In the pair form, duplicate detection precedes recursive validation of the duplicate's value,
+so the stable duplicate-key reason wins without inspecting rejected content. A wrong outer or pair
+container shape raises `unsupported_json_type`.
 
 ### ID newtypes and constructors
 
@@ -86,42 +110,53 @@ Each constructor calls `protocol.ids.validate_id(kind, value)` with the matching
 (prefixes exactly per INTERFACES §1: `req_`, `tsk_`, `ses_`, `wri_`, `evt_`, `obl_`, `clm_`, `act_`,
 `res_`, `evd_`, `fnd_`, `obj_`, `rcp_`) and returns the validated string wrapped in the
 newtype. `ActionId`/`ResultId`/`EvidenceId` use the payload-level client prefixes `act_`, `res_`,
-`evd_` exactly as registered in INTERFACES §1.
+`evd_` exactly as registered in INTERFACES §1. After validation, the constructor snapshots the
+spelling into an exact built-in `str` before applying the `NewType`; a valid `str` subclass may be
+accepted by the ID owner, but no caller-defined subclass behavior enters the frozen domain.
 `RequestId` validates the `req_` shape and is also the type used by the accepted envelope's
 `operation_id`; there is no separate operation-specific nominal type. `actor_id` is the exception: it
 is caller-asserted convention,
 validated only against `^[A-Za-z0-9._:-]{1,128}$` — never against a UUID shape — and raises
 the ID owner's `ProtocolValueError("actor_id_malformed")` on a shape mismatch (wrong non-string
-type remains `id_wrong_type`). Constructors never lowercase, trim, or
-otherwise rewrite input; the input either already has the single canonical spelling or fails.
+type remains `id_wrong_type`). `actor_id` applies the same exact-built-in snapshot after
+`validate_actor_id`. Constructors never lowercase, trim, or otherwise alter characters; the input
+either already has the single canonical spelling or fails.
 
 ### `Actor`
 
 Pure attribution triple. `assurance` is **server-assigned** upstream (INTERFACES §6); this class
 performs no assurance logic, only shape validation in `__post_init__`: `actor_id` re-validated as
-above, `actor_type`/`assurance` must be enum members. Display names are payload content and are
+above, `actor_type` must be an exact domain `ActorType` member, and `assurance` must be an exact
+`AuthorshipAssurance` member. Validation runs in that field order. A wrong actor enum raises
+`ProtocolValueError("invalid_actor_type")`; a wrong assurance value raises the coverage owner's
+`ProtocolValueError("invalid_coverage_value")`. Display names are payload content and are
 deliberately absent from this type; `specs/src/yoetz/domain/events.md` owns payload display fields.
 
 ### `Timestamp`
 
 Canonical wire form: RFC 3339 UTC, exactly three fractional digits, uppercase `Z`, uppercase `T`
 (`2026-07-13T09:14:31.010Z`) — INTERFACES §3. `timestamp_from_string` validates with a strict
-regex (`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$`) plus a real calendar-validity check by
+regex (`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$`) plus a real calendar-validity check by
 round-tripping through `datetime.strptime`; leap seconds and offsets other than `Z` are rejected
-(`ProtocolValueError("invalid_timestamp")`). `timestamp_from_datetime` requires an actual
-`datetime`, an aware instant whose UTC offset is exactly zero (otherwise
-`ProtocolValueError("timestamp_not_utc")`), and `microsecond % 1000 == 0`. Sub-millisecond input
-raises `ProtocolValueError("timestamp_submillisecond_precision")`; it is never rounded or
-truncated. `format_rfc3339_millis` applies the identical checks. A fixed-offset `+00:00` tzinfo is
-accepted because it denotes UTC, but the one rendered spelling remains `Z`.
+(`ProtocolValueError("invalid_timestamp")`). `timestamp_from_datetime` and
+`format_rfc3339_millis` validate in this exact order: `type(dt) is datetime` or
+`invalid_timestamp`; `tzinfo`/`utcoffset()` is present or `timestamp_timezone_missing`; the offset
+equals zero or `timestamp_not_utc`; and `microsecond % 1000 == 0` or
+`timestamp_submillisecond_precision`. No subclass, coercion, rounding, or truncation is accepted.
+An accepted fixed-offset or named-zone zero-offset instant is normalized to `timezone.utc` before
+rendering, so the one spelling remains `Z` and no later zone transition can affect arithmetic.
 Ordering is plain string comparison — valid because the format is fixed-width UTC, so
 lexicographic order equals chronological order. `Timestamp` never establishes ledger or causal
 order (binding invariant); it is metadata carried alongside events.
 
-`add_utc_milliseconds` requires an exact-millisecond UTC `datetime` and an `int` milliseconds
-argument (not `bool`), performs exact integer arithmetic, and preserves millisecond precision.
-Calendar overflow raises `ProtocolValueError("timestamp_out_of_range")`; it is never clipped and
-no platform `OverflowError` escapes this value boundary.
+`add_utc_milliseconds` is the sole duration-addition helper name. It first applies the exact
+datetime validation above and normalizes the accepted zero-offset instant to `timezone.utc`. It
+then requires `type(milliseconds) is int` and
+`1 <= milliseconds <= 9_007_199_254_740_991`; `bool`, zero, negative, subclassed, and over-limit
+values raise `ProtocolValueError("invalid_duration")`. It performs exact integer arithmetic and
+preserves millisecond precision. `timedelta` construction or calendar addition overflow raises
+`ProtocolValueError("timestamp_out_of_range")`; it is never clipped and no platform
+`OverflowError` escapes this value boundary.
 
 ### `Frontier`
 
@@ -132,6 +167,12 @@ no platform `OverflowError` escapes this value boundary.
 `as_wire()` returns `JsonObject({"sequence": render_wire_sequence(sequence),
 "head_digest": head_digest})`, the one closed frontier shape owned by
 `schemas/common/frontier-1.0.0.schema.json` and used for every `subject_frontier` value.
+`frontier_from_json` accepts an actual mapping with exactly the two exact built-in string keys
+`sequence` and `head_digest`, in either insertion order, and no others. It validates shape first,
+then parses `sequence` through `parse_wire_sequence`, then constructs `Frontier`. A malformed object,
+wrong key set, wrong `head_digest` type, or genesis/digest mismatch raises `invalid_frontier`;
+the sequence parser's `noncanonical_integer_string` reason propagates unchanged. `as_wire()` and
+`frontier_from_json()` are exact inverses over every valid frontier.
 Equality is structural over both fields. The four ordering operators compare `sequence`, but first
 raise `ProtocolValueError("frontier_digest_mismatch")` when two frontiers have the same sequence
 and different digests. A comparison with any non-`Frontier` returns `NotImplemented`. This is a
@@ -142,9 +183,13 @@ equal or ordered. The implementation must not use `@dataclass(order=True)`.
 
 At least one of the three fields must be non-`None`
 (`ProtocolValueError("empty_subject_state")`). `tree_digest`/`diff_digest`, when present, must
-pass `validate_sha256_digest`. `described_state` is a bounded free-text label (1–256 characters);
-it exists so weak references remain expressible but it never participates in equality-based
-freshness logic, request commitments, or deterministic state identity.
+pass `validate_sha256_digest`. `described_state`, when present, must be an exact built-in `str` of
+1–256 Unicode code points; a wrong type (including a subclass) or length raises
+`ProtocolValueError("invalid_subject_state")`, while canonical validation of NUL/lone-surrogate
+content propagates `nul_byte_forbidden`/`lone_surrogate`. Validation order is the all-absent check,
+`tree_digest`, `diff_digest`, then `described_state`. The label exists so weak references remain
+expressible but it never participates in equality-based freshness logic, request commitments, or
+deterministic state identity.
 
 `subject_state_relation(a, b)` implements the three-valued comparison the freshness checks
 depend on (kernel `deterministic_checks.md` K6):
@@ -165,22 +210,37 @@ weak `evidence_immutability`.
 
 ### Sequence helpers
 
-`parse_wire_sequence` accepts exactly the canonical pattern `0|[1-9][0-9]*` (leading zeros,
-signs, whitespace all rejected with `ProtocolValueError("noncanonical_integer_string")`), bounds
-the result to SQLite's signed 64-bit range `0..9_223_372_036_854_775_807`
-(`ProtocolValueError("integer_out_of_sqlite_range")`), and returns `int`.
-`render_wire_sequence` is its exact inverse and rejects `bool`, non-`int`, negatives, and values
-above the same signed-64-bit ceiling. The round trip holds over the complete accepted domain.
+`parse_wire_sequence` is a thin unsigned wrapper around
+`protocol.canonical.parse_canonical_integer_string`. It accepts exactly the canonical pattern
+`0|[1-9][0-9]*` in `0..9_223_372_036_854_775_807`; wrong types, leading zeros, signs, whitespace,
+and over-range values all retain the canonical owner's
+`ProtocolValueError("noncanonical_integer_string")` reason. `render_wire_sequence` is a thin alias
+or wrapper of `protocol.canonical.canonical_integer_string`; it rejects `bool`, non-`int`,
+negatives, and values above the same ceiling with `integer_out_of_sqlite_range`. The round trip
+holds over the complete accepted domain.
+
+### Fixed validation order
+
+Where more than one defect is present, validation is deterministic: `freeze_json` follows its
+eight-branch dispatch and checks mapping keys before values; ID constructors delegate all shape
+checks before snapshotting; `Actor` checks actor ID, actor type, then assurance; datetime helpers
+check exact type, timezone presence, zero offset, millisecond precision, then duration and calendar
+range; `Frontier` checks sequence type/range before the genesis/digest rule;
+`frontier_from_json` checks object/key shape, sequence parsing, then `Frontier`; and
+`SubjectStateRef` checks all-absent, tree digest, diff digest, then described state. Tests use
+multi-defect values to lock these precedence rules.
 
 ## Errors and edge cases
 
 - Every failure is `ProtocolValueError(reason_code)` with a bounded reason code from this file's
   fixed set: `duplicate_object_key`, `float_forbidden`, `integer_out_of_safe_range`,
   `integer_out_of_sqlite_range`, `object_key_not_string`, `unsupported_json_type`,
-  `actor_id_malformed`, `invalid_timestamp`, `timestamp_not_utc`,
+  `nul_byte_forbidden`, `lone_surrogate`, `actor_id_malformed`, `invalid_actor_type`,
+  `invalid_coverage_value`, `invalid_timestamp`, `timestamp_timezone_missing`, `timestamp_not_utc`,
   `timestamp_submillisecond_precision`, `timestamp_out_of_range`, `invalid_frontier`,
-  `frontier_digest_mismatch`, `empty_subject_state`, `invalid_digest`, `invalid_commitment`,
-  `noncanonical_integer_string`, `nesting_too_deep`, plus the codes raised through
+  `frontier_digest_mismatch`, `empty_subject_state`, `invalid_subject_state`, `invalid_digest`,
+  `invalid_commitment`, `invalid_duration`, `noncanonical_integer_string`, `nesting_too_deep`,
+  plus the codes raised through
   `protocol.ids.validate_id`.
 - Reason codes never embed caller input; no user text can leak through an exception message.
 - `freeze_json` on deeply nested input is bounded by the frozen `MAX_JSON_DEPTH = 64` levels
@@ -188,6 +248,8 @@ above the same signed-64-bit ceiling. The round trip holds over the complete acc
   `ProtocolValueError("nesting_too_deep")`, so hostile payloads cannot trigger recursion overflow.
 - `Timestamp` equality across identical instants with different spellings cannot occur: only the
   canonical spelling constructs.
+- An accepted zero-offset named timezone is converted to `timezone.utc` before duration arithmetic;
+  crossing a transition in the original zone therefore cannot change the requested UTC duration.
 
 ## Invariants
 
@@ -205,10 +267,13 @@ above the same signed-64-bit ceiling. The round trip holds over the complete acc
 ## Tests
 
 - `tests/unit/domain/test_values.py` — constructor accept/reject tables for every type; the
-  bool-before-int trap; depth bound; JsonObject duplicate-key and hash/equality laws.
+  bool-before-int trap; exact built-in and hostile-subclass gates; canonical string/key checks;
+  depth bound; JsonObject duplicate-key and hash/equality laws.
 - `tests/unit/domain/test_values.py` — constructor tables, the full subject-state relation matrix,
-  and Hypothesis coverage for `render_wire_sequence ∘ parse_wire_sequence`, timestamp round-trip,
-  and `freeze_json` idempotence.
+  frontier codec round trips, exact validation precedence, bounded UTC duration arithmetic including
+  a zero-offset-zone transition vector, and Hypothesis coverage for
+  `render_wire_sequence ∘ parse_wire_sequence`, timestamp round-trip, and `freeze_json`
+  idempotence.
 - Determinism controls required by ADR-002: identical bytes under varied `PYTHONHASHSEED`,
   locale, and timezone.
 

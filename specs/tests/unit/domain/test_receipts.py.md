@@ -23,6 +23,10 @@ Lock the receipt document’s canonical structure and the compact render’s hon
   document.
 - `test_section_order_and_redaction_notes_are_stable` — presentation order and redaction behavior
   stay fixed.
+- `test_receipt_response_preserves_evidence_and_result_refs` — response basis accepts the exact
+  sorted-unique `EvidenceId | ResultId` union and preserves each ID kind through the codec.
+- `test_receipt_section_items_are_required_and_exact` — missing `items` is invalid, while explicit
+  `items=[]` decodes to the required empty tuple and re-encodes as `items=[]`.
 
 ## Behavior
 
@@ -33,18 +37,27 @@ The suite proves:
 - every verdict/conclusion correspondence and capped-check branch is exhaustive;
 - weakest coverage is derived from supports, not guessed;
 - compact rendering can omit detail but cannot strengthen the statement;
-- redaction leaves an honest trace in the document.
+- redaction leaves an honest trace in the document;
+- response records preserve both evidence and result references without a lossy conversion;
+- every section carries an explicit `items` array, including the empty-array case, so exact inverse
+  encoding cannot collapse absence into emptiness.
 
 ## Errors and edge cases
 
 - A render that sounds stronger than the document fails.
 - A document with missing provenance or coverage summary fails.
+- A response evidence reference with any ID kind other than `evd_` or `res_`, an unsorted union, or
+  a duplicate member fails.
+- A section with absent `items` fails; explicit `items=[]` succeeds and remains present after the
+  codec round trip.
 
 ## Invariants
 
 1. Receipt documents are immutable truth records.
 2. Rendered views are always weaker or equal to the document.
 3. Coverage is computed from supports, not prose.
+4. Receipt response evidence is lossless across evidence/result ID kinds.
+5. Required empty section items never collapse into an omitted field.
 
 ## Tests
 

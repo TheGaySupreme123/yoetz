@@ -12,7 +12,7 @@ user-visible failures never leak implementation internals.
 ## Public surface
 
 - `test_public_error_code_membership` — the 22 public codes are exact with no extras.
-- `test_protocol_reason_registry_is_exact_and_import_order_independent` — the frozen 127-member
+- `test_protocol_reason_registry_is_exact_and_import_order_independent` — the frozen 129-member
   Wave B reason set declared by the B0 dependency root has exact membership, ordering source,
   grammar, and no runtime registration surface.
 - `test_operation_error_is_bounded` — message, details, and correlation IDs obey exact limits.
@@ -37,7 +37,10 @@ The suite proves:
 - the registry includes `privacy_receipt_not_durable` and
   `provider_attempt_provenance_is_not_final`, and includes the schema-instance boundary reason
   `schema_instance_invalid` between `schema_id_mismatch` and `schema_kind_mismatch` in exact ASCII
-  order, while the dependency-root module imports no privacy/provider/coordinator type;
+  order. It also freezes the B1 value/admission reasons `invalid_actor_type`,
+  `invalid_subject_state`, and `event_family_not_admitted`, and removes the superseded
+  `attachment_key_incomplete` event-only rule, while the dependency-root module imports no
+  privacy/provider/coordinator type;
 - importing `errors`, `canonical`, `ids`, `coverage`, and `schemas` in every relevant order yields
   the same reason set and no module mutates it;
 - retryable state is separate from user blame;

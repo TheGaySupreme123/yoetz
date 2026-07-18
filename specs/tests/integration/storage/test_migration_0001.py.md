@@ -92,6 +92,8 @@ The test checks that the migration:
 - requires the named unique `events_payload_object` index and rebuilds
   `payload_event_by_object`, `evidence_sources_by_object`, and `redaction_root_by_object` from
   `events`, `event_refs`, and `event_projection_locators` without reading object bytes;
+- freezes `event_refs.ref_type` as exactly `artifact|evidence|result|finding|claim`, preserving a
+  result-ID member of the envelope evidence-ref union under its own kind;
 - compares the exact thirteen-name base access-path set and `PRAGMA index_xinfo` key-column order,
   then
   uses `EXPLAIN QUERY PLAN` fixtures to require the matching named index for session/schema/writer

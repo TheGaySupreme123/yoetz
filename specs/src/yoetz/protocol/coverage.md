@@ -1,7 +1,7 @@
 # src/yoetz/protocol/coverage.py — coverage lattice and weakest-coverage helpers
 
 **Wave:** A/B | **ADRs:** ADR-002, ADR-004, ADR-006 | **Imports (spec-tree):**
-`protocol/errors.md`
+`protocol/errors.md`, `protocol/canonical.md` (`JsonValue` only)
 **Imported by:** `protocol/models.md`, `domain/events.md`, `domain/findings.md`,
 `domain/receipts.md`, `domain/values.md`, `kernel/ranking.md`, `kernel/receipt_builder.md`, checks,
 and renderers
@@ -26,6 +26,7 @@ weakest-coverage view.
 | `CheckType` | enum of `none`, `deterministic`, `semantic_model_derived` |
 | `AUTHORSHIP_ASSURANCE_ORDER`, `ARTIFACT_OBSERVATION_ORDER`, `EVIDENCE_IMMUTABILITY_ORDER`, `LEDGER_FRESHNESS_ORDER` | exact immutable weakest-to-strongest rank maps |
 | `COVERAGE_DEFAULTS_BY_CHANNEL` | exact immutable six-channel baseline table below |
+| `coverage_from_json(value)` / `coverage_to_json(coverage)` | exact coverage schema codecs |
 | `weakest(a, b)` | component-wise weakest-coverage merge |
 | `coverage_for_channel(channel)` | conservative default coverage for a channel |
 
@@ -90,6 +91,26 @@ and whose channel/check-kind/gap fields are sorted unions. An individual accepte
 singular publication channel; `coverage_for_channel` places it in a singleton tuple. It does not
 average, score, or collapse coverage into a single scalar.
 
+`coverage_from_json(value)` accepts either a parsed plain `dict` or any frozen `Mapping[str,
+JsonValue]` that is already in canonical JSON shape. It requires exactly the seven schema keys
+`publication_channels`, `authorship_assurance`, `artifact_observation`, `evidence_immutability`,
+`ledger_freshness`, `check_types`, and `known_gaps`; any missing key, extra key, wrong container
+shape, wrong enum token, or non-object value raises `ProtocolValueError("invalid_coverage_value")`.
+Array fields must be exact built-in `list` or `tuple` values containing exact enum/string tokens in
+the schema order. The constructor/validator on `Coverage` remains the owner of duplicate-set,
+unsorted-set, and invalid known-gap errors, so those reasons propagate unchanged rather than being
+relabeled here. The codec must preserve the exact tuple spellings after validation and must not
+import any domain modules.
+
+`coverage_to_json(coverage)` accepts only an exact `Coverage` instance. Subclasses, spoofed
+`__class__` objects, and foreign runtime types raise `ProtocolValueError("invalid_coverage_value")`.
+The encoder emits the exact closed coverage object as a plain `dict[str, JsonValue]` with list
+values for the tuple-backed fields and the `.value` spelling of each enum member. The output is
+schema-valid, preserves the field order `publication_channels`, `authorship_assurance`,
+`artifact_observation`, `evidence_immutability`, `ledger_freshness`, `check_types`,
+`known_gaps`, and round-trips through `coverage_from_json` without strengthening or normalizing the
+payload.
+
 `coverage_for_channel(channel)` accepts only an exact `PublicationChannel` enum member and returns
 the corresponding immutable row of `COVERAGE_DEFAULTS_BY_CHANNEL` below. Any other runtime type,
 including a raw token or spoofed `__class__`, raises `invalid_coverage_value`. Every row lists all
@@ -136,6 +157,9 @@ not a duck-typed extension point.
   direct construction with duplicates or wrong order fails, and a merge whose distinct union would
   exceed 64 fails with `invalid_known_gap` rather than losing evidence.
 - No helper here may infer cryptographic attestation unless the source actually proves it.
+- The JSON codecs never silently sort, coerce, or drop data. They pass through the constructor's
+  exact reason codes for duplicate set members, unsorted sets, invalid known gaps, and invalid
+  coverage values.
 
 ## Invariants
 

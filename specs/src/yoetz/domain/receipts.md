@@ -58,7 +58,7 @@ ReceiptObligation(obligation_id: ObligationId, status: ReceiptObligationStatus,
                   summary: str | None = None)
 ReceiptResponse(finding_id: FindingId, finding_frontier: Frontier,
                 disposition: ResponseDisposition,
-                evidence_refs: tuple[EvidenceId, ...],
+                evidence_refs: tuple[EvidenceId | ResultId, ...],
                 reason: str | None = None,
                 waiver_scope: WaiverScope | None = None,
                 waiver_expiry: Timestamp | None = None)
@@ -69,7 +69,7 @@ ReceiptRedaction(category: ReceiptRedactionCategory,
                   reason: ReceiptRedactionReason,
                   count: int)
 ReceiptSection(key: ReceiptSectionKey, title: str, body: str,
-               items: tuple[str, ...] = (), coverage_note: str | None = None)
+               items: tuple[str, ...], coverage_note: str | None = None)
 ```
 
 `ReceiptDocument` has exactly these fields:
@@ -157,10 +157,15 @@ finding identities. While a visible actionable finding remains it yields
 `unresolved_findings_remain`; otherwise it yields `insufficient_coverage` until a newer applicable
 check records zero suppression. A receipt exposes the count, never invented suppressed IDs.
 
+`ReceiptResponse.evidence_refs` preserves the exact response basis accepted by
+`ResponseRecordedPayload`: each sorted-unique member is either an `EvidenceId` or a `ResultId`.
+There is no result-to-evidence coercion, lookup, or lossy projection at receipt construction.
+
 `ReceiptSection` is canonical document content, not a separate presentation wrapper. It carries its
-registered key, short title, bounded body, optional bullet items, and optional local coverage note.
-There is no `ReceiptRender` type in v0.1: it had no schema, no stable fields, and no consumer that
-needed a second object graph.
+registered key, short title, bounded body, required bullet-item tuple (which may be empty), and
+optional local coverage note. `items` has no dataclass default: absence is invalid, while an explicit
+empty tuple encodes as `"items": []`. There is no `ReceiptRender` type in v0.1: it had no schema,
+no stable fields, and no consumer that needed a second object graph.
 
 ### JSON codecs
 
@@ -168,8 +173,10 @@ needed a second object graph.
 `receipt-document-1.0.0.schema.json`, constructs every nested nominal record, parses frontier and
 redaction-count decimal strings, and rejects all missing, extra, conditionally invalid, unsorted,
 or duplicate values. `receipt_document_to_json(document)` is its exact inverse, omits only optional
-members whose value is `None`, and delegates findings and coverage to their one owning codecs. It
-does not serialize adapters, Pydantic models, datetimes, or mutable containers.
+members whose value is `None`, always emits every section's required `items` array, preserves
+`EvidenceId | ResultId` response evidence without rewriting its ID kind, and delegates findings and
+coverage to their one owning codecs. It does not serialize adapters, Pydantic models, datetimes, or
+mutable containers.
 
 For each valid schema value `x`, canonical encoding of
 `receipt_document_to_json(receipt_document_from_json(x))` equals canonical encoding of `x`. The
@@ -219,6 +226,10 @@ canonical-set validators propagate their owning reason unchanged.
   digest of the event that commits this document and would create a hash self-reference. The
   operation result carries the post-commit frontier.
 - Redacted or missing supporting material weakens the document; it does not disappear.
+- A response may cite either recorded evidence or a recorded result; any other ID kind is invalid,
+  and a result reference is never silently discarded or converted.
+- A receipt section missing `items` is invalid. `items=[]` is the one explicit empty representation
+  and round-trips byte-identically.
 - A receipt never claims “verified” in place of a weaker conclusion.
 - Rendering functions never expose raw payloads, secrets, or unbounded evidence text.
 - A render may omit detail for a bounded surface, but it may not invent a stronger conclusion.
