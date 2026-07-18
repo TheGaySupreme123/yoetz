@@ -119,6 +119,9 @@ case. The frozen marker grammar is:
 - `redacted_object:<object_id>` -> code `redacted_object`, subject refs containing exactly the
   causative redaction event with the lowest ledger ingestion sequence in the same prefix whose
   locator targets that object;
+- `missing_ref:<source_event_id>:<target_logical_id>` -> code `missing_ref`, subject refs
+  containing the visible source event ID; the target logical ID is retained in the marker for
+  audit but is never guessed into a public finding root;
 - case-only `unavailable_event:<event_id>` -> code `event_payload_unavailable`, rooted at that event,
   only when a current record payload is unavailable without any effective redaction target; and
 - case-only `unavailable_captured_object:<source_event_id>:<object_id>` -> code
