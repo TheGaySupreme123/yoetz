@@ -403,13 +403,10 @@ The complete content map is:
 | `status` obligations view | `/page/items/*/description`, `/page/items/*/evidence_expectation`, `/page/items/*/acceptance_criteria` | `obligation_text` |
 | `status` evidence view | `/page/items/*/description`, `/page/items/*/reference` | `evidence_excerpt` |
 | `status` findings view | `/page/items/*/summary`, `/page/items/*/detail`, `/page/items/*/reason` | `finding_summary` |
-| `status` assignment/candidate_findings/history/versions views | none; their exact v0.1 schemas contain structural IDs, codes, rule-templated candidate prose, and bounded metadata only | — |
-| `receipt` | `/document/task/title` | `task_description` |
-| `receipt` | `/document/obligations/*/description`, `/document/obligations/*/evidence_expectation`, `/document/obligations/*/acceptance_criteria` | `obligation_text` |
-| `receipt` | `/document/claims/*/statement` | `claim_text` |
-| `receipt` | `/document/decisions/*/statement`, `/document/decisions/*/rationale`, `/document/decisions/*/alternatives/*` | `decision_excerpt` |
-| `receipt` | `/document/evidence/*/description`, `/document/evidence/*/reference` | `evidence_excerpt` |
-| `receipt` | `/document/findings/*/summary`, `/document/findings/*/detail`, `/document/responses/*/reason`, `/human_text` | `finding_summary` |
+| `status` candidate_findings view | `/page/items/*/summary`, `/page/items/*/detail` | `finding_summary` |
+| `status` assignment/history/versions views | none; their exact v0.1 schemas contain structural IDs, closed codes, and bounded metadata only | — |
+| `receipt` | `/document/obligations/*/summary` | `obligation_text` |
+| `receipt` | `/document/findings/*/summary`, `/document/findings/*/detail`, `/document/responses/*/reason`, `/document/gaps/*/detail`, `/human_text` | `finding_summary` |
 | `receipt` | `/document/sections/*/title`, `/document/sections/*/body`, `/document/sections/*/coverage_note`, `/document/sections/*/items/*` | `finding_summary` |
 | `review` | `/check_result/findings/*/summary`, `/check_result/findings/*/detail` | `finding_summary` |
 | `integration_preview` | `/file_changes/*/relative_path`, `/file_states/*/relative_path` | `repository_excerpt` |
@@ -418,9 +415,10 @@ The complete content map is:
 
 Each result schema and view discriminator makes these patterns unambiguous. For example,
 `/page/items/*/description` is registered separately under the exact status view; it is not a
-global field-name heuristic. `Coverage.known_gaps`, warning arrays, and failure classes are closed
-codes and structural; any future free-form warning is a new content field and needs a registry
-entry.
+global field-name heuristic. Candidate-finding prose is content-bearing unless and until its schema
+is narrowed to exact template tokens. `Coverage.known_gaps`, warning arrays, and failure classes
+are closed codes and structural; any future free-form warning is a new content field and needs a
+registry entry.
 
 `MAX_PROJECTION_CONTENT_LEAVES=512`, `MAX_PROJECTION_POINTER_BYTES=256`,
 `MAX_INTERNAL_PROJECTABLE_RESULT_BYTES=524_288`, and
