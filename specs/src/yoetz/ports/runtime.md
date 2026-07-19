@@ -16,21 +16,34 @@ concrete adapter. CLI/MCP/UI never implement or receive this port.
 
 - `class BundleRuntimePort(Protocol)` with async `provision_start`, `route`, `verify_start`,
   `release`, and `close`.
-- `@dataclass(frozen=True, slots=True) class ServiceRuntimeContext` — current service/vault/catalog
-  generations, admitted capability ceiling, version manifest, and shutdown token; nonserializable.
+- `@dataclass(frozen=True, slots=True) class ServiceRuntimeContext` — exactly
+  `service_instance_id`, positive `service_generation`, `vault_generation`, `catalog_generation`,
+  `capabilities: frozenset[RuntimeCapability]`, immutable structural `version_manifest`, and an
+  opaque `shutdown_token`; nonserializable and constant-redacted.
 - `enum RouteAccess` — `structural_read`, `payload_read`, `write`, `import_review`, `maintenance`.
-- `@dataclass(frozen=True, slots=True) class RouteCommand` — exact session, optional writer, access,
-  and required capability set; no client kind/path/fuzzy reference.
+- `@dataclass(frozen=True, slots=True) class RouteCommand` — exactly `session_id`, optional
+  `writer_id`, `access`, and `required_capabilities`; no client kind/path/fuzzy reference.
 - `enum BundleProvisionMode` — `created`, `attached`.
-- `@dataclass(frozen=True, slots=True) class BundleProvisionCommand` — exact live start allocation
-  projection and version identities.
-- `@dataclass(frozen=True, slots=True) class OwnershipFence` — service instance/generation,
-  monotonic bundle owner generation, and opaque nonce; constant-redacted.
-- `@dataclass(frozen=True, slots=True) class TaskRuntime` — exact task/session/writer, admitted
-  least-authority subports, projection/version identity, and current fence; no keys/paths.
+- `@dataclass(frozen=True, slots=True) class BundleProvisionCommand` — exactly `mode`, `task_id`,
+  `session_id`, `writer_id`, `lifecycle_event_id`, generated `bundle_relpath`, positive
+  `route_generation`, `route_identity_digest`, `phase`, optional `response_object_id`, positive
+  `owner_generation`, `lease_owner_id`, positive `lease_generation`, `lease_expires_at`, and exact
+  `protocol_version`, `engine_version`, `projection_version`, `bundle_schema_version` identities.
+- `@dataclass(frozen=True, slots=True) class OwnershipFence` — exactly `service_instance_id`,
+  positive `service_generation`, positive monotonic `owner_generation`, and opaque `nonce`;
+  constant-redacted.
+- `@dataclass(frozen=True, slots=True) class TaskRuntime` — exactly `task_id`, `session_id`, optional
+  `writer_id`, admitted `capabilities`, least-authority `ledger`, `objects`, and `importer` ports,
+  `projection_version`, `engine_version`, `protocol_version`, `bundle_schema_version`, and current
+  `fence`; no keys/paths.
 - `enum StartMilestone` and frozen `StartMilestoneExpectation`/
   `StartCompletionEvidence` with the existing bundle-ready/lifecycle-committed/result-published
   semantics.
+
+`StartMilestoneExpectation` carries exactly the milestone plus task/session/writer/lifecycle-event
+identity, route generation/digest, and optional response-object/result-digest pair.
+`StartCompletionEvidence` carries the same structural identity plus owner generation, optional
+lifecycle frontier, optional response-object/result-digest pair, and a canonical evidence digest.
 
 The removed per-client `RuntimeScopeKind`/`mcp_service`/one-shot CLI scope is not part of v0.1.
 Client authorization is enforced by service control before application entry; this port sees only

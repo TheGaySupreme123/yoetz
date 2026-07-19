@@ -23,6 +23,15 @@ shape before any operation-specific fields are considered.
 | `MAX_FINDINGS_LIMIT` | `int = 10` |
 | `MAX_REASON_BYTES` | `int = 4_096` |
 | `MAX_OBJECT_PLAINTEXT_BYTES` | `int = 4_194_304` |
+| `MAX_SEMANTIC_ITEM_BYTES` | `int = 16_384` |
+| `MAX_SEMANTIC_CASE_BYTES` | `int = 262_144` |
+| `MAX_REVIEW_TEXT_BYTES` | `int = 4_096` |
+| `MAX_REVIEW_TIMELINE_ITEMS` | `int = 64` |
+| `MAX_REVIEW_ASSESSMENTS` | `int = 64` |
+| `MAX_REVIEW_CHANGE_OBSERVATIONS` | `int = 32` |
+| `MAX_REVIEW_EXCERPTS` | `int = 16` |
+| `MAX_REVIEW_OMISSIONS` | `int = 64` |
+| `MAX_REVIEW_CHALLENGES` | `int = 3` |
 | `GENESIS_PREDECESSOR_DIGEST` | `str = "genesis"` |
 | `ActorType` | enum of public actor kinds |
 | `PublicationChannel` | enum of observed publication channels |

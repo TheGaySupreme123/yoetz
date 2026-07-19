@@ -34,13 +34,15 @@ dangling reference.
 - `@dataclass(frozen=True, slots=True) class StagedObject` — `object_id: str`,
   `plaintext_size: int`, `commitment: str`, `envelope_digest: str`,
   `encryption_format: Literal["yoetz-object/1"]`, `key_slot: str`, `metadata: ObjectMetadata`,
-  plus an adapter-opaque staging handle (temp location token; never a caller-visible path).
+  plus `staging_handle`, an adapter-opaque temp-location token excluded from repr/comparison and
+  never a caller-visible path.
 - `@dataclass(frozen=True, slots=True) class ObjectRef` — same fields as `StagedObject` minus the
   staging handle; the durable identity an owning ledger/importer/catalog record may retain.
 - `@dataclass(frozen=True, slots=True) class ObjectRootSnapshot` — service-internal GC/maintenance
-  proof containing task ID, active route identity, bundle generation, privacy-root generation,
-  source-set digests, maintenance-pin digest, captured time, and sorted unique live object IDs; no
-  path or content.
+  proof with exactly `task_id`, `route_identity_digest`, positive `route_generation`, positive
+  `bundle_generation`, nonnegative `privacy_root_generation`, `ledger_roots_digest`,
+  `importer_roots_digest`, `privacy_roots_digest`, `maintenance_pin_digest`, `captured_at`, and
+  sorted unique `live_object_ids`; no path or content.
 - `enum ObjectKind` — `event_payload`, `captured_content`, `semantic_case`, `semantic_response`,
   `operation_result`, `start_result`, `check_resume`, `deterministic_result`, `receipt`,
   `import_source`, `import_source_manifest`, `import_plan`, `import_report`, `import_stderr`,

@@ -13,7 +13,8 @@ provider-policy contracts.
 
 ## Public surface
 
-- `enum SecretPurpose` — `vault_initialize`, `vault_unlock`, `portable_recovery`,
+- `enum SecretPurpose` — `vault_initialize`, `vault_unlock`, `vault_root_key`,
+  `portable_recovery`, `object_payload`,
   `provider_reauthentication`, `provider_credential`, `privacy_reauthentication`,
   `security_reauthentication`. Initialization, later unlock, credential reauthentication,
   credential bytes, privacy reauthentication, and security-policy reauthentication are distinct
@@ -27,12 +28,12 @@ provider-policy contracts.
 - `class SecretHandle(Protocol)` — nonserializable, noncopyable, constant-redacted representation;
   `consume(consumer: SecretConsumer, fn)` exposes one bounded writable `memoryview` to an
   allowlisted service-internal consumer exactly once and overwrites/releases it in `finally`.
-- `enum SecretConsumer` — `vault_root`, `recovery_wrapper`, `provider_authorizer`,
+- `enum SecretConsumer` — `vault_root`, `recovery_wrapper`, `object_crypto`, `provider_authorizer`,
   `privacy_authorizer`, `security_authorizer`.
 - `@dataclass(frozen=True, slots=True) class ProviderAttemptAuthBinding` — exact `provider_id`,
   `model_id`, `endpoint_profile_id`, `endpoint_profile_version`, `purpose`,
-  `authorization_scope_digest`, `purpose_digest`, `dispatch_id`, `request_body_digest`, service
-  generation, and absolute/monotonic deadline. It is internal, nonsecret, and contains no
+  `authorization_scope_digest`, `purpose_digest`, `dispatch_id`, `request_body_digest`,
+  `service_generation`, and `monotonic_deadline: float`. It is internal, nonsecret, and contains no
   URL/header/credential/body.
 - `class ProviderAuthTransportCallback(Protocol[T])` — custom HTTP-transport-only
   `async inject_and_start(credential_view: memoryview) -> T`. It may use the view only to inject the
@@ -56,16 +57,17 @@ provider-policy contracts.
   purpose-specific confidential reauthentication is its required input. The proof is immediately
   consumed with the exact pending change and never serialized or returned to a helper/client.
 - `@dataclass(frozen=True, slots=True) class UserPresenceChallenge` — exact authorization purpose,
-  ceremony/target/display-summary digests, service/vault generation, optional policy generation,
-  and monotonic expiry;
+  `ceremony_digest`, `target_digest`, `display_summary_digest`, `service_generation`,
+  `vault_generation`, optional `policy_generation`, and `expires_at_monotonic`;
   constructed only from a live human-control ceremony.
 - `class UserPresenceAttestation(Protocol)` — opaque nonserializable, nonconstructible outside the
   installed adapter, one-use result bound to every challenge field; never a generic boolean or
   reusable credential.
-- `@dataclass(frozen=True, slots=True) class UserPresenceCapability` — exact adapter/profile/
-  platform identity and measured `os_authenticated_prompt`, `trusted_action_binding`,
-  `one_use_attestation`, and `available` states plus capability-evidence digest and candidate-
-  artifact digest. Each measured state is `active|unavailable`; no inferred `supported` value
+- `@dataclass(frozen=True, slots=True) class UserPresenceCapability` — exactly
+  `candidate_artifact_digest`, `release_cell`, `adapter_id`, `profile_id`,
+  `os_authentication_primitive`, and measured `os_authenticated_prompt`, `trusted_action_binding`,
+  `one_use_attestation`, and `available` states plus `capability_evidence_digest`. Each measured
+  state is `active|unavailable`; no inferred `supported` value
   authorizes runtime behavior.
 - `class UserPresencePort(Protocol)` with `capability() -> UserPresenceCapability`,
   `async assert_presence(challenge: UserPresenceChallenge) -> UserPresenceAttestation`,
@@ -76,6 +78,8 @@ provider-policy contracts.
   `consumer_forbidden`, `already_consumed`, `memory_lock_failed`, `closed`,
   `provider_binding_mismatch`, `provider_body_digest_mismatch`, `provider_deadline_expired`,
   `provider_transport_forbidden`, `presence_capability_unverified`, `internal_error`.
+  Human-proof validation additionally uses `proof_binding_mismatch` and `proof_expired`; it never
+  reuses provider-specific deadline or binding reasons.
 
 ## Behavior
 

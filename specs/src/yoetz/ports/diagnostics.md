@@ -19,12 +19,13 @@ and exception strings out of startup evidence.
 - `class DiagnosticsPort(Protocol)` with
   `def record(self, result: StartupCheckResult) -> None` (INTERFACES §10).
 - `@dataclass(frozen=True, slots=True) class StartupCheckResult`.
-- `enum StartupCheckArea` — `runtime`, `package`, `resources`, `path`, `sqlite_build`,
-  `sqlite_schema`, `ownership`, `ledger`, `objects`, `keys`, `projection`, `provider`.
+- `enum StartupCheckArea` — `runtime`, `package`, `resources`, `path`, `service_control`,
+  `service_lifecycle`, `sqlite_build`, `sqlite_schema`, `ownership`, `ledger`, `objects`, `keys`,
+  `vault`, `secret_memory`, `projection`, `privacy_policy`, `egress_gateway`, `provider`.
 - `enum StartupCheckOutcome` — `ok`, `degraded`, `blocked`.
 - `enum RuntimeCapability` — `structural_read`, `payload_read`, `write`, `semantic`.
 - `@dataclass(frozen=True, slots=True) class StartupGateReport`.
-- `evaluate_startup_gate(results, *, requested_profile) -> StartupGateReport`.
+- `evaluate_startup_gate(results) -> StartupGateReport`.
 
 These shared types are registered in `specs/INTERFACES.md`. They are internal structural types,
 not a promise to expose a `doctor` command in v0.1.

@@ -33,10 +33,18 @@ schemas cannot import or serialize it.
   minted; no method exports/rebinds/clones key material.
 - `@dataclass(frozen=True, slots=True) class WrappedDek` — exactly `algorithm =
   "aes-256-kw-rfc3394"` and `wrapped: bytes` of length 40; it has no nonce field.
+- `@dataclass(frozen=True, slots=True) class BundleKeys` — exactly `key_slot: str`,
+  `wrap_key: WrapKeyHandle`, and `commitment_key: MacKeyHandle`; its representation is constant-
+  redacted and it cannot be copied, pickled, or converted to a public mapping.
 - `class RecoverySecret(Protocol)` — one-shot alias/protocol restricted to
   `SecretHandle(purpose=portable_recovery)`; no `str`/`bytes` constructor.
-- `@dataclass(frozen=True, slots=True) class RecoveryArtifact` — authenticated versioned envelope
-  and bounded structural manifest.
+- `class RecoveryKeyMaterialHandle(Protocol)` — opaque one-shot recovered BMK material exposed
+  only through `consume(fn)` to the portable-recovery adapter. It has no task/key-slot metadata,
+  byte export, clone, or serialization surface.
+- `@dataclass(frozen=True, slots=True) class RecoveryArtifact` — exactly
+  `canonical_bytes: bytes` and `artifact_digest: str`. Bytes are nonempty canonical UTF-8/JCS,
+  at most 16 KiB, and the digest is SHA-256 over those exact bytes. Closed envelope parsing and
+  manifest validation remain owned by the portable-recovery adapter.
 - `class KeyStoreError(Exception)` and exact bounded reasons: `vault_locked`, `key_missing`,
   `key_id_mismatch`, `unsupported_backend`, `backend_unverified`, recovery missing/wrong/tampered/
   unsupported, `machine_bound_key_missing`, `recovered_key_cannot_decrypt`, `stale_key_handle`,

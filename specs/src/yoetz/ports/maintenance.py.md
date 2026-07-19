@@ -31,7 +31,7 @@ procedures and cannot skip planning, verification, generation fencing, or the no
 - `restore(command: RestoreCommand, *, confirmed_plan_digest: str,
   recovery_secret: RecoverySecret | None) -> RestoreResult`;
 - `preview_migration(command: MigrationCommand) -> MigrationPlan`;
-- `migrate(command: MigrationCommand, *, confirmed_plan_digest: str) -> MigrationResult`.
+- `migrate(command: MigrationCommand, confirmed_plan_digest: str) -> MigrationResult`.
 
 Preview methods are read-only and never acquire a long-lived maintenance generation. Execution
 methods recompute the plan under authority and require an exact digest match. Every method returns

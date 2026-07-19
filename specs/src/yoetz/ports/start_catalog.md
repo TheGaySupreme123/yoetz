@@ -32,14 +32,17 @@ a home for task titles or other user plaintext.
     result: EncryptedResultRef | None = None) -> StartAllocation`
     (durable checkpoint between reserve and complete)
 - `@dataclass(frozen=True, slots=True) class StartCommand`
-- `@dataclass(frozen=True, slots=True) class StartIdentityInput` — redacted title/workspace/external
-  references, never logged or persisted
-- `@dataclass(frozen=True, slots=True) class StartIdentityCommitments` — domain-separated keyed
-  commitments only
+- `@dataclass(frozen=True, slots=True) class StartIdentityInput` — exactly `task_title`, optional
+  `workspace_ref`, and optional `external_ref`; constant-redacted and never logged or persisted
+- `@dataclass(frozen=True, slots=True) class StartIdentityCommitments` — exactly
+  `title_commitment`, optional `workspace_ref_commitment`, and optional
+  `external_ref_commitment`; domain-separated keyed commitments only
 - `@dataclass(frozen=True, slots=True) class TaskRoute` — bounded structural catalog route for
   exact runtime resolution
 - `enum TaskRouteState` — `initializing`, `active`, `quarantined`
 - `@dataclass(frozen=True, slots=True) class StartAllocation`
+- `@dataclass(frozen=True, slots=True) class StartOperationLease` — start-catalog-specific
+  generation lease; distinct from the check-operation `ports.ledger.OperationLease`.
 - `@dataclass(frozen=True, slots=True) class EncryptedResultRef`
 - `@dataclass(frozen=True, slots=True) class SafeReason` — `code: str` from the allowlisted
   `quarantine_code` enum; no free text, ever.
@@ -106,7 +109,7 @@ not a title lookup index.
 - `phase: StartPhase` — the durably recorded phase (a lower bound after a crash).
 - `response_object_id: str | None` — absent before `result_published`; the exact pinned result
   object locator at `result_published`/terminal replay.
-- `lease: OperationLease` — `owner_generation: str`, `lease_owner_id: str`,
+- `lease: StartOperationLease` — positive `owner_generation: int`, `lease_owner_id: str`,
   `lease_generation: int`, `lease_expires_at: datetime`. Absent (`None`) when
   `outcome == "replayed"`.
 - `replayed_result: bytes | None` — the stored `terminal_result_canonical` envelope (structural

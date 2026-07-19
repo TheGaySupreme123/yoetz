@@ -846,9 +846,13 @@ Shared route values are `TaskRoute` and `TaskRouteState` (`initializing`, `activ
 route generation, state, and the stored active route-identity digest. That digest is SHA-256 over
 canonical task ID/bundle route/route generation; session/state transitions do not change it.
 `StartAllocation` freezes the same generation/digest selected at reservation.
+Its lease is the distinct `StartOperationLease(owner_generation: positive int, lease_owner_id,
+lease_generation: positive int, lease_expires_at)` and is absent only for terminal replay; it is
+not the check-specific `ports.ledger.OperationLease`.
 
-`StartIdentityInput` is a redacted one-shot value containing title/workspace/external references;
-`StartIdentityCommitments` contains only domain-separated installation-keyed HMAC commitments.
+`StartIdentityInput(task_title, workspace_ref?, external_ref?)` is a redacted one-shot value;
+`StartIdentityCommitments(title_commitment, workspace_ref_commitment?,
+external_ref_commitment?)` contains only domain-separated installation-keyed HMAC commitments.
 The application builds the start `request_digest` from those commitments plus nonsecret logical
 fields. `reserve_or_resume` recomputes/verifies them before idempotency or route lookup, preventing
 low-entropy plaintext from leaking through an unkeyed structural request digest.
@@ -985,9 +989,9 @@ reveals credential or policy state.
 
 `SecretMemoryPort` exposes `capability`, `capture`, `allocate`, and `close` over opaque one-shot
 `SecretHandle` values. `SecretPurpose` is exactly `vault_initialize`, `vault_unlock`,
-`portable_recovery`, `provider_reauthentication`, `provider_credential`,
+`vault_root_key`, `portable_recovery`, `object_payload`, `provider_reauthentication`, `provider_credential`,
 `privacy_reauthentication`, or `security_reauthentication`; `SecretConsumer` is exactly
-`vault_root`, `recovery_wrapper`, `provider_authorizer`, `privacy_authorizer`, or
+`vault_root`, `recovery_wrapper`, `object_crypto`, `provider_authorizer`, `privacy_authorizer`, or
 `security_authorizer`. Shared types are
 `SecretMemoryCapability`, `ProviderAttemptAuthBinding`, `ProviderAuthTransportCallback`,
 `ProviderCredentialHandle`, `HumanAuthorizationProof`, `UserPresenceChallenge`,
