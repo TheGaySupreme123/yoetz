@@ -38,17 +38,25 @@ from yoetz.domain.values import (
     event_id,
     evidence_id,
     finding_id,
+    freeze_json,
+    frontier_from_json,
     object_id,
     obligation_id,
     result_id,
 )
-from yoetz.kernel.projections import ProjectionRecord, ProjectionState
+from yoetz.kernel.projections import (
+    ProjectionRecord,
+    ProjectionState,
+    projection_from_snapshot,
+    projection_snapshot,
+)
 from yoetz.kernel.reducers import (
     ReplayIndex,
     empty_replay_index,
     extend_replay_index,
     replay,
 )
+from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.coverage import (
     EVIDENCE_IMMUTABILITY_ORDER,
     LEDGER_FRESHNESS_ORDER,
@@ -58,6 +66,8 @@ from yoetz.protocol.coverage import (
     EvidenceImmutability,
     LedgerFreshness,
     PublicationChannel,
+    coverage_from_json,
+    coverage_to_json,
     weakest,
 )
 
@@ -76,6 +86,10 @@ __all__ = [
     "PolicyPack",
     "UnavailableCapturedObject",
     "build_deterministic_case",
+    "deterministic_case_from_json",
+    "deterministic_case_to_json",
+    "finding_basis_from_json",
+    "finding_basis_to_json",
     "finding_basis_to_status_json",
     "render_deterministic_finding_text",
     "run_deterministic_policies",
@@ -555,6 +569,241 @@ class DeterministicCase:
             raise _invalid_case()
         object.__setattr__(self, "allowed_ids", allowed)
         object.__setattr__(self, "coverage_by_ref", MappingProxyType(coverage))
+
+
+_CASE_JSON_KEYS: Final = frozenset(
+    {"projection", "frontier", "availability", "allowed_ids", "coverage_by_ref", "gaps"}
+)
+
+
+def _case_json_object(
+    value: object,
+    *,
+    required: frozenset[str] | None = None,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, Mapping):
+        raise _invalid_case()
+    source = cast(Mapping[object, object], value)
+    keys = tuple(source)
+    if any(type(key) is not str for key in keys):
+        raise _invalid_case()
+    typed = cast(Mapping[str, JsonValue], source)
+    if required is not None and frozenset(cast(tuple[str, ...], keys)) != required:
+        raise _invalid_case()
+    return typed
+
+
+def _case_json_array(value: object) -> tuple[JsonValue, ...]:
+    if type(value) is not tuple:
+        raise _invalid_case()
+    return cast(tuple[JsonValue, ...], value)
+
+
+def _basis_json_object(
+    value: object,
+    *,
+    required: frozenset[str],
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, Mapping):
+        raise _invalid_basis()
+    source = cast(Mapping[object, object], value)
+    keys = tuple(source)
+    if any(type(key) is not str for key in keys):
+        raise _invalid_basis()
+    if frozenset(cast(tuple[str, ...], keys)) != required:
+        raise _invalid_basis()
+    return cast(Mapping[str, JsonValue], source)
+
+
+def _basis_json_array(value: object) -> tuple[JsonValue, ...]:
+    if type(value) is not tuple:
+        raise _invalid_basis()
+    return cast(tuple[JsonValue, ...], value)
+
+
+def finding_basis_to_json(basis: FindingBasis) -> dict[str, JsonValue]:
+    """Encode one complete finding basis without the lossy status projection."""
+
+    if type(basis) is not FindingBasis:
+        raise _invalid_basis()
+
+    def encode_facts(facts: tuple[FindingFact, ...]) -> list[JsonValue]:
+        return [
+            {
+                "fact_code": fact.fact_code,
+                "subject_refs": list(fact.subject_refs),
+            }
+            for fact in facts
+        ]
+
+    return {
+        "rule_id": basis.rule_id,
+        "observed_facts": encode_facts(basis.observed_facts),
+        "required_but_missing_facts": encode_facts(basis.required_but_missing_facts),
+        "subject_state_relation": basis.subject_state_relation.value,
+        "source_availability": basis.source_availability.value,
+        "coverage_gaps": list(basis.coverage_gaps),
+        "supporting_refs": list(basis.supporting_refs),
+    }
+
+
+def finding_basis_from_json(value: JsonValue) -> FindingBasis:
+    """Decode and revalidate one complete, closed finding-basis JSON tree."""
+
+    try:
+        frozen = freeze_json(value)
+        source = _basis_json_object(
+            frozen,
+            required=frozenset(
+                {
+                    "rule_id",
+                    "observed_facts",
+                    "required_but_missing_facts",
+                    "subject_state_relation",
+                    "source_availability",
+                    "coverage_gaps",
+                    "supporting_refs",
+                }
+            ),
+        )
+
+        def decode_facts(raw_facts: JsonValue) -> tuple[FindingFact, ...]:
+            facts: list[FindingFact] = []
+            for raw_fact in _basis_json_array(raw_facts):
+                fact_source = _basis_json_object(
+                    raw_fact,
+                    required=frozenset({"fact_code", "subject_refs"}),
+                )
+                facts.append(
+                    FindingFact(
+                        fact_code=cast(str, fact_source["fact_code"]),
+                        subject_refs=cast(
+                            tuple[FindingBasisRef, ...],
+                            _basis_json_array(fact_source["subject_refs"]),
+                        ),
+                    )
+                )
+            return tuple(facts)
+
+        return FindingBasis(
+            rule_id=cast(str, source["rule_id"]),
+            observed_facts=decode_facts(source["observed_facts"]),
+            required_but_missing_facts=decode_facts(source["required_but_missing_facts"]),
+            subject_state_relation=SubjectStateRelation(
+                cast(str, source["subject_state_relation"])
+            ),
+            source_availability=FrozenSourceAvailability(cast(str, source["source_availability"])),
+            coverage_gaps=cast(
+                tuple[str, ...],
+                _basis_json_array(source["coverage_gaps"]),
+            ),
+            supporting_refs=cast(
+                tuple[FindingBasisRef, ...],
+                _basis_json_array(source["supporting_refs"]),
+            ),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise _invalid_basis() from exc
+
+
+def deterministic_case_to_json(case: DeterministicCase) -> dict[str, JsonValue]:
+    """Encode one frozen deterministic case as its exact canonical JSON tree."""
+
+    if type(case) is not DeterministicCase:
+        raise _invalid_case()
+    coverage: dict[str, JsonValue] = {
+        str(ref): coverage_to_json(case.coverage_by_ref[ref])
+        for ref in sorted(case.coverage_by_ref, key=_ascii_key)
+    }
+    return {
+        "projection": projection_snapshot(case.projection),
+        "frontier": case.frontier.as_wire(),
+        "availability": {
+            "unavailable_event_ids": list(case.availability.unavailable_event_ids),
+            "unavailable_captured_objects": [
+                {
+                    "source_event_id": item.source_event_id,
+                    "object_id": item.object_id,
+                }
+                for item in case.availability.unavailable_captured_objects
+            ],
+        },
+        "allowed_ids": list(sorted(case.allowed_ids, key=_ascii_key)),
+        "coverage_by_ref": coverage,
+        "gaps": [
+            {
+                "marker": gap.marker,
+                "code": gap.code,
+                "subject_refs": list(gap.subject_refs),
+            }
+            for gap in case.gaps
+        ],
+    }
+
+
+def deterministic_case_from_json(value: JsonValue) -> DeterministicCase:
+    """Decode and revalidate one exact deterministic-case JSON tree."""
+
+    try:
+        frozen = freeze_json(value)
+        source = _case_json_object(frozen, required=_CASE_JSON_KEYS)
+        availability_source = _case_json_object(
+            source["availability"],
+            required=frozenset({"unavailable_event_ids", "unavailable_captured_objects"}),
+        )
+        unavailable_objects: list[UnavailableCapturedObject] = []
+        for raw_object in _case_json_array(availability_source["unavailable_captured_objects"]):
+            object_source = _case_json_object(
+                raw_object,
+                required=frozenset({"source_event_id", "object_id"}),
+            )
+            unavailable_objects.append(
+                UnavailableCapturedObject(
+                    source_event_id=cast(EventId, object_source["source_event_id"]),
+                    object_id=cast(ObjectId, object_source["object_id"]),
+                )
+            )
+        availability = CaseAvailabilityFacts(
+            unavailable_event_ids=cast(
+                tuple[EventId, ...],
+                _case_json_array(availability_source["unavailable_event_ids"]),
+            ),
+            unavailable_captured_objects=tuple(unavailable_objects),
+        )
+        coverage_source = _case_json_object(source["coverage_by_ref"])
+        coverage = {
+            _basis_ref(raw_ref): coverage_from_json(raw_coverage)
+            for raw_ref, raw_coverage in coverage_source.items()
+        }
+        allowed_refs = tuple(_basis_ref(item) for item in _case_json_array(source["allowed_ids"]))
+        if allowed_refs != _sorted_unique(allowed_refs):
+            raise _invalid_case()
+        gaps: list[CaseGap] = []
+        for raw_gap in _case_json_array(source["gaps"]):
+            gap_source = _case_json_object(
+                raw_gap,
+                required=frozenset({"marker", "code", "subject_refs"}),
+            )
+            gaps.append(
+                CaseGap(
+                    marker=cast(str, gap_source["marker"]),
+                    code=cast(str, gap_source["code"]),
+                    subject_refs=cast(
+                        tuple[PublicSubjectRef, ...],
+                        _case_json_array(gap_source["subject_refs"]),
+                    ),
+                )
+            )
+        return DeterministicCase(
+            projection=projection_from_snapshot(source["projection"]),
+            frontier=frontier_from_json(source["frontier"]),
+            availability=availability,
+            allowed_ids=frozenset(allowed_refs),
+            coverage_by_ref=coverage,
+            gaps=tuple(gaps),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise _invalid_case() from exc
 
 
 def _projection_records(

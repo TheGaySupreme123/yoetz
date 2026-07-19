@@ -57,7 +57,7 @@ optional; every other listed field is required.
 
 | Method constant | Exact closed `body` definition |
 |---|---|
-| `import_codex_jsonl` | `{v, request_id:req_, session_id:ses_, writer_id:wri_, source_kind:file\|stdin, source_encoding:base64, source_bytes_base64, codex_version:SemVer, codex_capability_profile_id:token, mapping_version:token, exit_status:int[-1..255], stderr_present:bool, stderr_truncated:bool, stderr_captured_bytes:int[0..65536]}`; decoded source is at most 4 MiB and raw stderr/path/argv/cwd are absent. |
+| `import_codex_jsonl` | `{v, request_id:req_, session_id:ses_, writer_id:wri_, source_kind:file\|stdin, source_encoding:base64, source_bytes_base64, codex_version:SemVer, codex_capability_profile_id:token, mapping_version:token, exit_status:int[-1..255], stderr_present:false, stderr_truncated:false, stderr_captured_bytes:0}`; decoded source is at most 4 MiB and raw stderr/path/argv/cwd are absent. |
 | `review` | `{v, request_id:req_, session_id:ses_, writer_id:wri_, at_frontier:Frontier, source_identity_digests:sorted-unique digest[1..32], mode:deterministic_only\|semantic_if_configured\|semantic_required}`. |
 | `backup_preview` | `{v, request_id:req_, session_id:ses_, destination:location, mode:machine_bound\|portable_recovery, expected_frontier:Frontier}`. It is read-only and secret-free even in portable mode. |
 | `backup_execute` | The exact `backup_preview` body plus required `confirmed_plan_digest:digest`; no confirmation boolean or secret field. For portable mode, confidential ingress may stage one service-internal `RecoverySecret` only after local-human confirmation of this exact request+plan digest, and execution consumes it once. |
@@ -65,8 +65,8 @@ optional; every other listed field is required.
 | `restore_execute` | The exact `restore_preview` body plus required `confirmed_plan_digest:digest`. Portable mode requires a one-shot service-internal `RecoverySecret` staged only after the local human confirms that exact request+plan digest; the JSON body contains no handle/token. |
 | `migrate_preview` | `{v, request_id:req_, session_id:ses_, target_storage_version:positive-canonical-decimal, expected_frontier:Frontier}`. |
 | `migrate_execute` | The exact `migrate_preview` body plus required `confirmed_plan_digest:digest`. |
-| `integration_preview` | A closed union of `{v, operation:preview, request_id:req_, project_root:location, action:install\|replace\|remove, replace_modified:bool}` and `{v, operation:status, project_root:location}`. |
-| `integration_execute` | `{v, request_id:req_, project_root:location, action:install\|replace\|remove, preview_digest:digest, explicitly_accepted:true, replace_modified:bool}`. |
+| `integration_preview` | A closed union of `{v, operation:preview, request_id:req_, harness:codex, project_root:location, action:install\|replace\|remove, replace_modified:bool}` and `{v, operation:status, harness:codex, project_root:location}`. |
+| `integration_execute` | `{v, request_id:req_, harness:codex, project_root:location, action:install\|replace\|remove, preview_digest:digest, explicitly_accepted:true, replace_modified:bool}`. |
 | `service_status` | `{}`. |
 | `service_lock` | `{}`. |
 | `service_stop` | `{}`. |
@@ -78,8 +78,9 @@ optional; every other listed field is required.
 | `privacy_receipts_get` | `{v, receipt_id:egr_}`. |
 
 `source_bytes_base64` is canonical padded RFC 4648 base64, at most 5,592,408 ASCII characters,
-and must decode to at most 4,194,304 bytes. If `stderr_present=false`, `stderr_truncated` is false
-and `stderr_captured_bytes` is zero; no branch carries stderr bytes. To preserve the importer's
+and must decode to at most 4,194,304 bytes. `stderr_present=false`, `stderr_truncated=false`, and
+`stderr_captured_bytes=0` are required constants; no branch carries stderr bytes or a caller-made
+stderr commitment. To preserve the importer's
 frozen 4 MiB exact-source limit without an unbounded stream or path grant, this one branch is allowed only when the
 whole canonical control frame remains within `MAX_CONTROL_FRAME_BYTES = 6_291_456`; every other
 call retains the 1_048_576-byte method-body ceiling and the same 6_291_456 absolute frame guard.

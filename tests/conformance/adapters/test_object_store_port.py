@@ -243,6 +243,24 @@ async def test_redaction_and_missing_object_parity(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_catalog_pinned_resolution_requires_exact_id_and_envelope_digest(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+    metadata = ObjectMetadata(ObjectKind.START_RESULT, "application/json", _TASK_ID, now)
+    for store in _stores(tmp_path, now):
+        ref = await store.finalize(await store.stage(ObjectSource(data=b"{}"), metadata))
+        assert await store.resolve_verified(ref.object_id, ref.envelope_digest) == ref
+        with pytest.raises(ValueError, match="object_verification_failed"):
+            await store.resolve_verified(ref.object_id, "sha256:" + "f" * 64)
+        with pytest.raises(ValueError, match="object_verification_failed"):
+            await store.resolve_verified(
+                "obj_ffffffff-0000-4000-8000-000000000001",
+                ref.envelope_digest,
+            )
+
+
+@pytest.mark.anyio
 async def test_generation_fenced_sweep_parity(tmp_path: Path) -> None:
     now = datetime(2026, 3, 5, 5, 6, 7, tzinfo=UTC)
     roots = _Roots(_snapshot(now))

@@ -250,6 +250,7 @@ def test_opened_binding_and_terminal_close_round_trip() -> None:
     "result",
     [
         VaultStateResult("locked", "human_authority_unavailable"),
+        VaultStateResult("locked", "unlock_failed"),
         VaultStateResult("locked", "unlock_wrong"),
         VaultStateResult("ready", "succeeded"),
         KeyringRetryResult("locked", "keyring_unavailable"),

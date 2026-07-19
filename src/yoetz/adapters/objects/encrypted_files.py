@@ -268,6 +268,58 @@ class EncryptedFilesObjectStore:
                 raise
             raise _verification_failed() from exc
 
+    async def resolve_verified(self, object_id: str, envelope_digest: str) -> ObjectRef:
+        """Reconstruct and authenticate one exact catalog-pinned object reference."""
+
+        try:
+            path = self._path_for(object_id)
+            self._validate_object_path(path)
+            frame = self._read_private_file(path)
+            observed_digest = f"sha256:{hashlib.sha256(frame).hexdigest()}"
+            if observed_digest != envelope_digest:
+                raise _verification_failed()
+            envelope = decode_object_envelope(frame)
+            header = envelope.header
+            if header.object_id != object_id or header.key_slot != self._keys.key_slot:
+                raise _verification_failed()
+            wrapped = WrappedDek("aes-256-kw-rfc3394", header.wrapped_dek)
+            dek = self._keys.wrap_key.unwrap_dek(wrapped)
+
+            def _decrypt(key: memoryview) -> bytes:
+                return AESGCM(key).decrypt(
+                    envelope.payload_nonce,
+                    envelope.ciphertext + envelope.tag,
+                    envelope.header_bytes,
+                )
+
+            plaintext = dek.consume(SecretConsumer.OBJECT_CRYPTO, _decrypt)
+            if len(plaintext) != header.plaintext_size:
+                raise _verification_failed()
+            commitment = self._keys.commitment_key.mac(
+                OBJECT_COMMITMENT_DOMAINS[header.object_kind], plaintext
+            )
+            metadata = ObjectMetadata(
+                header.object_kind,
+                header.media_type,
+                header.task_id,
+                header.created_at_datetime,
+            )
+            return ObjectRef(
+                object_id=header.object_id,
+                plaintext_size=header.plaintext_size,
+                commitment=commitment,
+                envelope_digest=envelope_digest,
+                encryption_format=header.encryption_format,
+                key_slot=header.key_slot,
+                metadata=metadata,
+            )
+        except InvalidTag as exc:
+            raise _verification_failed() from exc
+        except (OSError, TypeError, ValueError) as exc:
+            if isinstance(exc, ValueError) and str(exc) == "object_verification_failed":
+                raise
+            raise _verification_failed() from exc
+
     async def _verified_chunks(self, ref: ObjectRef) -> AsyncIterator[bytes]:
         plaintext = await self._open_verified_bytes(ref)
         for start in range(0, len(plaintext), _CHUNK_SIZE):

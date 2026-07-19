@@ -195,7 +195,7 @@ PublicErrorModel(code: PublicErrorCode, message: String1To4096, retryable: bool,
 OmittedContentModel(omitted: Literal[True], category: DataCategory,
                     reason: Literal["local_disclosure_not_authorized",
                                     "never_send_redacted"])
-PrivacyProjectionModel(sink: Literal["agent_context"],
+PrivacyProjectionModel(sink: Literal["agent_context", "local_human_view"],
                        local_disclosure_receipt_id: EgressReceiptIdWire,
                        policy_id: PrivacyPolicyIdWire,
                        policy_version: CanonicalPositiveUInt64Wire,

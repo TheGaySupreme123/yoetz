@@ -7,6 +7,7 @@ import hashlib
 import uuid
 from collections.abc import Sequence
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import apsw
@@ -27,8 +28,15 @@ from yoetz.domain.events import EventDraft, LedgerRecord, UnknownEvent, encode_p
 from yoetz.domain.values import Frontier, event_id, object_id, parse_rfc3339_millis
 from yoetz.kernel.projections import ProjectionState, projection_digest
 from yoetz.kernel.reducers import replay
-from yoetz.ports.ledger import AppendCommand, AppendEntry, OperationKind, ProjectionView
-from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef
+from yoetz.ports.ledger import (
+    AppendCommand,
+    AppendEntry,
+    CheckPhase,
+    FrozenCase,
+    OperationKind,
+    ProjectionView,
+)
+from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
 from yoetz.protocol.canonical import canonical_digest, canonical_encode
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 
@@ -186,6 +194,61 @@ def memory_for(command: AppendCommand, objects: MemoryObjects) -> MemoryLedgerAd
         ids=FixedIds(),
         objects=objects,
     )
+
+
+def memory_for_state(
+    command: AppendCommand,
+    objects: MemoryObjects,
+    state: MemoryLedgerState,
+) -> MemoryLedgerAdapter:
+    return MemoryLedgerAdapter(
+        task_id=command.task_id,
+        ownership_fence=ownership_fence(),
+        state=state,
+        import_state=MemoryImportState(),
+        transaction_lock=asyncio.Lock(),
+        clock=FixedClock(),
+        ids=FixedIds(),
+        objects=objects,
+    )
+
+
+async def deterministic_result_ref(
+    command: AppendCommand,
+    objects: MemoryObjects,
+    frozen: FrozenCase,
+    prior: ObjectRef,
+    request_digest: str,
+) -> ObjectRef:
+    canonical = canonical_encode(
+        {
+            "schema_version": "1.0.0",
+            "request_id": frozen.lease.operation_id,
+            "request_digest": request_digest,
+            "task_id": command.task_id,
+            "session_id": command.session_id,
+            "writer_id": command.writer_id,
+            "subject_frontier": frozen.case.frontier.as_wire(),
+            "dependency_digest": frozen.lease.dependency_digest,
+            "prior_resume": {
+                "object_id": prior.object_id,
+                "envelope_digest": prior.envelope_digest,
+                "commitment": prior.commitment,
+            },
+            "policy_executions": (),
+            "assessments": (),
+        }
+    )
+    staged = await objects.stage(
+        ObjectSource(data=canonical, declared_size=len(canonical)),
+        ObjectMetadata(
+            ObjectKind.DETERMINISTIC_RESULT,
+            "application/vnd.yoetz.deterministic-result+json",
+            command.task_id,
+            datetime(2026, 7, 19, 12, 0, tzinfo=UTC),
+        ),
+    )
+    return await objects.finalize(staged)
 
 
 def sqlite_for(
@@ -362,4 +425,130 @@ async def test_replay_after_append_matches_reference_projection(tmp_path: Path) 
     assert operation.result_locator is not None
     assert operation.result_locator.last_ingestion_sequence == len(records)
     assert stored.frontier == Frontier(expected.frontier, expected.head_digest)
+    reopened_db.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("install_local_result", [False, True])
+async def test_memory_check_resume_survives_state_cache_loss(
+    install_local_result: bool,
+) -> None:
+    command, objects = command_from_records(replay_records("projection-rebuild")[:1])
+    state = MemoryLedgerState()
+    ledger = memory_for_state(command, objects, state)
+    await ledger.append_batch(command)
+    check_request = uuid_id("req", 80_001)
+    request_digest = "sha256:" + "8" * 64
+    frozen = await ledger.freeze_case(
+        command.session_id,
+        command.writer_id,
+        1,
+        check_request,
+        request_digest,
+    )
+    assert type(frozen) is FrozenCase
+    operation = await ledger.lookup_operation(command.writer_id, check_request)
+    assert operation is not None and operation.resume_object_ref is not None
+    prior = operation.resume_object_ref
+    local = await deterministic_result_ref(command, objects, frozen, prior, request_digest)
+    expected_phase = CheckPhase.RESERVED
+    expected_ref = prior
+    if install_local_result:
+        await ledger.advance_check_phase(
+            frozen.lease,
+            CheckPhase.RESERVED,
+            CheckPhase.LOCAL_READY,
+            local,
+        )
+        expected_phase = CheckPhase.LOCAL_READY
+        expected_ref = local
+
+    key = (command.writer_id, check_request)
+    current = state.operations[key][0]
+    state.operations[key] = (
+        replace(
+            current,
+            lease_expires_at=datetime(2026, 7, 19, 11, 59, tzinfo=UTC),
+        ),
+        None,
+    )
+    state.frozen_cases.clear()
+
+    reopened = memory_for_state(command, objects, state)
+    resumed = await reopened.freeze_case(
+        command.session_id,
+        command.writer_id,
+        1,
+        check_request,
+        request_digest,
+    )
+    assert type(resumed) is FrozenCase
+    assert resumed.case == frozen.case
+    assert resumed.lease.phase is expected_phase
+    durable = await reopened.lookup_operation(command.writer_id, check_request)
+    assert durable is not None
+    assert durable.resume_object_ref == expected_ref
+    assert len(objects.refs_for_kind(ObjectKind.CHECK_RESUME)) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("install_local_result", [False, True])
+async def test_sqlite_reopen_recovers_pending_check_from_sole_resume_pointer(
+    tmp_path: Path,
+    install_local_result: bool,
+) -> None:
+    command, objects = command_from_records(replay_records("projection-rebuild")[:1])
+    path = tmp_path / f"pending-check-{install_local_result}.sqlite3"
+    ledger, db = file_sqlite_for(command, objects, path)
+    await ledger.append_batch(command)
+    check_request = uuid_id("req", 80_002)
+    request_digest = "sha256:" + "9" * 64
+    frozen = await ledger.freeze_case(
+        command.session_id,
+        command.writer_id,
+        1,
+        check_request,
+        request_digest,
+    )
+    assert type(frozen) is FrozenCase
+    operation = await ledger.lookup_operation(command.writer_id, check_request)
+    assert operation is not None and operation.resume_object_ref is not None
+    prior = operation.resume_object_ref
+    local = await deterministic_result_ref(command, objects, frozen, prior, request_digest)
+    expected_phase = CheckPhase.RESERVED
+    expected_ref = prior
+    if install_local_result:
+        await ledger.advance_check_phase(
+            frozen.lease,
+            CheckPhase.RESERVED,
+            CheckPhase.LOCAL_READY,
+            local,
+        )
+        expected_phase = CheckPhase.LOCAL_READY
+        expected_ref = local
+    db.execute(
+        "UPDATE operations SET lease_expires_at=? WHERE writer_id=? AND operation_id=?",
+        ("2026-07-19T11:59:00.000Z", command.writer_id, check_request),
+    )
+    db.close()
+
+    reopened, reopened_db = file_sqlite_for(command, objects, path)
+    resumed = await reopened.freeze_case(
+        command.session_id,
+        command.writer_id,
+        1,
+        check_request,
+        request_digest,
+    )
+    assert type(resumed) is FrozenCase
+    assert resumed.case == frozen.case
+    assert resumed.lease.phase is expected_phase
+    durable = await reopened.lookup_operation(command.writer_id, check_request)
+    assert durable is not None
+    assert durable.resume_object_ref == expected_ref
+    assert reopened_db.execute(
+        "SELECT resume_object_id FROM operations WHERE writer_id=? AND operation_id=?",
+        (command.writer_id, check_request),
+    ).fetchone() == (expected_ref.object_id,)
+    assert len(objects.refs_for_kind(ObjectKind.CHECK_RESUME)) == 1
     reopened_db.close()

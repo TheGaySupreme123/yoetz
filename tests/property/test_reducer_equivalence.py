@@ -6,8 +6,20 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from builders.replay import replay_records
-from yoetz.kernel.projections import ProjectionState, empty_projection_state
+from yoetz.kernel.deterministic_checks import (
+    CaseAvailabilityFacts,
+    build_deterministic_case,
+    deterministic_case_from_json,
+    deterministic_case_to_json,
+)
+from yoetz.kernel.projections import (
+    ProjectionState,
+    empty_projection_state,
+    projection_from_snapshot,
+    projection_snapshot,
+)
 from yoetz.kernel.reducers import empty_replay_index, extend_replay_index, reduce_event, replay
+from yoetz.protocol.canonical import canonical_encode
 from yoetz.protocol.coverage import LEDGER_FRESHNESS_ORDER
 
 _FIXTURES = (
@@ -57,6 +69,25 @@ def test_incremental_replay_matches_reference_model(name: str) -> None:
         state = reduce_event(state, record, index)
         assert state == replay(records[:position])
         assert reduce_event(previous, record, index) == state
+
+
+@given(st.sampled_from(_FIXTURES))
+@settings(deadline=None, max_examples=12)
+def test_projection_and_case_codecs_are_lossless(name: str) -> None:
+    records = replay_records(name)
+    state = replay(records)
+    snapshot = projection_snapshot(state)
+    decoded_state = projection_from_snapshot(snapshot)
+    assert decoded_state == state
+    assert canonical_encode(projection_snapshot(decoded_state)) == canonical_encode(snapshot)
+
+    case = build_deterministic_case(state, records, CaseAvailabilityFacts())
+    encoded_case = deterministic_case_to_json(case)
+    decoded_case = deterministic_case_from_json(encoded_case)
+    assert decoded_case == case
+    assert canonical_encode(deterministic_case_to_json(decoded_case)) == canonical_encode(
+        encoded_case
+    )
 
 
 def test_unknown_event_and_redaction_paths_weaken_only() -> None:

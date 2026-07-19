@@ -8,8 +8,8 @@ This is the complete one-to-one ledger between the natural-language specificatio
 files planned for the public v0.1 repository. It is declarative: adding, removing, renaming, or
 splitting a future file requires changing this reviewed table and its owning spec together.
 
-The inventory contains 530 spec files: 516 exact future-file owners,
-10 directory indexes, and 4 coordination files. The 516 future paths are unique. The eleven
+The inventory contains 539 spec files: 525 exact future-file owners,
+10 directory indexes, and 4 coordination files. The 525 future paths are unique. The eleven
 already-authored public ADRs are current decision authorities, not future-file candidates, so
 they are intentionally outside the mirrored ownership universe. Ignored local architecture/
 strategy inputs are neither inventoried nor authoritative.
@@ -204,6 +204,7 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/src/yoetz/adapters/memory/importer.md` | `future_file` | `src/yoetz/adapters/memory/importer.py` | `python_shorthand` | — | `B/C/D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/memory/ledger.md` | `future_file` | `src/yoetz/adapters/memory/ledger.py` | `python_shorthand` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/memory/objects.md` | `future_file` | `src/yoetz/adapters/memory/objects.py` | `python_shorthand` | — | `C` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/adapters/memory/privacy.md` | `future_file` | `src/yoetz/adapters/memory/privacy.py` | `python_shorthand` | — | `C–E` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/memory/start_catalog.md` | `future_file` | `src/yoetz/adapters/memory/start_catalog.py` | `python_shorthand` | — | `B/C` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/objects/__init__.md` | `future_file` | `src/yoetz/adapters/objects/__init__.py` | `python_shorthand` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/objects/encrypted_files.md` | `future_file` | `src/yoetz/adapters/objects/encrypted_files.py` | `python_shorthand` | — | `C` | `draft` | Owns exactly this future public repository file. |
@@ -440,8 +441,9 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/tests/fixture_loader.py.md` | `future_file` | `tests/fixture_loader.py` | `exact_suffix` | — | `D–F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/integration.md` | `index_only` | — | `none` | `tests/integration/` | `C–E` | `draft` | Enumerates this directory family and owns no future file. |
 | `specs/tests/integration/application/test_check.py.md` | `future_file` | `tests/integration/application/test_check.py` | `exact_suffix` | — | `D/E` | `draft` | Owns exactly this future public repository file. |
-| `specs/tests/integration/application/test_full_workflow.py.md` | `future_file` | `tests/integration/application/test_full_workflow.py` | `exact_suffix` | — | `D/E` | `draft` | Owns exactly this future public repository file. |
+| `specs/tests/integration/application/test_full_workflow.py.md` | `future_file` | `tests/integration/application/test_full_workflow.py` | `exact_suffix` | — | `B6/D/E` | `draft` | Owns the materialized provider-free full-workflow and final client-projection integration test. |
 | `specs/tests/integration/application/test_import_review.py.md` | `future_file` | `tests/integration/application/test_import_review.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/tests/integration/application/test_maintenance.py.md` | `future_file` | `tests/integration/application/test_maintenance.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/integration/application/test_publish_work.py.md` | `future_file` | `tests/integration/application/test_publish_work.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/integration/application/test_respond_status_receipt.py.md` | `future_file` | `tests/integration/application/test_respond_status_receipt.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/integration/application/test_start.py.md` | `future_file` | `tests/integration/application/test_start.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
@@ -522,9 +524,14 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/tests/subprocess/test_service_unlock_boundary.py.md` | `future_file` | `tests/subprocess/test_service_unlock_boundary.py` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/subprocess/test_signals_and_cancellation.py.md` | `future_file` | `tests/subprocess/test_signals_and_cancellation.py` | `exact_suffix` | — | `C–F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit.md` | `index_only` | — | `none` | `tests/unit/` | `A–F` | `draft` | Enumerates this directory family and owns no future file. |
+| `specs/tests/unit/adapters/test_codex_jsonl.py.md` | `future_file` | `tests/unit/adapters/test_codex_jsonl.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/tests/unit/adapters/test_codex_skill_integration.py.md` | `future_file` | `tests/unit/adapters/test_codex_skill_integration.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/tests/unit/adapters/test_git_subject_state.py.md` | `future_file` | `tests/unit/adapters/test_git_subject_state.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/application/test_error_mapping.py.md` | `future_file` | `tests/unit/application/test_error_mapping.py` | `exact_suffix` | — | `C/D` | `draft` | Owns exactly this future public repository file. |
+| `specs/tests/unit/application/test_integrations.py.md` | `future_file` | `tests/unit/application/test_integrations.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/application/test_semantic_post_validation.py.md` | `future_file` | `tests/unit/application/test_semantic_post_validation.py` | `exact_suffix` | — | `D/E` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/application/test_service_facade.py.md` | `future_file` | `tests/unit/application/test_service_facade.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/tests/unit/application/test_unit_of_work.py.md` | `future_file` | `tests/unit/application/test_unit_of_work.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/application/test_verdict_rules.py.md` | `future_file` | `tests/unit/application/test_verdict_rules.py` | `exact_suffix` | — | `C/D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/config/test_load_precedence.py.md` | `future_file` | `tests/unit/config/test_load_precedence.py` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/config/test_models.py.md` | `future_file` | `tests/unit/config/test_models.py` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
@@ -543,6 +550,8 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/tests/unit/observability/test_logging_allowlist.py.md` | `future_file` | `tests/unit/observability/test_logging_allowlist.py` | `exact_suffix` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/observability/test_privacy.py.md` | `future_file` | `tests/unit/observability/test_privacy.py` | `exact_suffix` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/privacy/test_policy_and_contracts.py.md` | `future_file` | `tests/unit/privacy/test_policy_and_contracts.py` | `exact_suffix` | — | `B/C/E` | `draft` | Owns exactly this future public repository file. |
+| `specs/tests/unit/privacy/test_catalog_audit.py.md` | `future_file` | `tests/unit/privacy/test_catalog_audit.py` | `exact_suffix` | — | `C/E` | `draft` | Owns exactly this future public repository file. |
+| `specs/tests/unit/privacy/test_local_enforcer.py.md` | `future_file` | `tests/unit/privacy/test_local_enforcer.py` | `exact_suffix` | — | `C/E` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/protocol/test_canonical_vectors.py.md` | `future_file` | `tests/unit/protocol/test_canonical_vectors.py` | `exact_suffix` | — | `A` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/protocol/test_coverage.py.md` | `future_file` | `tests/unit/protocol/test_coverage.py` | `exact_suffix` | — | `A/B` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/protocol/test_errors.py.md` | `future_file` | `tests/unit/protocol/test_errors.py` | `exact_suffix` | — | `A/B` | `draft` | Owns exactly this future public repository file. |

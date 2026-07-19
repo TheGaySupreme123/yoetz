@@ -39,6 +39,7 @@ tests/integration/
     test_check.py
     test_respond_status_receipt.py
     test_import_review.py
+    test_maintenance.py
     test_full_workflow.py
   privacy/
     test_egress_gateway.py
@@ -66,6 +67,7 @@ This index covers exactly these separately owned future files:
 tests/integration/application/test_check.py
 tests/integration/application/test_full_workflow.py
 tests/integration/application/test_import_review.py
+tests/integration/application/test_maintenance.py
 tests/integration/application/test_publish_work.py
 tests/integration/application/test_respond_status_receipt.py
 tests/integration/application/test_start.py

@@ -447,6 +447,7 @@ class ServiceLifecycle:
             return
         if self._instance is not None and self.state not in {
             ServiceState.LOCKED,
+            ServiceState.DRAINING,
             ServiceState.FAILED,
         }:
             await self.request_stop("close")

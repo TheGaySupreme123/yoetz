@@ -16,8 +16,10 @@ idempotency, and the final commit.
 
 ## Public surface
 
-- `async execute_publish_work(app: Application, request: PublishWorkRequest) -> PublishWorkResult`
-  — implementation behind `Application.publish_work`.
+- `@dataclass(frozen=True, slots=True) PublishWorkInternalResult` — the exact successful
+  publish-work body minus `privacy_projection`, with `as_json()`.
+- `async execute_publish_work(app: Application, request: PublishWorkRequest) ->
+  PublishWorkInternalResult` — implementation behind `Application.publish_work`.
 - `prepare_publication(request, *, channel, app) -> PreparedPublication` — internal, pure except
   for object staging/finalization performed by the execute function.
 
@@ -92,7 +94,7 @@ the shielded commit helper. The port rechecks idempotency and frontier, assigns 
 and ingestion sequences, builds accepted envelopes/digests, applies reducers, stores the stable
 result, and commits atomically.
 
-Map `AppendResult` to `PublishWorkResult` without recomputing assignments: `accepted` summaries,
+Map `AppendResult` to `PublishWorkInternalResult` without recomputing assignments: `accepted` summaries,
 subject/result frontiers, `accepted|replayed` outcome, bounded warning codes, coverage, and versions.
 Every unknown event adds `unknown_event_schema_preserved` and a known coverage gap. Same-ID replay
 returns the original assigned sequences/digests even if retry created different orphan objects.

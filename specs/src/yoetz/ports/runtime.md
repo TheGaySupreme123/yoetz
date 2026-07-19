@@ -41,9 +41,11 @@ concrete adapter. CLI/MCP/UI never implement or receive this port.
   semantics.
 
 `StartMilestoneExpectation` carries exactly the milestone plus task/session/writer/lifecycle-event
-identity, route generation/digest, and optional response-object/result-digest pair.
+identity, route generation/digest, and optional response-object/envelope-digest/result-digest
+triple.
 `StartCompletionEvidence` carries the same structural identity plus owner generation, optional
-lifecycle frontier, optional response-object/result-digest pair, and a canonical evidence digest.
+lifecycle frontier, optional response-object/envelope-digest/result-digest triple, and a canonical
+evidence digest.
 
 The removed per-client `RuntimeScopeKind`/`mcp_service`/one-shot CLI scope is not part of v0.1.
 Client authorization is enforced by service control before application entry; this port sees only

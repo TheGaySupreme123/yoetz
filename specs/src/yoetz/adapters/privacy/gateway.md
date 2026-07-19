@@ -18,7 +18,7 @@ on policy tightening, and exposes neither clients nor credentials to application
   credential-free provider-adapter factory mapping. Individual snapshots are immutable;
   `reconcile_policy` atomically swaps the current snapshot after policy/vault/human-authority
   validation. Every snapshot binds `HumanAuthorityCapability` generation/digest.
-- `async close() -> None` — idempotent closure of all bound transports.
+- `async close() -> None` — idempotent terminal closure of all bound transports.
 
 ## Behavior
 
@@ -65,6 +65,14 @@ gateway. The local-model adapter is distinct and can exist only
 for an approved AF_UNIX endpoint profile. `close_revoked` immediately removes and closes adapters no
 longer permitted. The registry has no default adapter, wildcard provider, generic URL, redirect, or
 fallback. Retry is coordinated above the gateway and requires a new authorization/receipt.
+
+`close` atomically installs a terminal deny fence and removes every visible binding before awaiting
+transport closure. After the fence, `reconcile_policy`, both dispatch methods, and `close_revoked`
+admit no new work, mint no credential handle, render no content-bearing request, and perform no new
+adapter I/O. An in-flight unconsumed attempt is fenced before I/O. An already-consumed attempt is
+best-effort closed and nonselectable but still resolves its actual or `outcome_unknown` durable
+receipt; closure never claims to recall transmitted bytes. Repeated `close` calls await the same
+closure and expose neither provider credentials nor approved content.
 
 After every committed policy generation, `reconcile_policy` first installs a deny fence for all
 bindings not permitted by the new effective policy and removes them from the visible snapshot.

@@ -37,12 +37,27 @@ retaining or returning their bytes:
 4. the NUL-sorted Git-ignored-aware untracked inventory, hashing each safe regular file's relative
    path, mode, length, and bytes under the global file/byte caps.
 
+The component hash framing is exact. Staged and tracked-worktree delta hashes are respectively
+`sha256("yoetz/git-index-delta/v1\0" || diff_bytes)` and
+`sha256("yoetz/git-worktree-delta/v1\0" || diff_bytes)`. The untracked hasher starts with
+`"yoetz/git-untracked/v1\0"`; each Git-byte-sorted member then contributes
+`u32be(path_length) || path_bytes || u32be(stat.S_IMODE) || u64be(file_length) || file_bytes`.
+`bytes_hashed` counts the two raw diff lengths plus included untracked file bytes, while
+`files_hashed` counts included untracked regular files. Metadata framing is bounded but is not
+added to `bytes_hashed`.
+
 Tracked Git diff bytes may contain source content; they exist only in bounded in-memory streaming
 buffers feeding the hasher and are overwritten/released immediately after use. No component,
 filename, diff, path, Git output, or file digest is returned, logged, persisted, or published. The
 adapter recomputes the pre-snapshot identity after hashing. Any change, Git failure, unsafe entry,
 submodule, unsupported symlink, special file, or cap breach discards all candidate digests and
 returns a closed no-state result.
+
+For race closure the adapter performs two complete component captures between the before/after
+identity samples and requires their private `GitStateComponents` values to be identical. Candidate
+tracked diff buffers are mutable, best-effort overwritten immediately after hashing, and never
+stored on the adapter. Every failure result has zero `bytes_hashed`/`files_hashed` and no partial
+component or subject-state digest.
 
 `diff_digest` is SHA-256 over restricted canonical JSON containing the format token plus the three
 delta component digests. `tree_digest` is SHA-256 over restricted canonical JSON containing the
@@ -55,6 +70,12 @@ commit, lock acquisition, or config write. It opens no network and reads no repo
 validated root. A complete capture can support `content_digest` evidence immutability, but the
 event's publication/authorship/artifact-observation coverage remains whatever the actual channel
 earned.
+
+The fixed invocation prefix disables aliases, hooks, external diff, textconv, fsmonitor, optional
+locks, credential helpers, prompts, pagers, global/system configuration, and shell execution.
+Repository discovery accepts only a non-bare top level whose resolved Git top-level descriptor is
+the explicit root and whose `.git` directory is inside that root; linked worktrees and submodule
+roots therefore fail `unsafe_root` rather than reading repository metadata outside the handle.
 
 ## Errors and edge cases
 

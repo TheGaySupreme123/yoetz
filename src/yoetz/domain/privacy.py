@@ -9,10 +9,12 @@ from enum import Enum
 from typing import Final, Literal, cast
 
 from yoetz.domain.values import (
+    Frontier,
     format_rfc3339_millis,
     validate_commitment,
     validate_sha256_digest,
 )
+from yoetz.protocol.canonical import canonical_encode, strict_json_parse
 from yoetz.protocol.ids import IdKind, validate_id
 from yoetz.protocol.models import DataCategory
 
@@ -56,6 +58,8 @@ __all__ = [
     "PrivacyOutcome",
     "PrivacyPolicy",
     "PrivacyProfile",
+    "ProjectionAuditContext",
+    "ProjectionProvenanceContext",
     "PrivacyReason",
     "ProviderBinding",
     "ProviderDataUseProfile",
@@ -77,7 +81,7 @@ PRIVACY_REQUEST_COMMITMENT_ALGORITHM: Final = "hmac-sha256/yoetz-privacy-egress-
 _IDENTITY = re.compile(r"^[a-z0-9][a-z0-9._-]*$", re.ASCII)
 _MODEL_IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]*$", re.ASCII)
 _VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]*$", re.ASCII)
-_PURPOSE = re.compile(r"^[a-z][a-z0-9-]{0,127}$", re.ASCII)
+_PURPOSE = re.compile(r"^[a-z][a-z0-9_-]{0,127}$", re.ASCII)
 _OPAQUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$", re.ASCII)
 _POINTER = re.compile(r"^(?:/(?:[^~/]|~0|~1)*)*$")
 _MAX_SAFE_INTEGER = 2**53 - 1
@@ -98,6 +102,14 @@ def _text(value: object, pattern: re.Pattern[str], *, maximum: int = 128) -> str
     if pattern.fullmatch(value) is None:
         raise _invalid()
     return value
+
+
+def _origin_ref(value: object) -> str:
+    if type(value) is not str or not value:
+        raise _invalid()
+    candidate = value
+    pattern = _POINTER if candidate.startswith("/") else _OPAQUE
+    return _text(candidate, pattern, maximum=256 if pattern is _POINTER else 128)
 
 
 def _nonnegative(value: object, *, maximum: int = _MAX_SAFE_INTEGER) -> int:
@@ -730,11 +742,14 @@ class PolicyOverlay:
     local_model_data_classes: tuple[DataClass, ...]
     agent_context_categories: tuple[DataCategory, ...]
     agent_context_data_classes: tuple[DataClass, ...]
+    candidate_policy: PrivacyPolicy
 
     def __post_init__(self) -> None:
         if (
             type(self.scope) is not AuthorizationScope
             or type(self.review_selection) is not ReviewSelectionPolicy
+            or type(self.candidate_policy) is not PrivacyPolicy
+            or self.candidate_policy.effective_scope != self.scope
         ):
             raise _invalid()
         if type(self.require_current_provider_data_use_evidence) is not bool:
@@ -750,6 +765,17 @@ class PolicyOverlay:
             ("agent_context_data_classes", DataClass),
         ):
             object.__setattr__(self, name, _sorted_enums(getattr(self, name), enum_type))
+        if (
+            self.candidate_policy.review_selection != self.review_selection
+            or self.candidate_policy.require_current_provider_data_use_evidence
+            != self.require_current_provider_data_use_evidence
+            or self.candidate_policy.channel_policies != self.channel_policies
+            or self.candidate_policy.local_model_categories != self.local_model_categories
+            or self.candidate_policy.local_model_data_classes != self.local_model_data_classes
+            or self.candidate_policy.agent_context_categories != self.agent_context_categories
+            or self.candidate_policy.agent_context_data_classes != self.agent_context_data_classes
+        ):
+            raise _invalid()
 
 
 @dataclass(frozen=True, slots=True)
@@ -759,15 +785,67 @@ class CandidateContextItem:
     source_scope: AuthorizationScope
     origin_ref: str
     plaintext: bytes
+    contributor_refs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.item_id, _OPAQUE)
         _enum(self.category, DataCategory)
         if type(self.source_scope) is not AuthorizationScope:
             raise _invalid()
-        _text(self.origin_ref, _OPAQUE)
+        _origin_ref(self.origin_ref)
         if type(self.plaintext) is not bytes or len(self.plaintext) > MAX_EGRESS_ITEM_BYTES:
             raise _invalid()
+        object.__setattr__(self, "contributor_refs", _sorted_text(self.contributor_refs))
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionProvenanceContext:
+    """Trusted identity and frozen ledger boundary for agent projection authorship."""
+
+    session_id: str
+    writer_id: str
+    frontier: Frontier
+
+    def __post_init__(self) -> None:
+        validate_id(IdKind.SESSION, self.session_id)
+        validate_id(IdKind.WRITER, self.writer_id)
+        if type(self.frontier) is not Frontier:
+            raise _invalid()
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class ProjectionAuditContext:
+    """Trusted control binding and canonical source for one client projection."""
+
+    rpc_id: str
+    method: str
+    service_instance_id: str
+    service_generation: int
+    original_request_id: str | None
+    route_identity_digest: str | None
+    control_request_canonical: bytes
+    internal_result_canonical: bytes
+
+    def __post_init__(self) -> None:
+        validate_id(IdKind.CONTROL_RPC, self.rpc_id)
+        _text(self.method, _IDENTITY)
+        validate_id(IdKind.SERVICE_INSTANCE, self.service_instance_id)
+        _positive(self.service_generation)
+        if self.original_request_id is not None:
+            validate_id(IdKind.REQUEST, self.original_request_id)
+        if self.route_identity_digest is not None:
+            validate_sha256_digest(self.route_identity_digest)
+        for value in (self.control_request_canonical, self.internal_result_canonical):
+            if type(value) is not bytes or not value or len(value) > MAX_EGRESS_CASE_BYTES:
+                raise _invalid()
+            try:
+                if canonical_encode(strict_json_parse(value)) != value:
+                    raise _invalid()
+            except ValueError as exc:
+                raise _invalid() from exc
+
+    def __repr__(self) -> str:
+        return "ProjectionAuditContext(<redacted>)"
 
 
 @dataclass(frozen=True, slots=True)
@@ -780,6 +858,8 @@ class CandidateContext:
     subject_digest: str | None
     provider_binding: ProviderBinding | None
     items: tuple[CandidateContextItem, ...]
+    provenance_context: ProjectionProvenanceContext | None = None
+    projection_audit_context: ProjectionAuditContext | None = None
 
     def __post_init__(self) -> None:
         validate_id(IdKind.REQUEST, self.request_id)
@@ -802,6 +882,31 @@ class CandidateContext:
             raise _invalid()
         if len({item.item_id for item in self.items}) != len(self.items):
             raise _invalid()
+        if (
+            self.provenance_context is not None
+            and self.local_sink is not LocalDisclosureSink.AGENT_CONTEXT
+        ):
+            raise _invalid()
+        if (
+            self.provenance_context is not None
+            and type(self.provenance_context) is not ProjectionProvenanceContext
+        ):
+            raise _invalid()
+        projection = self.purpose == "client_result_projection" and self.local_sink in {
+            LocalDisclosureSink.AGENT_CONTEXT,
+            LocalDisclosureSink.LOCAL_HUMAN_VIEW,
+        }
+        if (self.projection_audit_context is not None) != projection:
+            raise _invalid()
+        if self.projection_audit_context is not None:
+            if type(self.projection_audit_context) is not ProjectionAuditContext:
+                raise _invalid()
+            needs_route = self.scope.kind in {
+                AuthorizationScopeKind.TASK,
+                AuthorizationScopeKind.REQUEST,
+            }
+            if (self.projection_audit_context.route_identity_digest is not None) != needs_route:
+                raise _invalid()
 
 
 @dataclass(frozen=True, slots=True)
@@ -811,6 +916,7 @@ class ClassifiedContextItem:
     forbidden_findings: tuple[ForbiddenDataKind, ...]
     scope_valid: bool
     classifier_ruleset_version: str
+    provenance: DisclosureProvenance | None = None
 
     def __post_init__(self) -> None:
         if type(self.candidate) is not CandidateContextItem:
@@ -822,6 +928,8 @@ class ClassifiedContextItem:
         if type(self.scope_valid) is not bool:
             raise _invalid()
         _text(self.classifier_ruleset_version, _VERSION)
+        if self.provenance is not None:
+            _enum(self.provenance, DisclosureProvenance)
 
 
 @dataclass(frozen=True, slots=True)

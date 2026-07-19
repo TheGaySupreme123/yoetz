@@ -12,9 +12,14 @@ result, and remain idempotent on retry.
 
 ## Public surface
 
-- `test_create_attach_and_restore_paths` — the supported start modes work end to end.
-- `test_idempotent_resume_returns_same_result` — same request identity returns same result.
-- `test_crash_before_and_after_publish_is_recoverable` — failures are durable and replayable.
+- `test_create_replays_exact_result_without_reopening_runtime` — terminal same-ID retry returns the
+  exact stored unprojected result without reopening the task runtime.
+- `test_matching_refs_attach_and_same_title_without_refs_stays_distinct` — committed reference
+  identity attaches, title-only equality does not, and lifecycle events are opened/resumed once.
+- `test_result_published_crash_resumes_pinned_object_and_releases_each_runtime` — a crash after
+  publication reclaims the lease, resolves the exact ID+envelope, and never republishes the result.
+- `test_sqlite_and_encrypted_files_resume_exact_catalog_pinned_object` — the production-shaped
+  SQLite catalog and encrypted-files store persist/reopen the same pinned bytes and frontier.
 
 ## Behavior
 
@@ -22,8 +27,9 @@ The test exercises the full start catalog and result publication path, then asse
 
 - allocation, route, and session IDs are stable and durable;
 - retries return the stored result rather than re-allocating state;
-- crash windows before and after result publication remain recoverable;
-- the published start result is exact and bounded.
+- the after-publication crash window remains recoverable from the four pinned response values;
+- the persisted result is the exact bounded `StartInternalResult`, without privacy projection;
+- every admitted task runtime usage reference is released.
 
 ## Errors and edge cases
 

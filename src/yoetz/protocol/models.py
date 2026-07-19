@@ -934,7 +934,7 @@ class OmittedContentModel(_ClosedModel):
 
 
 class PrivacyProjectionModel(_ClosedModel):
-    sink: Literal["agent_context"]
+    sink: Literal["agent_context", "local_human_view"]
     local_disclosure_receipt_id: EgressReceiptIdWire
     policy_id: PrivacyPolicyIdWire
     policy_version: CanonicalPositiveUInt64Wire

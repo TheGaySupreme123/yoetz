@@ -135,6 +135,7 @@ def _result(seed: int) -> EncryptedResultRef:
     content = canonical_encode({"result": "started", "seed": seed})
     return EncryptedResultRef(
         _id(IdKind.OBJECT, seed),
+        f"sha256:{hashlib.sha256(b'envelope' + content).hexdigest()}",
         content,
         f"sha256:{hashlib.sha256(content).hexdigest()}",
     )
@@ -147,6 +148,7 @@ def _evidence(allocation: StartAllocation, result: EncryptedResultRef) -> StartC
         "lifecycle_frontier": dict(frontier.as_wire()),
         "milestone": "result_published",
         "owner_generation": 1,
+        "response_envelope_digest": result.envelope_digest,
         "response_object_id": result.response_object_id,
         "result_digest": result.result_digest,
         "route_generation": allocation.route_generation,
@@ -166,6 +168,7 @@ def _evidence(allocation: StartAllocation, result: EncryptedResultRef) -> StartC
         1,
         frontier,
         result.response_object_id,
+        result.envelope_digest,
         result.result_digest,
         canonical_digest(value),
     )

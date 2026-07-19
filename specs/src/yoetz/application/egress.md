@@ -22,7 +22,8 @@ coordinator may reproduce or skip these steps.
 - `async evaluate_semantic(candidate: CandidateContext, deadline: Deadline) -> SemanticEgressResult`.
 - `async prepare_local_disclosure(candidate: CandidateContext) -> LocalDisclosureResult`.
 - `async resume(request_id: str, case_digest: str, deadline: Deadline) -> SemanticEgressResult`.
-- `async close() -> None` — closes/revokes gateway sessions and releases no vault secret upstream.
+- `async close() -> None` — idempotently enters terminal closure, stops admission, and closes the
+  injected gateway exactly once; it releases no vault secret, credential, or content upstream.
 - Closed `SemanticEgressResult`: `SemanticEgressSuccess`, `SemanticEgressAwaitingHuman`,
   `SemanticEgressBlocked`, `SemanticEgressProviderOutcome`.
 - Closed `LocalDisclosureResult`: `LocalDisclosureApproved`, `LocalDisclosureBlocked`, or
@@ -130,6 +131,11 @@ require a human; never-send matches remain unapprovable.
 secret scan, local consume, and durable `LocalDisclosureReceipt` without creating an
 `EgressAuthorization`.
 
+For exact `client_result_projection`, the coordinator calls the audit port's atomic objectless
+projection transition. It never creates a `DisclosureProposal` or encrypted duplicate. Zero
+content leaves completes with one structural receipt; denied leaves become pointer-stable
+omissions, and audit failure returns `LocalDisclosureUnavailable` before projection.
+
 - `local_model` receives only an approved bounded model case over its exact service-approved AF_UNIX
   profile. It cannot receive never-send material and Yoetz's delivery is not counted as network
   egress. A separately running model process is a trusted disclosure sink whose own ambient
@@ -194,6 +200,12 @@ but unsuccessful semantic evaluation records its exact status and coverage gap.
   `consume_local` occurs immediately before the first AF_UNIX write; after consumption,
   crash/timeout cannot resend that proposal and must close its real or `outcome_unknown` receipt
   before a fresh-proposal retry.
+- Closure installs the coordinator's terminal admission fence before awaiting gateway closure.
+  From that point `evaluate_semantic`, `prepare_local_disclosure`, and `resume` fail closed without
+  proposal/authorization creation, rendering, credential minting, content return, or adapter I/O.
+  Repeated `close` calls await the same closure and never close the gateway twice. Closure does not
+  close or erase durable policy/audit state; pending durable work may be resumed only through a
+  fresh ready coordinator after restart/recomposition.
 
 ## Invariants
 
@@ -225,6 +237,8 @@ but unsuccessful semantic evaluation records its exact status and coverage gap.
     looser ceiling, never an unaudited one.
 14. Provenance can widen only `agent_context`, only for the requesting writer, and never past
     `sensitive_confidential` or the never-send set.
+15. Closing is a terminal in-memory admission fence, not a credential/content-returning operation
+    and not a durable-state deletion shortcut.
 
 ## Tests
 

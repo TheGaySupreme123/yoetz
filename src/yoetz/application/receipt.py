@@ -1,0 +1,585 @@
+"""Build, store, record, replay, and render one honest receipt."""
+
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass, replace
+from typing import Literal, Protocol, cast
+
+from yoetz.application.check import case_coverage
+from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
+from yoetz.domain.events import (
+    CheckRecordedPayload,
+    EventDraft,
+    EventSchema,
+    LedgerRecord,
+    ReceiptRecordedPayload,
+    encode_payload,
+    media_type_for,
+)
+from yoetz.domain.findings import Finding, rank_key
+from yoetz.domain.receipts import (
+    ReceiptDocument,
+    ReceiptVersionSlice,
+    receipt_document_from_json,
+    receipt_document_to_json,
+    render_receipt_compact,
+)
+from yoetz.domain.values import (
+    Actor,
+    ActorType,
+    Frontier,
+    actor_id,
+    event_id,
+    object_id,
+    receipt_id,
+    session_id,
+    task_id,
+    timestamp_from_datetime,
+)
+from yoetz.kernel.deterministic_checks import CaseGap, build_deterministic_case
+from yoetz.kernel.receipt_builder import (
+    ReceiptBuildContext,
+    ReceiptFindingState,
+    build_receipt,
+)
+from yoetz.kernel.reducers import replay
+from yoetz.ports.clock import ClockPort
+from yoetz.ports.diagnostics import RuntimeCapability
+from yoetz.ports.ids import IdPort
+from yoetz.ports.ledger import (
+    AppendCommand,
+    AppendEntry,
+    OperationKind,
+    OperationRecord,
+    OperationState,
+)
+from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
+from yoetz.ports.runtime import BundleRuntimePort, RouteAccess, RouteCommand, TaskRuntime
+from yoetz.protocol.canonical import (
+    JsonValue,
+    canonical_digest,
+    canonical_encode,
+    request_digest,
+    strict_json_parse,
+)
+from yoetz.protocol.coverage import (
+    Coverage,
+    LedgerFreshness,
+    PublicationChannel,
+    coverage_for_channel,
+    coverage_to_json,
+)
+from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
+from yoetz.protocol.ids import IdKind
+from yoetz.protocol.models import (
+    ReceiptFormat,
+    ReceiptInclude,
+    ReceiptRedactionProfile,
+    ReceiptRequest,
+)
+
+__all__ = ["Application", "ReceiptInternalResult", "execute_receipt"]
+
+_RECEIPT_MEDIA_TYPE = "application/vnd.yoetz.receipt+json"
+
+
+class Application(Protocol):
+    runtime: BundleRuntimePort
+    clock: ClockPort
+    ids: IdPort
+
+    def receipt_versions_for(self, runtime: TaskRuntime) -> ReceiptVersionSlice: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiptInternalResult:
+    protocol_version: Literal["0.1"]
+    schema_version: Literal["1.0.0"]
+    request_id: str
+    ok: Literal[True]
+    receipt_id: str
+    task_id: str
+    session_id: str
+    subject_frontier: Frontier
+    result_frontier: Frontier
+    receipt_object_id: str
+    receipt_digest: str
+    conclusion: str
+    redaction_profile: ReceiptRedactionProfile
+    format: ReceiptFormat
+    include: ReceiptInclude
+    document: JsonValue | None
+    human_text: str | None
+    coverage: Coverage
+    suppressed_finding_count: int
+    versions: ReceiptVersionSlice
+
+    def as_json(self) -> dict[str, JsonValue]:
+        versions = {
+            "package_name": self.versions.package_name,
+            "package_version": self.versions.package_version,
+            "protocol_version": self.versions.protocol_version,
+            "engine_version": self.versions.engine_version,
+            "projection_version": self.versions.projection_version,
+            "object_format_version": self.versions.object_format_version,
+            "catalog_schema_version": self.versions.catalog_schema_version,
+            "bundle_schema_version": self.versions.bundle_schema_version,
+            "policy_versions": tuple(
+                {
+                    "policy_id": item.policy_id,
+                    "policy_version": item.policy_version,
+                }
+                for item in self.versions.policy_versions
+            ),
+            "schema_versions": tuple(
+                {
+                    "schema_id": item.schema_id,
+                    "schema_version": item.schema_version,
+                }
+                for item in self.versions.schema_versions
+            ),
+            "resource_manifest_digest": self.versions.resource_manifest_digest,
+        }
+        return {
+            "protocol_version": self.protocol_version,
+            "schema_version": self.schema_version,
+            "request_id": self.request_id,
+            "ok": self.ok,
+            "receipt_id": self.receipt_id,
+            "task_id": self.task_id,
+            "session_id": self.session_id,
+            "subject_frontier": dict(self.subject_frontier.as_wire().items()),
+            "result_frontier": dict(self.result_frontier.as_wire().items()),
+            "receipt_object_id": self.receipt_object_id,
+            "receipt_digest": self.receipt_digest,
+            "conclusion": self.conclusion,
+            "redaction_profile": self.redaction_profile.value,
+            "format": self.format.value,
+            "include": self.include.value,
+            "document": self.document,
+            "human_text": self.human_text,
+            "coverage": coverage_to_json(self.coverage),
+            "suppressed_finding_count": self.suppressed_finding_count,
+            "versions": cast(JsonValue, versions),
+        }
+
+
+def _error(code: PublicErrorCode, message: str, *, retryable: bool = False) -> PublicOperationError:
+    return PublicOperationError(code, message, retryable)
+
+
+def _version_json(value: ReceiptVersionSlice) -> JsonValue:
+    return {
+        "package_name": value.package_name,
+        "package_version": value.package_version,
+        "protocol_version": value.protocol_version,
+        "engine_version": value.engine_version,
+        "projection_version": value.projection_version,
+        "object_format_version": value.object_format_version,
+        "catalog_schema_version": value.catalog_schema_version,
+        "bundle_schema_version": value.bundle_schema_version,
+        "policy_versions": tuple(
+            {"policy_id": item.policy_id, "policy_version": item.policy_version}
+            for item in value.policy_versions
+        ),
+        "schema_versions": tuple(
+            {"schema_id": item.schema_id, "schema_version": item.schema_version}
+            for item in value.schema_versions
+        ),
+        "resource_manifest_digest": value.resource_manifest_digest,
+    }
+
+
+def _identity(request: ReceiptRequest, versions: ReceiptVersionSlice) -> JsonValue:
+    return {
+        "protocol_version": request.protocol_version,
+        "schema_version": request.schema_version,
+        "request_id": request.request_id,
+        "task_id": request.task_id,
+        "session_id": request.session_id,
+        "writer_id": request.writer_id,
+        "expected_frontier": request.expected_frontier.model_dump(mode="json"),
+        "format": request.format.value,
+        "include": request.include.value,
+        "redaction_profile": request.redaction_profile.value,
+        "actor": {
+            "actor_id": request.actor.actor_id,
+            "actor_type": request.actor.actor_type.value,
+        },
+        "client": {
+            "integration": request.client.integration.value,
+            "kind": request.client.kind.value,
+            "version": request.client.version,
+        },
+        "versions": _version_json(versions),
+    }
+
+
+async def _read_object(runtime: TaskRuntime, ref: ObjectRef) -> bytes:
+    chunks = [chunk async for chunk in runtime.objects.open_verified(ref)]
+    data = b"".join(chunks)
+    if len(data) != ref.plaintext_size:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The receipt object is invalid.")
+    return data
+
+
+async def _preflight(
+    runtime: TaskRuntime, request: ReceiptRequest, digest: str
+) -> OperationRecord | None:
+    operation = await runtime.ledger.lookup_operation(request.writer_id, request.request_id)
+    if operation is None:
+        return None
+    if operation.request_digest != digest or operation.operation_kind is not OperationKind.RECEIPT:
+        raise _error(PublicErrorCode.IDEMPOTENCY_CONFLICT, "The request ID was already used.")
+    if operation.state is OperationState.COMPLETE:
+        return operation
+    if operation.state is OperationState.QUARANTINED:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The receipt operation is quarantined.")
+    raise _error(
+        PublicErrorCode.OPERATION_PENDING,
+        "The receipt operation is pending.",
+        retryable=True,
+    )
+
+
+async def _records_through(runtime: TaskRuntime, frontier: Frontier) -> tuple[LedgerRecord, ...]:
+    records = tuple(
+        [
+            record
+            async for record in runtime.ledger.load_events(
+                runtime.session_id, through=frontier.sequence
+            )
+        ]
+    )
+    projection = replay(records)
+    if Frontier(projection.frontier, projection.head_digest) != frontier:
+        raise _error(PublicErrorCode.FRONTIER_CONFLICT, "The receipt frontier is not current.")
+    return records
+
+
+def _issue_key(finding: Finding) -> tuple[object, ...]:
+    return (
+        finding.origin,
+        finding.policy_id,
+        finding.policy_version,
+        finding.kind,
+        finding.subject_refs,
+    )
+
+
+def _finding_states(projection: object) -> tuple[ReceiptFindingState, ...]:
+    from yoetz.kernel.projections import ProjectionState
+
+    assert type(projection) is ProjectionState
+    newest: dict[tuple[object, ...], tuple[int, Finding]] = {}
+    for record in projection.findings.values():
+        if record.payload is None:
+            continue
+        key = _issue_key(record.payload)
+        candidate = (record.source_frontier, record.payload)
+        prior = newest.get(key)
+        if prior is None or candidate[0] > prior[0]:
+            newest[key] = candidate
+    findings = tuple(sorted((item[1] for item in newest.values()), key=rank_key))
+    # Resolution is proof-based. Conservatively unresolved is always safe; the shared projection
+    # proof can only weaken a receipt if unavailable, never strengthen it from a disposition.
+    return tuple(ReceiptFindingState(item.finding_id, False) for item in findings)
+
+
+def _context(
+    projection: object,
+    frontier: Frontier,
+    case: object,
+    records: tuple[LedgerRecord, ...],
+) -> ReceiptBuildContext:
+    from yoetz.kernel.deterministic_checks import DeterministicCase
+    from yoetz.kernel.projections import ProjectionState
+
+    assert type(projection) is ProjectionState
+    assert type(case) is DeterministicCase
+    applicable: CheckRecordedPayload | None = None
+    gaps = list(case.gaps)
+    latest = projection.latest_tested_state
+    if latest is not None and latest.subject_frontier == frontier:
+        for record in records:
+            if record.event_id == latest.source_check_event_id:
+                if type(record.payload) is CheckRecordedPayload:
+                    applicable = record.payload
+                else:
+                    gaps.append(
+                        CaseGap(
+                            f"check_payload_unavailable:{latest.source_check_event_id}",
+                            "check_payload_unavailable",
+                            (latest.source_check_event_id,),
+                        )
+                    )
+                break
+    elif latest is None:
+        gaps.append(CaseGap("check_not_recorded", "check_not_recorded", ()))
+    else:
+        gaps.append(CaseGap("check_not_applicable", "check_not_applicable", ()))
+    if applicable is None and not any(
+        gap.code in {"check_not_recorded", "check_not_applicable", "check_payload_unavailable"}
+        for gap in gaps
+    ):
+        gaps.append(CaseGap("check_not_recorded", "check_not_recorded", ()))
+    ordered_gaps = tuple(
+        sorted(
+            gaps,
+            key=lambda gap: (
+                gap.marker.encode("ascii"),
+                tuple(ref.encode("ascii") for ref in gap.subject_refs),
+            ),
+        )
+    )
+    coverage = case_coverage(case)
+    codes = tuple(sorted({gap.code for gap in ordered_gaps}, key=str.encode))
+    if codes != coverage.known_gaps:
+        freshness = coverage.ledger_freshness
+        if codes and freshness is LedgerFreshness.CURRENT:
+            freshness = LedgerFreshness.PARTIAL
+        coverage = replace(coverage, ledger_freshness=freshness, known_gaps=codes)
+    if applicable is not None:
+        from yoetz.protocol.coverage import weakest
+
+        coverage = weakest(coverage, applicable.coverage)
+    return ReceiptBuildContext(
+        projection,
+        frontier,
+        case.availability,
+        coverage,
+        ordered_gaps,
+        _finding_states(projection),
+        applicable,
+    )
+
+
+async def _accepted_receipt_event(
+    runtime: TaskRuntime, operation: OperationRecord
+) -> tuple[LedgerRecord, ObjectRef]:
+    locator = operation.result_locator
+    if (
+        locator is None
+        or locator.first_ingestion_sequence is None
+        or locator.first_ingestion_sequence != locator.last_ingestion_sequence
+        or locator.result_object_ref is None
+        or locator.result_object_ref.metadata.kind is not ObjectKind.RECEIPT
+    ):
+        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The receipt locator is invalid.")
+    records = tuple(
+        [
+            record
+            async for record in runtime.ledger.load_events(
+                runtime.session_id,
+                after=locator.first_ingestion_sequence - 1,
+                through=locator.first_ingestion_sequence,
+            )
+        ]
+    )
+    if len(records) != 1:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The receipt locator is invalid.")
+    record = records[0]
+    payload = record.payload
+    if (
+        type(payload) is not ReceiptRecordedPayload
+        or payload.receipt_object_id != locator.result_object_ref.object_id
+        or record.schema.name != "receipt_recorded"
+    ):
+        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The receipt locator is invalid.")
+    return record, locator.result_object_ref
+
+
+def _internal_result(
+    request: ReceiptRequest,
+    document: ReceiptDocument,
+    receipt_ref: ObjectRef,
+    digest: str,
+    result_frontier: Frontier,
+) -> ReceiptInternalResult:
+    document_json = cast(JsonValue, receipt_document_to_json(document))
+    human = None if request.format is ReceiptFormat.JSON else render_receipt_compact(document)
+    return ReceiptInternalResult(
+        "0.1",
+        "1.0.0",
+        request.request_id,
+        True,
+        str(document.receipt_id),
+        str(document.task_id),
+        str(document.session_id),
+        document.subject_frontier,
+        result_frontier,
+        receipt_ref.object_id,
+        digest,
+        document.conclusion.value,
+        request.redaction_profile,
+        request.format,
+        request.include,
+        document_json if request.format is ReceiptFormat.JSON else None,
+        human,
+        document.coverage,
+        document.suppressed_finding_count,
+        document.versions,
+    )
+
+
+async def _replay_result(
+    runtime: TaskRuntime, request: ReceiptRequest, operation: OperationRecord
+) -> ReceiptInternalResult:
+    record, receipt_ref = await _accepted_receipt_event(runtime, operation)
+    payload = cast(ReceiptRecordedPayload, record.payload)
+    data = await _read_object(runtime, receipt_ref)
+    try:
+        document = receipt_document_from_json(strict_json_parse(data))
+    except (TypeError, ValueError) as exc:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The stored receipt is invalid.") from exc
+    digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
+    if (
+        digest != payload.receipt_digest
+        or str(document.receipt_id) != str(payload.receipt_id)
+        or document.subject_frontier != payload.subject_frontier
+        or document.conclusion is not payload.conclusion_code
+        or request.redaction_profile is not payload.redaction_profile
+    ):
+        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The stored receipt is invalid.")
+    return _internal_result(
+        request,
+        document,
+        receipt_ref,
+        digest,
+        Frontier(record.ledger.ingestion_sequence, record.entry_digest),
+    )
+
+
+async def execute_receipt(app: Application, request: ReceiptRequest) -> ReceiptInternalResult:
+    """Freeze an exact case, publish its canonical document, and append one locator event."""
+
+    runtime = await app.runtime.route(
+        RouteCommand(
+            request.session_id,
+            request.writer_id,
+            RouteAccess.WRITE,
+            frozenset({RuntimeCapability.WRITE, RuntimeCapability.PAYLOAD_READ}),
+        )
+    )
+    try:
+        if (
+            runtime.task_id != request.task_id
+            or runtime.session_id != request.session_id
+            or runtime.writer_id != request.writer_id
+        ):
+            raise _error(PublicErrorCode.SESSION_CONFLICT, "The writer route is inconsistent.")
+        import_status = await runtime.importer.status(runtime.session_id)
+        if import_status.active_job_count:
+            raise _error(
+                PublicErrorCode.OPERATION_PENDING,
+                "An import is still pending.",
+                retryable=True,
+            )
+        versions = app.receipt_versions_for(runtime)
+        logical_digest = request_digest(_identity(request, versions))
+        operation = await _preflight(runtime, request, logical_digest)
+        if operation is not None:
+            return await _replay_result(runtime, request, operation)
+
+        frontier = Frontier(
+            int(request.expected_frontier.sequence), request.expected_frontier.head_digest
+        )
+        records = await _records_through(runtime, frontier)
+        projection = replay(records)
+        availability = await runtime.ledger.load_case_availability(
+            runtime.session_id, frontier, projection
+        )
+        case = build_deterministic_case(projection, records, availability)
+        context = _context(projection, frontier, case, records)
+        now = app.clock.now_utc()
+        document = build_receipt(
+            context,
+            receipt_id(app.ids.new(IdKind.RECEIPT)),
+            task_id(runtime.task_id),
+            session_id(runtime.session_id),
+            timestamp_from_datetime(now),
+            versions,
+            request.redaction_profile,
+            request.include,
+        )
+        document_json = cast(JsonValue, receipt_document_to_json(document))
+        document_bytes = canonical_encode(document_json)
+        digest = canonical_digest(document_json)
+        receipt_staged = await runtime.objects.stage(
+            ObjectSource(data=document_bytes, declared_size=len(document_bytes)),
+            ObjectMetadata(ObjectKind.RECEIPT, _RECEIPT_MEDIA_TYPE, runtime.task_id, now),
+        )
+        receipt_ref = await runtime.objects.finalize(receipt_staged)
+        payload = ReceiptRecordedPayload(
+            document.receipt_id,
+            frontier,
+            digest,
+            object_id(receipt_ref.object_id),
+            document.conclusion,
+            request.redaction_profile,
+        )
+        draft = EventDraft(
+            event_id(app.ids.new(IdKind.EVENT)),
+            EventSchema("receipt_recorded", "1.0.0"),
+            timestamp_from_datetime(now),
+            (),
+            payload,
+            (object_id(receipt_ref.object_id),),
+            (),
+        )
+        payload_bytes = canonical_encode(encode_payload(payload))
+        payload_metadata = ObjectMetadata(
+            ObjectKind.EVENT_PAYLOAD,
+            media_type_for("receipt_recorded"),
+            runtime.task_id,
+            now,
+        )
+        payload_staged = await runtime.objects.stage(
+            ObjectSource(data=payload_bytes, declared_size=len(payload_bytes)), payload_metadata
+        )
+        payload_ref = await runtime.objects.finalize(payload_staged)
+        coverage = coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
+        command = AppendCommand(
+            runtime.task_id,
+            runtime.session_id,
+            cast(str, runtime.writer_id),
+            request.request_id,
+            OperationKind.RECEIPT,
+            logical_digest,
+            frontier.sequence,
+            (
+                AppendEntry(
+                    draft,
+                    Actor(
+                        actor_id("yoetz.engine"),
+                        ActorType.YOETZ_ENGINE,
+                        coverage.authorship_assurance,
+                    ),
+                    payload_ref,
+                    payload_ref.commitment,
+                    payload_metadata.media_type,
+                    payload_ref.plaintext_size,
+                    PublicationChannel.ENGINE_DERIVED,
+                    coverage,
+                    "projected",
+                ),
+            ),
+            receipt_ref,
+        )
+        result = await run_prepared_append(
+            runtime.ledger,
+            PreparedMutation(
+                cast(str, runtime.writer_id),
+                request.request_id,
+                logical_digest,
+                frontier.sequence,
+                (payload_ref, receipt_ref),
+                command,
+            ),
+        )
+        return _internal_result(request, document, receipt_ref, digest, result.result_frontier)
+    except ProtocolValueError as exc:
+        raise _error(PublicErrorCode.INVALID_REQUEST, "The receipt request is invalid.") from exc
+    finally:
+        await app.runtime.release(runtime)

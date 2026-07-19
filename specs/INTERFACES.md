@@ -645,6 +645,8 @@ top-level known-gap set, and the fold must equal that top-level coverage.
 `LedgerPort` is the shared memory/SQLite contract. Its methods are:
 
 - `append_batch(command: AppendCommand) -> AppendResult`;
+- `load_frontier() -> Frontier` (task-ledger truth without requiring a pre-existing session;
+  START resumed-event content and append CAS use this value);
 - `load_events(session_id, after=0, through=None) -> AsyncIterator[LedgerRecord]`;
 - `load_projection(session_id, view) -> StoredProjection | None` (cache/rebuild use);
 - `load_case_availability(session_id, frontier, projection) -> CaseAvailabilityFacts` (shared bounded
@@ -665,7 +667,7 @@ top-level known-gap set, and the fold must equal that top-level coverage.
 
 The check orchestration methods are authority-bearing port methods, not SQLite extensions.
 `ports/ledger.py` owns the shared closed enums: `OperationKind` is
-`publish_work|check|respond|receipt`; `OperationState` is `pending|complete|quarantined`;
+`start|publish_work|check|respond|receipt`; `OperationState` is `pending|complete|quarantined`;
 `CheckPhase` is `reserved|local_ready|semantic_wait|ready_to_finalize|terminal`;
 `AttemptOutcome` is `response_durable|failed|expired|late|selected`;
 `AppendWarning` is exactly `unknown_event_schema_preserved`;
@@ -709,7 +711,11 @@ The exact shared frozen records, also owned by `ports/ledger.py`, are:
 These field sets are closed: `OperationLease` and `SemanticAttemptHandle` carry the complete
 owner/lease/frontier/dependency compare-and-swap fence, while job, selected-attempt, and pending
 records carry only their listed durable state. `advance_check_phase` binds the durable
-local-result/case object when that transition promises recoverability. Every successful phase
+local-result/case object when that transition promises recoverability. The pending operation's
+`resume_object_ref` is the sole current row pointer: `CHECK_RESUME` at `reserved`, atomically
+replaced by `DETERMINISTIC_RESULT` at `local_ready` and retained through later nonterminal phases;
+the deterministic envelope authenticates its prior full-case pointer for verified reopen. No
+memory-only phase-object map is recovery authority. Every successful phase
 advance, renewal, or reclaim returns a replacement current lease; the prior lease is spent and the
 application reconstructs `FrozenCase` with the unchanged case and replacement lease before the
 next step.
@@ -838,8 +844,9 @@ in a receipt (`application/status.md`, `application/check.md`).
 EncryptedResultRef, StartCompletionEvidence)`, and `quarantine(allocation, SafeReason)`. `StartPhase` is
 `route_reserved`, `bundle_ready`, `lifecycle_committed`, `result_published`, `terminal`. IDs and
 route are allocated once at reservation and reused on resume. The result argument is forbidden on
-earlier transitions and required for `result_published`, whose CAS pins `response_object_id` for
-exact crash resume before terminal catalog completion.
+earlier transitions and required for `result_published`, whose CAS pins the response object ID,
+encrypted-envelope digest, canonical unprojected structural bytes, and result digest for exact
+crash resume before terminal catalog completion.
 
 Shared route values are `TaskRoute` and `TaskRouteState` (`initializing`, `active`,
 `quarantined`). `TaskRoute` carries task ID, active session ID, generated bundle route, positive
@@ -865,6 +872,8 @@ low-entropy plaintext from leaking through an unkeyed structural request digest.
   non-publishing, used to build a logical request digest before object publication;
 - `stage(ObjectSource, ObjectMetadata) -> StagedObject`;
 - `finalize(StagedObject) -> ObjectRef`;
+- `resolve_verified(object_id, envelope_digest) -> ObjectRef` — bounded exact finalized-object
+  resolution for catalog-pinned START crash resume;
 - `open_verified(ObjectRef) -> AsyncIterator[bytes]`;
 - `sweep_orphans(ObjectRootSnapshot, now) -> int` — delete only safety-window-eligible objects
   absent from every owning root while the bound route/bundle/privacy generations remain unchanged.
@@ -1020,6 +1029,16 @@ consumed exact OS-presence source and an admitted purpose-specific passphrase re
 source. `UnlockCoordinator` exclusively owns the durable passphrase throttle and calls the vault
 only after admission/reservation; `unlock_rate_limited` is therefore a coordinator outcome and not
 a `VaultError`.
+Every vault-opening completion additionally calls one injected async daemon activation callback
+with the exact current service and vault generations while lifecycle state remains `unlocking`.
+That callback builds and validates a fresh Application, atomically installs it, and transitions the
+lifecycle to `ready`; it returns only after daemon ownership transfers. Failure closes partial
+ready state in reverse order, relocks the vault/lifecycle, and returns the bounded
+`unlock_failed` structural reason. Unlock success is impossible without this callback succeeding.
+Before first passphrase publication, `UnlockThrottleStore.stage_or_adopt_initial_record()` may
+adopt without rewrite only the exact valid generation-1, zero-failure, inactive record for the
+same installation. This is the sole clean-crash continuation for a provisional throttle record;
+all advanced, active, mismatched, unsafe, or malformed records fail closed and are never reset.
 
 Provider mutation uses only
 `VaultService.store_provider_credential(action, binding, secret, proof, now_monotonic)`. The
@@ -1210,6 +1229,14 @@ external/local consume share one generation CAS: tightening-first means no I/O; 
 one admitted attempt may send, is best-effort closed/nonselectable, and receives its actual receipt.
 `OutboundGatewayPort.reconcile_policy(policy, human_authority: HumanAuthorityCapability)` binds both
 policy and human-authority generations; unavailable authority yields an empty external registry.
+`OutboundGatewayPort.close()` is an idempotent terminal operation: it installs a deny fence before
+awaiting transport closure, after which reconciliation/dispatch/revocation admit no new work, mint
+no credential, render no content-bearing request, and perform no new adapter I/O. Unconsumed work is
+fenced before I/O; a consumed attempt is only best-effort closed/nonselectable and still receives
+its actual or `outcome_unknown` durable receipt. `PrivacyCoordinator.close()` installs its own
+terminal admission fence first and closes the gateway exactly once; it neither returns credential or
+content nor erases durable policy/audit state, so pending durable work may resume only in a fresh
+ready coordinator.
 
 For a physical attempt, the deterministic adapter first renders the exact final provider/application
 request body, performs the final exact-body scan, and computes
@@ -1386,6 +1413,13 @@ cannot affect the budget. Deadlines never cross a process restart. `format_rfc33
 `evaluate_startup_gate(results) -> StartupGateReport` is pure and no write-capable application is
 exposed until the required gate passes.
 
+Maintenance operation evidence is deliberately separate: `MaintenanceDiagnostic` is the frozen,
+path-free record of one `backup|restore|migration` `preview|execute` observation, and
+`MaintenanceDiagnosticSink.record_maintenance` is its only sink. It carries only closed outcome,
+request/optional task identity, plan/result digests, migration versions, count, duration, bounded
+reason, and observed time. It is never accepted by `DiagnosticsPort.record`, never passed to
+`evaluate_startup_gate`, and cannot change runtime capabilities.
+
 v0.1 exception diagnostics contain only a generated correlation ID plus bounded component,
 operation, outcome, and reason identities. Exception messages, locals, source excerpts, paths, and
 tracebacks are neither emitted nor captured in plaintext or encrypted form. A future encrypted
@@ -1441,6 +1475,9 @@ forbidden.
 against the current bundle generation. Catalog completion consumes that evidence while the same
 authoritative process holds the fence. This generation-fenced verification-then-catalog-commit is
 the v0.1 cross-database seam; a stronger atomic proof would require a different storage topology.
+At `result_published`, expectation/evidence carry the exact response object ID, envelope digest,
+and structural result digest; client-specific privacy projection is outside this seam and is never
+stored in the START result object/catalog.
 
 ### Codex JSONL importer
 
@@ -1458,7 +1495,7 @@ the v0.1 cross-database seam; a stronger atomic proof would require a different 
 - `status(session_id) -> ImportStatusSnapshot`;
 - `complete(allocation) -> ImportAllocation`;
 - `quarantine(allocation, reason: ImportSafeReason) -> None`.
-- `load_review_source(identity, through: Frontier) -> ImportReviewSource | None`.
+- `load_review_source(identity_digest: str, through: Frontier) -> ImportReviewSource | None`.
 
 Shared types are `ImportByteSource`, `ImportCaptureInput`, `CapturedImportSource`,
 `ImportSourceIdentity`, `ImportCommand`, `ImportAllocation`, `ImportLineOutcome`,
@@ -1479,11 +1516,11 @@ versions are an explicit tested set, never a continuous range
 inferred between probes. `source_commitment` is the domain-separated bundle-keyed HMAC of exact
 source bytes; the raw SHA-256 audit digest remains inside encrypted source/report material. v0.1
 captures at most 4 MiB exact JSONL and rejects larger sources; object
-chunking is a later format amendment. Raw stderr is not retained in v0.1: a bounded capture records
-only presence, captured-byte count, truncation status, and a commitment-only
-`ObjectKind.import_stderr` keyed commitment over the retained prefix. Its ordinary SHA-256 audit
-digest may remain inside encrypted capture metadata but is never structural. The exact JSONL
-source remains encrypted.
+chunking is a later format amendment. The v0.1 ordinary import request requires stderr to be
+absent: `stderr_present=false`, `stderr_captured_bytes=0`, and `stderr_truncated=false` are exact
+constants. `ImportCaptureInput` has no stderr byte source or caller-supplied stderr commitment,
+and a legacy/crafted true branch is rejected before capture. A confidential stderr channel is not
+part of v0.1. The exact JSONL source remains encrypted.
 
 All planned candidate batches use ordinary `publish_work`. After them, the importer reserves and
 publishes one final `evidence_recorded` event (`EvidenceKind.import_report`) that references the
@@ -1499,7 +1536,11 @@ verify these reservations inside their authoritative transaction; terminal trans
 delete them. The closed quarantine registry contains the six source/object/plan/batch/report/phase
 contradiction codes plus `import_commit_state_ambiguous`; malformed or unknown input is a gap.
 
-No artifact-inspection port exists in v0.1. Review compares only recorded/captured evidence at a
+Application import/review owns frozen `ImportCodexJsonlRequest`, `ImportReportInternal`,
+`ReviewRequest`, `ReviewCounts`, and `ReviewInternal`. The internal results contain no
+`privacy_projection` and perform no disclosure call; the central application facade projects the
+support result exactly once per client and supplies the public schema field. No artifact-inspection
+port exists in v0.1. Review compares only recorded/captured evidence at a
 frozen frontier. Live Git/shell/filesystem inspection requires a later consent/root/symlink/
 submodule/redaction ADR and a separate port.
 
@@ -1521,12 +1562,15 @@ Shared types are `MaintenanceLocation`, `MaintenanceKind` (`backup`, `restore`, 
 `MaintenanceHandle`, `MaintenancePin`, `BackupObjectEntry`, `PrivacyAuditBackupSnapshot`, `BackupManifest`,
 `BackupCommand`, `BackupPlan`,
 `BackupResult`, `RestoreCommand`, `RestorePlan`, `RestoreResult`, `MigrationCommand`,
-`MigrationPlan`, `MigrationResult`, `RecoveryOperation` (`create|restore`), and `RecoverySecret`.
+`MigrationPlan`, `MigrationResult`, `RecoveryOperation` (`create|restore`),
+`RecoverySecretAcquisition`, `RecoverySecretAcquirer`, and `RecoverySecret`.
 A preview is read-only;
 execution recomputes every material fact under the current generation and requires the exact
 confirmed plan digest. Backup uses one pinned frontier and an online SQLite snapshot; restore
 builds and verifies a new quarantined route before one catalog CAS; migration is backup-first and
-never rewrites canonical event bytes.
+never rewrites canonical event bytes. A migration target equal to the current version is rejected as
+an invalid/no-migration request; v0.1 does not fabricate backup/replay identities or widen the frozen
+plan/result schemas to represent a no-op. Downgrades and skipped versions remain rejected.
 
 The maintenance pin and backup manifest bind privacy-root generation/digest. The backup contains a
 canonical structural `privacy-audit-snapshot.json` sidecar plus every referenced encrypted
@@ -1539,13 +1583,25 @@ authority.
 `ports/maintenance.py` owns the service-internal `MaintenanceHandle`; the SQLite maintenance
 adapter is its sole concrete constructor after a durable generation CAS, and every consumer
 revalidates its task/request/route/generation/plan bindings. `MaintenanceService` owns support
-request validation and explicit confirmation. Its shared values are maintenance request values,
-`Confirmation`, and `ConfirmationChannel`.
+request validation and explicit confirmation. Its exact generation-bound constructor injects
+`MaintenancePort`, `ClockPort`, `MaintenanceDiagnosticSink`, the least-authority
+`RecoverySecretAcquirer`, whose sole method is
+`acquire_recovery_secret(RecoverySecretAcquisition) -> RecoverySecret`.
+`RecoverySecretAcquisition` is the frozen, secret-free tuple of exact request ID, confirmed plan
+digest, current positive service generation, and `create|restore` operation. The acquirer accepts
+no raw secret, `str`, `bytes`, mutable buffer, location, command, or general maintenance authority;
+it may return only the opaque one-shot `RecoverySecret` for that exact binding. Its shared values
+are maintenance request values, `Confirmation`, and `ConfirmationChannel`.
 `ConfirmationChannel` is exactly `interactive|noninteractive_flag|release_automation`. Every
 channel requires the exact current plan digest plus explicit acceptance; a bare/general `--yes`
-never suffices. Portable-recovery execution additionally requires the foreground confidential
-helper after confirmation, so it fails closed in noninteractive v0.1 environments; machine-bound
-maintenance may use either reviewed automation channel. MCP exposes no maintenance method.
+never suffices. Only after `Confirmation.plan_digest` equals the returned preview's current
+`plan_digest` and explicit acceptance is true may `MaintenanceService` construct the acquisition
+and call the acquirer. Portable-recovery execution additionally requires the foreground
+confidential helper after confirmation, so it fails closed in noninteractive v0.1 environments;
+machine-bound maintenance never calls the acquirer and may use either reviewed automation channel.
+MCP exposes no maintenance method.
+The constructor's positive `service_generation` is the owning daemon instance generation, not a
+caller/request field, and is copied only into a confirmed portable `RecoverySecretAcquisition`.
 
 ### Harness integration
 
@@ -1561,7 +1617,9 @@ Shared types are `HarnessId`, `HarnessProfile`, `HarnessHookProfile`, `Integrati
 frozen per-harness descriptor: `harness_id`, `skill_root` (the exact relative install directory),
 `frontmatter_profile` (the harness's required skill-header shape), `capability_profile_ids`,
 `supported_versions`, and `hooks_by_capability_profile: Mapping[str, HarnessHookProfile | None]`.
-The map has exactly the same keys as `capability_profile_ids`; missing, extra, wildcard, inherited,
+All three support collections may be jointly empty only for the explicit unprofiled/unadvertised
+state. Otherwise capability profiles and supported versions are nonempty and the map has exactly
+the same keys as `capability_profile_ids`; missing, extra, wildcard, inherited,
 or range-derived entries are invalid. A v0.1 exact cell may select a trigger-only profile after
 E-013 passes, while an unsupported cell selects `None`. Every v0.1 observation arm is absent, so no
 v0.1 integration can emit the `hook_observed` publication channel or artifact-observation class
@@ -1593,18 +1651,46 @@ never a different public contract.
 
 `IntegrationService` owns request validation and confirmation. Install/replace/remove are bound to
 a freshly recomputed preview digest and explicit acceptance. Its shared values are
-`IntegrationRequest`, `IntegrationStatusRequest`, `IntegrationConfirmation`, and the exact
+`IntegrationRequest`, `IntegrationStatusRequest`, `IntegrationConfirmation`,
+`IntegrationDiagnostic`, `IntegrationDiagnosticSink`, and the exact
 confirmation channel `interactive|noninteractive_flag`. Noninteractive execution requires both
 the exact preview digest and explicit acceptance; a generic `--yes` cannot stand alone. Modified,
 partial, unmanaged, unsafe, or changed-after-preview copies are preserved. v0.1 writes only the
 profile's exact `skill_root` — `.agents/skills/yoetz/` for `codex` — inside one explicitly supplied
 trusted project; it never edits harness/MCP configuration, Git state, package resources, or
 arbitrary skills.
+Every `integration_preview` preview/status body and every `integration_execute` body carries an
+explicit required `harness` discriminator. Its frozen v0.1 schema value is exactly `codex`; omission,
+defaulting, environment inference, and unknown values fail at control-schema admission before an
+`IntegrationRequest` or `IntegrationStatusRequest` is constructed.
+`IntegrationDiagnosticSink.record_integration(IntegrationDiagnostic)` is separate from startup
+`DiagnosticsPort.record(StartupCheckResult)`. Its frozen diagnostic contains only harness, action,
+phase/outcome, before/after state, compatibility, managed-file count, structural digests, and an
+optional closed integration reason; it has no project path, content, environment, Git, task, or
+exception field.
 
 ## 11. Application (`application/`)
 
 `Application` is a service-internal frozen dataclass wiring all use-case ports, `PrivacyCoordinator`,
-and `VerificationPolicy`. One public async method
+and `VerificationPolicy`. `VerificationPolicy(semantic, max_findings)` is the immutable
+application-safe snapshot of effective verification config: `semantic` is exactly
+`disabled|optional|required`, `max_findings` is an exact non-bool integer in `1..10`, and its
+derived default check mode is respectively
+`deterministic_only|semantic_if_configured|semantic_required`.
+
+The same module owns `ProjectionRenderMode(human_readable|machine_readable)`, frozen
+`ClientProjectionContext(client_kind, render_mode, output_is_controlling_tty)`,
+`resolve_client_disclosure_sink`, and `ProjectedControlBody`. The projected-body type is exactly
+the six operation result types plus `JsonObject` support results. The sink resolver returns
+`local_human_view` only for authenticated `cli` plus human-readable rendering plus an output
+attached to its controlling TTY; all other or contradictory contexts return `agent_context`.
+The context is service-internal, carries no caller-named sink, must match the authenticated session
+kind, and defaults fail-safe to machine-readable/non-TTY when trusted presentation facts are
+absent. The daemon first obtains catalog-backed `Application.projection_binding_facts(...)`, then
+`Application.project_result_for_client(context, binding, result)` is the only route from a
+content-capable internal result to an ordinary serialized success.
+
+One public async method
 per operation: `start`, `publish_work`, `check`, `respond`, `status`, `receipt`, plus
 `import_codex_jsonl` and `review` (support). All accept/return Yoetz request/result dataclasses
 (`StartRequest/StartResult`, etc.), never SDK types. All expected failures leave as
@@ -1697,7 +1783,12 @@ facade and are never MCP tools.
 ## 13. Surfaces
 
 - `service/daemon.py`: sole application/runtime/vault/privacy/provider composition owner and
-  ordinary-control dispatcher; starts into explicit `ready` or `locked`.
+  ordinary-control dispatcher; starts into explicit `ready` or `locked`. Its private canonical
+  installation marker owns immutable vault-mode publication. Unlock calls only
+  `activate_ready_application(service_generation, vault_generation)`, which revalidates both
+  generations around the injected `ReadyApplicationFactory` and transfers application ownership
+  before lifecycle publishes `ready`. Lifecycle drains close through the daemon relay in reverse
+  order, so activation cannot race explicit/session/idle lock or stop.
 - `service/client.py`: shared ordinary `ServiceClient` used by CLI, MCP, and future UI.
 - `service/unlock.py`: server-side vault transition, throttle, and reauthentication coordinator; it
   has no terminal/client surface.

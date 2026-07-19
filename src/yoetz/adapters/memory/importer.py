@@ -41,6 +41,7 @@ from yoetz.domain.values import (
     session_id,
     timestamp_from_datetime,
     timestamp_from_string,
+    validate_sha256_digest,
 )
 from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
@@ -143,7 +144,6 @@ async def _read_bounded(source: ImportByteSource, limit: int) -> tuple[bytes, bo
 @dataclass(frozen=True, slots=True)
 class MemoryImportPolicy:
     source_bytes: int = 4 * 1024 * 1024
-    stderr_prefix_bytes: int = 64 * 1024
     line_bytes: int = 1024 * 1024
     line_count: int = 20_000
     batch_count: int = 1_024
@@ -154,7 +154,6 @@ class MemoryImportPolicy:
     def __post_init__(self) -> None:
         if (
             self.source_bytes != 4 * 1024 * 1024
-            or self.stderr_prefix_bytes != 64 * 1024
             or self.line_bytes != 1024 * 1024
             or self.line_count != 20_000
             or self.batch_count != 1_024
@@ -356,27 +355,15 @@ class MemoryImporter:
         source_ref = await self._finalize_object(
             source_bytes, ObjectKind.IMPORT_SOURCE, _SOURCE_MEDIA_TYPE, now
         )
-        stderr_prefix = b""
-        stderr_present = value.stderr is not None
-        stderr_truncated = False
-        if value.stderr is not None:
-            stderr_prefix, stderr_truncated = await _read_bounded(
-                value.stderr, self._policy.stderr_prefix_bytes
-            )
-        stderr_commitment = (
-            await self._objects.commitment_for(stderr_prefix, ObjectKind.IMPORT_STDERR)
-            if stderr_present
-            else None
-        )
         safe_metadata = JsonObject(
             {
                 "codex_capability_profile_id": value.codex_capability_profile_id,
                 "codex_version": value.codex_version,
                 "exit_status": value.exit_status,
                 "source_kind": value.source_kind,
-                "stderr_present": stderr_present,
-                "stderr_captured_bytes": len(stderr_prefix),
-                "stderr_truncated": stderr_truncated,
+                "stderr_present": False,
+                "stderr_captured_bytes": 0,
+                "stderr_truncated": False,
             }
         )
         audit_manifest = JsonObject(
@@ -390,7 +377,6 @@ class MemoryImporter:
                 "safe_metadata": safe_metadata,
                 "source_audit_digest": digest_bytes(source_bytes),
                 "source_object_id": source_ref.object_id,
-                "stderr_audit_digest": digest_bytes(stderr_prefix) if stderr_present else None,
             }
         )
         manifest_ref = await self._finalize_object(
@@ -411,10 +397,10 @@ class MemoryImporter:
             exit_status=value.exit_status,
             source_kind=value.source_kind,
             capture_metadata_object=manifest_ref,
-            stderr_present=stderr_present,
-            stderr_captured_bytes=len(stderr_prefix),
-            stderr_truncated=stderr_truncated,
-            stderr_commitment=stderr_commitment,
+            stderr_present=False,
+            stderr_captured_bytes=0,
+            stderr_truncated=False,
+            stderr_commitment=None,
         )
 
     async def _finalize_object(
@@ -934,10 +920,7 @@ class MemoryImporter:
                 JsonObject(
                     {
                         "identity_digest": job.identity.identity_digest,
-                        "report_event_id": job.report_event_id,
-                        "report_event_frontier": cast(
-                            AppendResult, job.report_append_result
-                        ).result_frontier.as_wire(),
+                        "report_evidence_id": job.report_evidence_id,
                     }
                 )
                 for job in terminal[: self._policy.status_jobs]
@@ -947,13 +930,14 @@ class MemoryImporter:
         )
 
     async def load_review_source(
-        self, identity: ImportSourceIdentity, through: Frontier
+        self, identity_digest: str, through: Frontier
     ) -> ImportReviewSource | None:
+        validate_sha256_digest(identity_digest)
         async with self._lock:
-            job = self._state.jobs.get(identity.identity_digest)
+            job = self._state.jobs.get(identity_digest)
             if job is None:
                 return None
-            if job.identity != identity:
+            if job.identity.identity_digest != identity_digest:
                 raise _error(
                     PublicErrorCode.STORAGE_CORRUPT,
                     "Import review identity is contradictory.",
@@ -965,7 +949,7 @@ class MemoryImporter:
                     "Import review source is quarantined.",
                     retryable=False,
                 )
-            rows = self._job_batches(identity.identity_digest)
+            rows = self._job_batches(identity_digest)
             completed = tuple(row.result for row in rows if row.result is not None)
             report_result = job.report_append_result
         await read_exact_object(self._objects, job.source.source_object)
@@ -1020,7 +1004,7 @@ class MemoryImporter:
                 retryable=False,
             )
         return ImportReviewSource(
-            identity=identity,
+            identity=job.identity,
             through=through,
             state=job.state,
             phase=job.phase,
@@ -1038,8 +1022,8 @@ class MemoryImporter:
             ),
             gaps=tuple(gaps_by_range[index] for index in sorted(gaps_by_range)),
             coverage=coverage,
-            codex_capability_profile_id=identity.codex_capability_profile_id,
-            mapping_version=identity.mapping_version,
+            codex_capability_profile_id=job.identity.codex_capability_profile_id,
+            mapping_version=job.identity.mapping_version,
             import_incomplete=job.state is ImportState.PENDING,
         )
 

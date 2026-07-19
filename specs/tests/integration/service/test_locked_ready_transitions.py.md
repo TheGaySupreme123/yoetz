@@ -22,6 +22,12 @@ available-absent or locked/unavailable; queryable correlated-entry and any prior
 catalog/artifact refuse initialization; committed passphrase startup performs zero keyring calls;
 distinct unlock ceremony; correct-secret startup failure after committed
 initialization; 15-minute true idle, monitor loss, wake stays locked and fresh ready composition.
+The injected daemon activation observes the exact current service/vault generations only after the
+vault is ready. A correct passphrase followed by activation/startup-gate failure returns bounded
+`unlock_failed`, resets the successful passphrase throttle, relocks the vault, and leaves lifecycle
+state locked without publishing a ready result.
+Clean-crash continuation adopts an exact provisional initial throttle record without changing its
+bytes or prior writer binding; any nonprovisional record blocks re-initialization.
 
 ## Errors and edge cases
 

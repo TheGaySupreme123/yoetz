@@ -1,7 +1,7 @@
 # src/yoetz/application/integrations.py — harness skill preview, consent, status, and removal
 
 **Wave:** D | **ADRs:** ADR-005, ADR-007, ADR-010 | **Imports (spec-tree):**
-`ports/integrations.py.md`, `protocol/errors.md`, `ports/diagnostics.md` | **Imported by:**
+`ports/integrations.py.md`, `protocol/errors.md` | **Imported by:**
 CLI `integrate <harness> skill` commands and integration tests
 
 ## Purpose
@@ -19,7 +19,7 @@ updater daemon.
 
 ## Public surface
 
-- `IntegrationService(integrations: IntegrationsPort, diagnostics: DiagnosticsPort)`.
+- `IntegrationService(integrations: IntegrationsPort, diagnostics: IntegrationDiagnosticSink)`.
 - `preview_skill(IntegrationRequest) -> IntegrationPreview`.
 - `install_skill(IntegrationRequest, IntegrationConfirmation) -> IntegrationResult`.
 - `status_skill(IntegrationStatusRequest) -> IntegrationStatus`.
@@ -28,10 +28,17 @@ updater daemon.
 - `IntegrationStatusRequest(harness, project_root)`.
 - `IntegrationConfirmation(preview_digest, explicitly_accepted, channel)` with
   `interactive|noninteractive_flag`.
+- `IntegrationDiagnostic` — frozen path-free structural observation containing only harness,
+  action, phase/outcome, before/after state, compatibility, managed-file count, structural digests,
+  and an optional closed `IntegrationReason`; `IntegrationDiagnosticSink.record_integration`
+  consumes it. It is separate from startup `DiagnosticsPort`/`StartupCheckResult`.
 
 The request/confirmation names and exact confirmation-channel vocabulary are shared application
 values registered in `specs/INTERFACES.md`.
 `project_root` is secret/redacted in representation and excluded from diagnostics.
+The ordinary control mapping preserves `harness` as a required field on preview, status, and
+execute bodies. In v0.1 its only wire value is the schema constant `codex`; the service never
+defaults a missing wire discriminator before constructing either request value.
 
 ## Behavior
 
@@ -106,7 +113,8 @@ modified content/diff, user/home name, environment, exception and any Yoetz task
 
 ## Tests
 
-- `specs/tests/unit.md`: request/action/confirmation mapping, modified-replace double consent, no-TTY,
+- `specs/tests/unit/application/test_integrations.py.md`: request/action/confirmation mapping,
+  modified-replace double consent, no-TTY,
   errors/cancellation/privacy; unregistered harness rejected before any port call; no environment
   inference of the harness.
 - `specs/tests/integration.md`: application-to-port ordering and stale-preview/no-auto-retry; the

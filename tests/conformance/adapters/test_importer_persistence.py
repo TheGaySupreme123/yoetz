@@ -476,7 +476,9 @@ async def test_prepare_and_review_sources_are_memory_sqlite_equivalent(tmp_path:
         prepared = await importer.prepare_plan(allocation)
         assert prepared == plan
         allocation = await importer.publish_plan(allocation, prepared)
-        pending_review = await importer.load_review_source(identity, Frontier.genesis())
+        pending_review = await importer.load_review_source(
+            identity.identity_digest, Frontier.genesis()
+        )
         assert pending_review is not None
         assert pending_review.mapped_event_ids == ()
         assert pending_review.gaps == plan.gaps
@@ -488,11 +490,13 @@ async def test_prepare_and_review_sources_are_memory_sqlite_equivalent(tmp_path:
         allocation = await importer.record_batch(
             selection.allocation, selection.batch, _append(event)
         )
-        publishing_review = await importer.load_review_source(identity, Frontier(1, _DIGEST))
+        publishing_review = await importer.load_review_source(
+            identity.identity_digest, Frontier(1, _DIGEST)
+        )
         assert publishing_review is not None
         assert publishing_review.mapped_event_ids == (event.event_id,)
         with pytest.raises(PublicOperationError) as cut:
-            await importer.load_review_source(identity, Frontier.genesis())
+            await importer.load_review_source(identity.identity_digest, Frontier.genesis())
         assert cut.value.code is PublicErrorCode.INVALID_REQUEST
 
         report_object = _object(
@@ -515,7 +519,9 @@ async def test_prepare_and_review_sources_are_memory_sqlite_equivalent(tmp_path:
         )
         completed = await importer.complete(allocation)
         assert completed.replayed_report == report
-        complete_review = await importer.load_review_source(identity, Frontier(2, _DIGEST))
+        complete_review = await importer.load_review_source(
+            identity.identity_digest, Frontier(2, _DIGEST)
+        )
         assert complete_review is not None
         assert not complete_review.import_incomplete
         assert complete_review.report_object == report_object
@@ -534,7 +540,9 @@ async def test_prepare_and_review_sources_are_memory_sqlite_equivalent(tmp_path:
         )
         await importer.quarantine(allocation, ImportSafeReason("import_phase_state_contradiction"))
         with pytest.raises(PublicOperationError) as quarantined:
-            await importer.load_review_source(quarantined_identity, Frontier.genesis())
+            await importer.load_review_source(
+                quarantined_identity.identity_digest, Frontier.genesis()
+            )
         assert quarantined.value.code is PublicErrorCode.STORAGE_CORRUPT
 
     writer_db.close()

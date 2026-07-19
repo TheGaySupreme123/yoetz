@@ -30,7 +30,7 @@ draft through normal `publish_work` and reports the `AppendResult` back.
   aliases, source jobs, ordered batch rows, and a monotonic revision, never plaintext.
 - `@dataclass(frozen=True, slots=True) class MemoryImportPolicy` with v0.1 constants:
   - exact source `4 * 1024 * 1024` bytes;
-  - stderr retained-prefix/commitment input `64 * 1024` bytes (raw bytes then discarded);
+  - exact stderr-absent capture constants (`false`, `0`, `false`, `None`);
   - physical line `1 * 1024 * 1024` bytes and 20,000 lines;
   - at most 1,024 planned batches;
   - 60-second job lease and 30-second minimum renewed publication window;
@@ -100,11 +100,10 @@ publisher/lease identity. There is no background lease reaper.
    source equality value.
 4. Run `sanitize_codex_argv`. Convert cwd identity input through the bundle-keyed commitment
    helper; never normalize/open it. Build bounded safe metadata fields.
-5. If stderr exists, read at most 64 KiB plus one byte, record present/captured count/truncated,
-   compute `ObjectKind.import_stderr` through `objects.commitment_for` over the retained prefix,
-   compute its ordinary digest only for audit metadata, then discard all stderr bytes. Never call
-   `stage` for this commitment-only kind and never drain an unbounded remainder.
-6. Encode source/stderr audit digests, sanitized argv/cwd audit material, exact object ref, and
+5. Record the exact stderr-absent constants. `ImportCaptureInput` cannot carry stderr bytes or a
+   caller-created stderr commitment, and capture never reads, hashes, commits, stages, or drains a
+   stderr source.
+6. Encode the source audit digest, sanitized argv/cwd audit material, exact object ref, and
    safe capture fields into one encrypted `ObjectKind.import_source_manifest` object; finalize it.
 7. Return `CapturedImportSource` only after both objects are finalized/authentic. Failures may
    leave finalized unreferenced memory objects, matching durable orphan semantics, but create no
@@ -233,7 +232,8 @@ all batch reservations plus the final-report ordinal atomically with the plan. L
 the same maps together with its operation map under the shared lock. Completion and quarantine do
 not remove reservations.
 
-`load_review_source(identity, through)` snapshots the exact job/batch rows under the lock; absent
+`load_review_source(identity_digest, through)` validates and exactly indexes the durable identity
+digest, then snapshots the exact job/batch rows under the lock; absent
 returns `None`, quarantined/contradictory state raises `STORAGE_CORRUPT`. It verifies source/plan/
 report objects and accepted batch/report events outside the lock, rejects any selected event past
 `through`, then returns the bounded structural `ImportReviewSource`. Pending jobs include only
@@ -267,7 +267,7 @@ It acquires no lease and mutates nothing.
 
 ## Tests
 
-- `specs/tests/unit.md`: every method/state/phase guard, source cap/stderr discard, alias/source
+- `specs/tests/unit.md`: every method/state/phase guard, source cap/stderr-absent lock, alias/source
   dedupe, publisher freeze, lease/reclaim, batching, report-ready identity, review/status bounds,
   no-await-under-lock assertion, redacted state/reprs.
 - `specs/tests/conformance.md`: run the shared importer state-machine suite against

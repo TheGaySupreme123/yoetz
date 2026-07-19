@@ -95,6 +95,7 @@ class _OperationRow:
     lease_generation: int | None
     lease_expires_at: datetime | None
     response_object_id: str | None
+    response_envelope_digest: str | None
     terminal_result_canonical: bytes | None
     terminal_result_digest: str | None
     quarantine_code: str | None
@@ -223,7 +224,7 @@ def _route_value(row: _RouteRow) -> TaskRoute:
 
 
 def _operation_from_row(row: tuple[object, ...]) -> _OperationRow:
-    if len(row) != 21:
+    if len(row) != 22:
         raise _error(PublicErrorCode.STORAGE_CORRUPT)
     owner_generation_text = _optional_text(row[13])
     try:
@@ -248,9 +249,10 @@ def _operation_from_row(row: tuple[object, ...]) -> _OperationRow:
             lease_generation=_optional_int(row[15]),
             lease_expires_at=lease_expires_at,
             response_object_id=_optional_text(row[17]),
-            terminal_result_canonical=_optional_bytes(row[18]),
-            terminal_result_digest=_optional_text(row[19]),
-            quarantine_code=_optional_text(row[20]),
+            response_envelope_digest=_optional_text(row[18]),
+            terminal_result_canonical=_optional_bytes(row[19]),
+            terminal_result_digest=_optional_text(row[20]),
+            quarantine_code=_optional_text(row[21]),
         )
     except (TypeError, ValueError) as exc:
         raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
@@ -279,6 +281,9 @@ def _lease(row: _OperationRow) -> StartOperationLease | None:
 
 def _allocation(row: _OperationRow, outcome: str) -> StartAllocation:
     replayed = row.terminal_result_canonical if outcome == "replayed" else None
+    expose_response = row.state == "complete" or (
+        row.state == "pending" and row.phase is StartPhase.RESULT_PUBLISHED
+    )
     try:
         return StartAllocation(
             outcome=outcome,  # type: ignore[arg-type]
@@ -291,7 +296,10 @@ def _allocation(row: _OperationRow, outcome: str) -> StartAllocation:
             route_generation=row.route_generation,
             route_identity_digest=row.route_identity_digest,
             phase=row.phase,
-            response_object_id=row.response_object_id,
+            response_object_id=row.response_object_id if expose_response else None,
+            response_envelope_digest=(row.response_envelope_digest if expose_response else None),
+            response_result_canonical=(row.terminal_result_canonical if expose_response else None),
+            response_result_digest=(row.terminal_result_digest if expose_response else None),
             lease=_lease(row),
             replayed_result=replayed,
         )
@@ -307,6 +315,10 @@ def _same_allocation(row: _OperationRow, allocation: StartAllocation) -> bool:
         and row.lifecycle_event_id == allocation.lifecycle_event_id
         and row.route_generation == allocation.route_generation
         and hmac.compare_digest(row.route_identity_digest, allocation.route_identity_digest)
+        and row.response_object_id == allocation.response_object_id
+        and row.response_envelope_digest == allocation.response_envelope_digest
+        and row.terminal_result_canonical == allocation.response_result_canonical
+        and row.terminal_result_digest == allocation.response_result_digest
     )
 
 
@@ -319,6 +331,7 @@ def _evidence_value(evidence: StartCompletionEvidence) -> dict[str, JsonValue]:
         "lifecycle_frontier": frontier,
         "milestone": evidence.milestone.value,
         "owner_generation": evidence.owner_generation,
+        "response_envelope_digest": evidence.response_envelope_digest,
         "response_object_id": evidence.response_object_id,
         "result_digest": evidence.result_digest,
         "route_generation": evidence.route_generation,
@@ -336,6 +349,7 @@ def _validate_completion_evidence(
 ) -> None:
     if (
         evidence.milestone is not StartMilestone.RESULT_PUBLISHED
+        or evidence.owner_generation != row.owner_generation
         or evidence.task_id != row.task_id
         or evidence.session_id != row.session_id
         or evidence.writer_id != row.writer_id
@@ -343,6 +357,7 @@ def _validate_completion_evidence(
         or evidence.route_generation != row.route_generation
         or not hmac.compare_digest(evidence.route_identity_digest, row.route_identity_digest)
         or evidence.response_object_id != result.response_object_id
+        or evidence.response_envelope_digest != result.envelope_digest
         or evidence.result_digest != result.result_digest
         or not hmac.compare_digest(
             evidence.evidence_digest, canonical_digest(_evidence_value(evidence))
@@ -373,7 +388,7 @@ _OPERATION_COLUMNS: Final = """
 installation_id, operation_id, request_digest, requested_mode, route_action, state, phase,
 task_id, session_id, writer_id, lifecycle_event_id, route_generation, route_identity_digest,
 owner_generation, lease_owner_id, lease_generation, lease_expires_at, response_object_id,
-terminal_result_canonical, terminal_result_digest, quarantine_code
+response_envelope_digest, terminal_result_canonical, terminal_result_digest, quarantine_code
 """
 
 
@@ -503,11 +518,11 @@ class SqliteStartCatalog:
                     installation_id, operation_id, request_digest, requested_mode, route_action,
                     state, phase, task_id, session_id, writer_id, lifecycle_event_id,
                     route_generation, route_identity_digest, owner_generation, lease_owner_id,
-                    lease_generation, lease_expires_at, response_object_id,
+                    lease_generation, lease_expires_at, response_object_id, response_envelope_digest,
                     terminal_result_canonical, terminal_result_digest, quarantine_code,
                     terminal_at, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, 'pending', 'route_reserved', ?, ?, ?, ?, ?, ?, ?, ?, 1,
-                    ?, NULL, NULL, NULL, NULL, NULL, ?, ?)""",
+                    ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)""",
                 (
                     self._installation_id,
                     request.operation_id,
@@ -551,20 +566,33 @@ class SqliteStartCatalog:
             row = self._operation_for(allocation)
             self._require_lease(row, allocation, now, self._owner_generation())
             if row.phase is phase:
-                if result is not None and row.response_object_id != result.response_object_id:
+                if result is not None and (
+                    row.response_object_id != result.response_object_id
+                    or row.response_envelope_digest != result.envelope_digest
+                    or row.terminal_result_canonical != result.result_canonical
+                    or row.terminal_result_digest != result.result_digest
+                ):
                     raise _error(PublicErrorCode.INTERNAL_ERROR)
                 return _allocation(row, allocation.outcome)
             if _PHASE_SUCCESSOR.get(row.phase) is not phase:
                 raise _error(PublicErrorCode.INTERNAL_ERROR)
             response_object_id = result.response_object_id if result is not None else None
+            response_envelope_digest = result.envelope_digest if result is not None else None
+            result_canonical = result.result_canonical if result is not None else None
+            result_digest = result.result_digest if result is not None else None
             cursor = self._db.execute(
-                """UPDATE start_operations SET phase = ?, response_object_id = ?, updated_at = ?
+                """UPDATE start_operations SET phase = ?, response_object_id = ?,
+                   response_envelope_digest = ?, terminal_result_canonical = ?,
+                   terminal_result_digest = ?, updated_at = ?
                    WHERE installation_id = ? AND operation_id = ? AND state = 'pending'
                      AND phase = ? AND owner_generation = ? AND lease_owner_id = ?
                      AND lease_generation = ? AND lease_expires_at = ?""",
                 (
                     phase.value,
                     response_object_id,
+                    response_envelope_digest,
+                    result_canonical,
+                    result_digest,
                     now_wire,
                     row.installation_id,
                     row.operation_id,
@@ -601,7 +629,12 @@ class SqliteStartCatalog:
             self._require_lease(row, allocation, now, self._owner_generation())
             if row.phase is not StartPhase.RESULT_PUBLISHED:
                 raise _error(PublicErrorCode.INTERNAL_ERROR)
-            if row.response_object_id != result.response_object_id:
+            if (
+                row.response_object_id != result.response_object_id
+                or row.response_envelope_digest != result.envelope_digest
+                or row.terminal_result_canonical != result.result_canonical
+                or row.terminal_result_digest != result.result_digest
+            ):
                 raise _error(PublicErrorCode.INTERNAL_ERROR)
             _validate_completion_evidence(row, result, evidence)
             route = self._require_current_route(row)
@@ -664,6 +697,7 @@ class SqliteStartCatalog:
                 """UPDATE start_operations SET
                     state = 'quarantined', phase = 'terminal', owner_generation = NULL,
                     lease_owner_id = NULL, lease_generation = NULL, lease_expires_at = NULL,
+                    response_object_id = NULL, response_envelope_digest = NULL,
                     terminal_result_canonical = ?, terminal_result_digest = ?, quarantine_code = ?,
                     terminal_at = ?, updated_at = ?
                    WHERE installation_id = ? AND operation_id = ? AND state = 'pending'""",

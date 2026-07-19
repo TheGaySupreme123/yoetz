@@ -14,6 +14,8 @@ Prove the object store port publishes and opens the same canonical object behavi
 - `test_failure_atomicity_parity` — partial failures do not create divergent public state.
 - `test_redaction_and_missing_object_parity` — redaction and missing objects are surfaced the same
   way.
+- `test_catalog_pinned_resolution_requires_exact_id_and_envelope_digest` — bounded START-resume
+  resolution succeeds only for the exact finalized object ID+envelope pair.
 - `test_generation_fenced_sweep_parity` — all adapters retain the same owning-root union and abort
   collection on generation drift.
 
@@ -27,6 +29,7 @@ The test asserts:
 - failed publication leaves no fake success on either backend;
 - verified open returns the same bytes for the same finalized object;
 - redacted or missing objects are represented with the same public limitations.
+- wrong/missing ID or wrong full envelope digest fails closed before returning an `ObjectRef`.
 - `ObjectRootSnapshot` unions ledger, importer, catalog privacy, and pin roots identically; a
   catalog-rooted `privacy_audit` object remains live without ledger inventory and generation drift
   aborts collection.

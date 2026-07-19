@@ -22,6 +22,7 @@ and provider implementations to vary without granting CLI/MCP/provider code dire
   - `async tighten(scope, overlay: PolicyOverlay) -> PrivacyPolicy`
   - `async watch_generation() -> int`
 - `class PrivacyAuditPort(Protocol)`:
+  - `async complete_agent_projection(request: AgentProjectionRequest, receipt: LocalDisclosureReceipt) -> CompletedAgentProjection`
   - `async reserve(subject: PrivacyAuditSubject) -> PrivacyAuditReservation`
   - `async load(request_id: str, subject_digest: str) -> PrivacyAuditState | None`
   - `async record_human_decision(reservation_id, decision: HumanPrivacyDecision) -> PrivacyAuditState`
@@ -47,10 +48,12 @@ and provider implementations to vary without granting CLI/MCP/provider code dire
   - `async dispatch_external_semantic(case: ApprovedOutboundCase, authorization: EgressAuthorization, deadline: Deadline) -> SemanticResult`
   - `async dispatch_local_semantic(case: ApprovedLocalDisclosureCase, deadline: Deadline) -> SemanticResult`
   - `async close_revoked(policy_generation: int) -> None`
+  - `async close() -> None`
 - Frozen authority/state values: `EffectivePrivacyPolicy`, `PolicyTransitionProposal`,
   `PreparedPolicyTransition`, `HumanPolicyDecision`, `PrivacyAuditReservation`,
   `PrivacyAuditSubject`, `PreDispatchAuditDecision`, `AgentProjectionAuditSubject`,
   `PrivacyAuditState`,
+  `AgentProjectionRequest`, `CompletedAgentProjection`,
   `PendingHumanDecision`, `PreparedOutboundCase`,
   `ConsumedAuthorization`, `ConsumedLocalDisclosure`, `PrivacyAuditObjectRoots`,
   `PrivacyReceiptQuery`, `PrivacyReceiptPage` (positive `snapshot_generation`, bounded unique
@@ -399,6 +402,13 @@ or widen one.
   explicit verified repair. `quarantined` is a `PrivacyAuditState.status`, not a receipt outcome.
 - `close_revoked` is idempotent and closes all sessions whose policy generation or destination is no
   longer permitted; it never waits for a future request to notice tightening.
+- `close` is idempotent and terminal. It atomically installs a deny fence before awaiting transport
+  closure. Once closing begins, reconciliation, external/local dispatch, and revocation calls admit
+  no new work, mint no credential handle, render no content-bearing request, and perform no new
+  adapter I/O. Unconsumed in-flight work is fenced before I/O; a consumed attempt may only be
+  best-effort closed and made nonselectable, and still receives its actual or `outcome_unknown`
+  durable receipt. Closure never claims to recall bytes already sent and exposes no credential or
+  content upstream.
 
 ## Invariants
 

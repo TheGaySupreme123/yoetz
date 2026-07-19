@@ -302,16 +302,14 @@ class HarnessProfile:
         object.__setattr__(self, "skill_root", root)
         object.__setattr__(self, "frontmatter_profile", _token(self.frontmatter_profile))
         profiles = _sorted_unique_strings(self.capability_profile_ids, maximum=64, token=True)
-        if not profiles:
-            raise _port_error("integration_profile_invalid")
         versions = _sorted_unique_strings(self.supported_versions, maximum=64, token=True)
-        if not versions:
-            raise _port_error("integration_profile_invalid")
         try:
             hooks = dict(self.hooks_by_capability_profile)
         except Exception as exc:
             raise _port_error("integration_profile_invalid") from exc
         if tuple(sorted(hooks, key=str.encode)) != profiles:
+            raise _port_error("integration_profile_invalid")
+        if bool(profiles) != bool(versions):
             raise _port_error("integration_profile_invalid")
         if any(type(key) is not str for key in hooks):
             raise _port_error("integration_profile_invalid")
@@ -376,8 +374,6 @@ class SkillSource:
         object.__setattr__(self, "skill_version", _token(self.skill_version))
         object.__setattr__(self, "protocol_range", _token(self.protocol_range))
         tested = _sorted_unique_strings(self.harness_tested_set, maximum=64, token=True)
-        if not tested:
-            raise _port_error("integration_source_invalid")
         object.__setattr__(self, "harness_tested_set", tested)
         validate_sha256_digest(self.resource_set_digest)
         raw_files = _tuple(self.files, maximum=_MAX_FILES, reason="integration_source_invalid")

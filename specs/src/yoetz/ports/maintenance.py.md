@@ -87,6 +87,14 @@ Yoetz values and raises typed bounded failures; no SQLite/APSW/`Path` type cross
   required_migration_ids, preflight_backup_mode, warnings, plan_digest)`.
 - `MigrationResult(request_id, task_id, from_version, to_version, backup_manifest_digest,
   frontier_before, frontier_after, replay_digest, completed_at)`.
+- `RecoverySecretAcquisition(request_id, confirmed_plan_digest, service_generation, operation)` —
+  frozen secret-free binding for one confirmed portable operation. `service_generation` is a
+  positive integer and `operation` is exact `create|restore`; it carries no location, command,
+  confirmation flag, prompt content, or secret-shaped value.
+- `class RecoverySecretAcquirer(Protocol)` — least-authority confidential injection with the sole
+  method `acquire_recovery_secret(acquisition: RecoverySecretAcquisition) -> RecoverySecret`.
+  It cannot accept or return raw `str`, `bytes`, `bytearray`, `memoryview`, a generic
+  `SecretHandle`, or maintenance execution authority.
 - `RecoverySecret` — opaque one-shot `SecretHandle(purpose=portable_recovery)` staged only after
   exact plan confirmation. It is service-internal, constant-redacted, bound to request ID + plan
   digest + service generation, supplied as the separate execution-only keyword above, and never
@@ -117,8 +125,11 @@ Each preview:
 
 Preview never requests, receives, derives, validates, or stages `RecoverySecret`, even when the
 selected plan is portable. After the exact plan is rendered and locally confirmed, confidential
-ingress may mint one recovery handle bound to `(request_id, plan_digest, service_generation,
-operation)`. Portable backup/create requires helper-side double entry and one send; portable
+ingress may mint one recovery handle through `RecoverySecretAcquirer`, bound by one
+`RecoverySecretAcquisition(request_id, confirmed_plan_digest, service_generation, operation)`.
+The acquisition is constructed only after explicit acceptance and exact equality between the
+confirmation digest and returned preview digest; it is not reusable for a changed preview or
+service generation. Portable backup/create requires helper-side double entry and one send; portable
 restore requires one entry and one send. The port receives exactly one handle in either case.
 Execution requires it exactly when the recomputed confirmed plan says portable, forbids it for
 machine-bound mode, consumes it once inside the recovery wrapper, and overwrites it on every

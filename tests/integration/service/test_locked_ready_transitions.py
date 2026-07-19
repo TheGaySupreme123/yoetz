@@ -11,6 +11,7 @@ from yoetz.ports.control import ServiceState
 from yoetz.ports.keys import KeyStoreError
 from yoetz.ports.secret_memory import SecretPurpose
 from yoetz.service.lifecycle import ServiceLifecycle, SessionSecurityEvent
+from yoetz.service.unlock import UnlockCoordinator, UnlockThrottleStore
 from yoetz.service.vault import VaultError, VaultMode, VaultService, VaultState
 
 _INSTALLATION_ID = "ins_00000000-0000-4000-8000-000000000001"
@@ -110,3 +111,66 @@ async def test_wrong_unlock_remains_locked_and_never_opens_ready_composition(
     assert vault.state is VaultState.LOCKED
     with pytest.raises(KeyStoreError, match="vault_locked"):
         await vault.load_bundle_keys(_TASK_ID)
+
+
+@pytest.mark.anyio
+async def test_ready_activation_failure_relocks_after_correct_passphrase(
+    tmp_path: Path,
+) -> None:
+    memory = LocalSecretMemory()
+    clock = _Clock()
+    vault = VaultService(
+        installation_id=_INSTALLATION_ID,
+        service_generation=1,
+        mode=VaultMode.UNINITIALIZED,
+        secret_memory=memory,
+        clock=clock,  # pyright: ignore[reportArgumentType]
+        vault_store_factory=lambda: EncryptedVaultStore(tmp_path / "vault"),
+        pristine_state_digest="sha256:" + "1" * 64,
+    )
+    initialize = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"correct horse battery"))
+    await vault.initialize_passphrase(initialize, "sha256:" + "2" * 64)
+    await vault.lock()
+
+    lifecycle = ServiceLifecycle(
+        clock,  # pyright: ignore[reportArgumentType]
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "3" * 64,
+        instance_id=_INSTANCE_ID,
+    )
+    await lifecycle.acquire_singleton()
+    await lifecycle.transition(ServiceState.LOCKED)
+    throttle = UnlockThrottleStore(
+        tmp_path / "unlock-throttle.json",
+        installation_id=_INSTALLATION_ID,
+        writer_instance_id=_INSTANCE_ID,
+        clock=clock,  # pyright: ignore[reportArgumentType]
+    )
+    throttle.stage_initial_record()
+    activation_calls: list[tuple[int, int, bool]] = []
+
+    async def fail_ready_activation(service_generation: int, vault_generation: int) -> None:
+        activation_calls.append((service_generation, vault_generation, vault.ready))
+        raise RuntimeError("startup gate failed")
+
+    coordinator = UnlockCoordinator(
+        clock=clock,  # pyright: ignore[reportArgumentType]
+        throttle=throttle,
+        vault=vault,
+        lifecycle=lifecycle,
+        activate_ready=fail_ready_activation,
+    )
+    challenge = await coordinator.begin_passphrase_unlock(target_digest="sha256:" + "4" * 64)
+    unlock = memory.capture(SecretPurpose.VAULT_UNLOCK, bytearray(b"correct horse battery"))
+
+    result = await coordinator.complete_passphrase_unlock(challenge, unlock)
+
+    assert result.state == "locked"
+    assert result.reason == "unlock_failed"
+    assert activation_calls == [(1, 3, True)]
+    assert lifecycle.state is ServiceState.LOCKED
+    assert vault.state is VaultState.LOCKED
+    assert vault.generation == 4
+    assert throttle.record.consecutive_failures == 0
+    assert throttle.record.attempt_in_progress is False
+    memory.close()

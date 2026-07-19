@@ -206,7 +206,7 @@ class ControlSession:
         ):
             raise ValueError("connection_nonce_invalid")
         if self.peer_identity is None or isinstance(
-            self.peer_identity, (str, bytes, bytearray, int, float, bool)
+            self.peer_identity, str | bytes | bytearray | int | float | bool
         ):
             raise TypeError("peer_identity_invalid")
 
@@ -481,7 +481,7 @@ def schema_for_method(method: ControlMethod, direction: SchemaDirection) -> Mapp
     schema_name = "control-request" if direction == "request" else "control-result"
     document = schema_document_for(schema_name, _SCHEMA_VERSION)
     branches = document.json_schema.get("oneOf")
-    if not isinstance(branches, (list, tuple)):
+    if not isinstance(branches, list | tuple):
         _fail("frame_invalid")
     matches: list[Mapping[str, JsonValue]] = []
     for branch in branches:

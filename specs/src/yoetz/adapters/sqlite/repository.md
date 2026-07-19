@@ -199,6 +199,17 @@ Phases only move forward; on reclaim the recorded phase is a lower bound — the
 re-validates durable state for that phase before advancing and never assumes an external call
 completed.
 
+`operations.resume_object_id` is the sole current durable phase pointer. Reservation inventories a
+full strict `CHECK_RESUME` case envelope. The `reserved -> local_ready` transaction inventories the
+already verified `DETERMINISTIC_RESULT` and replaces that column atomically; no cache-only
+`phase_objects` map participates in recovery. On SQLite reopen, every pending row is reconstructed
+with the media/kind required by its phase and the object is resolved and canonical-decoded. Later
+phases follow the deterministic envelope's authenticated prior-resume pointer to recover the full
+case. Missing objects, descriptor drift, noncanonical bytes, malformed case trees, or any
+request/task/session/writer/frontier/dependency mismatch fail closed as storage corruption (and the
+owning quarantine path may fence the row); recovery never reruns case construction or ID
+allocation.
+
 Every successful advance, renewal, or reclaim returns a replacement `OperationLease`; the prior
 value is spent. The application reconstructs the two-field `FrozenCase` with the returned current
 lease before finalization. The final transaction requires its embedded phase to be

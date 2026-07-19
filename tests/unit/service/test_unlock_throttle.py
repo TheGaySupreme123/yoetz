@@ -19,6 +19,7 @@ from yoetz.service.unlock import (
 
 INSTALLATION_ID = "ins_10000000-0000-4000-8000-000000000001"
 SERVICE_ID = "svc_10000000-0000-4000-8000-000000000002"
+SUCCESSOR_SERVICE_ID = "svc_10000000-0000-4000-8000-000000000003"
 
 
 @dataclass
@@ -95,6 +96,33 @@ def test_atomic_owner_only_record_and_success_reset(tmp_path: Path) -> None:
     assert not reset.attempt_in_progress
     assert reset.last_failure_utc is None
     assert reset.record_generation == 3
+
+
+def test_successor_adopts_only_exact_provisional_initial_record(tmp_path: Path) -> None:
+    path = _private_directory(tmp_path) / "unlock-throttle.json"
+    clock = _Clock()
+    staged = _store(path, clock).stage_initial_record()
+    staged_bytes = path.read_bytes()
+    successor = UnlockThrottleStore(
+        path,
+        installation_id=INSTALLATION_ID,
+        writer_instance_id=SUCCESSOR_SERVICE_ID,
+        clock=clock,
+    )
+
+    adopted = successor.stage_or_adopt_initial_record()
+
+    assert adopted == staged
+    assert adopted.last_writer_instance_id == SERVICE_ID
+    assert path.read_bytes() == staged_bytes
+    successor.reserve_attempt()
+    with pytest.raises(UnlockError, match="throttle_record_exists"):
+        UnlockThrottleStore(
+            path,
+            installation_id=INSTALLATION_ID,
+            writer_instance_id=SUCCESSOR_SERVICE_ID,
+            clock=clock,
+        ).stage_or_adopt_initial_record()
 
 
 def test_failure_is_charged_before_delay_and_restart_rearms_full_delay(tmp_path: Path) -> None:

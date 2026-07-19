@@ -24,7 +24,7 @@ CREATE TABLE operations (
     writer_id TEXT NOT NULL REFERENCES writers(writer_id),
     operation_id TEXT NOT NULL,
     operation_kind TEXT NOT NULL
-        CHECK (operation_kind IN ('publish_work', 'check', 'respond', 'receipt')),
+        CHECK (operation_kind IN ('start', 'publish_work', 'check', 'respond', 'receipt')),
     request_digest TEXT NOT NULL,
     resume_object_id TEXT REFERENCES objects(object_id),
     state TEXT NOT NULL CHECK (state IN ('pending', 'complete', 'quarantined')),

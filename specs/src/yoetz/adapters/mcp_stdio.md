@@ -24,6 +24,8 @@ bytes into request parsing, or interleave non-protocol noise into stdout.
   yields the pair `(read_stream, write_stream)` consumed by `Server.run` in `mcp/server.py`
   (`specs/INTERFACES.md`). `read_stream` delivers validated SDK `SessionMessage` values to the server;
   `write_stream` accepts SDK `SessionMessage` values from the server and serializes them to stdout.
+  A nondefault cap must be at least the byte length of the largest fixed transport-error frame, so
+  the adapter never violates its own outbound cap while reporting a bounded inbound failure.
 - `TransportFailure` — internal exception type (never crosses to the SDK streams) with a bounded
   reason code; terminates the context manager body. It is deliberately adapter-private under the
   registry ownership rule.

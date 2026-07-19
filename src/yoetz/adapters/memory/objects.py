@@ -252,8 +252,21 @@ class MemoryObjectStore:
             return plaintext
         except InvalidTag as exc:
             raise _verification_failed() from exc
-        except ValueError as exc:
-            if str(exc) == "object_verification_failed":
+
+    async def resolve_verified(self, object_id: str, envelope_digest: str) -> ObjectRef:
+        """Resolve one durable reference only under its catalog-pinned envelope digest."""
+
+        try:
+            validate_id(IdKind.OBJECT, object_id)
+            with self._lock:
+                record = self._durable.get(object_id)
+                ref = None if record is None else record.finalized
+            if ref is None or ref.envelope_digest != envelope_digest:
+                raise _verification_failed()
+            await self._open_verified_bytes(ref)
+            return ref
+        except (TypeError, ValueError) as exc:
+            if isinstance(exc, ValueError) and str(exc) == "object_verification_failed":
                 raise
             raise _verification_failed() from exc
 

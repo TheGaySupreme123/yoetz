@@ -51,7 +51,8 @@ outbound request-body plaintext in structural audit records.
   `stale`, `outcome_unknown`.
 - Frozen values: `ProviderBinding`, `ProviderDataUseProfile`, `ReviewSelectionPolicy`,
   `AuthorizationScope`, `ChannelPolicy`, `PrivacyPolicy`,
-  `PolicyOverlay`, `CandidateContextItem`, `CandidateContext`, `ClassifiedContextItem`,
+  `PolicyOverlay`, `ProjectionProvenanceContext`, `ProjectionAuditContext`,
+  `CandidateContextItem`, `CandidateContext`, `ClassifiedContextItem`,
   `ClassifiedContext`, `PreDispatchAuditDecision`, `AgentProjectionAuditSubject`,
   `DisclosureProposal`, `PrivacyAuditSubject`,
   `HumanPrivacyDecision`, `EgressAuthorization`, `ApprovedOutboundCase`,
@@ -195,9 +196,16 @@ category set means no user content, not all content.
 ### Candidate and classification values
 
 `CandidateContextItem` carries an internal opaque item ID, declared category, source-owned scope,
-origin reference, and local plaintext bytes. Candidate bytes remain in protected process memory and
+origin reference (a bounded source tag or canonical JSON Pointer), sorted contributor references,
+and local plaintext bytes. Candidate bytes remain in protected process memory and
 encrypted objects only. They have no public serializer and may not be logged, placed in an error,
 or passed to a provider.
+
+`ProjectionProvenanceContext(session_id, writer_id, frontier)` is optional on `agent_context` and
+forbidden on every other sink. Absence is ambiguous and grants no authorship widening.
+`ProjectionAuditContext` is required only for exact `client_result_projection` to
+`agent_context|local_human_view`; it carries trusted RPC/service/route identity and bounded
+canonical control-request/internal-result bytes. Only the audit adapter may mint commitments.
 
 `ClassifiedContextItem` adds exactly one `DataClass`, zero or more `ForbiddenDataKind` findings,
 scope-validity status, and classifier ruleset version. A forbidden finding can never be waived.

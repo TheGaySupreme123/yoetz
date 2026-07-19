@@ -244,6 +244,9 @@ class StartAllocation:
     route_identity_digest: str
     phase: StartPhase
     response_object_id: str | None
+    response_envelope_digest: str | None
+    response_result_canonical: bytes | None
+    response_result_digest: str | None
     lease: StartOperationLease | None
     replayed_result: bytes | None
 
@@ -278,6 +281,31 @@ class StartAllocation:
             raise _invalid()
         if self.response_object_id is not None:
             _id(IdKind.OBJECT, self.response_object_id)
+        try:
+            if self.response_envelope_digest is not None:
+                validate_sha256_digest(self.response_envelope_digest)
+            if self.response_result_digest is not None:
+                validate_sha256_digest(self.response_result_digest)
+        except ValueError as exc:
+            raise _invalid() from exc
+        if self.response_result_canonical is not None:
+            if type(self.response_result_canonical) is not bytes:
+                raise _invalid()
+            expected_result_digest = (
+                f"sha256:{hashlib.sha256(self.response_result_canonical).hexdigest()}"
+            )
+            if self.response_result_digest != expected_result_digest:
+                raise _invalid()
+        response_identity = (
+            self.response_object_id,
+            self.response_envelope_digest,
+            self.response_result_canonical,
+            self.response_result_digest,
+        )
+        response_identity_complete = all(value is not None for value in response_identity)
+        response_identity_absent = all(value is None for value in response_identity)
+        if not (response_identity_complete or response_identity_absent):
+            raise _invalid()
         if self.outcome == "replayed":
             if (
                 self.phase is not StartPhase.TERMINAL
@@ -292,20 +320,25 @@ class StartAllocation:
         ):
             raise _invalid()
         if self.phase is StartPhase.RESULT_PUBLISHED:
-            if self.response_object_id is None:
+            if not response_identity_complete:
                 raise _invalid()
-        elif self.outcome != "replayed" and self.response_object_id is not None:
+        elif self.outcome != "replayed" and not response_identity_absent:
             raise _invalid()
 
 
 @dataclass(frozen=True, slots=True)
 class EncryptedResultRef:
     response_object_id: str
+    envelope_digest: str
     result_canonical: bytes
     result_digest: str
 
     def __post_init__(self) -> None:
         _id(IdKind.OBJECT, self.response_object_id)
+        try:
+            validate_sha256_digest(self.envelope_digest)
+        except ValueError as exc:
+            raise _invalid() from exc
         if type(self.result_canonical) is not bytes:
             raise _invalid()
         expected = f"sha256:{hashlib.sha256(self.result_canonical).hexdigest()}"

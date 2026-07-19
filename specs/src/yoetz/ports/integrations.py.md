@@ -37,8 +37,10 @@ operations and the same guidance through the MCP baseline (`mcp/resources.md`).
   frozen per-harness descriptor. It is
   reviewed packaged data, not caller input: `skill_root` is the exact relative install directory
   (`.agents/skills/yoetz/` for `codex`), and `frontmatter_profile` is the harness's required
-  skill-header shape. `hooks_by_capability_profile` has exactly one explicit value for every
-  capability-profile ID and no other key. A v0.1 value may be trigger-only after E-013 passes or
+  skill-header shape. The three support collections may be jointly empty to represent an explicit
+  unprofiled/unadvertised harness while E-002 remains open. Otherwise capability-profile IDs and
+  supported versions are both nonempty, and `hooks_by_capability_profile` has exactly one explicit
+  value for every capability-profile ID and no other key. A v0.1 value may be trigger-only after E-013 passes or
   `None`; no v0.1 value has an observation arm, so no v0.1 integration emits the `hook_observed`
   publication channel or artifact-observation class (ADR-005).
 - `HarnessHookProfile(trigger_event, trigger_payload_profile_id, evidence_case_ids,
@@ -60,7 +62,9 @@ operations and the same guidance through the MCP baseline (`mcp/resources.md`).
   adapter validates an exact trusted repository root; cwd is never implicit.
 - `SkillSource(harness_id, skill_version, protocol_range, harness_tested_set, resource_set_digest,
   files: tuple[IntegrationFile, ...])`. `harness_tested_set` is the profile's tested host-version
-  set; the shared guidance members it carries are identical across harnesses by construction.
+  set; it may be empty only for the explicit unprofiled/unsupported source case and then adapter
+  compatibility is `unsupported` and state is `incompatible`. The shared guidance members it
+  carries are identical across harnesses by construction.
 - `IntegrationFile(relative_path, size, sha256, media_type)` — allowed canonical skill/reference or
   managed marker member.
 - `SkillPreviewCommand(request_id, target, requested_action, replace_modified)`.

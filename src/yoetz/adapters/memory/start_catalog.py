@@ -103,6 +103,7 @@ class _OperationRecord:
     lease_generation: int | None
     lease_expires_at: datetime | None
     response_object_id: str | None
+    response_envelope_digest: str | None
     terminal_result_canonical: bytes | None
     terminal_result_digest: str | None
     quarantine_code: str | None
@@ -202,6 +203,9 @@ def _lease(record: _OperationRecord) -> StartOperationLease | None:
 
 def _allocation(record: _OperationRecord, outcome: str) -> StartAllocation:
     replayed = record.terminal_result_canonical if outcome == "replayed" else None
+    expose_response = record.state is _OperationState.COMPLETE or (
+        record.state is _OperationState.PENDING and record.phase is StartPhase.RESULT_PUBLISHED
+    )
     try:
         return StartAllocation(
             outcome=outcome,  # type: ignore[arg-type]
@@ -214,7 +218,12 @@ def _allocation(record: _OperationRecord, outcome: str) -> StartAllocation:
             route_generation=record.route_generation,
             route_identity_digest=record.route_identity_digest,
             phase=record.phase,
-            response_object_id=record.response_object_id,
+            response_object_id=record.response_object_id if expose_response else None,
+            response_envelope_digest=(record.response_envelope_digest if expose_response else None),
+            response_result_canonical=(
+                record.terminal_result_canonical if expose_response else None
+            ),
+            response_result_digest=record.terminal_result_digest if expose_response else None,
             lease=_lease(record),
             replayed_result=replayed,
         )
@@ -230,6 +239,10 @@ def _same_allocation(record: _OperationRecord, allocation: StartAllocation) -> b
         and record.lifecycle_event_id == allocation.lifecycle_event_id
         and record.route_generation == allocation.route_generation
         and hmac.compare_digest(record.route_identity_digest, allocation.route_identity_digest)
+        and record.response_object_id == allocation.response_object_id
+        and record.response_envelope_digest == allocation.response_envelope_digest
+        and record.terminal_result_canonical == allocation.response_result_canonical
+        and record.terminal_result_digest == allocation.response_result_digest
     )
 
 
@@ -243,6 +256,7 @@ def _evidence_value(evidence: StartCompletionEvidence) -> dict[str, JsonValue]:
         "milestone": evidence.milestone.value,
         "owner_generation": evidence.owner_generation,
         "response_object_id": evidence.response_object_id,
+        "response_envelope_digest": evidence.response_envelope_digest,
         "result_digest": evidence.result_digest,
         "route_generation": evidence.route_generation,
         "route_identity_digest": evidence.route_identity_digest,
@@ -259,6 +273,7 @@ def _validate_completion_evidence(
 ) -> None:
     if (
         evidence.milestone is not StartMilestone.RESULT_PUBLISHED
+        or evidence.owner_generation != record.owner_generation
         or evidence.task_id != record.task_id
         or evidence.session_id != record.session_id
         or evidence.writer_id != record.writer_id
@@ -266,6 +281,7 @@ def _validate_completion_evidence(
         or evidence.route_generation != record.route_generation
         or not hmac.compare_digest(evidence.route_identity_digest, record.route_identity_digest)
         or evidence.response_object_id != result.response_object_id
+        or evidence.response_envelope_digest != result.envelope_digest
         or evidence.result_digest != result.result_digest
         or not hmac.compare_digest(
             evidence.evidence_digest, canonical_digest(_evidence_value(evidence))
@@ -413,6 +429,7 @@ class MemoryStartCatalogAdapter:
                 lease_generation=1,
                 lease_expires_at=expires,
                 response_object_id=None,
+                response_envelope_digest=None,
                 terminal_result_canonical=None,
                 terminal_result_digest=None,
                 quarantine_code=None,
@@ -443,7 +460,12 @@ class MemoryStartCatalogAdapter:
             key, record = self._operation_for(allocation)
             self._require_lease(record, allocation, now)
             if record.phase is phase:
-                if result is not None and record.response_object_id != result.response_object_id:
+                if result is not None and (
+                    record.response_object_id != result.response_object_id
+                    or record.response_envelope_digest != result.envelope_digest
+                    or record.terminal_result_canonical != result.result_canonical
+                    or record.terminal_result_digest != result.result_digest
+                ):
                     raise _error(PublicErrorCode.INTERNAL_ERROR)
                 return _allocation(record, allocation.outcome)
             if _PHASE_SUCCESSOR.get(record.phase) is not phase:
@@ -452,6 +474,9 @@ class MemoryStartCatalogAdapter:
                 record,
                 phase=phase,
                 response_object_id=(result.response_object_id if result is not None else None),
+                response_envelope_digest=(result.envelope_digest if result is not None else None),
+                terminal_result_canonical=(result.result_canonical if result is not None else None),
+                terminal_result_digest=(result.result_digest if result is not None else None),
                 updated_at=now,
             )
             self._state.operations[key] = updated
@@ -477,7 +502,12 @@ class MemoryStartCatalogAdapter:
             self._require_lease(record, allocation, now)
             if record.phase is not StartPhase.RESULT_PUBLISHED:
                 raise _error(PublicErrorCode.INTERNAL_ERROR)
-            if record.response_object_id != result.response_object_id:
+            if (
+                record.response_object_id != result.response_object_id
+                or record.response_envelope_digest != result.envelope_digest
+                or record.terminal_result_canonical != result.result_canonical
+                or record.terminal_result_digest != result.result_digest
+            ):
                 raise _error(PublicErrorCode.INTERNAL_ERROR)
             _validate_completion_evidence(record, result, evidence)
             route = self._require_current_route(record)

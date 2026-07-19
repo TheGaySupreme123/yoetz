@@ -18,14 +18,38 @@ a second truth owner, and strict-local remains a complete deterministic path.
 
 ## Public surface
 
-- `async execute_check(app: Application, request: CheckRequest) -> CheckResult` — implementation
-  behind `Application.check`.
-- Application-internal immutable values for the coordinator's deterministic result, semantic job
-  plan, post-validation result, and resumed phase. They are not protocol or transport schemas.
+- `async execute_check(app: Application, request: CheckRequest) -> CheckCommitResult` — returns
+  the closed content-complete, sink-independent application result behind `Application.check`.
+  The facade passes this value to its sole `project_result_for_client` boundary; this module does
+  not add `privacy_projection`, choose a sink, or finalize a client result.
+- `async execute_check_commit(app, request) -> CheckCommitResult` — the service-internal typed
+  coordinator used before the facade's public-result projection.
+- Frozen `CheckScope(claim_ids, obligation_ids)` and `normalize_check_scope` — omitted and
+  explicit-empty scope both become the same empty/empty whole-case value; nonempty tuples are
+  canonical typed ID sets.
+- Frozen `FinalSemanticEvaluation(status, reason, judgment?, provenance?)` — accepts only the
+  registered status/reason matrix, requires a receipt-finalized `SemanticProvenance` plus judgment
+  for success, and forbids a judgment on non-success paths.
+- `run_deterministic_policies`, `allocate_findings`, `case_coverage`, and
+  `validate_semantic_judgment` are application-internal pure helpers. They own execution accounting,
+  deterministic ID allocation order, full material coverage folding, and the frozen-case semantic
+  fence respectively. They are not protocol or transport schemas.
 
 The durable orchestration methods named under “Port contract” below are frozen in the shared
 `LedgerPort` contract. This module must not downcast `LedgerPort` to a SQLite adapter or import
 repository types.
+
+The executable v0.1 slice calls `BundleRuntimePort.route` with write/payload-read authority,
+normalizes scope and policy selection into the request digest, calls `LedgerPort.freeze_case`,
+runs the actual built-in policy functions in their registered emission order, allocates canonical
+finding IDs through `IdPort`, ranks through `kernel/ranking.py`, and calls
+`commit_check_if_current`. A returned `CheckCommitResult` is replayed without policy evaluation or
+new IDs, and the task runtime is released on success, conflict, or cancellation. The ledger port
+owns the bounded event/object transaction; the application does not synthesize an append beside it.
+Persisted and replayed `CheckCommitResult` values therefore contain no presentation mode, client
+sink, omission marker, or local-disclosure receipt. Identical durable replay remains byte- and
+meaning-equivalent before the current client's one projection; different authorized sinks may
+produce different projected views without changing the stored check result.
 
 ## Behavior
 

@@ -31,7 +31,12 @@ Git, stage/commit files, update `.gitignore`, download anything, or manage arbit
   version bounds, and an exact `hooks_by_capability_profile` map. Each value is `None` unless that
   exact installed-artifact cell passes E-013; a passing v0.1 value is trigger-only and its
   observation arm remains absent, so no v0.1 harness earns `hook_observed`.
-- `load_packaged_skill_source() -> SkillSource` — verifies installed resource manifest before
+- Until E-002 capability evidence exists, this constant has empty capability-profile IDs,
+  supported versions, and hook map: an explicit unprofiled/unadvertised state, not inferred
+  compatibility for either locally observed Codex version.
+- `SkillResourceSource.read_bytes(package_path)` — bounded read-only package-resource injection
+  seam for unit/packaging tests. Production uses package resources.
+- `load_packaged_skill_source(resource_source=None) -> SkillSource` — verifies installed resource manifest before
   returning the exact inventory, composed of the Codex skill header plus the neutral guidance
   members.
 - `inspect_destination(target, source) -> DestinationInspection` — descriptor-safe read-only state.
@@ -53,6 +58,12 @@ version/protocol/Codex tested set, link containment and public boundary. Unknown
 compatibility fields in `SKILL.md` frontmatter are invalid rather than treated as runtime metadata.
 Read via package resources; no cwd/root source/network fallback. Source files are bounded and
 immutable for one adapter call.
+
+Before B9 lands the owned packaged manifest/skill/guidance files, production loading fails closed
+with `source_invalid`; it never reads a developer checkout. Tests may inject a bounded,
+manifest-bound `SkillResourceSource`. The explicit empty E-002 support profile classifies verified
+source as `unsupported`/`incompatible`; status remains read-only and source-verifying, while install
+is refused until reviewed exact support cells populate all three support collections.
 
 Guidance members are copied byte-for-byte from `guidance/` into the destination layout Codex
 expects; this adapter never rewrites, reflows, templates, merges, or per-harness edits their bytes,
@@ -164,7 +175,8 @@ completed; ambiguity preserves it. Never force-delete modified/unmanaged content
 
 ## Tests
 
-- `specs/tests/unit.md`: manifest/frontmatter/link/marker/preview digest and classification fixtures.
+- `specs/tests/unit/adapters/test_codex_skill_integration.py.md`: manifest/frontmatter/link/marker,
+  explicit unprofiled compatibility, fail-closed source loading, status purity and classification.
 - `specs/tests/integration.md`: absent/exact/unmanaged/modified/partial/incompatible/unsafe, every
   write/rename/fsync kill point, concurrent modification and conservative recovery.
 - `specs/tests/capability.md`: install into real isolated trusted Codex project, discovery, status,

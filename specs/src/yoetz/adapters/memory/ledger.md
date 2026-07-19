@@ -107,6 +107,15 @@ returns `CheckCommitResult(outcome="replayed", ...)`, and terminal failure raise
 error. The reference adapter must expose hooks in tests at the prepare, object-finalized, and
 pre-reservation boundaries so the same races are driven against both backends.
 
+The resume object contains the full strict `DeterministicCase` codec, not only a digest. After
+process-local `frozen_cases` loss, reclaim verified-resolves and canonical-decodes the row's sole
+current reference. A `reserved` row opens that `CHECK_RESUME` directly; a later-phase row opens its
+`DETERMINISTIC_RESULT`, verifies the request/task/session/writer/frontier/dependency bindings, then
+verified-resolves the authenticated prior-resume pointer and decodes the same case. The
+`reserved -> local_ready` CAS first resolves the finalized deterministic object outside the shared
+lock and atomically replaces `OperationRecord.resume_object_ref`; no `phase_objects` side map is
+durable authority.
+
 Every successful phase advance/renewal/reclaim returns a replacement lease; the reference caller
 rebuilds the two-field `FrozenCase` with that lease before its next step. A spent lease fails the
 same compare-and-swap check as SQLite.

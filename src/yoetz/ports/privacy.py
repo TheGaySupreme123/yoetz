@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Literal, Protocol
 
 from yoetz.domain.privacy import (
+    AgentProjectionAuditSubject,
     ApprovedLocalDisclosureCase,
     ApprovedOutboundCase,
     AuthorizationScope,
@@ -16,6 +17,7 @@ from yoetz.domain.privacy import (
     CandidateContext,
     ClassifiedContext,
     DisclosureProposal,
+    DisclosureProvenance,
     EgressAuthorization,
     EgressChannel,
     EgressReceipt,
@@ -25,18 +27,25 @@ from yoetz.domain.privacy import (
     LocalDisclosureSink,
     PolicyOverlay,
     PrivacyAuditSubject,
+    PrivacyDecision,
     PrivacyOutcome,
     PrivacyPolicy,
+    ProviderBinding,
 )
 from yoetz.domain.values import format_rfc3339_millis, validate_commitment, validate_sha256_digest
 from yoetz.ports.objects import ObjectKind, ObjectRef
 from yoetz.ports.semantic import Deadline, SemanticResult
+from yoetz.protocol.canonical import canonical_encode, strict_json_parse
 from yoetz.protocol.ids import IdKind, validate_id
+from yoetz.protocol.models import DataCategory
 
 __all__ = [
     "ConsumedAuthorization",
     "ConsumedLocalDisclosure",
+    "AgentProjectionRequest",
+    "CompletedAgentProjection",
     "EffectivePrivacyPolicy",
+    "DisclosureProposalRequest",
     "HumanAuthorityCapability",
     "HumanPolicyDecision",
     "HumanPrivacyControlPort",
@@ -44,8 +53,11 @@ __all__ = [
     "NetworkEgressReceiptView",
     "OutboundGatewayPort",
     "PendingHumanDecision",
+    "PolicyCommitResult",
+    "MinimizedDisclosure",
     "PolicyTransitionProposal",
     "PreparedOutboundCase",
+    "PreparedDisclosureReservation",
     "PreparedPolicyTransition",
     "PrivacyAuditObjectRoots",
     "PrivacyAuditPort",
@@ -130,6 +142,8 @@ class PolicyTransitionProposal:
     proposal_digest: str
     created_at: datetime
     expires_at: datetime
+    privacy_proposal_id: str | None = None
+    expected_policy_digest: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -141,6 +155,10 @@ class PolicyTransitionProposal:
         validate_sha256_digest(self.proposal_digest)
         if _time(self.expires_at) <= _time(self.created_at):
             raise _invalid()
+        if self.privacy_proposal_id is not None:
+            validate_id(IdKind.PRIVACY_PROPOSAL, self.privacy_proposal_id)
+        if self.expected_policy_digest is not None:
+            validate_sha256_digest(self.expected_policy_digest)
         # P0-4: unsupported v0.1 non-LLM enablement is rejected before a
         # prepared transition or any pending consent can exist.
         if self.proposed_policy.unsupported_enabled_channels:
@@ -176,6 +194,21 @@ class HumanPolicyDecision:
             raise _invalid()
         _time(self.decided_at)
         validate_commitment(self.authority_commitment)
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyCommitResult:
+    policy: PrivacyPolicy
+    generation: int
+    revoked_authorization_count: int
+    closed_session_count: int
+
+    def __post_init__(self) -> None:
+        if type(self.policy) is not PrivacyPolicy:
+            raise _invalid()
+        _positive(self.generation)
+        _nonnegative(self.revoked_authorization_count)
+        _nonnegative(self.closed_session_count)
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,6 +277,222 @@ class PreparedOutboundCase:
             raise _invalid()
         validate_sha256_digest(self.approved_case_digest)
         if self.proposal.prepared_case_digest != self.approved_case_digest:
+            raise _invalid()
+
+
+@dataclass(frozen=True, slots=True)
+class MinimizedDisclosure:
+    """Authority-free deterministic minimization and exact-scan result."""
+
+    prepared_bytes: bytes
+    included_item_ids: tuple[str, ...]
+    source_item_digests: tuple[str, ...]
+    approved_categories: tuple[DataCategory, ...]
+    blocked_categories: tuple[DataCategory, ...]
+    transformation_summary: tuple[tuple[str, int], ...]
+    byte_count: int
+    token_count: int
+    case_digest: str
+    scanner_registry_version: str
+    scanner_profile_digest: str
+    forbidden_findings: tuple[ForbiddenDataKind, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.prepared_bytes) is not bytes or len(self.prepared_bytes) > 262_144:
+            raise _invalid()
+        for values in (self.included_item_ids, self.source_item_digests):
+            if type(values) is not tuple or values != tuple(sorted(set(values), key=str.encode)):
+                raise _invalid()
+        for digest in self.source_item_digests:
+            validate_sha256_digest(digest)
+        for values, enum_type in (
+            (self.approved_categories, DataCategory),
+            (self.blocked_categories, DataCategory),
+            (self.forbidden_findings, ForbiddenDataKind),
+        ):
+            if type(values) is not tuple or any(type(value) is not enum_type for value in values):
+                raise _invalid()
+            if values != tuple(sorted(set(values), key=lambda value: value.value.encode())):
+                raise _invalid()
+        if type(self.transformation_summary) is not tuple:
+            raise _invalid()
+        if self.transformation_summary != tuple(
+            sorted(set(self.transformation_summary), key=lambda item: item[0].encode())
+        ):
+            raise _invalid()
+        for name, count in self.transformation_summary:
+            if type(name) is not str or not name or type(count) is not int or count < 0:
+                raise _invalid()
+        if self.byte_count != len(self.prepared_bytes):
+            raise _invalid()
+        _nonnegative(self.token_count)
+        validate_sha256_digest(self.case_digest)
+        if type(self.scanner_registry_version) is not str or not self.scanner_registry_version:
+            raise _invalid()
+        validate_sha256_digest(self.scanner_profile_digest)
+
+
+@dataclass(frozen=True, slots=True)
+class DisclosureProposalRequest:
+    privacy_proposal_id: str
+    request_id: str
+    task_id: str
+    minimized: MinimizedDisclosure
+    provider_binding: ProviderBinding | None
+    local_sink: LocalDisclosureSink | None
+    purpose: str
+    scope: AuthorizationScope
+    policy_id: str
+    policy_version: int
+    policy_generation: int
+    policy_digest: str
+    max_bytes: int
+    max_tokens: int
+    expires_at: datetime
+
+    def __post_init__(self) -> None:
+        validate_id(IdKind.PRIVACY_PROPOSAL, self.privacy_proposal_id)
+        validate_id(IdKind.REQUEST, self.request_id)
+        validate_id(IdKind.TASK, self.task_id)
+        if type(self.minimized) is not MinimizedDisclosure:
+            raise _invalid()
+        if (self.provider_binding is None) == (self.local_sink is None):
+            raise _invalid()
+        if self.provider_binding is not None and type(self.provider_binding) is not ProviderBinding:
+            raise _invalid()
+        if type(self.local_sink) not in {LocalDisclosureSink, type(None)}:
+            raise _invalid()
+        if type(self.purpose) is not str or not self.purpose:
+            raise _invalid()
+        if type(self.scope) is not AuthorizationScope:
+            raise _invalid()
+        validate_id(IdKind.PRIVACY_POLICY, self.policy_id)
+        _positive(self.policy_version)
+        _positive(self.policy_generation)
+        validate_sha256_digest(self.policy_digest)
+        _nonnegative(self.max_bytes, maximum=262_144)
+        _nonnegative(self.max_tokens)
+        _time(self.expires_at)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedDisclosureReservation:
+    proposal: DisclosureProposal
+    reservation: PrivacyAuditReservation
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.proposal) is not DisclosureProposal
+            or type(self.reservation) is not PrivacyAuditReservation
+        ):
+            raise _invalid()
+        if self.proposal.privacy_proposal_id != self.reservation.privacy_proposal_id:
+            raise _invalid()
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class AgentProjectionRequest:
+    privacy_proposal_id: str
+    projection_request_id: str
+    rpc_id: str
+    method: str
+    service_instance_id: str
+    service_generation: int
+    original_request_id: str | None
+    control_request_canonical: bytes
+    scope: AuthorizationScope
+    task_id: str | None
+    route_identity_digest: str | None
+    policy_id: str
+    policy_version: int
+    policy_generation: int
+    policy_digest: str
+    sink: LocalDisclosureSink
+    provenance: tuple[DisclosureProvenance, ...]
+    internal_result_canonical: bytes
+    projection_canonical: bytes
+    field_decisions: tuple[tuple[str, DataCategory, bool, str | None], ...]
+    candidate_count: int
+    approved_count: int
+    omitted_count: int
+    finished_at: datetime
+
+    def __post_init__(self) -> None:
+        validate_id(IdKind.PRIVACY_PROPOSAL, self.privacy_proposal_id)
+        validate_id(IdKind.REQUEST, self.projection_request_id)
+        validate_id(IdKind.CONTROL_RPC, self.rpc_id)
+        validate_id(IdKind.SERVICE_INSTANCE, self.service_instance_id)
+        if type(self.method) is not str or not self.method:
+            raise _invalid()
+        _positive(self.service_generation)
+        if self.original_request_id is not None:
+            validate_id(IdKind.REQUEST, self.original_request_id)
+        for value in (
+            self.control_request_canonical,
+            self.internal_result_canonical,
+            self.projection_canonical,
+        ):
+            if type(value) is not bytes or not value or len(value) > 262_144:
+                raise _invalid()
+            if canonical_encode(strict_json_parse(value)) != value:
+                raise _invalid()
+        if type(self.scope) is not AuthorizationScope:
+            raise _invalid()
+        needs_task = self.scope.kind in {
+            AuthorizationScopeKind.TASK,
+            AuthorizationScopeKind.REQUEST,
+        }
+        if (self.task_id is not None) != needs_task or (
+            self.route_identity_digest is not None
+        ) != needs_task:
+            raise _invalid()
+        if self.task_id is not None:
+            validate_id(IdKind.TASK, self.task_id)
+        if self.route_identity_digest is not None:
+            validate_sha256_digest(self.route_identity_digest)
+        validate_id(IdKind.PRIVACY_POLICY, self.policy_id)
+        _positive(self.policy_version)
+        _positive(self.policy_generation)
+        validate_sha256_digest(self.policy_digest)
+        if self.sink not in {
+            LocalDisclosureSink.AGENT_CONTEXT,
+            LocalDisclosureSink.LOCAL_HUMAN_VIEW,
+        }:
+            raise _invalid()
+        if type(self.provenance) is not tuple or any(
+            type(value) is not DisclosureProvenance for value in self.provenance
+        ):
+            raise _invalid()
+        if self.provenance != tuple(
+            sorted(set(self.provenance), key=lambda value: value.value.encode())
+        ):
+            raise _invalid()
+        if type(self.field_decisions) is not tuple or self.field_decisions != tuple(
+            sorted(self.field_decisions, key=lambda value: value[0].encode())
+        ):
+            raise _invalid()
+        _nonnegative(self.candidate_count)
+        _nonnegative(self.approved_count)
+        _nonnegative(self.omitted_count)
+        if self.approved_count + self.omitted_count != self.candidate_count:
+            raise _invalid()
+        _time(self.finished_at)
+
+    def __repr__(self) -> str:
+        return "AgentProjectionRequest(<redacted>)"
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedAgentProjection:
+    subject: AgentProjectionAuditSubject
+    reservation: PrivacyAuditReservation
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.subject) is not AgentProjectionAuditSubject
+            or type(self.reservation) is not PrivacyAuditReservation
+            or self.subject.privacy_proposal_id != self.reservation.privacy_proposal_id
+        ):
             raise _invalid()
 
 
@@ -464,14 +713,27 @@ class PrivacyPolicyStorePort(Protocol):
 
     async def commit_transition(
         self, prepared: PreparedPolicyTransition, decision: HumanPolicyDecision
-    ) -> PrivacyPolicy: ...
+    ) -> PolicyCommitResult: ...
 
-    async def tighten(self, scope: AuthorizationScope, overlay: PolicyOverlay) -> PrivacyPolicy: ...
+    async def tighten(
+        self,
+        scope: AuthorizationScope,
+        overlay: PolicyOverlay,
+        expected_policy_digest: str,
+    ) -> PolicyCommitResult: ...
 
     async def watch_generation(self) -> int: ...
 
 
 class PrivacyAuditPort(Protocol):
+    async def complete_agent_projection(
+        self, request: AgentProjectionRequest, receipt: LocalDisclosureReceipt
+    ) -> CompletedAgentProjection: ...
+
+    async def prepare_disclosure_proposal(
+        self, request: DisclosureProposalRequest
+    ) -> PreparedDisclosureReservation: ...
+
     async def reserve(self, subject: PrivacyAuditSubject) -> PrivacyAuditReservation: ...
 
     async def load(self, request_id: str, subject_digest: str) -> PrivacyAuditState | None: ...
@@ -523,8 +785,8 @@ class PrivacyClassifierPort(Protocol):
     ) -> ClassifiedContext: ...
 
     def minimize_and_scan(
-        self, classified: ClassifiedContext, decision: object
-    ) -> PreparedOutboundCase: ...
+        self, classified: ClassifiedContext, decision: PrivacyDecision
+    ) -> MinimizedDisclosure: ...
 
     def scan_exact_bytes(self, data: bytes) -> tuple[ForbiddenDataKind, ...]: ...
 
@@ -556,3 +818,5 @@ class OutboundGatewayPort(Protocol):
     ) -> SemanticResult: ...
 
     async def close_revoked(self, policy_generation: int) -> None: ...
+
+    async def close(self) -> None: ...

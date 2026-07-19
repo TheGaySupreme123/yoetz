@@ -18,6 +18,10 @@ derived state.
   preserve the exact returned IDs/count.
 - `test_projection_record_and_snapshot_shapes_are_exact` — every common/specialized record,
   contradiction key, integer rendering, and top-level field matches the frozen fixture shape.
+- `test_projection_snapshot_codec_round_trips_canonical_bytes` — the strict inverse reconstructs
+  the same typed state and canonical bytes.
+- `test_projection_snapshot_decoder_rejects_open_or_contradictory_shapes` — extra fields and
+  logical-key/source contradictions fail closed.
 - `test_null_payload_tombstone_bit_does_not_claim_redaction_cause` — both recorded redaction and
   non-redaction object/key loss use the frozen bit while case facts distinguish their gap codes.
 - `test_redacted_payload_deletion_rebuilds_identically_from_locator` — deleting targeted payload
@@ -40,6 +44,8 @@ The suite checks:
 
 - replay from `empty_projection_state()` matches replay from partitioned prefixes;
 - projection snapshots preserve registry order and deterministic map ordering;
+- every replay-owned snapshot round trips through the strict decoder without byte drift, while
+  missing/extra fields and contradictory record identities are rejected;
 - the 17-field snapshot uses decimal strings only for registered frontier/version fields, retains
   JSON integers for suppression/payload integers, and exposes no locator metadata;
 - common and specialized records preserve payload digests and exact null-payload tombstones;

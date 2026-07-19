@@ -103,6 +103,7 @@ class ProjectionView(str, Enum):  # noqa: UP042 - exact durable enum base
 
 
 class OperationKind(str, Enum):  # noqa: UP042 - exact durable enum base
+    START = "start"
     PUBLISH_WORK = "publish_work"
     CHECK = "check"
     RESPOND = "respond"
@@ -290,6 +291,7 @@ class AppendCommand:
     request_digest: str
     expected_frontier: int | None
     entries: tuple[AppendEntry, ...]
+    result_object_ref: ObjectRef | None = None
 
     def __post_init__(self) -> None:
         _id(IdKind.TASK, self.task_id)
@@ -311,6 +313,15 @@ class AppendCommand:
         if len(event_ids) != len(set(event_ids)):
             raise _invalid()
         if any(entry.payload_object.metadata.task_id != self.task_id for entry in self.entries):
+            raise _invalid()
+        if self.operation_kind is OperationKind.RECEIPT:
+            if (
+                type(self.result_object_ref) is not ObjectRef
+                or self.result_object_ref.metadata.kind is not ObjectKind.RECEIPT
+                or self.result_object_ref.metadata.task_id != self.task_id
+            ):
+                raise _invalid()
+        elif self.result_object_ref is not None:
             raise _invalid()
 
 
@@ -597,11 +608,18 @@ class OperationRecord:
         _digest(self.request_digest)
         if type(self.phase) is not CheckPhase:
             raise _invalid()
-        if self.resume_object_ref is not None and (
-            type(self.resume_object_ref) is not ObjectRef
-            or self.resume_object_ref.metadata.kind is not ObjectKind.CHECK_RESUME
-        ):
-            raise _invalid()
+        if self.resume_object_ref is not None:
+            if type(self.resume_object_ref) is not ObjectRef:
+                raise _invalid()
+            expected_resume_kind = (
+                ObjectKind.CHECK_RESUME
+                if self.phase is CheckPhase.RESERVED
+                else ObjectKind.DETERMINISTIC_RESULT
+            )
+            if self.phase is CheckPhase.TERMINAL or (
+                self.resume_object_ref.metadata.kind is not expected_resume_kind
+            ):
+                raise _invalid()
         if (
             self.result_locator is not None
             and type(self.result_locator) is not OperationResultLocator
@@ -1237,6 +1255,8 @@ class ProjectionPage:
 
 class LedgerPort(Protocol):
     async def append_batch(self, command: AppendCommand) -> AppendResult: ...
+
+    async def load_frontier(self) -> Frontier: ...
 
     def load_events(
         self,

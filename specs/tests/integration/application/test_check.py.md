@@ -41,6 +41,9 @@ admits semantic results only after post-validation.
 The test freezes a case and then asserts:
 
 - deterministic findings are stable;
+- `execute_check` returns the closed unprojected `CheckCommitResult` directly; persisted/replayed
+  state has no client sink, rendering mode, omission marker, `privacy_projection`, or local
+  disclosure receipt, and the application facade owns the only later client projection;
 - every deterministic candidate has one persisted machine-readable `FindingBasis`, and the
   semantic case binds both frozen-frontier refs and locally pinned deterministic finding refs;
 - semantic capability is optional or required only by mode;

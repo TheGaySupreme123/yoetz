@@ -14,6 +14,7 @@ from yoetz.domain.events import (
     ClaimRecordedPayload,
     DecisionRecordedPayload,
     EventPayload,
+    EventSchema,
     EvidenceRecordedPayload,
     ObligationChangeKind,
     ObligationPublishedPayload,
@@ -21,6 +22,7 @@ from yoetz.domain.events import (
     PlanRevisedPayload,
     ResponseRecordedPayload,
     ResultRecordedPayload,
+    decode_payload,
     encode_payload,
 )
 from yoetz.domain.findings import CheckVerdict, Finding
@@ -39,13 +41,28 @@ from yoetz.domain.values import (
     event_id,
     evidence_id,
     finding_id,
+    freeze_json,
+    frontier_from_json,
     object_id,
     obligation_id,
     result_id,
     validate_sha256_digest,
 )
-from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_integer_string
-from yoetz.protocol.coverage import Coverage, LedgerFreshness, coverage_to_json
+from yoetz.domain.values import (
+    JsonValue as DomainJsonValue,
+)
+from yoetz.protocol.canonical import (
+    JsonValue,
+    canonical_digest,
+    canonical_integer_string,
+    parse_canonical_integer_string,
+)
+from yoetz.protocol.coverage import (
+    Coverage,
+    LedgerFreshness,
+    coverage_from_json,
+    coverage_to_json,
+)
 
 __all__ = [
     "PROJECTION_GENERATION",
@@ -61,6 +78,7 @@ __all__ = [
     "ProjectionState",
     "empty_projection_state",
     "projection_digest",
+    "projection_from_snapshot",
     "projection_snapshot",
 ]
 
@@ -771,6 +789,356 @@ def projection_snapshot(state: ProjectionState) -> dict[str, JsonValue]:
         "unknown_event_count": state.unknown_event_count,
         "coverage_gaps": list(state.coverage_gaps),
     }
+
+
+_SNAPSHOT_KEYS: Final = frozenset(
+    {
+        "frontier",
+        "head_digest",
+        "plans",
+        "obligations",
+        "decisions",
+        "assignments",
+        "actions",
+        "results",
+        "evidence",
+        "claims",
+        "contradictions",
+        "findings",
+        "responses",
+        "latest_tested_state",
+        "freshness",
+        "unknown_event_count",
+        "coverage_gaps",
+    }
+)
+_RECORD_KEYS: Final = frozenset(
+    {"payload", "payload_digest", "redacted", "source_event_id", "source_frontier"}
+)
+_COLLECTION_SCHEMAS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
+    {
+        "plans": ("plan_published", "plan_revised"),
+        "obligations": ("obligation_published",),
+        "decisions": ("decision_recorded",),
+        "assignments": ("assignment_recorded",),
+        "actions": ("action_recorded",),
+        "results": ("result_recorded",),
+        "evidence": ("evidence_recorded",),
+        "claims": ("claim_recorded",),
+        "findings": ("finding_recorded",),
+        "responses": ("response_recorded",),
+    }
+)
+
+
+def _snapshot_object(
+    value: object,
+    *,
+    required: frozenset[str],
+    optional: frozenset[str] = frozenset(),
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, Mapping):
+        raise _invalid()
+    source = cast(Mapping[object, object], value)
+    keys = tuple(source)
+    if any(type(key) is not str for key in keys):
+        raise _invalid()
+    typed = cast(Mapping[str, JsonValue], source)
+    key_set = frozenset(cast(tuple[str, ...], keys))
+    if not required <= key_set or key_set - required - optional:
+        raise _invalid()
+    return typed
+
+
+def _snapshot_map(value: object) -> Mapping[str, JsonValue]:
+    if not isinstance(value, Mapping):
+        raise _invalid()
+    source = cast(Mapping[object, object], value)
+    keys = tuple(source)
+    if any(type(key) is not str for key in keys):
+        raise _invalid()
+    return cast(Mapping[str, JsonValue], source)
+
+
+def _snapshot_array(value: object) -> tuple[JsonValue, ...]:
+    if type(value) is not tuple:
+        raise _invalid()
+    return cast(tuple[JsonValue, ...], value)
+
+
+def _snapshot_uint(value: object, *, safe: bool = False) -> int:
+    parsed = parse_canonical_integer_string(cast(str, value))
+    if safe and parsed > _MAX_SAFE_INTEGER:
+        raise _invalid()
+    return parsed
+
+
+def _decoded_payload(value: JsonValue, schemas: tuple[str, ...]) -> EventPayload:
+    decoded: list[EventPayload] = []
+    for schema_name in schemas:
+        try:
+            decoded.append(
+                decode_payload(
+                    EventSchema(schema_name, "1.0.0"),
+                    cast(DomainJsonValue, value),
+                )
+            )
+        except ValueError:
+            continue
+    if len(decoded) != 1:
+        raise _invalid()
+    return decoded[0]
+
+
+def _record_from_snapshot(
+    value: JsonValue,
+    *,
+    collection: str,
+) -> _ProjectionRecordLike:
+    optional: frozenset[str]
+    required = _RECORD_KEYS
+    if collection == "plans":
+        optional = frozenset({"superseded_by_plan_version"})
+    elif collection == "obligations":
+        optional = frozenset(
+            {
+                "plan_change",
+                "plan_change_reason",
+                "superseded_by_obligation_ids",
+            }
+        )
+    elif collection == "decisions":
+        optional = frozenset({"superseded_by_event_id"})
+    elif collection == "evidence":
+        required = _RECORD_KEYS | frozenset({"object_available"})
+        optional = frozenset({"redacted_object_id"})
+    else:
+        optional = frozenset()
+    source = _snapshot_object(value, required=required, optional=optional)
+    raw_payload = source["payload"]
+    payload = (
+        None
+        if raw_payload is None
+        else _decoded_payload(raw_payload, _COLLECTION_SCHEMAS[collection])
+    )
+    payload_digest = source["payload_digest"]
+    redacted = source["redacted"]
+    if type(payload_digest) is not str or type(redacted) is not bool:
+        raise _invalid()
+    source_event_id = event_id(source["source_event_id"])
+    source_frontier = _snapshot_uint(source["source_frontier"])
+    if collection == "plans":
+        raw_superseded = source.get("superseded_by_plan_version")
+        if "superseded_by_plan_version" in source and raw_superseded is None:
+            raise _invalid()
+        return PlanProjectionRecord(
+            payload=cast(PlanPublishedPayload | PlanRevisedPayload | None, payload),
+            payload_digest=payload_digest,
+            redacted=redacted,
+            source_event_id=source_event_id,
+            source_frontier=source_frontier,
+            superseded_by_plan_version=(
+                None if raw_superseded is None else _snapshot_uint(raw_superseded, safe=True)
+            ),
+        )
+    if collection == "obligations":
+        has_change = "plan_change" in source
+        if has_change is not ("superseded_by_obligation_ids" in source):
+            raise _invalid()
+        if not has_change and "plan_change_reason" in source:
+            raise _invalid()
+        if "plan_change_reason" in source and source["plan_change_reason"] is None:
+            raise _invalid()
+        raw_replacements = source.get("superseded_by_obligation_ids", ())
+        return ObligationProjectionRecord(
+            payload=cast(ObligationPublishedPayload | None, payload),
+            payload_digest=payload_digest,
+            redacted=redacted,
+            source_event_id=source_event_id,
+            source_frontier=source_frontier,
+            plan_change=(
+                None if not has_change else ObligationChangeKind(cast(str, source["plan_change"]))
+            ),
+            plan_change_reason=cast(str | None, source.get("plan_change_reason")),
+            superseded_by_obligation_ids=cast(
+                tuple[ObligationId, ...],
+                _snapshot_array(raw_replacements),
+            ),
+        )
+    if collection == "decisions":
+        if "superseded_by_event_id" in source and source["superseded_by_event_id"] is None:
+            raise _invalid()
+        return DecisionProjectionRecord(
+            payload=cast(DecisionRecordedPayload | None, payload),
+            payload_digest=payload_digest,
+            redacted=redacted,
+            source_event_id=source_event_id,
+            source_frontier=source_frontier,
+            superseded_by_event_id=cast(EventId | None, source.get("superseded_by_event_id")),
+        )
+    if collection == "evidence":
+        if "redacted_object_id" in source and source["redacted_object_id"] is None:
+            raise _invalid()
+        return EvidenceProjectionRecord(
+            payload=cast(EvidenceRecordedPayload | None, payload),
+            payload_digest=payload_digest,
+            redacted=redacted,
+            source_event_id=source_event_id,
+            source_frontier=source_frontier,
+            object_available=cast(bool, source["object_available"]),
+            redacted_object_id=cast(ObjectId | None, source.get("redacted_object_id")),
+        )
+    return ProjectionRecord(
+        payload=payload,
+        payload_digest=payload_digest,
+        redacted=redacted,
+        source_event_id=source_event_id,
+        source_frontier=source_frontier,
+    )
+
+
+def _record_map_from_snapshot(
+    value: JsonValue,
+    *,
+    collection: str,
+) -> dict[str, _ProjectionRecordLike]:
+    source = _snapshot_map(value)
+    return {
+        key: _record_from_snapshot(record, collection=collection) for key, record in source.items()
+    }
+
+
+def _plans_from_snapshot(value: JsonValue) -> dict[int, PlanProjectionRecord]:
+    decoded = _record_map_from_snapshot(value, collection="plans")
+    return {
+        _snapshot_uint(key, safe=True): cast(PlanProjectionRecord, record)
+        for key, record in decoded.items()
+    }
+
+
+def _latest_tested_from_snapshot(value: JsonValue) -> LatestTestedState | None:
+    if value is None:
+        return None
+    source = _snapshot_object(
+        value,
+        required=frozenset(
+            {
+                "source_check_event_id",
+                "subject_frontier",
+                "verdict",
+                "returned_finding_ids",
+                "suppressed_count",
+                "coverage",
+            }
+        ),
+    )
+    return LatestTestedState(
+        source_check_event_id=cast(EventId, source["source_check_event_id"]),
+        subject_frontier=frontier_from_json(source["subject_frontier"]),
+        verdict=CheckVerdict(cast(str, source["verdict"])),
+        returned_finding_ids=cast(
+            tuple[FindingId, ...],
+            _snapshot_array(source["returned_finding_ids"]),
+        ),
+        suppressed_count=cast(int, source["suppressed_count"]),
+        coverage=coverage_from_json(source["coverage"]),
+    )
+
+
+def _contradictions_from_snapshot(
+    value: JsonValue,
+) -> dict[ContradictionKey, ContradictionRecord]:
+    source = _snapshot_map(value)
+    result: dict[ContradictionKey, ContradictionRecord] = {}
+    for encoded_key, raw_record in source.items():
+        parts = encoded_key.split("|")
+        if len(parts) != 2:
+            raise _invalid()
+        record_source = _snapshot_object(
+            raw_record,
+            required=frozenset(
+                {
+                    "disputing_claim_id",
+                    "disputed_ref",
+                    "source_event_id",
+                    "source_frontier",
+                }
+            ),
+        )
+        if parts != [record_source["disputing_claim_id"], record_source["disputed_ref"]]:
+            raise _invalid()
+        key = ContradictionKey(
+            disputing_claim_id=cast(ClaimId, record_source["disputing_claim_id"]),
+            disputed_ref=cast(ClaimId | EventId, record_source["disputed_ref"]),
+        )
+        result[key] = ContradictionRecord(
+            disputing_claim_id=key.disputing_claim_id,
+            disputed_ref=key.disputed_ref,
+            source_event_id=cast(EventId, record_source["source_event_id"]),
+            source_frontier=_snapshot_uint(record_source["source_frontier"]),
+        )
+    return result
+
+
+def projection_from_snapshot(value: JsonValue) -> ProjectionState:
+    """Decode and revalidate one exact generation-1 projection snapshot."""
+
+    try:
+        frozen = freeze_json(value)
+        source = _snapshot_object(frozen, required=_SNAPSHOT_KEYS)
+        freshness_value = source["freshness"]
+        if type(freshness_value) is not str:
+            raise _invalid()
+        return ProjectionState(
+            frontier=_snapshot_uint(source["frontier"]),
+            head_digest=cast(str, source["head_digest"]),
+            plans=_plans_from_snapshot(source["plans"]),
+            obligations=cast(
+                Mapping[ObligationId, ObligationProjectionRecord],
+                _record_map_from_snapshot(source["obligations"], collection="obligations"),
+            ),
+            decisions=cast(
+                Mapping[EventId, DecisionProjectionRecord],
+                _record_map_from_snapshot(source["decisions"], collection="decisions"),
+            ),
+            assignments=cast(
+                Mapping[EventId, ProjectionRecord[AssignmentRecordedPayload]],
+                _record_map_from_snapshot(source["assignments"], collection="assignments"),
+            ),
+            actions=cast(
+                Mapping[ActionId, ProjectionRecord[ActionRecordedPayload]],
+                _record_map_from_snapshot(source["actions"], collection="actions"),
+            ),
+            results=cast(
+                Mapping[ResultId, ProjectionRecord[ResultRecordedPayload]],
+                _record_map_from_snapshot(source["results"], collection="results"),
+            ),
+            evidence=cast(
+                Mapping[EvidenceId, EvidenceProjectionRecord],
+                _record_map_from_snapshot(source["evidence"], collection="evidence"),
+            ),
+            claims=cast(
+                Mapping[ClaimId, ProjectionRecord[ClaimRecordedPayload]],
+                _record_map_from_snapshot(source["claims"], collection="claims"),
+            ),
+            contradictions=_contradictions_from_snapshot(source["contradictions"]),
+            findings=cast(
+                Mapping[FindingId, ProjectionRecord[Finding]],
+                _record_map_from_snapshot(source["findings"], collection="findings"),
+            ),
+            responses=cast(
+                Mapping[FindingId, ProjectionRecord[ResponseRecordedPayload]],
+                _record_map_from_snapshot(source["responses"], collection="responses"),
+            ),
+            latest_tested_state=_latest_tested_from_snapshot(source["latest_tested_state"]),
+            freshness=LedgerFreshness(freshness_value),
+            unknown_event_count=cast(int, source["unknown_event_count"]),
+            coverage_gaps=cast(tuple[str, ...], _snapshot_array(source["coverage_gaps"])),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        if type(exc) is ValueError and str(exc) == "invalid_projection_state":
+            raise
+        raise _invalid() from exc
 
 
 def projection_digest(state: ProjectionState) -> str:

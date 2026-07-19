@@ -20,7 +20,7 @@ source parsing/mapping to the pure Codex adapter, exact object publication/authe
 `ObjectStorePort`, and all observation/report event commits to application `publish_work` through
 `LedgerPort`. SQLite contains only structural IDs, keyed commitments, safe digests/counts/ranges,
 canonical result envelopes, phases, and object inventory—not source/payload/argv/cwd/stderr text or
-ordinary source/stderr audit digests.
+ordinary source audit digests.
 
 ## Public surface
 
@@ -31,7 +31,7 @@ ordinary source/stderr audit digests.
 - `@dataclass(frozen=True, slots=True) class SqliteImportPolicy` with the release-frozen v0.1
   values shared with `MemoryImportPolicy`:
   - source cap 4 MiB;
-  - stderr prefix/commitment input 64 KiB;
+  - exact stderr-absent capture constants (`false`, `0`, `false`, `None`);
   - physical line cap 1 MiB and aggregate line cap 20,000;
   - batch cap 1,024 in addition to the public 100-event/1-MiB request caps;
   - 60-second job lease, 30-second minimum renewed publication window;
@@ -168,13 +168,12 @@ writer job runs does not cancel SQLite work; identical retry observes the durabl
 3. ordinary SHA-256 computed only for encrypted audit metadata; stage/finalize one exact
    `import_source`, whose keyed commitment is structural;
 4. pure Codex argv sanitization and bundle-keyed cwd audit commitment;
-5. optional stderr prefix read capped at 64 KiB plus one: record present/count/truncated and
-   `objects.commitment_for(prefix, import_stderr)`, compute ordinary digest for encrypted audit,
-   close and discard bytes; never stage stderr and never drain an unbounded remainder;
-6. stage/finalize one `import_source_manifest` containing audit digests/sanitized metadata and
+5. record the exact stderr-absent constants; `ImportCaptureInput` supplies no stderr source or
+   commitment and capture performs no stderr read/hash/object operation;
+6. stage/finalize one `import_source_manifest` containing the source audit digest/sanitized metadata and
    exact source ref; return `CapturedImportSource` only after both objects authenticate.
 
-Failure/cancellation may leave temp/finalized orphans but no DB state. Source/stderr/argv/cwd
+Failure/cancellation may leave temp/finalized orphans but no DB state. Source/argv/cwd
 plaintext and ordinary audit digests never enter the object inventory row, SQL parameters for
 import tables, structural result, log, or exception.
 
@@ -291,7 +290,8 @@ the check dependency/final-currentness guard detects staleness.
 
 ### Read-only review snapshot
 
-`load_review_source(identity, through)` performs a short read transaction that selects the exact
+`load_review_source(identity_digest, through)` validates and exactly indexes the durable identity
+digest, then performs a short read transaction that selects the exact
 job and ordered rows only—never filename/cwd/text matching. Missing returns `None`; quarantined or
 structurally contradictory state is `STORAGE_CORRUPT`. It snapshots one `job_revision`, releases
 the transaction, then authenticates all required source/plan/report objects and verifies accepted
@@ -317,7 +317,7 @@ acquires no lease and writes nothing.
 - Object IO/parser/ID generation while a transaction is open is forbidden and asserted in tests.
 - Empty valid source produces zero batch rows, a `plan_ready` job, report-ready evidence, and an
   honest terminal report with `empty_public_stream` gap.
-- Raw source/stderr SHA audit digests exist only inside encrypted metadata/report objects; SQL,
+- The raw source SHA audit digest exists only inside encrypted metadata/report objects; SQL,
   WAL, SHM, logs, errors, and reprs contain neither digest nor plaintext.
 
 ## Invariants

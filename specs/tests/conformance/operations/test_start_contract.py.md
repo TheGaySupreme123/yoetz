@@ -6,33 +6,32 @@
 
 ## Purpose
 
-Prove the public start operation behaves identically across application-direct, CLI, and MCP
-surfaces.
+Prove the application START boundary rejects identity-invalid attach and preserves request-ID
+idempotency before the facade adds any client-specific projection.
 
 ## Public surface
 
-- `test_start_request_result_parity` — the same request yields the same structured result.
-- `test_start_error_and_retry_contract` — failures and retries map to the same public code/shape.
-- `test_start_human_summary_is_weaker_than_json` — text summary never outruns structured truth.
+- `test_attach_requires_route_identity_before_catalog_reservation` — attach without session or
+  reference identity is rejected before runtime provisioning.
+- `test_same_request_id_with_changed_public_input_is_idempotency_conflict` — changed logical input
+  under an already completed request ID fails with the stable conflict code.
 
 ## Behavior
 
-The test executes the start operation through each surface and asserts:
-
-- exact request/result parity;
-- the same IDs, route, and result identity are surfaced everywhere;
-- errors are mapped consistently;
-- human summaries remain weaker than structured JSON.
+The test executes the application operation directly and asserts that validation precedes catalog
+and runtime mutation, and that request digest/idempotency behavior is exact. Service facade/CLI/MCP
+projection parity is owned by the service control conformance suite.
 
 ## Errors and edge cases
 
-- A CLI or MCP wrapper that mutates the public result fails.
+- A failed identity validation that opens a runtime fails.
+- Reusing a request ID with changed task input without conflict fails.
 
 ## Invariants
 
-1. Public start behavior is surface-neutral.
-2. Structured truth outranks summaries.
-3. Retry identity is stable.
+1. Identity validation precedes mutation.
+2. Retry identity is stable.
+3. Client projection is outside the persisted operation boundary.
 
 ## Tests
 

@@ -13,11 +13,13 @@ One canonical strict-JSON fixture case with `fixture_schema: "yoetz.fixture-case
 ## Behavior
 
 The `input` section contains synthetic canaries in commands, paths, model text, environment-shaped
-values, and stderr bytes. Command variants include shell environment assignments, inline
+values, and one raw-stderr-classified disclosure vector that cannot enter the ordinary import
+request. Capture metadata freezes the required stderr-absent false/zero constants and carries no
+stderr bytes or commitment. Command variants include shell environment assignments, inline
 `Authorization`/header flags, bearer and API-key forms, credential-bearing URLs, and tokens split
 across JSON escapes, UTF-8 chunks, and scanner chunk boundaries. The import expectation freezes
 exact encrypted raw source/payload retention with no destructive import-time content scan,
-allowlisted structural outputs, keyed commitments where allowed, and zero canary occurrences
+allowlisted structural outputs, keyed source commitments where allowed, and zero canary occurrences
 outside encrypted objects. Disclosure variants then select each imported item for external
 `llm_inference`, `local_model`, `agent_context`, and `local_human_view` sinks: every variant
 traverses the ordinary classifier

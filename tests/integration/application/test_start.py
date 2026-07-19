@@ -1,0 +1,437 @@
+"""Integration coverage for crash-safe application START orchestration."""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
+
+import apsw
+import pytest
+from cryptography.hazmat.primitives.keywrap import aes_key_unwrap, aes_key_wrap
+
+from builders.ledger_adapters import FixedIds, ownership_fence
+from builders.start_application import (
+    FailOnceStartCatalog,
+    StartTestApplication,
+    StartTestClock,
+    StartTestLookup,
+    protocol_id,
+    start_composition,
+    start_request,
+)
+from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
+from yoetz.adapters.objects.envelope import decode_object_envelope
+from yoetz.adapters.sqlite.migrations import initialize_bundle, initialize_catalog
+from yoetz.adapters.sqlite.repository import SqliteLedger
+from yoetz.adapters.sqlite.start_catalog import SqliteStartCatalog
+from yoetz.application.start import execute_start
+from yoetz.domain.values import Frontier
+from yoetz.ports.importer import ImporterPort
+from yoetz.ports.keys import BundleKeys, WrappedDek
+from yoetz.ports.ledger import LedgerPort
+from yoetz.ports.objects import (
+    ObjectKind,
+    ObjectRef,
+    ObjectRootSnapshot,
+    ObjectStorePort,
+)
+from yoetz.ports.runtime import (
+    BundleProvisionCommand,
+    RouteCommand,
+    StartCompletionEvidence,
+    StartMilestone,
+    StartMilestoneExpectation,
+    TaskRuntime,
+)
+from yoetz.ports.secret_memory import (
+    SecretConsumer,
+    SecretMemoryCapability,
+    SecretPurpose,
+)
+from yoetz.ports.start_catalog import StartCatalogPort
+from yoetz.protocol.canonical import JsonValue, canonical_digest
+
+if TYPE_CHECKING:
+    from yoetz.ports.secret_memory import SecretHandle
+
+pytestmark = pytest.mark.anyio
+
+
+class _Secret:
+    def __init__(self, value: bytes | bytearray) -> None:
+        self._value = bytearray(value)
+        self._consumed = False
+
+    @property
+    def purpose(self) -> SecretPurpose:
+        return SecretPurpose.OBJECT_PAYLOAD
+
+    def consume[T](self, consumer: SecretConsumer, fn: Callable[[memoryview], T]) -> T:
+        if consumer is not SecretConsumer.OBJECT_CRYPTO or self._consumed:
+            raise ValueError("secret_handle_invalid")
+        self._consumed = True
+        try:
+            return fn(memoryview(self._value))
+        finally:
+            self._value[:] = b"\0" * len(self._value)
+
+
+class _SecretMemory:
+    def capability(self) -> SecretMemoryCapability:
+        return SecretMemoryCapability("active", "unavailable", "unavailable", "active", "active")
+
+    def capture(self, purpose: SecretPurpose, source: bytearray) -> _Secret:
+        assert purpose is SecretPurpose.OBJECT_PAYLOAD
+        result = _Secret(source)
+        source[:] = b"\0" * len(source)
+        return result
+
+    def allocate(self, purpose: SecretPurpose, size: int) -> _Secret:
+        assert purpose is SecretPurpose.OBJECT_PAYLOAD
+        return _Secret(bytes(size))
+
+    def close(self) -> None:
+        return None
+
+
+class _WrapKey:
+    def __init__(self, key: bytes) -> None:
+        self._key = key
+
+    def wrap_dek(self, dek: SecretHandle) -> WrappedDek:
+        wrapped = dek.consume(
+            SecretConsumer.OBJECT_CRYPTO,
+            lambda value: aes_key_wrap(self._key, bytes(value)),
+        )
+        return WrappedDek("aes-256-kw-rfc3394", wrapped)
+
+    def unwrap_dek(self, wrapped: WrappedDek) -> _Secret:
+        return _Secret(aes_key_unwrap(self._key, wrapped.wrapped))
+
+
+class _MacKey:
+    def __init__(self, key: bytes) -> None:
+        self._key = key
+
+    def mac(self, domain: bytes, message: bytes) -> str:
+        digest = hmac.new(self._key, domain + message, hashlib.sha256).hexdigest()
+        return f"hmac-sha256:{digest}"
+
+
+class _CountingLedger:
+    def __init__(self, delegate: SqliteLedger) -> None:
+        self.delegate = delegate
+        self.frontier_loads = 0
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.delegate, name)
+
+    async def load_frontier(self) -> Frontier:
+        self.frontier_loads += 1
+        return await self.delegate.load_frontier()
+
+
+class _CountingObjects:
+    def __init__(self, delegate: EncryptedFilesObjectStore) -> None:
+        self.delegate = delegate
+        self.resolutions: list[tuple[str, str]] = []
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.delegate, name)
+
+    async def resolve_verified(self, object_id: str, envelope_digest: str) -> ObjectRef:
+        self.resolutions.append((object_id, envelope_digest))
+        return await self.delegate.resolve_verified(object_id, envelope_digest)
+
+    def open_verified(self, ref: ObjectRef) -> AsyncIterator[bytes]:
+        return self.delegate.open_verified(ref)
+
+
+@dataclass(slots=True)
+class _RealResources:
+    bundle_root: Path
+    db: apsw.Connection
+    ledger: _CountingLedger
+    objects: _CountingObjects
+
+
+class _RealRuntime:
+    def __init__(self, root: Path, clock: StartTestClock, ids: FixedIds) -> None:
+        self.root = root
+        self.clock = clock
+        self.ids = ids
+        self.resources: dict[str, _RealResources] = {}
+        self.owners: dict[tuple[str, str], int] = {}
+        self.provisions: list[BundleProvisionCommand] = []
+        self.release_count = 0
+
+    async def provision_start(self, command: BundleProvisionCommand) -> TaskRuntime:
+        self.provisions.append(command)
+        existing = self.resources.get(command.task_id)
+        if existing is None:
+            bundle_root = self.root / command.bundle_relpath
+            bundle_root.mkdir(mode=0o700, parents=True)
+            bundle_root.chmod(0o700)
+            db = apsw.Connection(str(bundle_root / "bundle.db"))
+            initialize_bundle(
+                db,
+                {
+                    "task_id": command.task_id,
+                    "owner_generation": str(command.owner_generation),
+                    "owner_nonce": "ledger-test-nonce",
+                },
+            )
+        else:
+            bundle_root = existing.bundle_root
+            db = existing.db
+
+        async def current_roots() -> ObjectRootSnapshot:
+            digest = "sha256:" + "0" * 64
+            return ObjectRootSnapshot(
+                command.task_id,
+                command.route_identity_digest,
+                command.route_generation,
+                1,
+                0,
+                digest,
+                digest,
+                digest,
+                digest,
+                self.clock.now_utc(),
+                (),
+            )
+
+        store = EncryptedFilesObjectStore(
+            bundle_root=bundle_root,
+            bundle_keys=BundleKeys(
+                "bmk-1",
+                _WrapKey(bytes(range(32))),
+                _MacKey(bytes(range(32, 64))),
+            ),
+            secret_memory=_SecretMemory(),
+            id_port=self.ids,
+            current_root_snapshot=current_roots,
+        )
+        fence = ownership_fence(generation=command.owner_generation)
+        ledger = SqliteLedger(
+            db=db,
+            task_id=command.task_id,
+            ownership_fence=fence,
+            clock=self.clock,
+            ids=self.ids,
+            objects=store,
+        )
+        counting_ledger = _CountingLedger(ledger)
+        counting_objects = _CountingObjects(store)
+        self.resources[command.task_id] = _RealResources(
+            bundle_root,
+            db,
+            counting_ledger,
+            counting_objects,
+        )
+        self.owners[(command.session_id, command.writer_id)] = command.owner_generation
+        return TaskRuntime(
+            command.task_id,
+            command.session_id,
+            command.writer_id,
+            frozenset(),
+            cast(LedgerPort, counting_ledger),
+            cast(ObjectStorePort, counting_objects),
+            cast(ImporterPort, object()),
+            command.projection_version,
+            command.engine_version,
+            command.protocol_version,
+            command.bundle_schema_version,
+            fence,
+        )
+
+    async def verify_start(
+        self,
+        runtime: TaskRuntime,
+        expectation: StartMilestoneExpectation,
+    ) -> StartCompletionEvidence:
+        frontier: Frontier | None = None
+        if expectation.milestone is not StartMilestone.BUNDLE_READY:
+            frontier = await runtime.ledger.load_frontier()
+        owner_generation = self.owners[(expectation.session_id, expectation.writer_id)]
+        value: dict[str, JsonValue] = {
+            "lifecycle_event_id": expectation.lifecycle_event_id,
+            "lifecycle_frontier": None if frontier is None else dict(frontier.as_wire()),
+            "milestone": expectation.milestone.value,
+            "owner_generation": owner_generation,
+            "response_envelope_digest": expectation.response_envelope_digest,
+            "response_object_id": expectation.response_object_id,
+            "result_digest": expectation.result_digest,
+            "route_generation": expectation.route_generation,
+            "route_identity_digest": expectation.route_identity_digest,
+            "session_id": expectation.session_id,
+            "task_id": expectation.task_id,
+            "writer_id": expectation.writer_id,
+        }
+        return StartCompletionEvidence(
+            expectation.milestone,
+            expectation.task_id,
+            expectation.session_id,
+            expectation.writer_id,
+            expectation.lifecycle_event_id,
+            expectation.route_generation,
+            expectation.route_identity_digest,
+            owner_generation,
+            frontier,
+            expectation.response_object_id,
+            expectation.response_envelope_digest,
+            expectation.result_digest,
+            canonical_digest(value),
+        )
+
+    async def release(self, runtime: TaskRuntime) -> None:
+        assert runtime.task_id in self.resources
+        self.release_count += 1
+
+    async def route(self, command: RouteCommand) -> TaskRuntime:
+        del command
+        raise AssertionError("route_not_used_by_start")
+
+    async def close(self) -> None:
+        return None
+
+
+def _real_composition(
+    tmp_path: Path,
+) -> tuple[
+    StartTestApplication,
+    _RealRuntime,
+    StartTestClock,
+    FailOnceStartCatalog,
+    apsw.Connection,
+]:
+    tmp_path.chmod(0o700)
+    clock = StartTestClock()
+    ids = FixedIds()
+    catalog_db = apsw.Connection(str(tmp_path / "catalog.db"))
+    initialize_catalog(catalog_db)
+    installation_id = protocol_id("ins_", 1700)
+    catalog_db.executemany(
+        "INSERT INTO catalog_meta(key, value) VALUES(?, ?)",
+        (("installation_id", installation_id), ("owner_generation", "1")),
+    )
+    catalog = SqliteStartCatalog(
+        catalog_db,
+        installation_id=installation_id,
+        lookup=StartTestLookup(),
+        clock=clock,
+        ids=ids,
+    )
+    wrapper = FailOnceStartCatalog(cast(StartCatalogPort, catalog))
+    runtime = _RealRuntime(tmp_path, clock, ids)
+    return (
+        StartTestApplication(cast(StartCatalogPort, wrapper), runtime, clock),
+        runtime,
+        clock,
+        wrapper,
+        catalog_db,
+    )
+
+
+async def test_create_replays_exact_result_without_reopening_runtime() -> None:
+    app, runtime, _, _ = start_composition()
+    request = start_request(701)
+
+    created = await execute_start(app, request)
+    replayed = await execute_start(app, request)
+
+    assert replayed == created
+    assert created.ok is True
+    assert created.outcome == "created"
+    assert created.frontier.sequence == "1"
+    assert len(runtime.provisions) == 1
+    assert runtime.release_count == 1
+    assert runtime.frontier_verifications == 2
+    ledger, _ = runtime.resources[created.task_id]
+    assert ledger._state.records[0].schema.name == "session_opened"  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_matching_refs_attach_and_same_title_without_refs_stays_distinct() -> None:
+    app, runtime, _, _ = start_composition()
+    created = await execute_start(app, start_request(710, refs=True))
+    attached = await execute_start(app, start_request(711, refs=True))
+    separate = await execute_start(app, start_request(712, title="Exact task"))
+
+    assert attached.outcome == "attached"
+    assert attached.task_id == created.task_id
+    assert attached.session_id != created.session_id
+    assert separate.task_id != created.task_id
+    ledger, _ = runtime.resources[created.task_id]
+    assert [record.schema.name for record in ledger._state.records] == [  # pyright: ignore[reportPrivateUsage]
+        "session_opened",
+        "session_resumed",
+    ]
+
+
+async def test_result_published_crash_resumes_pinned_object_and_releases_each_runtime() -> None:
+    app, runtime, clock, catalog = start_composition()
+    request = start_request(720)
+    catalog.fail_complete = True
+
+    with pytest.raises(RuntimeError, match="simulated_post_publish_crash"):
+        await execute_start(app, request)
+    assert runtime.release_count == 1
+    first_task = runtime.provisions[0].task_id
+    published = runtime.start_result_refs(first_task)
+    assert len(published) == 1
+
+    clock.advance(61)
+    resumed = await execute_start(app, request)
+
+    assert resumed.ok is True
+    assert resumed.outcome == "created"
+    assert runtime.release_count == 2
+    assert runtime.provisions[-1].phase == "result_published"
+    republished = runtime.start_result_refs(first_task)
+    assert republished == published
+
+
+async def test_sqlite_and_encrypted_files_resume_exact_catalog_pinned_object(
+    tmp_path: Path,
+) -> None:
+    app, runtime, clock, catalog, catalog_db = _real_composition(tmp_path)
+    request = start_request(1720)
+    catalog.fail_complete = True
+
+    with pytest.raises(RuntimeError, match="simulated_post_publish_crash"):
+        await execute_start(app, request)
+
+    row = catalog_db.execute(
+        "SELECT task_id, response_object_id, response_envelope_digest "
+        "FROM start_operations WHERE operation_id=?",
+        (request.request_id,),
+    ).fetchone()
+    assert row is not None
+    task_id, object_id, envelope_digest = cast(tuple[str, str, str], row)
+    resources = runtime.resources[task_id]
+    pinned_path = resources.bundle_root / "objects" / object_id[4:6] / object_id
+    assert pinned_path.is_file()
+    pinned_bytes = pinned_path.read_bytes()
+    assert resources.ledger.frontier_loads == 3
+
+    clock.advance(61)
+    resumed = await execute_start(app, request)
+    reopened = runtime.resources[task_id]
+
+    assert resumed.task_id == task_id
+    assert runtime.provisions[-1].phase == "result_published"
+    assert reopened.objects.resolutions == [(object_id, envelope_digest)]
+    assert reopened.ledger.frontier_loads == 3
+    assert pinned_path.read_bytes() == pinned_bytes
+    start_result_ids = {
+        decode_object_envelope(path.read_bytes()).header.object_id
+        for path in (reopened.bundle_root / "objects").rglob("obj_*")
+        if path.is_file()
+        and decode_object_envelope(path.read_bytes()).header.object_kind is ObjectKind.START_RESULT
+    }
+    assert start_result_ids == {object_id}
+    assert runtime.release_count == 2

@@ -112,7 +112,8 @@ authorization phase. Server phases either carry one `SecretIngressBinding` or de
 presence availability plus whether an established passphrase reauthentication path exists; they
 never carry authority/proof bytes.
 
-Result branches are exact and structural: vault/keyring state plus bounded reason; portable
+Result branches are exact and structural: vault/keyring state plus bounded reason (including
+`unlock_failed` when the outer ready-Application gate rejects an otherwise valid vault open); portable
 operation/status/result commitment; credential action/stored generation/activation status;
 privacy committed/denied/stale plus policy/receipt commitment; idle-relock policy previous/effective
 value, `scope:"service_generation"`, and service generation. Server-error code is one of

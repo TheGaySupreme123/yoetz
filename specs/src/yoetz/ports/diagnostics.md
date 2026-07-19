@@ -2,7 +2,7 @@
 
 **Wave:** B (definition) / C–F (producers) | **ADRs:** ADR-001, ADR-003, ADR-004, ADR-005,
 ADR-006, ADR-007, ADR-008, ADR-009 | **Imports (spec-tree):** `protocol/errors.md` | **Imported by:**
-`application/service.md`, `config/paths.md`, `adapters/sqlite/connection.md`,
+`application/service.md`, `application/maintenance.py.md`, `config/paths.md`, `adapters/sqlite/connection.md`,
 `adapters/sqlite/recovery.md`, `adapters/keys/*`, `version.md`
 
 ## Purpose
@@ -13,6 +13,9 @@ results without turning them into a public v0.1 `doctor` command. The vocabulary
 the service daemon's ready-composition factory make one mandatory capability gate while keeping
 secrets, raw paths, payloads,
 and exception strings out of startup evidence.
+
+Maintenance support diagnostics use a separate sink and value so operational observations can
+never be passed to the startup capability gate.
 
 ## Public surface
 
@@ -26,9 +29,20 @@ and exception strings out of startup evidence.
 - `enum RuntimeCapability` — `structural_read`, `payload_read`, `write`, `semantic`.
 - `@dataclass(frozen=True, slots=True) class StartupGateReport`.
 - `evaluate_startup_gate(results) -> StartupGateReport`.
+- `@dataclass(frozen=True, slots=True) class MaintenanceDiagnostic` — one bounded path-free
+  `backup|restore|migration` preview/execute observation.
+- `class MaintenanceDiagnosticSink(Protocol)` with
+  `record_maintenance(diagnostic: MaintenanceDiagnostic) -> None`.
 
 These shared types are registered in `specs/INTERFACES.md`. They are internal structural types,
 not a promise to expose a `doctor` command in v0.1.
+
+`MaintenanceDiagnostic` contains only operation, phase, `success|failed|cancelled`, request ID,
+optional task ID, optional plan/result digest, optional migration versions, optional count,
+nonnegative bounded duration milliseconds, optional bounded reason code, and observed time.
+Location, object ID, manifest body, secret/key locator, SQL, and exception text cannot be
+represented. `MaintenanceDiagnosticSink` is orthogonal to `DiagnosticsPort`: its values are never
+inputs to `evaluate_startup_gate` and cannot prove or remove a runtime capability.
 
 ## Behavior
 
@@ -116,6 +130,7 @@ reason. The complete structural report remains internal/release evidence in v0.1
 4. Provider degradation never disguises itself as semantic success or disables strict-local
   deterministic usefulness.
 5. Recording evidence and deciding capability are separate operations.
+6. Maintenance observations cannot enter or alter the startup capability gate.
 
 ## Tests
 

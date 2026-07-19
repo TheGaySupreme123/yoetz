@@ -15,11 +15,14 @@ backend details, and transport rendering remain behind ports/composition.
 
 ## Public surface
 
-- `async execute_start(app: Application, request: StartRequest) -> StartResult` — implementation
-  behind `Application.start`.
+- `@dataclass(frozen=True, slots=True) class StartInternalResult` — exact structural START success
+  fields except client-specific `privacy_projection`, with `as_wire()` for canonical persistence.
+- `async execute_start(app: Application, request: StartRequest) -> StartInternalResult` —
+  implementation behind `Application.start` and the service projection boundary.
 
-`StartRequest`, `StartResult`, compact view types, and wire conversion are defined by
-`protocol/models.py`; this file exports no second request/result schema.
+`StartRequest`, public `StartResult`, and compact/version model types are defined by
+`protocol/models.py`. `StartInternalResult` is not a second public schema; it is the closed durable
+pre-projection application value consumed only by the service facade.
 
 ## Behavior
 
@@ -80,15 +83,18 @@ logged or persisted in the catalog.
    append commit/evidence is verified, again retaining the returned allocation.
 5. Load/build the bounded **structural-only** compact projection at the lifecycle result frontier:
    task/current-plan refs, counts of open obligations and unresolved findings, freshness/coverage
-   enums and closed gap codes, versions, and allocated IDs/frontiers. `StartResult` never echoes a
+   enums and closed gap codes, versions, and allocated IDs/frontiers. The internal/public result
+   never echoes a
    title, description, finding summary/detail, evidence excerpt, path, external/workspace ref, or
    other user text; clients use bounded `status` pages for separately projected content.
-6. Canonically encode the full structural start result, stage/finalize it as
-   `ObjectKind.start_result`, and create `EncryptedResultRef` with the safe structural terminal
-   envelope (IDs/digests/reason codes only). CAS `lifecycle_committed → result_published`, passing
-   that ref so the same transaction stores its `response_object_id`, after the object is durable.
-   Retain the returned allocation. On resume at `result_published`, reopen and validate its pinned
-   object and rebuild the same structural ref; never re-encrypt a replacement.
+6. Build the frozen `StartInternalResult` (the exact public START success fields except
+   `privacy_projection`), canonically encode that unprojected body, stage/finalize it as
+   `ObjectKind.start_result`, and create `EncryptedResultRef`. CAS
+   `lifecycle_committed → result_published`, passing that ref so the same transaction stores its
+   object ID, full encrypted-envelope digest, canonical structural bytes, and result digest after
+   the object is durable. Retain the returned allocation. On resume at `result_published`, resolve
+   by the pinned ID+envelope digest, authenticate/open the object, compare plaintext byte-for-byte
+   with the pinned canonical bytes/digest, and rebuild the same ref; never re-encrypt a replacement.
 7. Call `app.runtime.verify_start(..., milestone=result_published)` with the lifecycle acceptance
    and `EncryptedResultRef`, then pass the returned `StartCompletionEvidence` to
    `start_catalog.complete`. The catalog transaction compares allocation/result/evidence, rechecks
@@ -96,6 +102,11 @@ logged or persisted in the catalog.
    lease, and sets `complete/terminal`. Return only after this catalog commit. Always release the
    task-runtime usage reference in the operation's lifecycle cleanup; release never cancels an
    admitted commit.
+
+`execute_start` returns the unprojected `StartInternalResult`, and exact terminal replay returns
+the original canonical structural result. The service facade alone adds a sink-specific
+`privacy_projection`/receipt and constructs public `StartResult`; client projection is never
+persisted in the START object/catalog and cannot cause a second start mutation.
 
 On resume at any later phase, repeat the relevant verification and reuse the already durable
 event/object. Never trust phase alone and never append a second lifecycle event.

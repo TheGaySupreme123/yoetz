@@ -148,7 +148,7 @@ def ensure_canonical_value(value: JsonValue) -> None:
 def ensure_canonical_set(values: list[str] | tuple[str, ...]) -> None:
     """Validate a set-valued field without normalizing its order."""
 
-    if not isinstance(cast(object, values), (list, tuple)):
+    if not isinstance(cast(object, values), list | tuple):
         raise ProtocolValueError("unsupported_json_type")
 
     previous: bytes | None = None

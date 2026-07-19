@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 from types import MappingProxyType
+from typing import Any, cast
 
 import pytest
 
@@ -17,6 +19,10 @@ from yoetz.kernel.deterministic_checks import (
     PolicyPack,
     UnavailableCapturedObject,
     build_deterministic_case,
+    deterministic_case_from_json,
+    deterministic_case_to_json,
+    finding_basis_from_json,
+    finding_basis_to_json,
     finding_basis_to_status_json,
     render_deterministic_finding_text,
     run_deterministic_policies,
@@ -25,6 +31,7 @@ from yoetz.kernel.policies.research_evidence import RESEARCH_EVIDENCE_POLICY_PAC
 from yoetz.kernel.policies.work_integrity import WORK_INTEGRITY_POLICY_PACK
 from yoetz.kernel.projections import empty_projection_state
 from yoetz.kernel.reducers import replay
+from yoetz.protocol.canonical import canonical_encode, strict_json_parse
 
 
 def test_genesis_case_is_exact_and_immutable() -> None:
@@ -40,6 +47,53 @@ def test_genesis_case_is_exact_and_immutable() -> None:
     assert case.gaps == ()
     with pytest.raises(TypeError):
         case.coverage_by_ref["evt_00000000-0000-4000-8000-000000000001"] = None  # type: ignore[index, assignment]
+
+
+def test_deterministic_case_codec_round_trips_canonical_bytes() -> None:
+    records = replay_records("all-event-families")
+    case = build_deterministic_case(replay(records), records, CaseAvailabilityFacts())
+    encoded = deterministic_case_to_json(case)
+    decoded = deterministic_case_from_json(encoded)
+    assert decoded == case
+    assert canonical_encode(deterministic_case_to_json(decoded)) == canonical_encode(encoded)
+
+
+def test_deterministic_case_decoder_rejects_extra_and_contradictory_state() -> None:
+    records = replay_records("all-event-families")
+    encoded = cast(
+        dict[str, Any],
+        strict_json_parse(
+            canonical_encode(
+                deterministic_case_to_json(
+                    build_deterministic_case(replay(records), records, CaseAvailabilityFacts())
+                )
+            )
+        ),
+    )
+    with_extra = deepcopy(encoded)
+    with_extra["unexpected"] = None
+    with pytest.raises(ValueError, match="deterministic_case_invalid"):
+        deterministic_case_from_json(with_extra)
+
+    missing_coverage = deepcopy(encoded)
+    coverage = cast(dict[str, Any], missing_coverage["coverage_by_ref"])
+    coverage.pop(next(iter(coverage)))
+    with pytest.raises(ValueError, match="deterministic_case_invalid"):
+        deterministic_case_from_json(missing_coverage)
+
+    duplicate_allowed = deepcopy(encoded)
+    allowed_ids = cast(list[Any], duplicate_allowed["allowed_ids"])
+    allowed_ids.append(allowed_ids[0])
+    with pytest.raises(ValueError, match="deterministic_case_invalid"):
+        deterministic_case_from_json(duplicate_allowed)
+
+    wrong_frontier = deepcopy(encoded)
+    wrong_frontier["frontier"] = {
+        "sequence": "0",
+        "head_digest": "genesis",
+    }
+    with pytest.raises(ValueError, match="deterministic_case_invalid"):
+        deterministic_case_from_json(wrong_frontier)
 
 
 def test_case_requires_the_exact_projection_prefix_head_pair() -> None:
@@ -168,6 +222,24 @@ def test_status_basis_projection_is_controlled_and_exact() -> None:
     assert projected["subject_state_relation"] == "unknown"
     assert projected["evidence_refs"] == []
     assert "supporting_refs" not in projected
+
+
+def test_finding_basis_codec_is_lossless_closed_and_distinct_from_status() -> None:
+    records = replay_records("all-event-families")
+    case = build_deterministic_case(replay(records), records, CaseAvailabilityFacts())
+    assessment = run_deterministic_policies(case, WORK_INTEGRITY_POLICY_PACK).assessments[0]
+    encoded = finding_basis_to_json(assessment.basis)
+    assert finding_basis_from_json(encoded) == assessment.basis
+    assert canonical_encode(finding_basis_to_json(finding_basis_from_json(encoded))) == (
+        canonical_encode(encoded)
+    )
+
+    with_extra = deepcopy(encoded)
+    cast(dict[str, Any], with_extra)["unexpected"] = None
+    with pytest.raises(ValueError, match="finding_basis_invalid"):
+        finding_basis_from_json(with_extra)
+    with pytest.raises(ValueError, match="finding_basis_invalid"):
+        finding_basis_from_json(cast(Any, finding_basis_to_status_json(assessment)))
 
 
 def test_unknown_or_tampered_pack_is_rejected() -> None:

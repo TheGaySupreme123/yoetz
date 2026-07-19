@@ -105,6 +105,27 @@ async def test_admission_blocks_drain_until_released() -> None:
 
 
 @pytest.mark.anyio
+async def test_close_after_completed_stop_does_not_repeat_ready_cleanup() -> None:
+    cleanup_calls = 0
+
+    async def close_ready() -> None:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+
+    lifecycle = _lifecycle(_Clock(), close_ready_composition=close_ready)
+    await lifecycle.acquire_singleton()
+    await lifecycle.transition(ServiceState.READY, vault_generation=1)
+
+    await lifecycle.request_stop()
+    assert lifecycle.state is ServiceState.DRAINING
+    assert cleanup_calls == 1
+
+    await lifecycle.close()
+    await lifecycle.close()
+    assert cleanup_calls == 1
+
+
+@pytest.mark.anyio
 async def test_idle_policy_requires_exact_generation_bound_proof() -> None:
     clock = _Clock()
     lifecycle = _lifecycle(clock)

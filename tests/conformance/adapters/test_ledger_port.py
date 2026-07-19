@@ -73,6 +73,7 @@ class _Objects:
     def __init__(self, ids: _Ids) -> None:
         self._ids = ids
         self._data: dict[str, bytes] = {}
+        self._refs: dict[str, ObjectRef] = {}
 
     async def commitment_for(self, data: bytes, kind: ObjectKind) -> str:
         del kind
@@ -95,7 +96,7 @@ class _Objects:
         )
 
     async def finalize(self, staged: StagedObject) -> ObjectRef:
-        return ObjectRef(
+        ref = ObjectRef(
             staged.object_id,
             staged.plaintext_size,
             staged.commitment,
@@ -104,6 +105,14 @@ class _Objects:
             staged.key_slot,
             staged.metadata,
         )
+        self._refs[ref.object_id] = ref
+        return ref
+
+    async def resolve_verified(self, object_id: str, envelope_digest: str) -> ObjectRef:
+        ref = self._refs[object_id]
+        if ref.envelope_digest != envelope_digest:
+            raise ValueError("object_verification_failed")
+        return ref
 
     async def _open(self, ref: ObjectRef) -> AsyncIterator[bytes]:
         yield self._data[ref.object_id]
@@ -277,7 +286,7 @@ async def _local_result_ref(
         ObjectSource(data=b"{}", declared_size=2),
         ObjectMetadata(
             ObjectKind.DETERMINISTIC_RESULT,
-            "application/json",
+            "application/vnd.yoetz.deterministic-result+json",
             command.task_id,
             datetime(2026, 7, 19, 12, 0, tzinfo=UTC),
         ),

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from copy import deepcopy
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from typing import Any, cast
@@ -29,9 +30,10 @@ from yoetz.kernel.projections import (
     ProjectionState,
     empty_projection_state,
     projection_digest,
+    projection_from_snapshot,
     projection_snapshot,
 )
-from yoetz.protocol.canonical import canonical_digest
+from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
 from yoetz.protocol.coverage import LedgerFreshness
 
 _DIGEST = "sha256:" + "1" * 64
@@ -154,6 +156,40 @@ def test_projection_record_and_snapshot_shapes_are_exact() -> None:
         "source_frontier",
     )
     assert cast(dict[str, Any], record_snapshot)["source_frontier"] == "1"
+
+
+def test_projection_snapshot_codec_round_trips_canonical_bytes() -> None:
+    state = _state_with_actions({_ACTION_ID: _action_record()})
+    snapshot = projection_snapshot(state)
+    decoded = projection_from_snapshot(snapshot)
+    assert decoded == state
+    assert canonical_encode(projection_snapshot(decoded)) == canonical_encode(snapshot)
+
+
+def test_projection_snapshot_decoder_rejects_open_or_contradictory_shapes() -> None:
+    snapshot = cast(
+        dict[str, Any],
+        strict_json_parse(
+            canonical_encode(
+                projection_snapshot(_state_with_actions({_ACTION_ID: _action_record()}))
+            )
+        ),
+    )
+    with_extra = deepcopy(snapshot)
+    with_extra["unexpected"] = None
+    with pytest.raises(ValueError, match="invalid_projection_state"):
+        projection_from_snapshot(with_extra)
+
+    wrong_source = deepcopy(snapshot)
+    action = cast(
+        dict[str, Any],
+        cast(dict[str, Any], wrong_source["actions"])[_ACTION_ID],
+    )
+    cast(dict[str, Any], action["payload"])["action_id"] = (
+        "act_00000000-0000-4000-8000-000000000099"
+    )
+    with pytest.raises(ValueError, match="invalid_projection_state"):
+        projection_from_snapshot(wrong_source)
 
 
 def test_obligation_plan_change_emits_exact_empty_replacement_array() -> None:

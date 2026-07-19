@@ -33,6 +33,7 @@ It is a pure upstream value module: it never imports `ports/ledger.py` or `versi
 | `ProjectionState` | frozen dataclass containing the derived work snapshot |
 | `empty_projection_state()` | construct the empty derived state for a new bundle or replay |
 | `projection_snapshot(state)` | canonical JSON-compatible view used for digesting and persistence |
+| `projection_from_snapshot(value)` | strict inverse that reconstructs and revalidates the exact generation-1 snapshot |
 | `projection_digest(state)` | `sha256:` digest of the canonical projection snapshot |
 
 ## Behavior
@@ -245,6 +246,16 @@ object may satisfy both associations, in which case both effects apply in that f
 `projection_digest(state)` is the `sha256:` digest of the canonical snapshot bytes. It must be
 stable across hash seeds, locales, and installation order.
 
+`projection_from_snapshot(value)` accepts exactly the 17-field snapshot tree emitted above. It
+rejects missing or extra root, record, contradiction, coverage, and latest-check members; requires
+canonical unsigned-decimal strings in every registered string-integer position; decodes each
+non-null payload through its registered event schema; and reconstructs every specialized record.
+The ordinary frozen constructors then recheck payload digests, logical mapping keys, source
+frontiers, supersession combinations, contradiction identities, gap counts, and latest-check
+bounds. A successful decode is lossless:
+`canonical_encode(projection_snapshot(projection_from_snapshot(snapshot)))` equals the original
+canonical snapshot bytes.
+
 ## Errors and edge cases
 
 - A non-frozen or malformed state record is invalid at construction time.
@@ -253,6 +264,8 @@ stable across hash seeds, locales, and installation order.
   protocol errors.
 - The projection never invents missing evidence, claims, or findings to fill gaps.
 - A corrupted snapshot digest means the typed projection tables must be rebuilt from the ledger.
+- A malformed, open, noncanonical, or internally contradictory snapshot raises exactly
+  `ValueError("invalid_projection_state")`; it is never normalized or partially recovered.
 
 ## Invariants
 
@@ -267,7 +280,8 @@ stable across hash seeds, locales, and installation order.
 - `specs/tests/conformance.md` — memory and SQLite projection parity over the same event stream.
 - `specs/tests/integration.md` — projection corruption, rebuild, and stale-generation handling.
 - `tests/unit/kernel/test_replay_and_projections.py` — snapshot ordering, full/incremental parity,
-  tombstone rebuild, marker lifecycle, and digest stability against `fixtures/replay/*.case.json`.
+  strict snapshot codec round trips/rejection, tombstone rebuild, marker lifecycle, and digest
+  stability against `fixtures/replay/*.case.json`.
 
 ## Open questions
 

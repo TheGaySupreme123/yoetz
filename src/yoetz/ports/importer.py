@@ -250,7 +250,6 @@ class ImportByteSource(Protocol):
 @dataclass(frozen=True, slots=True, repr=False)
 class ImportCaptureInput:
     source: ImportByteSource
-    stderr: ImportByteSource | None
     codex_version: str
     codex_capability_profile_id: str
     argv: tuple[str, ...]
@@ -265,12 +264,6 @@ class ImportCaptureInput:
         declared = self.source.declared_size
         if declared is not None:
             _nonnegative(declared, maximum=_MAX_SOURCE_BYTES)
-        if self.stderr is not None:
-            if not hasattr(self.stderr, "__aiter__") or not hasattr(self.stderr, "close"):
-                raise _invalid("import_source_invalid")
-            stderr_size = self.stderr.declared_size
-            if stderr_size is not None:
-                _nonnegative(stderr_size, maximum=_MAX_SOURCE_BYTES)
         object.__setattr__(self, "codex_version", _token(self.codex_version))
         object.__setattr__(
             self,
@@ -324,10 +317,10 @@ class CapturedImportSource:
     exit_status: int
     source_kind: ImportSourceKind
     capture_metadata_object: ObjectRef
-    stderr_present: bool
-    stderr_captured_bytes: int
-    stderr_truncated: bool
-    stderr_commitment: str | None
+    stderr_present: Literal[False]
+    stderr_captured_bytes: Literal[0]
+    stderr_truncated: Literal[False]
+    stderr_commitment: None
 
     def __post_init__(self) -> None:
         _object_ref(self.source_object, ObjectKind.IMPORT_SOURCE)
@@ -356,16 +349,10 @@ class CapturedImportSource:
         if self.source_kind not in {"file", "stdin"}:
             raise _invalid("import_source_invalid")
         _object_ref(self.capture_metadata_object, ObjectKind.IMPORT_SOURCE_MANIFEST)
-        if type(self.stderr_present) is not bool or type(self.stderr_truncated) is not bool:
-            raise _invalid("import_capture_metadata_invalid")
-        _nonnegative(self.stderr_captured_bytes, maximum=65_536)
-        if self.stderr_present:
-            if self.stderr_commitment is None:
-                raise _invalid("import_capture_metadata_invalid")
-            validate_commitment(self.stderr_commitment)
-        elif (
-            self.stderr_truncated
+        if (
+            self.stderr_present is not False
             or self.stderr_captured_bytes != 0
+            or self.stderr_truncated is not False
             or self.stderr_commitment is not None
         ):
             raise _invalid("import_capture_metadata_invalid")
@@ -868,7 +855,7 @@ def _status_rows(value: tuple[object, ...], *, active: bool) -> tuple[JsonObject
     expected = (
         frozenset({"identity_digest", "phase", "completed_batch_count", "batch_count"})
         if active
-        else frozenset({"identity_digest", "report_event_id", "report_event_frontier"})
+        else frozenset({"identity_digest", "report_evidence_id"})
     )
     for item in value:
         row = item if type(item) is JsonObject else JsonObject(item)
@@ -891,10 +878,7 @@ def _status_rows(value: tuple[object, ...], *, active: bool) -> tuple[JsonObject
             if completed > count:
                 raise _invalid("import_status_invalid")
         else:
-            validate_id(IdKind.EVENT, row["report_event_id"])
-            frontier = row["report_event_frontier"]
-            if type(frontier) is not JsonObject:
-                raise _invalid("import_status_invalid")
+            validate_id(IdKind.EVIDENCE, row["report_evidence_id"])
         rows.append(row)
         previous = identity
     return tuple(rows)
@@ -1045,6 +1029,6 @@ class ImporterPort(Protocol):
 
     async def load_review_source(
         self,
-        identity: ImportSourceIdentity,
+        identity_digest: str,
         through: Frontier,
     ) -> ImportReviewSource | None: ...

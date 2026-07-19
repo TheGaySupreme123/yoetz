@@ -110,8 +110,8 @@ class _Vault:
     def state(self) -> str:
         return "ready" if self.ready else "locked"
 
-    async def retry_keyring(self, capability: UserPresenceCapability | None) -> None:
-        self.ready = capability is not None
+    async def retry_keyring(self, user_presence_capability: UserPresenceCapability | None) -> None:
+        self.ready = user_presence_capability is not None
 
     async def initialize_passphrase(
         self, handle: SecretHandle, throttle_record_digest: str
@@ -125,6 +125,10 @@ class _Vault:
     async def unlock(self, handle: SecretHandle) -> None:
         handle.consume(SecretConsumer.VAULT_ROOT, bytes)
         self.ready = True
+        self.generation += 1
+
+    async def lock(self) -> None:
+        self.ready = False
         self.generation += 1
 
     async def mint_human_authorization(
@@ -317,7 +321,20 @@ def _service(
     )
     if mode == "passphrase":
         throttle.stage_initial_record()
-    unlock = UnlockCoordinator(clock=clock, throttle=throttle, vault=vault, lifecycle=lifecycle)
+
+    async def activate_ready(service_generation: int, vault_generation: int) -> None:
+        assert service_generation == lifecycle.instance.generation
+        assert vault_generation == vault.generation
+        assert vault.ready
+        await lifecycle.transition(ServiceState.READY, vault_generation=vault_generation)
+
+    unlock = UnlockCoordinator(
+        clock=clock,
+        throttle=throttle,
+        vault=vault,
+        lifecycle=lifecycle,
+        activate_ready=activate_ready,
+    )
     effects = _Effects()
     service = HumanControlService(
         clock=clock,

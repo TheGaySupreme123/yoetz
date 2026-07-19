@@ -21,6 +21,7 @@ _PACKAGE_ROOT = resources.files("yoetz").joinpath("resources", "schemas", "servi
 _VERSION = "1.0.0"
 _INSTANCE_ID = "svc_00000000-0000-4000-8000-000000000001"
 _RPC_ID = "rpc_00000000-0000-4000-8000-000000000002"
+_REQUEST_ID = "req_00000000-0000-4000-8000-000000000003"
 _DIGEST = "sha256:" + "0" * 64
 _WORKFLOW_METHODS = (
     "check",
@@ -233,6 +234,72 @@ def test_control_request_and_result_unions_are_exact_and_disjoint() -> None:
     assert tuple(sorted(result_pairs)) == tuple(
         sorted((method, outcome) for method in _ALL_METHODS for outcome in ("error", "ok"))
     )
+
+
+def test_integration_requests_require_explicit_codex_harness() -> None:
+    definitions = cast(dict[str, dict[str, Any]], _schema("control-request")["$defs"])
+    preview_branches = cast(list[dict[str, Any]], definitions["integration_preview_body"]["oneOf"])
+    execute_body = definitions["integration_execute_body"]
+    for body in (*preview_branches, execute_body):
+        properties = cast(dict[str, dict[str, Any]], body["properties"])
+        assert properties["harness"] == {"const": "codex"}
+        assert "harness" in cast(list[str], body["required"])
+
+    bodies: tuple[tuple[str, dict[str, JsonValue]], ...] = (
+        (
+            "integration_preview",
+            {
+                "schema_version": "1.0.0",
+                "operation": "preview",
+                "request_id": _REQUEST_ID,
+                "harness": "codex",
+                "project_root": "/tmp/project",
+                "action": "install",
+                "replace_modified": False,
+            },
+        ),
+        (
+            "integration_preview",
+            {
+                "schema_version": "1.0.0",
+                "operation": "status",
+                "harness": "codex",
+                "project_root": "/tmp/project",
+            },
+        ),
+        (
+            "integration_execute",
+            {
+                "schema_version": "1.0.0",
+                "request_id": _REQUEST_ID,
+                "harness": "codex",
+                "project_root": "/tmp/project",
+                "action": "install",
+                "preview_digest": _DIGEST,
+                "explicitly_accepted": True,
+                "replace_modified": False,
+            },
+        ),
+    )
+    for method, body in bodies:
+        request: dict[str, JsonValue] = {
+            "kind": "call",
+            "protocol_version": "1.0",
+            "rpc_id": _RPC_ID,
+            "service_instance_id": _INSTANCE_ID,
+            "service_generation": "1",
+            "method": method,
+            "body": body,
+        }
+        validate_schema_instance("control-request", _VERSION, request)
+        for invalid_harness in (None, "claude"):
+            invalid = deepcopy(request)
+            invalid_body = cast(dict[str, JsonValue], invalid["body"])
+            if invalid_harness is None:
+                del invalid_body["harness"]
+            else:
+                invalid_body["harness"] = invalid_harness
+            _assert_invalid("control-request", invalid)
 
 
 def test_envelope_identity_and_error_bodies_fail_closed() -> None:

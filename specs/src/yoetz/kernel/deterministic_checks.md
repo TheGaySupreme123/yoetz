@@ -38,9 +38,11 @@ and a recorded finding at the same frontier can never disagree.
 | `DeterministicFindingTemplate` | frozen `(summary, next_action)` text owned once for every deterministic kind |
 | `DETERMINISTIC_FINDING_TEMPLATES` | immutable complete `FindingKind -> DeterministicFindingTemplate` registry |
 | `render_deterministic_finding_text(kind, subject_refs)` | render the exact ID-only summary/detail pair |
+| `finding_basis_to_json(basis)` / `finding_basis_from_json(value)` | lossless strict codec for the encrypted durable internal basis |
 | `finding_basis_to_status_json(assessment)` | controlled projection to `status-result#/$defs/finding_basis` |
 | `CaseGap` | frozen typed projection/case gap `(marker, code, subject_refs)` |
 | `DeterministicCase` | pure frozen policy input with projection, frontier, availability facts, allowed IDs, coverage index, and typed gaps |
+| `deterministic_case_to_json(case)` / `deterministic_case_from_json(value)` | lossless strict codec for encrypted CHECK continuation state |
 | `build_deterministic_case(projection, records, availability)` | derive the pure case from one exact accepted-record prefix and its frozen availability snapshot |
 | `run_deterministic_policies(case, policy)` | evaluate one `DeterministicCase` and return `DeterministicPolicyResult` |
 
@@ -99,6 +101,17 @@ The index contains the current visible logical IDs and their source event IDs, p
 IDs needed as nonempty gap roots. Each value starts from the exact accepted-envelope coverage for
 that source and is weakened by the closed component table below; no default is inferred from a
 channel or record kind.
+
+The durable case codec has exactly six root members: `projection`, `frontier`, `availability`,
+`allowed_ids`, `coverage_by_ref`, and `gaps`. `projection` uses the strict projection snapshot
+codec; `frontier` uses the shared frontier codec; availability contains exactly the sorted event-ID
+array and sorted `{source_event_id, object_id}` array; allowed IDs are sorted; coverage is an
+ASCII-keyed exact ref map using the shared coverage codec; and every gap is exactly
+`{marker, code, subject_refs}`. Decode rejects missing/extra members, malformed values, unsorted or
+duplicate set-valued arrays, coverage/allowed-ID disagreement, and any projection/frontier
+contradiction. Successful decode reconstructs the frozen constructors and reproduces the same
+canonical bytes. The codec contains no plaintext payload outside the already frozen projection
+and is suitable only inside the authenticated encrypted CHECK continuation envelope.
 
 `build_deterministic_case(projection, records, availability)` is pure. The caller supplies the authoritative
 ledger-ordered prefix whose final accepted record has `ingestion_sequence == projection.frontier`
@@ -241,6 +254,13 @@ it carries `policy_id` and `kind`, so the public bare rule token is unambiguous.
 fact, never from a later disclosure decision. Internal construction bounds the unions above, so the mapper never truncates
 to the schema's 64-member ceilings.
 
+The lossless internal basis codec is separate from that status projection. It carries exactly
+`rule_id`, `observed_facts`, `required_but_missing_facts`, `subject_state_relation`,
+`source_availability`, `coverage_gaps`, and `supporting_refs`; each fact is exactly
+`{fact_code, subject_refs}`. Decode is closed and re-runs `FindingFact` and `FindingBasis`
+constructors, including fact ordering, ref typing, and the supporting-ref union. The flattened
+status object is therefore not accepted as resumable internal state.
+
 `source_availability` is intentionally earlier than disclosure visibility. It says only whether the
 frozen projection supplied comparable material, an explicit availability fact, or an
 already-redacted marker. The later case
@@ -378,6 +398,8 @@ Rule-level expectations are:
 - If the case contains only rootless/global gaps, the engine returns no fabricated finding; the
   caller's material coverage/completeness derivation still produces an insufficient or incomplete
   conclusion as applicable.
+- Malformed, open, or contradictory durable case/basis JSON raises the bounded kernel value error
+  (`deterministic_case_invalid` or `finding_basis_invalid`) and is never normalized.
 
 ## Invariants
 
@@ -403,6 +425,9 @@ Rule-level expectations are:
 - Basis fixtures freeze trigger/missing fact codes, state relation, source availability, coverage
   gaps, and byte-equivalent output across repeated runs. Marker-string fixtures prove no rule's
   rendered `summary`/`detail` carries content from behind a `subject_ref`.
+- `tests/unit/kernel/test_deterministic_checks.py` and
+  `tests/property/test_reducer_equivalence.py` prove case/basis canonical byte round trips and
+  closed-shape/contradiction rejection over the replay corpus.
 
 ## Open questions
 

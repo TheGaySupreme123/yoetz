@@ -1712,6 +1712,22 @@ def test_json_pointer_lone_surrogates_fail_with_the_bounded_reason() -> None:
         models.PrivacyProjectionModel.model_validate(projection)
 
 
+def test_privacy_projection_admits_only_the_two_ordinary_client_sinks() -> None:
+    models = _models_module()
+    for sink in ("agent_context", "local_human_view"):
+        projection = _privacy_projection_wire()
+        projection["sink"] = sink
+        assert models.PrivacyProjectionModel.model_validate(projection).sink == sink
+        check = _check_result_wire()
+        check["privacy_projection"] = projection
+        assert models.CheckResultModel.model_validate(check).root.privacy_projection.sink == sink
+    for sink in ("local_model", "trusted_human_control"):
+        projection = _privacy_projection_wire()
+        projection["sink"] = sink
+        with pytest.raises(ValidationError):
+            models.PrivacyProjectionModel.model_validate(projection)
+
+
 def _assert_reason(exc_info: pytest.ExceptionInfo[ProtocolValueError], reason: str) -> None:
     assert exc_info.value.reason_code == reason
     assert exc_info.value.args == (reason,)

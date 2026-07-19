@@ -34,6 +34,12 @@ more, with one exact machine-readable basis for every candidate finding.
   public-root, observed/missing, and supporting-ref mappings.
 - `test_status_basis_projection_is_controlled_and_exact` — namespaced rule IDs, fact/ref flattening,
   availability spelling, and evidence/result ref selection map exactly to the frozen status shape.
+- `test_deterministic_case_codec_round_trips_canonical_bytes` — encrypted continuation material
+  reconstructs the exact frozen case and canonical bytes.
+- `test_deterministic_case_decoder_rejects_extra_and_contradictory_state` — open objects,
+  coverage/ref mismatch, and projection/frontier mismatch fail closed.
+- `test_finding_basis_codec_is_lossless_closed_and_distinct_from_status` — the durable internal
+  basis round trips exactly and rejects both extra members and the lossy public status shape.
 - `test_redaction_and_unavailability_coverage_caps_are_componentwise` — all six kernel gap
   conditions preserve/cap/add exactly the registered fields and never strengthen a weaker base.
 - `test_redacted_object_root_is_first_cause_and_stable` — repeated object redactions yield one gap
@@ -82,6 +88,8 @@ The suite exercises:
 - candidate-status and durable-check builders supplied the same accepted prefix and
   `CaseAvailabilityFacts` yield byte-equivalent `DeterministicCase` values; a changed availability
   tuple changes the case/dependency digest without changing `ProjectionState` snapshots.
+- strict case and basis codecs preserve canonical bytes, re-run their frozen constructors, and do
+  not accept the flattened status basis as restart state.
 
 ## Errors and edge cases
 

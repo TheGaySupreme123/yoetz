@@ -869,6 +869,7 @@ _VAULT_STATE_RESULT_REASONS: Final = frozenset(
         "throttle_record_tampered",
         "throttle_record_unsafe",
         "unlock_rate_limited",
+        "unlock_failed",
         "unlock_wrong",
         "vault_locked",
         "vault_tampered",

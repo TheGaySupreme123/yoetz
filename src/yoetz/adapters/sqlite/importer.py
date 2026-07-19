@@ -37,6 +37,7 @@ from yoetz.domain.values import (
     request_id,
     task_id,
     timestamp_from_datetime,
+    validate_sha256_digest,
     writer_id,
 )
 from yoetz.domain.values import (
@@ -83,7 +84,6 @@ type PlanReader = Callable[[ObjectRef], Awaitable[ImportPlanMaterial]]
 @dataclass(frozen=True, slots=True)
 class SqliteImportPolicy:
     source_bytes: int = 4 * 1024 * 1024
-    stderr_prefix_bytes: int = 64 * 1024
     line_bytes: int = 1024 * 1024
     line_count: int = 20_000
     batch_count: int = 1_024
@@ -94,7 +94,6 @@ class SqliteImportPolicy:
     def __post_init__(self) -> None:
         MemoryImportPolicy(
             self.source_bytes,
-            self.stderr_prefix_bytes,
             self.line_bytes,
             self.line_count,
             self.batch_count,
@@ -886,14 +885,11 @@ class SqliteImporter:
                 JsonObject(
                     {
                         "identity_digest": row[0],
-                        "report_event_id": row[1],
-                        "report_event_frontier": append_result_from_bytes(
-                            row[2]
-                        ).result_frontier.as_wire(),
+                        "report_evidence_id": row[1],
                     }
                 )
                 for row in db.execute(
-                    "SELECT source_identity_digest, report_event_id, report_append_result_canonical "
+                    "SELECT source_identity_digest, report_evidence_id "
                     "FROM import_jobs WHERE session_id=? AND state!='pending' "
                     "AND report_append_result_canonical IS NOT NULL "
                     "ORDER BY source_identity_digest LIMIT ?",
@@ -911,11 +907,12 @@ class SqliteImporter:
             db.close()
 
     async def load_review_source(
-        self, identity: ImportSourceIdentity, through: Frontier
+        self, identity_digest: str, through: Frontier
     ) -> ImportReviewSource | None:
+        validate_sha256_digest(identity_digest)
         db = self._read_factory()
         try:
-            row = self._job_row(db, identity.identity_digest)
+            row = self._job_row(db, identity_digest)
             if row is None:
                 return None
             batches = tuple(
@@ -923,12 +920,13 @@ class SqliteImporter:
                 for value in db.execute(
                     "SELECT plan_object_id, event_ids_canonical, append_result_canonical "
                     "FROM import_batches WHERE source_identity_digest=? ORDER BY batch_index",
-                    (identity.identity_digest,),
+                    (identity_digest,),
                 )
             )
         finally:
             db.close()
-        if self._identity_from_row(row) != identity:
+        identity = self._identity_from_row(row)
+        if identity.identity_digest != identity_digest:
             raise _error(
                 PublicErrorCode.STORAGE_CORRUPT,
                 "Import review identity is contradictory.",

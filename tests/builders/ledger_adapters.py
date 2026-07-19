@@ -52,6 +52,12 @@ class MemoryObjects:
     def __init__(self, ids: FixedIds) -> None:
         self._ids = ids
         self._data: dict[str, bytes] = {}
+        self._refs: dict[str, ObjectRef] = {}
+
+    def refs_for_kind(self, kind: ObjectKind) -> tuple[ObjectRef, ...]:
+        """Expose finalized references to tests without leaking mutable storage."""
+
+        return tuple(ref for ref in self._refs.values() if ref.metadata.kind is kind)
 
     async def commitment_for(self, data: bytes, kind: ObjectKind) -> str:
         del kind
@@ -74,7 +80,7 @@ class MemoryObjects:
         )
 
     async def finalize(self, staged: StagedObject) -> ObjectRef:
-        return ObjectRef(
+        ref = ObjectRef(
             staged.object_id,
             staged.plaintext_size,
             staged.commitment,
@@ -83,6 +89,14 @@ class MemoryObjects:
             staged.key_slot,
             staged.metadata,
         )
+        self._refs[ref.object_id] = ref
+        return ref
+
+    async def resolve_verified(self, object_id: str, envelope_digest: str) -> ObjectRef:
+        ref = self._refs[object_id]
+        if ref.envelope_digest != envelope_digest:
+            raise ValueError("object_verification_failed")
+        return ref
 
     async def _open(self, ref: ObjectRef) -> AsyncIterator[bytes]:
         yield self._data[ref.object_id]

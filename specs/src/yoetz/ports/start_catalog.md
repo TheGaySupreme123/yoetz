@@ -107,18 +107,21 @@ not a title lookup index.
   preserves the existing pair. They are immutable for this start operation even if a later
   maintenance switch makes the allocation stale.
 - `phase: StartPhase` — the durably recorded phase (a lower bound after a crash).
-- `response_object_id: str | None` — absent before `result_published`; the exact pinned result
-  object locator at `result_published`/terminal replay.
+- `response_object_id`, `response_envelope_digest`, `response_result_canonical`, and
+  `response_result_digest` — all absent before `result_published`, then all present as the exact
+  pinned result identity and structural bytes through completion/replay; partial presence is
+  invalid.
 - `lease: StartOperationLease` — positive `owner_generation: int`, `lease_owner_id: str`,
   `lease_generation: int`, `lease_expires_at: datetime`. Absent (`None`) when
   `outcome == "replayed"`.
 - `replayed_result: bytes | None` — the stored `terminal_result_canonical` envelope (structural
-  IDs/digests/reason codes only) when terminal; the application deserializes it into the public
-  `StartResult`/error without recomputation.
+  IDs/digests/reason codes only) when terminal; the application deserializes it into the closed
+  `StartInternalResult` without recomputation or client projection.
 
 `EncryptedResultRef` fields: `response_object_id: str` (the finalized encrypted start-result
-object), `result_canonical: bytes` (the safe structural terminal envelope to store in the
-catalog), `result_digest: str`.
+object), `envelope_digest: str` (the full encrypted envelope digest),
+`result_canonical: bytes` (the safe unprojected structural terminal envelope to store in the
+catalog), `result_digest: str`. It carries no sink-specific privacy projection or receipt.
 
 `TaskRoute` contains only `task_id`, active `session_id`, generated `bundle_relpath`, positive
 `route_generation`, `state: TaskRouteState`, and `route_identity_digest`. The digest is the stored
@@ -186,9 +189,9 @@ lease owner/generation match, unexpired), verify the requested phase is the dire
 the recorded phase in the fixed order `route_reserved → bundle_ready → lifecycle_committed →
 result_published`, update `phase` and `updated_at`, and return the refreshed allocation. `result`
 must be absent for the first two transitions and is required for `lifecycle_committed →
-result_published`; that CAS stores its `response_object_id` in the catalog row. The safe terminal
-bytes/digest remain null until `complete`, as required by the pending-row CHECK. A resume at
-`result_published` returns the pinned locator and must reopen/revalidate that exact task object; it
+result_published`; that CAS stores its object ID, envelope digest, canonical structural bytes, and
+result digest in the catalog row. A resume at `result_published` returns all four pinned values and
+must resolve/reopen/revalidate that exact task object; it
 never rebuilds or substitutes a newly encrypted result. Phase
 regression, skipping, or a lost lease raises `PublicOperationError(OPERATION_PENDING)` (another
 owner) or `INTERNAL_ERROR` with a bounded code for contradiction. A recorded phase is a lower

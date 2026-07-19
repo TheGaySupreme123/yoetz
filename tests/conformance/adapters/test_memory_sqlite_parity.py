@@ -99,7 +99,7 @@ async def _local_result_ref(objects: MemoryObjects, command: AppendCommand) -> O
         ObjectSource(data=b"{}", declared_size=2),
         ObjectMetadata(
             ObjectKind.DETERMINISTIC_RESULT,
-            "application/json",
+            "application/vnd.yoetz.deterministic-result+json",
             command.task_id,
             command.entries[0].payload_object.metadata.created_at,
         ),

@@ -15,6 +15,7 @@ from yoetz.adapters.memory.ledger import (
     MemoryLedgerAdapter,
     MemoryLedgerState,
     build_append_operation_record,
+    load_frozen_case_from_resume,
 )
 from yoetz.domain.events import (
     AcceptedEvent,
@@ -412,9 +413,71 @@ class SqliteLedger:
                 )
             self._state.records = records
             self._state.projection = projection
+            for pending_row in self._db.execute(
+                "SELECT writer_id,operation_id,operation_kind,request_digest,phase,"
+                "owner_generation,lease_owner_id,lease_generation,lease_expires_at,"
+                "resume_object_id FROM operations WHERE state='pending'"
+            ):
+                (
+                    writer_value,
+                    operation_value,
+                    kind_value,
+                    digest_value,
+                    phase_value,
+                    owner_generation,
+                    lease_owner_id,
+                    lease_generation,
+                    lease_expires_at,
+                    resume_object_id,
+                ) = pending_row
+                try:
+                    phase = CheckPhase(cast(str, phase_value))
+                    media_type = (
+                        "application/vnd.yoetz.check-resume+json"
+                        if phase is CheckPhase.RESERVED
+                        else "application/vnd.yoetz.deterministic-result+json"
+                    )
+                    resume_ref = self._object_ref_from_inventory(
+                        cast(str, resume_object_id), self._task_id, media_type
+                    )
+                    operation = OperationRecord(
+                        cast(str, writer_value),
+                        cast(str, operation_value),
+                        OperationKind(cast(str, kind_value)),
+                        cast(str, digest_value),
+                        OperationState.PENDING,
+                        phase,
+                        cast(str, owner_generation),
+                        cast(str, lease_owner_id),
+                        cast(int, lease_generation),
+                        parse_rfc3339_millis(cast(str, lease_expires_at)),
+                        resume_ref,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    writer = self._state.writers[operation.writer_id]
+                    if self._objects is None:
+                        raise ValueError("object_store_missing")
+                    case = await load_frozen_case_from_resume(
+                        self._objects,
+                        operation,
+                        task=self._task_id,
+                        session=writer.session_id,
+                    )
+                except PublicOperationError:
+                    raise
+                except (KeyError, OSError, TypeError, ValueError) as exc:
+                    raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
+                key = (operation.writer_id, operation.operation_id)
+                self._state.frozen_cases[key] = case
+                self._state.operations[key] = (operation, None)
             for operation_row in self._db.execute(
                 "SELECT writer_id,operation_id,operation_kind,request_digest,state,phase,"
-                "result_canonical,result_digest,first_ingestion_seq,last_ingestion_seq,terminal_at "
+                "result_canonical,result_digest,first_ingestion_seq,last_ingestion_seq,"
+                "result_object_id,terminal_at "
                 "FROM operations WHERE state='complete'"
             ):
                 (
@@ -428,6 +491,7 @@ class SqliteLedger:
                     result_digest,
                     first,
                     last,
+                    result_object_id,
                     terminal,
                 ) = operation_row
                 structural = tuple(
@@ -438,7 +502,16 @@ class SqliteLedger:
                         (first, last),
                     )
                 )
-                locator = OperationResultLocator(first, last, None, structural)
+                result_ref = (
+                    None
+                    if result_object_id is None
+                    else self._object_ref_from_inventory(
+                        cast(str, result_object_id),
+                        self._task_id,
+                        "application/vnd.yoetz.receipt+json",
+                    )
+                )
+                locator = OperationResultLocator(first, last, result_ref, structural)
                 operation = OperationRecord(
                     writer_value,
                     operation_value,
@@ -629,8 +702,6 @@ class SqliteLedger:
                     "terminal_at=?,updated_at=? WHERE writer_id=? AND operation_id=?",
                     (*values, now, key[0], key[1]),
                 )
-        for ref in self._state.phase_objects.values():
-            self._inventory_object(ref)
         for job in self._state.jobs.values():
             self._inventory_object(job.case_object_ref)
             if job.selected_result_object_ref is not None:
@@ -1042,7 +1113,6 @@ class SqliteLedger:
                 frozen_cases=dict(self._state.frozen_cases),
                 check_results=dict(self._state.check_results),
                 check_errors=dict(self._state.check_errors),
-                phase_objects=dict(self._state.phase_objects),
                 jobs=dict(self._state.jobs),
                 job_by_case=dict(self._state.job_by_case),
                 attempts=dict(self._state.attempts),
@@ -1137,6 +1207,10 @@ class SqliteLedger:
     ) -> StoredProjection | None:
         await self._ensure_recovered()
         return await self._oracle().load_projection(session_id, view)
+
+    async def load_frontier(self) -> Frontier:
+        await self._ensure_recovered()
+        return await self._oracle().load_frontier()
 
     async def load_case_availability(
         self, session_id: str, frontier: Frontier, projection: ProjectionState

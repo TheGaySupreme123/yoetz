@@ -3,9 +3,19 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
+import yoetz.service.daemon as daemon_module
+from yoetz.application.service import (
+    ClientProjectionContext,
+    ControlProjectionBinding,
+    ProjectedControlBody,
+    ProjectionBindingFacts,
+    ProjectionRenderMode,
+)
+from yoetz.config.models import YoetzConfig
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import (
     ControlCallRequest,
@@ -17,7 +27,7 @@ from yoetz.ports.control import (
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import StartRequest, StartResult
 from yoetz.service.daemon import ServiceComposition, ServiceDaemon
-from yoetz.service.lifecycle import ServiceLifecycle
+from yoetz.service.lifecycle import LifecycleError, ServiceLifecycle
 from yoetz.service.vault import VaultMode
 
 _INSTANCE_ID = "svc_00000000-0000-4000-8000-000000000001"
@@ -97,7 +107,7 @@ class _Vault:
 class _Application:
     def __init__(self) -> None:
         self.start_calls = 0
-        self.projections: list[ControlClientKind] = []
+        self.projections: list[ClientProjectionContext] = []
         self.close_count = 0
 
     async def start(self, request: object) -> StartResult:
@@ -123,11 +133,26 @@ class _Application:
         assert isinstance(request, JsonObject)
         return JsonObject({"accepted": True})
 
+    async def projection_binding_facts(
+        self,
+        method: ControlMethod,
+        request: object,
+        result: object,
+    ) -> ProjectionBindingFacts:
+        del method, result
+        request_id = getattr(request, "request_id", None)
+        return ProjectionBindingFacts(request_id if type(request_id) is str else None, None)
+
     async def project_result_for_client(
-        self, client_kind: ControlClientKind, method: ControlMethod, result: object
-    ) -> object:
+        self,
+        context: ClientProjectionContext,
+        binding: ControlProjectionBinding,
+        result: object,
+    ) -> ProjectedControlBody:
+        method = binding.method
         assert method in {ControlMethod.START, ControlMethod.REVIEW}
-        self.projections.append(client_kind)
+        self.projections.append(context)
+        assert isinstance(result, StartResult | JsonObject)
         return result
 
     async def close(self) -> None:
@@ -189,6 +214,32 @@ def _daemon() -> tuple[ServiceDaemon, _Application, _Vault, _Listener]:
     return ServiceDaemon(_composition=composition), application, vault, listener
 
 
+def _locked_daemon(
+    root: Path,
+    factory: object,
+) -> tuple[ServiceDaemon, _Vault]:
+    vault = _Vault()
+    vault.ready = False
+    lifecycle = ServiceLifecycle(
+        _Clock(),
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "2" * 64,
+        instance_id=_INSTANCE_ID,
+        singleton_lock_path=root / "service.lock",
+    )
+    composition = ServiceComposition(
+        lifecycle=lifecycle,
+        control_listener=_Listener(),  # pyright: ignore[reportArgumentType]
+        secret_ingress_listener=None,
+        human_control_listener=None,
+        human_control_service=None,
+        session_monitor=None,
+        vault=vault,
+        ready_application_factory=factory,  # pyright: ignore[reportArgumentType]
+    )
+    return ServiceDaemon(_composition=composition), vault
+
+
 @pytest.mark.anyio
 async def test_cli_mcp_and_ui_share_one_ready_application_and_projection() -> None:
     daemon, application, _vault, _listener = _daemon()
@@ -200,7 +251,38 @@ async def test_cli_mcp_and_ui_share_one_ready_application_and_projection() -> No
     )
     assert all(result.outcome == "ok" for result in results)
     assert application.start_calls == 3
-    assert application.projections == list(kinds)
+    assert application.projections == [ClientProjectionContext.fail_safe(kind) for kind in kinds]
+
+
+@pytest.mark.anyio
+async def test_dispatch_passes_trusted_human_projection_context() -> None:
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    body = _start_body()
+    context = ClientProjectionContext(
+        ControlClientKind.CLI,
+        ProjectionRenderMode.HUMAN_READABLE,
+        True,
+    )
+
+    result = await daemon.dispatch(
+        ControlClientKind.CLI,
+        _request(daemon, ControlMethod.START, body),
+        projection_context=context,
+    )
+
+    assert result.outcome == "ok"
+    assert application.projections == [context]
+
+    cross_paired = await daemon.dispatch(
+        ControlClientKind.UI,
+        _request(daemon, ControlMethod.START, body),
+        projection_context=context,
+    )
+    assert cross_paired.outcome == "error"
+    assert isinstance(cross_paired.body, ControlError)
+    assert cross_paired.body.reason == "frame_invalid"
+    assert application.projections == [context]
     assert daemon.status().state is ServiceState.READY
     await daemon.close()
 
@@ -245,3 +327,157 @@ async def test_shutdown_is_idempotent_and_closes_owned_listener() -> None:
     assert listener.closed
     assert application.close_count == 1
     assert vault.close_count == 1
+
+
+@pytest.mark.anyio
+async def test_unlock_activation_constructs_exact_generation_once(tmp_path: Path) -> None:
+    application = _Application()
+    calls: list[tuple[int, int]] = []
+
+    async def factory(service_generation: int, vault_generation: int) -> _Application:
+        calls.append((service_generation, vault_generation))
+        return application
+
+    daemon, vault = _locked_daemon(tmp_path, factory)
+    await daemon.start()
+    assert daemon.status().state is ServiceState.LOCKED
+    await daemon.composition.lifecycle.transition(ServiceState.UNLOCKING)
+    vault.ready = True
+
+    await daemon.activate_ready_application(7, 3)
+
+    assert calls == [(7, 3)]
+    assert daemon.status().state is ServiceState.READY
+    assert daemon.status().state_reason == "none"
+    await daemon.lock()
+    assert application.close_count == 1
+    assert not vault.ready
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_unlock_activation_revalidates_after_factory_and_closes_partial(
+    tmp_path: Path,
+) -> None:
+    application = _Application()
+    daemon: ServiceDaemon
+    vault: _Vault
+
+    async def factory(_service_generation: int, _vault_generation: int) -> _Application:
+        vault.generation = 4
+        return application
+
+    daemon, vault = _locked_daemon(tmp_path, factory)
+    await daemon.start()
+    await daemon.composition.lifecycle.transition(ServiceState.UNLOCKING)
+    vault.ready = True
+
+    with pytest.raises(LifecycleError, match="invalid_transition"):
+        await daemon.activate_ready_application(7, 3)
+
+    assert application.close_count == 1
+    assert not vault.ready
+    assert daemon.status().state is ServiceState.LOCKED
+    assert daemon.status().state_reason == "unlock_failed"
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_lock_serializes_with_in_flight_ready_activation(tmp_path: Path) -> None:
+    application = _Application()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def factory(_service_generation: int, _vault_generation: int) -> _Application:
+        entered.set()
+        await release.wait()
+        return application
+
+    daemon, vault = _locked_daemon(tmp_path, factory)
+    await daemon.start()
+    await daemon.composition.lifecycle.transition(ServiceState.UNLOCKING)
+    vault.ready = True
+    activation = asyncio.create_task(daemon.activate_ready_application(7, 3))
+    await entered.wait()
+    locking = asyncio.create_task(daemon.lock("explicit_lock"))
+    await asyncio.sleep(0)
+    assert not locking.done()
+
+    release.set()
+    await activation
+    await locking
+
+    assert daemon.status().state is ServiceState.LOCKED
+    assert application.close_count == 1
+    assert not vault.ready
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_production_composition_starts_locked_before_ready_only_state(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "data"
+    metadata = tmp_path / "state"
+    paths = daemon_module._ProductionPaths(  # pyright: ignore[reportPrivateUsage]
+        root,
+        metadata / "service-generation.json",
+        metadata / "unlock-throttle.json",
+        metadata / "service.lock",
+    )
+    bound: list[str] = []
+
+    async def bind(kind: str) -> _Listener:
+        bound.append(kind)
+        return _Listener()
+
+    binders = daemon_module._ListenerBinders(  # pyright: ignore[reportPrivateUsage]
+        lambda: bind("control"),  # pyright: ignore[reportArgumentType]
+        lambda: bind("secret"),  # pyright: ignore[reportArgumentType]
+        lambda: bind("human"),  # pyright: ignore[reportArgumentType]
+    )
+    composition = await daemon_module._production_composition(  # pyright: ignore[reportPrivateUsage]
+        _config=YoetzConfig(),
+        _paths=paths,
+        _binders=binders,
+    )
+    daemon = ServiceDaemon(_composition=composition)
+
+    await daemon.start()
+
+    assert bound == ["control", "secret", "human"]
+    assert daemon.status().state is ServiceState.LOCKED
+    assert daemon.status().vault_mode == "uninitialized"
+    assert daemon.status().capabilities == ("confidential_ingress",)
+    assert not (root / "vault").exists()
+    await daemon.close()
+
+
+def test_installation_marker_round_trip_is_canonical_and_self_authenticated(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "data"
+    root.mkdir(mode=0o700)
+    marker_path = root / "installation-state.json"
+    store = daemon_module._InstallationStateStore(  # pyright: ignore[reportPrivateUsage]
+        marker_path,
+        tmp_path / "unlock-throttle.json",
+        tmp_path / "service-generation.json",
+    )
+    digest = "sha256:" + "3" * 64
+
+    store.publish(VaultMode.OS_KEYRING, None, digest)
+    loaded = store.load()
+
+    assert loaded is not None
+    assert loaded.vault_mode is VaultMode.OS_KEYRING
+    assert loaded.mode_binding_digest == digest
+    assert marker_path.read_bytes().endswith(b"\n")
+    assert marker_path.stat().st_mode & 0o077 == 0
+
+    corrupted = bytearray(marker_path.read_bytes())
+    digest_start = corrupted.rfind(b"sha256:") + len(b"sha256:")
+    corrupted[digest_start] = ord("0") if corrupted[digest_start] != ord("0") else ord("1")
+    marker_path.write_bytes(corrupted)
+    with pytest.raises(RuntimeError, match="installation_marker_invalid"):
+        store.load()

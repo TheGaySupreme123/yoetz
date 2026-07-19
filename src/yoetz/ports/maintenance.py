@@ -47,6 +47,8 @@ __all__ = [
     "MigrationResult",
     "PrivacyAuditBackupSnapshot",
     "RecoveryOperation",
+    "RecoverySecretAcquirer",
+    "RecoverySecretAcquisition",
     "RecoverySecret",
     "RestoreCommand",
     "RestorePlan",
@@ -76,6 +78,23 @@ class BackupMode(str, Enum):  # noqa: UP042 - exact durable wire enum
 class RecoveryOperation(str, Enum):  # noqa: UP042 - exact durable wire enum
     CREATE = "create"
     RESTORE = "restore"
+
+
+@dataclass(frozen=True, slots=True)
+class RecoverySecretAcquisition:
+    """Secret-free authority request for one confirmed portable operation."""
+
+    request_id: RequestId
+    confirmed_plan_digest: str
+    service_generation: int
+    operation: RecoveryOperation
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "request_id", request_id(self.request_id))
+        _digest(self.confirmed_plan_digest)
+        _positive_int(self.service_generation)
+        if type(self.operation) is not RecoveryOperation:
+            raise _invalid()
 
 
 class MaintenanceReason(str, Enum):  # noqa: UP042 - exact durable wire enum
@@ -737,3 +756,12 @@ class MaintenancePort(Protocol):
         command: MigrationCommand,
         confirmed_plan_digest: str,
     ) -> MigrationResult: ...
+
+
+class RecoverySecretAcquirer(Protocol):
+    """Acquire one opaque recovery handle for one exact confirmed plan."""
+
+    async def acquire_recovery_secret(
+        self,
+        acquisition: RecoverySecretAcquisition,
+    ) -> RecoverySecret: ...

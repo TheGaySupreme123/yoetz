@@ -143,6 +143,7 @@ def _result(value: int = 900) -> EncryptedResultRef:
     canonical = canonical_encode({"outcome": "complete", "sequence": value})
     return EncryptedResultRef(
         _id(IdKind.OBJECT, value),
+        f"sha256:{hashlib.sha256(b'envelope' + canonical).hexdigest()}",
         canonical,
         f"sha256:{hashlib.sha256(canonical).hexdigest()}",
     )
@@ -158,6 +159,7 @@ def _evidence(allocation: object, result: EncryptedResultRef) -> StartCompletion
         "lifecycle_frontier": dict(frontier.as_wire()),
         "milestone": StartMilestone.RESULT_PUBLISHED.value,
         "owner_generation": 1,
+        "response_envelope_digest": result.envelope_digest,
         "response_object_id": result.response_object_id,
         "result_digest": result.result_digest,
         "route_generation": allocation.route_generation,
@@ -177,6 +179,7 @@ def _evidence(allocation: object, result: EncryptedResultRef) -> StartCompletion
         owner_generation=1,
         lifecycle_frontier=frontier,
         response_object_id=result.response_object_id,
+        response_envelope_digest=result.envelope_digest,
         result_digest=result.result_digest,
         evidence_digest=canonical_digest(value),
     )

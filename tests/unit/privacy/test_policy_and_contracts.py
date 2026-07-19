@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,7 +23,7 @@ from yoetz.domain.privacy import (
     ReviewSelectionPolicy,
     outcome_reason_is_valid,
 )
-from yoetz.ports.privacy import PolicyTransitionProposal
+from yoetz.ports.privacy import OutboundGatewayPort, PolicyTransitionProposal
 from yoetz.protocol.models import DataCategory
 
 _HERE = Path(__file__).resolve()
@@ -112,6 +113,11 @@ def test_closed_privacy_vocabularies_and_never_send_set() -> None:
         "update_checks",
         "capability_testing",
     }
+
+
+def test_outbound_gateway_contract_includes_terminal_async_close() -> None:
+    assert "close" in OutboundGatewayPort.__dict__
+    assert inspect.iscoroutinefunction(OutboundGatewayPort.close)
 
 
 def test_named_review_selectors_are_exact_and_orthogonal() -> None:

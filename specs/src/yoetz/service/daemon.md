@@ -21,6 +21,9 @@ installation and dispatches all CLI/MCP/future-UI requests through one authentic
 - `@dataclass(frozen=True, slots=True) class ServiceComposition` — lifecycle, control listener,
   secret-ingress listener, human-control listener/service, session monitor, vault, and optional ready-only application; private to
   this module and constant-redacted.
+- Private `ready_application_factory(service_generation, vault_generation)` and daemon method
+  `activate_ready_application(...)` form the only ready ownership transfer. The factory closes over
+  generation-bound catalog/runtime/privacy dependencies; unlock receives only the daemon callback.
 
 No public constructor accepts caller-selected roots/endpoints, raw secrets, key handles, provider
 clients, or an already-open database.
@@ -33,6 +36,17 @@ clients, or an already-open database.
 
 1. Parse/validate service configuration and verified per-user data/runtime paths; configure
    allowlisted diagnostics; suppress core dumps where supported.
+   The daemon-private installation-state marker is canonical owner-only JSON plus one LF:
+   `{schema_version:"1", installation_id, vault_mode:"os_keyring"|"passphrase",
+   root_envelope_base64:null|<standard-base64 canonical envelope>, mode_binding_digest,
+   record_digest}`. `record_digest` is
+   `sha256("yoetz/installation-state/v1\0" || canonical_json(marker_without_record_digest))`.
+   The marker is size-bounded, no-follow/type/owner/mode/link checked, fsynced to a same-directory
+   unpredictable `0600` temporary, atomically renamed, and parent-fsynced. Absence means pristine;
+   a provisional installation ID is recovered from an exact staged initial throttle record, then
+   the existing service-generation record when a crash preceded throttle staging, or allocated
+   fresh. Contradictory identities fail closed. The ID becomes committed vault identity only when
+   immutable mode publication writes this marker.
 2. Acquire the lifecycle singleton. A second daemon exits boundedly before keyring/catalog access.
 3. Advance service generation in the separate owner-only nonsecret lifecycle store, bind the three
    owner-only ordinary, one-secret, and human-control local endpoints,
@@ -55,6 +69,12 @@ clients, or an already-open database.
    allowed by active policy, once. No provider credential is retrieved at startup; the gateway
    mints one body/profile/deadline-bound opaque handle per authorized physical attempt, never from
    config/environment bytes.
+   `activate_ready_application` holds the daemon activation mutex, requires lifecycle `unlocking`,
+   exact current service/vault generations, a ready vault, no installed application, and the
+   injected factory. It rechecks every gate after construction, installs the application, then
+   transitions lifecycle to `ready`. Any construction/recheck/transition failure closes the
+   partial application, locks the vault, returns lifecycle to `locked`, and records only
+   `unlock_failed`.
    Catalog writer admission verifies/copies the already advertised service generation and fails on
    any greater/contradictory catalog value; locked startup never opens the catalog to obtain it.
 7. Run startup gates, publish `ready`, then admit requests. A gate failure closes the partial
@@ -85,7 +105,7 @@ missing capability prevents keyring-mode creation entirely and leaves setup requ
 The ordinary listener authenticates peer UID before protocol parsing. `dispatch` applies client-
 kind/method/state/admission policy, validates the method body, calls the one ready `Application` or
 support service, and validates the internal result. For every ready content-capable workflow or
-support success it invokes `Application.project_result_for_client(client_kind, method, result)`,
+support success it invokes `Application.project_result_for_client(context, method, result)`,
 validates that projected body and its durable local-disclosure receipt binding, and only then
 serializes a control envelope. The exact exceptions are handshake, fixed control-error bodies, the
 closed structural-only `service_status`, `service_lock`, and `service_stop` results, and the
@@ -97,6 +117,10 @@ another receipt. No logger, tracer, renderer, MCP bridge, or socket writer sees 
 content-capable result. Requests from all clients
 share runtime/task caches, writer queues, key handles, policy, and provider coordinator.
 
+The `context` is the exact service-internal `ClientProjectionContext` from
+`application/service.md`; the daemon rejects a context whose client kind differs from the
+authenticated control session. If the trusted adapter supplies no presentation facts, the daemon
+constructs the fail-safe machine-readable/non-TTY context rather than guessing human presence.
 Ordinary `mcp_bridge` and `ui` results use `agent_context`. An ordinary CLI result uses
 `local_human_view` only for validated human-readable rendering on an attached controlling terminal;
 `--json`, piped/redirected output, non-TTY use, or any absent/contradictory presentation state uses
@@ -148,6 +172,12 @@ in reverse order, clears secret/vault handles best-effort, and remains alive `lo
 cannot meet the lock bound, the process terminates rather than report a false lock. Stop performs a
 longer bounded drain, removes only this instance's endpoints, releases singleton authority, and
 exits. KILL recovery depends on generations, not cleanup.
+
+Activation, explicit/session lock, idle lifecycle close, and stop share one daemon-owned ready
+close relay. Lifecycle changes to `draining` before invoking it, so no concurrent activation can
+publish after the state decision. Ready application detachment/close precedes vault lock; final
+shutdown then closes authenticated listeners, human/unlock/secret/session services, vault, and
+secret memory in reverse ownership order.
 
 ## Errors and edge cases
 

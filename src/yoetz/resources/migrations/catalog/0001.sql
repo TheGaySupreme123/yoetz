@@ -60,6 +60,7 @@ CREATE TABLE start_operations (
     lease_generation INTEGER CHECK (lease_generation > 0),
     lease_expires_at TEXT,
     response_object_id TEXT,
+    response_envelope_digest TEXT,
     terminal_result_canonical BLOB,
     terminal_result_digest TEXT,
     quarantine_code TEXT,
@@ -75,11 +76,25 @@ CREATE TABLE start_operations (
             AND lease_owner_id IS NOT NULL
             AND lease_generation IS NOT NULL
             AND lease_expires_at IS NOT NULL
-            AND terminal_result_canonical IS NULL
-            AND terminal_result_digest IS NULL
             AND quarantine_code IS NULL
             AND terminal_at IS NULL
-            AND (phase != 'result_published' OR response_object_id IS NOT NULL)
+            AND (
+                (
+                    phase = 'result_published'
+                    AND response_object_id IS NOT NULL
+                    AND response_envelope_digest IS NOT NULL
+                    AND terminal_result_canonical IS NOT NULL
+                    AND terminal_result_digest IS NOT NULL
+                )
+                OR
+                (
+                    phase != 'result_published'
+                    AND response_object_id IS NULL
+                    AND response_envelope_digest IS NULL
+                    AND terminal_result_canonical IS NULL
+                    AND terminal_result_digest IS NULL
+                )
+            )
         )
         OR
         (
@@ -90,6 +105,7 @@ CREATE TABLE start_operations (
             AND lease_generation IS NULL
             AND lease_expires_at IS NULL
             AND response_object_id IS NOT NULL
+            AND response_envelope_digest IS NOT NULL
             AND terminal_result_canonical IS NOT NULL
             AND terminal_result_digest IS NOT NULL
             AND quarantine_code IS NULL
@@ -103,6 +119,8 @@ CREATE TABLE start_operations (
             AND lease_owner_id IS NULL
             AND lease_generation IS NULL
             AND lease_expires_at IS NULL
+            AND response_object_id IS NULL
+            AND response_envelope_digest IS NULL
             AND terminal_result_canonical IS NOT NULL
             AND terminal_result_digest IS NOT NULL
             AND quarantine_code IS NOT NULL

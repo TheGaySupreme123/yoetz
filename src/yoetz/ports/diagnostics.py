@@ -8,19 +8,23 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from types import MappingProxyType
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 
 from yoetz.domain.values import (
     JsonScalar,
     format_rfc3339_millis,
     parse_rfc3339_millis,
+    task_id,
     validate_sha256_digest,
 )
 from yoetz.protocol.canonical import JsonValue as CanonicalJsonValue
 from yoetz.protocol.canonical import canonical_digest
+from yoetz.protocol.ids import IdKind, validate_id
 
 __all__ = [
     "DiagnosticsPort",
+    "MaintenanceDiagnostic",
+    "MaintenanceDiagnosticSink",
     "RuntimeCapability",
     "StartupCheckArea",
     "StartupCheckOutcome",
@@ -73,6 +77,13 @@ _DETAIL_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
 _DETAIL_STRING_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$", re.ASCII)
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
 _MAX_SAFE_DETAILS = 16
+_MAINTENANCE_OPERATIONS = frozenset({"backup", "migration", "restore"})
+_MAINTENANCE_PHASES = frozenset({"execute", "preview"})
+_MAINTENANCE_OUTCOMES = frozenset({"cancelled", "failed", "success"})
+
+type MaintenanceOperation = Literal["backup", "migration", "restore"]
+type MaintenancePhase = Literal["execute", "preview"]
+type MaintenanceOutcome = Literal["cancelled", "failed", "success"]
 
 
 def _invalid(reason: str) -> ValueError:
@@ -203,6 +214,72 @@ class DiagnosticsPort(Protocol):
     """Consume an already validated structural startup result."""
 
     def record(self, result: StartupCheckResult) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceDiagnostic:
+    """Bounded path-free observation for one maintenance preview or execution."""
+
+    operation: MaintenanceOperation
+    phase: MaintenancePhase
+    outcome: MaintenanceOutcome
+    request_id: str
+    task_id: str | None
+    plan_digest: str | None
+    result_digest: str | None
+    from_version: str | None
+    to_version: str | None
+    count: int | None
+    duration_ms: int
+    reason_code: str | None
+    observed_at: datetime
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.operation) is not str
+            or self.operation not in _MAINTENANCE_OPERATIONS
+            or type(self.phase) is not str
+            or self.phase not in _MAINTENANCE_PHASES
+            or type(self.outcome) is not str
+            or self.outcome not in _MAINTENANCE_OUTCOMES
+        ):
+            raise _invalid("maintenance_diagnostic_invalid")
+        try:
+            validate_id(IdKind.REQUEST, self.request_id)
+            if self.task_id is not None:
+                task_id(self.task_id)
+            for digest in (self.plan_digest, self.result_digest):
+                if digest is not None:
+                    validate_sha256_digest(digest)
+        except ValueError as exc:
+            raise _invalid("maintenance_diagnostic_invalid") from exc
+        for version in (self.from_version, self.to_version):
+            if version is not None and (
+                type(version) is not str or _DETAIL_STRING_PATTERN.fullmatch(version) is None
+            ):
+                raise _invalid("maintenance_diagnostic_invalid")
+        for value in (self.count, self.duration_ms):
+            if value is not None and (
+                type(value) is not int or not 0 <= value <= _MAX_SAFE_INTEGER
+            ):
+                raise _invalid("maintenance_diagnostic_invalid")
+        if self.reason_code is not None and (
+            type(self.reason_code) is not str
+            or _SAFE_TOKEN_PATTERN.fullmatch(self.reason_code) is None
+        ):
+            raise _invalid("maintenance_diagnostic_invalid")
+        if self.outcome == "success" and self.reason_code is not None:
+            raise _invalid("maintenance_diagnostic_invalid")
+        if self.outcome != "success" and self.reason_code is None:
+            raise _invalid("maintenance_diagnostic_invalid")
+        normalized_time = parse_rfc3339_millis(format_rfc3339_millis(self.observed_at))
+        object.__setattr__(self, "observed_at", normalized_time)
+
+
+class MaintenanceDiagnosticSink(Protocol):
+    """Consume only already-redacted maintenance observations."""
+
+    def record_maintenance(self, diagnostic: MaintenanceDiagnostic) -> None: ...
 
 
 def _result_json(result: StartupCheckResult) -> Mapping[str, CanonicalJsonValue]:

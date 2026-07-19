@@ -19,8 +19,15 @@ seventh/eighth public workflow operation or MCP tool.
 
 ## Public surface
 
-- `async execute_import_codex_jsonl(app: Application, request: ImportCodexJsonlRequest) -> ImportReport`.
-- `async execute_review(app: Application, request: ReviewRequest) -> ReviewResult`.
+- `async execute_import_codex_jsonl(app: Application, request: ImportCodexJsonlRequest) -> ImportReportInternal`.
+- `async execute_review(app: Application, request: ReviewRequest) -> ReviewInternal`.
+
+The module owns frozen `ImportCodexJsonlRequest`, `ImportReportInternal`, `ReviewRequest`,
+`ReviewCounts`, and `ReviewInternal` values. The two internal results are sink-independent and
+serialize the exact support-success body fields except `privacy_projection`; only the central
+application facade performs the one client-specific projection. `ReviewInternal` carries the
+structural nested check result, also without an embedded projection; the facade reuses its one
+projection record at both schema-required locations without making a second disclosure decision.
 
 These are application support methods invoked by the CLI commands `yoetz import codex-jsonl`
 and `yoetz review`. They are not registered in the six-tool MCP registry. The application
@@ -33,7 +40,10 @@ adapter.
 ### Capture and identify one source
 
 1. The CLI opens the named file/stdin through an `ImportByteSource` and passes a validated
-   `ImportCaptureInput`, session/writer identity, request ID, capture metadata, and limits. Resolve
+   `ImportCodexJsonlRequest`, session/writer identity, request ID, capture metadata, and limits.
+   The request requires exact stderr-absent constants (`false`, `0`, `false`); the application
+   rejects any legacy/crafted true branch before constructing `ImportCaptureInput`, which has no
+   stderr source. Resolve
    the task with `app.runtime.route(..., access=write)` and use `TaskRuntime.importer`; never infer
    a task from source cwd/transcript path.
 2. Call `importer.capture`, which preserves the exact byte sequence in one encrypted
@@ -43,12 +53,10 @@ adapter.
    source above `MAX_OBJECT_PLAINTEXT_BYTES` (4 MiB) is `LIMIT_EXCEEDED`; digest-only metadata is
    insufficient for an import that promises retained source bytes.
 3. Capture only bounded metadata: pinned Codex version/schema capability, capture time, sanitized
-   argv, stable working-directory identity, exit status, and whether stderr exists. Sanitized cwd/
-   argv audit material stays encrypted; values removed as secrets are not retained. Structural
-   reports use keyed commitments/safe categories. Raw stderr is not retained in v0.1: a bounded
-   prefix produces captured-byte count, truncation state, and a non-publishing keyed commitment,
-   then is discarded; its ordinary audit digest stays encrypted in capture metadata. Stderr is
-   never interleaved into JSONL or copied into errors/logs.
+   argv, stable working-directory identity, exit status, and the stderr-absent constants. Sanitized
+   cwd/argv audit material stays encrypted; values removed as secrets are not retained. Structural
+   reports use keyed commitments/safe categories. Raw stderr, a caller-invented stderr commitment,
+   and a confidential stderr channel are absent from the v0.1 import contract.
 4. Import source identity is `(task_id, exact_source_commitment, codex_capability_profile_id,
    importer_mapping_version)`. Reimporting that identity under a new CLI request resolves the same
    durable plan/observation set. Same request ID with different source/metadata semantics is
@@ -126,7 +134,7 @@ link is terminal, `importer.status` exposes `import_incomplete`; public status c
 and receipt may use that snapshot as an early UX rejection, but correctness comes from the
 ledger's same-transaction pending-import predicate at check freeze/final commit and receipt append.
 Already committed events remain immutable and visible. After all candidate batches, build/finalize the canonical
-`ImportReport` and call `importer.prepare_report` before publishing anything; replace the
+`ImportReportInternal` and call `importer.prepare_report` before publishing anything; replace the
 allocation with its `report_ready` return. On resume at `report_ready`, reopen the stored report
 and use `allocation.report_evidence_draft` rather than rebuilding/re-encrypting either value.
 Publish that importer-authored `evidence_recorded` event with `evidence_kind=import_report`,
@@ -143,8 +151,10 @@ sanitized metadata—never source text.
 
 1. Validate the review request/session/writer and freeze one exact frontier `F` after the selected
    import manifest(s). Select sources by their durable identity, never by fuzzy filename/cwd match;
-   call `TaskRuntime.importer.load_review_source(identity, F)` for each and reject a snapshot whose
-   completed batch/report history is not wholly at or before `F`.
+   call `TaskRuntime.importer.load_review_source(identity_digest, F)` for each and reject a snapshot whose
+   completed batch/report history is not wholly at or before `F`. Because v0.1 `check` has no
+   arbitrary-import-subset scope, the selection must equal the bounded complete terminal import
+   identity set reported for the session; silently widening a subset to the whole case is forbidden.
 2. Build a deterministic comparison case from three explicitly labeled classes already available
    at `F`: cooperative ledger events, imported observations/gaps, and captured/digested
    repository/artifact evidence. Preserve source channel, assurance, freshness, and immutability;
@@ -158,7 +168,7 @@ sanitized metadata—never source text.
    finding, lease, and append contracts. Disagreements become explicit deterministic findings
    where rule-supported or sorted coverage gaps otherwise. Review never appends a hand-built
    finding and never lets semantic output bypass post-validation.
-5. Return `ReviewResult` containing `F`, selected source/report identities, check result, comparison
+5. Return `ReviewInternal` containing `F`, selected source/report identities, check result, comparison
    coverage, and unmatched/unknown/redacted/unavailable counts. Any later event or artifact change
    makes the review stale under ordinary frontier/subject-state rules.
 
@@ -209,7 +219,7 @@ hashes, or rely on process memory for crash recovery.
 ## Tests
 
 - `specs/tests/unit.md`: all mapping categories, partial/malformed/unknown/truncated lines,
-  argv/cwd sanitization, bounded stderr status/commitment, coverage clamping, deterministic
+  argv/cwd sanitization, exact stderr-absent constants, coverage clamping, deterministic
   batching/IDs.
 - `specs/tests/conformance.md`: same source/new request dedupe, report/event parity across memory and
   SQLite, source-order mapping, imported-vs-cooperative comparison fixtures.

@@ -21,6 +21,11 @@ object references where content exists; it never needs a taskless content-encryp
 - Internal frozen row codecs for policy generation, overlay, proposal, authorization, dispatch, and
   receipt state. They are not exported or exposed through application results.
 
+`complete_agent_projection` receives an authority-free `AgentProjectionRequest`, mints the keyed
+control/internal/projection commitments inside this adapter, and inserts the subject plus terminal
+receipt in one `BEGIN IMMEDIATE`. Exact replay returns the same subject; contradiction fails
+closed. Receipt cursors bind the exact query and snapshot boundary under the audit MAC key.
+
 ## Behavior
 
 Policy writes and audit transitions use bounded `BEGIN IMMEDIATE` transactions with generation and

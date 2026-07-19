@@ -42,6 +42,14 @@ credential, or passphrase bytes.
 `VaultService` implements the service-internal `KeyStorePort`. It is never serialized, exposed by
 the application facade, or accepted as a control-protocol value.
 
+The daemon, not `VaultService`, owns the immutable installation-state marker and supplies its
+verified mode, optional decoded `VaultRootEnvelope`, pristine digest, and atomic `publish_mode`
+callback. The canonical v1 marker format, self-digest, file-safety checks, and publication order
+are frozen in `service/daemon.md`. For passphrase publication its `mode_binding_digest` must equal
+the already staged/adopted initial throttle record digest; for keyring it is the initialization
+correlation commitment. Existing marker, throttle, and service-generation installation identities
+must agree before construction.
+
 ## Behavior
 
 ### Initialization and root key

@@ -24,6 +24,7 @@ dangling reference.
   - `async def commitment_for(self, data: bytes, kind: ObjectKind) -> str`
   - `async def stage(self, source: ObjectSource, metadata: ObjectMetadata) -> StagedObject`
   - `async def finalize(self, staged: StagedObject) -> ObjectRef`
+  - `async def resolve_verified(self, object_id: str, envelope_digest: str) -> ObjectRef`
   - `def open_verified(self, ref: ObjectRef) -> AsyncIterator[bytes]`
   - `async def sweep_orphans(self, root_snapshot: ObjectRootSnapshot, now: datetime) -> int`
 - `@dataclass(frozen=True, slots=True) class ObjectSource` — exactly one of
@@ -51,6 +52,14 @@ dangling reference.
 - `OBJECT_COMMITMENT_DOMAINS: Mapping[ObjectKind, bytes]` — the exact closed table below.
 
 ## Behavior
+
+### `resolve_verified`
+
+Resolve only a finalized durable object whose ID and full encrypted-envelope SHA-256 digest both
+match the caller's catalog-pinned identity. Verify its envelope, authenticated header, plaintext
+size, and keyed content commitment before returning the reconstructed `ObjectRef`. Absence,
+staging-only state, digest mismatch, decryption failure, or metadata corruption fails closed. This
+bounded START-resume resolver never searches by content, title, path, or partial digest.
 
 ### `commitment_for`
 

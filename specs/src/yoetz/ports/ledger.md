@@ -27,6 +27,8 @@ No SQLite, APSW, or transport type appears in any signature. Effectful and point
 
 - `class LedgerPort(Protocol)` with the shared methods registered in `specs/INTERFACES.md`:
   - `async def append_batch(self, command: AppendCommand) -> AppendResult`
+  - `async def load_frontier(self) -> Frontier` — current task-ledger frontier without requiring
+    an already recorded session; START uses it for resumed-event content and append CAS
   - `def load_events(self, session_id: SessionId, *, after: int = 0, through: int | None = None) -> AsyncIterator[LedgerRecord]`
   - `async def load_projection(self, session_id: SessionId, view: ProjectionView) -> StoredProjection | None`
   - `async def load_case_availability(self, session_id: SessionId, frontier: Frontier, projection: ProjectionState) -> CaseAvailabilityFacts`
@@ -64,7 +66,7 @@ No SQLite, APSW, or transport type appears in any signature. Effectful and point
 - `@dataclass(frozen=True, slots=True) class OperationResultLocator`
 - `enum AppendWarning` — exactly `unknown_event_schema_preserved`
 - `enum ProjectionView` — `compact`, `assignment`, `obligations`, `findings`, `candidate_findings`, `evidence`, `history`, `versions`
-- `enum OperationKind` — `publish_work`, `check`, `respond`, `receipt`
+- `enum OperationKind` — `start`, `publish_work`, `check`, `respond`, `receipt`
 - `enum OperationState` — `pending`, `complete`, `quarantined`
 - `enum CheckPhase` — `reserved`, `local_ready`, `semantic_wait`, `ready_to_finalize`, `terminal`
 - `enum AttemptOutcome` — `response_durable`, `failed`, `expired`, `late`, `selected`
@@ -170,6 +172,13 @@ reason codes only), `result_digest: str | None`, `result_locator: OperationResul
 not free text, is serialized in `quarantine_code`. The five values are exhaustive for the
 task-ledger `operations` row; database-, object-, and bundle-wide corruption uses the storage
 recovery classification instead of inventing another operation code.
+
+For a pending check, `resume_object_ref` is the sole current durable phase pointer. It is a
+`CHECK_RESUME` reference only in `reserved`; the successful `reserved -> local_ready` CAS replaces
+it with the verified durable `DETERMINISTIC_RESULT` reference, which remains current through later
+nonterminal phases. The deterministic-result envelope carries the authenticated pointer to its
+prior `CHECK_RESUME`, so recovery follows the closed object chain without a second row pointer or
+memory-only phase map. Terminal rows clear `resume_object_ref`.
 
 `OperationResultLocator` fields are `first_ingestion_sequence: int | None`,
 `last_ingestion_sequence: int | None`, `result_object_ref: ObjectRef | None`, and

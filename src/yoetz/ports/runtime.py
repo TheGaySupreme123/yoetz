@@ -132,12 +132,14 @@ def _validate_milestone_presence(
     *,
     lifecycle_frontier: Frontier | None,
     response_object_id: str | None,
+    response_envelope_digest: str | None,
     result_digest: str | None,
 ) -> None:
     if milestone is StartMilestone.BUNDLE_READY:
         if (
             lifecycle_frontier is not None
             or response_object_id is not None
+            or response_envelope_digest is not None
             or result_digest is not None
         ):
             raise _invalid()
@@ -146,6 +148,7 @@ def _validate_milestone_presence(
             type(lifecycle_frontier) is not Frontier
             or lifecycle_frontier.sequence == 0
             or response_object_id is not None
+            or response_envelope_digest is not None
             or result_digest is not None
         ):
             raise _invalid()
@@ -153,6 +156,7 @@ def _validate_milestone_presence(
         type(lifecycle_frontier) is not Frontier
         or lifecycle_frontier.sequence == 0
         or response_object_id is None
+        or response_envelope_digest is None
         or result_digest is None
     ):
         raise _invalid()
@@ -395,6 +399,7 @@ class StartMilestoneExpectation:
     route_generation: int
     route_identity_digest: str
     response_object_id: str | None = None
+    response_envelope_digest: str | None = None
     result_digest: str | None = None
 
     def __post_init__(self) -> None:
@@ -416,13 +421,23 @@ class StartMilestoneExpectation:
             self, "lifecycle_event_id", _validated_id(event_id, self.lifecycle_event_id)
         )
         response_object_id = _validated_optional_object_id(self.response_object_id)
+        response_envelope_digest = _validated_optional_digest(self.response_envelope_digest)
         result_digest = _validated_optional_digest(self.result_digest)
         object.__setattr__(self, "response_object_id", response_object_id)
+        object.__setattr__(self, "response_envelope_digest", response_envelope_digest)
         object.__setattr__(self, "result_digest", result_digest)
         if self.milestone is StartMilestone.RESULT_PUBLISHED:
-            if response_object_id is None or result_digest is None:
+            if (
+                response_object_id is None
+                or response_envelope_digest is None
+                or result_digest is None
+            ):
                 raise _invalid()
-        elif response_object_id is not None or result_digest is not None:
+        elif (
+            response_object_id is not None
+            or response_envelope_digest is not None
+            or result_digest is not None
+        ):
             raise _invalid()
 
 
@@ -438,6 +453,7 @@ class StartCompletionEvidence:
     owner_generation: int
     lifecycle_frontier: Frontier | None
     response_object_id: str | None
+    response_envelope_digest: str | None
     result_digest: str | None
     evidence_digest: str
 
@@ -463,13 +479,16 @@ class StartCompletionEvidence:
         if self.lifecycle_frontier is not None and type(self.lifecycle_frontier) is not Frontier:
             raise _invalid()
         response_object_id = _validated_optional_object_id(self.response_object_id)
+        response_envelope_digest = _validated_optional_digest(self.response_envelope_digest)
         result_digest = _validated_optional_digest(self.result_digest)
         object.__setattr__(self, "response_object_id", response_object_id)
+        object.__setattr__(self, "response_envelope_digest", response_envelope_digest)
         object.__setattr__(self, "result_digest", result_digest)
         _validate_milestone_presence(
             self.milestone,
             lifecycle_frontier=self.lifecycle_frontier,
             response_object_id=response_object_id,
+            response_envelope_digest=response_envelope_digest,
             result_digest=result_digest,
         )
         try:

@@ -14,6 +14,8 @@ The matrix covers `vault_unlock`, `provider_reauthentication`, `privacy_reauthen
 
 Table tests for record validation/digest, attempt reservation/resolution, crash recovery, success
 reset, delay calculation, restart, wall-clock anomaly, and unsafe/missing path handling.
+The crash matrix includes byte-preserving successor adoption of only the exact provisional
+generation-1 zero-failure record and rejection after any attempt-state advance.
 
 ## Behavior
 

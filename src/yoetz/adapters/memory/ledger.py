@@ -69,13 +69,14 @@ from yoetz.kernel.deterministic_checks import (
     DeterministicCase,
     UnavailableCapturedObject,
     build_deterministic_case,
+    deterministic_case_from_json,
+    deterministic_case_to_json,
 )
 from yoetz.kernel.projections import (
     PROJECTION_VERSION,
     ProjectionState,
     empty_projection_state,
     projection_digest,
-    projection_snapshot,
 )
 from yoetz.kernel.reducers import replay
 from yoetz.ports.clock import ClockPort
@@ -123,7 +124,12 @@ from yoetz.ports.objects import (
     ObjectStorePort,
 )
 from yoetz.ports.runtime import OwnershipFence
-from yoetz.protocol.canonical import canonical_digest, canonical_encode, entry_digest
+from yoetz.protocol.canonical import (
+    canonical_digest,
+    canonical_encode,
+    entry_digest,
+    strict_json_parse,
+)
 from yoetz.protocol.coverage import (
     AuthorshipAssurance,
     PublicationChannel,
@@ -216,7 +222,6 @@ class MemoryLedgerState:
     frozen_cases: dict[tuple[str, str], DeterministicCase] = field(default_factory=lambda: {})
     check_results: dict[tuple[str, str], CheckCommitResult] = field(default_factory=lambda: {})
     check_errors: dict[tuple[str, str], PublicOperationError] = field(default_factory=lambda: {})
-    phase_objects: dict[tuple[str, str], ObjectRef] = field(default_factory=lambda: {})
     jobs: dict[str, SemanticJobRecord] = field(default_factory=lambda: {})
     job_by_case: dict[tuple[str, str, str], str] = field(default_factory=lambda: {})
     attempts: dict[str, _AttemptState] = field(default_factory=lambda: {})
@@ -231,6 +236,149 @@ class MemoryLedgerState:
         head_digest: str,
     ) -> None:
         self.writers[writer] = _WriterState(task, session, next_sequence, head_digest)
+
+
+def _case_dependency_digest(case: DeterministicCase) -> str:
+    return canonical_digest(
+        {
+            "availability": {
+                "captured": tuple(
+                    (item.source_event_id, item.object_id)
+                    for item in case.availability.unavailable_captured_objects
+                ),
+                "events": case.availability.unavailable_event_ids,
+            },
+            "projection": projection_digest(case.projection),
+        }
+    )
+
+
+async def _open_exact_object(objects: ObjectStorePort, expected: ObjectRef) -> bytes:
+    resolved = await objects.resolve_verified(expected.object_id, expected.envelope_digest)
+    if resolved != expected:
+        raise ValueError("resume_object_descriptor_invalid")
+    return b"".join([chunk async for chunk in objects.open_verified(resolved)])
+
+
+def _strict_mapping(value: object, *, reason: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise ValueError(reason)
+    mapping = cast(Mapping[object, object], value)
+    if any(type(key) is not str for key in mapping):
+        raise ValueError(reason)
+    return cast(Mapping[str, object], value)
+
+
+async def load_frozen_case_from_resume(
+    objects: ObjectStorePort,
+    record: OperationRecord,
+    *,
+    task: str,
+    session: str,
+) -> DeterministicCase:
+    """Verified-decode the case reachable from the row's sole current pointer."""
+
+    current = record.resume_object_ref
+    if current is None or current.metadata.task_id != task:
+        raise ValueError("resume_object_binding_invalid")
+    raw = await _open_exact_object(objects, current)
+    parsed = strict_json_parse(raw)
+    if canonical_encode(parsed) != raw:
+        raise ValueError("resume_object_noncanonical")
+    source = _strict_mapping(parsed, reason="resume_object_shape_invalid")
+
+    if current.metadata.kind is ObjectKind.DETERMINISTIC_RESULT:
+        if frozenset(source) != frozenset(
+            {
+                "schema_version",
+                "request_id",
+                "request_digest",
+                "task_id",
+                "session_id",
+                "writer_id",
+                "subject_frontier",
+                "dependency_digest",
+                "prior_resume",
+                "policy_executions",
+                "assessments",
+            }
+        ):
+            raise ValueError("deterministic_result_shape_invalid")
+        if (
+            source["schema_version"] != "1.0.0"
+            or source["request_id"] != record.operation_id
+            or source["request_digest"] != record.request_digest
+            or source["task_id"] != task
+            or source["session_id"] != session
+            or source["writer_id"] != record.writer_id
+        ):
+            raise ValueError("deterministic_result_binding_invalid")
+        pointer = _strict_mapping(
+            source["prior_resume"], reason="deterministic_result_pointer_invalid"
+        )
+        if frozenset(pointer) != frozenset({"object_id", "envelope_digest", "commitment"}) or any(
+            type(pointer[key]) is not str for key in pointer
+        ):
+            raise ValueError("deterministic_result_pointer_invalid")
+        prior = await objects.resolve_verified(
+            cast(str, pointer["object_id"]), cast(str, pointer["envelope_digest"])
+        )
+        if (
+            prior.metadata.kind is not ObjectKind.CHECK_RESUME
+            or prior.metadata.task_id != task
+            or prior.commitment != pointer["commitment"]
+        ):
+            raise ValueError("deterministic_result_pointer_invalid")
+        raw = await _open_exact_object(objects, prior)
+        parsed = strict_json_parse(raw)
+        if canonical_encode(parsed) != raw:
+            raise ValueError("resume_object_noncanonical")
+        resume_source = _strict_mapping(parsed, reason="resume_object_shape_invalid")
+        expected_frontier = source["subject_frontier"]
+        expected_dependency = source["dependency_digest"]
+    elif current.metadata.kind is ObjectKind.CHECK_RESUME:
+        resume_source = source
+        expected_frontier = None
+        expected_dependency = None
+    else:
+        raise ValueError("resume_object_kind_invalid")
+
+    if frozenset(resume_source) != frozenset(
+        {
+            "schema_version",
+            "task_id",
+            "session_id",
+            "writer_id",
+            "request_id",
+            "request_digest",
+            "frontier",
+            "dependency_digest",
+            "case_digest",
+            "case",
+        }
+    ):
+        raise ValueError("resume_object_shape_invalid")
+    if (
+        resume_source["schema_version"] != "1.0.0"
+        or resume_source["task_id"] != task
+        or resume_source["session_id"] != session
+        or resume_source["writer_id"] != record.writer_id
+        or resume_source["request_id"] != record.operation_id
+        or resume_source["request_digest"] != record.request_digest
+    ):
+        raise ValueError("resume_object_binding_invalid")
+    case = deterministic_case_from_json(cast(JsonValue, resume_source["case"]))
+    case_json = deterministic_case_to_json(case)
+    dependency = _case_dependency_digest(case)
+    if (
+        resume_source["case_digest"] != canonical_digest(case_json)
+        or resume_source["frontier"] != case.frontier.as_wire()
+        or resume_source["dependency_digest"] != dependency
+        or (expected_frontier is not None and expected_frontier != case.frontier.as_wire())
+        or (expected_dependency is not None and expected_dependency != dependency)
+    ):
+        raise ValueError("resume_object_binding_invalid")
+    return case
 
 
 def _now(clock: ClockPort | None) -> datetime:
@@ -452,7 +600,7 @@ def build_append_operation_record(
         result_locator=OperationResultLocator(
             first,
             last,
-            None,
+            command.result_object_ref,
             tuple(sorted((row.event_id for row in result.accepted), key=str.encode)),
         ),
         quarantine_code=None,
@@ -706,9 +854,7 @@ def _projection_items(
             (
                 row.payload
                 for row in records
-                if row.session_id == session
-                and type(row) is AcceptedEvent
-                and type(row.payload) is SessionOpenedPayload
+                if type(row) is AcceptedEvent and type(row.payload) is SessionOpenedPayload
             ),
             None,
         )
@@ -884,18 +1030,7 @@ class MemoryLedgerAdapter:
             record.lease_generation,
             record.lease_expires_at,
             case.frontier,
-            canonical_digest(
-                {
-                    "availability": {
-                        "captured": tuple(
-                            (item.source_event_id, item.object_id)
-                            for item in case.availability.unavailable_captured_objects
-                        ),
-                        "events": case.availability.unavailable_event_ids,
-                    },
-                    "projection": projection_digest(case.projection),
-                }
-            ),
+            _case_dependency_digest(case),
         )
 
     def _require_lease(self, lease: OperationLease) -> OperationRecord:
@@ -914,11 +1049,18 @@ class MemoryLedgerAdapter:
         return record
 
     def _replace_pending_record(
-        self, record: OperationRecord, *, phase: CheckPhase | None = None
+        self,
+        record: OperationRecord,
+        *,
+        phase: CheckPhase | None = None,
+        resume_object_ref: ObjectRef | None = None,
     ) -> tuple[OperationRecord, OperationLease]:
         updated = replace(
             record,
             phase=record.phase if phase is None else phase,
+            resume_object_ref=(
+                record.resume_object_ref if resume_object_ref is None else resume_object_ref
+            ),
             owner_generation=str(self._fence.owner_generation),
             lease_owner_id=self._fence.service_instance_id,
             lease_generation=cast(int, record.lease_generation) + 1,
@@ -1052,6 +1194,11 @@ class MemoryLedgerAdapter:
                     entry.payload_object.object_id: entry.payload_object
                     for entry in command.entries
                 },
+                **(
+                    {}
+                    if command.result_object_ref is None
+                    else {command.result_object_ref.object_id: command.result_object_ref}
+                ),
             }
             self._state.writers = {
                 **self._state.writers,
@@ -1106,6 +1253,12 @@ class MemoryLedgerAdapter:
                 view, projection, records, task=self._task_id, session=session_id
             )
         return StoredProjection(view, state, frontier, 0, PROJECTION_VERSION, False)
+
+    async def load_frontier(self) -> Frontier:
+        """Return the task-ledger frontier without requiring an existing session."""
+
+        async with self._lock:
+            return Frontier(self._state.projection.frontier, self._state.projection.head_digest)
 
     async def load_case_availability(
         self, session_id: str, frontier: Frontier, projection: ProjectionState
@@ -1336,12 +1489,26 @@ class MemoryLedgerAdapter:
         ):
             remaining = max(0, int((record.lease_expires_at - now).total_seconds() * 1000))
             return PendingVerdict(PendingVerdictKind.LIVE, record, remaining)
+        writer = self._state.writers.get(writer_id)
+        if writer is None:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        assert self._objects is not None
+        try:
+            case = await load_frozen_case_from_resume(
+                self._objects,
+                record,
+                task=self._task_id,
+                session=writer.session_id,
+            )
+        except (KeyError, OSError, TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
         async with self._lock:
             current = self._state.operations.get((writer_id, operation_id))
             if current is None or current[0] != record:
                 raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
-            if self._pending_import(self._lease_for(record).session_id):
+            if self._pending_import(writer.session_id):
                 raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+            self._state.frozen_cases[(writer_id, operation_id)] = case
             _, lease = self._replace_pending_record(record)
             return lease
 
@@ -1354,6 +1521,10 @@ class MemoryLedgerAdapter:
         request_digest: str,
     ) -> FrozenCase | CheckCommitResult:
         key = (writer_id, request_id)
+        prior_record: OperationRecord | None = None
+        projection: ProjectionState | None = None
+        frontier: Frontier | None = None
+        records: tuple[LedgerRecord, ...] | None = None
         async with self._lock:
             prior = self._state.operations.get(key)
             if prior is not None:
@@ -1368,42 +1539,61 @@ class MemoryLedgerAdapter:
                     if stored_error is not None:
                         raise stored_error
                     raise _error(PublicErrorCode.STORAGE_CORRUPT)
-                lease = self._lease_for(record)
-                if lease.lease_expires_at > _now(self._clock) and lease.owner_generation == str(
+                if record.state is OperationState.QUARANTINED:
+                    raise _error(PublicErrorCode.STORAGE_CORRUPT)
+                writer = self._state.writers.get(writer_id)
+                if writer is None or writer.session_id != session_id:
+                    raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+                assert record.lease_expires_at is not None
+                if record.lease_expires_at > _now(self._clock) and record.owner_generation == str(
                     self._fence.owner_generation
                 ):
                     raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
                 if self._pending_import(session_id):
                     raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
-                _, renewed = self._replace_pending_record(record)
-                return FrozenCase(self._state.frozen_cases[key], renewed)
-            if self._pending_import(session_id):
-                raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
-            projection = self._state.projection
-            frontier = Frontier(projection.frontier, projection.head_digest)
-            if expected_frontier is not None and expected_frontier != frontier.sequence:
-                raise _error(PublicErrorCode.FRONTIER_CONFLICT, reason_code="frontier_changed")
-            records = self._state.records
-            writer = self._state.writers.get(writer_id)
-            if writer is None or writer.session_id != session_id:
-                raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+                prior_record = record
+            else:
+                if self._pending_import(session_id):
+                    raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+                projection = self._state.projection
+                frontier = Frontier(projection.frontier, projection.head_digest)
+                if expected_frontier is not None and expected_frontier != frontier.sequence:
+                    raise _error(PublicErrorCode.FRONTIER_CONFLICT, reason_code="frontier_changed")
+                records = self._state.records
+                writer = self._state.writers.get(writer_id)
+                if writer is None or writer.session_id != session_id:
+                    raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+        if prior_record is not None:
+            assert self._objects is not None
+            try:
+                case = await load_frozen_case_from_resume(
+                    self._objects,
+                    prior_record,
+                    task=self._task_id,
+                    session=session_id,
+                )
+            except (KeyError, OSError, TypeError, ValueError) as exc:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
+            async with self._lock:
+                current = self._state.operations.get(key)
+                if current is None or current[0] != prior_record:
+                    raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+                if self._pending_import(session_id):
+                    raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+                self._state.frozen_cases[key] = case
+                _, renewed = self._replace_pending_record(prior_record)
+                return FrozenCase(case, renewed)
+        assert projection is not None and frontier is not None and records is not None
         availability = await self.load_case_availability(session_id, frontier, projection)
         case = build_deterministic_case(projection, records, availability)
-        dependency = canonical_digest(
-            {
-                "availability": {
-                    "captured": tuple(
-                        (item.source_event_id, item.object_id)
-                        for item in availability.unavailable_captured_objects
-                    ),
-                    "events": availability.unavailable_event_ids,
-                },
-                "projection": projection_digest(projection),
-            }
-        )
+        dependency = _case_dependency_digest(case)
+        case_json = deterministic_case_to_json(case)
         case_bytes = canonical_encode(
             {
-                "case_digest": canonical_digest(projection_snapshot(projection)),
+                "schema_version": "1.0.0",
+                "task_id": self._task_id,
+                "case": case_json,
+                "case_digest": canonical_digest(case_json),
                 "dependency_digest": dependency,
                 "frontier": frontier.as_wire(),
                 "request_digest": request_digest,
@@ -1467,17 +1657,36 @@ class MemoryLedgerAdapter:
         }
         if (expected_phase, next_phase) not in edges:
             raise _error(PublicErrorCode.INVALID_REQUEST)
+        if expected_phase is CheckPhase.RESERVED:
+            if (
+                durable_object_ref is None
+                or durable_object_ref.metadata.kind is not ObjectKind.DETERMINISTIC_RESULT
+                or durable_object_ref.metadata.task_id != self._task_id
+                or durable_object_ref.metadata.media_type
+                != "application/vnd.yoetz.deterministic-result+json"
+            ):
+                raise _error(PublicErrorCode.INVALID_REQUEST)
+            assert self._objects is not None
+            try:
+                resolved = await self._objects.resolve_verified(
+                    durable_object_ref.object_id,
+                    durable_object_ref.envelope_digest,
+                )
+            except (KeyError, OSError, TypeError, ValueError) as exc:
+                raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+            if resolved != durable_object_ref:
+                raise _error(PublicErrorCode.INVALID_REQUEST)
+        elif durable_object_ref is not None:
+            raise _error(PublicErrorCode.INVALID_REQUEST)
         async with self._lock:
             record = self._require_lease(lease)
             if record.phase is not expected_phase:
                 raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
-            if expected_phase is CheckPhase.RESERVED and durable_object_ref is None:
-                raise _error(PublicErrorCode.INVALID_REQUEST)
-            if durable_object_ref is not None:
-                self._state.phase_objects[(lease.writer_id, lease.operation_id)] = (
-                    durable_object_ref
-                )
-            _, replacement = self._replace_pending_record(record, phase=next_phase)
+            _, replacement = self._replace_pending_record(
+                record,
+                phase=next_phase,
+                resume_object_ref=durable_object_ref,
+            )
             return replacement
 
     async def enqueue_semantic_job(

@@ -21,10 +21,16 @@ state, rate limits, generation binding, and ready-composition construction atomi
   `complete_reauthentication(source) -> HumanAuthorizationProof`, `cancel`, and `close`.
   The returned proof is the exact object minted by `VaultService`, remains service-internal, and is
   handed directly to `HumanControlService`; this coordinator never constructs one.
+- Construction requires `activate_ready(service_generation, vault_generation)`, one injected async
+  callback owned by the daemon composition boundary. The callback must build and validate a fresh
+  ready Application, atomically install it, and publish lifecycle `ready` only for those exact
+  still-current generations. It returns only after ownership has transferred to the daemon.
 - `@dataclass(frozen=True, slots=True) class UnlockChallenge` — one-use structural binding for the
   confidential ingress; no user/provider/key detail.
 - `@dataclass(frozen=True, slots=True) class UnlockResult` — state and bounded reason only.
 - `class UnlockThrottleStore` — sole owner of the crash-safe locked-state throttle record.
+  `stage_or_adopt_initial_record()` creates a missing record or adopts byte-for-byte only an exact
+  generation-1, zero-failure, inactive provisional record left before passphrase-mode publication.
 - `@dataclass(frozen=True, slots=True) class UnlockThrottleRecord` — exact record below; no secret,
   user content, entered length, purpose target, or derived passphrase evidence.
 - `class UnlockError(Exception)` — bounded reasons matching lifecycle/vault/ingress failures.
@@ -42,6 +48,14 @@ correlated entry. Both branches change service/vault state to `unlocking` only f
 either construct/validate complete ready state or return to locked. Passphrase mode, ambiguous or
 non-pristine initialization, and missing/mismatched committed keyring material reject without
 creation, deletion, replacement, or fallback.
+
+Every successful vault-opening path snapshots the current service and vault generations and calls
+the injected daemon activation exactly once while lifecycle state is still `unlocking`. The daemon
+builds and validates the complete Application before atomically installing it and transitioning
+the lifecycle to `ready`; the coordinator then rechecks the exact generations, vault readiness,
+and lifecycle state before returning success. A callback failure or invalid terminal state is the
+bounded `unlock_failed` outcome. It closes any partial Application inside the activation boundary,
+then the coordinator idempotently relocks the vault and returns lifecycle state to `locked`.
 
 `begin_passphrase_initialization` is available only when the service is locked, mode is exactly
 `uninitialized`, and `VaultService` has just re-proven a pristine installation: no committed mode,
@@ -131,6 +145,13 @@ after passphrase publication, or unsafe file state never shortens the wait: it a
 mechanism claims crash/restart throttling, not defense against a malicious active same-UID user who
 can rewrite local files.
 
+If a clean crash leaves the exact provisional throttle record but no committed passphrase marker,
+the successor coordinator may adopt that record without rewriting it after the vault has re-proven
+the pre-publication state. Adoption requires the exact installation ID, generation 1, zero
+failures, `attempt_in_progress=false`, and no last-failure time; the prior service writer ID and
+record digest remain unchanged. Any advanced, active, mismatched, unsafe, or malformed record is
+not provisional and fails closed rather than being reset or replaced.
+
 ## Errors and edge cases
 
 - Concurrent attempts coalesce/reject; no two KDF jobs run for one vault.
@@ -148,7 +169,7 @@ can rewrite local files.
   immediate attempt; the exact record/re-arm rules above apply and no persisted monotonic value is
   interpreted across reboot.
 - Ready-composition failure after correct vault unlock relocks and reports the startup gate reason,
-  not success.
+  `unlock_failed`, not success.
 
 ## Invariants
 

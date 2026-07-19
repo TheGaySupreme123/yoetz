@@ -175,6 +175,19 @@ def test_large_frame_exception_is_only_the_exact_bounded_import_branch() -> None
     assert len(encoded) - 4 > MAX_ORDINARY_CONTROL_FRAME_BYTES
     assert decode_control_frame(encoded)["method"] == "import_codex_jsonl"
 
+    for field, value in (
+        ("stderr_present", True),
+        ("stderr_captured_bytes", 1),
+        ("stderr_truncated", True),
+    ):
+        legacy_body = dict(cast(dict[str, JsonValue], request["body"]))
+        legacy_body[field] = value
+        legacy = dict(request)
+        legacy["body"] = legacy_body
+        with pytest.raises(ControlProtocolError) as legacy_stderr:
+            encode_control_frame(legacy)
+        _assert_reason(legacy_stderr, "frame_invalid")
+
     widened = dict(request)
     widened["method"] = "service_status"
     with pytest.raises(ControlProtocolError) as wrong_branch:

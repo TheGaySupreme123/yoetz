@@ -30,6 +30,8 @@ Prove check returns the same findings, verdicts, coverage, and safety boundaries
 The test uses the same frozen case and policy settings across surfaces and asserts:
 
 - the structured result is identical;
+- durable `CheckCommitResult` is sink-independent and contains no rendering/client/projection/
+  local-disclosure field; surface parity is compared only after the facade's sole projection;
 - the same finding order and suppressed count appear everywhere;
 - semantic-required and semantic-optional modes map to the same contract decisions;
 - `semantic_required` failure preserves deterministic findings, returns no semantic findings,

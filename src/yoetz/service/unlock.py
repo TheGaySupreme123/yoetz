@@ -7,7 +7,9 @@ import math
 import os
 import secrets
 import stat
+from asyncio import CancelledError
 from asyncio import Lock as AsyncLock
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -71,6 +73,7 @@ _UNLOCK_REASONS: Final = frozenset(
         "throttle_record_tampered",
         "throttle_record_unsafe",
         "unlock_rate_limited",
+        "unlock_failed",
         "unlock_wrong",
         "vault_locked",
         "vault_uninitialized",
@@ -315,6 +318,31 @@ class UnlockThrottleStore:
                 last_writer_instance_id=self._writer_instance_id,
             )
             self._write(record, replace_existing=False)
+            self._record = record
+            self._deadline = 0.0
+            self._repair_required = False
+            return record
+
+    def stage_or_adopt_initial_record(self) -> UnlockThrottleRecord:
+        """Create or adopt only the exact provisional pre-publication record."""
+
+        with self._lock:
+            if not self._path.exists():
+                return self.stage_initial_record()
+            try:
+                record = self._read()
+            except UnlockError:
+                raise
+            except (OSError, TypeError, ValueError) as exc:
+                raise UnlockError("throttle_record_tampered") from exc
+            if (
+                record.installation_id != self._installation_id
+                or record.record_generation != 1
+                or record.consecutive_failures != 0
+                or record.attempt_in_progress
+                or record.last_failure_utc is not None
+            ):
+                raise UnlockError("throttle_record_exists")
             self._record = record
             self._deadline = 0.0
             self._repair_required = False
@@ -658,13 +686,17 @@ class _Vault(Protocol):
     @property
     def ready(self) -> bool: ...
 
-    async def retry_keyring(self, capability: UserPresenceCapability | None) -> object: ...
+    async def retry_keyring(
+        self, user_presence_capability: UserPresenceCapability | None
+    ) -> object: ...
 
     async def initialize_passphrase(
         self, handle: SecretHandle, throttle_record_digest: str
     ) -> object: ...
 
     async def unlock(self, handle: SecretHandle) -> object: ...
+
+    async def lock(self) -> object: ...
 
     async def mint_human_authorization(
         self,
@@ -688,11 +720,15 @@ class UnlockCoordinator:
         throttle: UnlockThrottleStore,
         vault: _Vault,
         lifecycle: _Lifecycle,
+        activate_ready: Callable[[int, int], Awaitable[None]],
     ) -> None:
+        if not callable(activate_ready):
+            raise TypeError("ready_activation_invalid")
         self._clock = clock
         self._throttle = throttle
         self._vault = vault
         self._lifecycle = lifecycle
+        self._activate_ready = activate_ready
         self._active: UnlockChallenge | None = None
         self._presence_challenge: UserPresenceChallenge | None = None
         self._closed = False
@@ -707,10 +743,7 @@ class UnlockCoordinator:
             try:
                 await self._vault.retry_keyring(capability)
                 if self._vault.ready:
-                    await self._lifecycle.transition(
-                        ServiceState.READY, vault_generation=self._vault.generation
-                    )
-                    return UnlockResult("ready")
+                    return await self._activate_fresh_ready()
                 await self._lifecycle.transition(ServiceState.LOCKED)
                 return UnlockResult("locked", self._vault_reason())
             except Exception as exc:
@@ -744,14 +777,11 @@ class UnlockCoordinator:
                 await self._lifecycle.transition(ServiceState.LOCKED)
                 raise UnlockError("secret_purpose_mismatch")
             try:
-                record = self._throttle.stage_initial_record()
+                record = self._throttle.stage_or_adopt_initial_record()
                 await self._vault.initialize_passphrase(secret, record.record_digest)
                 self._active = None
                 if self._vault.ready:
-                    await self._lifecycle.transition(
-                        ServiceState.READY, vault_generation=self._vault.generation
-                    )
-                    return UnlockResult("ready")
+                    return await self._activate_fresh_ready()
                 await self._lifecycle.transition(ServiceState.LOCKED)
                 return UnlockResult("locked", self._vault_reason())
             except Exception as exc:
@@ -794,10 +824,7 @@ class UnlockCoordinator:
                     raise UnlockError(self._vault_reason())
                 self._throttle.reset_success()
                 self._active = None
-                await self._lifecycle.transition(
-                    ServiceState.READY, vault_generation=self._vault.generation
-                )
-                return UnlockResult("ready")
+                return await self._activate_fresh_ready()
             except Exception as exc:
                 if self._attempt_reserved():
                     self._throttle.charge_failure()
@@ -927,6 +954,44 @@ class UnlockCoordinator:
         self._active = challenge
         self._presence_challenge = None
         return challenge
+
+    async def _activate_fresh_ready(self) -> UnlockResult:
+        """Delegate one generation-bound ready build/install before publishing success."""
+
+        service_generation = self._lifecycle.instance.generation
+        vault_generation = self._vault.generation
+        if self._lifecycle_state() is not ServiceState.UNLOCKING or not self._vault.ready:
+            await self._rollback_ready_failure()
+            return UnlockResult("locked", "unlock_failed")
+        try:
+            await self._activate_ready(service_generation, vault_generation)
+        except CancelledError:
+            await self._rollback_ready_failure()
+            raise
+        except Exception:
+            await self._rollback_ready_failure()
+            return UnlockResult("locked", "unlock_failed")
+        if (
+            self._lifecycle_state() is not ServiceState.READY
+            or self._lifecycle.instance.generation != service_generation
+            or self._vault.generation != vault_generation
+            or not self._vault.ready
+        ):
+            await self._rollback_ready_failure()
+            return UnlockResult("locked", "unlock_failed")
+        return UnlockResult("ready")
+
+    async def _rollback_ready_failure(self) -> None:
+        """Best-effort reverse-order rollback after a failed outer ready gate."""
+
+        try:
+            await self._vault.lock()
+        finally:
+            if self._lifecycle_state() is ServiceState.UNLOCKING:
+                await self._lifecycle.transition(ServiceState.LOCKED)
+
+    def _lifecycle_state(self) -> ServiceState:
+        return self._lifecycle.state
 
     def _require_open_idle(self) -> None:
         if self._closed:

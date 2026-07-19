@@ -2,7 +2,7 @@
 
 **Wave:** D | **ADRs:** ADR-001, ADR-002, ADR-003, ADR-004 | **Imports (spec-tree):**
 `protocol/canonical.md`, `protocol/errors.md`, `domain/values.md`, `ports/ledger.md`,
-`ports/objects.md`, `ports/start_catalog.md` | **Imported by:** `application/start.md`,
+`ports/objects.md`, `ports/runtime.md`, `ports/start_catalog.md` | **Imported by:** `application/start.md`,
 `application/publish_work.md`, `application/check.md`, `application/respond.md`,
 `application/receipt.md`, `application/import_review.md`
 
@@ -15,17 +15,27 @@ inside adapters; application code sees immutable prepared values and port result
 
 ## Public surface
 
-Application-internal, natural-language contracts:
+Application-internal contracts:
 
-- `PreparedMutation` — immutable operation identity, canonical logical request digest, finalized
-  object/entry references, expected frontier, and the bounded port command ready to commit.
-- `CommitResolution` — closed outcome `committed`, `not_committed`, `pending`, `quarantined`, or
-  `unknown`, plus only a verified stored result/safe reason where applicable.
+- `PreparedMutation(writer_id, operation_id, request_digest, expected_frontier,
+  finalized_object_refs, command)` — immutable operation identity, canonical logical request
+  digest, finalized object/entry references, expected frontier, and the exact `AppendCommand`
+  ready to commit. Its duplicated identity/frontier fields must equal the command and every entry
+  payload ref must be present in the unique, task-scoped finalized-ref tuple.
+- `CommitResolution(outcome, stored_result=None, safe_reason=None, failure=None)` — closed outcome
+  `committed`, `not_committed`, `pending`, `quarantined`, or `unknown`. `committed` carries only
+  verified stored bytes, `quarantined` only a stable safe reason, and `unknown` only an already
+  mapped storage `PublicOperationError`; the other outcomes carry no additional data.
 - `run_prepared_append(ledger, prepared) -> AppendResult` — execute the shielded task-bundle append
   discipline below.
 - `resolve_ambiguous_operation(ledger, writer_id, operation_id, request_digest) -> CommitResolution`.
-- `run_catalog_transition` / `resolve_ambiguous_start` — equivalent helpers that delegate to
-  `StartCatalogPort` rather than pretending pre-writer start is a ledger append.
+- `CatalogPhaseAdvance(allocation, phase, result=None)`,
+  `CatalogCompletion(allocation, result, evidence)`, and
+  `CatalogQuarantine(allocation, reason)` — closed typed start-catalog transition values.
+- `run_catalog_transition(catalog, transition)` accepts only `StartCommand` or one of those closed
+  values and returns the exact port result. `resolve_ambiguous_start(catalog, command)` maps a
+  catalog replay to `committed`, reserve/resume to `pending`, and mapped unreadable storage to
+  `unknown`.
 
 These names remain internal and need not enter `INTERFACES.md`. They contain no connection,
 cursor, SQL callable, arbitrary callback, SDK exception, or filesystem path.
@@ -113,14 +123,16 @@ identity; never infer outcome from the exception or elapsed time:
 | no row, after the writer job/process is definitively stopped and recovery completed | `not_committed`; an ordinary retry may prepare again |
 | `complete` + same request digest | `committed`; return/reconstruct the stored original result |
 | `complete` + different digest | raise `IDEMPOTENCY_CONFLICT` |
-| `pending` + same digest, current generation and unexpired lease | `pending`; return `OPERATION_PENDING` |
+| `pending` + same digest | `pending`; this helper never infers lease liveness or reclaims |
 | `pending` + same digest, expired or stale generation | only the registered check/import state machine may fenced-CAS reclaim and resume |
 | `pending` for a single-commit kind | contradictory state; quarantine, never guess |
 | `quarantined` | stable terminal safe reason; operator repair is explicit |
 | storage cannot be verified/read | `unknown` plus mapped storage failure; never say “not committed” |
 
-`lookup_operation` itself does not renew/reclaim. Start uses the catalog's installation/request
-scope and `reserve_or_resume`; it must not query the task ledger before writer allocation. A new
+`lookup_operation` itself does not renew/reclaim. A pending record is handed to only the registered
+check/import state machine, which owns current-generation/expiry checks and fenced reclaim. Start
+uses the catalog's installation/request scope and `reserve_or_resume`; it must not query the task
+ledger before writer allocation. A new
 verified connection/startup recovery is required after SQLite reports an ambiguous connection/
 commit failure before absence can be trusted.
 
@@ -158,8 +170,10 @@ rebuild is separate fenced maintenance, not hidden inside one long status read.
 
 ## Tests
 
-- `specs/tests/unit.md`: logical digest inclusion/exclusion, prepared-value immutability, outcome
-  resolution table, result-validation-as-defect, cancellation timing model.
+- `specs/tests/unit/application/test_unit_of_work.py.md`: prepared-value immutability, exact
+  commit/rollback delegation, single submission, cancellation timing, fence propagation,
+  ambiguity resolution, cleanup/idempotency, catalog scope, and absence of concrete-adapter
+  selection.
 - `specs/tests/conformance.md`: preflight races, same/different digest replay, pending/quarantine,
   reference and memory/SQLite result parity.
 - `specs/tests/subprocess.md`: every object/transaction/commit/response kill point, signals during

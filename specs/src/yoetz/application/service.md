@@ -3,7 +3,7 @@
 **Wave:** D | **ADRs:** ADR-001–ADR-008 | **Imports (spec-tree):** `protocol/models.md`,
 `protocol/errors.md`, `ports/start_catalog.md`, `ports/runtime.md`, `ports/semantic.md`,
 `ports/clock.md`, `ports/ids.md`, `ports/diagnostics.md`, `domain/privacy.md`,
-`application/egress.md`, application use-case modules |
+`config/models.md`, `application/egress.md`, application use-case modules |
 **Imported by:** `service/daemon.md` only in production; application tests
 
 ## Purpose
@@ -18,11 +18,34 @@ MCP, and future UI do not construct or import this facade; they use `ControlClie
 - `@dataclass(frozen=True, slots=True) class Application` with injected
   `start_catalog`, `runtime`, semantic/egress coordinator, clock, IDs, diagnostics, and immutable
   verification policy.
+- `@dataclass(frozen=True, slots=True) class VerificationPolicy` — the application-safe immutable
+  copy of the effective `[verification]` choices: exact
+  `semantic: disabled|optional|required` and `max_findings: int` in `1..10`. Its
+  `default_check_mode` maps those values one-to-one to
+  `deterministic_only|semantic_if_configured|semantic_required`. It contains no provider,
+  credential, mutable config, or policy-pack implementation.
+- `enum ProjectionRenderMode` — exactly `human_readable|machine_readable`.
+- `@dataclass(frozen=True, slots=True) class ClientProjectionContext` — service-owned
+  `client_kind`, `render_mode`, and boolean `output_is_controlling_tty` facts. It is internal,
+  nonserializable, and cannot carry a requested sink. `fail_safe(client_kind)` constructs
+  `machine_readable` plus `output_is_controlling_tty=False`.
+- `ProjectedControlBody` — the exact Python union of the six operation result models and
+  `JsonObject` for already-validated support results. It is not a seventh wire schema and cannot
+  contain lifecycle/control-error results.
+- `resolve_client_disclosure_sink(ClientProjectionContext) -> LocalDisclosureSink` — returns
+  `local_human_view` only for `cli + human_readable + output_is_controlling_tty`; every other
+  complete or contradictory combination returns `agent_context`.
 - Exactly six async workflow methods: `start`, `publish_work`, `check`, `respond`, `status`, and
   `receipt`, with the existing exact request/result types.
-- Service-internal `async project_result_for_client(client_kind, method, result) ->
+- `@dataclass(frozen=True, slots=True, repr=False) ControlProjectionBinding` carries the exact
+  admitted RPC/service generation/method, original request identity, catalog-resolved route
+  identity digest, and canonical control request. It contains no presentation choice.
+- Service-internal `async project_result_for_client(context, binding, result) ->
   ProjectedControlBody`, the only route by which an application/support result may become an
   ordinary CLI, MCP, or UI response.
+- `async projection_binding_facts(method, request, result) -> ProjectionBindingFacts` resolves the
+  active route through `StartCatalogPort.resolve_route(session_id)`, requires exact task/session
+  agreement, and returns no route digest only for a truly installation-scoped support result.
 - Support methods `import_codex_jsonl`, `review`, `privacy_get_setup`,
   `privacy_get_effective`, `privacy_propose_policy`, `privacy_tighten_policy`,
   `privacy_receipts_list`, and `privacy_receipts_get`; the six `privacy_*` names are exactly the
@@ -30,7 +53,8 @@ MCP, and future UI do not construct or import this facade; they use `ControlClie
   not extra workflow operations or MCP tools. Policy/disclosure decision completion is a separate
   service-internal call used only by `HumanControlService` with its consumed reauth proof.
 - `async close()` — idempotent ready-composition shutdown.
-- `class ReadyApplicationFactory` with `async open(ServiceReadyContext) -> Application`; this is
+- `class ReadyApplicationFactory` with `async open(ServiceReadyContext) -> Application` and an
+  async callable `(service_generation, vault_generation) -> Application`; this is
   service-internal and rejects any context not carrying the current vault/service generation.
 - `@dataclass(frozen=True, slots=True) class ServiceReadyContext` — current service/vault
   generations, ready `BundleRuntimePort`, verified catalog, policy gateway, and structural startup
@@ -75,8 +99,9 @@ The daemon serializes `PrivacyReceiptPage` directly into the list body and maps
 
 ### Service-owned client disclosure projection
 
-The daemon must call `project_result_for_client` after internal result validation and before any
-ordinary control serialization, tracing, summary rendering, or response write. The projection uses
+The daemon must obtain catalog-backed `ProjectionBindingFacts`, construct the exact
+`ControlProjectionBinding`, and call `project_result_for_client` after internal result validation
+and before any ordinary control serialization, tracing, summary rendering, or response write. The projection uses
 one frozen client/sink matrix:
 
 | Source | Required sink |
@@ -88,10 +113,12 @@ one frozen client/sink matrix:
 | authenticated foreground YZH1 preview/policy-diff view | `trusted_human_control` |
 | local semantic runtime input | `local_model` |
 
-The service resolves the two CLI branches fail-safe from the authenticated client kind plus the
-validated rendering mode and controlling-terminal state: any absent, contradictory, redirected,
-non-TTY, or machine-readable state is `agent_context`. A caller-supplied actor label or arbitrary
-sink claim never selects a branch, and ordinary TTY output never upgrades to
+The service resolves the two CLI branches fail-safe from one exact `ClientProjectionContext`. The
+context is constructed at the trusted service/client-adapter boundary and passed intact by the
+daemon; it is not derived from the operation actor/client identity and never accepts a sink. Any
+absent presentation facts use `ClientProjectionContext.fail_safe`, and any contradictory,
+redirected, non-TTY, or machine-readable state resolves to `agent_context`. A caller-supplied actor
+label or arbitrary sink claim never selects a branch, and ordinary TTY output never upgrades to
 `trusted_human_control`. A future desktop UI obtains that sink only through the separate
 authenticated confidential human-control ceremony.
 
@@ -103,7 +130,8 @@ content-bearing leaf is a `CandidateContextItem` with its exact JSON Pointer and
 An unregistered new field fails closed as content and blocks release until classified; it never
 inherits structural status by type alone.
 
-The facade sends the complete set of content-bearing leaves as one bounded candidate to
+The facade sends the complete set of content-bearing leaves as one bounded candidate with exact
+purpose `client_result_projection` and a trusted `ProjectionAuditContext` to
 `PrivacyCoordinator.prepare_local_disclosure`. The returned projection is deterministic:
 
 - an approved leaf retains its schema-valid value;
@@ -121,6 +149,14 @@ receives the structural result plus markers and receipt. Initial audit reservati
 the fixed retryable control error `privacy_projection_unavailable` before any content result is
 serialized. Same logical request/result/sink/policy digest replays the same projection and receipt;
 changed result bytes or policy require a new projection.
+
+The coordinator owns the one objectless `AgentProjectionAuditSubject` reservation/commit for both
+ordinary sinks. Workflow provenance is attached only when session, writer, and frozen frontier are
+all present; absent provenance disables the self-authored bypass and does not reject support
+projection. A support result without a workflow request ID receives one internal `req_` projection
+identity. Review is projected once over its complete canonical internal body; the one resulting
+`privacy_projection` value is inserted byte-identically at the review root and nested check result
+only because the frozen public review shape requires both locations.
 
 The local receipt proves only what Yoetz released across its service-to-client
 `agent_context|local_human_view` boundary. It does not attest what an MCP host, CLI consumer,

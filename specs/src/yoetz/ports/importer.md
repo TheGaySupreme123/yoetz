@@ -33,7 +33,7 @@ validation/append contract as cooperative work, then reports the accepted result
   - `status(session_id: str) -> ImportStatusSnapshot`
   - `complete(allocation: ImportAllocation) -> ImportAllocation`
   - `quarantine(allocation: ImportAllocation, reason: ImportSafeReason) -> None`
-  - `load_review_source(identity: ImportSourceIdentity, through: Frontier) -> ImportReviewSource | None`
+  - `load_review_source(identity_digest: str, through: Frontier) -> ImportReviewSource | None`
 - `class ImportByteSource(Protocol)` — one-shot bounded async byte source with
   `declared_size: int | None`, an async iterator yielding `bytes`, and async idempotent `close()`;
   its representation is redacted and contains no path.
@@ -43,7 +43,7 @@ validation/append contract as cooperative work, then reports the accepted result
   `ImportStatusSnapshot`, `ImportReviewSource`, and `ImportSafeReason`.
 - Enums `ImportAllocationOutcome`, `ImportState`, `ImportPhase`, and `ImportLineStatus`.
 
-All are internal shared registry types. `ImportReport` and `ReviewResult` remain application/
+All are internal shared registry types. `ImportReportInternal` and `ReviewInternal` remain application/
 protocol support results; neither is a seventh public workflow model.
 
 ## Behavior
@@ -51,27 +51,28 @@ protocol support results; neither is a seventh public workflow model.
 ### Type contracts
 
 `ImportCaptureInput` is a one-shot sensitive value containing the JSONL `ImportByteSource`,
-optional separately captured stderr source, asserted Codex version, raw argv input for sanitizer
-consumption, working-directory identity input, exit status, capture time, and source kind
+asserted Codex version, raw argv input for sanitizer consumption, working-directory identity
+input, exit status, capture time, and source kind
 (`file` or `stdin`). Its `repr`/`str` is a constant redacted marker. The application/CLI never
-places a filesystem path into a structural result or log.
+places a filesystem path into a structural result or log. It has no stderr source or commitment:
+the v0.1 ordinary import surface is stderr-absent only.
 
 `CapturedImportSource` contains:
 
 - `source_object: ObjectRef` (`ObjectKind.import_source`), its exact keyed
   `source_commitment: hmac-sha256:…`, byte count, line count, and final-newline flag;
 - `metadata_digest` plus bounded safe metadata (Codex capability-profile ID/version, exit status,
-  source kind, stderr present/truncated status); sanitized argv/cwd material, if retained, is in an
+  source kind, and the required stderr-absent constants); sanitized argv/cwd material, if retained, is in an
   encrypted metadata object and only its object ID/keyed commitment is structural. The structural
   `metadata_digest` covers only the listed safe fields, not encrypted audit/argv/cwd content;
 - required verified `capture_metadata_object: ObjectRef`
   (`ObjectKind.import_source_manifest`; despite the name it describes this one exact object, not
-  chunks); bounded stderr captured-byte count, truncation, and kind-domain-separated keyed
-  commitment (no stderr object in v0.1);
+  chunks); `stderr_present=false`, `stderr_captured_bytes=0`, `stderr_truncated=false`, and
+  `stderr_commitment=None` exactly;
 - no raw source line, argv value, cwd/path, stderr text, object plaintext, or key identifier.
 
-The ordinary `sha256:` audit digest of exact source/stderr bytes is retained only inside the
-encrypted capture-metadata/report object. It is never a structural column, log field, object name,
+The ordinary `sha256:` audit digest of exact source bytes is retained only inside the encrypted
+capture-metadata/report object. It is never a structural column, log field, object name,
 or safe terminal-envelope value: using it there would create a dictionary oracle for low-entropy
 private input. Structural equality uses the kind-domain-separated `K_commit` commitment produced
 by `ObjectStorePort`.
@@ -147,7 +148,10 @@ argv/cwd plaintext. It is not a projection or a new public result type.
 
 `ImportStatusSnapshot` is the session-wide bounded structural view used by public status and
 operation gates. It contains active/terminal job counts, each active job's identity digest/phase/
-completed-vs-total batch count, and terminal report evidence locators up to the status page cap.
+completed-vs-total batch count, and terminal rows shaped exactly as
+`{identity_digest, report_evidence_id}` up to the status page cap. The terminal row uses the
+published report evidence ID required by public status; it does not substitute the report event ID
+or expose a second frontier field.
 It contains no raw capture metadata, source text, filenames, paths, or payloads.
 
 ### Exact bounded capture
@@ -329,7 +333,8 @@ is always an import gap, never quarantine.
 
 ### Read-only review snapshot
 
-`load_review_source` resolves only the exact task-scoped `ImportSourceIdentity`; it never searches
+`load_review_source` resolves only the exact validated durable `ImportSourceIdentity.identity_digest`;
+the returned source carries the complete authenticated identity. It never searches
 filenames, cwd values, source text, or similar reports. It reads job/batch rows, authenticates every
 referenced source/plan/report object needed for the snapshot, and verifies their digests and IDs
 against the structural manifest. Missing identity returns `None`; contradiction is
