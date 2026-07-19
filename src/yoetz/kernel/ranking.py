@@ -1,0 +1,132 @@
+"""Pure stable finding ranking, capping, diversity, and verdict selection."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import Final
+
+from yoetz.domain.findings import (
+    FINDING_KIND_TRAITS,
+    CheckVerdict,
+    Finding,
+    FindingOrigin,
+    RankedFindings,
+    rank_key,
+)
+from yoetz.protocol.coverage import Coverage, weakest
+from yoetz.protocol.errors import ProtocolValueError
+from yoetz.protocol.models import MAX_FINDINGS_LIMIT
+
+__all__ = [
+    "CheckCompleteness",
+    "RankingContext",
+    "rank_findings",
+]
+
+_MATERIAL_CHALLENGE_PRIORITIES: Final = frozenset({1, 2})
+
+
+class CheckCompleteness(str, Enum):  # noqa: UP042 - exact internal contract token
+    COMPLETE = "complete"
+    COVERAGE_INCOMPLETE = "coverage_incomplete"
+    REQUIRED_INCOMPLETE = "required_incomplete"
+
+
+@dataclass(frozen=True, slots=True)
+class RankingContext:
+    coverage: Coverage
+    completeness: CheckCompleteness
+
+    def __post_init__(self) -> None:
+        if type(self.coverage) is not Coverage or type(self.completeness) is not CheckCompleteness:
+            raise ProtocolValueError("invalid_ranked_findings")
+        if (
+            self.completeness is CheckCompleteness.COVERAGE_INCOMPLETE
+            and not self.coverage.known_gaps
+        ):
+            raise ProtocolValueError("invalid_ranked_findings")
+
+
+def _validate_inputs(
+    deterministic: tuple[Finding, ...],
+    semantic: tuple[Finding, ...],
+    context: RankingContext,
+    max_findings: int,
+) -> tuple[Finding, ...]:
+    if (
+        type(deterministic) is not tuple
+        or type(semantic) is not tuple
+        or type(context) is not RankingContext
+        or type(max_findings) is not int
+        or not 1 <= max_findings <= MAX_FINDINGS_LIMIT
+    ):
+        raise ProtocolValueError("invalid_ranked_findings")
+    if any(type(finding) is not Finding for finding in deterministic + semantic):
+        raise ProtocolValueError("invalid_ranked_findings")
+    if any(finding.origin is not FindingOrigin.DETERMINISTIC for finding in deterministic):
+        raise ProtocolValueError("invalid_ranked_findings")
+    if any(finding.origin is not FindingOrigin.SEMANTIC_MODEL_DERIVED for finding in semantic):
+        raise ProtocolValueError("invalid_ranked_findings")
+
+    findings = deterministic + semantic
+    ids = tuple(finding.finding_id for finding in findings)
+    if len(ids) != len(set(ids)):
+        raise ProtocolValueError("invalid_ranked_findings")
+    for finding in findings:
+        if weakest(context.coverage, finding.coverage) != context.coverage:
+            raise ProtocolValueError("invalid_ranked_findings")
+    return findings
+
+
+def _selected_with_diversity(
+    ordered: tuple[Finding, ...],
+    semantic: tuple[Finding, ...],
+    max_findings: int,
+) -> tuple[Finding, ...]:
+    selected = ordered[:max_findings]
+    if max_findings < 2:
+        return selected
+    material_challenges = tuple(
+        finding for finding in semantic if finding.priority in _MATERIAL_CHALLENGE_PRIORITIES
+    )
+    if not material_challenges:
+        return selected
+    challenge = min(material_challenges, key=rank_key)
+    if challenge in selected:
+        return selected
+    return tuple(sorted((*selected[:-1], challenge), key=rank_key))
+
+
+def _verdict(
+    selected: tuple[Finding, ...],
+    context: RankingContext,
+) -> CheckVerdict:
+    if context.completeness is CheckCompleteness.REQUIRED_INCOMPLETE:
+        return CheckVerdict.INCOMPLETE_CHECK
+    if any(FINDING_KIND_TRAITS[finding.kind][1] for finding in selected):
+        return CheckVerdict.ACTION_REQUIRED
+    if context.completeness is CheckCompleteness.COVERAGE_INCOMPLETE:
+        return CheckVerdict.INSUFFICIENT_COVERAGE
+    if selected:
+        raise ProtocolValueError("invalid_ranked_findings")
+    return CheckVerdict.NO_ISSUE_DETECTED
+
+
+def rank_findings(
+    deterministic: tuple[Finding, ...],
+    semantic: tuple[Finding, ...],
+    context: RankingContext,
+    max_findings: int,
+) -> RankedFindings:
+    """Return the registered stable, bounded finding selection and conservative verdict."""
+
+    findings = _validate_inputs(deterministic, semantic, context, max_findings)
+    ordered = tuple(sorted(findings, key=rank_key))
+    selected = _selected_with_diversity(ordered, semantic, max_findings)
+    return RankedFindings(
+        findings=selected,
+        suppressed_count=len(findings) - len(selected),
+        verdict=_verdict(selected, context),
+        coverage=context.coverage,
+    )
