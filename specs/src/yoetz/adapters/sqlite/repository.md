@@ -101,7 +101,11 @@ hashing of payloads, no I/O beyond SQLite:
    load stored `result_canonical`, COMMIT, return; same+pending → only valid for `check`
    (this method never creates pending rows); same+quarantined → load stable safe envelope,
    COMMIT, return; different digest → ROLLBACK, conflict).
-3. For a new `operation_kind='receipt'`, run the indexed predicate
+3. For every new importer-authored publication, verify that its permanent
+   `import_publication_requests` row matches both `(writer_id, operation_id)` and the expected
+   `(source_identity_digest, publication_ordinal)` before inserting `operations`; a missing or
+   different reservation is `IDEMPOTENCY_CONFLICT`. For a new `operation_kind='receipt'`, run the
+   indexed predicate
    `NOT EXISTS (SELECT 1 FROM import_jobs WHERE session_id=? AND state='pending')`. If false,
    ROLLBACK and return retryable `OPERATION_PENDING`. This occurs after terminal replay and before
    any sequence allocation, in this same authoritative transaction.

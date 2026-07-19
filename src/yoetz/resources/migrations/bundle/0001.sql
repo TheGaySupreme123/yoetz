@@ -1,183 +1,116 @@
-# migrations/bundle/0001.sql — initial durable task-bundle schema
+PRAGMA application_id = 0x594F4554;
 
-**Wave:** C | **ADRs:** ADR-001, ADR-002, ADR-003, ADR-004, ADR-006 | **Imports (spec-tree):**
-`specs/src/yoetz/adapters/sqlite/migrations.md`,
-`specs/src/yoetz/adapters/sqlite/importer.md`,
-`specs/src/yoetz/kernel/projections.md` | **Imported by:**
-`specs/src/yoetz/resources/migrations/bundle/0001.sql.md`,
-`specs/scripts/verify_resource_manifest.py.md`, packaging and migration tests
+CREATE TABLE bundle_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+) STRICT, WITHOUT ROWID;
 
-## Purpose
+CREATE TABLE counters (
+    name TEXT PRIMARY KEY,
+    next_value INTEGER NOT NULL CHECK (next_value > 0)
+) STRICT, WITHOUT ROWID;
 
-This file is the reviewable SQL source for task-bundle migration `0001`. It creates the append-only
-ledger indexes, durable operation/semantic/import orchestration rows, object metadata,
-maintenance pins, and generation-1 projection cache. It stores structural metadata and canonical
-event envelopes;
-payloads, semantic cases/results, response documents, and imported source bytes remain encrypted
-objects.
+CREATE TABLE writers (
+    writer_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    next_writer_seq INTEGER NOT NULL CHECK (next_writer_seq > 0),
+    head_entry_digest TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('active', 'closed', 'quarantined')),
+    created_at TEXT NOT NULL
+) STRICT, WITHOUT ROWID;
 
-Released migration bytes are immutable. Table or constraint changes after release require a new
-numbered migration and backward-read fixture.
+CREATE TABLE operations (
+    writer_id TEXT NOT NULL REFERENCES writers(writer_id),
+    operation_id TEXT NOT NULL,
+    operation_kind TEXT NOT NULL
+        CHECK (operation_kind IN ('publish_work', 'check', 'respond', 'receipt')),
+    request_digest TEXT NOT NULL,
+    resume_object_id TEXT REFERENCES objects(object_id),
+    state TEXT NOT NULL CHECK (state IN ('pending', 'complete', 'quarantined')),
+    phase TEXT NOT NULL CHECK (phase IN (
+        'reserved',
+        'local_ready',
+        'semantic_wait',
+        'ready_to_finalize',
+        'terminal'
+    )),
+    owner_generation TEXT,
+    lease_owner_id TEXT,
+    lease_generation INTEGER CHECK (lease_generation > 0),
+    lease_expires_at TEXT,
+    first_ingestion_seq INTEGER,
+    last_ingestion_seq INTEGER,
+    result_canonical BLOB,
+    result_digest TEXT,
+    result_object_id TEXT REFERENCES objects(object_id),
+    quarantine_code TEXT,
+    terminal_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (writer_id, operation_id),
+    CHECK (
+        (
+            state = 'pending'
+            AND operation_kind = 'check'
+            AND phase != 'terminal'
+            AND resume_object_id IS NOT NULL
+            AND owner_generation IS NOT NULL
+            AND lease_owner_id IS NOT NULL
+            AND lease_generation IS NOT NULL
+            AND lease_expires_at IS NOT NULL
+            AND result_canonical IS NULL
+            AND result_digest IS NULL
+            AND quarantine_code IS NULL
+            AND terminal_at IS NULL
+        )
+        OR
+        (
+            state = 'complete'
+            AND phase = 'terminal'
+            AND owner_generation IS NULL
+            AND lease_owner_id IS NULL
+            AND lease_generation IS NULL
+            AND lease_expires_at IS NULL
+            AND result_canonical IS NOT NULL
+            AND result_digest IS NOT NULL
+            AND quarantine_code IS NULL
+            AND terminal_at IS NOT NULL
+        )
+        OR
+        (
+            state = 'quarantined'
+            AND phase = 'terminal'
+            AND owner_generation IS NULL
+            AND lease_owner_id IS NULL
+            AND lease_generation IS NULL
+            AND lease_expires_at IS NULL
+            AND result_canonical IS NOT NULL
+            AND result_digest IS NOT NULL
+            AND quarantine_code IS NOT NULL
+            AND terminal_at IS NOT NULL
+        )
+    ),
+    CHECK (phase != 'semantic_wait' OR operation_kind = 'check'),
+    CHECK (
+        (first_ingestion_seq IS NULL AND last_ingestion_seq IS NULL)
+        OR
+        (first_ingestion_seq IS NOT NULL AND last_ingestion_seq >= first_ingestion_seq)
+    )
+) STRICT, WITHOUT ROWID;
 
-## Public surface
+CREATE TABLE objects (
+    object_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    plaintext_size INTEGER NOT NULL CHECK (plaintext_size >= 0),
+    commitment TEXT NOT NULL,
+    envelope_digest TEXT NOT NULL,
+    encryption_format TEXT NOT NULL,
+    key_slot TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('present', 'redacted', 'missing', 'quarantined')),
+    durable_at TEXT NOT NULL
+) STRICT, WITHOUT ROWID;
 
-The future SQL file has no language-level exports. Its external identity is:
-
-- migration family `bundle`, version `0001`, previous version `0000`;
-- UTF-8/LF text, final LF, no BOM or templating;
-- SQLite application ID `0x594F4554`, schema/user version `1`;
-- core tables `bundle_meta`, `counters`, `writers`, `operations`, `objects`, `semantic_jobs`,
-  `semantic_attempts`, `import_jobs`, `import_request_aliases`, `import_batches`,
-  `import_publication_requests`, `events`,
-  `event_projection_locators`, `event_parents`, `event_refs`, `projection_state`, and
-  `maintenance_pins`;
-- generation-1 `p1_` projection tables specified by `kernel/projections.md`;
-- named indexes needed for deterministic bounded access paths.
-
-The migration runner seeds metadata and the ingestion counter after DDL verification; this file
-contains no task-specific DML.
-
-Fresh initialization also seeds the active `work` projection and its query snapshot at
-`0`/`genesis` with the frozen
-17-key empty-snapshot digest
-`sha256:0f8ec0c66f196bee631ef5447ef5c914e812fe530ee1f4b7477e24b22a9911c9`; the exact two rows are
-owned by `adapters/sqlite/migrations.md`, not embedded as task-specific DML here.
-
-## Behavior
-
-### File rules and creation order
-
-Start with the application-ID pragma. Create base tables, then `import_jobs`,
-`import_request_aliases`, `import_batches`, and `import_publication_requests` after `objects`, then the remaining tables in
-dependency order, the generation-1 projection tables, then indexes, and end with user-version pragma. Foreign keys
-may name a later table because the whole DDL set is installed before any application DML. All
-business tables are `STRICT`; key/value and edge tables use `WITHOUT ROWID` where their composite
-or text primary key makes that representation canonical.
-
-No trigger, view, virtual table, collation, attached database, extension, dynamic identifier,
-environment substitution, clock/random function, or `INSERT OR REPLACE` is permitted. The SQL is
-valid with `foreign_keys=ON` and `trusted_schema=OFF`.
-
-### Metadata, counter, and writers
-
-`bundle_meta` is `key TEXT PRIMARY KEY, value TEXT NOT NULL`, strict and without rowid. The runner
-later seeds protocol/storage/task/head/projection/SQLite-support/encryption/commitment/owner values,
-plus `route_generation`, `route_identity_digest`, and `route_state`. `route_state` is one of
-`staging|active|retained|quarantined`, enforced by the adapter's bounded metadata-key/value registry.
-The runner also seeds `import_schema_version=1`; missing/older/newer/disagreeing values fail the
-import capability gate as specified by `adapters/sqlite/importer.md`.
-A restored target additionally records `restored_from_manifest_digest` and
-`restore_operation_id`; a newly created bundle omits those two keys. These are structural recovery
-facts, not user paths.
-
-`counters` has text primary key `name` and positive integer `next_value`; it is strict and without
-rowid. Version 1 uses one row named `ingestion_sequence`, initially `1`.
-
-`writers` has primary key `writer_id`, required `task_id`, `session_id`, positive
-`next_writer_seq`, `head_entry_digest`, state limited to `active|closed|quarantined`, and
-`created_at`. The adapter enforces task ID equality with bundle metadata and canonical digest/ID
-syntax.
-
-### Durable operations
-
-`operations` has composite primary key `(writer_id, operation_id)` and references its writer. It
-records `operation_kind`, `request_digest`, optional encrypted resume object, state, phase,
-generation-fenced lease, optional affected ingestion range, canonical terminal result/digest,
-optional result object, quarantine code, terminal time, and created/updated times.
-
-Kinds are exactly `publish_work|check|respond|receipt`. States are
-`pending|complete|quarantined`. Phases are `reserved|local_ready|semantic_wait|
-ready_to_finalize|terminal`, and `semantic_wait` is legal only for checks. A paired-range check
-requires first/last ingestion sequence to be both absent or both present with last at least first.
-`quarantine_code`, when present, is one of the five `OperationQuarantineCode` values owned by
-`specs/src/yoetz/ports/ledger.md`; the repository validates the closed value before binding while
-the DDL's compound row check enforces its state-dependent presence/absence.
-
-The compound row check admits only:
-
-- pending check operations with a resume object and all four lease fields, no terminal result,
-  digest, quarantine code, or terminal time;
-- complete terminal operations with no lease, canonical result/digest and terminal time, no
-  quarantine code;
-- quarantined terminal operations with no lease and canonical result/digest, quarantine code, and
-  terminal time.
-
-Non-check operations are finalized in their bounded append transaction and therefore never remain
-as a pending row after commit. Application code additionally checks result digest equality,
-monotonic phases, owner generation, and event-range correspondence.
-
-### Object metadata
-
-`objects` stores `object_id` primary key, bounded `kind`, non-negative plaintext size,
-`commitment`, `envelope_digest`, `encryption_format`, `key_slot`, state, and `durable_at`.
-State is exactly `present|redacted|missing|quarantined`. There is no plaintext, original filename,
-path, title, prompt, URL, model output, or open metadata JSON column.
-
-An event or semantic row can reference an object only after publication durability. Cross-field
-cryptographic validity is checked by the object adapter before the SQLite transaction.
-
-### Import jobs, request aliases, and batches
-
-The exact DDL column/state contract is jointly locked by this migration and
-`specs/src/yoetz/adapters/sqlite/importer.md`; neither implementation may synthesize tables
-at runtime. `import_jobs` is strict/without-rowid with primary key `source_identity_digest`. It
-stores validated task/session identity; keyed source commitment; exact Codex capability profile
-and mapping version; immutable publishing writer; source/manifest object IDs and commitments;
-bounded byte/line/final-newline/safe metadata facts; state/phase/revision; generation-fenced lease;
-plan and completed-batch counts; preallocated report request/event/evidence IDs; pinned
-report/evidence draft and accepted-result locators; safe terminal envelope/digest/quarantine code;
-and canonical timestamps. Every object ID references `objects`.
-
-States are `pending|complete|quarantined`. Phases are
-`source_reserved|plan_ready|publishing|report_ready|report_published|terminal`. Row checks require:
-
-- pending rows have a nonterminal phase plus all lease fields and no terminal fields;
-- `source_reserved` has no plan/batch/report fields;
-- `plan_ready|publishing` has a complete preallocated plan identity and
-  `0 <= completed_batch_count <= batch_count`, but no report-ready fields;
-- `report_ready` has every batch complete and exact pinned report/evidence-draft fields;
-- `report_published` additionally has the exact report-evidence append result/locator;
-- complete rows are terminal, clear every lease/quarantine field, and retain the full pinned
-  report/evidence/terminal identity;
-- quarantined rows are terminal, clear leases, and carry only an allowlisted quarantine code plus
-  stable structural terminal envelope.
-
-`import_request_aliases` is strict/without-rowid with primary key
-`(requesting_writer_id, request_id)`, canonical request digest, source identity FK, and creation
-time. It provides CLI-request idempotency without making writer/request the source-level dedupe
-key.
-
-`import_batches` is strict/without-rowid with primary key
-`(source_identity_digest, batch_index)`, FK to its job, state `planned|complete`, stable publishing
-request ID, exact encrypted plan object ID/commitment/digest, canonical ordered event IDs plus
-digest/count, and nullable completion result/digest/frontiers/ingestion range/time. Planned rows
-have all completion fields null; complete rows have all fields present, an ordered ingestion
-range, and event count/IDs exactly matching the plan. The adapter enforces cross-row count/index/
-canonical equality in the same writer transaction.
-
-`import_publication_requests` is the one no-trigger reservation mechanism. Its primary key
-`(publishing_writer_id, request_id)` reserves the same namespace used by
-`operations(writer_id, operation_id)`. `publication_ordinal` values `0..batch_count-1` name
-candidate batches and `batch_count` names the final report publication, including ordinal `0` for
-a zero-batch report. `UNIQUE(source_identity_digest, publication_ordinal)` permits exactly one
-reservation per durable publication step. Rows are inserted atomically with the plan and retained
-forever; both plan publication and ledger append probe the reservation and operation namespaces
-inside their sole-writer `BEGIN IMMEDIATE` transactions. This is the only cross-table uniqueness
-mechanism; triggers are forbidden.
-
-Named indexes provide bounded aliases-by-source, pending jobs by `(session_id, state,
-source_identity_digest)`, terminal jobs by `(session_id, terminal_at,
-source_identity_digest)`, and next batch by `(source_identity_digest, state, batch_index)`. The
-migration's reviewed uniqueness mechanism also forbids reuse of batch/report publication request
-IDs under one publishing writer.
-
-These tables contain no source line, source/argv/cwd/stderr/payload plaintext, filename, raw
-source/stderr SHA audit digest, exception string, or arbitrary metadata JSON. Capture, plan, and
-report content stays in authenticated encrypted objects.
-
-The exact released importer DDL is:
-
-```sql
 CREATE TABLE import_jobs (
     source_identity_digest TEXT PRIMARY KEY,
     task_id TEXT NOT NULL,
@@ -490,42 +423,220 @@ CREATE TABLE import_publication_requests (
     PRIMARY KEY (publishing_writer_id, request_id),
     UNIQUE (source_identity_digest, publication_ordinal)
 ) STRICT, WITHOUT ROWID;
-```
 
-### Semantic jobs and attempts
+CREATE TABLE semantic_jobs (
+    job_id TEXT PRIMARY KEY,
+    writer_id TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    case_digest TEXT NOT NULL,
+    case_object_id TEXT NOT NULL REFERENCES objects(object_id),
+    state TEXT NOT NULL
+        CHECK (state IN ('queued', 'leased', 'succeeded', 'failed', 'quarantined')),
+    active_attempt_id TEXT,
+    selected_attempt_id TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    owner_generation TEXT,
+    lease_owner_id TEXT,
+    lease_generation INTEGER CHECK (lease_generation > 0),
+    lease_expires_at TEXT,
+    selected_result_object_id TEXT REFERENCES objects(object_id),
+    terminal_code TEXT,
+    terminal_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (writer_id, operation_id)
+        REFERENCES operations(writer_id, operation_id),
+    FOREIGN KEY (job_id, active_attempt_id)
+        REFERENCES semantic_attempts(job_id, attempt_id),
+    FOREIGN KEY (job_id, selected_attempt_id)
+        REFERENCES semantic_attempts(job_id, attempt_id),
+    UNIQUE (writer_id, operation_id, case_digest),
+    CHECK (
+        (
+            state = 'queued'
+            AND active_attempt_id IS NULL
+            AND selected_attempt_id IS NULL
+            AND owner_generation IS NULL
+            AND lease_owner_id IS NULL
+            AND lease_generation IS NULL
+            AND lease_expires_at IS NULL
+            AND selected_result_object_id IS NULL
+            AND terminal_code IS NULL
+            AND terminal_at IS NULL
+        )
+        OR
+        (
+            state = 'leased'
+            AND active_attempt_id IS NOT NULL
+            AND selected_attempt_id IS NULL
+            AND owner_generation IS NOT NULL
+            AND lease_owner_id IS NOT NULL
+            AND lease_generation IS NOT NULL
+            AND lease_expires_at IS NOT NULL
+            AND selected_result_object_id IS NULL
+            AND terminal_code IS NULL
+            AND terminal_at IS NULL
+        )
+        OR
+        (
+            state = 'succeeded'
+            AND active_attempt_id IS NULL
+            AND selected_attempt_id IS NOT NULL
+            AND owner_generation IS NULL
+            AND lease_owner_id IS NULL
+            AND lease_generation IS NULL
+            AND lease_expires_at IS NULL
+            AND selected_result_object_id IS NOT NULL
+            AND terminal_code IS NOT NULL
+            AND terminal_at IS NOT NULL
+        )
+        OR
+        (
+            state IN ('failed', 'quarantined')
+            AND active_attempt_id IS NULL
+            AND selected_attempt_id IS NULL
+            AND owner_generation IS NULL
+            AND lease_owner_id IS NULL
+            AND lease_generation IS NULL
+            AND lease_expires_at IS NULL
+            AND selected_result_object_id IS NULL
+            AND terminal_code IS NOT NULL
+            AND terminal_at IS NOT NULL
+        )
+    )
+) STRICT, WITHOUT ROWID;
 
-`semantic_jobs` has primary key `job_id`, owning writer/operation pair, `case_digest`, encrypted
-case object, state, active/selected attempt IDs, non-negative attempt count, generation-fenced
-lease, selected result object, terminal code/time, and created/updated times. It references the
-operation, attempts, and objects. `(writer_id, operation_id, case_digest)` is unique.
+CREATE TABLE semantic_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES semantic_jobs(job_id),
+    attempt_ordinal INTEGER NOT NULL CHECK (attempt_ordinal > 0),
+    provider_request_id TEXT NOT NULL,
+    owner_generation TEXT NOT NULL,
+    lease_owner_id TEXT NOT NULL,
+    lease_generation INTEGER NOT NULL CHECK (lease_generation > 0),
+    state TEXT NOT NULL CHECK (state IN (
+        'started',
+        'response_durable',
+        'selected',
+        'failed',
+        'expired',
+        'late'
+    )),
+    result_object_id TEXT REFERENCES objects(object_id),
+    terminal_code TEXT,
+    started_at TEXT NOT NULL,
+    terminal_at TEXT,
+    UNIQUE (job_id, attempt_id),
+    UNIQUE (job_id, attempt_ordinal),
+    UNIQUE (job_id, lease_generation),
+    CHECK (
+        (
+            state = 'started'
+            AND result_object_id IS NULL
+            AND terminal_code IS NULL
+            AND terminal_at IS NULL
+        )
+        OR
+        (
+            state = 'response_durable'
+            AND result_object_id IS NOT NULL
+            AND terminal_code IS NULL
+            AND terminal_at IS NULL
+        )
+        OR
+        (
+            state = 'selected'
+            AND result_object_id IS NOT NULL
+            AND terminal_code IS NOT NULL
+            AND terminal_at IS NOT NULL
+        )
+        OR
+        (
+            state = 'failed'
+            AND terminal_code IS NOT NULL
+            AND terminal_at IS NOT NULL
+        )
+        OR
+        (
+            state = 'expired'
+            AND result_object_id IS NULL
+            AND terminal_code IS NOT NULL
+            AND terminal_at IS NOT NULL
+        )
+        OR
+        (
+            state = 'late'
+            AND result_object_id IS NOT NULL
+            AND terminal_code IS NOT NULL
+            AND terminal_at IS NOT NULL
+        )
+    )
+) STRICT, WITHOUT ROWID;
 
-The job-state check requires:
+CREATE UNIQUE INDEX semantic_attempts_one_selected
+ON semantic_attempts(job_id)
+WHERE state = 'selected';
 
-- queued: no active/selected attempt, lease, result, terminal code, or time;
-- leased: active attempt and complete lease, no selected/result/terminal fields;
-- succeeded: selected attempt/result and terminal code/time, no active lease;
-- failed/quarantined: terminal code/time, no active/selected attempt, lease, or selected result.
+CREATE TABLE events (
+    ingestion_seq INTEGER PRIMARY KEY CHECK (ingestion_seq > 0),
+    event_id TEXT NOT NULL UNIQUE,
+    task_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    schema_name TEXT NOT NULL,
+    schema_version TEXT NOT NULL,
+    projection_status TEXT NOT NULL
+        CHECK (projection_status IN ('projected', 'unknown_unprojected')),
+    summary_code TEXT NOT NULL CHECK (summary_code IN (
+        'session_opened',
+        'session_resumed',
+        'plan_published',
+        'obligation_published',
+        'assignment_recorded',
+        'decision_recorded',
+        'action_recorded',
+        'result_recorded',
+        'evidence_recorded',
+        'claim_recorded',
+        'plan_revised',
+        'finding_recorded',
+        'response_recorded',
+        'redaction_recorded',
+        'check_recorded',
+        'receipt_recorded',
+        'opaque_unknown'
+    )),
+    author_id TEXT NOT NULL,
+    author_type TEXT NOT NULL,
+    author_assurance TEXT NOT NULL,
+    writer_id TEXT NOT NULL REFERENCES writers(writer_id),
+    writer_seq INTEGER NOT NULL CHECK (writer_seq > 0),
+    operation_id TEXT NOT NULL,
+    previous_ledger_digest TEXT NOT NULL,
+    previous_writer_digest TEXT NOT NULL,
+    entry_digest TEXT NOT NULL UNIQUE,
+    canonical_entry BLOB NOT NULL,
+    payload_object_id TEXT NOT NULL REFERENCES objects(object_id),
+    payload_commitment TEXT NOT NULL,
+    publication_channel TEXT NOT NULL,
+    redaction_state TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    accepted_at TEXT NOT NULL,
+    UNIQUE (writer_id, writer_seq),
+    UNIQUE (writer_id, operation_id, event_id),
+    CHECK (
+        (
+            projection_status = 'unknown_unprojected'
+            AND summary_code = 'opaque_unknown'
+        )
+        OR
+        (
+            projection_status = 'projected'
+            AND summary_code = schema_name
+            AND summary_code <> 'opaque_unknown'
+        )
+    )
+) STRICT;
 
-`semantic_attempts` records a positive ordinal, unique provider request ID, owner and lease
-generation, state, optional result object, terminal code, and start/terminal times. Unique
-constraints cover `(job_id, attempt_id)`, ordinal, and lease generation. State constraints permit
-only the exact `started`, `response_durable`, `selected`, `failed`, `expired`, and `late` shapes.
-A unique partial index `semantic_attempts_one_selected` permits one selected attempt per job.
-
-### Ledger events and edges
-
-`events` uses positive `ingestion_seq` as rowid primary key and requires unique `event_id` and
-`entry_digest`. It stores task/session/schema/author/writer/operation identities, positive
-`writer_seq`, previous global and writer digests, the exact canonical entry blob, encrypted payload
-object ID and commitment, bounded publication channel/redaction state, exact event `occurred_at`,
-canonical accepted time, and the closed `projected|unknown_unprojected`/summary-code history
-classification. The history columns are verified against the canonical entry and locator on every
-read; they never come from a payload object.
-Unique constraints enforce `(writer_id, writer_seq)` and `(writer_id, operation_id, event_id)`.
-
-Immediately after `events`, the released DDL creates this non-disposable structural replay table:
-
-```sql
 CREATE TABLE event_projection_locators (
     event_id TEXT PRIMARY KEY REFERENCES events(event_id),
     schema_name TEXT NOT NULL,
@@ -535,37 +646,21 @@ CREATE TABLE event_projection_locators (
     redaction_target_event_ids BLOB NOT NULL,
     redaction_target_object_ids BLOB NOT NULL
 ) STRICT, WITHOUT ROWID;
-```
 
-Every accepted event has exactly one locator row inserted in its append transaction. Schema fields
-must equal the owning event. `logical_key` follows the exact known-family mapping in
-`domain/events.md` and is `NULL` for an unknown schema;
-the two target blobs are JCS arrays of sorted typed IDs, nonempty only for a redaction family, and
-the digest commits to the normalized canonical payload. Repository validation, bundle integrity,
-backup/restore, and replay treat a missing/extra/mismatched row as corruption. This table retains
-only schema identity, typed structural IDs, and one SHA-256 digest—never decrypted payload text—and
-is not dropped with a `p1_` projection generation.
+CREATE TABLE event_parents (
+    child_event_id TEXT NOT NULL REFERENCES events(event_id),
+    parent_event_id TEXT NOT NULL REFERENCES events(event_id),
+    PRIMARY KEY (child_event_id, parent_event_id),
+    CHECK (child_event_id <> parent_event_id)
+) STRICT, WITHOUT ROWID;
 
-`event_parents` is the strict, without-rowid edge table keyed by child/parent event IDs; self-edges
-are rejected. `event_refs` is keyed by event/ref-type/target and limits ref type to
-`artifact|evidence|result|finding|claim`. The `result` row preserves the result-ID member of the
-accepted envelope's historically named evidence-ref union rather than relabeling it as evidence.
-Referential, acyclicity, digest, and same-task rules that cannot be expressed locally are checked
-before append and again during replay.
+CREATE TABLE event_refs (
+    event_id TEXT NOT NULL REFERENCES events(event_id),
+    ref_type TEXT NOT NULL CHECK (ref_type IN ('artifact', 'evidence', 'result', 'finding', 'claim')),
+    target_id TEXT NOT NULL,
+    PRIMARY KEY (event_id, ref_type, target_id)
+) STRICT, WITHOUT ROWID;
 
-### Projection and maintenance state
-
-`projection_state` is the generation-neutral active identity/checkpoint row. Its
-`projection_version` is the registered text identity `yoetz/0.1.0`; its distinct
-`projection_generation` is integer `1`. `p1_projection_state` stores the exact non-collection
-fields of `ProjectionState` plus the current compact/status query facts. The active identity,
-current state, and matching temporal `p1_query_snapshots` row are updated in the same transaction
-as the typed record/query tables, and the repository requires their sequence, interval, and
-computed snapshot digest to agree before it returns a projection.
-
-The released generation-1 DDL is exactly the following statements, in this order:
-
-```sql
 CREATE TABLE projection_state (
     projection_name TEXT PRIMARY KEY CHECK (projection_name = 'work'),
     projection_version TEXT NOT NULL CHECK (projection_version = 'yoetz/0.1.0'),
@@ -1674,80 +1769,7 @@ WHERE source_event_id IS NOT NULL;
 CREATE INDEX p1_coverage_gaps_target_object
 ON p1_coverage_gaps(target_object_id, gap_marker)
 WHERE target_object_id IS NOT NULL;
-```
 
-The record tables intentionally contain no payload/body/canonical-JSON/free-form-content column.
-For a non-redacted record, the repository follows `source_event_id` to `events.payload_object_id`
-and decodes that authenticated encrypted object with the registered event codec. For a tombstone,
-it never reads the object. In both branches it verifies `payload_digest`, source frontier, family,
-and logical key against the non-disposable `event_projection_locators` row. Thus dropping every
-`p1_` table never drops event payload truth, and deleting a redacted object never makes its logical
-key or digest unreplayable.
-
-`latest_returned_finding_ids` is the canonical JCS array of the ordered tuple and
-`latest_coverage_canonical` is canonical JCS for the closed `Coverage` value. They contain only
-bounded typed IDs, enums, and machine gap codes. `plan_change_source_event_id` lets the adapter
-recover the optional `plan_change_reason` from the encrypted `plan_revised` payload; the
-`p1_obligation_replacements` rows reconstruct the exact sorted replacement tuple. These are the
-record-family helper derivations not already recoverable from the visible source record.
-`p1_results.action_id` is present exactly for a readable result and is NULL for its tombstone,
-because a full replay after payload deletion cannot recover that payload-owned link. Missing-ref
-rows are recomputed from readable records and therefore disappear in the same transition.
-Logical companion IDs are deliberately not relational foreign keys: result `action_id`, response
-`finding_id`, contradiction `disputed_ref`, and replacement `replacement_obligation_id` may name a
-currently absent projection record, which is a valid visible row plus `missing_ref` gap. The owning
-record and every durable source event/locator/object association retain foreign keys. A plan or
-decision `superseded_by_*` column is populated only on an already-visible owner when the
-superseding record is itself materialized, so those self-links do not reject a missing companion.
-
-The compact/status columns on `p1_projection_state` and every `p1_query_*` row are derived query
-sidecars, not additional `ProjectionState` snapshot keys. `state_digest` is still computed from
-exactly the registered 17-key snapshot. Before commit the repository separately verifies the
-current query snapshot equals those same typed records plus accepted-envelope Coverage and that
-its open/unresolved counters include conservative obligation/finding tombstones exactly once.
-
-`p1_coverage_gaps.root_event_id` is deterministic-case sidecar data and is not a new
-`ProjectionState` snapshot key. An `unknown_event` or `redacted_event` root equals its target event;
-a `missing_ref` root equals its source event; a `redacted_object` root is exactly the
-`redaction_recorded` event with the lowest ledger ingestion sequence through the projection
-frontier whose durable locator targets that object. Later redactions remain ledger facts but never
-replace the stored first cause. The repository rejects a zero/wrong-family root, a root outside the
-exact projection prefix, or a root that is not the first causative locator by ingestion order.
-
-Before commit the repository proves every row's exact typed-ID/digest grammar, JCS byte identity,
-logical-key mapping, source-event/frontier equality, replacement/change consistency, canonical gap
-marker spelling/root set, and
-`projection_state.applied_through_seq == p1_projection_state.frontier_seq`.
-It recomputes the 17-key snapshot and requires its digest to equal `projection_state.state_digest`.
-Constraints that require another row or payload decryption are deliberately repository checks, not
-triggers.
-
-Projection tables are disposable caches. Their columns never become an alternate event format and
-they contain no decrypted source objects. A later projection generation creates new prefixed tables
-and replays canonical events; it never edits event bytes.
-
-The seventeen `p1_query_*` sidecars are part of projection generation 1, not durable ledger truth.
-They retain only typed IDs, enums, booleans, integers, digests, canonical structural Coverage/gap/
-issue-key bytes, and half-open validity intervals. Every edge inherits its owning version's
-interval through its composite foreign key. A redaction globally nulls the payload-derived fields
-of every affected historical version and deletes its edges/order fanout; a rebuild after physical
-deletion produces the same minimal tombstone rows. No sidecar contains task title, assignment
-scope prose, obligation/finding/evidence text, response reason, payload JSON, path, URL, or provider
-output.
-
-The finding-order table has a finite reviewed fanout: each readable unresolved finding has exactly
-sixteen rows and each readable resolved finding exactly eight, covering actual-or-wildcard origin,
-priority, and disposition plus `active|all` resolution scope. The complete descending portions of
-the public rank are stored as checked nonpositive sort facts, so one ordinary ascending row-value
-seek implements the typed exclusive position. The other finite optional-filter combinations use
-the named assignment/obligation/evidence indexes. Actor-filtered obligations use the actor edge as
-the left side of a fixed-order join before the owner point lookup; they never scan obligations and
-filter actors afterward.
-
-`maintenance_pins` is the bundle-side proof that objects/projection generations at a frozen frontier
-cannot be collected while a catalog maintenance operation is active. Its exact DDL is:
-
-```sql
 CREATE TABLE maintenance_pins (
     pin_id TEXT PRIMARY KEY,
     task_id TEXT NOT NULL,
@@ -1773,28 +1795,7 @@ CREATE TABLE maintenance_pins (
 CREATE UNIQUE INDEX maintenance_pins_one_active_operation
 ON maintenance_pins(operation_id)
 WHERE state = 'active';
-```
 
-Creation is one `BEGIN IMMEDIATE` CAS that verifies: `task_id` equals bundle metadata; current global
-frontier equals the supplied sequence+digest; `owner_generation` equals current bundle generation;
-the supplied privacy-root generation/digest equals the installation catalog's complete current
-root set for this task and route;
-the catalog operation/request is the one admitted by the authoritative runtime; and no active pin
-exists for that operation. The table stores the public request/operation ID, not a catalog path or
-manifest location.
-
-Release uses `UPDATE ... WHERE pin_id=? AND state='active' AND owner_generation=? AND
-lease_generation=?`; exactly one row must change. Wall-clock expiry does not make collection legal.
-After expiry, a current-generation recovery transaction must prove the old generation is fenced,
-mark the pin `expired`, record `released_at`, and only then may bounded GC reason about it. Retained/
-quarantined routes remain protected by catalog retention regardless of an expired pin.
-
-### Required indexes
-
-The released base access-path DDL is exact and executable; prose is not a substitute for any of
-these statements:
-
-```sql
 CREATE INDEX events_session_seq
 ON events(session_id, ingestion_seq);
 
@@ -1837,75 +1838,5 @@ ON import_jobs(session_id, terminal_at, source_identity_digest);
 
 CREATE INDEX import_batches_next
 ON import_batches(source_identity_digest, state, batch_index);
-```
 
-`events_session_seq`, `events_schema_seq`, and `events_writer_seq` are the base sequence-scan
-paths. The three `events_session_*` composite paths cover every finite `history` status-filter
-combination (`session` alone, plus schema, author, or both) with `ingestion_seq` last, so an
-exclusive `after_sequence`/cursor is an index range and never a post-scan sort. `refs_target` is
-the reverse typed-reference path; and
-`semantic_jobs_operation_state` is the durable semantic-operation/state path. The four importer
-indexes are respectively the source-alias reverse lookup, the atomic pending/status gate, bounded
-terminal ordering, and next-planned-batch selection. They are present even where a primary-key
-prefix could answer a subset of the query, because the reviewed column order is part of migration
-identity and bounded query planning.
-
-The payload-object reverse association required by `ReplayIndex` is the exact unique non-content
-`events_payload_object` index. Together with `refs_target` and each locator's canonical
-redaction-target arrays, it makes payload-event, captured-evidence, and causative-redaction object
-associations reconstructible without opening a payload object. The selected-attempt and
-one-active-maintenance-pin partial indexes remain frozen beside their owning tables. Generation-1
-projection indexes are named and frozen with their tables. An implementation may not add an
-unreviewed expression index or index a user-controlled decrypted value.
-
-After running the file, the migration runner validates schema inventory and normalized SQL,
-foreign keys, required indexes, application/user versions, and absence of unexpected objects. It
-then seeds metadata and counter in the same staged initialization transaction.
-
-## Errors and edge cases
-
-- `0001` may run only on an uninitialized staged bundle; pre-existing objects are a hard failure.
-- Unsupported `STRICT`, partial-index, foreign-key, or pragma behavior rejects the runtime build;
-  no weaker compatibility schema is substituted.
-- Every illegal lease/state/phase shape is rejected at row insertion/update. Cross-row equality
-  failures are rejected by the repository before commit.
-- A pin with the wrong task/frontier/privacy-root snapshot/owner generation, a duplicate active
-  operation, or a release with stale lease generation affects no legal state and fails closed.
-- Newer schema or changed released SQL is never auto-downgraded.
-- DDL failure cannot produce a routed bundle. The caller discards the staging directory after
-  bounded, payload-safe diagnostics.
-- SQL errors exposed outside the adapter use bounded codes and never include SQL, parameters,
-  database/object paths, or user content.
-
-## Invariants
-
-1. Canonical event bytes and chain digests are the durable truth; projections remain rebuildable.
-2. User-controlled content lives only in encrypted objects, never structural SQL columns.
-3. Acknowledged event batches have object durability and one committed transaction.
-4. Pending semantic work is resumable and generation-fenced; exactly one attempt can be selected.
-5. Active maintenance pins bind a full frontier, exact catalog privacy-root generation/digest, and
-   current owner/lease generation; expiry alone never authorizes collection.
-6. Route recovery metadata is structural and contains no source/destination/user path or payload.
-7. One import source identity owns one job/plan/event/report identity; pending-import checks use the
-   co-located indexed job rows inside ledger transactions.
-8. Schema identity, migration bytes, and packaged copy are digest-bound.
-9. Released migration `0001` is never edited in place.
-
-## Tests
-
-- `specs/tests/integration.md`: clean initialize, table-by-table constraint mutations, foreign
-  keys, schema identity, migrations, projection rebuild, and object-publication ordering.
-- `specs/tests/conformance.md`: reference/SQLite operation, replay, projection, finding, and receipt
-  parity, including importer state and pending check/receipt gates.
-- `specs/tests/property.md`: generated operation/job/attempt transitions and event graphs.
-- `specs/tests/subprocess.md`: all commit, migration, checkpoint, semantic, and restore kill points.
-- `specs/tests/packaging.md`: reviewable/embedded bytes and manifest entries match.
-- Maintenance tests cover pin create/release/expiry recovery CAS, wrong frontier/privacy-root/
-  generation/lease, duplicate active operation, object GC while pinned, restored route metadata and
-  privacy canaries.
-
-## Open questions
-
-Gate `W-C-001` was closed on 2026-07-19 by the exact four-table importer DDL above, the permanent
-publication-reservation protocol, and fresh-database execution of the standalone root migration.
-The projection/query sidecars were retained unchanged.
+PRAGMA user_version = 1;

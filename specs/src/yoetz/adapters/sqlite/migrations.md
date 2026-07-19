@@ -469,6 +469,15 @@ CREATE INDEX import_jobs_session_terminal
 ON import_jobs(session_id, terminal_at, source_identity_digest);
 CREATE INDEX import_batches_next
 ON import_batches(source_identity_digest, state, batch_index);
+
+CREATE TABLE import_publication_requests (
+    publishing_writer_id TEXT NOT NULL REFERENCES writers(writer_id),
+    request_id TEXT NOT NULL,
+    source_identity_digest TEXT NOT NULL REFERENCES import_jobs(source_identity_digest),
+    publication_ordinal INTEGER NOT NULL CHECK (publication_ordinal BETWEEN 0 AND 1024),
+    PRIMARY KEY (publishing_writer_id, request_id),
+    UNIQUE (source_identity_digest, publication_ordinal)
+) STRICT, WITHOUT ROWID;
 ```
 
 Migration `0001` also creates the versioned **projection tables** for projection generation 1. The
@@ -653,8 +662,7 @@ Mixed-version writers are out of scope; upgrade is all-or-nothing per installati
 
 ## Open questions
 
-`specs/OPEN_QUESTIONS.md` gate `W-C-001` must close before this Wave C module is materialized. The
-runner will load and verify one standalone root bundle-migration resource; it may not concatenate
-the explanatory SQL fragment above with separate files or retain a divergent DDL copy.
+None for this module. `W-C-001` closed on 2026-07-19: the runner loads and verifies the standalone
+root bundle-migration resource and contains no Python DDL copy.
 
 E-003 is the sole central platform-behavior gate.

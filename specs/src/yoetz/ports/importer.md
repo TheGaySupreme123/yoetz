@@ -34,8 +34,9 @@ validation/append contract as cooperative work, then reports the accepted result
   - `complete(allocation: ImportAllocation) -> ImportAllocation`
   - `quarantine(allocation: ImportAllocation, reason: ImportSafeReason) -> None`
   - `load_review_source(identity: ImportSourceIdentity, through: Frontier) -> ImportReviewSource | None`
-- `class ImportByteSource(Protocol)` — one-shot bounded async byte source with optional declared
-  size and an idempotent close; its representation is redacted and contains no path.
+- `class ImportByteSource(Protocol)` — one-shot bounded async byte source with
+  `declared_size: int | None`, an async iterator yielding `bytes`, and async idempotent `close()`;
+  its representation is redacted and contains no path.
 - Frozen values `ImportCaptureInput`, `CapturedImportSource`, `ImportSourceIdentity`,
   `ImportCommand`, `ImportAllocation`, `ImportLineOutcome`, `ImportEventCandidate`, `ImportGap`,
   `PreparedImportPlan`, `ImportBatch`, `ImportBatchSelection`, `EncryptedImportReportRef`,
@@ -171,11 +172,15 @@ harmless orphans once the durable source-identity lookup selects the first accep
 
 ### Reservation, source-level idempotency, and leases
 
-The durable model has two conceptual structural tables implemented identically by memory/SQLite:
+The durable model has four conceptual structural tables implemented identically by memory/SQLite:
 
 - request aliases keyed by `(requesting_writer_id, request_id)` with request digest and
   source-identity digest;
-- one import job keyed uniquely by `ImportSourceIdentity.identity_digest`, plus ordered batch rows.
+- one import job keyed uniquely by `ImportSourceIdentity.identity_digest`;
+- ordered batch rows; and
+- permanent publication reservations with both `(publishing_writer_id, request_id)` and
+  `(source_identity_digest, publication_ordinal)` unique. Batch ordinals are
+  `0..batch_count-1`; the final report ordinal is `batch_count`.
 
 `reserve_or_resume` uses one short generation-fenced transaction:
 
@@ -309,6 +314,12 @@ phase transition, or irreconcilable commit ambiguity. It stores only an allowlis
 evidence, ordinary key/storage failure, or partial progress are normal gap/pending outcomes and do
 not quarantine the job.
 
+The closed codes are `import_source_identity_contradiction`,
+`import_object_identity_contradiction`, `import_plan_identity_contradiction`,
+`import_batch_identity_contradiction`, `import_report_identity_contradiction`,
+`import_phase_state_contradiction`, and `import_commit_state_ambiguous`. Unknown or malformed input
+is always an import gap, never quarantine.
+
 ### Read-only review snapshot
 
 `load_review_source` resolves only the exact task-scoped `ImportSourceIdentity`; it never searches
@@ -350,7 +361,9 @@ consumes recorded evidence rather than ambient mutable state.
 
 - Unsupported Codex profile/mapping, invalid metadata/source handle, bad source identity, or unsafe
   mapping request → `INVALID_REQUEST`; exact-source, bounded stderr-capture, aggregate line-count,
-  manifest, or batch-count cap → `LIMIT_EXCEEDED` before plan publication.
+  manifest, or batch-count cap → `LIMIT_EXCEEDED`. The 20,000-line aggregate bound is measured
+  during capture and rejected before `reserve_or_resume`, so a source that cannot be planned never
+  leaves a `pending/source_reserved` job.
 - One line/candidate above its semantic or event-size cap becomes an `oversized` line outcome and
   explicit gap when the exact source range is retained; it never becomes a partial known event or
   makes independently bounded lines disappear.

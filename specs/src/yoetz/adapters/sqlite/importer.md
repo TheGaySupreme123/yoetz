@@ -53,7 +53,7 @@ snapshots use bounded query-only connections; every mutation is a submitted writ
 
 ### Physical schema and migration ownership
 
-Bundle migration `0001` creates these importer tables before the runtime can advertise import
+Bundle migration `0001` creates these four importer tables before the runtime can advertise import
 capability. The DDL is owned by canonical root `migrations/bundle/0001.sql` and loaded/verified by
 `adapters/sqlite/migrations.py`; this file reproduces the
 behavioral columns and constraints it must match.
@@ -93,6 +93,12 @@ behavioral columns and constraints it must match.
 | completion fields | nullable `append_result_canonical`/digest, subject/result frontiers, first/last ingestion sequence, `completed_at` |
 | timestamps | `created_at`, `updated_at` |
 
+`import_publication_requests` permanently records both publication identity keys. Its primary key
+is `(publishing_writer_id, request_id)` and its second unique key is
+`(source_identity_digest, publication_ordinal)`. Ordinals `0..batch_count-1` belong to batches and
+ordinal `batch_count` belongs to the final report, so a zero-batch report uses ordinal `0`.
+Reservations are inserted with the plan and are never deleted or reused.
+
 Indexes are:
 
 - unique source identity primary key;
@@ -100,8 +106,9 @@ Indexes are:
 - `import_jobs(session_id, state, source_identity_digest)` for the atomic pending gate/status;
 - `import_jobs(session_id, terminal_at, source_identity_digest)` for bounded terminal status;
 - `import_batches(source_identity_digest, state, batch_index)` for next-batch selection;
-- unique `(publishing_writer_id, request_id)` across planned batches/report publication identities
-  through migration triggers/auxiliary indexes, preventing reuse under one writer.
+- the two declarative keys on `import_publication_requests`, preventing request reuse under one
+  writer and preventing two identities from occupying one source ordinal. No trigger participates
+  in this invariant.
 
 CHECK constraints enforce:
 
@@ -248,9 +255,12 @@ batch/report/evidence identities, writes stable terminal result/digest, clears l
 sets `complete/terminal`. Acknowledgement follows COMMIT. A response lost at any boundary is
 resolved from phase and stable IDs; no report object or event is rebuilt after `report_ready`.
 
-`quarantine` is a leased one-transaction terminal transition for verified contradiction only. It
-stores an allowlisted `ImportSafeReason`, safe terminal envelope/digest, clears leases, and retains
-all structural evidence/object roots. Malformed/unknown lines, unsupported categories, partial
+`quarantine` is a leased one-transaction terminal transition for verified contradiction only. Its
+closed codes are `import_source_identity_contradiction`, `import_object_identity_contradiction`,
+`import_plan_identity_contradiction`, `import_batch_identity_contradiction`,
+`import_report_identity_contradiction`, `import_phase_state_contradiction`, and
+`import_commit_state_ambiguous`. It stores the code and safe terminal envelope/digest, clears
+leases, and retains all structural evidence/object roots. Malformed/unknown lines, unsupported categories, partial
 progress, storage busy/full, key lock, or cancellation do not quarantine.
 
 ### Status and atomic check/receipt gate

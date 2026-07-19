@@ -201,8 +201,9 @@ batch/report/evidence facts, sets `complete/terminal`, records the stable termin
 clears lease fields, and returns the terminal allocation. Only then may application code
 acknowledge. Same-source aliases always replay this original report.
 
-`quarantine` is one transaction from a current leased pending job. It accepts only an allowlisted
-`ImportSafeReason`, writes the stable safe terminal envelope/digest, clears leases, and sets
+`quarantine` is one transaction from a current leased pending job. It accepts only the seven
+frozen importer contradiction/commit-ambiguity codes owned by the bundle migration, writes the
+stable safe terminal envelope/digest, clears leases, and sets
 `quarantined/terminal`. Parse gaps, unsupported source categories, cancellation, key unavailability,
 or ordinary partial progress are never quarantine reasons.
 
@@ -217,6 +218,13 @@ The same `MemoryImportState` and lock are visible to `MemoryLedgerAdapter` only 
 `has_pending_import(session_id)` predicate. Ledger `freeze_case`, final check commit, and receipt
 append invoke that predicate inside their own atomic state transition; preflight `status` is an UX
 optimization, not the correctness boundary.
+
+`MemoryImportState` also owns both directions of the permanent publication reservation relation:
+`(publishing_writer_id, request_id) -> (source_identity_digest, ordinal)` and
+`(source_identity_digest, ordinal) -> (publishing_writer_id, request_id)`. Plan publication swaps
+all batch reservations plus the final-report ordinal atomically with the plan. Ledger append checks
+the same maps together with its operation map under the shared lock. Completion and quarantine do
+not remove reservations.
 
 `load_review_source(identity, through)` snapshots the exact job/batch rows under the lock; absent
 returns `None`, quarantined/contradictory state raises `STORAGE_CORRUPT`. It verifies source/plan/

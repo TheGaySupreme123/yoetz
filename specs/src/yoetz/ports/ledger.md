@@ -447,8 +447,9 @@ through `load_projection` rather than `query_projection` for that reason
    orphan object, never an acknowledged event with a missing object.
 2. The adapter executes this port's durable append shape: an optional bounded preflight idempotency
    read (never trusted for correctness), then one `BEGIN IMMEDIATE`-equivalent atomic section that
-   re-checks idempotency, and—only for a new `operation_kind=receipt`—requires no pending import
-   for the session in that same transaction; then verifies the bundle owner generation is current, verifies writer
+   re-checks idempotency; for an importer-authored operation, verifies the permanent writer/request
+   and source/ordinal publication reservation; and—only for a new `operation_kind=receipt`—requires
+   no pending import for the session in that same transaction. It then verifies the bundle owner generation is current, verifies writer
    sequence/predecessor continuity, verifies `expected_frontier` when present, allocates N
    consecutive ledger sequences and N consecutive writer sequences, builds accepted envelopes and
    `entry_digest`s over canonical bytes, inserts object inventory/events/parents/refs, advances
@@ -473,6 +474,13 @@ through `load_projection` rather than `query_projection` for that reason
    with no partial acceptance.
 5. A lease is valid only when owner generation is current AND expiry is in the future. Wall-clock
    expiry never revives a stale generation (ADR-001).
+
+Importer reservations are not inferred from an event payload. For an importer-authored command,
+the adapter resolves `(writer_id, operation_id)` in its shared permanent reservation state and
+verifies the selected source/ordinal still names the same planned batch or final-report request
+before a new operation row can be committed. Missing or contradictory reservation state fails closed with
+`IDEMPOTENCY_CONFLICT`; replay of an already complete operation remains governed by the operation
+row and never requires recreating a reservation.
 
 ### `load_events`
 

@@ -1477,6 +1477,13 @@ completion. `status` returns only bounded structural pending/terminal counts, so
 digest, phase, and report evidence locator. `check` and `receipt` return retryable
 `OPERATION_PENDING` while an import for that session is pending; public `status` discloses it.
 
+Importer publication identity is permanently reserved in both directions: the publishing
+writer/request pair and the source/ordinal pair are unique. Ordinals `0..batch_count-1` name
+batches and ordinal `batch_count` names the final report. Plan publication and ledger append both
+verify these reservations inside their authoritative transaction; terminal transitions never
+delete them. The closed quarantine registry contains the six source/object/plan/batch/report/phase
+contradiction codes plus `import_commit_state_ambiguous`; malformed or unknown input is a gap.
+
 No artifact-inspection port exists in v0.1. Review compares only recorded/captured evidence at a
 frozen frontier. Live Git/shell/filesystem inspection requires a later consent/root/symlink/
 submodule/redaction ADR and a separate port.

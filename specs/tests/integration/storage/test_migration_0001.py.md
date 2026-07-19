@@ -43,6 +43,9 @@ fresh bundle.
   referenced object bytes are deleted.
 - `test_base_access_indexes_are_exact_and_bounded` — ledger sequence/ref, semantic-operation, and
   importer alias/status/terminal/next-batch paths exist with the frozen names and column order.
+- `test_importer_publication_reservations_are_exact` — all four importer tables have frozen
+  ordered columns and declarative keys; duplicate writer/request or source/ordinal reservations
+  are rejected and no trigger/view exists.
 - `test_projection_query_index_is_temporal_nonplaintext_and_covering` — every query view has exact
   validity/filter/order facts, finite edges/fanout, and a named bounded access path.
 - `test_projection_query_tombstones_scrub_all_intervals` — redaction clears payload-derived
@@ -244,7 +247,5 @@ inventory; tests never create missing projection tables themselves.
 
 ## Open questions
 
-Materialization is gated by `specs/OPEN_QUESTIONS.md` `W-C-001`. The first test must execute the
-single root `migrations/bundle/0001.sql` resource on a fresh database; a harness that precreates
-missing importer/base tables or concatenates SQL fragments from owner specs is not acceptable exit
-evidence.
+None. W-C-001 closed with direct fresh-database execution of the single root/resource migration;
+tests never precreate importer/base tables or concatenate SQL fragments.
