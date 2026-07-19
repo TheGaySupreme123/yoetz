@@ -1,0 +1,62 @@
+/* ============================================================
+   YOETZ DESIGN SYSTEM — tokens
+   Imported from the Claude Design project (colors_and_type.css).
+   ============================================================ */
+
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap");
+
+:root {
+  /* ---------- BRAND CORE ---------- */
+  --brand-teal-700: #0f766e;
+  --brand-teal-600: #0d9488;
+  --brand-teal-500: #14b8a6;
+  --brand-teal-400: #2dd4bf;
+  --brand-teal-50: #f0fdfa;
+
+  --brand-cyan-500: #06b6d4;
+  --brand-cyan-400: #22d3ee;
+
+  --brand-emerald-500: #10b981;
+
+  --brand-blue-700: #1d4ed8;
+  --brand-blue-600: #2563eb;
+  --brand-blue-500: #3b82f6;
+  --brand-blue-50: #eff6ff;
+
+  --brand-sky-700: #0369a1;
+  --brand-sky-500: #0ea5e9;
+
+  --brand-lime-500: #84cc16;
+
+  /* ---------- NEUTRALS (slate scale) ---------- */
+  --slate-950: #020617;
+  --slate-900: #0f172a;
+  --slate-800: #1e293b;
+  --slate-700: #334155;
+  --slate-600: #475569;
+  --slate-500: #64748b;
+  --slate-400: #94a3b8;
+  --slate-300: #cbd5e1;
+  --slate-200: #e2e8f0;
+  --slate-100: #f1f5f9;
+  --slate-50: #f8fafc;
+
+  /* ---------- SEMANTIC ---------- */
+  --background: #f0f7ff;
+  --foreground: #0f172a;
+  --border: #d6e4ee;
+
+  /* ---------- GRADIENTS ---------- */
+  --grad-hero: linear-gradient(90deg, #0d9488 0%, #06b6d4 100%);
+
+  /* ---------- TYPOGRAPHY ---------- */
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* ---------- SHADOWS ---------- */
+  --shadow-xs: 0 1px 2px 0 rgba(15, 23, 42, 0.05);
+  --shadow-sm: 0 1px 3px 0 rgba(15, 23, 42, 0.08), 0 1px 2px -1px rgba(15, 23, 42, 0.06);
+  --shadow-md: 0 4px 6px -1px rgba(15, 23, 42, 0.1), 0 2px 4px -2px rgba(15, 23, 42, 0.06);
+  --shadow-xl: 0 20px 25px -5px rgba(15, 23, 42, 0.1), 0 8px 10px -6px rgba(15, 23, 42, 0.04);
+  --shadow-teal-glow: 0 4px 14px 0 rgba(20, 184, 166, 0.15);
+}

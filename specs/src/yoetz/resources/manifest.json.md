@@ -34,7 +34,7 @@ Each `ResourceEntry` contains, in order:
 - `logical_name`: POSIX relative runtime name;
 - `source_path`: POSIX relative public-repository source;
 - `package_path`: POSIX relative path below `src/yoetz/resources/`;
-- `kind`: one of `json_schema|canonical_vector|migration|skill|skill_reference|
+- `kind`: one of `json_schema|canonical_vector|migration|skill|guidance|
   compatibility_manifest|runtime_support`;
 - `media_type`: frozen lowercase ASCII media type;
 - `size`: non-negative JSON integer;
@@ -42,8 +42,14 @@ Each `ResourceEntry` contains, in order:
 - optional `contract_version`: bounded public version string.
 
 Entries are sorted by ASCII `logical_name`. No optional key is serialized as null. The
-`resource_set_digest` is SHA-256 of the canonical JSON encoding of the top-level object with that
-field omitted; it is not a signature.
+`resource_set_digest` is the stable, self-excluding identity of the reviewed set. Its digest
+material is the canonical JSON encoding of `schema`, `package`, `resource_set_version`, and the
+sorted entries, except that the `runtime_support` entry contributes only `logical_name`,
+`source_path`, `package_path`, `kind`, `media_type`, and optional `contract_version`; its `size` and
+`sha256` are omitted. This one explicit exclusion lets the packaged support document bind the set
+identity without requiring a hash fixed point. The checked-in manifest still carries and runtime
+still verifies the support entry's actual size and SHA-256. The set digest is not a signature or a
+digest of the manifest file.
 
 ## Behavior
 
@@ -154,4 +160,5 @@ manifest with the locked script and must see a clean diff afterward.
 
 ## Open questions
 
-None.
+None. The runtime-support self-exclusion is the sole v0.1 set-identity exclusion; adding another
+self-referential installed resource requires a new manifest schema.

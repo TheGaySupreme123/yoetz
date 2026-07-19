@@ -508,7 +508,7 @@ async def remove_stale_endpoint(kind: EndpointKind, service_lock: _ServiceLockAu
     if type(kind) is not EndpointKind:
         raise TypeError("endpoint_kind_invalid")
     _assert_service_lock(service_lock)
-    runtime = _verify_runtime_directory(create=False)
+    runtime = _verify_runtime_directory(create=True)
     path = _endpoint_path(kind)
     expected_inode = _verify_endpoint(path)
 

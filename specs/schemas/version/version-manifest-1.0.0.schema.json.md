@@ -35,6 +35,10 @@ The implementation-locked capability/resource wire records are closed:
 
 - version, source-ID, and digest components are `{status:"present", version|source_id|digest}` or
   exactly `{status:"absent"}`;
+- an installed MCP SDK is descriptive metadata only. `mcp_protocol_supported` remains the exact
+  evidence-backed tested set and may be empty while the SDK component is present; that development
+  state carries the `mcp_capability_unverified` limitation and never infers protocol support from
+  installation;
 - provider adapters are `{name,status:"present",adapter_version,[sdk_distribution],[sdk_version]}`
   or `{name,status:"absent"}`;
 - `CapabilitySet` is `{name,supported_versions,tested_versions,denied_versions}` with bounded

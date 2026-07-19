@@ -4,9 +4,11 @@ import base64
 import json
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
+import pytest
 from helpers.child import (
     ChildLimits,
     ChildResult,
@@ -119,3 +121,86 @@ def test_ordinary_control_cannot_name_or_carry_an_unlock_secret() -> None:
     assert observed["argv_leak"] is False
     assert observed["env_leak"] is False
     assert _PASSPHRASE_CANARY not in result.stdout + result.stderr
+
+
+class _SecretTerminal:
+    def __init__(self, values: list[bytearray]) -> None:
+        self.values = values
+        self.bounds: list[int] = []
+
+    def read_secret(self, _prompt: str, maximum: int) -> bytearray:
+        self.bounds.append(maximum)
+        return self.values.pop(0)
+
+
+def _unlock_secret_reader() -> Callable[[object, object, object, object], bytearray]:
+    from yoetz.cli import unlock
+
+    return cast(
+        Callable[[object, object, object, object], bytearray],
+        getattr(unlock, "_read_secret"),
+    )
+
+
+def test_initialize_confirms_twice_locally_and_returns_only_first_buffer() -> None:
+    from yoetz.service.confidential_protocol import (
+        ConfidentialSecretPurpose,
+        EmptyVaultTarget,
+        HumanCeremonyKind,
+    )
+
+    first = bytearray(_PASSPHRASE_CANARY)
+    confirmation = bytearray(_PASSPHRASE_CANARY)
+    terminal = _SecretTerminal([first, confirmation])
+    result = _unlock_secret_reader()(
+        terminal,
+        HumanCeremonyKind.VAULT_INITIALIZE,
+        EmptyVaultTarget(expected_mode="uninitialized"),
+        ConfidentialSecretPurpose.VAULT_INITIALIZE,
+    )
+    assert result is first
+    assert confirmation == bytearray(len(_PASSPHRASE_CANARY))
+    assert terminal.bounds == [1_024, 1_024]
+    result[:] = b"\x00" * len(result)
+
+
+def test_initialize_mismatch_overwrites_both_and_sends_nothing() -> None:
+    from yoetz.cli.unlock import HumanCeremonyCliError
+    from yoetz.service.confidential_protocol import (
+        ConfidentialSecretPurpose,
+        EmptyVaultTarget,
+        HumanCeremonyKind,
+    )
+
+    first = bytearray(_PASSPHRASE_CANARY)
+    confirmation = bytearray(b"different-secret-value-2026")
+    terminal = _SecretTerminal([first, confirmation])
+    with pytest.raises(HumanCeremonyCliError, match="confirmation_mismatch"):
+        _unlock_secret_reader()(
+            terminal,
+            HumanCeremonyKind.VAULT_INITIALIZE,
+            EmptyVaultTarget(expected_mode="uninitialized"),
+            ConfidentialSecretPurpose.VAULT_INITIALIZE,
+        )
+    assert first == bytearray(len(first))
+    assert confirmation == bytearray(len(confirmation))
+
+
+def test_unlock_reads_one_bounded_buffer_without_confirmation() -> None:
+    from yoetz.service.confidential_protocol import (
+        ConfidentialSecretPurpose,
+        EmptyVaultTarget,
+        HumanCeremonyKind,
+    )
+
+    first = bytearray(_PASSPHRASE_CANARY)
+    terminal = _SecretTerminal([first])
+    result = _unlock_secret_reader()(
+        terminal,
+        HumanCeremonyKind.VAULT_UNLOCK,
+        EmptyVaultTarget(expected_mode="passphrase"),
+        ConfidentialSecretPurpose.VAULT_UNLOCK,
+    )
+    assert result is first
+    assert terminal.bounds == [1_024]
+    result[:] = b"\x00" * len(result)

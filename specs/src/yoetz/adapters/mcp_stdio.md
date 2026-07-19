@@ -101,6 +101,11 @@ The reader owns a single `bytearray` buffer and loops:
    **non-empty** partial frame is a transport failure (partial-EOF): the incomplete frame is
    discarded, never forwarded, and the transport terminates through the failure path.
 
+`EINTR` from either the readiness wait or `os.read` is retried from the same buffer state. Any
+other read failure becomes only the bounded adapter-private `read_failed` reason. The task-group
+boundary consumes that transport failure after closing the SDK streams, so no exception group,
+raw `OSError`, traceback, errno text, or filesystem path reaches the SDK, stdout, or stderr.
+
 Frame validation failures in step 5 for a *fully consumed, bounded* frame are recoverable: the
 reader requests a fixed parse-error frame through the sole writer and continues with the next
 frame, because the LF delimiter keeps the stream synchronized. Cap-plus-one (step 4) and
@@ -124,6 +129,11 @@ one internal queue so exactly one task ever calls `os.write` on fd 1). For each 
    write fewer bytes than requested; the writer advances its offset and re-awaits readiness until
    the entire frame is written or a write raises. `BrokenPipeError`/`EPIPE` is a bounded transport
    failure that closes the transport; it is never converted into an exception on the SDK stream.
+
+`EINTR` from readiness or `os.write` retries without advancing the byte offset. Other write errors
+collapse to `write_failed`, and a zero/negative write is the same bounded failure. Cleanup restores
+Python stdout and best-effort closes both owned descriptor duplicates without surfacing close-time
+OS detail.
 
 A slow or stalled client therefore blocks the writer at readiness-wait, which (through the
 zero-capacity stream) backpressures `Server.run`, which backpressures the reader. Memory stays

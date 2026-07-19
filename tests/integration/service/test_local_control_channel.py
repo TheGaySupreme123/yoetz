@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 import yoetz.adapters.control as control_package
+import yoetz.service.daemon as daemon_module
 from yoetz.adapters.control.unix_socket import (
     CONTROL_ENDPOINT_BASENAME,
     ENDPOINT_MODE,
@@ -33,6 +34,11 @@ from yoetz.adapters.control.unix_socket import (
     connect_secret,
     remove_stale_endpoint,
 )
+from yoetz.ports.control import ServiceState
+from yoetz.service.lifecycle import ServiceLifecycle
+
+_INSTANCE_ID = "svc_00000000-0000-4000-8000-000000000071"
+_COMMITMENT = "sha256:" + "7" * 64
 
 
 @pytest.fixture
@@ -64,8 +70,35 @@ class _MissingServiceLock:
         raise RuntimeError("not held")
 
 
+class _Clock:
+    def monotonic_seconds(self) -> float:
+        return 1.0
+
+    def now_utc(self) -> object:
+        raise AssertionError("wall clock forbidden")
+
+
+class _GenerationStore:
+    def advance(self, instance_id: str) -> int:
+        assert instance_id == _INSTANCE_ID
+        return 1
+
+
 def test_control_package_marker_is_inert() -> None:
     assert control_package.__all__ == []
+
+
+@pytest.mark.anyio
+async def test_stale_recovery_creates_only_the_fixed_owner_runtime_directory(
+    runtime_directory: Path,
+) -> None:
+    runtime_directory.rmdir()
+    with pytest.raises(LocalControlTransportError, match="endpoint_missing"):
+        await remove_stale_endpoint(EndpointKind.CONTROL, _HeldServiceLock())
+    facts = runtime_directory.lstat()
+    assert stat.S_ISDIR(facts.st_mode)
+    assert stat.S_IMODE(facts.st_mode) == RUNTIME_DIRECTORY_MODE
+    assert facts.st_uid == os.geteuid()
 
 
 @pytest.mark.anyio
@@ -175,6 +208,49 @@ async def test_stale_removal_requires_lock_and_never_removes_live_endpoint(
     stale.close()
     await remove_stale_endpoint(EndpointKind.CONTROL, _HeldServiceLock())
     assert not endpoint.exists()
+
+
+@pytest.mark.anyio
+async def test_production_listener_publication_recovers_all_stale_fixed_endpoints(
+    runtime_directory: Path,
+) -> None:
+    for basename in (
+        CONTROL_ENDPOINT_BASENAME,
+        SECRET_ENDPOINT_BASENAME,
+        HUMAN_CONTROL_ENDPOINT_BASENAME,
+    ):
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(os.fspath(runtime_directory / basename))
+        os.chmod(runtime_directory / basename, ENDPOINT_MODE)
+        stale.close()
+
+    listeners = daemon_module._ProductionListeners(  # pyright: ignore[reportPrivateUsage]
+        daemon_module._ListenerBinders(  # pyright: ignore[reportPrivateUsage]
+            bind_control_listener,
+            bind_secret_listener,
+            bind_human_control_listener,
+        )
+    )
+    lifecycle = ServiceLifecycle(
+        _Clock(),  # pyright: ignore[reportArgumentType] - wall clock is intentionally unavailable
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment=_COMMITMENT,
+        instance_id=_INSTANCE_ID,
+        singleton_lock_path=runtime_directory / "service.lock",
+        endpoint_recovery=listeners.recover_stale,
+        endpoint_publisher=listeners.bind,
+        endpoint_cleanup=listeners.close,
+    )
+
+    await lifecycle.acquire_singleton()
+    await lifecycle.publish_endpoint()
+    for connect in (connect_control, connect_secret, connect_human_control):
+        stream = await connect()
+        await stream.aclose()
+
+    await lifecycle.transition(ServiceState.LOCKED)
+    await lifecycle.close()
+    assert not tuple(runtime_directory.glob("*.sock"))
 
 
 @pytest.mark.anyio

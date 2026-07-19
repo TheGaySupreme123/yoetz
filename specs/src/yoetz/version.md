@@ -72,8 +72,10 @@ startup diagnostics compare it with the reviewed packaged `runtime-support.json`
 
 1. Load distribution metadata without importing CLI/MCP/provider packages.
 2. Capture CPython, ABI, OS, machine, and normalized wheel-platform identity.
-3. Load packaged `resources/support/runtime-support.json`, verify it through the resource manifest,
-   then validate its schema/canonical self-digest and artifact/resource binding.
+3. Load packaged `resources/support/runtime-support.json`, verify its concrete bytes through the
+   resource-manifest entry, then validate its schema/canonical self-digest and self-excluding
+   resource-set binding. Raw artifact and post-build evidence bindings remain typed external/absent
+   references; this module never fabricates them or tries to make an artifact contain its own hash.
 4. Enumerate installed resources through `importlib.resources`, reject duplicates, and compute
    SHA-256 over exact bytes. Do not follow arbitrary filesystem links.
 5. If APSW is installed, introspect its version, SQLite library version/source ID, amalgamation
@@ -126,6 +128,9 @@ reports the mismatch without executing the damaged resource.
 - Unsupported Python patch/platform/ABI: import and version inspection work; writes fail closed.
 - Unknown/newer installed SDK: report exact version as untested; do not silently extend the tested
   set.
+- A present installed MCP SDK with no passing capability cell reports an empty
+  `mcp_protocol_supported` set and `mcp_capability_unverified`; package presence is not support
+  evidence.
 - Metadata strings are bounded and normalized; arbitrary package metadata is never copied to logs
   or public error details.
 - The build identity is not fabricated from file mtimes or a dirty Git checkout.

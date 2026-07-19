@@ -100,10 +100,50 @@ def test_exact_payload_limit_is_accepted() -> None:
 def test_invalid_utf8_nul_and_partial_eof_never_enter_sdk_stream() -> None:
     result = _run(b'\xff\n{"jsonrpc":"2.0",\x00}\n' + _request(4)[:-1])
     rows = [json.loads(line) for line in result.stdout.splitlines()]
+    assert result.returncode == 0
     assert [row["error"]["data"]["reason"] for row in rows] == [
         "invalid_utf8",
         "nul_rejected",
     ]
+    assert b'"id":4' not in result.stdout
+    assert b"Traceback" not in result.stderr
+
+
+def test_injected_read_failure_closes_cleanly_without_os_detail_leakage() -> None:
+    child = r"""
+import anyio
+import errno
+import yoetz.adapters.mcp_stdio as transport
+
+def fail_read(fd, maximum):
+    del fd, maximum
+    raise OSError(errno.EIO, "secret /Users/private/hostile-input.json")
+
+transport._read_fd = fail_read
+
+async def main():
+    async with transport.bounded_stdio_server(512) as (read_stream, write_stream):
+        async with write_stream:
+            async for message in read_stream:
+                await write_stream.send(message)
+
+anyio.run(main)
+"""
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = os.pathsep.join(("tests", "tests/subprocess", "src"))
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", child],
+        input=b"x",
+        capture_output=True,
+        check=False,
+        env=environment,
+        timeout=5,
+    )
+    assert result.returncode == 0
+    assert result.stdout == b""
+    assert b"Traceback" not in result.stderr
+    assert b"/Users/private" not in result.stderr
+    assert b"hostile-input" not in result.stderr
 
 
 def test_lone_surrogate_is_rejected_before_sdk_construction_then_recovers() -> None:

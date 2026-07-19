@@ -40,6 +40,13 @@ full raw argument payload.
 `tool_error_envelope(...)` is a convenience wrapper for the common public error shape. It keeps the
 tool result format consistent between success and failure cases.
 
+The concrete v0.1 mapping API stays transport-neutral: `build_public_error_result` accepts an exact
+`PublicErrorCode`, bounded public message, retryability, bound correlation ID, optional request ID,
+and allowlisted safe details; `tool_error_envelope` accepts a bound `PublicOperationError`. Both
+return the common protocol failure mapping, which the server later places in `structuredContent`.
+`safe_validation_locations` returns at most eight `{field, reason}` records, keeps only statically
+allowlisted public field paths and bounded reason tokens, and never stringifies the exception.
+
 ## Errors and edge cases
 
 - JSON-RPC error objects are not used for ordinary public operation failures.

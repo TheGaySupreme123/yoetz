@@ -1,0 +1,754 @@
+"""Installed resource integrity and version identity reporting."""
+
+from __future__ import annotations
+
+import hashlib
+import importlib.metadata
+import platform
+import sys
+import sysconfig
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from importlib import resources
+from types import MappingProxyType
+from typing import Final, cast
+
+from yoetz.ports.diagnostics import (
+    StartupCheckArea,
+    StartupCheckOutcome,
+    StartupCheckResult,
+)
+from yoetz.protocol.canonical import (
+    JsonValue,
+    canonical_digest,
+    canonical_encode,
+    strict_json_parse,
+)
+from yoetz.protocol.errors import ProtocolValueError
+
+__all__ = [
+    "BUNDLE_SCHEMA_VERSION",
+    "CATALOG_SCHEMA_VERSION",
+    "CONTROL_PROTOCOL_VERSION",
+    "CapabilitySet",
+    "EGRESS_RECEIPT_SCHEMA_VERSION",
+    "ENGINE_VERSION",
+    "OBJECT_FORMAT_VERSION",
+    "PRIVACY_CLASSIFIER_RULESET_VERSION",
+    "PRIVACY_POLICY_SCHEMA_VERSION",
+    "PROJECTION_VERSION",
+    "PROTOCOL_VERSION",
+    "RESEARCH_EVIDENCE_POLICY_VERSION",
+    "ResourceIdentity",
+    "ResourceIntegrityError",
+    "SQLITE_APPLICATION_ID",
+    "VersionManifest",
+    "WORK_INTEGRITY_POLICY_VERSION",
+    "build_version_manifest",
+    "read_verified_resource",
+    "verify_resource_manifest",
+    "version_manifest_json",
+]
+
+PROTOCOL_VERSION: Final = "0.1"
+CONTROL_PROTOCOL_VERSION: Final = "1.0"
+PRIVACY_POLICY_SCHEMA_VERSION: Final = "1.0.0"
+EGRESS_RECEIPT_SCHEMA_VERSION: Final = "1.0.0"
+PRIVACY_CLASSIFIER_RULESET_VERSION: Final = "privacy-classifier/0.1.0"
+ENGINE_VERSION: Final = "0.1.0"
+PROJECTION_VERSION: Final = "yoetz/0.1.0"
+WORK_INTEGRITY_POLICY_VERSION: Final = "work-integrity/0.1.0"
+RESEARCH_EVIDENCE_POLICY_VERSION: Final = "research-evidence/0.1.0"
+OBJECT_FORMAT_VERSION: Final = "yoetz-object/1"
+CATALOG_SCHEMA_VERSION: Final = "1"
+BUNDLE_SCHEMA_VERSION: Final = "1"
+SQLITE_APPLICATION_ID: Final = "0x594F4554"
+
+_MANIFEST_SCHEMA: Final = "yoetz.resource-manifest/1"
+_SUPPORT_SCHEMA: Final = "yoetz.runtime-support/1"
+_RESOURCE_ROOT: Final = "yoetz.resources"
+_MANIFEST_LIMIT: Final = 1_048_576
+_RESOURCE_LIMIT: Final = 4_194_304
+_EXPECTED_RESOURCE_COUNT: Final = 71
+_RESOURCE_KINDS: Final = frozenset(
+    {
+        "canonical_vector",
+        "compatibility_manifest",
+        "guidance",
+        "json_schema",
+        "migration",
+        "runtime_support",
+        "skill",
+    }
+)
+_REQUEST_RESULT_NAMES: Final = (
+    "actor-assertion",
+    "check-request",
+    "check-result",
+    "client-info",
+    "control-hello",
+    "control-hello-result",
+    "control-request",
+    "control-result",
+    "coverage",
+    "egress-receipt",
+    "finding",
+    "frontier",
+    "operation-result",
+    "outbound-case",
+    "privacy-policy",
+    "public-error",
+    "publish-work-request",
+    "publish-work-result",
+    "receipt-document",
+    "receipt-request",
+    "receipt-result",
+    "respond-request",
+    "respond-result",
+    "semantic-provenance",
+    "service-status",
+    "setup-wizard-contract",
+    "start-request",
+    "start-result",
+    "status-request",
+    "status-result",
+    "subject-state-ref",
+)
+_EVENT_NAMES: Final = (
+    "action_recorded",
+    "assignment_recorded",
+    "check_recorded",
+    "claim_recorded",
+    "decision_recorded",
+    "evidence_recorded",
+    "finding_recorded",
+    "obligation_published",
+    "plan_published",
+    "plan_revised",
+    "receipt_recorded",
+    "redaction_recorded",
+    "response_recorded",
+    "result_recorded",
+    "session_opened",
+    "session_resumed",
+)
+_EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+class ResourceIntegrityError(ValueError):
+    """A required installed resource failed a bounded integrity check."""
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceIdentity:
+    name: str
+    media_type: str
+    size_bytes: int
+    sha256_digest: str
+
+    def __post_init__(self) -> None:
+        if (
+            not self.name
+            or self.name.startswith(("/", "."))
+            or "\\" in self.name
+            or any(part in {"", ".", ".."} for part in self.name.split("/"))
+        ):
+            raise ValueError("resource_name_invalid")
+        if "/" not in self.media_type or self.media_type.lower() != self.media_type:
+            raise ValueError("resource_media_type_invalid")
+        if type(self.size_bytes) is not int or not 0 <= self.size_bytes <= _RESOURCE_LIMIT:
+            raise ValueError("resource_size_invalid")
+        _validate_digest(self.sha256_digest)
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilitySet:
+    name: str
+    supported_versions: tuple[str, ...]
+    tested_versions: tuple[str, ...]
+    denied_versions: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("capability_name_invalid")
+        for values in (
+            self.supported_versions,
+            self.tested_versions,
+            self.denied_versions,
+        ):
+            if values != tuple(sorted(set(values), key=str.encode)):
+                raise ValueError("capability_versions_invalid")
+
+
+type Component = Mapping[str, str]
+type VersionPairs = tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class VersionManifest:
+    schema_version: str
+    package_name: str
+    package_version: str
+    protocol_version: str
+    engine_version: str
+    projection_version: str
+    control_protocol_version: str
+    privacy_policy_schema_version: str
+    egress_receipt_schema_version: str
+    privacy_classifier_ruleset_version: str
+    request_result_schema_versions: VersionPairs
+    event_schema_versions: VersionPairs
+    policy_versions: tuple[str, ...]
+    object_format_version: str
+    catalog_schema_version: str
+    bundle_schema_version: str
+    application_id: str
+    python_implementation: str
+    python_version: str
+    python_abi: str
+    os_name: str
+    os_version: str
+    machine: str
+    platform_tag: str
+    apsw_version: Component
+    sqlite_version: Component
+    sqlite_source_id: Component
+    sqlite_compile_options_digest: Component
+    mcp_sdk_version: Component
+    mcp_protocol_supported: tuple[str, ...]
+    provider_adapters: tuple[Mapping[str, str], ...]
+    service_capabilities: tuple[CapabilitySet, ...]
+    codex_capability_profiles: tuple[Mapping[str, JsonValue], ...]
+    subject_state_capabilities: Mapping[str, JsonValue]
+    resource_manifest_digest: str
+    resource_counts: VersionPairs
+    resources: tuple[ResourceIdentity, ...]
+    build_identity: str
+    support_status: str
+    limitations: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ResourceEntry:
+    logical_name: str
+    source_path: str
+    package_path: str
+    kind: str
+    media_type: str
+    size: int
+    sha256: str
+    contract_version: str | None
+
+    def identity(self) -> ResourceIdentity:
+        return ResourceIdentity(self.logical_name, self.media_type, self.size, self.sha256)
+
+    def stable_json(self) -> Mapping[str, JsonValue]:
+        result: dict[str, JsonValue] = {
+            "kind": self.kind,
+            "logical_name": self.logical_name,
+            "media_type": self.media_type,
+            "package_path": self.package_path,
+            "source_path": self.source_path,
+        }
+        if self.kind != "runtime_support":
+            result["sha256"] = self.sha256
+            result["size"] = self.size
+        if self.contract_version is not None:
+            result["contract_version"] = self.contract_version
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class _ResourceManifest:
+    resource_set_version: str
+    resource_set_digest: str
+    entries: tuple[_ResourceEntry, ...]
+
+
+def _validate_digest(value: object) -> str:
+    if (
+        type(value) is not str
+        or len(value) != 71
+        or not value.startswith("sha256:")
+        or any(char not in "0123456789abcdef" for char in value[7:])
+    ):
+        raise ResourceIntegrityError("digest_invalid")
+    return value
+
+
+def _mapping(value: object, reason: str) -> Mapping[str, JsonValue]:
+    if not isinstance(value, Mapping):
+        raise ResourceIntegrityError(reason)
+    return cast(Mapping[str, JsonValue], value)
+
+
+def _canonical_document(raw: bytes, *, limit: int, reason: str) -> Mapping[str, JsonValue]:
+    if len(raw) > limit or not raw.endswith(b"\n") or b"\r" in raw:
+        raise ResourceIntegrityError(reason)
+    try:
+        parsed = _mapping(strict_json_parse(raw), reason)
+    except (ProtocolValueError, UnicodeError) as exc:
+        raise ResourceIntegrityError(reason) from exc
+    if raw != canonical_encode(parsed) + b"\n":
+        raise ResourceIntegrityError(reason)
+    return parsed
+
+
+def _package_bytes(package_path: str) -> bytes:
+    if (
+        not package_path
+        or package_path.startswith(("/", "."))
+        or "\\" in package_path
+        or any(part in {"", ".", ".."} for part in package_path.split("/"))
+    ):
+        raise ResourceIntegrityError("resource_path_invalid")
+    node = resources.files(_RESOURCE_ROOT)
+    for part in package_path.split("/"):
+        node = node.joinpath(part)
+    try:
+        raw = node.read_bytes()
+    except (FileNotFoundError, ModuleNotFoundError, OSError) as exc:
+        raise ResourceIntegrityError("resource_missing") from exc
+    if len(raw) > _RESOURCE_LIMIT:
+        raise ResourceIntegrityError("resource_too_large")
+    return raw
+
+
+def _entry_from_json(value: JsonValue) -> _ResourceEntry:
+    entry = _mapping(value, "resource_entry_invalid")
+    allowed = {
+        "contract_version",
+        "kind",
+        "logical_name",
+        "media_type",
+        "package_path",
+        "sha256",
+        "size",
+        "source_path",
+    }
+    if not set(entry) <= allowed or set(entry) - {"contract_version"} != allowed - {
+        "contract_version"
+    }:
+        raise ResourceIntegrityError("resource_entry_invalid")
+    logical_name = entry["logical_name"]
+    source_path = entry["source_path"]
+    package_path = entry["package_path"]
+    kind = entry["kind"]
+    media_type = entry["media_type"]
+    size = entry["size"]
+    digest = entry["sha256"]
+    contract_version = entry.get("contract_version")
+    if (
+        type(logical_name) is not str
+        or type(source_path) is not str
+        or type(package_path) is not str
+        or type(kind) is not str
+        or kind not in _RESOURCE_KINDS
+        or type(media_type) is not str
+        or type(size) is not int
+        or type(digest) is not str
+        or (contract_version is not None and type(contract_version) is not str)
+    ):
+        raise ResourceIntegrityError("resource_entry_invalid")
+    identity = ResourceIdentity(logical_name, media_type, size, digest)
+    if package_path != logical_name:
+        raise ResourceIntegrityError("resource_path_mapping_invalid")
+    for candidate in (source_path, package_path):
+        if (
+            candidate.startswith(("/", "."))
+            or "\\" in candidate
+            or any(part in {"", ".", ".."} for part in candidate.split("/"))
+        ):
+            raise ResourceIntegrityError("resource_path_invalid")
+    return _ResourceEntry(
+        identity.name,
+        source_path,
+        package_path,
+        kind,
+        identity.media_type,
+        identity.size_bytes,
+        identity.sha256_digest,
+        contract_version,
+    )
+
+
+def _load_resource_manifest() -> _ResourceManifest:
+    raw = _package_bytes("manifest.json")
+    manifest = _canonical_document(raw, limit=_MANIFEST_LIMIT, reason="manifest_invalid")
+    if set(manifest) != {
+        "entries",
+        "package",
+        "resource_set_digest",
+        "resource_set_version",
+        "schema",
+    }:
+        raise ResourceIntegrityError("manifest_shape_invalid")
+    if manifest["schema"] != _MANIFEST_SCHEMA or manifest["package"] != "yoetz":
+        raise ResourceIntegrityError("manifest_identity_invalid")
+    version = manifest["resource_set_version"]
+    digest = manifest["resource_set_digest"]
+    raw_entries = manifest["entries"]
+    if type(version) is not str or type(raw_entries) is not list:
+        raise ResourceIntegrityError("manifest_shape_invalid")
+    entries = tuple(_entry_from_json(item) for item in raw_entries)
+    names = tuple(entry.logical_name for entry in entries)
+    if (
+        len(entries) != _EXPECTED_RESOURCE_COUNT
+        or names != tuple(sorted(set(names), key=str.encode))
+        or len({entry.package_path for entry in entries}) != len(entries)
+        or sum(entry.kind == "runtime_support" for entry in entries) != 1
+    ):
+        raise ResourceIntegrityError("manifest_inventory_invalid")
+    stable: Mapping[str, JsonValue] = {
+        "entries": [entry.stable_json() for entry in entries],
+        "package": "yoetz",
+        "resource_set_version": version,
+        "schema": _MANIFEST_SCHEMA,
+    }
+    if _validate_digest(digest) != canonical_digest(stable):
+        raise ResourceIntegrityError("manifest_digest_mismatch")
+    return _ResourceManifest(version, cast(str, digest), entries)
+
+
+def read_verified_resource(logical_name: str) -> bytes:
+    """Read one exact installed resource after closed-manifest size/digest verification."""
+
+    if type(logical_name) is not str:
+        raise ResourceIntegrityError("resource_name_invalid")
+    manifest = _load_resource_manifest()
+    entry = next((item for item in manifest.entries if item.logical_name == logical_name), None)
+    if entry is None:
+        raise ResourceIntegrityError("resource_unknown")
+    raw = _package_bytes(entry.package_path)
+    if len(raw) != entry.size or f"sha256:{hashlib.sha256(raw).hexdigest()}" != entry.sha256:
+        raise ResourceIntegrityError("resource_digest_mismatch")
+    return raw
+
+
+def _load_support(manifest: _ResourceManifest) -> Mapping[str, JsonValue]:
+    raw = read_verified_resource("support/runtime-support.json")
+    support = _canonical_document(raw, limit=_MANIFEST_LIMIT, reason="support_invalid")
+    required = {
+        "capability_matrix",
+        "codex_profiles",
+        "denied_cells",
+        "dependency_lock",
+        "key_backend_cells",
+        "limitations",
+        "local_service_cells",
+        "manifest_digest",
+        "manifest_version",
+        "mcp_cells",
+        "package_artifact",
+        "privacy_enforcement_cells",
+        "provider_profiles",
+        "release_evidence",
+        "release_version",
+        "resource_set_digest",
+        "runtime_cells",
+        "schema",
+        "secret_memory_cells",
+        "session_event_cells",
+        "subject_state_cells",
+        "user_presence_cells",
+    }
+    if set(support) != required or support["schema"] != _SUPPORT_SCHEMA:
+        raise ResourceIntegrityError("support_shape_invalid")
+    digest = support["manifest_digest"]
+    without_digest = {key: value for key, value in support.items() if key != "manifest_digest"}
+    if _validate_digest(digest) != canonical_digest(without_digest):
+        raise ResourceIntegrityError("support_digest_mismatch")
+    if support["resource_set_digest"] != manifest.resource_set_digest:
+        raise ResourceIntegrityError("support_resource_set_mismatch")
+    _validate_support_reference(support["package_artifact"], allow_digest=False)
+    _validate_support_reference(support["capability_matrix"], allow_digest=True)
+    _validate_support_reference(support["release_evidence"], allow_digest=True)
+    _validate_support_reference(support["dependency_lock"], allow_digest=True)
+    for key in required & {
+        "codex_profiles",
+        "denied_cells",
+        "key_backend_cells",
+        "limitations",
+        "local_service_cells",
+        "mcp_cells",
+        "privacy_enforcement_cells",
+        "provider_profiles",
+        "runtime_cells",
+        "secret_memory_cells",
+        "session_event_cells",
+        "subject_state_cells",
+        "user_presence_cells",
+    }:
+        if type(support[key]) is not list:
+            raise ResourceIntegrityError("support_shape_invalid")
+    return support
+
+
+def _validate_support_reference(value: JsonValue, *, allow_digest: bool) -> None:
+    reference = _mapping(value, "support_reference_invalid")
+    status = reference.get("status")
+    if status == "absent":
+        if set(reference) != {"reason_code", "status"} or type(reference["reason_code"]) is not str:
+            raise ResourceIntegrityError("support_reference_invalid")
+        return
+    if status == "external":
+        if set(reference) == {"status"}:
+            return
+        if allow_digest and set(reference) == {"digest", "status"}:
+            _validate_digest(reference["digest"])
+            return
+    raise ResourceIntegrityError("support_reference_invalid")
+
+
+def _component(*, value: str | None, field: str) -> Component:
+    if value is None:
+        return MappingProxyType({"status": "absent"})
+    return MappingProxyType({"status": "present", field: value})
+
+
+def _distribution_version(name: str) -> str | None:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _runtime_components() -> tuple[Component, Component, Component, Component]:
+    try:
+        import apsw
+    except ImportError:
+        absent = _component(value=None, field="version")
+        return (
+            absent,
+            absent,
+            _component(value=None, field="source_id"),
+            _component(value=None, field="digest"),
+        )
+    options = tuple(sorted(apsw.compile_options, key=str.encode))
+    return (
+        _component(value=apsw.apsw_version(), field="version"),
+        _component(value=apsw.sqlitelibversion(), field="version"),
+        _component(value=apsw.sqlite3_sourceid(), field="source_id"),
+        _component(value=canonical_digest(options), field="digest"),
+    )
+
+
+def _provider_adapters() -> tuple[Mapping[str, str], ...]:
+    sdk_version = _distribution_version("openai")
+    if sdk_version is None:
+        return (MappingProxyType({"name": "openai", "status": "absent"}),)
+    return (
+        MappingProxyType(
+            {
+                "adapter_version": "openai-adapter/0.1.0",
+                "name": "openai",
+                "sdk_distribution": "openai",
+                "sdk_version": sdk_version,
+                "status": "present",
+            }
+        ),
+    )
+
+
+def _resource_counts(entries: tuple[_ResourceEntry, ...]) -> VersionPairs:
+    counts = {
+        "canonical_vectors": sum(item.kind == "canonical_vector" for item in entries),
+        "guidance_resources": sum(item.kind == "guidance" for item in entries),
+        "migrations": sum(item.kind == "migration" for item in entries),
+        "runtime_support_resources": sum(item.kind == "runtime_support" for item in entries),
+        "schema_resources": sum(item.kind == "json_schema" for item in entries),
+        "skill_resources": sum(
+            item.kind in {"compatibility_manifest", "skill"} for item in entries
+        ),
+        "total": len(entries),
+    }
+    expected = {
+        "canonical_vectors": 9,
+        "guidance_resources": 4,
+        "migrations": 2,
+        "runtime_support_resources": 1,
+        "schema_resources": 53,
+        "skill_resources": 2,
+        "total": 71,
+    }
+    if counts != expected:
+        raise ResourceIntegrityError("resource_counts_invalid")
+    return tuple((name, str(counts[name])) for name in sorted(counts, key=str.encode))
+
+
+def build_version_manifest(*, include_optional_probes: bool = False) -> VersionManifest:
+    """Build the deterministic installed manifest without network, config, or storage access."""
+
+    if type(include_optional_probes) is not bool:
+        raise TypeError("include_optional_probes_must_be_bool")
+    manifest = _load_resource_manifest()
+    support = _load_support(manifest)
+    apsw_version, sqlite_version, sqlite_source_id, compile_digest = _runtime_components()
+    mcp_version = _distribution_version("mcp")
+    limitations = tuple(cast(list[str], support["limitations"]))
+    if mcp_version is not None and not cast(list[JsonValue], support["mcp_cells"]):
+        limitations = tuple(sorted({*limitations, "mcp_capability_unverified"}, key=str.encode))
+    return VersionManifest(
+        schema_version="1.0.0",
+        package_name="yoetz",
+        package_version=_distribution_version("yoetz") or "0.1.0",
+        protocol_version=PROTOCOL_VERSION,
+        engine_version=ENGINE_VERSION,
+        projection_version=PROJECTION_VERSION,
+        control_protocol_version=CONTROL_PROTOCOL_VERSION,
+        privacy_policy_schema_version=PRIVACY_POLICY_SCHEMA_VERSION,
+        egress_receipt_schema_version=EGRESS_RECEIPT_SCHEMA_VERSION,
+        privacy_classifier_ruleset_version=PRIVACY_CLASSIFIER_RULESET_VERSION,
+        request_result_schema_versions=tuple((name, "1.0.0") for name in _REQUEST_RESULT_NAMES),
+        event_schema_versions=tuple((name, "1.0.0") for name in _EVENT_NAMES),
+        policy_versions=(RESEARCH_EVIDENCE_POLICY_VERSION, WORK_INTEGRITY_POLICY_VERSION),
+        object_format_version=OBJECT_FORMAT_VERSION,
+        catalog_schema_version=CATALOG_SCHEMA_VERSION,
+        bundle_schema_version=BUNDLE_SCHEMA_VERSION,
+        application_id=SQLITE_APPLICATION_ID,
+        python_implementation=platform.python_implementation(),
+        python_version=platform.python_version(),
+        python_abi=str(sysconfig.get_config_var("SOABI") or "unknown"),
+        os_name=platform.system() or sys.platform,
+        os_version=platform.release() or "unknown",
+        machine=platform.machine() or "unknown",
+        platform_tag=sysconfig.get_platform().replace("-", "_"),
+        apsw_version=apsw_version,
+        sqlite_version=sqlite_version,
+        sqlite_source_id=sqlite_source_id,
+        sqlite_compile_options_digest=compile_digest,
+        mcp_sdk_version=_component(value=mcp_version, field="version"),
+        mcp_protocol_supported=(),
+        provider_adapters=_provider_adapters(),
+        service_capabilities=(),
+        codex_capability_profiles=(),
+        subject_state_capabilities=MappingProxyType({"status": "absent"}),
+        resource_manifest_digest=manifest.resource_set_digest,
+        resource_counts=_resource_counts(manifest.entries),
+        resources=tuple(entry.identity() for entry in manifest.entries),
+        build_identity="development-unavailable",
+        support_status="development_unverified",
+        limitations=limitations,
+    )
+
+
+def _component_json(value: Mapping[str, str]) -> Mapping[str, JsonValue]:
+    return dict(value)
+
+
+def _manifest_json(
+    manifest: VersionManifest, *, include_resources: bool
+) -> Mapping[str, JsonValue]:
+    if type(manifest) is not VersionManifest:
+        raise TypeError("manifest_must_be_version_manifest")
+    resources_json: list[JsonValue] = []
+    if include_resources:
+        resources_json = [
+            {
+                "media_type": item.media_type,
+                "name": item.name,
+                "sha256_digest": item.sha256_digest,
+                "size_bytes": str(item.size_bytes),
+            }
+            for item in manifest.resources
+        ]
+    return {
+        "application_id": manifest.application_id,
+        "apsw_version": _component_json(manifest.apsw_version),
+        "build_identity": manifest.build_identity,
+        "bundle_schema_version": manifest.bundle_schema_version,
+        "catalog_schema_version": manifest.catalog_schema_version,
+        "codex_capability_profiles": [dict(item) for item in manifest.codex_capability_profiles],
+        "control_protocol_version": manifest.control_protocol_version,
+        "egress_receipt_schema_version": manifest.egress_receipt_schema_version,
+        "engine_version": manifest.engine_version,
+        "event_schema_versions": dict(manifest.event_schema_versions),
+        "limitations": list(manifest.limitations),
+        "machine": manifest.machine,
+        "mcp_protocol_supported": list(manifest.mcp_protocol_supported),
+        "mcp_sdk_version": _component_json(manifest.mcp_sdk_version),
+        "object_format_version": manifest.object_format_version,
+        "os_name": manifest.os_name,
+        "os_version": manifest.os_version,
+        "package_name": manifest.package_name,
+        "package_version": manifest.package_version,
+        "platform_tag": manifest.platform_tag,
+        "policy_versions": list(manifest.policy_versions),
+        "privacy_classifier_ruleset_version": manifest.privacy_classifier_ruleset_version,
+        "privacy_policy_schema_version": manifest.privacy_policy_schema_version,
+        "projection_version": manifest.projection_version,
+        "protocol_version": manifest.protocol_version,
+        "provider_adapters": [dict(item) for item in manifest.provider_adapters],
+        "python_abi": manifest.python_abi,
+        "python_implementation": manifest.python_implementation,
+        "python_version": manifest.python_version,
+        "request_result_schema_versions": dict(manifest.request_result_schema_versions),
+        "resource_counts": dict(manifest.resource_counts),
+        "resource_manifest_digest": manifest.resource_manifest_digest,
+        "resources": resources_json,
+        "schema_version": manifest.schema_version,
+        "service_capabilities": [
+            {
+                "denied_versions": list(item.denied_versions),
+                "name": item.name,
+                "supported_versions": list(item.supported_versions),
+                "tested_versions": list(item.tested_versions),
+            }
+            for item in manifest.service_capabilities
+        ],
+        "sqlite_compile_options_digest": _component_json(manifest.sqlite_compile_options_digest),
+        "sqlite_source_id": _component_json(manifest.sqlite_source_id),
+        "sqlite_version": _component_json(manifest.sqlite_version),
+        "subject_state_capabilities": dict(manifest.subject_state_capabilities),
+        "support_status": manifest.support_status,
+    }
+
+
+def version_manifest_json(manifest: VersionManifest, *, include_resources: bool = False) -> bytes:
+    """Render canonical protocol JSON bytes without a transport newline."""
+
+    if type(include_resources) is not bool:
+        raise TypeError("include_resources_must_be_bool")
+    return canonical_encode(_manifest_json(manifest, include_resources=include_resources))
+
+
+def verify_resource_manifest(manifest: VersionManifest) -> tuple[StartupCheckResult, ...]:
+    """Verify every installed resource and return one bounded startup diagnostic."""
+
+    try:
+        installed = _load_resource_manifest()
+        expected = tuple(entry.identity() for entry in installed.entries)
+        if (
+            manifest.resources != expected
+            or manifest.resource_manifest_digest != installed.resource_set_digest
+        ):
+            raise ResourceIntegrityError("version_resource_identity_mismatch")
+        for entry in installed.entries:
+            read_verified_resource(entry.logical_name)
+    except ResourceIntegrityError, OSError, ValueError:
+        return (
+            StartupCheckResult(
+                "resources.manifest",
+                StartupCheckArea.RESOURCES,
+                StartupCheckOutcome.BLOCKED,
+                "resource_integrity_failed",
+                frozenset(),
+                {},
+                _EPOCH,
+            ),
+        )
+    return (
+        StartupCheckResult(
+            "resources.manifest",
+            StartupCheckArea.RESOURCES,
+            StartupCheckOutcome.OK,
+            None,
+            frozenset(),
+            {
+                "resource_count": len(installed.entries),
+                "resource_set_digest": installed.resource_set_digest,
+            },
+            _EPOCH,
+        ),
+    )

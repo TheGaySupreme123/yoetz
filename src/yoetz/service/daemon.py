@@ -21,9 +21,12 @@ import anyio
 
 from yoetz import __version__
 from yoetz.adapters.control.unix_socket import (
+    EndpointKind,
+    LocalControlTransportError,
     bind_control_listener,
     bind_human_control_listener,
     bind_secret_listener,
+    remove_stale_endpoint,
 )
 from yoetz.adapters.keys.encrypted_vault import EncryptedVaultStore
 from yoetz.adapters.keys.secret_memory import LocalSecretMemory
@@ -151,6 +154,10 @@ class _Listener(Protocol):
     async def accept(self) -> ControlStream: ...
 
     async def aclose(self) -> None: ...
+
+
+class _ServiceLockAuthority(Protocol):
+    def assert_held(self) -> None: ...
 
 
 class _SessionCapability(Protocol):
@@ -901,6 +908,20 @@ class _ProductionListeners:
         self._binders = binders
         self._bound = False
 
+    async def recover_stale(self, service_lock: _ServiceLockAuthority) -> None:
+        """Remove only fixed endpoints proven stale under lifecycle singleton authority."""
+
+        for kind in (
+            EndpointKind.CONTROL,
+            EndpointKind.SECRET,
+            EndpointKind.HUMAN_CONTROL,
+        ):
+            try:
+                await remove_stale_endpoint(kind, service_lock)
+            except LocalControlTransportError as exc:
+                if exc.reason != "endpoint_missing":
+                    raise
+
     async def bind(self, _instance: object) -> None:
         if self._bound:
             raise RuntimeError("listeners_already_bound")
@@ -1206,6 +1227,7 @@ async def _production_composition(
     marker = marker_store.load()
     installation_id = marker_store.select_installation_id(marker)
     clock = _SystemClock()
+    production_binders = _binders is None
     listeners = _ProductionListeners(
         _binders
         or _ListenerBinders(
@@ -1220,6 +1242,7 @@ async def _production_composition(
         generation_store=ServiceLifecycle.generation_store(paths.generation, installation_id),
         process_start_identity_commitment=("sha256:" + hashlib.sha256(os.urandom(32)).hexdigest()),
         singleton_lock_path=paths.singleton_lock,
+        endpoint_recovery=listeners.recover_stale if production_binders else None,
         endpoint_publisher=listeners.bind,
         endpoint_cleanup=listeners.close,
         close_ready_composition=ready_close_relay,

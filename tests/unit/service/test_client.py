@@ -166,6 +166,65 @@ async def test_request_result_correlation_and_lifecycle_conversion() -> None:
 
 
 @pytest.mark.anyio
+async def test_valid_stop_result_survives_immediate_eof_and_fails_unrelated_pending_call() -> None:
+    stream = _FakeStream()
+    client = _client(stream)
+    status_task = asyncio.create_task(client.service_status())
+    stop_task = asyncio.create_task(client.stop())
+    await _wait_for_sent(stream, 2)
+    requests = {
+        cast(str, frame["method"]): frame
+        for frame in (decode_control_frame(encoded) for encoded in stream.sent)
+    }
+    stop_request = requests["service_stop"]
+    expected = ServiceStopResult()
+    await stream.feed(
+        encode_control_frame(
+            ControlResult(
+                protocol_version="1.0",
+                rpc_id=cast(str, stop_request["rpc_id"]),
+                service_instance_id=_SERVICE_ID,
+                service_generation="1",
+                method=ControlMethod.SERVICE_STOP,
+                outcome="ok",
+                body=expected,
+            )
+        )
+    )
+    await stream.aclose()
+
+    assert await stop_task == expected
+    with pytest.raises(ControlError, match="frame_invalid"):
+        await status_task
+
+
+@pytest.mark.anyio
+async def test_result_correlation_mismatch_remains_a_protocol_failure() -> None:
+    stream = _FakeStream()
+    client = _client(stream)
+    task = asyncio.create_task(client.service_status())
+    await _wait_for_sent(stream, 1)
+    request = decode_control_frame(stream.sent[0])
+    await stream.feed(
+        encode_control_frame(
+            ControlResult(
+                protocol_version="1.0",
+                rpc_id=cast(str, request["rpc_id"]),
+                service_instance_id=_SERVICE_ID,
+                service_generation="1",
+                method=ControlMethod.SERVICE_LOCK,
+                outcome="ok",
+                body=_status(),
+            )
+        )
+    )
+
+    with pytest.raises(ControlError, match="frame_invalid"):
+        await task
+    await client.close()
+
+
+@pytest.mark.anyio
 async def test_mcp_rejects_every_support_method_before_transport() -> None:
     stream = _FakeStream()
     client = _client(stream, ControlClientKind.MCP_BRIDGE)

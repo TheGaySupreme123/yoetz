@@ -13,13 +13,16 @@ supported.
 ## Public surface
 
 The future file is byte-identical to root `support/runtime-support.json` and has the complete
-`yoetz.runtime-support/1` shape, exact cell sets, evidence digests, limitations, and self-digest
+`yoetz.runtime-support/1` shape, exact cell sets, typed external/absent evidence references,
+limitations, and self-digest
 owned by that source spec, including exact trigger-hook and structural subject-state cells.
 
 ## Behavior
 
 The resource generator copies reviewed source bytes without decoding or newline normalization and
-registers this path as `runtime_support` in the package resource manifest. Runtime loads it through
+registers this path as `runtime_support` in the package resource manifest. Its size and byte digest
+are deliberately excluded only from the stable resource-set digest material, while remaining
+mandatory in the concrete manifest entry. Runtime loads it through
 `importlib.resources`, verifies resource size/SHA-256 and the inner canonical self-digest, then
 constructs immutable support values. It performs no fallback to root source and no online refresh.
 

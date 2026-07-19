@@ -41,6 +41,11 @@ The registry is closed and built at startup from the packaged `guidance/` resour
 size and SHA-256 are verified against the resource manifest before registration; a failure is fatal
 to startup rather than degraded, for the same reason it is fatal in `mcp/descriptors.md`.
 
+Each entry exposes frozen URI, logical name, display metadata, and media type. Its bytes, strict
+UTF-8 text, and byte size are projections of `yoetz.version.read_verified_resource(logical_name)`;
+there is no second manifest parser or package-reader seam in the MCP layer. `list_resources()`
+forces all four reads before returning the tuple so a partial guidance set is startup-fatal.
+
 `read_resource` accepts only an exact registered URI. It resolves no path, accepts no template,
 traversal, glob, or relative segment, and reads only through `importlib.resources`. A URI is a
 lookup key into a frozen table, never a filesystem instruction — a resource reader that takes a path

@@ -169,6 +169,21 @@ class _GenerationStorePort(Protocol):
     def advance(self, instance_id: str) -> int: ...
 
 
+class _SingletonEndpointAuthority:
+    """Nonserializable proof that this lifecycle still owns its singleton descriptor."""
+
+    __slots__ = ("_assertion",)
+
+    def __init__(self, assertion: Callable[[], None]) -> None:
+        self._assertion = assertion
+
+    def assert_held(self) -> None:
+        self._assertion()
+
+    def __reduce__(self) -> str | tuple[object, ...]:
+        raise TypeError("singleton_endpoint_authority_not_serializable")
+
+
 class ServiceLifecycle:
     """Own exactly one service instance and all ready admission."""
 
@@ -180,6 +195,7 @@ class ServiceLifecycle:
         process_start_identity_commitment: str,
         instance_id: str | None = None,
         singleton_lock_path: Path | None = None,
+        endpoint_recovery: Callable[[_SingletonEndpointAuthority], Awaitable[None]] | None = None,
         endpoint_publisher: Callable[[ServiceInstance], Awaitable[None]] | None = None,
         endpoint_cleanup: Callable[[ServiceInstance], Awaitable[None]] | None = None,
         cancel_ready_work: Callable[[], Awaitable[None]] | None = None,
@@ -199,6 +215,7 @@ class ServiceLifecycle:
         self._process_commitment = process_start_identity_commitment
         self._instance_id = instance_id or new_id(IdKind.SERVICE_INSTANCE)
         self._singleton_lock_path = singleton_lock_path
+        self._endpoint_recovery = endpoint_recovery
         self._endpoint_publisher = endpoint_publisher or _noop_instance
         self._endpoint_cleanup = endpoint_cleanup or _noop_instance
         self._cancel_ready_work = cancel_ready_work or _noop
@@ -217,6 +234,7 @@ class ServiceLifecycle:
         self._drain_task: asyncio.Task[None] | None = None
         self._idle_stop = asyncio.Event()
         self._singleton_fd: int | None = None
+        self._singleton_authority: _SingletonEndpointAuthority | None = None
         self._endpoint_published = False
         self._closed = False
 
@@ -261,6 +279,9 @@ class ServiceLifecycle:
                     os.close(descriptor)
                     raise LifecycleError("service_already_running") from exc
                 self._singleton_fd = descriptor
+                self._singleton_authority = _SingletonEndpointAuthority(
+                    lambda: self._assert_singleton_descriptor_held(descriptor)
+                )
             try:
                 generation = self._generation_store.advance(self._instance_id)
             except Exception:
@@ -279,6 +300,14 @@ class ServiceLifecycle:
             if self._instance is None or self._endpoint_published or self._closed:
                 raise LifecycleError("invalid_transition")
             instance = self._instance
+            recovery = self._endpoint_recovery
+            if recovery is not None:
+                authority = self._singleton_authority
+                if authority is None:
+                    raise LifecycleError("invalid_transition")
+                authority.assert_held()
+                await recovery(authority)
+                authority.assert_held()
             await self._endpoint_publisher(instance)
             self._endpoint_published = True
 
@@ -514,8 +543,22 @@ class ServiceLifecycle:
             raise LifecycleError("invalid_transition")
         return value
 
+    def _assert_singleton_descriptor_held(self, descriptor: int) -> None:
+        if (
+            self._closed
+            or self._instance is None
+            or self._singleton_fd != descriptor
+            or self._singleton_authority is None
+        ):
+            raise LifecycleError("invalid_transition")
+        try:
+            os.fstat(descriptor)
+        except OSError as exc:
+            raise LifecycleError("invalid_transition") from exc
+
     def _release_singleton(self) -> None:
         descriptor = self._singleton_fd
+        self._singleton_authority = None
         self._singleton_fd = None
         if descriptor is not None:
             try:

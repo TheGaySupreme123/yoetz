@@ -13,10 +13,13 @@ Documentation, version ranges, and neighboring successful cells are never substi
 
 A canonical strict-JSON object with:
 
-- `schema: "yoetz.runtime-support/1"`, `manifest_version`, `release_version`, and
-  `package_artifact_digest`;
-- `resource_set_digest`, `capability_matrix_digest`, `release_evidence_digest`, and
-  `dependency_lock_digest`;
+- `schema: "yoetz.runtime-support/1"`, `manifest_version`, and `release_version`;
+- `package_artifact`, a tagged `external` reference because a package cannot contain its own raw
+  artifact digest; the release bundle binds the artifact digest to this support-manifest digest;
+- `resource_set_digest`, the self-excluding set identity defined by the resource-manifest contract;
+- `capability_matrix`, `release_evidence`, and `dependency_lock`, each a tagged evidence reference:
+  `{status:"absent",reason_code:<bounded token>}` while unavailable, or
+  `{status:"external",digest:"sha256:<hex>"}` when a separately produced immutable input exists;
 - `runtime_cells`: ASCII-sorted exact combinations of CPython implementation/version/SOABI,
   normalized platform tag, OS floor, architecture, APSW version, SQLite version/source ID,
   amalgamation flag, and compile-options digest;
@@ -64,8 +67,10 @@ only the coverage-neutral re-grounding action; observation-hook status remains a
 `subject_state_cells` row is admitted only when E-015 proves the complete ADR-011 privacy, bound,
 race, and no-service-reachability matrix for that exact artifact/platform/Git cell.
 
-At development time the file may contain no supported cells and a
-`development_unverified` limitation. A release with an advertised write-support claim must contain
+At development time the file contains no supported cells, uses typed absent evidence references,
+and carries a `development_unverified` limitation. The package-artifact reference remains tagged
+`external` without an embedded raw artifact digest at every stage; the external release bundle
+binds the raw artifact digest and this manifest's digest in one record. A release with an advertised write-support claim must contain
 every and only the exact passing cells. Optional provider absence does not invalidate `local_only`
 deterministic/service cells. An upstream version not listed is `untested`; it is never accepted
 because it lies between listed versions.
@@ -87,8 +92,10 @@ mutation. This composite gate does not apply retroactively to loading an already
 keyring-mode vault; missing current presence instead limits that ready generation to local work and
 fences external activation.
 
-The source and packaged mirror change together. Runtime verifies canonical JSON, self-digest,
-resource/artifact identity, and exact cell match before granting write/semantic capabilities. The
+The source and packaged mirror change together. Runtime verifies canonical JSON, self-digest, the
+self-excluding resource-set identity, and exact cell match before granting write/semantic
+capabilities. Raw artifact identity and post-build evidence are verified by release/install tooling
+against their external references; runtime never pretends an absent reference is present. The
 manifest is an evidence-bound allowlist, not a signature; it never claims authenticity by itself.
 
 ## Errors and edge cases
@@ -123,4 +130,5 @@ resource byte-parity/corruption tests.
 None.
 
 Exact cell contents are empirical release-lock outputs under the applicable gates among E-001
-through E-015.
+through E-015. No cell or evidence digest may be filled from documentation, a version label, or an
+unexecuted test plan.

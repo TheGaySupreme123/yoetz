@@ -555,6 +555,10 @@ class ServiceClient(ControlClientPort):
                 pending = self._pending.get(result.rpc_id)
                 if pending is None or pending.done():
                     raise ControlError("frame_invalid")
+                try:
+                    self._session.correlate(result)
+                except ControlProtocolError as exc:
+                    raise ControlError("frame_invalid") from exc
                 pending.set_result(result)
         except asyncio.CancelledError:
             return
@@ -628,11 +632,6 @@ class ServiceClient(ControlClientPort):
         finally:
             self._pending.pop(request.rpc_id, None)
 
-        try:
-            self._session.correlate(result)
-        except ControlProtocolError as exc:
-            await self._fail_connection(ControlError("frame_invalid"))
-            raise ControlError("frame_invalid") from exc
         if result.outcome == "error" and isinstance(result.body, ControlError):
             if result.body.reason in {
                 "service_generation_changed",

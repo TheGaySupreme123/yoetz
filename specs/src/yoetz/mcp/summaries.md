@@ -40,6 +40,10 @@ The per-operation helpers format the visible summary for each tool:
 The summaries are English-only in v0.1. They can be shorter than the structured content but must
 remain faithful to it.
 
+Every summary is ASCII English and at most 512 encoded bytes. Rendering reads only allowlisted
+structural fields, counts, enum tokens, frontiers, and public correlation IDs; it never copies
+finding prose, task titles, error messages, or receipt bodies into the compact text.
+
 ## Errors and edge cases
 
 - The summary renderer must tolerate absent optional fields.

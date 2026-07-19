@@ -24,18 +24,19 @@ It owns strings only. It performs no dispatch, holds no client, and reaches no s
 |---|---|
 | `ToolDescriptor` | frozen name, title, description, input/output schema refs, and annotations for one tool |
 | `TOOL_DESCRIPTORS` | frozen tuple of the six descriptors, in the exact order `tools/list` returns |
-| `server_instructions()` | return the verified `instructions` bytes for initialize |
+| `server_instructions()` | return the verified bytes decoded as strict UTF-8 for initialize |
 | `descriptor_for(name)` | exact lookup; unknown name is a programming error, not a runtime fallback |
 
 ## Behavior
 
 ### Instructions
 
-`server_instructions()` returns the packaged `guidance/agent-instructions.md` bytes verbatim, after
-verifying size and SHA-256 against the resource manifest. There is no composition, summarization,
-truncation, interpolation, or built-in literal fallback: the served string is the reviewed document
-or the server does not start. A server that cannot prove its instruction bytes must not hand an
-agent unverified text that shapes what that agent publishes.
+`server_instructions()` returns the packaged `guidance/agent-instructions.md` decoded as strict
+UTF-8 only after verifying size and SHA-256 against the resource manifest. Re-encoding the string
+as UTF-8 produces the exact verified bytes. There is no composition, summarization, truncation,
+interpolation, or built-in literal fallback: the served string is the reviewed document or the
+server does not start. A server that cannot prove its instruction bytes must not hand an agent
+unverified text that shapes what that agent publishes.
 
 The bytes are identical to what `mcp/resources.md` serves for the same logical name, and to what
 every harness installs.
@@ -73,6 +74,10 @@ what the re-grounding condition needs and all it may take from what `status` ret
 Descriptor text is static reviewed product text. It is never composed at runtime from user, task,
 provider, policy, or environment values, so no descriptor can leak state or vary between
 installations.
+
+Each descriptor retains the canonical input/output schema URI and exposes the corresponding
+verified local schema object for `tools/list`. Descriptor identity has one reviewed SHA-256 golden
+per tool and one ordered-set SHA-256 golden; drift fails module initialization.
 
 ### Honesty lint
 

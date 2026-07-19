@@ -14,6 +14,11 @@ Parameterized write schedules: one-byte, alternating short lengths, EINTR before
 readiness, reader paused then resumed, reader never reads, broken pipe at byte offsets, concurrent
 completed requests, and shutdown/cancellation while blocked.
 
+The focused implementation also drives partial EOF, injected read `EIO`, the 64-KiB read-call cap,
+zero-capacity second-frame blocking, Python-level cancellation during readiness wait, and SIGTERM
+while idle. Fault strings deliberately contain hostile paths and are asserted absent from both
+captured streams and the bounded `TransportFailure` representation.
+
 ## Behavior
 
 Inject descriptor behavior through test-only shims. Drive known responses with unique structural

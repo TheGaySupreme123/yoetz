@@ -170,8 +170,20 @@ def _minimal_environment(temp_root: Path, artifact_env: Mapping[str, str]) -> di
     return environment
 
 
-def spawn_installed(spec: ChildSpec, artifact_env: Mapping[str, str]) -> ChildHandle:
+def spawn_installed(
+    spec: ChildSpec,
+    artifact_env: Mapping[str, str],
+    *,
+    _inherited_fds: tuple[int, ...] = (),
+) -> ChildHandle:
     """Spawn one isolated binary child in a new owned process group."""
+
+    if type(_inherited_fds) is not tuple or any(
+        type(descriptor) is not int or descriptor < 3 for descriptor in _inherited_fds
+    ):
+        raise ValueError("child_inherited_descriptor_invalid")
+    if len(set(_inherited_fds)) != len(_inherited_fds):
+        raise ValueError("child_inherited_descriptor_invalid")
 
     temp_root = Path(tempfile.mkdtemp(prefix="yoetz-subprocess-"))
     temp_root.chmod(0o700)
@@ -192,6 +204,7 @@ def spawn_installed(spec: ChildSpec, artifact_env: Mapping[str, str]) -> ChildHa
         stderr=subprocess.PIPE,
         bufsize=0,
         close_fds=True,
+        pass_fds=_inherited_fds,
         start_new_session=True,
     )
     marker = {"pid": process.pid, "pgid": process.pid, "token": temp_root.name}

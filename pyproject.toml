@@ -63,3 +63,7 @@ venv = ".venv"
 [tool.pytest.ini_options]
 addopts = ["--strict-config", "--strict-markers"]
 testpaths = ["tests"]
+markers = [
+    "fault: destructive or abrupt-fault subprocess case; excluded from bounded PR runs",
+    "kill_matrix: full deterministic durability kill matrix; serial release/nightly profile only",
+]

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
 
 import pytest
 
@@ -16,6 +18,10 @@ from yoetz.service.lifecycle import (
 
 _INSTANCE_ID = "svc_00000000-0000-4000-8000-000000000001"
 _COMMITMENT = "sha256:" + "a" * 64
+
+
+class _EndpointRecoveryAuthority(Protocol):
+    def assert_held(self) -> None: ...
 
 
 @dataclass(slots=True)
@@ -47,6 +53,36 @@ def _lifecycle(clock: _Clock, **callbacks: object) -> ServiceLifecycle:
         instance_id=_INSTANCE_ID,
         **callbacks,  # pyright: ignore[reportArgumentType]
     )
+
+
+@pytest.mark.anyio
+async def test_endpoint_recovery_runs_under_singleton_before_publication(tmp_path: Path) -> None:
+    calls: list[str] = []
+    captured: list[_EndpointRecoveryAuthority] = []
+
+    async def recover(authority: _EndpointRecoveryAuthority) -> None:
+        authority.assert_held()
+        captured.append(authority)
+        calls.append("recover")
+
+    async def publish(_instance: object) -> None:
+        assert calls == ["recover"]
+        calls.append("publish")
+
+    lifecycle = _lifecycle(
+        _Clock(),
+        singleton_lock_path=tmp_path / "service.lock",
+        endpoint_recovery=recover,
+        endpoint_publisher=publish,
+    )
+    await lifecycle.acquire_singleton()
+    await lifecycle.publish_endpoint()
+    assert calls == ["recover", "publish"]
+
+    await lifecycle.transition(ServiceState.LOCKED)
+    await lifecycle.close()
+    with pytest.raises(LifecycleError, match="invalid_transition"):
+        captured[0].assert_held()
 
 
 @pytest.mark.anyio

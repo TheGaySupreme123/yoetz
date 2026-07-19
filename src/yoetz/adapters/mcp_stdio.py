@@ -150,13 +150,23 @@ def _transport_error_frame(reason: str) -> bytes:
     ).encode("ascii")
 
 
+def _read_fd(fd: int, maximum: int) -> bytes:
+    return os.read(fd, maximum)
+
+
+def _write_fd(fd: int, payload: bytes) -> int:
+    return os.write(fd, payload)
+
+
 async def _write_all(fd: int, payload: bytes) -> None:
     frame = payload + b"\n"
     offset = 0
     while offset < len(frame):
         try:
             await anyio.wait_writable(fd)
-            written = os.write(fd, frame[offset:])
+            written = _write_fd(fd, frame[offset:])
+        except InterruptedError:
+            continue
         except BrokenPipeError as exc:
             raise TransportFailure("broken_pipe") from exc
         except OSError as exc:
@@ -220,12 +230,14 @@ async def _reader(
                     return
                 try:
                     await anyio.wait_readable(fd)
-                    chunk = os.read(fd, min(_MAX_READ_CHUNK, remaining))
-                except OSError:
-                    return
+                    chunk = _read_fd(fd, min(_MAX_READ_CHUNK, remaining))
+                except InterruptedError:
+                    continue
+                except OSError as exc:
+                    raise TransportFailure("read_failed") from exc
                 if not chunk:
                     if buffer:
-                        return
+                        raise TransportFailure("partial_eof")
                     return
                 buffer.extend(chunk)
                 while True:
@@ -277,19 +289,27 @@ async def bounded_stdio_server(
     item_send, item_receive = anyio.create_memory_object_stream[_WriterItem](0)
     reader_items = item_send.clone()
     try:
-        async with anyio.create_task_group() as tasks:
-            tasks.start_soon(_writer, stdout_fd, max_json_bytes, item_receive)
-            tasks.start_soon(_outbound_forwarder, outbound_receive, item_send)
-            tasks.start_soon(_reader, stdin_fd, max_json_bytes, inbound_send, reader_items)
-            try:
-                yield inbound_receive, outbound_send
-            except BaseException:
-                tasks.cancel_scope.cancel()
-                raise
-            finally:
-                await inbound_receive.aclose()
-                await outbound_send.aclose()
+        try:
+            async with anyio.create_task_group() as tasks:
+                tasks.start_soon(_writer, stdout_fd, max_json_bytes, item_receive)
+                tasks.start_soon(_outbound_forwarder, outbound_receive, item_send)
+                tasks.start_soon(_reader, stdin_fd, max_json_bytes, inbound_send, reader_items)
+                try:
+                    yield inbound_receive, outbound_send
+                except BaseException:
+                    tasks.cancel_scope.cancel()
+                    raise
+                finally:
+                    await inbound_receive.aclose()
+                    await outbound_send.aclose()
+        except* TransportFailure:
+            # Raw I/O failures are adapter-private bounded shutdown reasons. The
+            # SDK sees stream closure, never an exception group or OS detail.
+            pass
     finally:
         sys.stdout = original_stdout
-        os.close(stdin_fd)
-        os.close(stdout_fd)
+        for descriptor in (stdin_fd, stdout_fd):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass

@@ -26,12 +26,14 @@ The future file is canonical JSON with an exact reviewed shape. Its top-level co
   contract;
 - `hooks_by_capability_profile` — exact same-key map whose values are tagged absent or the
   E-013-proven trigger-only descriptor; every v0.1 observation arm is absent;
-- `managed_members` — the exact managed files with logical member name, byte size, SHA-256, role,
-  and `origin` (`harness_owned` or `shared_guidance`);
+- `managed_members` — the exact managed files with logical member name, role, and `origin`
+  (`harness_owned` or `shared_guidance`). Every non-manifest member also has byte size and SHA-256.
+  The manifest's own entry is tagged `identity_status: "self_excluded"` and carries neither, so it
+  does not require a digest fixed point;
 - `member_digest` — SHA-256 over the canonical manifest content excluding the digest field.
 
 Managed members are limited to the installed Codex skill file, this compatibility manifest as a
-tracked resource, and the four shared guidance members installed under `references/`. Each guidance
+tracked self-excluded resource, and the four shared guidance members installed under `references/`. Each guidance
 member records `origin: shared_guidance` and the digest of the `guidance/<name>` resource it was
 copied from, so a reviewer can prove the installed bytes are the shared bytes and not a Codex
 variant. No local source checkout path, home directory, or repository-relative absolute path appears
