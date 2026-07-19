@@ -35,6 +35,7 @@ __all__ = [
     "ControlRequest",
     "ControlResult",
     "ServiceState",
+    "ServiceStopResult",
     "ServiceStatus",
 ]
 
@@ -94,6 +95,21 @@ class ServiceState(str, Enum):  # noqa: UP042 - exact wire enum base
     FAILED = "failed"
 
 
+@dataclass(frozen=True, slots=True)
+class ServiceStopResult:
+    schema_version: Literal["1.0.0"] = "1.0.0"
+    state: Literal["draining"] = "draining"
+    accepted: Literal[True] = True
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "1.0.0":
+            raise ValueError("service_stop_schema_version_invalid")
+        if self.state != "draining":
+            raise ValueError("service_stop_state_invalid")
+        if self.accepted is not True:
+            raise ValueError("service_stop_acceptance_invalid")
+
+
 type ControlCallBody = (
     StartRequest
     | PublishWorkRequest
@@ -112,6 +128,7 @@ type ControlSuccessBody = (
     | ReceiptResult
     | JsonObject
     | ServiceStatus
+    | ServiceStopResult
 )
 
 _WORKFLOW_REQUEST_TYPES: dict[ControlMethod, type[object]] = {
@@ -269,6 +286,8 @@ class ControlResult:
             expected_body_type = _WORKFLOW_RESULT_TYPES.get(self.method, JsonObject)
             if self.method in {ControlMethod.SERVICE_STATUS, ControlMethod.SERVICE_LOCK}:
                 expected_body_type = ServiceStatus
+            elif self.method is ControlMethod.SERVICE_STOP:
+                expected_body_type = ServiceStopResult
             if type(self.body) is not expected_body_type:
                 raise ValueError("control_method_body_mismatch")
 
@@ -360,6 +379,6 @@ class ControlClientPort(Protocol):
 
     async def lock(self) -> ServiceStatus: ...
 
-    async def stop(self) -> ServiceStatus: ...
+    async def stop(self) -> ServiceStopResult: ...
 
     async def close(self) -> None: ...

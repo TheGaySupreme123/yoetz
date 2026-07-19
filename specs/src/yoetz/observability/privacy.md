@@ -2,7 +2,7 @@
 
 **Wave:** C | **ADRs:** ADR-003, ADR-004, ADR-007, ADR-008, ADR-009 | **Imports (spec-tree):**
 `protocol/canonical.md`, `protocol/ids.md`, `ports/keys.md`, `config/models.md`,
-`domain/privacy.md` | **Imported by:**
+`domain/privacy.md`, `domain/values.md` | **Imported by:**
 `observability/logging.md`, storage/object adapters, import/review, CLI support-bundle paths, tests
 
 ## Purpose
@@ -25,13 +25,15 @@ that separation, not permission to put payloads there first.
   installation-local, non-reversible correlation label rendered `hmac-sha256:<64 lowercase hex>`.
 - `class Sensitivity(Enum)` — `public_structural`, `local_identifier`, `user_content`, `secret`,
   `key_material`.
-- `class ScanFinding` — frozen record with bounded `kind`, byte offset range, and severity; it never
-  retains the matched bytes.
+- `class ScanFinding` — frozen slots record with exact fields `kind: str`, `start_offset: int`,
+  `end_offset: int` (exclusive), and `severity: Sensitivity`; `kind` is exactly
+  `canary|credential_pattern|private_key_marker`, and it never retains the matched bytes.
 - `scan_for_sensitive_content(data: bytes, *, canaries: tuple[bytes, ...] = ()) -> tuple[ScanFinding, ...]`.
 - `assert_plaintext_safe(data: bytes, surface: str, *, canaries=()) -> None` — raises the typed
   internal `PrivacyFenceError` when a forbidden match is found.
 - `redact_diagnostic_value(name: str, value: object) -> JsonValue` — allowlist conversion for a
-  single diagnostic field.
+  single diagnostic field. `None` (a `JsonValue`) is the omission sentinel for an unknown or
+  forbidden name; an invalid value under a known name becomes the fixed string `"unavailable"`.
 - `redact_diagnostic_record(record: Mapping[str, object]) -> dict[str, JsonValue]` — drops unknown
   keys and sanitizes the allowlisted remainder.
 - `class DiagnosticRedactionProfile(Enum)` — `minimal`, `support`, `release_probe`.
@@ -98,6 +100,14 @@ and false-positive fixtures. Inputs larger than the configured diagnostic scan c
 overlapping chunks, with overlap at least the maximum pattern length; the scanner never truncates
 and then reports success.
 
+One call accepts at most 64 explicit canaries of 1..4096 bytes each. Inputs larger than 65,536
+bytes are scanned in 65,536-byte chunks with 4,096 bytes of overlap (the maximum accepted canary
+and detector-pattern length). A call returns at most 128 findings, sorted by
+`(start_offset, end_offset, kind)`. Exceeding the canary-input limits fails
+closed with `scanner_input_invalid`; reaching the finding cap still means the surface is unsafe and
+never turns into a successful scan. Exact overlap detects a marker across any producer or scanner
+chunk boundary; no prefix or suffix is discarded before a successful verdict.
+
 `assert_plaintext_safe` maps findings to bounded reasons such as `plaintext_canary_detected`,
 `credential_pattern_detected`, or `private_key_marker_detected`. It does not expose offset, source
 bytes, path, URL, command, or field value in its exception string.
@@ -147,6 +157,18 @@ Before finalization, the exact manifest bytes and every plaintext member pass
 `assert_plaintext_safe`. Encrypted user objects are never copied into a generic support bundle.
 The manifest records its redaction profile and schema version so support cannot infer omitted data.
 
+The closed v0.1 manifest-field registry is exactly `schema_version`, `redaction_profile`,
+`package_version`, `protocol_version`, `control_protocol_version`, `engine_version`,
+`policy_version`, `projection_version`, `privacy_policy_schema_version`,
+`egress_receipt_schema_version`, `platform_identity`, `runtime_identity`, `sqlite_version`,
+`sqlite_source_id_hash`, `sqlite_compile_options_ok`, `startup_check_outcome`,
+`startup_reason_code`, `operation_count`, `duration_bucket_ms`, `terminal_outcome_count`,
+`session_id_hash`, and `capability_probe_id`. The builder always supplies
+`schema_version="yoetz-diagnostic-manifest/1"` and the selected `redaction_profile`. `minimal`
+omits both session and capability-probe identity; `support` may include only the hashed session
+identity; `release_probe` may include only the bounded capability-probe identity. Unknown inputs
+are dropped before canonical encoding and the final canonical bytes pass the plaintext fence.
+
 ### Pre-persistence hooks
 
 Callers use the scanner at plaintext surfaces that are supposed to be structural: structured log
@@ -174,6 +196,8 @@ complete sweep.
 - False positives are handled by narrowing/versioning the detector and fixtures, never by a
   call-site `ignore=True` bypass.
 - Redacted output must itself be rescanned; replacement strings are fixed ASCII constants.
+- An arbitrary or sensitive `surface` label on `PrivacyFenceError` is replaced by the fixed
+  `unsafe_surface` token; paths and filenames never become exception text.
 - This module does not promise zeroization of immutable Python bytes. Key-owning adapters minimize
   lifetime and the threat model states that live-process memory is out of scope.
 

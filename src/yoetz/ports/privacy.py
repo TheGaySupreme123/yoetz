@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -39,6 +40,8 @@ __all__ = [
     "HumanAuthorityCapability",
     "HumanPolicyDecision",
     "HumanPrivacyControlPort",
+    "LocalDisclosureReceiptView",
+    "NetworkEgressReceiptView",
     "OutboundGatewayPort",
     "PendingHumanDecision",
     "PolicyTransitionProposal",
@@ -73,6 +76,10 @@ _AUDIT_STATUSES = frozenset(
         "expired",
         "quarantined",
     }
+)
+_CURSOR = re.compile(
+    r"^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-][AQgw]|[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048])?$",
+    re.ASCII,
 )
 
 
@@ -335,28 +342,67 @@ class PrivacyReceiptQuery:
         _positive(self.limit)
         if self.limit > 100:
             raise _invalid()
-        if self.cursor is not None and (type(self.cursor) is not str or not self.cursor):
+        if self.cursor is not None and (
+            type(self.cursor) is not str
+            or not 1 <= len(self.cursor) <= 1024
+            or _CURSOR.fullmatch(self.cursor) is None
+        ):
             raise _invalid()
 
 
-type PrivacyReceiptView = EgressReceipt | LocalDisclosureReceipt
+@dataclass(frozen=True, slots=True)
+class NetworkEgressReceiptView:
+    kind: Literal["network_egress"]
+    receipt: EgressReceipt
+
+    def __post_init__(self) -> None:
+        if self.kind != "network_egress" or type(self.receipt) is not EgressReceipt:
+            raise _invalid()
+
+
+@dataclass(frozen=True, slots=True)
+class LocalDisclosureReceiptView:
+    kind: Literal["local_disclosure"]
+    receipt: LocalDisclosureReceipt
+
+    def __post_init__(self) -> None:
+        if self.kind != "local_disclosure" or type(self.receipt) is not LocalDisclosureReceipt:
+            raise _invalid()
+
+
+type PrivacyReceiptView = NetworkEgressReceiptView | LocalDisclosureReceiptView
 
 
 @dataclass(frozen=True, slots=True)
 class PrivacyReceiptPage:
+    snapshot_generation: int
     receipts: tuple[PrivacyReceiptView, ...]
     next_cursor: str | None
 
     def __post_init__(self) -> None:
+        _positive(self.snapshot_generation)
         if type(self.receipts) is not tuple or len(self.receipts) > 100:
             raise _invalid()
         if any(
-            type(receipt) not in {EgressReceipt, LocalDisclosureReceipt}
+            type(receipt) not in {NetworkEgressReceiptView, LocalDisclosureReceiptView}
             for receipt in self.receipts
         ):
             raise _invalid()
+        if len(set(self.receipts)) != len(self.receipts):
+            raise _invalid()
+        expected = tuple(
+            sorted(
+                self.receipts,
+                key=lambda view: (view.receipt.finished_at, view.receipt.receipt_id),
+                reverse=True,
+            )
+        )
+        if self.receipts != expected:
+            raise _invalid()
         if self.next_cursor is not None and (
-            type(self.next_cursor) is not str or not self.next_cursor
+            type(self.next_cursor) is not str
+            or not 1 <= len(self.next_cursor) <= 1024
+            or _CURSOR.fullmatch(self.next_cursor) is None
         ):
             raise _invalid()
 

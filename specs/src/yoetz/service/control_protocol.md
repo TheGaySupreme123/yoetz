@@ -17,7 +17,16 @@ calling Python objects directly or inventing a secret-bearing/private service me
   allocation guard needed for canonical-base64 transport of the importer's 4 MiB exact source.
 - `MAX_ORDINARY_CONTROL_FRAME_BYTES = 1_048_576`; every frame other than the exact
   `import_codex_jsonl` call branch must remain at or below this stricter cap.
-- `encode_control_frame(value) -> bytes` and `decode_control_frame(frame: bytes) -> ControlFrame`.
+- `encode_control_frame(value) -> bytes` and `decode_control_frame(frame: bytes) -> ControlFrame`,
+  where `ControlFrame` is one deeply frozen canonical JSON object validated against exactly one of
+  the five service-control schemas.
+- `async read_control_frame(stream) -> ControlFrame` and
+  `async write_control_frame(stream, value) -> None`; `ControlStream` exposes only the authenticated
+  peer handle, bounded `receive(max_bytes)`, backpressure-aware `send_all`, and `aclose`.
+- `parse_control_request(ControlFrame) -> ControlRequest` and
+  `parse_control_result(ControlFrame) -> ControlResult`. Workflow bodies become the existing exact
+  request/result models, service status/lock results become `ServiceStatus`, and every other closed
+  support body remains a deeply frozen `JsonObject`.
 - `async client_handshake(stream, client_kind, client_version) -> ControlSession`.
 - `async server_handshake(stream, peer_identity, service_status) -> ControlSession`.
 - `validate_request(ControlRequest)`, `validate_result(ControlResult)`, and
@@ -25,8 +34,15 @@ calling Python objects directly or inventing a secret-bearing/private service me
   from the control request/result artifacts (six offline operation `$ref`s plus nineteen inline
   support `$defs`) and has no open-dict/default registry entry.
 - `@dataclass(frozen=True, slots=True) class ControlSession` — negotiated version, client kind,
-  service instance/generation, and authenticated peer identity handle; nonserializable.
+  service instance/generation, exact allowed methods, connection nonce, and authenticated peer
+  identity handle; nonserializable. `admit(request)` enforces instance/generation, client-kind
+  authority, unique RPC IDs, and the 32-active-request cap; `correlate(result)` resolves only the
+  exact RPC/method/instance/generation tuple; `close()` drops all pending correlation state.
+- `BoundedControlQueue(capacity)` accepts only capacities `1..32` and never maps zero to an
+  unbounded runtime queue.
 - `class ControlProtocolError(Exception)` carrying only a bounded control reason.
+- `public_error_code_for_control_reason(reason) -> PublicErrorCode` maps wire-only generation and
+  projection failures to the existing public `SERVICE_UNAVAILABLE` code.
 
 The wire schemas are the five exact `service/*.schema.json` files named in `ports/control.md`.
 The confidential secret-ingress protocol is deliberately not implemented or imported here.

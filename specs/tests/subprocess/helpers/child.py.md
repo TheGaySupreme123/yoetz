@@ -11,9 +11,13 @@ HOME/secrets, deadlock on pipes, or kill an unrelated process.
 
 ## Public surface
 
-- `ChildSpec`: immutable executable/argv/stdin/env-overlay/cwd/limits description.
-- `ChildHandle`: process ID/group, stdin/stdout/stderr descriptors, start time, temp-root marker.
-- `ChildResult`: exact stdout/stderr bytes and digests, exit/signal, duration, limit verdict.
+- `ChildLimits`: immutable exact `wall_time_seconds: float` and `max_output_bytes: int` caps.
+- `ChildSpec`: immutable exact `executable: Path`, `argv: tuple[str, ...]`,
+  `env_overlay: Mapping[str, str]`, `cwd: Path | None`, and `limits: ChildLimits` description.
+- `ChildHandle`: mutable owner-only process handle plus exact `process_id`, `process_group`,
+  `start_monotonic`, `temp_root`, and `limits`; it is never serialized into child input.
+- `ChildResult`: exact stdout/stderr bytes and SHA-256 digests, exit/signal, duration,
+  `passed|wall_time_exceeded|output_limit_exceeded` verdict, process group, and temp root.
 - `spawn_installed(spec, artifact_env) -> ChildHandle`.
 - `communicate_bounded(handle, input_bytes=b"") -> ChildResult`.
 - `signal_child(handle, signal)`, `close_stdin(handle)`, `terminate_owned_group(handle)`.
@@ -21,8 +25,11 @@ HOME/secrets, deadlock on pipes, or kill an unrelated process.
 
 ## Behavior
 
-Resolve `yoetz` or the selected Python from the isolated artifact environment and reject a path
-inside the source checkout. Construct a minimal allowlisted environment: isolated HOME/XDG/Yoetz
+Resolve `yoetz` or the selected Python from the isolated artifact environment and, when the
+installed-artifact gate supplies `YOETZ_CHECKOUT_ROOT`, reject an executable path inside that
+checkout before spawn. Focused pre-packaging source-tree tests may omit that marker; they remain
+process-isolated but cannot earn the installed-artifact claim, which is frozen only by the Wave F
+wheel/sdist gate. Construct a minimal allowlisted environment: isolated HOME/XDG/Yoetz
 data/temp, UTF-8/C locale, UTC, fixed hash seed, explicit test marker, and only named test variables.
 Remove provider/package credentials, Python path/startup hooks, proxy variables, and ambient config.
 

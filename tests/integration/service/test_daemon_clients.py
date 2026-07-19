@@ -1,0 +1,247 @@
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from datetime import UTC, datetime
+
+import pytest
+
+from yoetz.domain.values import JsonObject
+from yoetz.ports.control import (
+    ControlCallRequest,
+    ControlClientKind,
+    ControlError,
+    ControlMethod,
+    ServiceState,
+)
+from yoetz.protocol.ids import IdKind, new_id
+from yoetz.protocol.models import StartRequest, StartResult
+from yoetz.service.daemon import ServiceComposition, ServiceDaemon
+from yoetz.service.lifecycle import ServiceLifecycle
+from yoetz.service.vault import VaultMode
+
+_INSTANCE_ID = "svc_00000000-0000-4000-8000-000000000001"
+_UUID = "00000000-0000-4000-8000-000000000002"
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+class _Clock:
+    def now_utc(self) -> datetime:
+        return datetime(2026, 7, 19, tzinfo=UTC)
+
+    def monotonic_seconds(self) -> float:
+        return 10.0
+
+
+class _GenerationStore:
+    def advance(self, instance_id: str) -> int:
+        assert instance_id == _INSTANCE_ID
+        return 7
+
+
+class _Listener:
+    def __init__(self) -> None:
+        self.closed = False
+        self._closed = asyncio.Event()
+
+    async def accept(self) -> object:
+        await self._closed.wait()
+        raise RuntimeError("closed")
+
+    async def aclose(self) -> None:
+        self.closed = True
+        self._closed.set()
+
+
+@dataclass(frozen=True, slots=True)
+class _Capability:
+    active: bool = True
+
+
+class _Monitor:
+    capability = _Capability()
+
+    def __init__(self) -> None:
+        self.callback = None
+        self.closed = False
+
+    async def start(self, callback: object) -> None:
+        self.callback = callback
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _Vault:
+    mode = VaultMode.OS_KEYRING
+    generation = 3
+    ready = True
+
+    def __init__(self) -> None:
+        self.lock_count = 0
+        self.close_count = 0
+
+    async def lock(self) -> None:
+        self.lock_count += 1
+        self.ready = False
+
+    async def close(self) -> None:
+        self.close_count += 1
+        self.ready = False
+
+
+class _Application:
+    def __init__(self) -> None:
+        self.start_calls = 0
+        self.projections: list[ControlClientKind] = []
+        self.close_count = 0
+
+    async def start(self, request: object) -> StartResult:
+        assert isinstance(request, StartRequest)
+        self.start_calls += 1
+        await asyncio.sleep(0)
+        return StartResult.model_validate(
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": request.request_id,
+                "ok": False,
+                "error": {
+                    "code": "INVALID_REQUEST",
+                    "message": "The request is invalid.",
+                    "retryable": False,
+                    "correlation_id": f"err_{_UUID}",
+                },
+            }
+        )
+
+    async def review(self, request: object) -> JsonObject:
+        assert isinstance(request, JsonObject)
+        return JsonObject({"accepted": True})
+
+    async def project_result_for_client(
+        self, client_kind: ControlClientKind, method: ControlMethod, result: object
+    ) -> object:
+        assert method in {ControlMethod.START, ControlMethod.REVIEW}
+        self.projections.append(client_kind)
+        return result
+
+    async def close(self) -> None:
+        self.close_count += 1
+
+
+def _start_body() -> StartRequest:
+    return StartRequest.model_validate(
+        {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "request_id": f"req_{_UUID}",
+            "actor": {"actor_id": "harness:test", "actor_type": "harness"},
+            "client": {
+                "kind": "test_client",
+                "version": "0.1.0",
+                "integration": "local_cli",
+            },
+            "mode": "create",
+            "task_title": "shared service",
+            "requested_view": "compact",
+        }
+    )
+
+
+def _request(daemon: ServiceDaemon, method: ControlMethod, body: object) -> ControlCallRequest:
+    instance = daemon.composition.lifecycle.instance
+    return ControlCallRequest(
+        kind="call",
+        protocol_version="1.0",
+        rpc_id=new_id(IdKind.CONTROL_RPC),
+        service_instance_id=instance.instance_id,
+        service_generation=str(instance.generation),
+        method=method,
+        body=body,  # pyright: ignore[reportArgumentType]
+    )
+
+
+def _daemon() -> tuple[ServiceDaemon, _Application, _Vault, _Listener]:
+    application = _Application()
+    vault = _Vault()
+    listener = _Listener()
+    lifecycle = ServiceLifecycle(
+        _Clock(),
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "1" * 64,
+        instance_id=_INSTANCE_ID,
+    )
+    composition = ServiceComposition(
+        lifecycle=lifecycle,
+        control_listener=listener,  # pyright: ignore[reportArgumentType]
+        secret_ingress_listener=None,
+        human_control_listener=None,
+        human_control_service=None,
+        session_monitor=_Monitor(),  # pyright: ignore[reportArgumentType]
+        vault=vault,
+        application=application,
+    )
+    return ServiceDaemon(_composition=composition), application, vault, listener
+
+
+@pytest.mark.anyio
+async def test_cli_mcp_and_ui_share_one_ready_application_and_projection() -> None:
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    body = _start_body()
+    kinds = (ControlClientKind.CLI, ControlClientKind.MCP_BRIDGE, ControlClientKind.UI)
+    results = await asyncio.gather(
+        *(daemon.dispatch(kind, _request(daemon, ControlMethod.START, body)) for kind in kinds)
+    )
+    assert all(result.outcome == "ok" for result in results)
+    assert application.start_calls == 3
+    assert application.projections == list(kinds)
+    assert daemon.status().state is ServiceState.READY
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_client_kind_and_state_admission_fail_closed() -> None:
+    daemon, application, vault, _listener = _daemon()
+    await daemon.start()
+    forbidden = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.SERVICE_STATUS, JsonObject({})),
+    )
+    assert forbidden.outcome == "error"
+    assert isinstance(forbidden.body, ControlError)
+    assert forbidden.body.reason == "method_forbidden"
+
+    locked = await daemon.dispatch(
+        ControlClientKind.CLI,
+        _request(daemon, ControlMethod.SERVICE_LOCK, JsonObject({})),
+    )
+    assert locked.outcome == "ok"
+    assert daemon.status().state is ServiceState.LOCKED
+    assert application.close_count == 1
+    assert vault.lock_count >= 1
+
+    rejected = await daemon.dispatch(
+        ControlClientKind.UI,
+        _request(daemon, ControlMethod.START, _start_body()),
+    )
+    assert rejected.outcome == "error"
+    assert isinstance(rejected.body, ControlError)
+    assert rejected.body.reason == "vault_locked"
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_shutdown_is_idempotent_and_closes_owned_listener() -> None:
+    daemon, application, vault, listener = _daemon()
+    await daemon.start()
+    await daemon.stop()
+    await daemon.stop()
+    assert listener.closed
+    assert application.close_count == 1
+    assert vault.close_count == 1

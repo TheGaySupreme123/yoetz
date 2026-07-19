@@ -1,0 +1,768 @@
+"""Frozen ordinary local-service control framing and handshake protocol."""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import binascii
+import secrets
+import struct
+from collections.abc import Buffer, Mapping
+from dataclasses import dataclass, field, fields, is_dataclass
+from enum import Enum
+from typing import Final, Literal, Never, Protocol, cast
+
+from pydantic import BaseModel
+
+from yoetz.domain.values import JsonObject, freeze_json
+from yoetz.ports.control import (
+    ControlCallRequest,
+    ControlCancelRequest,
+    ControlClientKind,
+    ControlError,
+    ControlMethod,
+    ControlRequest,
+    ControlResult,
+    ServiceState,
+    ServiceStatus,
+    ServiceStopResult,
+)
+from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
+from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
+from yoetz.protocol.models import (
+    CheckRequest,
+    CheckResult,
+    PublishWorkRequest,
+    PublishWorkResult,
+    ReceiptRequest,
+    ReceiptResult,
+    RespondRequest,
+    RespondResult,
+    StartRequest,
+    StartResult,
+    StatusRequest,
+    StatusResult,
+)
+from yoetz.protocol.schemas import (
+    load_schema_catalog,
+    schema_document_for,
+    validate_schema_instance,
+)
+
+__all__ = [
+    "CONTROL_PROTOCOL_VERSION",
+    "MAX_ACTIVE_REQUESTS_PER_SESSION",
+    "MAX_CONTROL_FRAME_BYTES",
+    "MAX_ORDINARY_CONTROL_FRAME_BYTES",
+    "BoundedControlQueue",
+    "ControlFrame",
+    "ControlProtocolError",
+    "ControlSession",
+    "ControlStream",
+    "client_handshake",
+    "decode_control_frame",
+    "encode_control_frame",
+    "parse_control_request",
+    "parse_control_result",
+    "public_error_code_for_control_reason",
+    "read_control_frame",
+    "schema_for_method",
+    "server_handshake",
+    "validate_request",
+    "validate_result",
+    "write_control_frame",
+]
+
+CONTROL_PROTOCOL_VERSION: Final = "1.0"
+MAX_CONTROL_FRAME_BYTES: Final = 6_291_456
+MAX_ORDINARY_CONTROL_FRAME_BYTES: Final = 1_048_576
+MAX_ACTIVE_REQUESTS_PER_SESSION: Final = 32
+
+_SCHEMA_VERSION: Final = "1.0.0"
+_MAX_IMPORT_SOURCE_BYTES: Final = 4 * 1024 * 1024
+_ERROR_REASONS: Final = frozenset(
+    {
+        "correlation_mismatch",
+        "duplicate_rpc_id",
+        "frame_invalid",
+        "frame_too_large",
+        "manifest_mismatch",
+        "method_forbidden",
+        "peer_untrusted",
+        "protocol_mismatch",
+        "request_limit_exceeded",
+        "service_generation_changed",
+        "session_closed",
+    }
+)
+_WORKFLOW_METHODS: Final = tuple(
+    sorted(
+        (
+            ControlMethod.START,
+            ControlMethod.PUBLISH_WORK,
+            ControlMethod.CHECK,
+            ControlMethod.RESPOND,
+            ControlMethod.STATUS,
+            ControlMethod.RECEIPT,
+        ),
+        key=lambda value: value.value.encode("ascii"),
+    )
+)
+_ALL_METHODS: Final = tuple(sorted(ControlMethod, key=lambda value: value.value.encode("ascii")))
+_WORKFLOW_REQUEST_MODELS: Final[Mapping[ControlMethod, type[BaseModel]]] = {
+    ControlMethod.START: StartRequest,
+    ControlMethod.PUBLISH_WORK: PublishWorkRequest,
+    ControlMethod.CHECK: CheckRequest,
+    ControlMethod.RESPOND: RespondRequest,
+    ControlMethod.STATUS: StatusRequest,
+    ControlMethod.RECEIPT: ReceiptRequest,
+}
+_WORKFLOW_RESULT_MODELS: Final[Mapping[ControlMethod, type[BaseModel]]] = {
+    ControlMethod.START: StartResult,
+    ControlMethod.PUBLISH_WORK: PublishWorkResult,
+    ControlMethod.CHECK: CheckResult,
+    ControlMethod.RESPOND: RespondResult,
+    ControlMethod.STATUS: StatusResult,
+    ControlMethod.RECEIPT: ReceiptResult,
+}
+
+type ControlFrame = JsonObject
+type SchemaDirection = Literal["request", "result"]
+
+
+class ControlStream(Protocol):
+    """Authenticated bounded byte stream used by the ordinary protocol."""
+
+    @property
+    def peer_identity(self) -> object: ...
+
+    async def receive(self, max_bytes: int) -> bytes: ...
+
+    async def send_all(self, data: Buffer) -> None: ...
+
+    async def aclose(self) -> None: ...
+
+
+class ControlProtocolError(Exception):
+    """A fixed, sanitized control-protocol failure."""
+
+    __slots__ = ("reason",)
+
+    reason: str
+
+    def __init__(self, reason: str) -> None:
+        if type(reason) is not str or reason not in _ERROR_REASONS:
+            raise ValueError("control_protocol_reason_invalid")
+        self.reason = reason
+        super().__init__(reason)
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingCall:
+    method: ControlMethod
+
+
+def _new_pending_calls() -> dict[str, _PendingCall]:
+    return {}
+
+
+@dataclass(frozen=True, slots=True)
+class ControlSession:
+    """Peer-bound negotiated session with bounded request correlation state."""
+
+    protocol_version: Literal["1.0"]
+    client_kind: ControlClientKind
+    service_instance_id: str
+    service_generation: str
+    allowed_methods: tuple[ControlMethod, ...]
+    peer_identity: object = field(repr=False, compare=False)
+    connection_nonce: str = field(repr=False, compare=False)
+    _active: dict[str, _PendingCall] = field(
+        default_factory=_new_pending_calls, init=False, repr=False, compare=False
+    )
+    _closed: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.protocol_version != CONTROL_PROTOCOL_VERSION:
+            raise ValueError("control_protocol_version_invalid")
+        if type(self.client_kind) is not ControlClientKind:
+            raise TypeError("control_client_kind_invalid")
+        if type(self.allowed_methods) is not tuple or not self.allowed_methods:
+            raise ValueError("control_allowed_methods_invalid")
+        expected = tuple(
+            sorted(set(self.allowed_methods), key=lambda value: value.value.encode("ascii"))
+        )
+        if self.allowed_methods != expected:
+            raise ValueError("control_allowed_methods_invalid")
+        if self.client_kind is ControlClientKind.MCP_BRIDGE:
+            if self.allowed_methods != _WORKFLOW_METHODS:
+                raise ValueError("control_allowed_methods_invalid")
+        elif self.allowed_methods != _ALL_METHODS:
+            raise ValueError("control_allowed_methods_invalid")
+        if (
+            type(self.connection_nonce) is not str
+            or len(self.connection_nonce) != 64
+            or any(character not in "0123456789abcdef" for character in self.connection_nonce)
+        ):
+            raise ValueError("connection_nonce_invalid")
+        if self.peer_identity is None or isinstance(
+            self.peer_identity, (str, bytes, bytearray, int, float, bool)
+        ):
+            raise TypeError("peer_identity_invalid")
+
+    @property
+    def active_request_count(self) -> int:
+        return len(self._active)
+
+    def admit(self, request: ControlRequest) -> None:
+        """Admit one call under the per-session authority and 32-call cap."""
+
+        if self._closed:
+            raise ControlProtocolError("session_closed")
+        validate_request(request)
+        if request.service_instance_id != self.service_instance_id:
+            raise ControlProtocolError("service_generation_changed")
+        if request.service_generation != self.service_generation:
+            raise ControlProtocolError("service_generation_changed")
+        if isinstance(request, ControlCancelRequest):
+            if request.rpc_id in self._active:
+                raise ControlProtocolError("duplicate_rpc_id")
+            if request.target_rpc_id not in self._active:
+                raise ControlProtocolError("correlation_mismatch")
+            return
+        if request.method not in self.allowed_methods:
+            raise ControlProtocolError("method_forbidden")
+        if request.rpc_id in self._active:
+            raise ControlProtocolError("duplicate_rpc_id")
+        if len(self._active) >= MAX_ACTIVE_REQUESTS_PER_SESSION:
+            raise ControlProtocolError("request_limit_exceeded")
+        self._active[request.rpc_id] = _PendingCall(request.method)
+
+    def correlate(self, result: ControlResult) -> None:
+        """Resolve exactly one active call by RPC ID, method, instance, and generation."""
+
+        if self._closed:
+            raise ControlProtocolError("session_closed")
+        validate_result(result)
+        pending = self._active.get(result.rpc_id)
+        if (
+            pending is None
+            or pending.method is not result.method
+            or result.service_instance_id != self.service_instance_id
+            or result.service_generation != self.service_generation
+        ):
+            raise ControlProtocolError("correlation_mismatch")
+        del self._active[result.rpc_id]
+
+    def close(self) -> None:
+        self._active.clear()
+        object.__setattr__(self, "_closed", True)
+
+    def __reduce__(self) -> Never:
+        raise TypeError("control_session_not_serializable")
+
+
+class BoundedControlQueue:
+    """A queue whose capacity can never silently become unbounded."""
+
+    __slots__ = ("_queue", "capacity")
+
+    capacity: int
+    _queue: asyncio.Queue[ControlFrame]
+
+    def __init__(self, capacity: int = MAX_ACTIVE_REQUESTS_PER_SESSION) -> None:
+        if type(capacity) is not int or not 1 <= capacity <= MAX_ACTIVE_REQUESTS_PER_SESSION:
+            raise ValueError("control_queue_capacity_invalid")
+        self.capacity = capacity
+        self._queue = asyncio.Queue(maxsize=capacity)
+
+    async def put(self, frame: ControlFrame) -> None:
+        if type(frame) is not JsonObject:
+            raise TypeError("control_frame_invalid")
+        await self._queue.put(frame)
+
+    async def get(self) -> ControlFrame:
+        return await self._queue.get()
+
+    @property
+    def size(self) -> int:
+        return self._queue.qsize()
+
+
+def _fail(reason: str) -> Never:
+    raise ControlProtocolError(reason)
+
+
+def _plain_wire_value(value: object) -> JsonValue:
+    if isinstance(value, Enum):
+        return cast(JsonValue, value.value)
+    if isinstance(value, ControlError):
+        return {"code": value.reason, "retryable": value.retryable}
+    if isinstance(value, BaseModel):
+        return cast(
+            JsonValue,
+            value.model_dump(mode="json", by_alias=True, exclude_none=True),
+        )
+    if is_dataclass(value) and not isinstance(value, type):
+        converted: dict[str, JsonValue] = {}
+        for item in fields(value):
+            if item.name.startswith("_"):
+                continue
+            member = getattr(value, item.name)
+            if member is None:
+                continue
+            converted[item.name] = _plain_wire_value(member)
+        return converted
+    if isinstance(value, Mapping):
+        source = cast(Mapping[object, object], value)
+        converted_mapping: dict[str, JsonValue] = {}
+        for key, member in source.items():
+            if type(key) is not str:
+                raise TypeError("control_object_key_invalid")
+            converted_mapping[key] = _plain_wire_value(member)
+        return converted_mapping
+    if type(value) in {list, tuple}:
+        return [
+            _plain_wire_value(member) for member in cast(list[object] | tuple[object, ...], value)
+        ]
+    return cast(JsonValue, value)
+
+
+def _validated_wire(value: object, schema_name: str) -> JsonObject:
+    try:
+        wire = _plain_wire_value(value)
+        if not isinstance(wire, Mapping):
+            _fail("frame_invalid")
+        validate_schema_instance(schema_name, _SCHEMA_VERSION, wire)
+        frozen = freeze_json(wire)
+        if type(frozen) is not JsonObject:
+            _fail("frame_invalid")
+        return frozen
+    except ControlProtocolError:
+        raise
+    except ProtocolValueError, TypeError, ValueError:
+        raise ControlProtocolError("frame_invalid") from None
+
+
+def _schema_name_for_frame(value: Mapping[str, JsonValue]) -> str:
+    keys = frozenset(value)
+    if "connection_nonce" in keys:
+        return "control-hello"
+    if "allowed_methods" in keys and "status" in keys:
+        return "control-hello-result"
+    if "kind" in keys:
+        return "control-request"
+    if "outcome" in keys:
+        return "control-result"
+    if "state" in keys and "vault_mode" in keys:
+        return "service-status"
+    _fail("frame_invalid")
+
+
+def _is_bounded_import(frame: JsonObject) -> bool:
+    if frame.get("kind") != "call" or frame.get("method") != "import_codex_jsonl":
+        return False
+    body = frame.get("body")
+    if type(body) is not JsonObject:
+        return False
+    encoded = body.get("source_bytes_base64")
+    if type(encoded) is not str:
+        return False
+    try:
+        decoded = base64.b64decode(encoded, validate=True)
+    except ValueError, binascii.Error:
+        return False
+    return len(decoded) <= _MAX_IMPORT_SOURCE_BYTES
+
+
+def _validate_frame_size(payload: bytes, frame: JsonObject) -> None:
+    if len(payload) > MAX_CONTROL_FRAME_BYTES:
+        _fail("frame_too_large")
+    if len(payload) > MAX_ORDINARY_CONTROL_FRAME_BYTES and not _is_bounded_import(frame):
+        _fail("frame_too_large")
+
+
+def encode_control_frame(value: object) -> bytes:
+    """Validate and encode one length-prefixed canonical control frame."""
+
+    try:
+        wire = _plain_wire_value(value)
+        if not isinstance(wire, Mapping):
+            _fail("frame_invalid")
+        schema_name = _schema_name_for_frame(wire)
+        frame = _validated_wire(wire, schema_name)
+        payload = canonical_encode(frame)
+        _validate_frame_size(payload, frame)
+        return struct.pack(">I", len(payload)) + payload
+    except ControlProtocolError:
+        raise
+    except ProtocolValueError, TypeError, ValueError, struct.error:
+        raise ControlProtocolError("frame_invalid") from None
+
+
+def decode_control_frame(frame: bytes) -> ControlFrame:
+    """Decode exactly one complete length-prefixed control frame."""
+
+    if type(frame) is not bytes:
+        raise TypeError("control_frame_bytes_required")
+    if len(frame) < 4:
+        _fail("frame_invalid")
+    declared = struct.unpack(">I", frame[:4])[0]
+    if declared == 0:
+        _fail("frame_invalid")
+    if declared > MAX_CONTROL_FRAME_BYTES:
+        _fail("frame_too_large")
+    if len(frame) != declared + 4:
+        _fail("frame_invalid")
+    payload = frame[4:]
+    try:
+        parsed = strict_json_parse(payload)
+        if canonical_encode(parsed) != payload or not isinstance(parsed, Mapping):
+            _fail("frame_invalid")
+        schema_name = _schema_name_for_frame(parsed)
+        value = _validated_wire(parsed, schema_name)
+        _validate_frame_size(payload, value)
+        return value
+    except ControlProtocolError:
+        raise
+    except ProtocolValueError, TypeError, ValueError:
+        raise ControlProtocolError("frame_invalid") from None
+
+
+async def _read_exact(stream: ControlStream, byte_count: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = byte_count
+    while remaining:
+        try:
+            chunk = await stream.receive(remaining)
+        except BaseException as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise ControlProtocolError("frame_invalid") from None
+        if type(chunk) is not bytes or not chunk or len(chunk) > remaining:
+            _fail("frame_invalid")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+async def read_control_frame(stream: ControlStream) -> ControlFrame:
+    """Read one frame without consuming bytes belonging to its successor."""
+
+    prefix = await _read_exact(stream, 4)
+    declared = struct.unpack(">I", prefix)[0]
+    if declared == 0:
+        _fail("frame_invalid")
+    if declared > MAX_CONTROL_FRAME_BYTES:
+        _fail("frame_too_large")
+    payload = await _read_exact(stream, declared)
+    return decode_control_frame(prefix + payload)
+
+
+async def write_control_frame(stream: ControlStream, value: object) -> None:
+    """Write one validated frame using the stream's backpressure-aware send."""
+
+    encoded = encode_control_frame(value)
+    try:
+        await stream.send_all(encoded)
+    except BaseException as exc:
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        raise ControlProtocolError("frame_invalid") from None
+
+
+def schema_for_method(method: ControlMethod, direction: SchemaDirection) -> Mapping[str, JsonValue]:
+    """Return the one frozen reviewed schema branch for a method and direction."""
+
+    if type(method) is not ControlMethod:
+        raise TypeError("control_method_invalid")
+    if direction not in {"request", "result"}:
+        raise ValueError("control_schema_direction_invalid")
+    schema_name = "control-request" if direction == "request" else "control-result"
+    document = schema_document_for(schema_name, _SCHEMA_VERSION)
+    branches = document.json_schema.get("oneOf")
+    if not isinstance(branches, (list, tuple)):
+        _fail("frame_invalid")
+    matches: list[Mapping[str, JsonValue]] = []
+    for branch in branches:
+        if not isinstance(branch, Mapping):
+            continue
+        properties = branch.get("properties")
+        if not isinstance(properties, Mapping):
+            continue
+        method_schema = properties.get("method")
+        if not isinstance(method_schema, Mapping) or method_schema.get("const") != method.value:
+            continue
+        if direction == "result":
+            outcome = properties.get("outcome")
+            if not isinstance(outcome, Mapping) or outcome.get("const") != "ok":
+                continue
+        matches.append(cast(Mapping[str, JsonValue], branch))
+    if len(matches) != 1:
+        _fail("frame_invalid")
+    return matches[0]
+
+
+def validate_request(request: ControlRequest) -> None:
+    """Validate a typed request against the exact closed request envelope."""
+
+    _validated_wire(request, "control-request")
+
+
+def validate_result(result: ControlResult) -> None:
+    """Validate a typed result against the exact matching result envelope."""
+
+    if type(result) is not ControlResult:
+        raise TypeError("control_result_invalid")
+    _validated_wire(result, "control-result")
+
+
+def _service_status_from_wire(value: object) -> ServiceStatus:
+    if not isinstance(value, Mapping):
+        _fail("frame_invalid")
+    source = cast(Mapping[str, object], value)
+    try:
+        return ServiceStatus(
+            protocol_version=cast(Literal["1.0"], source["protocol_version"]),
+            service_version=cast(str, source["service_version"]),
+            service_instance_id=cast(str, source["service_instance_id"]),
+            service_generation=cast(str, source["service_generation"]),
+            state=ServiceState(cast(str, source["state"])),
+            state_reason=cast(str, source["state_reason"]),
+            vault_mode=cast(str, source["vault_mode"]),
+            capabilities=tuple(cast(tuple[str, ...], source["capabilities"])),
+            session_monitor=cast(str, source["session_monitor"]),
+            idle_relock_seconds=cast(int | None, source.get("idle_relock_seconds")),
+        )
+    except KeyError, TypeError, ValueError:
+        raise ControlProtocolError("frame_invalid") from None
+
+
+def parse_control_request(frame: ControlFrame) -> ControlRequest:
+    """Convert one validated request frame to the exact typed port union."""
+
+    wire = _validated_wire(frame, "control-request")
+    try:
+        if wire["kind"] == "cancel":
+            return ControlCancelRequest(
+                kind="cancel",
+                protocol_version="1.0",
+                rpc_id=cast(str, wire["rpc_id"]),
+                service_instance_id=cast(str, wire["service_instance_id"]),
+                service_generation=cast(str, wire["service_generation"]),
+                target_rpc_id=cast(str, wire["target_rpc_id"]),
+            )
+        method = ControlMethod(cast(str, wire["method"]))
+        raw_body = wire["body"]
+        model = _WORKFLOW_REQUEST_MODELS.get(method)
+        body = (
+            JsonObject(cast(Mapping[str, JsonValue], raw_body))
+            if model is None
+            else model.model_validate(raw_body)
+        )
+        deadline = wire.get("deadline_ms")
+        return ControlCallRequest(
+            kind="call",
+            protocol_version="1.0",
+            rpc_id=cast(str, wire["rpc_id"]),
+            service_instance_id=cast(str, wire["service_instance_id"]),
+            service_generation=cast(str, wire["service_generation"]),
+            method=method,
+            body=body,
+            deadline_ms=cast(int | None, deadline),
+        )
+    except KeyError, TypeError, ValueError:
+        raise ControlProtocolError("frame_invalid") from None
+
+
+def parse_control_result(frame: ControlFrame) -> ControlResult:
+    """Convert one validated result frame to the exact typed port result."""
+
+    wire = _validated_wire(frame, "control-result")
+    try:
+        method = ControlMethod(cast(str, wire["method"]))
+        raw_body = wire["body"]
+        if wire["outcome"] == "error":
+            if not isinstance(raw_body, Mapping):
+                _fail("frame_invalid")
+            error = cast(Mapping[str, object], raw_body)
+            body: object = ControlError(
+                cast(str, error["code"]), retryable=cast(bool, error["retryable"])
+            )
+        elif method in {ControlMethod.SERVICE_STATUS, ControlMethod.SERVICE_LOCK}:
+            body = _service_status_from_wire(raw_body)
+        elif method is ControlMethod.SERVICE_STOP:
+            if not isinstance(raw_body, Mapping):
+                _fail("frame_invalid")
+            body = ServiceStopResult(
+                schema_version=cast(Literal["1.0.0"], raw_body["schema_version"]),
+                state=cast(Literal["draining"], raw_body["state"]),
+                accepted=cast(Literal[True], raw_body["accepted"]),
+            )
+        else:
+            model = _WORKFLOW_RESULT_MODELS.get(method)
+            body = (
+                JsonObject(cast(Mapping[str, JsonValue], raw_body))
+                if model is None
+                else model.model_validate(raw_body)
+            )
+        return ControlResult(
+            protocol_version="1.0",
+            rpc_id=cast(str, wire["rpc_id"]),
+            service_instance_id=cast(str, wire["service_instance_id"]),
+            service_generation=cast(str, wire["service_generation"]),
+            method=method,
+            outcome=cast(Literal["ok", "error"], wire["outcome"]),
+            body=body,
+        )
+    except ControlProtocolError:
+        raise
+    except KeyError, TypeError, ValueError:
+        raise ControlProtocolError("frame_invalid") from None
+
+
+def _status_wire(status: ServiceStatus) -> JsonObject:
+    if type(status) is not ServiceStatus:
+        raise TypeError("service_status_invalid")
+    return _validated_wire(status, "service-status")
+
+
+def _allowed_for(kind: ControlClientKind) -> tuple[ControlMethod, ...]:
+    return _WORKFLOW_METHODS if kind is ControlClientKind.MCP_BRIDGE else _ALL_METHODS
+
+
+def _manifest_digest() -> str:
+    return load_schema_catalog().manifest_digest
+
+
+async def _close_after_failure(stream: ControlStream, error: BaseException) -> Never:
+    try:
+        await stream.aclose()
+    except BaseException:
+        pass
+    if isinstance(error, ControlProtocolError):
+        raise error
+    raise ControlProtocolError("frame_invalid") from None
+
+
+async def client_handshake(
+    stream: ControlStream,
+    client_kind: ControlClientKind,
+    client_version: str,
+) -> ControlSession:
+    """Negotiate an ordinary peer-authenticated client session."""
+
+    if type(client_kind) is not ControlClientKind:
+        raise TypeError("control_client_kind_invalid")
+    nonce = secrets.token_hex(32)
+    hello: dict[str, JsonValue] = {
+        "protocol_version": CONTROL_PROTOCOL_VERSION,
+        "client_kind": client_kind.value,
+        "client_version": client_version,
+        "connection_nonce": nonce,
+        "schema_manifest_digest": _manifest_digest(),
+    }
+    try:
+        await write_control_frame(stream, hello)
+        result = await read_control_frame(stream)
+        _validated_wire(result, "control-hello-result")
+        if result["protocol_version"] != CONTROL_PROTOCOL_VERSION:
+            _fail("protocol_mismatch")
+        if result["schema_manifest_digest"] != _manifest_digest():
+            _fail("manifest_mismatch")
+        status = _service_status_from_wire(result["status"])
+        if (
+            status.service_version != result["service_version"]
+            or status.service_instance_id != result["service_instance_id"]
+            or status.service_generation != result["service_generation"]
+        ):
+            _fail("protocol_mismatch")
+        raw_allowed = result["allowed_methods"]
+        if type(raw_allowed) is not tuple:
+            _fail("protocol_mismatch")
+        allowed = tuple(ControlMethod(cast(str, method)) for method in raw_allowed)
+        if allowed != _allowed_for(client_kind):
+            _fail("method_forbidden")
+        return ControlSession(
+            protocol_version="1.0",
+            client_kind=client_kind,
+            service_instance_id=cast(str, result["service_instance_id"]),
+            service_generation=cast(str, result["service_generation"]),
+            allowed_methods=allowed,
+            peer_identity=stream.peer_identity,
+            connection_nonce=nonce,
+        )
+    except BaseException as exc:
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        await _close_after_failure(stream, exc)
+
+
+async def server_handshake(
+    stream: ControlStream,
+    peer_identity: object,
+    service_status: ServiceStatus,
+) -> ControlSession:
+    """Negotiate a server session only after transport peer authentication."""
+
+    try:
+        if stream.peer_identity is not peer_identity:
+            _fail("peer_untrusted")
+        hello = await read_control_frame(stream)
+        _validated_wire(hello, "control-hello")
+        if hello["protocol_version"] != CONTROL_PROTOCOL_VERSION:
+            _fail("protocol_mismatch")
+        if hello["schema_manifest_digest"] != _manifest_digest():
+            _fail("manifest_mismatch")
+        kind = ControlClientKind(cast(str, hello["client_kind"]))
+        status = _status_wire(service_status)
+        allowed = _allowed_for(kind)
+        response: dict[str, JsonValue] = {
+            "protocol_version": CONTROL_PROTOCOL_VERSION,
+            "service_version": service_status.service_version,
+            "service_instance_id": service_status.service_instance_id,
+            "service_generation": service_status.service_generation,
+            "status": status,
+            "allowed_methods": [method.value for method in allowed],
+            "schema_manifest_digest": _manifest_digest(),
+        }
+        await write_control_frame(stream, response)
+        return ControlSession(
+            protocol_version="1.0",
+            client_kind=kind,
+            service_instance_id=service_status.service_instance_id,
+            service_generation=service_status.service_generation,
+            allowed_methods=allowed,
+            peer_identity=peer_identity,
+            connection_nonce=cast(str, hello["connection_nonce"]),
+        )
+    except BaseException as exc:
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        await _close_after_failure(stream, exc)
+
+
+def public_error_code_for_control_reason(reason: str) -> PublicErrorCode:
+    """Map a bounded control reason without exposing wire-only tokens."""
+
+    if reason in {
+        "service_generation_changed",
+        "privacy_projection_unavailable",
+        "service_unavailable",
+        "request_timeout",
+    }:
+        return PublicErrorCode.SERVICE_UNAVAILABLE
+    if reason == "vault_locked":
+        return PublicErrorCode.VAULT_LOCKED
+    if reason == "request_cancelled":
+        return PublicErrorCode.CANCELLED
+    if reason == "internal_error":
+        return PublicErrorCode.INTERNAL_ERROR
+    if reason in {
+        "frame_invalid",
+        "frame_too_large",
+        "method_forbidden",
+        "protocol_mismatch",
+    }:
+        return PublicErrorCode.INVALID_REQUEST
+    return PublicErrorCode.SERVICE_UNAVAILABLE

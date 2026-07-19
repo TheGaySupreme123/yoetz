@@ -315,12 +315,16 @@ transport-authentication contract.
 
 ### Receipts
 
-`EgressReceipt` always contains exact `receipt_id`, `request_id`, and `privacy_proposal_id`; channel;
-exact provider/model/
-endpoint profile when applicable; privacy-policy ID/version/digest; the complete authorization
-scope ancestor chain and purpose; approved and blocked categories; input/output byte and token
-counts when known; counts of dropped items, redactions, secret-scan findings, and minimization
-steps; consent source; finish timestamp; and bounded canonical outcome/reason. A pre-dispatch
+`EgressReceipt` is schema-shaped and always contains `schema_version="1.0.0"`; exact `receipt_id`,
+`request_id`, and `privacy_proposal_id`; channel, outcome, finish timestamp, complete authorization
+scope ancestor chain, and purpose; exact `destination` as `ProviderBinding` for `llm_inference` or
+`NonLlmDestination(kind, profile_id, profile_version)` for the matching bounded non-LLM channel;
+`ReceiptPolicyBinding(policy_id, version, policy_digest, authorization_scope_digest)`; consent
+source; approved and blocked categories; `ReceiptCounts`; `ReceiptTransformations`; complete
+`ReceiptSecretScan`; bounded canonical reason; and `audit_store_version=1`. `ReceiptCounts` has the
+seven schema-required item/byte fields plus optional estimated tokens and attempt-only request-body
+bytes; final bytes obey the 256 KiB schema cap. Transformations carry all three required counts.
+Secret scan carries the exact registry version, profile digest, match count, and pass result. A pre-dispatch
 decision receipt is keyed by its audit reservation/privacy proposal and conditionally omits
 `authorization_id`, `dispatch_id`, `dispatch_started_at`, and `request_commitment` because those
 facts do not yet exist. A physical-attempt receipt requires the authorization and dispatch IDs,
@@ -354,8 +358,10 @@ prompt, authorization, or dispatch. A post-consumption receipt-write failure rem
 does not finalize an `EgressReceipt`; the first receipt for that branch is a terminal denial/expiry/
 pre-dispatch failure or the terminal result of its physical attempt.
 
-`LocalDisclosureReceipt` uses the same structural fields but names a `LocalDisclosureSink`, has no
-`EgressChannel`, and records whether the sink was `local_model`, `agent_context`,
+`LocalDisclosureReceipt` uses the same required schema version, identity, outcome/time,
+scope/purpose, policy, consent, category, count, transformation, secret-scan, reason, and audit
+fields but names a `LocalDisclosureSink`, has no `EgressChannel` or destination, and forbids the
+network-attempt-only `counts.request_body_bytes`. It records whether the sink was `local_model`, `agent_context`,
 `local_human_view`, or `trusted_human_control`. Both receipt types are persisted through one
 `PrivacyAuditPort`; neither is
 a task event. Both enforce the protocol's same closed outcome/reason compatibility matrix:

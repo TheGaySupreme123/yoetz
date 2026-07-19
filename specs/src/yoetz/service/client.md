@@ -28,6 +28,10 @@ vault, or direct-execution fallback.
   `async privacy_receipts_get(GetPrivacyReceiptRequest) -> PrivacyReceiptGetResult`, where the
   latter is the exact closed control result union `found(PrivacyReceiptView)|not_found`, never a
   nullable wire value.
+  `ListPrivacyReceiptsRequest` owns the closed `PrivacyReceiptFilters`, page size, optional
+  authenticated cursor, and constant schema version; `GetPrivacyReceiptRequest` owns only the
+  constant schema version and exact receipt ID. `PrivacyReceiptGetResult` is the frozen
+  `PrivacyReceiptFound|PrivacyReceiptNotFound` union.
 - Structural lifecycle methods `service_status`, `lock`, `stop`, available only under the client-
   kind rules.
 - `async close()` — idempotent, cancels/awaits local receiver tasks without implying remote

@@ -17,7 +17,7 @@ implicit cwd exists.
 
 - `class ControlClientPort(Protocol)` with async `connect()`, `call(ControlCallRequest) ->
   ControlResult`, `cancel(ControlCancelRequest) -> None`, `service_status() -> ServiceStatus`,
-  `lock() -> ServiceStatus`, `stop() -> ServiceStatus`, and `close()`.
+  `lock() -> ServiceStatus`, `stop() -> ServiceStopResult`, and `close()`.
 - `enum ControlClientKind` — `cli`, `mcp_bridge`, `ui`.
 - `enum ControlMethod` — exactly `start`, `publish_work`, `check`, `respond`, `status`, `receipt`,
   `import_codex_jsonl`, `review`, `backup_preview`, `backup_execute`, `restore_preview`,
@@ -44,6 +44,9 @@ implicit cwd exists.
   bounded state reason, service instance/generation, vault mode classification, capabilities, and
   session-event monitor status. It contains no PID, path, username, key locator, provider
   credential status, or user content.
+- `@dataclass(frozen=True, slots=True) class ServiceStopResult` — the exact structural
+  `{schema_version:"1.0.0", state:"draining", accepted:true}` success body. It does not claim
+  process exit before the connection closes.
 - `class ControlError(Exception)` — one bounded reason from `service_unavailable`,
   `peer_untrusted`, `protocol_mismatch`, `frame_invalid`, `frame_too_large`, `request_cancelled`,
   `request_timeout`, `vault_locked`, `service_draining`, `method_forbidden`, `internal_error`.

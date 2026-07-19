@@ -1,7 +1,8 @@
 # src/yoetz/observability/logging.py — structured allowlisted stderr logging
 
 **Wave:** D | **ADRs:** ADR-005, ADR-007, ADR-008, ADR-009 | **Imports (spec-tree):**
-`specs/src/yoetz/observability/privacy.md`, `specs/src/yoetz/config/models.md` |
+`specs/src/yoetz/observability/privacy.md`, `specs/src/yoetz/config/models.md`,
+`specs/src/yoetz/ports/clock.md` |
 **Imported by:** `specs/src/yoetz/mcp/server.md`, `specs/src/yoetz/cli/app.md`,
 `specs/src/yoetz/application/service.md`, all adapter specs
 
@@ -14,8 +15,10 @@ dependency could leak user plaintext or corrupt the MCP protocol stream.
 
 ## Public surface
 
-- `configure_logging(config: LoggingConfig, mode: LogMode) -> None` — installs handlers/filters
-  once per process, before any adapter is constructed.
+- `configure_logging(config: LoggingConfig, mode: LogMode, *, clock: ClockPort | None = None) ->
+  None` — installs handlers/filters once per process, before any adapter is constructed. Production
+  composition omits `clock` and receives the exact-millisecond UTC system-clock adapter; tests
+  inject a conforming `ClockPort` so timestamp bytes never depend on ambient time.
 - `class LogMode(Enum)` — registered closed values `service`, `cli`, `mcp_stdio`, and
   `confidential_helper`.
 - `get_logger(component: str) -> StructuredLogger` — `component` is a bounded reviewed constant
@@ -129,7 +132,9 @@ creating a secondary diagnostic artifact.
 - Logging never raises into application code paths (`logging.raiseExceptions = False`).
 - Closed/broken stderr (client killed): writes fail silently; process behavior is governed by
   the transport/CLI layer, not logging.
-- Double `configure_logging` calls are idempotent (second call reconfigures level only).
+- Double `configure_logging` calls are idempotent. A later call replaces the same single structural
+  stderr sink and reconfigures level/mode/clock without accumulating handlers; this also removes a
+  handler that an imported library installed between calls.
 - A YZH1/YZS1 preview, binding, frame, or secret mistakenly offered as a message/arg is discarded
   before formatting and increments only the in-memory fixed `log_field_dropped` counter; it is never
   rendered to any sink.

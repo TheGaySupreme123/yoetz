@@ -53,7 +53,11 @@ and provider implementations to vary without granting CLI/MCP/provider code dire
   `PrivacyAuditState`,
   `PendingHumanDecision`, `PreparedOutboundCase`,
   `ConsumedAuthorization`, `ConsumedLocalDisclosure`, `PrivacyAuditObjectRoots`,
-  `PrivacyReceiptQuery`, `PrivacyReceiptPage`, `PrivacyReceiptView`.
+  `PrivacyReceiptQuery`, `PrivacyReceiptPage` (positive `snapshot_generation`, bounded unique
+  descending receipt tuple, and optional schema-bounded base64url authenticated next cursor), and
+  the closed tagged `PrivacyReceiptView = NetworkEgressReceiptView(kind="network_egress",
+  receipt=EgressReceipt) | LocalDisclosureReceiptView(kind="local_disclosure",
+  receipt=LocalDisclosureReceipt)`.
 - `ProviderReconciliation` — policy generation, activated/deactivated counts, and sorted unavailable
   binding digests/reasons; no credentials, URLs, clients, or exception text.
 - `HumanAuthorityCapability` — generation-bound structural snapshot with source
@@ -299,7 +303,9 @@ CLI/UI privacy-control callers; `PrivacyReceiptAudience` has only `trusted_local
 MCP, providers, plugins, and workflow operations cannot call them. Query filters are exact
 `receipt_id`, outcome, channel/local sink, provider/profile identity, policy version, scope kind,
 and bounded UTC interval; pages are at most 100, sorted `(finished_at, receipt_id)` descending, with
-an opaque authenticated cursor. Views contain the receipt fields already declared in
+an opaque authenticated cursor matching the control schema's base64url and 1024-character bound.
+Every view is an exact two-field tagged wrapper; raw receipt unions are accepted only by internal
+completion methods and never returned by get/list. Views contain the receipt fields already declared in
 `domain/privacy.md`, never proposal/object plaintext, request bodies, excerpts, source pointers,
 credentials, or object dereference handles. Privacy receipts remain distinct from the six-operation
 verification `receipt` document.

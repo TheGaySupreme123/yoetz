@@ -48,6 +48,7 @@ __all__ = [
     "LocalDisclosureReceipt",
     "LocalDisclosureSink",
     "LocalDisclosureUnavailable",
+    "NonLlmDestination",
     "PolicyOverlay",
     "PreDispatchAuditDecision",
     "PrivacyAuditSubject",
@@ -58,6 +59,11 @@ __all__ = [
     "PrivacyReason",
     "ProviderBinding",
     "ProviderDataUseProfile",
+    "ReceiptCounts",
+    "ReceiptPolicyBinding",
+    "ReceiptSecretScan",
+    "ReceiptTransformations",
+    "RequestCommitment",
     "ReviewContextProfile",
     "ReviewSelectionPolicy",
     "outcome_reason_is_valid",
@@ -1218,86 +1224,192 @@ class RequestCommitment:
 
 
 @dataclass(frozen=True, slots=True)
+class NonLlmDestination:
+    kind: EgressChannel
+    profile_id: str
+    profile_version: str
+
+    def __post_init__(self) -> None:
+        if self.kind not in {
+            EgressChannel.CAPABILITY_TESTING,
+            EgressChannel.CRASH_DIAGNOSTICS,
+            EgressChannel.PRODUCT_TELEMETRY,
+            EgressChannel.UPDATE_CHECKS,
+        }:
+            raise _invalid()
+        _text(self.profile_id, _OPAQUE)
+        _text(self.profile_version, _OPAQUE)
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiptPolicyBinding:
+    policy_id: str
+    version: int
+    policy_digest: str
+    authorization_scope_digest: str
+
+    def __post_init__(self) -> None:
+        validate_id(IdKind.PRIVACY_POLICY, self.policy_id)
+        _positive(self.version)
+        validate_sha256_digest(self.policy_digest)
+        validate_sha256_digest(self.authorization_scope_digest)
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiptCounts:
+    candidate_items: int
+    included_items: int
+    removed_items: int
+    approved_items: int
+    blocked_items: int
+    candidate_bytes: int
+    final_bytes: int
+    estimated_input_tokens: int | None = None
+    request_body_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        for value in (
+            self.candidate_items,
+            self.included_items,
+            self.removed_items,
+            self.approved_items,
+            self.blocked_items,
+            self.candidate_bytes,
+        ):
+            _nonnegative(value)
+        _nonnegative(self.final_bytes, maximum=MAX_EGRESS_CASE_BYTES)
+        if self.estimated_input_tokens is not None:
+            _nonnegative(self.estimated_input_tokens)
+        if self.request_body_bytes is not None:
+            _nonnegative(self.request_body_bytes)
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiptTransformations:
+    minimized_items: int
+    redacted_spans: int
+    blocked_items: int
+
+    def __post_init__(self) -> None:
+        _nonnegative(self.minimized_items)
+        _nonnegative(self.redacted_spans)
+        _nonnegative(self.blocked_items)
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiptSecretScan:
+    registry_version: str
+    scanner_profile_digest: str
+    match_count: int
+    passed: bool
+
+    def __post_init__(self) -> None:
+        _text(self.registry_version, _VERSION)
+        validate_sha256_digest(self.scanner_profile_digest)
+        _nonnegative(self.match_count)
+        if type(self.passed) is not bool:
+            raise _invalid()
+
+
+@dataclass(frozen=True, slots=True)
 class EgressReceipt:
+    schema_version: Literal["1.0.0"]
     receipt_id: str
     request_id: str
     privacy_proposal_id: str
     channel: EgressChannel
-    provider_binding: ProviderBinding | None
-    policy_id: str
-    policy_version: int
-    policy_digest: str
+    outcome: PrivacyOutcome
+    finished_at: datetime
     scope: AuthorizationScope
     purpose: str
+    destination: ProviderBinding | NonLlmDestination
+    policy: ReceiptPolicyBinding
+    consent_source: ConsentSource
     approved_categories: tuple[DataCategory, ...]
     blocked_categories: tuple[DataCategory, ...]
-    candidate_items: int
-    included_items: int
-    removed_items: int
-    candidate_bytes: int
-    final_bytes: int
-    consent_source: ConsentSource
-    finished_at: datetime
-    outcome: PrivacyOutcome
+    counts: ReceiptCounts
+    transformations: ReceiptTransformations
+    secret_scan: ReceiptSecretScan
     safe_failure_reason: PrivacyReason | None
+    audit_store_version: Literal[1]
     authorization_id: str | None = None
     dispatch_id: str | None = None
     dispatch_started_at: datetime | None = None
     request_commitment: RequestCommitment | None = None
-    request_body_bytes: int | None = None
-    audit_store_version: Literal[1] = 1
 
     def __post_init__(self) -> None:
+        if type(self.schema_version) is not str or self.schema_version != "1.0.0":
+            raise _invalid()
         validate_id(IdKind.EGRESS_RECEIPT, self.receipt_id)
         validate_id(IdKind.REQUEST, self.request_id)
         validate_id(IdKind.PRIVACY_PROPOSAL, self.privacy_proposal_id)
         _enum(self.channel, EgressChannel)
-        validate_id(IdKind.PRIVACY_POLICY, self.policy_id)
-        _positive(self.policy_version)
-        validate_sha256_digest(self.policy_digest)
+        _enum(self.outcome, PrivacyOutcome)
+        _time(self.finished_at)
+        if type(self.scope) is not AuthorizationScope:
+            raise _invalid()
         _text(self.purpose, _PURPOSE)
+        if self.channel is EgressChannel.LLM_INFERENCE:
+            if (
+                type(self.destination) is not ProviderBinding
+                or self.destination.transport != "external"
+            ):
+                raise _invalid()
+        elif (
+            type(self.destination) is not NonLlmDestination
+            or self.destination.kind is not self.channel
+        ):
+            raise _invalid()
+        if type(self.policy) is not ReceiptPolicyBinding:
+            raise _invalid()
+        _enum(self.consent_source, ConsentSource)
         object.__setattr__(
             self, "approved_categories", _sorted_enums(self.approved_categories, DataCategory)
         )
         object.__setattr__(
             self, "blocked_categories", _sorted_enums(self.blocked_categories, DataCategory)
         )
-        for value in (
-            self.candidate_items,
-            self.included_items,
-            self.removed_items,
-            self.candidate_bytes,
-            self.final_bytes,
+        if (
+            type(self.counts) is not ReceiptCounts
+            or type(self.transformations) is not ReceiptTransformations
+            or type(self.secret_scan) is not ReceiptSecretScan
+            or not outcome_reason_is_valid(self.outcome, self.safe_failure_reason)
         ):
-            _nonnegative(value)
-        _enum(self.consent_source, ConsentSource)
-        _time(self.finished_at)
-        if not outcome_reason_is_valid(self.outcome, self.safe_failure_reason):
             raise _invalid()
         attempted = self.dispatch_id is not None
+        if self.authorization_id is not None:
+            validate_id(IdKind.EGRESS_AUTHORIZATION, self.authorization_id)
         if attempted:
             if (
                 self.authorization_id is None
                 or self.dispatch_started_at is None
                 or self.request_commitment is None
-                or self.request_body_bytes is None
+                or self.counts.request_body_bytes is None
             ):
                 raise _invalid()
-            validate_id(IdKind.EGRESS_AUTHORIZATION, self.authorization_id)
             validate_id(IdKind.EGRESS_DISPATCH, self.dispatch_id)
-            _time(self.dispatch_started_at)
+            if _time(self.dispatch_started_at) > self.finished_at:
+                raise _invalid()
             if type(self.request_commitment) is not RequestCommitment:
                 raise _invalid()
-            _nonnegative(self.request_body_bytes)
         elif any(
             value is not None
             for value in (
-                self.authorization_id,
                 self.dispatch_started_at,
                 self.request_commitment,
-                self.request_body_bytes,
+                self.counts.request_body_bytes,
             )
         ):
+            raise _invalid()
+        if self.outcome in {
+            PrivacyOutcome.BLOCKED_BY_POLICY,
+            PrivacyOutcome.BLOCKED_FORBIDDEN_DATA,
+            PrivacyOutcome.CLASSIFICATION_UNCERTAIN,
+            PrivacyOutcome.HUMAN_DENIED,
+            PrivacyOutcome.CHANNEL_UNAVAILABLE,
+        } and (attempted or self.authorization_id is not None):
+            raise _invalid()
+        if self.outcome is PrivacyOutcome.COMPLETED and not attempted:
             raise _invalid()
         if (
             self.outcome
@@ -1308,51 +1420,66 @@ class EgressReceipt:
                 PrivacyOutcome.HUMAN_DENIED,
                 PrivacyOutcome.CHANNEL_UNAVAILABLE,
             }
-            and attempted
+            and self.consent_source is not ConsentSource.NONE
         ):
             raise _invalid()
-        if self.audit_store_version != AUDIT_STORE_VERSION:
+        if (
+            type(self.audit_store_version) is not int
+            or self.audit_store_version != AUDIT_STORE_VERSION
+        ):
             raise _invalid()
 
 
 @dataclass(frozen=True, slots=True)
 class LocalDisclosureReceipt:
+    schema_version: Literal["1.0.0"]
     receipt_id: str
     request_id: str
     privacy_proposal_id: str
     sink: LocalDisclosureSink
-    policy_id: str
-    policy_version: int
-    policy_digest: str
+    outcome: PrivacyOutcome
+    finished_at: datetime
     scope: AuthorizationScope
     purpose: str
+    policy: ReceiptPolicyBinding
+    consent_source: ConsentSource
     approved_categories: tuple[DataCategory, ...]
     blocked_categories: tuple[DataCategory, ...]
-    consent_source: ConsentSource
-    finished_at: datetime
-    outcome: PrivacyOutcome
+    counts: ReceiptCounts
+    transformations: ReceiptTransformations
+    secret_scan: ReceiptSecretScan
     safe_failure_reason: PrivacyReason | None
-    audit_store_version: Literal[1] = 1
+    audit_store_version: Literal[1]
 
     def __post_init__(self) -> None:
+        if type(self.schema_version) is not str or self.schema_version != "1.0.0":
+            raise _invalid()
         validate_id(IdKind.EGRESS_RECEIPT, self.receipt_id)
         validate_id(IdKind.REQUEST, self.request_id)
         validate_id(IdKind.PRIVACY_PROPOSAL, self.privacy_proposal_id)
         _enum(self.sink, LocalDisclosureSink)
-        validate_id(IdKind.PRIVACY_POLICY, self.policy_id)
-        _positive(self.policy_version)
-        validate_sha256_digest(self.policy_digest)
+        _enum(self.outcome, PrivacyOutcome)
+        _time(self.finished_at)
+        if (
+            type(self.scope) is not AuthorizationScope
+            or type(self.policy) is not ReceiptPolicyBinding
+        ):
+            raise _invalid()
         _text(self.purpose, _PURPOSE)
+        _enum(self.consent_source, ConsentSource)
         object.__setattr__(
             self, "approved_categories", _sorted_enums(self.approved_categories, DataCategory)
         )
         object.__setattr__(
             self, "blocked_categories", _sorted_enums(self.blocked_categories, DataCategory)
         )
-        _enum(self.consent_source, ConsentSource)
-        _time(self.finished_at)
         if (
-            not outcome_reason_is_valid(self.outcome, self.safe_failure_reason)
+            type(self.counts) is not ReceiptCounts
+            or self.counts.request_body_bytes is not None
+            or type(self.transformations) is not ReceiptTransformations
+            or type(self.secret_scan) is not ReceiptSecretScan
+            or not outcome_reason_is_valid(self.outcome, self.safe_failure_reason)
+            or type(self.audit_store_version) is not int
             or self.audit_store_version != 1
         ):
             raise _invalid()
@@ -1498,6 +1625,6 @@ def _validate_local_disclosure_result(
         or receipt.sink is not sink
         or receipt.purpose != purpose
         or receipt.scope != scope
-        or receipt.policy_digest != policy_digest
+        or receipt.policy.policy_digest != policy_digest
     ):
         raise _invalid()

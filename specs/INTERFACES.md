@@ -949,7 +949,12 @@ arbitrary-path, or policy-loosening field or method. `service_status` is availab
 task operations are not. MCP cannot invoke lifecycle or privacy-control methods.
 
 `ports/privacy.py` owns the shared receipt-inspection values `PrivacyReceiptAudience`,
-`PrivacyReceiptQuery`, `PrivacyReceiptPage`, and the closed tagged union `PrivacyReceiptView`.
+`PrivacyReceiptQuery`, `PrivacyReceiptPage` (positive snapshot generation, bounded unique
+descending receipt tuple, and optional schema-bounded base64url authenticated next cursor), and the
+closed tagged union `PrivacyReceiptView = NetworkEgressReceiptView(kind="network_egress",
+receipt=EgressReceipt) | LocalDisclosureReceiptView(kind="local_disclosure",
+receipt=LocalDisclosureReceipt)`. Internal completion methods continue to accept raw receipt types;
+`get_receipt` and `list_receipts` return only tagged wrappers.
 The ordinary-control boundary models `ListPrivacyReceiptsRequest` and
 `GetPrivacyReceiptRequest` exactly from the corresponding closed control-request bodies;
 `service/client.py` owns schema-derived `PrivacyReceiptGetResult = found(PrivacyReceiptView) |
@@ -1219,6 +1224,13 @@ wire bytes. The receipt uses `audit_store_version=1` and closed
 "hmac-sha256:<64 lowercase hex>"}` with no `key_slot_ref`; `dispatch_id` requires exact
 `counts.request_body_bytes`. A separately bound `ProviderCredentialHandle` injects authentication only at the
 transport boundary and cannot change or add user-content body fields.
+
+Receipt domain values are schema-shaped: `EgressReceipt` and `LocalDisclosureReceipt` require
+`schema_version="1.0.0"`, their complete structural identities, `ReceiptPolicyBinding` including
+authorization-scope digest, `ReceiptCounts`, `ReceiptTransformations`, and `ReceiptSecretScan`.
+Network egress additionally requires the exact channel-compatible `ProviderBinding |
+NonLlmDestination`; local disclosure names its sink and forbids attempt-only request-body counts.
+Required schema data is never modeled as an optional compatibility default.
 
 `EgressReceipt` and `LocalDisclosureReceipt` share one closed outcome/reason compatibility matrix:
 `completed` forbids `safe_failure_reason`; every other outcome requires exactly one reason permitted

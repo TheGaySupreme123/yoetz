@@ -1,0 +1,473 @@
+"""Foreground human-control phase, binding, and authority integration coverage."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Literal, cast
+
+import pytest
+
+from yoetz.adapters.keys.secret_memory import LocalSecretMemory
+from yoetz.ports.control import ServiceState
+from yoetz.ports.secret_memory import (
+    HumanAuthorizationProof,
+    SecretConsumer,
+    SecretHandle,
+    SecretPurpose,
+    UserPresenceAttestation,
+    UserPresenceCapability,
+    UserPresenceChallenge,
+)
+from yoetz.protocol.canonical import canonical_digest
+from yoetz.service.confidential_protocol import (
+    AuthorizationRequiredPhase,
+    ClientActionEnvelope,
+    ClientOpenEnvelope,
+    ConfidentialSecretPurpose,
+    DecisionAction,
+    EmptyVaultTarget,
+    HumanCeremonyKind,
+    HumanPreview,
+    IdleRelockPolicyResult,
+    IdleRelockPolicyTarget,
+    KeyringRetryPreview,
+    PortableRecoveryResult,
+    PortableRecoveryTarget,
+    PrivacyDecisionResult,
+    PrivacyDisclosureDecisionPreview,
+    PrivacyPendingTarget,
+    ProviderCredentialResult,
+    ProviderCredentialSetPreview,
+    ProviderCredentialTarget,
+    RetryAction,
+    SecretRequiredPhase,
+    SelectAuthorizationSourceAction,
+    ServerPhaseEnvelope,
+    ServerResultEnvelope,
+    VaultUnlockPreview,
+)
+from yoetz.service.human_control import HumanControlError, HumanControlService
+from yoetz.service.unlock import UnlockCoordinator, UnlockThrottleStore
+
+INSTALLATION_ID = "ins_20000000-0000-4000-8000-000000000001"
+SERVICE_ID = "svc_20000000-0000-4000-8000-000000000002"
+TARGET_DIGEST = "sha256:" + "2" * 64
+ZERO_DIGEST = "sha256:" + "0" * 64
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+@dataclass
+class _Clock:
+    monotonic: float = 100.0
+    utc: datetime = datetime(2026, 7, 19, 13, 0, 0, tzinfo=UTC)
+
+    def now_utc(self) -> datetime:
+        return self.utc
+
+    def monotonic_seconds(self) -> float:
+        return self.monotonic
+
+
+@dataclass(frozen=True)
+class _Instance:
+    instance_id: str = SERVICE_ID
+    generation: int = 7
+
+
+class _Lifecycle:
+    def __init__(self, state: ServiceState) -> None:
+        self.instance = _Instance()
+        self.state = state
+
+    async def transition(
+        self, target: ServiceState, *, vault_generation: int | None = None
+    ) -> None:
+        if target is ServiceState.READY and vault_generation is None:
+            raise AssertionError("ready requires vault generation")
+        self.state = target
+
+
+@dataclass(frozen=True)
+class _VaultStatus:
+    reason: str | None = None
+
+
+class _Vault:
+    def __init__(self, mode: str, *, ready: bool) -> None:
+        self.mode = mode
+        self.generation = 3
+        self.ready = ready
+        self.status = _VaultStatus()
+        self.presence: _Presence | None = None
+
+    @property
+    def state(self) -> str:
+        return "ready" if self.ready else "locked"
+
+    async def retry_keyring(self, capability: UserPresenceCapability | None) -> None:
+        self.ready = capability is not None
+
+    async def initialize_passphrase(
+        self, handle: SecretHandle, throttle_record_digest: str
+    ) -> None:
+        assert throttle_record_digest.startswith("sha256:")
+        handle.consume(SecretConsumer.VAULT_ROOT, bytes)
+        self.mode = "passphrase"
+        self.ready = True
+        self.generation += 1
+
+    async def unlock(self, handle: SecretHandle) -> None:
+        handle.consume(SecretConsumer.VAULT_ROOT, bytes)
+        self.ready = True
+        self.generation += 1
+
+    async def mint_human_authorization(
+        self,
+        source: UserPresenceAttestation | SecretHandle,
+        challenge: UserPresenceChallenge,
+    ) -> HumanAuthorizationProof:
+        if hasattr(source, "purpose"):
+            secret = cast(SecretHandle, source)
+            consumer = {
+                SecretPurpose.PROVIDER_REAUTHENTICATION: SecretConsumer.PROVIDER_AUTHORIZER,
+                SecretPurpose.PRIVACY_REAUTHENTICATION: SecretConsumer.PRIVACY_AUTHORIZER,
+                SecretPurpose.SECURITY_REAUTHENTICATION: SecretConsumer.SECURITY_AUTHORIZER,
+            }[secret.purpose]
+            secret.consume(consumer, bytes)
+        else:
+            assert self.presence is not None
+            self.presence.consume(cast(UserPresenceAttestation, source), challenge)
+        return HumanAuthorizationProof(
+            proof_id="proof-test",
+            purpose=challenge.purpose,
+            target_digest=challenge.target_digest,
+            service_generation=challenge.service_generation,
+            vault_generation=challenge.vault_generation,
+            policy_generation=challenge.policy_generation,
+            issued_at_monotonic=100.0,
+            expires_at_monotonic=challenge.expires_at_monotonic,
+        )
+
+
+class _SecretIngress:
+    def __init__(self, handles: list[SecretHandle]) -> None:
+        self.handles = handles
+        self.cancelled = 0
+
+    async def accept_once(self, expected_binding: object) -> SecretHandle:
+        del expected_binding
+        return self.handles.pop(0)
+
+    async def cancel_pending(self) -> None:
+        self.cancelled += 1
+
+    async def close(self) -> None:
+        return None
+
+
+@dataclass
+class _Attestation:
+    used: bool = False
+
+
+class _Presence:
+    def __init__(self, *, active: bool = True) -> None:
+        self.active = active
+        self.last_challenge: UserPresenceChallenge | None = None
+        self.attestation = _Attestation()
+
+    def capability(self) -> UserPresenceCapability:
+        state: Literal["active", "unavailable"] = "active" if self.active else "unavailable"
+        return UserPresenceCapability(
+            candidate_artifact_digest=ZERO_DIGEST,
+            release_cell="test-cell",
+            adapter_id="test.presence",
+            profile_id="test.profile",
+            os_authentication_primitive="test prompt",
+            os_authenticated_prompt=state,
+            trusted_action_binding=state,
+            one_use_attestation=state,
+            available=state,
+            capability_evidence_digest=ZERO_DIGEST,
+        )
+
+    async def assert_presence(self, challenge: UserPresenceChallenge) -> UserPresenceAttestation:
+        self.last_challenge = challenge
+        return cast(UserPresenceAttestation, self.attestation)
+
+    def consume(
+        self, attestation: UserPresenceAttestation, challenge: UserPresenceChallenge
+    ) -> None:
+        assert attestation is self.attestation
+        assert challenge is self.last_challenge
+        if self.attestation.used:
+            raise ValueError("replay")
+        self.attestation.used = True
+
+    def close(self) -> None:
+        return None
+
+
+class _Effects:
+    def __init__(self) -> None:
+        self.proofs: list[HumanAuthorizationProof | None] = []
+
+    async def prepare(self, request: ClientOpenEnvelope) -> tuple[HumanPreview, str, int | None]:
+        if request.ceremony_kind is HumanCeremonyKind.VAULT_UNLOCK:
+            return VaultUnlockPreview(), TARGET_DIGEST, None
+        if request.ceremony_kind is HumanCeremonyKind.KEYRING_RETRY:
+            return KeyringRetryPreview("existing_load"), TARGET_DIGEST, None
+        if request.ceremony_kind is HumanCeremonyKind.PROVIDER_CREDENTIAL_SET:
+            return (
+                ProviderCredentialSetPreview(cast(ProviderCredentialTarget, request.target)),
+                TARGET_DIGEST,
+                None,
+            )
+        if request.ceremony_kind is HumanCeremonyKind.PRIVACY_DISCLOSURE_DECISION:
+            target = cast(PrivacyPendingTarget, request.target)
+            return (
+                PrivacyDisclosureDecisionPreview(
+                    pending_id=target.pending_id,
+                    excerpt_preview="bounded preview",
+                    excerpt_digest=ZERO_DIGEST,
+                    category="ordinary-content",
+                    destination_commitment=ZERO_DIGEST,
+                    byte_count=15,
+                    token_count=2,
+                    policy_digest=ZERO_DIGEST,
+                ),
+                TARGET_DIGEST,
+                4,
+            )
+        raise AssertionError(request.ceremony_kind)
+
+    async def complete_portable_recovery(
+        self, target: PortableRecoveryTarget, secret: SecretHandle
+    ) -> PortableRecoveryResult:
+        del target, secret
+        raise AssertionError("not used")
+
+    async def store_provider_credential(
+        self,
+        target: ProviderCredentialTarget,
+        secret: SecretHandle,
+        proof: HumanAuthorizationProof,
+        now_monotonic: float,
+    ) -> ProviderCredentialResult:
+        secret.consume(SecretConsumer.PROVIDER_AUTHORIZER, bytes)
+        proof.consume("provider_credential_set", TARGET_DIGEST, 7, 3, None, now_monotonic)
+        self.proofs.append(proof)
+        return ProviderCredentialResult(target.action, 1, "stored")
+
+    async def decide_privacy(
+        self,
+        target: PrivacyPendingTarget,
+        decision: Literal["approve", "deny"],
+        proof: HumanAuthorizationProof | None,
+        now_monotonic: float,
+    ) -> PrivacyDecisionResult:
+        del target, now_monotonic
+        self.proofs.append(proof)
+        return PrivacyDecisionResult(
+            "committed" if decision == "approve" else "denied", ZERO_DIGEST
+        )
+
+    async def change_idle_relock_policy(
+        self,
+        target: IdleRelockPolicyTarget,
+        proof: HumanAuthorizationProof,
+        now_monotonic: float,
+    ) -> IdleRelockPolicyResult:
+        del target, proof, now_monotonic
+        raise AssertionError("not used")
+
+    async def deny_idle_relock_policy(
+        self,
+        target: IdleRelockPolicyTarget,
+        now_monotonic: float,
+    ) -> IdleRelockPolicyResult:
+        del target, now_monotonic
+        raise AssertionError("not used")
+
+
+def _service(
+    tmp_path: Path,
+    *,
+    mode: str,
+    ready: bool,
+    handles: list[SecretHandle],
+    presence: _Presence | None = None,
+) -> tuple[HumanControlService, _Clock, _Lifecycle, _Vault, _Effects]:
+    tmp_path.chmod(0o700)
+    clock = _Clock()
+    lifecycle = _Lifecycle(ServiceState.READY if ready else ServiceState.LOCKED)
+    vault = _Vault(mode, ready=ready)
+    vault.presence = presence
+    throttle = UnlockThrottleStore(
+        tmp_path / "unlock-throttle.json",
+        installation_id=INSTALLATION_ID,
+        writer_instance_id=SERVICE_ID,
+        clock=clock,
+    )
+    if mode == "passphrase":
+        throttle.stage_initial_record()
+    unlock = UnlockCoordinator(clock=clock, throttle=throttle, vault=vault, lifecycle=lifecycle)
+    effects = _Effects()
+    service = HumanControlService(
+        clock=clock,
+        lifecycle=lifecycle,
+        vault=vault,
+        unlock=unlock,
+        secret_ingress=_SecretIngress(handles),
+        effects=effects,
+        user_presence=presence,
+    )
+    return service, clock, lifecycle, vault, effects
+
+
+@pytest.mark.anyio
+async def test_passphrase_unlock_uses_separate_exact_secret_binding(tmp_path: Path) -> None:
+    memory = LocalSecretMemory()
+    handle = memory.capture(SecretPurpose.VAULT_UNLOCK, bytearray(b"correct horse battery"))
+    service, _, lifecycle, vault, _ = _service(
+        tmp_path, mode="passphrase", ready=False, handles=[handle]
+    )
+    opened = await service.open_ceremony(
+        ClientOpenEnvelope(
+            "1" * 64,
+            HumanCeremonyKind.VAULT_UNLOCK,
+            EmptyVaultTarget(expected_mode="passphrase"),
+        )
+    )
+    assert type(opened.phase) is SecretRequiredPhase
+    assert opened.phase.binding.purpose is ConfidentialSecretPurpose.VAULT_UNLOCK
+    result = await service.secret_completed(opened.ceremony_id)
+    assert type(result) is ServerResultEnvelope
+    assert result.step == 2
+    assert result.result == cast(object, result.result)
+    assert lifecycle.state is ServiceState.READY
+    assert vault.ready
+    memory.close()
+
+
+@pytest.mark.anyio
+async def test_provider_secret_reauthentication_is_exact_and_proof_is_single_use(
+    tmp_path: Path,
+) -> None:
+    memory = LocalSecretMemory()
+    reauth = memory.capture(
+        SecretPurpose.PROVIDER_REAUTHENTICATION, bytearray(b"correct horse battery")
+    )
+    credential = memory.capture(
+        SecretPurpose.PROVIDER_CREDENTIAL, bytearray(b"provider-token-value")
+    )
+    service, _, _, _, effects = _service(
+        tmp_path, mode="passphrase", ready=True, handles=[reauth, credential]
+    )
+    purpose = "semantic-review"
+    target = ProviderCredentialTarget(
+        action="set",
+        provider_id="openai",
+        model_id="gpt-5",
+        endpoint_profile_id="responses",
+        endpoint_profile_version="1",
+        purpose=purpose,
+        scope_digest=ZERO_DIGEST,
+        purpose_digest=canonical_digest({"purpose": purpose}),
+    )
+    opened = await service.open_ceremony(
+        ClientOpenEnvelope("2" * 64, HumanCeremonyKind.PROVIDER_CREDENTIAL_SET, target)
+    )
+    assert type(opened.phase) is AuthorizationRequiredPhase
+    assert opened.phase.available_sources == ("secret_reauthentication",)
+    phase = await service.submit_action(
+        ClientActionEnvelope(
+            opened.ceremony_id, 2, SelectAuthorizationSourceAction("secret_reauthentication")
+        )
+    )
+    assert type(phase) is ServerPhaseEnvelope
+    assert cast(SecretRequiredPhase, phase.phase).binding.purpose is (
+        ConfidentialSecretPurpose.PROVIDER_REAUTHENTICATION
+    )
+    credential_phase = await service.secret_completed(opened.ceremony_id)
+    assert type(credential_phase) is ServerPhaseEnvelope
+    assert cast(SecretRequiredPhase, credential_phase.phase).binding.purpose is (
+        ConfidentialSecretPurpose.PROVIDER_CREDENTIAL
+    )
+    result = await service.secret_completed(opened.ceremony_id)
+    assert type(result) is ServerResultEnvelope
+    assert result.result == ProviderCredentialResult("set", 1, "stored")
+    assert len(effects.proofs) == 1
+    with pytest.raises(Exception, match="already_consumed"):
+        cast(HumanAuthorizationProof, effects.proofs[0]).consume(
+            "provider_credential_set", TARGET_DIGEST, 7, 3, None, 100.0
+        )
+    memory.close()
+
+
+@pytest.mark.anyio
+async def test_os_presence_is_exact_challenge_bound_and_consumed_once(tmp_path: Path) -> None:
+    presence = _Presence()
+    memory = LocalSecretMemory()
+    credential = memory.capture(
+        SecretPurpose.PROVIDER_CREDENTIAL, bytearray(b"provider-token-value")
+    )
+    service, _, _, _, _ = _service(
+        tmp_path, mode="os_keyring", ready=True, handles=[credential], presence=presence
+    )
+    purpose = "semantic-review"
+    target = ProviderCredentialTarget(
+        "set",
+        "openai",
+        "gpt-5",
+        "responses",
+        "1",
+        purpose,
+        ZERO_DIGEST,
+        canonical_digest({"purpose": purpose}),
+    )
+    opened = await service.open_ceremony(
+        ClientOpenEnvelope("3" * 64, HumanCeremonyKind.PROVIDER_CREDENTIAL_SET, target)
+    )
+    phase = await service.submit_action(
+        ClientActionEnvelope(
+            opened.ceremony_id, 2, SelectAuthorizationSourceAction("os_user_presence")
+        )
+    )
+    assert type(phase) is ServerPhaseEnvelope
+    assert presence.attestation.used
+    assert presence.last_challenge is not None
+    assert presence.last_challenge.target_digest == TARGET_DIGEST
+    await service.cancel(opened.ceremony_id)
+    memory.close()
+
+
+@pytest.mark.anyio
+async def test_disclosure_consent_needs_no_strong_reauth_and_wrong_phase_is_consumed(
+    tmp_path: Path,
+) -> None:
+    service, _, _, _, effects = _service(tmp_path, mode="os_keyring", ready=True, handles=[])
+    target = PrivacyPendingTarget("disclosure", "pending-1")
+    opened = await service.open_ceremony(
+        ClientOpenEnvelope("4" * 64, HumanCeremonyKind.PRIVACY_DISCLOSURE_DECISION, target)
+    )
+    result = await service.submit_action(
+        ClientActionEnvelope(opened.ceremony_id, 2, DecisionAction("approve"))
+    )
+    assert type(result) is ServerResultEnvelope
+    assert result.result == PrivacyDecisionResult("committed", ZERO_DIGEST)
+    assert effects.proofs == [None]
+
+    reopened = await service.open_ceremony(
+        ClientOpenEnvelope("5" * 64, HumanCeremonyKind.PRIVACY_DISCLOSURE_DECISION, target)
+    )
+    with pytest.raises(HumanControlError, match="phase_invalid"):
+        await service.submit_action(ClientActionEnvelope(reopened.ceremony_id, 2, RetryAction()))
+    with pytest.raises(HumanControlError, match="replay"):
+        await service.cancel(reopened.ceremony_id)
