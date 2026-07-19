@@ -27,6 +27,10 @@ Unsupported API, wrong UID, symlink/non-socket, inherited descriptor.
 
 This file emits bounded structural capability evidence.
 
+Run this capability file separately from the same-basename integration file until the Wave F/B9
+runner selects pytest importlib mode or packages test directories; default pytest import mode
+otherwise aliases the two modules during one collection.
+
 ## Open questions
 
 None.

@@ -785,8 +785,8 @@ class ImportAllocation:
         }
         if self.state is ImportState.PENDING and planned_phase != has_plan:
             raise _invalid("import_allocation_invalid")
-        report_data = report_object is not None or report_digest is not None or terminal
-        if report_data != (report_object is not None and report_digest is not None and terminal):
+        report_data = report_object is not None or report_digest is not None
+        if report_data != (report_object is not None and report_digest is not None):
             raise _invalid("import_allocation_invalid")
         report_phase = self.phase in {
             ImportPhase.REPORT_READY,
@@ -799,6 +799,11 @@ class ImportAllocation:
             self.report_evidence_draft_bytes,
             self.report_evidence_draft_digest,
         )
+        evidence_present = tuple(value is not None for value in evidence_values)
+        if any(evidence_present) and not all(evidence_present):
+            raise _invalid("import_allocation_invalid")
+        if report_data != all(evidence_present):
+            raise _invalid("import_allocation_invalid")
         if report_data:
             if (
                 type(self.report_evidence_draft) is not EventDraft
@@ -809,9 +814,7 @@ class ImportAllocation:
             if canonical_digest(strict_json_parse(raw)) != self.report_evidence_draft_digest:
                 raise _invalid("import_allocation_invalid")
             _digest(self.report_evidence_draft_digest)
-        elif any(value is not None for value in evidence_values):
-            raise _invalid("import_allocation_invalid")
-        if self.state is ImportState.COMPLETE and (not has_plan or not report_data):
+        if self.state is ImportState.COMPLETE and (not has_plan or not report_data or not terminal):
             raise _invalid("import_allocation_invalid")
         if self.state is ImportState.QUARANTINED and not terminal:
             raise _invalid("import_allocation_invalid")

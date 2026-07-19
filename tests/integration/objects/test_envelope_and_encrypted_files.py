@@ -1,0 +1,312 @@
+"""Reviewed envelope vectors and durable encrypted-file lifecycle."""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import hmac
+import json
+import os
+from collections.abc import Callable
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
+
+import pytest
+from cryptography.hazmat.primitives.keywrap import aes_key_unwrap, aes_key_wrap
+
+from yoetz.adapters.objects import encrypted_files as encrypted_files_module
+from yoetz.adapters.objects.encrypted_files import (
+    EncryptedFilesObjectStore,
+    object_ref_from_staged,
+)
+from yoetz.adapters.objects.envelope import (
+    ObjectEnvelopeHeader,
+    decode_object_envelope,
+    encode_object_envelope,
+)
+from yoetz.ports.keys import BundleKeys, WrappedDek
+from yoetz.ports.objects import (
+    OBJECT_COMMITMENT_DOMAINS,
+    ObjectKind,
+    ObjectMetadata,
+    ObjectRootSnapshot,
+    ObjectSource,
+)
+from yoetz.ports.secret_memory import (
+    SecretConsumer,
+    SecretMemoryCapability,
+    SecretPurpose,
+)
+from yoetz.protocol.ids import IdKind
+
+if TYPE_CHECKING:
+    from yoetz.ports.secret_memory import SecretHandle
+
+_TASK_ID = "tsk_30000000-0000-4000-8000-000000000001"
+_DIGEST = "sha256:" + "0" * 64
+
+
+class SecretForObjectTest:
+    def __init__(self, value: bytes | bytearray) -> None:
+        self._value = bytearray(value)
+        self._consumed = False
+
+    @property
+    def purpose(self) -> SecretPurpose:
+        return SecretPurpose.OBJECT_PAYLOAD
+
+    def consume[T](self, consumer: SecretConsumer, fn: Callable[[memoryview], T]) -> T:
+        if consumer is not SecretConsumer.OBJECT_CRYPTO or self._consumed:
+            raise ValueError("secret_handle_invalid")
+        self._consumed = True
+        try:
+            return fn(memoryview(self._value))
+        finally:
+            self._value[:] = b"\0" * len(self._value)
+
+
+class SecretMemoryForObjectTest:
+    def capability(self) -> SecretMemoryCapability:
+        return SecretMemoryCapability("active", "unavailable", "unavailable", "active", "active")
+
+    def capture(self, purpose: SecretPurpose, source: bytearray) -> SecretForObjectTest:
+        assert purpose is SecretPurpose.OBJECT_PAYLOAD
+        result = SecretForObjectTest(source)
+        source[:] = b"\0" * len(source)
+        return result
+
+    def allocate(self, purpose: SecretPurpose, size: int) -> SecretForObjectTest:
+        assert purpose is SecretPurpose.OBJECT_PAYLOAD
+        return SecretForObjectTest(bytes(size))
+
+    def close(self) -> None:
+        return None
+
+
+class WrapKeyForObjectTest:
+    def __init__(self, key: bytes) -> None:
+        self._key = key
+
+    def wrap_dek(self, dek: SecretHandle) -> WrappedDek:
+        wrapped = dek.consume(
+            SecretConsumer.OBJECT_CRYPTO,
+            lambda value: aes_key_wrap(self._key, bytes(value)),
+        )
+        return WrappedDek("aes-256-kw-rfc3394", wrapped)
+
+    def unwrap_dek(self, wrapped: WrappedDek) -> SecretForObjectTest:
+        return SecretForObjectTest(aes_key_unwrap(self._key, wrapped.wrapped))
+
+
+class MacKeyForObjectTest:
+    def __init__(self, key: bytes) -> None:
+        self._key = key
+
+    def mac(self, domain: bytes, message: bytes) -> str:
+        return "hmac-sha256:" + hmac.new(self._key, domain + message, hashlib.sha256).hexdigest()
+
+
+class IdsForObjectTest:
+    def __init__(self) -> None:
+        self._next = 16
+
+    def new(self, kind: IdKind) -> str:
+        assert kind is IdKind.OBJECT
+        result = f"obj_{self._next:08x}-0000-4000-8000-000000000001"
+        self._next += 1
+        return result
+
+
+class RootsForObjectTest:
+    def __init__(self, value: ObjectRootSnapshot) -> None:
+        self.value = value
+
+    async def current(self) -> ObjectRootSnapshot:
+        return self.value
+
+
+def object_snapshot(now: datetime, live: tuple[str, ...] = ()) -> ObjectRootSnapshot:
+    return ObjectRootSnapshot(
+        _TASK_ID,
+        _DIGEST,
+        1,
+        1,
+        0,
+        _DIGEST,
+        _DIGEST,
+        _DIGEST,
+        _DIGEST,
+        now,
+        live,
+    )
+
+
+def object_store(tmp_path: Path, now: datetime) -> EncryptedFilesObjectStore:
+    tmp_path.chmod(0o700)
+    roots = RootsForObjectTest(object_snapshot(now))
+    return EncryptedFilesObjectStore(
+        bundle_root=tmp_path,
+        bundle_keys=BundleKeys(
+            "bmk-1",
+            WrapKeyForObjectTest(bytes(range(32))),
+            MacKeyForObjectTest(bytes(range(32, 64))),
+        ),
+        secret_memory=SecretMemoryForObjectTest(),
+        id_port=IdsForObjectTest(),
+        current_root_snapshot=roots.current,
+    )
+
+
+def _fixture() -> dict[str, object]:
+    path = Path(__file__).parents[3] / "fixtures" / "canonical" / "object-envelope.case.json"
+    return cast(dict[str, object], json.loads(path.read_bytes()))
+
+
+def test_reviewed_envelope_vectors_round_trip_and_reject_mutations() -> None:
+    fixture = _fixture()
+    fixture_input = cast(dict[str, object], fixture["input"])
+    publications = cast(list[dict[str, object]], fixture_input["object_publications"])
+    for publication in publications:
+        artifact = cast(dict[str, object], publication["envelope"])
+        blob = base64.b64decode(cast(str, artifact["base64"]), validate=True)
+        decoded = decode_object_envelope(blob)
+        assert decoded.header_bytes.hex() == publication["header_hex"]
+        assert decoded.header.created_at.endswith("000Z")
+        assert (
+            encode_object_envelope(
+                decoded.header,
+                decoded.payload_nonce,
+                decoded.ciphertext,
+                decoded.tag,
+            )
+            == blob
+        )
+        assert len(decoded.header_bytes) == 444
+
+    first_artifact = cast(dict[str, object], publications[0]["envelope"])
+    valid = base64.b64decode(cast(str, first_artifact["base64"]), validate=True)
+    invalid = (
+        valid[:-1],
+        valid + b"\0",
+        b"BAD!" + valid[4:],
+        valid[:4] + b"\x02" + valid[5:],
+        valid[:5] + (0).to_bytes(4, "big") + valid[9:],
+    )
+    for candidate in invalid:
+        with pytest.raises(ValueError, match="invalid_object_envelope"):
+            decode_object_envelope(candidate)
+
+
+def test_reviewed_commitment_vectors_are_byte_exact() -> None:
+    fixture_input = cast(dict[str, object], _fixture()["input"])
+    plaintexts = cast(list[dict[str, object]], fixture_input["plaintexts"])
+    raw = cast(dict[str, object], plaintexts[0]["bytes"])
+    plaintext = base64.b64decode(cast(str, raw["base64"]), validate=True)
+    vectors = cast(list[dict[str, object]], fixture_input["commitment_vectors"])
+    key = MacKeyForObjectTest(bytes(range(32, 64)))
+    assert len(vectors) == len(ObjectKind) == 17
+    for vector in vectors:
+        kind = ObjectKind(cast(str, vector["kind"]))
+        domain = base64.b64decode(cast(str, vector["domain_base64"]), validate=True)
+        assert domain == OBJECT_COMMITMENT_DOMAINS[kind]
+        assert domain.endswith(b"\0")
+        assert key.mac(domain, plaintext) == vector["commitment"]
+
+
+def test_stage_fsync_rename_dirfsync_finalize(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+    store = object_store(tmp_path, now)
+    metadata = ObjectMetadata(
+        ObjectKind.CAPTURED_CONTENT, "application/octet-stream", _TASK_ID, now
+    )
+    staged = asyncio.run(store.stage(ObjectSource(data=b"payload"), metadata))
+
+    events: list[str] = []
+    real_fsync = encrypted_files_module.os.fsync
+    real_replace = encrypted_files_module.os.replace
+
+    def recording_fsync(descriptor: int) -> None:
+        events.append("fsync")
+        real_fsync(descriptor)
+
+    def recording_replace(source: os.PathLike[str], destination: os.PathLike[str]) -> None:
+        events.append("rename")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(encrypted_files_module.os, "fsync", recording_fsync)
+    monkeypatch.setattr(encrypted_files_module.os, "replace", recording_replace)
+    ref = asyncio.run(store.finalize(staged))
+    assert events[0:3] == ["fsync", "rename", "fsync"]
+    assert asyncio.run(store.finalize(staged)) == ref
+
+
+def test_verified_open_reads_only_finalized_objects(tmp_path: Path) -> None:
+    now = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+    store = object_store(tmp_path, now)
+    metadata = ObjectMetadata(ObjectKind.RECEIPT, "application/json", _TASK_ID, now)
+    staged = asyncio.run(store.stage(ObjectSource(data=b"{}"), metadata))
+
+    async def read_before_finalize() -> bytes:
+        return b"".join(
+            [chunk async for chunk in store.open_verified(object_ref_from_staged(staged))]
+        )
+
+    with pytest.raises(ValueError, match="object_verification_failed"):
+        asyncio.run(read_before_finalize())
+    ref = asyncio.run(store.finalize(staged))
+
+    async def read_after_finalize() -> bytes:
+        return b"".join([chunk async for chunk in store.open_verified(ref)])
+
+    assert asyncio.run(read_after_finalize()) == b"{}"
+
+
+def test_header_and_envelope_digest_fields_match_reference(tmp_path: Path) -> None:
+    now = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+    store = object_store(tmp_path, now)
+    metadata = ObjectMetadata(
+        ObjectKind.CAPTURED_CONTENT, "application/octet-stream", _TASK_ID, now
+    )
+    ref = asyncio.run(
+        store.finalize(asyncio.run(store.stage(ObjectSource(data=b"payload"), metadata)))
+    )
+    path = tmp_path / "objects" / ref.object_id[4:6] / ref.object_id
+    frame = path.read_bytes()
+    envelope = decode_object_envelope(frame)
+    assert hashlib.sha256(frame).hexdigest() == ref.envelope_digest.removeprefix("sha256:")
+    assert envelope.header == ObjectEnvelopeHeader(
+        created_at="2026-03-04T05:06:07.000000Z",
+        encryption_format=ref.encryption_format,
+        key_slot=ref.key_slot,
+        media_type=metadata.media_type,
+        object_id=ref.object_id,
+        object_kind=metadata.kind,
+        payload_algorithm="aes-256-gcm",
+        plaintext_size=ref.plaintext_size,
+        task_id=metadata.task_id,
+        wrap_algorithm="aes-256-kw-rfc3394",
+        wrapped_dek=envelope.header.wrapped_dek,
+    )
+
+
+def test_staging_path_derivation_is_collision_safe(tmp_path: Path) -> None:
+    now = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+    store = object_store(tmp_path, now)
+    metadata = ObjectMetadata(
+        ObjectKind.CAPTURED_CONTENT, "application/octet-stream", _TASK_ID, now
+    )
+    first = asyncio.run(store.stage(ObjectSource(data=b"same"), metadata))
+    second = asyncio.run(store.stage(ObjectSource(data=b"same"), metadata))
+    staging_root = tmp_path / "objects" / ".staging"
+    staged_paths = tuple(staging_root.iterdir())
+    assert first.object_id != second.object_id
+    assert len(staged_paths) == 2
+    assert len({path.name for path in staged_paths}) == 2
+    assert all(path.parent == staging_root for path in staged_paths)
+    assert all(
+        path.resolve().is_relative_to((tmp_path / "objects").resolve()) for path in staged_paths
+    )

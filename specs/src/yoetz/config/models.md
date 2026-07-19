@@ -32,6 +32,9 @@ global network ceiling and five channel policies are distinct authority dimensio
   selection; it contains no socket locator or launch instruction.
 - `class ProfileCapabilities` (frozen dataclass) — `network: NetworkPolicy`,
   `semantic: SemanticPolicy` derived per profile.
+- `NetworkPolicy` is exactly `denied|candidate_external|explicit_per_probe`.
+- `SemanticPolicy` is exactly
+  `optional_local_model|optional_external|scripted_fake|no_implicit_model`.
 - `PROFILE_CAPABILITIES: Mapping[str, ProfileCapabilities]` — the capability table below.
 - `class ConfigError(Exception)` — carries a bounded `reason_code: str`; never free text copied
   from input; registered in `specs/INTERFACES.md`.

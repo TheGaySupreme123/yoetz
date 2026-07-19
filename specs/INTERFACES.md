@@ -1175,7 +1175,10 @@ projection time against the frozen frontier and is never cached across frontiers
 projection still reserves and completes its `AgentProjectionAuditSubject` receipt.
 
 `PrivacyPolicyStorePort` alone loads/intersects and mutates the machine ceiling plus
-workspace/task/request overlays. `PrivacyAuditPort` durably reserves the closed
+workspace/task/request overlays. Its `seed_if_absent(policy) -> PrivacyPolicy` transition is the
+only bootstrap write: it atomically commits the exact generation-1 denied machine policy when no
+row exists, returns an existing row only when it is byte/identity-equivalent, and otherwise fails
+with a bounded conflict without overwrite. `PrivacyAuditPort` durably reserves the closed
 `PrivacyAuditSubject = PreDispatchAuditDecision | AgentProjectionAuditSubject |
 DisclosureProposal` union, records exact
 human decisions, mints one-use `EgressAuthorization`, exposes atomic consumption only to the
@@ -1606,7 +1609,13 @@ facade and are never MCP tools.
   bounded lifetime without a per-client runtime mode.
 - `adapters/control/unix_socket.py`: fixed owner-only AF_UNIX endpoint plus Linux `SO_PEERCRED` and
   macOS `getpeereid` peer authentication; filesystem permissions are defense in depth, not the sole
-  identity check.
+  identity check. Exact adapter values are `EndpointKind` (`control|secret|human_control`), opaque
+  nonserializable `PeerIdentityHandle`, `AuthenticatedUnixStream`, `UnixEndpointListener`, and
+  bounded adapter-only `LocalControlTransportError`. The fixed basenames are `control.sock`,
+  `secret-ingress.sock`, and `human-control.sock`, beneath the verified platformdirs per-user
+  runtime directory with `0700` parent/`0600` endpoints. Async bind/connect functions have no path
+  overload or TCP fallback. Framing/schema/state-machine ownership remains in the ordinary and
+  confidential protocol modules; these transport values never enter public workflow results.
 - `adapters/session_events.py`: positively tested lock/suspend monitoring. v0.1 exposes foreground
   `service run` only; user-service-manager installers and hidden client spawn are absent.
 - `adapters/sqlite/connection.py`: `open_writer(path) -> apsw.Connection` (frozen PRAGMA + build
@@ -1714,7 +1723,10 @@ facade and are never MCP tools.
   the `PrivacyProfile` enum; provider credentials and unlock/recovery material cannot be represented
   by config or environment. Ordinary clients never load this object. `release-probe` is available
   only to the service-start release harness and cannot loosen user policy. Shared config values are
-  `YoetzConfig`, `MinimalConfig`, `ConfigError`, and `PathSafetyError`.
+  `YoetzConfig`, `MinimalConfig`, `ConfigError`, and `PathSafetyError`. Its composition-only
+  `NetworkPolicy` values are exactly `denied|candidate_external|explicit_per_probe`;
+  `SemanticPolicy` values are exactly
+  `optional_local_model|optional_external|scripted_fake|no_implicit_model`.
 - `config/paths.py`: platformdirs-based `bundle_root()`, `catalog_path()`, path safety checks
   (rejects repo/sync/network/world-readable locations).
 - `observability/logging.py`: structured stderr logging, allowlisted fields only; shared `LogMode`

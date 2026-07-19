@@ -101,6 +101,13 @@ ledger-assigned frontiers.
   the exact decoded safe `report_evidence_draft` plus its canonical structural bytes/digest;
 - `replayed_report` only for terminal identical-source/idempotent replay.
 
+The safe terminal-result group is independent from the report-ready group for a quarantined job.
+`report_object`/`report_digest` and the evidence-draft fields are each all-or-none and are required
+for `complete`, but a verified contradiction may quarantine at `source_reserved`, `plan_ready`, or
+mid-batch before any report exists. Such a replay returns the durable quarantine allocation without
+fabricating report identity. If quarantine occurs after `report_ready`, the already-pinned report
+group remains immutable.
+
 `PreparedImportPlan` is an immutable plan with source/mapper identities, ordered line outcomes,
 ordered candidate/gap counts, finalized encrypted per-batch plan objects, batch request IDs,
 event/payload logical IDs, and one canonical `plan_digest` over its safe structural manifest

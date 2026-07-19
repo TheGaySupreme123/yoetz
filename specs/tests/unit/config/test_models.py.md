@@ -23,6 +23,9 @@ Lock the strict config model, profile table, and secret rejection rules.
 - `test_unknown_keys_are_rejected` — no unreviewed config fields leak in.
 - `test_provider_data_use_profile_is_installed_evidence` — data-use posture is selected only through
   the exact installed endpoint profile and cannot be self-asserted in user config.
+- `test_privacy_seed_delegate_is_atomic_idempotent_and_never_overwrites` — concurrent equivalent
+  generation-1 seeds converge on the same row; a different complete policy conflicts without
+  overwrite.
 
 ## Behavior
 
@@ -36,6 +39,8 @@ The suite proves:
 - local model fields are exact structural identifiers only and merely select installed capability;
 - secret-like names are rejected even when values are absent;
 - unknown keys and wrong types fail before runtime startup.
+- config delegates an already-materialized denied policy to the store's atomic seed transition and
+  never manufactures identity, time, scope, or digest.
 
 ## Errors and edge cases
 

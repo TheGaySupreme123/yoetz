@@ -12,8 +12,15 @@ records behind `VaultService`.
 
 ## Public surface
 
-- `class OSVaultRootKeySource` with async `probe`, `authorize_first_install`, `load`,
-  `create_and_verify`, and `delete_after_proven_migration`.
+- `OSVaultRootKeySource(secret_memory: SecretMemoryPort, *, backend: object | None = None)`; the
+  optional backend injection exists only for bounded adapter tests. Its exact methods are
+  `async probe(installation_id) -> OSKeyringProbe`,
+  `async authorize_first_install(probe, user_presence, runtime_support, *, service_generation,
+  pristine_state_digest) -> FirstInstallKeyringAuthority`, `async load(installation_id) ->
+  KeyringInitializationBinding`, `async create_and_verify(authority, binding, *,
+  service_generation, pristine_state_digest, staged_sentinel_verifier) ->
+  KeyringInitializationBinding`, and `async delete_after_proven_migration(installation_id,
+  migration_verifier) -> None`.
 - `enum OSKeyringState` — `available`, `locked`, `missing`, `unsupported`, `unverified`.
 - `KeyringInitializationBinding` — version, installation identity, raw random correlation value and
   IVK held only in protected memory, plus the public correlation commitment used by vault staging.
@@ -30,6 +37,12 @@ returns a `SecretHandle` scoped to `vault_root` plus an opaque correlation verif
 correlation bytes never leave secret memory. The versioned entry payload binds installation ID,
 IVK, and the one-time initialization correlation value.
 
+The approved backend adapter must expose atomic
+`set_password_if_absent(service: str, username: str, password: str) -> bool` in addition to bounded
+`get_password` and `delete_password`. Ordinary overwrite-capable `set_password` is never an
+equivalent. An exact approved backend without that operation is structurally `unsupported` for
+first install; the adapter never emulates no-replace with a racy read-then-write sequence.
+
 `authorize_first_install` is mutation-free. It succeeds only when a fresh probe proves the exact
 approved backend's create-if-absent and round-trip-load behavior and the installed
 `UserPresenceCapability` matches an active `user_presence_cells` row in the verified packaged
@@ -37,6 +50,21 @@ runtime-support manifest for the same candidate artifact/release cell. All four 
 must be active. It returns a fresh authority bound to the current pristine-state digest and service
 generation. Missing, absent, inconclusive, stale, mismatched, or cross-artifact evidence returns
 bounded `human_authority_unavailable` and creates no stage, IVK, entry, or mode marker.
+
+The caller supplies an already canonical/self-digest/resource-verified runtime-support manifest.
+The adapter consumes `user_presence_cells`; the selected row must match these authorization fields:
+`candidate_artifact_digest`, `release_cell`, `adapter_id`, `profile_id`,
+`capability_evidence_digest`, `os_authenticated_prompt`, `trusted_action_binding`,
+`one_use_attestation`, and `available`, with all four state fields `active`. Other empirical row
+fields remain validated by the runtime-support resource owner and cannot widen this predicate.
+`OSKeyringProbe` contains installation ID, bounded state, backend identity, create-if-absent and
+round-trip booleans, and its canonical probe digest.
+
+`KeyringInitializationBinding` is exactly version `1`, installation ID, SHA-256 correlation
+commitment, one protected `vault_root_key` IVK handle, and one protected `vault_root_key`
+correlation handle. `staged_sentinel_verifier(memoryview, correlation_commitment) -> None` runs on
+the round-trip-loaded IVK before success; the returned binding is freshly loaded because that
+verification consumes its input handle.
 
 `create_and_verify` is first-install-only, requires and consumes that exact authority,
 uses an atomic backend create-if-absent operation (or fails unsupported when the backend cannot

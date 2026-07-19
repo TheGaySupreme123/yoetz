@@ -15,6 +15,7 @@ and provider implementations to vary without granting CLI/MCP/provider code dire
 ## Public surface
 
 - `class PrivacyPolicyStorePort(Protocol)`:
+  - `async seed_if_absent(policy: PrivacyPolicy) -> PrivacyPolicy`
   - `async effective_policy(scope: AuthorizationScope) -> EffectivePrivacyPolicy`
   - `async prepare_transition(proposal: PolicyTransitionProposal) -> PreparedPolicyTransition`
   - `async commit_transition(prepared, decision: HumanPolicyDecision) -> PrivacyPolicy`
@@ -80,6 +81,11 @@ inventory row is neither required nor permitted solely to keep a privacy object 
 ## Behavior
 
 ### Policy store
+
+`seed_if_absent` is the sole first-run bootstrap mutation. It atomically commits the supplied exact
+denied machine policy as generation 1 only when the store proves absence. A concurrent or repeated
+call returns the existing policy only when its complete canonical bytes and identity are equal;
+any different existing row fails with a bounded conflict and is never overwritten.
 
 `effective_policy` loads the durable machine policy and applicable workspace/task/request overlays
 and returns their deterministic intersection with a canonical digest and generation. On a truly

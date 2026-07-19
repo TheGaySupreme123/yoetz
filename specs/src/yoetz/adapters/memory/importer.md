@@ -42,7 +42,13 @@ Constructor contract:
 
 `MemoryImporter(*, task_id, admitted_session_id, ownership_fence, state, transaction_lock,
 objects: ObjectStorePort, ledger: LedgerPort, clock: ClockPort, ids: IdPort,
-policy: MemoryImportPolicy, fault_hook=None)`.
+plan_preparer, plan_reader, policy: MemoryImportPolicy, fault_hook=None)`.
+
+`plan_preparer(allocation)` is the injected async pure Codex mapper/materializer owned by
+`adapters/importers/codex_jsonl.py`; `plan_reader(plan_object)` is the injected async verified
+reader for its finalized plan material. Both dependencies are mandatory and shared with the
+SQLite adapter in parity tests. This keeps B4 persistence independent of the later B6 mapper
+without leaving a public method stub.
 
 The ledger is retained only for accepted-event/frontier verification in `record_batch`, report
 publication, and review. It is never called while `transaction_lock` is held. `state` and the lock
@@ -131,7 +137,8 @@ produce a second plan.
 ### Pure parsing, materialization, and plan publication
 
 `prepare_plan` requires a current `source_reserved` allocation. It snapshots/verifies job identity
-under the lock, then outside it:
+under the lock, calls the injected `plan_preparer` outside it, then rejects any result whose exact
+source identity differs from the allocation. The injected dependency:
 
 1. opens/authenticates the exact source and capture-metadata objects and rechecks size/commitment;
 2. calls the exact profile's `parse_codex_jsonl` and `plan_codex_mapping` with the registered line/
@@ -145,7 +152,7 @@ under the lock, then outside it:
    gaps, local-to-Yoetz ID map, mapping/profile identities, and source ranges; build the bounded
    structural manifest and `plan_digest`.
 
-It returns a provisional `PreparedImportPlan`; it does not mutate state. Repeated calls before a
+The method returns that provisional `PreparedImportPlan`; it does not mutate state. Repeated calls before a
 successful publication may allocate different IDs/objects, which remain harmless orphans.
 
 `publish_plan` uses one transaction to reverify phase/lease/source, validate every object ref/
@@ -161,8 +168,8 @@ index, verifies the fixed publisher and lease, renews the lease so at least 30 s
 and returns a refreshed allocation plus an immutable row snapshot. If no row remains, it returns
 the refreshed allocation with `batch=None`.
 
-Outside the lock, it opens/verifies the snapshot's `import_plan` object, reconstructs exact
-`EventDraft` values, remeasures caps, and returns `ImportBatch`. A verification failure is storage
+Outside the lock, it asks the injected verified `plan_reader` for the snapshot's finalized
+`import_plan` material, compares exact ordered event IDs, and returns `ImportBatch`. A verification failure is storage
 corruption; no later batch is skipped. A lease that cannot be safely renewed returns
 `OPERATION_PENDING` before payload exposure.
 

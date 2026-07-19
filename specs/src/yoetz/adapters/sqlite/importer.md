@@ -43,7 +43,13 @@ Constructor contract:
 
 `SqliteImporter(*, task_id, admitted_session_id, ownership_fence, writer: SqliteWriterThread,
 read_factory, objects: ObjectStorePort, ledger: LedgerPort, clock: ClockPort, ids: IdPort,
-policy: SqliteImportPolicy)`.
+plan_preparer, plan_reader, policy: SqliteImportPolicy)`.
+
+`plan_preparer(allocation)` is the mandatory injected async pure Codex mapper/materializer owned
+by `adapters/importers/codex_jsonl.py`; `plan_reader(plan_object)` is the mandatory injected async
+verified reader for finalized plan material. Production wiring supplies B6 implementations and
+conformance tests supply deterministic fakes, so every public B4 method remains functional before
+the mapper slice lands.
 
 The importer shares the exact task's one `SqliteWriterThread` and `OwnershipFence` with
 `SqliteLedgerRepository`. It never opens a second writer connection. Read-only `status`/review row
@@ -196,8 +202,9 @@ produces `source_already_imported_metadata_differs`; first accepted capture rema
 ### Prepare and durably publish the plan
 
 `prepare_plan` snapshots/verifies the leased `source_reserved` job on the writer thread, then
-outside SQLite authenticates the source/metadata objects, parses/maps through the exact Codex
-profile, allocates all UUIDv4-backed candidate/batch/report IDs, deterministically partitions
+outside SQLite calls the injected `plan_preparer` and rejects a returned plan whose exact source
+identity differs from the allocation. That dependency authenticates source/metadata objects,
+parses/maps through the exact Codex profile, allocates all UUIDv4-backed candidate/batch/report IDs, deterministically partitions
 under 100-event/1-MiB request and 1,024-batch caps, and finalizes one `import_plan` object per
 batch. It returns `PreparedImportPlan` without DB mutation. Before plan commit, retry may create
 different orphan objects/IDs.
@@ -220,8 +227,8 @@ batch, validate lease, extend expiry to at least the 30-second publication windo
 revision, commit, and return refreshed allocation plus a structural row snapshot. No remaining row
 returns `batch=None` with that same refreshed allocation.
 
-After COMMIT, open/authenticate the selected plan object and reconstruct the exact `ImportBatch`;
-remeasure request/event caps and compare every ID/digest. Corruption fails before application
+After COMMIT, use the injected verified `plan_reader` to reconstruct the exact `ImportBatch` and
+compare every ordered event ID/digest. Corruption fails before application
 publication. Global ledger writes may interleave, but this job always selects its own lowest batch.
 
 Application publishes through `publish_work`. `record_batch` validates the resulting canonical

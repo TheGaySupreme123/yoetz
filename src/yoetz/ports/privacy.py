@@ -408,6 +408,8 @@ class HumanAuthorityCapability:
 
 
 class PrivacyPolicyStorePort(Protocol):
+    async def seed_if_absent(self, policy: PrivacyPolicy) -> PrivacyPolicy: ...
+
     async def effective_policy(self, scope: AuthorizationScope) -> EffectivePrivacyPolicy: ...
 
     async def prepare_transition(

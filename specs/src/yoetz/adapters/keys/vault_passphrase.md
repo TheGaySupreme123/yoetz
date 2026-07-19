@@ -11,8 +11,9 @@ not portable bundle recovery and never activates as keyring fallback.
 
 ## Public surface
 
-- `create_vault_root_envelope(ivk_handle, initialize_handle) -> VaultRootEnvelope`; the second
-  handle must have purpose `vault_initialize`.
+- `create_vault_root_envelope(ivk_handle, initialize_handle, *, installation_id) ->
+  VaultRootEnvelope`; the first handle must have purpose `vault_root_key`, and the second must have
+  purpose `vault_initialize`.
 - `unlock_vault_root_envelope(envelope, unlock_handle) -> SecretHandle(vault_root)`.
 - Strict authenticated envelope/KDF structural types and bounded errors.
 - Candidate creation parameters: Argon2 version `19`, `time_cost=3`, `memory_kib=262_144`,

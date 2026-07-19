@@ -19,16 +19,20 @@ authority. Mutable scoped policy and human decisions live behind `PrivacyPolicyS
   `review_context_profile=structural`, the exact structural `ReviewSelectionPolicy`,
   `require_current_provider_data_use_evidence=false`, `network_egress_permitted=false`, all five
   network channels denied, local model disabled.
-- `seed_policy_if_absent(config, store) -> PrivacyPolicy` — atomically persists generation 1 only
-  when the policy store proves absence; otherwise returns the existing policy unchanged.
+- `async seed_policy_if_absent(policy: PrivacyPolicy, store: PrivacyPolicyStorePort) -> PrivacyPolicy`
+  — thin delegate to the store's atomic absent-or-generation-1 transition. Application composition
+  supplies IDs, clock, installation scope, and digest when materializing the domain policy; config
+  never mints identity or time.
 
 ## Behavior
 
 The only accepted v0.1 bootstrap value is the reviewed safe seed: `local_only`,
 `review_context_profile=structural`, the canonical structural selector, false provider-data-use
 guard, `network_egress_permitted=false`, all five network channels denied, and local model disabled. A
-missing section yields the same value. On first ready startup, the policy store atomically persists
-that seed as the machine policy generation 1. Once any durable policy exists, bootstrap config has
+missing section yields the same value. On first ready startup, application composition materializes
+the exact denied domain policy from that seed using injected IDs, clock, installation scope, and
+digest; the config helper delegates the complete value to the policy store's atomic
+`seed_if_absent`. Once any durable policy exists, bootstrap config has
 no intersection/ceiling effect and cannot overwrite, tighten, widen, reset, or roll back it. The
 word “ceiling” after bootstrap refers to the durable policy field, never this config seed. All later
 changes go through
@@ -50,8 +54,10 @@ Local-model permission is separate and does not imply external inference permiss
 
 Unknown/non-local profile, `network_egress_permitted=true`, enabled initial channel, enabled initial
 local model, omitted channel row, generic endpoint URL, secret-like key, or credential value fails
-closed with a bounded `ConfigError`. A crash during first seed is resolved by the policy store's
-absent-or-generation-1 transaction; config never replaces an existing policy.
+closed with `ConfigError("privacy_bootstrap_unsafe")` (or `secret_in_config` for a secret-like
+key). A crash or first-run race is resolved by the policy store's absent-or-generation-1
+transaction: an existing byte/identity-equivalent policy is returned, while a different row yields
+a bounded conflict without overwrite. Config never replaces an existing policy.
 
 ## Invariants
 

@@ -10,8 +10,15 @@ without exposing plaintext or requiring another migration resource/database.
 
 ## Public surface
 
-- `class EncryptedVaultStore` with `initialize`, `load_record`, `create_record`, `replace_
-  credential_record`, `delete_after_migration`, `verify_sentinel`, and `close`.
+- `EncryptedVaultStore(vault_dir: Path)`. Its exact adapter-internal methods are
+  `initialize(ivk_handle: SecretHandle[vault_root_key]) -> None`,
+  `create_record(kind, structural_binding: dict[str, str], payload: SecretHandle, *,
+  generation: int = 1) -> str`, `load_record(kind, structural_binding) -> SecretHandle`,
+  `replace_credential_record(structural_binding, payload, *, expected_generation: int) -> str`,
+  `verify_sentinel(structural_binding) -> None`,
+  `delete_after_migration(kind, structural_binding, *, expected_generation: int) -> None`, and
+  `close() -> None`. The mapping arguments are not open metadata: their exact key sets and value
+  validators are selected solely by the closed `VaultRecordKind` union below.
 - Closed `VaultRecordKind` — `vault_sentinel`, `bundle_key`, `provider_credential`,
   `recovery_metadata`. Installation lookup/log/privacy MAC keys are derivations, never records.
 - Frozen record header/envelope values and bounded `EncryptedVaultError`.
@@ -61,6 +68,13 @@ publishes and directory-fsyncs the generation-CAS index; a crash before the inde
 an unreferenced encrypted record. Bundle-key records are immutable generation 1. Credential
 replacement requires explicit human authorization, a fresh record DEK/nonce, generation+1, and an
 exact current-index CAS. No plaintext temp exists.
+
+`verify_sentinel` proves only that the indexed sentinel record has the expected keyed structural
+binding and passes frame digest, RFC-3394 unwrap, and AES-GCM authentication under the current IVK.
+Sentinel plaintext semantics and initialization-correlation/layout assertions are owned by
+`VaultService`; the adapter neither invents nor interprets them. `load_record` returns an opaque
+one-shot handle: provider credentials use purpose `provider_credential`; the other record kinds use
+the service-only `vault_root_key` purpose. All are consumable only by `vault_root`.
 
 ## Errors and edge cases
 

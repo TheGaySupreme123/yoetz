@@ -11,7 +11,11 @@ never an automatic fallback when the OS keyring is unavailable.
 
 ## Public surface
 
-- `wrap_recovery_artifact(BundleKeys, RecoverySecret) -> RecoveryArtifact`.
+- Internal helper
+  `wrap_recovery_artifact(RecoveryKeyMaterialHandle, RecoverySecret, *, task_id, key_slot) ->
+  RecoveryArtifact`. `KeyStorePort.wrap_recovery(bundle_id, recovery_secret)` remains the public
+  service-internal port method; the vault resolves the bundle record and passes its authenticated
+  binding plus a one-shot opaque BMK handle to this helper.
 - `unlock_recovery_artifact(RecoveryArtifact, RecoverySecret) -> recovered opaque key handle`.
 - KDF validation/calibration helpers over one-shot `portable_recovery` secret handles.
 - Candidate creation parameters: Argon2 version `19`, `time_cost=3`, `memory_kib=262_144`,

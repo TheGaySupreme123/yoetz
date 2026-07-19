@@ -41,6 +41,14 @@ smuggle configuration, and startup would parse untrusted TOML before any safety 
 The merge is computed per *leaf key*, not per section: setting `YOETZ_LOG_LEVEL` does not
 discard the file's `[logging] payloads` value.
 
+`service_overrides` uses the exact dotted leaf keys corresponding to the table below
+(`profile`, `storage.data_dir`, `storage.durability`, `verification.semantic`,
+`verification.max_findings`, `logging.level`, `provider.provider_id`,
+`provider.endpoint_profile_id`, `provider.endpoint_profile_version`, `provider.model`, and
+`provider.timeout_seconds`) plus `config` for the file path. Unknown or secret-shaped override
+names fail closed before their values are read. The explicit `config_path` argument, when present,
+wins over `service_overrides["config"]`.
+
 ### Environment variable naming
 
 `ENV_PREFIX + SECTION + "_" + KEY`, upper-cased, dots/section nesting flattened with `_`:
@@ -98,7 +106,8 @@ echoed unless all name-only validation succeeds; either name failure performs ze
 - Parser: stdlib `tomllib.load` on bytes read from the config file. `tomllib` rejects duplicate
   keys and invalid TOML natively; a `TOMLDecodeError` maps to `ConfigError("config_toml_invalid")`
   with the line/column only — never the offending text.
-- The parsed dict goes to `YoetzConfig.model_validate(..., strict=True)`; `extra="forbid"` on
+- The loader converts a selected TOML `storage.data_dir` string to `Path` (TOML has no path scalar),
+  then the parsed dict goes to `YoetzConfig.model_validate(..., strict=True)`; `extra="forbid"` on
   every model gives strict unknown-key rejection at all nesting levels.
 - File size is capped at 64 KiB before parsing (`ConfigError("config_file_too_large")`).
 - A missing config file is not an error: defaults apply. An unreadable existing file
@@ -136,7 +145,8 @@ the error report — but it does fail on unparseable TOML and on an invalid `pro
 
 ### Ordering with the rest of startup
 
-`load_config` performs no I/O beyond reading the one config file. It does not resolve or create
+`load_config` performs no I/O beyond reading the one config file and, only for an explicit config
+path, the bounded ancestor marker check required to emit `explicit_project_config`. It does not resolve or create
 `data_dir` (that is `config/paths.md`), does not construct a provider adapter (the ready service
 gateway composition does so only when capability, vault, and effective policy all permit), and does not configure logging (caller wires
 `observability/logging.md` using the returned config).

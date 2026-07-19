@@ -10,7 +10,9 @@ Python's copy/zeroization limits and a future native-vault substitution seam.
 
 ## Public surface
 
-- `class LocalSecretMemory(SecretMemoryPort)` and private one-shot handle implementation.
+- `LocalSecretMemory(*, require_page_locking: bool = False)` implements `SecretMemoryPort` and owns
+  a private one-shot handle implementation. One allocation is `1..4_194_304` bytes; this covers the
+  closed v0.1 secret/object-payload purposes without an unbounded mapping.
 - Startup probes for page lock/core-dump suppression and closed capability report.
 
 ## Behavior

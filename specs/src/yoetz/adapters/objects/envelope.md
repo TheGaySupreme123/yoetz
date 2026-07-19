@@ -105,6 +105,10 @@ Canonicality rules:
 - the header has only `created_at`, `encryption_format`, `key_slot`, `media_type`, `object_id`,
   `object_kind`, `payload_algorithm`, `plaintext_size`, `task_id`, `wrap_algorithm`, and
   `wrapped_dek`, with constants/encodings exactly as frozen by `ports/objects.md`;
+- `created_at` is UTC RFC 3339 with exactly six fractional digits and remains millisecond-aligned
+  (the final three digits are therefore `000`, as in `.000000Z`). This spelling is a local
+  `yoetz-object/1` byte-compatibility rule frozen by the reviewed envelope fixture; it does not
+  change the domain-wide three-digit `format_rfc3339_millis` representation;
 - there is no embedded checksum, wrap nonce, optional metadata map, or alternate integer encoding;
 - `ObjectRef.envelope_digest` is computed externally over the complete final frame and therefore
   cannot be an embedded self-checksum;
@@ -138,9 +142,9 @@ identity.
 ## Tests
 
 - `tests/integration/objects/test_envelope_and_encrypted_files.py` — exact u32-big-endian frame
-  vectors, fixed-input byte identity, structural rejection, full object-store authentication,
-  external envelope-digest stability, and proof that repeated logical encryption is intentionally
-  different.
+  vectors (including byte-exact six-digit `created_at` header bytes), fixed-input byte identity,
+  structural rejection, full object-store authentication, external envelope-digest stability, and
+  proof that repeated logical encryption is intentionally different.
 - `tests/integration/storage/test_quarantine_and_recovery.py` — envelope parsing during recovery and
   quarantine classification.
 

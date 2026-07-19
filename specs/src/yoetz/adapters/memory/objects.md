@@ -1,6 +1,7 @@
 # src/yoetz/adapters/memory/objects.py — in-memory object-store reference adapter
 
 **Wave:** C | **ADRs:** ADR-003, ADR-004 | **Imports (spec-tree):** `ports/objects.md`,
+`ports/clock.md`, `ports/ids.md`, `ports/keys.md`, `ports/secret_memory.md`,
 `adapters/objects/envelope.md`
 **Imported by:** conformance tests and object-publication fixtures
 
@@ -14,7 +15,7 @@ backend.
 
 | Name | Signature (natural language) |
 |---|---|
-| `MemoryObjectStore` | in-memory implementation of `ObjectStorePort` |
+| `MemoryObjectStore(bundle_keys, secret_memory, clock, id_port, current_root_snapshot)` | in-memory implementation of `ObjectStorePort` with injected opaque keys, protected-memory allocation, staging clock, ID allocation, and authoritative root revalidation |
 | `commitment_for(...)` | compute the non-publishing keyed logical commitment |
 | `stage(...)` | stage an object in memory with the same metadata rules as the durable store |
 | `finalize(...)` | promote a staged object to a durable reference in the reference model |
@@ -33,6 +34,9 @@ allocates/publishes nothing. `stage(...)` recomputes it independently.
 the same size, domain-commitment, fresh-identity/key/nonce, and header constraints as the durable
 adapter. Logical-repeat publications may differ in generated identity/envelope digest; conformance
 compares their stable plaintext commitment and contract shape unless randomness is injected.
+The internal orphan-age timestamp is captured from the injected `ClockPort` when staging succeeds;
+caller-controlled `ObjectMetadata.created_at` remains authenticated envelope metadata and is never
+used as evidence that a staged object is old enough to collect.
 
 `finalize(...)` returns a stable object reference and makes the staged object visible to reads.
 

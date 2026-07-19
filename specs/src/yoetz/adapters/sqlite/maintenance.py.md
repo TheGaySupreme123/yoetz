@@ -23,8 +23,12 @@ into operator-safe procedures.
 ## Public surface
 
 - `class SqliteMaintenance(MaintenancePort)` implementing all six preview/execute methods.
-- `acquire_maintenance(task_id, kind, request_id) -> MaintenanceHandle` — generation-fenced,
-  non-serializable authority used by migration/recovery/route-switch internals.
+- Private `_acquire_maintenance(command, plan, confirmed_plan_digest) -> MaintenanceHandle` —
+  generation-fenced, non-serializable authority used by migration/route-switch internals. The
+  exact command/plan pair supplies the request digest, confirmed plan digest, kind, task, and
+  frontier; injected authoritative providers supply the current route/owner/privacy-root facts
+  required by the complete non-null catalog operation row. There is no ambient request context
+  and no underspecified public acquisition helper.
 - `create_frontier_pin(handle, frontier, expires_at) -> MaintenancePin` and
   `release_frontier_pin(handle, pin) -> None`.
 - `build_backup_manifest(...) -> BackupManifest` — canonical structural builder.
@@ -68,9 +72,13 @@ no target/pin.
 Execution order:
 
 1. Recompute confirmed plan and reserve/reclaim operation under current generation.
-2. Create a `maintenance_pins` row at exact frontier `F` and bind the exact
-   `PrivacyAuditObjectRoots` generation/digest in one short catalog `BEGIN IMMEDIATE`; pin ID and
-   expiry are generation-bound. Snapshot the sorted set of object IDs referenced by events through
+2. Create a bundle `maintenance_pins` row at exact frontier `F` and bind the exact
+   `PrivacyAuditObjectRoots` generation/digest in one short bundle `BEGIN IMMEDIATE`; pin ID and
+   expiry are generation-bound. Then generation-CAS the catalog operation's durable phase lower
+   bound from `reserved` to `pinned`. A crash between those databases leaves an active bound pin
+   plus a reserved operation; retry revalidates and adopts that exact pin before advancing, never
+   creates a second live pin, and never treats the catalog phase alone as pin evidence. Snapshot
+   the sorted set of object IDs referenced by events through
    `F` plus required operation/result/receipt/semantic/importer objects whose durable state belongs
    to `F`, union every privacy-catalog ObjectRef, and serialize the matching canonical
    `privacy-audit-snapshot.json` structural sidecar. A privacy ref needs no task-ledger inventory row.
@@ -190,7 +198,9 @@ operator follows verified new-target restore. Never execute reverse SQL or overw
 
 - `specs/tests/integration.md`: exact backup/manifest/object/pin path; machine/portable modes; new-
   target restore, privacy sidecar/root union, full replay, route/root CAS, retained prior route,
-  clean-profile pending-state invalidation; migration success/failure.
+  clean-profile pending-state invalidation; migration success/failure; and a fault after the bundle
+  pin commit but before the catalog `reserved → pinned` CAS, whose retry must adopt the same live
+  pin ID/expiry and leave exactly one active pin.
 - `specs/tests/subprocess.md`: kill at database/object/manifest phases, migration and route-switch
   point 14, post-commit response loss and same-ID replay.
 - `specs/tests/property.md`: generated operation phase/retry/plan-stale/route-race model.
