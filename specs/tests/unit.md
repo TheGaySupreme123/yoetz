@@ -114,6 +114,8 @@ tests/unit/kernel/test_reducers_each_family.py
 tests/unit/kernel/test_replay_and_projections.py
 tests/unit/observability/test_logging_allowlist.py
 tests/unit/observability/test_privacy.py
+tests/unit/privacy/test_catalog_audit.py
+tests/unit/privacy/test_local_enforcer.py
 tests/unit/privacy/test_policy_and_contracts.py
 tests/unit/protocol/test_canonical_vectors.py
 tests/unit/protocol/test_coverage.py

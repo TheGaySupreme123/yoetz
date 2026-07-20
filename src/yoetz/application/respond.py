@@ -109,7 +109,11 @@ class RespondInternalResult:
             "subject_frontier": dict(self.subject_frontier.as_wire().items()),
             "result_frontier": dict(self.result_frontier.as_wire().items()),
             "accepted_event": cast(JsonValue, self.accepted_event.model_dump(mode="json")),
-            "response": cast(JsonValue, self.response.model_dump(mode="json", exclude_none=False)),
+            # ``RespondResponseModel.optional_non_null_fields`` (reason/waiver_scope/waiver_expiry)
+            # must be entirely omitted from the wire when absent, never present as an explicit
+            # null; ``_ClosedModel`` rejects a reflexive re-validation otherwise (for example
+            # when this internal JSON is later projected for an ordinary client).
+            "response": cast(JsonValue, self.response.model_dump(mode="json", exclude_none=True)),
             "coverage": coverage_to_json(self.coverage),
             "warning_codes": self.warning_codes,
             "versions": {
@@ -291,10 +295,7 @@ async def _public_result(
 ) -> RespondInternalResult:
     record = await _accepted_record(runtime, result)
     payload = cast(ResponseRecordedPayload, record.payload)
-    evidence = tuple(
-        RespondEvidenceSummaryModel(reference_id=ref, description=None)
-        for ref in payload.evidence_refs
-    )
+    evidence = tuple(RespondEvidenceSummaryModel(reference_id=ref) for ref in payload.evidence_refs)
     response_wire: dict[str, object] = {
         "response_event_id": record.event_id,
         "finding_id": payload.finding_id,

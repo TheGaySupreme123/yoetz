@@ -448,7 +448,14 @@ def _public_model(method: ControlMethod, value: Mapping[str, JsonValue]) -> Proj
         return JsonObject(value)
     success_type, result_type = model
     success = success_type.model_validate(value)
-    return result_type.model_validate(success.model_dump(mode="json", exclude_none=False))
+    # ``RespondResponseModel`` declares ``optional_non_null_fields`` (reason/waiver_scope/
+    # waiver_expiry) that the frozen wire schema requires to be entirely omitted when absent,
+    # never present as an explicit null. A blanket ``exclude_none=False`` round trip here would
+    # reintroduce that null for an ordinary acknowledged response and crash the reflexive
+    # re-validation below, so respond alone excludes it; the other five operations have no
+    # ordinarily-absent ``optional_non_null_fields`` member and keep the established behavior.
+    exclude_none = method is ControlMethod.RESPOND
+    return result_type.model_validate(success.model_dump(mode="json", exclude_none=exclude_none))
 
 
 @dataclass(frozen=True, slots=True)

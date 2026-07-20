@@ -6,7 +6,7 @@ import base64
 import hashlib
 import hmac
 from dataclasses import dataclass
-from typing import Literal, Protocol, cast
+from typing import Final, Literal, Protocol, cast
 
 from yoetz.application.check import CheckScope, run_deterministic_policies
 from yoetz.domain.findings import FINDING_KIND_TRAITS, FindingOrigin
@@ -144,6 +144,13 @@ def _filter_digest(request: StatusRequest) -> str:
     return canonical_digest(_filter_json(request.filter))
 
 
+# A SHA-256 HMAC digest is always exactly 32 bytes, so its unpadded base64url encoding is
+# always exactly this many characters -- fixed regardless of content. This lets the cursor
+# encode body and signature back-to-back with no separator character, matching the frozen
+# wire ``CursorWire`` pattern (``^[A-Za-z0-9_-]+$``), which admits no ``.`` or other delimiter.
+_SIGNATURE_B64_LEN: Final = 43
+
+
 def _b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
@@ -232,7 +239,9 @@ def _encode_cursor(
         }
     )
     signature = hmac.new(app.status_cursor_key, body, hashlib.sha256).digest()
-    return f"{_b64(body)}.{_b64(signature)}"
+    encoded_signature = _b64(signature)
+    assert len(encoded_signature) == _SIGNATURE_B64_LEN
+    return f"{_b64(body)}{encoded_signature}"
 
 
 def _decode_cursor(
@@ -243,7 +252,10 @@ def _decode_cursor(
     if type(app.status_cursor_key) is not bytes or len(app.status_cursor_key) < 32:
         raise _error(PublicErrorCode.SERVICE_UNAVAILABLE, "Status pagination is unavailable.")
     try:
-        body_part, signature_part = request.cursor.split(".", maxsplit=1)
+        if len(request.cursor) <= _SIGNATURE_B64_LEN:
+            raise ValueError("cursor_shape_invalid")
+        body_part = request.cursor[:-_SIGNATURE_B64_LEN]
+        signature_part = request.cursor[-_SIGNATURE_B64_LEN:]
         body = _unb64(body_part)
         signature = _unb64(signature_part)
         expected = hmac.new(app.status_cursor_key, body, hashlib.sha256).digest()
@@ -306,7 +318,10 @@ async def _exact_frontier(runtime: TaskRuntime, sequence: int | None) -> tuple[F
         head = stored.frontier
     target = head.sequence if sequence is None else sequence
     if target > head.sequence:
-        raise _error(PublicErrorCode.FRONTIER_CONFLICT, "The requested frontier is not current.")
+        # Status is a read-only query: a requested sequence beyond the observed head is invalid
+        # query input, never a stale optimistic mutation guard. See
+        # specs/src/yoetz/application/status.md "Errors and edge cases".
+        raise _error(PublicErrorCode.INVALID_REQUEST, "The requested frontier is in the future.")
     if target == head.sequence:
         return head, head
     if target == 0:
@@ -402,7 +417,7 @@ async def _candidate_page(
                 "subject_refs": item.candidate.subject_refs,
                 "policy_id": item.candidate.policy_id,
                 "policy_version": item.candidate.policy_version,
-                "subject_frontier": item.candidate.subject_frontier.as_wire(),
+                "subject_frontier": dict(item.candidate.subject_frontier.as_wire().items()),
                 "coverage": coverage_to_json(item.candidate.coverage),
                 "basis": finding_basis_to_status_json(item),
             }

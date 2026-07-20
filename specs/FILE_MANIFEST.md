@@ -97,15 +97,15 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/fixtures/replay/empty.case.json.md` | `future_file` | `fixtures/replay/empty.case.json` | `exact_suffix` | — | `A-B` | `draft` | Owns exactly this future public repository file. |
 | `specs/fixtures/replay/multi-writer.case.json.md` | `future_file` | `fixtures/replay/multi-writer.case.json` | `exact_suffix` | — | `A-B` | `draft` | Owns exactly this future public repository file. |
 | `specs/fixtures/replay/page-size-equivalence.case.json.md` | `future_file` | `fixtures/replay/page-size-equivalence.case.json` | `exact_suffix` | — | `A-C` | `draft` | Owns exactly this future public repository file. |
+| `specs/fixtures/replay/projection-rebuild.case.json.md` | `future_file` | `fixtures/replay/projection-rebuild.case.json` | `exact_suffix` | — | `A-C` | `draft` | Owns exactly this future public repository file. |
+| `specs/fixtures/replay/supersession-redaction.case.json.md` | `future_file` | `fixtures/replay/supersession-redaction.case.json` | `exact_suffix` | — | `A-B` | `draft` | Owns exactly this future public repository file. |
+| `specs/fixtures/replay/unknown-schema.case.json.md` | `future_file` | `fixtures/replay/unknown-schema.case.json` | `exact_suffix` | — | `A-B` | `draft` | Owns exactly this future public repository file. |
+| `specs/fixtures/replay/wall-clock-reversal.case.json.md` | `future_file` | `fixtures/replay/wall-clock-reversal.case.json` | `exact_suffix` | — | `A-B` | `draft` | Owns exactly this future public repository file. |
 | `specs/guidance/README.md` | `index_only` | — | `none` | `guidance/` | `D` | `draft` | Enumerates this directory family and owns no future file. |
 | `specs/guidance/agent-instructions.md` | `future_file` | `guidance/agent-instructions.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/guidance/coverage-and-receipts.md` | `future_file` | `guidance/coverage-and-receipts.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/guidance/publication-policy.md` | `future_file` | `guidance/publication-policy.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/guidance/workflow.md` | `future_file` | `guidance/workflow.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
-| `specs/fixtures/replay/projection-rebuild.case.json.md` | `future_file` | `fixtures/replay/projection-rebuild.case.json` | `exact_suffix` | — | `A-C` | `draft` | Owns exactly this future public repository file. |
-| `specs/fixtures/replay/supersession-redaction.case.json.md` | `future_file` | `fixtures/replay/supersession-redaction.case.json` | `exact_suffix` | — | `A-B` | `draft` | Owns exactly this future public repository file. |
-| `specs/fixtures/replay/unknown-schema.case.json.md` | `future_file` | `fixtures/replay/unknown-schema.case.json` | `exact_suffix` | — | `A-B` | `draft` | Owns exactly this future public repository file. |
-| `specs/fixtures/replay/wall-clock-reversal.case.json.md` | `future_file` | `fixtures/replay/wall-clock-reversal.case.json` | `exact_suffix` | — | `A-B` | `draft` | Owns exactly this future public repository file. |
 | `specs/migrations/bundle/0001.sql.md` | `future_file` | `migrations/bundle/0001.sql` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/migrations/catalog/0001.sql.md` | `future_file` | `migrations/catalog/0001.sql` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/repository/.gitignore.md` | `future_file` | `.gitignore` | `repository_projection` | — | `A/F` | `draft` | Owns exactly this future public repository file. |
@@ -549,9 +549,9 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/tests/unit/kernel/test_replay_and_projections.py.md` | `future_file` | `tests/unit/kernel/test_replay_and_projections.py` | `exact_suffix` | — | `B` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/observability/test_logging_allowlist.py.md` | `future_file` | `tests/unit/observability/test_logging_allowlist.py` | `exact_suffix` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/observability/test_privacy.py.md` | `future_file` | `tests/unit/observability/test_privacy.py` | `exact_suffix` | — | `F` | `draft` | Owns exactly this future public repository file. |
-| `specs/tests/unit/privacy/test_policy_and_contracts.py.md` | `future_file` | `tests/unit/privacy/test_policy_and_contracts.py` | `exact_suffix` | — | `B/C/E` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/privacy/test_catalog_audit.py.md` | `future_file` | `tests/unit/privacy/test_catalog_audit.py` | `exact_suffix` | — | `C/E` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/privacy/test_local_enforcer.py.md` | `future_file` | `tests/unit/privacy/test_local_enforcer.py` | `exact_suffix` | — | `C/E` | `draft` | Owns exactly this future public repository file. |
+| `specs/tests/unit/privacy/test_policy_and_contracts.py.md` | `future_file` | `tests/unit/privacy/test_policy_and_contracts.py` | `exact_suffix` | — | `B/C/E` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/protocol/test_canonical_vectors.py.md` | `future_file` | `tests/unit/protocol/test_canonical_vectors.py` | `exact_suffix` | — | `A` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/protocol/test_coverage.py.md` | `future_file` | `tests/unit/protocol/test_coverage.py` | `exact_suffix` | — | `A/B` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/protocol/test_errors.py.md` | `future_file` | `tests/unit/protocol/test_errors.py` | `exact_suffix` | — | `A/B` | `draft` | Owns exactly this future public repository file. |
