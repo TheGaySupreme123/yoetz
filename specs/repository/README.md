@@ -23,6 +23,9 @@ The file must contain, at minimum, these sections:
 - a “development status” section that clearly states the repo is a working draft or public-alpha
   style build, not a finished user guide;
 - links to the repository security, contribution, changelog, and license pages;
+- a short Contributing section that states contributions are welcome with a high bar (issue-first,
+  no duplicates, design gates for sensitive areas) and points to `CONTRIBUTING.md` and `AGENTS.md`
+  without claiming the project is closed or invitation-only;
 - support routing: repository issues for ordinary bugs/questions, GitHub private vulnerability
   reporting or `security@yoetz.dev` for security, and `conduct@yoetz.dev` for private conduct reports;
 - an explicit statement that the project is licensed under Apache-2.0;

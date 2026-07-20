@@ -6,7 +6,14 @@ released versions.
 
 ## Unreleased
 
-No unreleased changes yet.
+### Changed
+
+- Strengthened contribution intake: issue-first process with duplicate search, design gates for
+  protocol/privacy/storage/release/ADR work, mandatory PR checklist, and required disposition of
+  human and code-review-agent comments (`CONTRIBUTING.md`, `.github/ISSUE_TEMPLATE/`,
+  `.github/pull_request_template.md`).
+- Added root `AGENTS.md`, root `CODEOWNERS` for trust boundaries, and a SECURITY threat-model /
+  out-of-scope table.
 
 ## 0.1.0 — Public alpha
 

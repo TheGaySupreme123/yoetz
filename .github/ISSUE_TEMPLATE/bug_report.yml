@@ -1,0 +1,78 @@
+name: Bug report
+description: Report a defect with repro steps. Search for duplicates first. Security issues use SECURITY.md.
+title: "[bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Yoetz. Please search existing issues and PRs before filing.
+        **Do not** report security vulnerabilities here — use `SECURITY.md` / private
+        vulnerability reporting.
+  - type: checkboxes
+    id: duplicate-search
+    attributes:
+      label: Duplicate search
+      description: Confirm you searched issues and pull requests for the same problem.
+      options:
+        - label: I searched existing issues and PRs and did not find a duplicate.
+          required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - protocol
+        - CLI
+        - MCP
+        - privacy / egress
+        - storage / durability
+        - packaging / release
+        - docs / specs
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Minimal steps to reproduce. Do not paste secrets or live customer data.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: version
+    attributes:
+      label: Version
+      description: Prefer `yoetz version --json` when available; otherwise commit SHA or package version.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: Who is affected and how severe is it from your point of view?
+    validations:
+      required: true
+  - type: textarea
+    id: extras
+    attributes:
+      label: Additional context (optional)
+      description: OS, install method, or redacted logs. Never paste secrets.
+    validations:
+      required: false

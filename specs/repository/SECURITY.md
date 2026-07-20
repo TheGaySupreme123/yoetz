@@ -18,7 +18,8 @@ The file must describe:
 - the supported security-response window;
 - what information the reporter should include;
 - what the project will and will not do in public before a fix is ready;
-- how to handle urgent disclosure when the issue is actively exploitable.
+- how to handle urgent disclosure when the issue is actively exploitable;
+- a short threat-model / out-of-scope table so reporters know what is in policy scope.
 
 ## Behavior
 
@@ -42,6 +43,19 @@ actually commits to them.
 During public alpha, the newest published release is the only security-fix line promised; reports
 against older versions are still accepted and triaged, but backports are not promised. E-012 must
 prove private reporting is enabled and the fallback mailbox is monitored before public release.
+
+The policy must include a concise threat-model / out-of-scope table covering at least:
+
+| Topic | In scope for this policy | Out of scope / reporter responsibility |
+| --- | --- | --- |
+| Yoetz package, official docs, release artifacts | Yes | Unrelated third-party tools you run alongside Yoetz |
+| Local service, storage, privacy/egress gateway | Yes — defects in Yoetz enforcement | Operator misconfiguration that widens policy after informed consent |
+| Provider / MCP destinations you enable | Defects in Yoetz classification, binding, or audit | Trustworthiness of an external provider or MCP server you chose |
+| Agent / harness integrations | Defects in Yoetz-owned bridges and guidance delivery | Host agent bugs outside Yoetz adapters |
+| Social engineering, physical access, compromised host OS | Only when Yoetz fails a stated boundary | General host compromise outside Yoetz’s control |
+
+The table must stay short and must not invent sandbox or remote-hardening claims Yoetz does not
+make. It must not ask reporters to paste secrets to prove a finding.
 
 ## Errors and edge cases
 

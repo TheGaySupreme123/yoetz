@@ -1,0 +1,65 @@
+name: Change request
+description: Propose a feature or design/behavior change. Search for duplicates first. Design-gated areas need maintainer acknowledgement before a PR.
+title: "[change]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Contributions are welcome with a high bar — see `CONTRIBUTING.md`.
+        Design-gated areas (protocol, privacy/egress, storage/durability, release/packaging, ADR /
+        `OPEN_QUESTIONS`) require **maintainer acknowledgement on this issue before a PR**.
+  - type: checkboxes
+    id: duplicate-search
+    attributes:
+      label: Duplicate search
+      description: Confirm you searched issues and pull requests for the same proposal.
+      options:
+        - label: I searched existing issues and PRs and did not find a duplicate.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What is wrong or missing for users or contributors?
+    validations:
+      required: true
+  - type: textarea
+    id: approach
+    attributes:
+      label: Proposed approach
+      description: Smallest useful scope that solves the problem.
+    validations:
+      required: true
+  - type: input
+    id: owning-spec
+    attributes:
+      label: Owning specs path (if known)
+      description: Path under `specs/`, or `unknown — needs triage`.
+      placeholder: specs/src/yoetz/...
+    validations:
+      required: true
+  - type: dropdown
+    id: design-gated
+    attributes:
+      label: Design-gated?
+      description: Protocol, privacy/egress, storage/durability, release/packaging, ADR / OPEN_QUESTIONS.
+      options:
+        - "Yes — I will wait for maintainer acknowledgement before opening a PR"
+        - "No — docs clarification, typo, or narrowly scoped non-gated bugfix"
+        - "Unsure — please triage"
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: How will we know this is done?
+    validations:
+      required: true
+  - type: textarea
+    id: non-goals
+    attributes:
+      label: Non-goals / alternatives (optional)
+    validations:
+      required: false

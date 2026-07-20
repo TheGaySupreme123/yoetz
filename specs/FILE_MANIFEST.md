@@ -8,8 +8,8 @@ This is the complete one-to-one ledger between the natural-language specificatio
 files planned for the public v0.1 repository. It is declarative: adding, removing, renaming, or
 splitting a future file requires changing this reviewed table and its owning spec together.
 
-The inventory contains 539 spec files: 525 exact future-file owners,
-10 directory indexes, and 4 coordination files. The 525 future paths are unique. The eleven
+The inventory contains 545 spec files: 531 exact future-file owners,
+10 directory indexes, and 4 coordination files. The 531 future paths are unique. The eleven
 already-authored public ADRs are current decision authorities, not future-file candidates, so
 they are intentionally outside the mirrored ownership universe. Ignored local architecture/
 strategy inputs are neither inventoried nor authoritative.
@@ -31,6 +31,10 @@ strategy inputs are neither inventoried nor authoritative.
 
 | Spec path | Classification | Future path | Mapping | Indexed prefix | Wave | Status | Owner note |
 |---|---|---|---|---|---|---|---|
+| `specs/.github/ISSUE_TEMPLATE/bug_report.yml.md` | `future_file` | `.github/ISSUE_TEMPLATE/bug_report.yml` | `exact_suffix` | — | `F` | `draft` | Owns exactly this future public repository file. |
+| `specs/.github/ISSUE_TEMPLATE/change_request.yml.md` | `future_file` | `.github/ISSUE_TEMPLATE/change_request.yml` | `exact_suffix` | — | `F` | `draft` | Owns exactly this future public repository file. |
+| `specs/.github/ISSUE_TEMPLATE/config.yml.md` | `future_file` | `.github/ISSUE_TEMPLATE/config.yml` | `exact_suffix` | — | `F` | `draft` | Owns exactly this future public repository file. |
+| `specs/.github/pull_request_template.md.md` | `future_file` | `.github/pull_request_template.md` | `exact_suffix` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/.github/workflows/capability.yml.md` | `future_file` | `.github/workflows/capability.yml` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/.github/workflows/nightly-fault.yml.md` | `future_file` | `.github/workflows/nightly-fault.yml` | `exact_suffix` | — | `C/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/.github/workflows/pr-ci.yml.md` | `future_file` | `.github/workflows/pr-ci.yml` | `exact_suffix` | — | `F` | `draft` | Owns exactly this future public repository file. |
@@ -110,7 +114,9 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/migrations/catalog/0001.sql.md` | `future_file` | `migrations/catalog/0001.sql` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/repository/.gitignore.md` | `future_file` | `.gitignore` | `repository_projection` | — | `A/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/repository/.python-version.md` | `future_file` | `.python-version` | `repository_projection` | — | `F` | `draft` | Owns exactly this future public repository file. |
+| `specs/repository/AGENTS.md` | `future_file` | `AGENTS.md` | `repository_projection` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/repository/CHANGELOG.md` | `future_file` | `CHANGELOG.md` | `repository_projection` | — | `F` | `draft` | Owns exactly this future public repository file. |
+| `specs/repository/CODEOWNERS.md` | `future_file` | `CODEOWNERS` | `repository_projection` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/repository/CODE_OF_CONDUCT.md` | `future_file` | `CODE_OF_CONDUCT.md` | `repository_projection` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/repository/CONTRIBUTING.md` | `future_file` | `CONTRIBUTING.md` | `repository_projection` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/repository/LICENSE.md` | `future_file` | `LICENSE` | `repository_projection` | — | `F` | `draft` | Owns exactly this future public repository file. |

@@ -34,6 +34,20 @@ channel above.
 This policy covers the Yoetz package, its official documentation, and its release artifacts in this
 repository. It does not cover unrelated third-party integrations you have configured yourself.
 
+### Threat model / out of scope
+
+| Topic | In scope for this policy | Out of scope / reporter responsibility |
+| --- | --- | --- |
+| Yoetz package, official docs, release artifacts | Yes | Unrelated third-party tools you run alongside Yoetz |
+| Local service, storage, privacy/egress gateway | Yes — defects in Yoetz enforcement | Operator misconfiguration that widens policy after informed consent |
+| Provider / MCP destinations you enable | Defects in Yoetz classification, binding, or audit | Trustworthiness of an external provider or MCP server you chose |
+| Agent / harness integrations | Defects in Yoetz-owned bridges and guidance delivery | Host agent bugs outside Yoetz adapters |
+| Social engineering, physical access, compromised host OS | Only when Yoetz fails a stated boundary | General host compromise outside Yoetz’s control |
+
+Yoetz does not claim a general-purpose sandbox for untrusted code. Reports that only restate
+documented operator choices (for example, enabling an egress destination) are usually out of scope
+unless Yoetz failed classification, binding, minimization, or audit.
+
 ## Public disclosure
 
 We will not discuss unpatched vulnerability details in public issues, discussions, or chat before a

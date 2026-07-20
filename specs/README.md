@@ -124,15 +124,15 @@ implicit composition detail:
 
 ## Status board
 
-The manifest is the canonical inventory. At this draft checkpoint it classifies 539 spec files:
-525 unique future-file owners, 10 directory indexes, and 4 coordination files. Every future owner
+The manifest is the canonical inventory. At this draft checkpoint it classifies 545 spec files:
+531 unique future-file owners, 10 directory indexes, and 4 coordination files. Every future owner
 has all seven required sections; all local Open questions are closed or routed to the central
 decision ledger.
 
 | Future repository scope | Exact file owners | Additional spec coordination |
 |---|---:|---|
-| Repository root | 13 | — |
-| `.github/` workflows | 5 | — |
+| Repository root | 15 | — |
+| `.github/` workflows | 9 | — |
 | `docs/` public protocol and runbooks | 11 | The eleven already-authored ADRs remain current authorities outside the future-file universe. |
 | `schemas/` | 53 | 1 directory index |
 | `fixtures/` | 49 | 1 directory index |
@@ -144,7 +144,7 @@ decision ledger.
 | `src/yoetz/resources/` | 72 | The resource manifest plus exactly 71 installed entries. |
 | `scripts/` | 6 | — |
 | `tests/` | 177 | 7 suite indexes |
-| **Total future files** | **525** | **10 indexes + 4 coordination files = 539 spec files** |
+| **Total future files** | **531** | **10 indexes + 4 coordination files = 545 spec files** |
 
 All rows remain `draft` until the founder freeze; “present” is not the same as “reviewed” or
 “locked.” Empirical release cells and independent threat review remain later evidence gates even

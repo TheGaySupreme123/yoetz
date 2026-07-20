@@ -58,5 +58,16 @@ upstream privacy/support claims.
 Private strategy/architecture drafting inputs under `docs/architecture/` are intentionally ignored.
 The public ADRs and `specs/` tree must remain self-contained without them.
 
+## Contributing
+
+Contributions are welcome with a high bar: search for duplicates, open an issue first, wait for
+maintainer acknowledgement on design-gated areas, update owning specs with behavior changes, and
+disposition every review comment (including code-review agents) before merge. See
+[`CONTRIBUTING.md`](CONTRIBUTING.md) and [`AGENTS.md`](AGENTS.md).
+
+- Ordinary bugs and change requests: GitHub issues (use the forms; blank issues are disabled).
+- Security: [`SECURITY.md`](SECURITY.md) — private vulnerability reporting or `security@yoetz.dev`.
+- Conduct: [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — `conduct@yoetz.dev`.
+
 Licensed under the [Apache License 2.0](LICENSE), using the official unmodified license text and
 the SPDX expression `Apache-2.0`; Yoetz does not add a fabricated project-wide ownership notice.

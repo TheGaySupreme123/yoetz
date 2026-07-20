@@ -1,0 +1,14 @@
+# Trust-boundary review owners. See CONTRIBUTING.md for the contribution process.
+# Ownership is a review signal, not exclusive authorship.
+
+SECURITY.md              @TheGaySupreme123
+PRIVACY.md               @TheGaySupreme123
+CODE_OF_CONDUCT.md       @TheGaySupreme123
+
+/docs/adr/               @TheGaySupreme123
+/schemas/                @TheGaySupreme123
+/migrations/             @TheGaySupreme123
+/.github/workflows/      @TheGaySupreme123
+
+/specs/INTERFACES.md     @TheGaySupreme123
+/specs/OPEN_QUESTIONS.md @TheGaySupreme123
