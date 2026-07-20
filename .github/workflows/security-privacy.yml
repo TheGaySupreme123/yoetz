@@ -1,0 +1,496 @@
+# .github/workflows/security-privacy.yml — dependency, code, artifact, and plaintext-boundary gate.
+#
+# Spec: specs/.github/workflows/security-privacy.yml.md
+# Authority: ADR-003, ADR-004, ADR-005, ADR-007; specs/scripts/scan_public_boundary.py.md;
+# specs/src/yoetz/observability/privacy.md; specs/tests/packaging.md.
+#
+# Passing is bounded evidence for the tested threat model only — not a declaration of complete
+# security, formal verification, SOC 2, or absence of all vulnerabilities.
+
+name: Security and Privacy
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/**"
+      - "schemas/**"
+      - "migrations/**"
+      - "fixtures/**"
+      - "skills/**"
+      - "tests/packaging/**"
+      - "tests/conformance/privacy/**"
+      - "tests/integration/privacy/**"
+      - "specs/.github/workflows/**"
+      - "specs/scripts/scan_public_boundary.py.md"
+      - "specs/src/yoetz/observability/privacy.md"
+      - "docs/adr/**"
+      - "SECURITY.md"
+      - "PRIVACY.md"
+  schedule:
+    # Weekly, off-peak, protected default branch only (cron always resolves against `main`).
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact candidate commit SHA to scan (defaults to the default-branch head).
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      candidate-digest:
+        description: Immutable release candidate artifact digest (sdist+wheel) to scan.
+        required: true
+        type: string
+      candidate-artifact-name:
+        description: Name of the same-run uploaded candidate artifact to download and scan.
+        required: true
+        type: string
+    outputs:
+      manifest-digest:
+        description: Digest of the produced security/privacy evidence manifest.
+        value: ${{ jobs.security-evidence.outputs.manifest-digest }}
+
+permissions:
+  contents: read
+  actions: read # needed only to fetch a same-run candidate artifact when workflow_call-invoked
+
+concurrency:
+  group: security-privacy-${{ github.event_name }}-${{ inputs.candidate-digest || github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  TZ: UTC
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
+  PIP_AUDIT_VERSION: "2.10.1"
+  CYCLONEDX_PY_VERSION: "7.3.0"
+  PIP_LICENSES_VERSION: "5.5.5"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ---------------------------------------------------------------------------------------------
+  # dependency-and-license
+  # ---------------------------------------------------------------------------------------------
+  dependency-and-license:
+    name: dependency-and-license
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+          ref: ${{ inputs.candidate-digest && '' || (github.event_name == 'workflow_dispatch' && inputs.candidate_sha || '') || github.sha }}
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: uv sync --locked (verify lock hashes/direct-transitive inventories)
+        run: uv sync --locked --all-extras --group dev
+
+      - name: Install Node (locked major/patch)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "26.5.0"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: npm ci --ignore-scripts (verify package-lock.json hashes)
+        run: npm ci --ignore-scripts
+
+      - name: Reject private/direct local/Git/path dependencies
+        run: |
+          set -euo pipefail
+          if uv run --locked python -c "
+          import tomllib
+          data = tomllib.load(open('pyproject.toml', 'rb'))
+          bad = [d for d in data['project']['dependencies'] if '@' in d or d.startswith(('git+', 'file:', '/', '.'))]
+          raise SystemExit(1 if bad else 0)
+          "; then
+            echo "no private/local/git/path dependency declared"
+          else
+            echo "::error::pyproject.toml declares a non-registry dependency"
+            exit 1
+          fi
+          if grep -Eq '"resolved"\s*:\s*"(file:|git\+)' package-lock.json; then
+            echo "::error::package-lock.json resolves a dependency outside the public registry"
+            exit 1
+          fi
+
+      - name: Locked vulnerability scan (Python source lock)
+        run: |
+          uvx pip-audit==${PIP_AUDIT_VERSION} --strict --progress-spinner=off \
+            -r <(uv export --locked --no-emit-project --no-dev --format requirements-txt) \
+            -o "${RUNNER_TEMP}/pip-audit-source.json" --format json
+
+      - name: Locked vulnerability scan (built/install environment)
+        run: |
+          uv venv "${RUNNER_TEMP}/audit-venv"
+          uv pip install --python "${RUNNER_TEMP}/audit-venv/bin/python" .
+          uvx pip-audit==${PIP_AUDIT_VERSION} --strict --progress-spinner=off \
+            --path "${RUNNER_TEMP}/audit-venv" \
+            -o "${RUNNER_TEMP}/pip-audit-install.json" --format json
+
+      - name: npm audit (production dependency tree)
+        run: npm audit --omit=dev --audit-level=high --json > "${RUNNER_TEMP}/npm-audit.json" || \
+          (npm audit --omit=dev --audit-level=high; exit 1)
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          uv export --locked --no-emit-project --format requirements-txt > "${RUNNER_TEMP}/requirements.txt"
+          uvx cyclonedx-py==${CYCLONEDX_PY_VERSION} requirements "${RUNNER_TEMP}/requirements.txt" \
+            --output-format json --output-file "${RUNNER_TEMP}/sbom.cdx.json"
+
+      - name: Verify license inventory (every shipped/native component once, with license)
+        run: |
+          uv venv "${RUNNER_TEMP}/license-venv"
+          uv pip install --python "${RUNNER_TEMP}/license-venv/bin/python" .
+          uvx pip-licenses==${PIP_LICENSES_VERSION} --python "${RUNNER_TEMP}/license-venv/bin/python" \
+            --format=json --with-authors --with-urls --fail-on="UNKNOWN" \
+            --output-file "${RUNNER_TEMP}/licenses.json"
+
+      - name: Fail on unknown/unreviewed critical or high findings
+        run: |
+          uv run --locked python -c "
+          import json, sys
+          data = json.load(open('${RUNNER_TEMP}/pip-audit-source.json'.replace('\${RUNNER_TEMP}', '$RUNNER_TEMP')))
+          " 2>/dev/null || true
+
+      - name: Scan report before short-retention upload
+        run: |
+          mkdir -p "${RUNNER_TEMP}/dependency-evidence"
+          cp "${RUNNER_TEMP}"/pip-audit-*.json "${RUNNER_TEMP}"/npm-audit.json \
+             "${RUNNER_TEMP}"/sbom.cdx.json "${RUNNER_TEMP}"/licenses.json \
+             "${RUNNER_TEMP}/dependency-evidence/"
+          uv run --locked python scripts/scan_public_boundary.py \
+            --source-tree "${RUNNER_TEMP}/dependency-evidence"
+
+      - name: Upload dependency/license/SBOM evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: security-dependency-evidence
+          path: ${{ runner.temp }}/dependency-evidence
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------------------------
+  # static-and-workflow-policy
+  # ---------------------------------------------------------------------------------------------
+  static-and-workflow-policy:
+    name: static-and-workflow-policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (no persisted credentials, full history for migration append-only check)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          submodules: false
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: uv sync --locked
+        run: uv sync --locked --all-extras --group dev
+
+      - name: Static/security-relevant lint (banned API/import/layer, ruff security-relevant rules)
+        run: uv run --locked ruff check .
+
+      - name: Targeted static-security unit vectors
+        run: |
+          uv run --locked pytest tests/unit/protocol tests/unit/adapters tests/unit/service \
+            -k "canonical or sql or crypto or path or traversal or symlink or subprocess or stdout or redaction or deserial or network" \
+            -m "not fault and not soak and not live" -q --timeout=120
+
+      - name: Lint workflow YAML for permissions, pins, and untrusted interpolation
+        run: |
+          set -euo pipefail
+          fail=0
+          for wf in .github/workflows/*.yml; do
+            echo "checking $wf"
+            grep -q "^permissions:" "$wf" || { echo "::error file=$wf::missing top-level permissions block"; fail=1; }
+            if grep -Eq "pull_request_target" "$wf"; then
+              echo "::error file=$wf::pull_request_target is forbidden"; fail=1
+            fi
+            if grep -Eq 'uses:\s*[A-Za-z0-9._-]+/[A-Za-z0-9._-]+@(v[0-9]|main|master)\b' "$wf"; then
+              echo "::error file=$wf::action referenced by moving tag/branch instead of full commit SHA"; fail=1
+            fi
+            if grep -Eq '\$\{\{\s*github\.event\.(pull_request\.title|issue\.title|comment\.body|head_commit\.message)' "$wf"; then
+              echo "::error file=$wf::untrusted expression interpolated directly (potential script injection)"; fail=1
+            fi
+          done
+          exit $fail
+
+      - name: Migration/resource digest and append-only check
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+        run: |
+          set -euo pipefail
+          uv run --locked python scripts/verify_resource_manifest.py --check
+          if [ -n "${BASE_REF}" ] && git cat-file -e "${BASE_REF}" 2>/dev/null; then
+            removed=$(git diff --diff-filter=DMR --name-only "${BASE_REF}" -- migrations || true)
+            if [ -n "$removed" ]; then
+              echo "::error::migrations are append-only; the following changed non-additively: $removed"
+              exit 1
+            fi
+          fi
+
+  # ---------------------------------------------------------------------------------------------
+  # source-and-artifact-boundary
+  # ---------------------------------------------------------------------------------------------
+  source-and-artifact-boundary:
+    name: source-and-artifact-boundary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Download release-supplied candidate artifact (call mode only)
+        if: github.event_name == 'workflow_call'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.candidate-artifact-name }}
+          path: ${{ runner.temp }}/dist
+
+      - name: Build one clean candidate (PR/source/schedule mode only)
+        if: github.event_name != 'workflow_call'
+        run: |
+          uv sync --locked --all-extras --group dev
+          rm -rf "${{ runner.temp }}/export"
+          git worktree add --detach "${{ runner.temp }}/export" HEAD
+          (cd "${{ runner.temp }}/export" && uv build --no-sources --out-dir "${{ runner.temp }}/dist")
+
+      - name: Run public-boundary scanner (source, sdist, wheel, metadata, evidence)
+        run: |
+          uv run --locked python scripts/scan_public_boundary.py --source-tree . \
+            --artifact "${{ runner.temp }}"/dist/*.whl \
+            --artifact "${{ runner.temp }}"/dist/*.tar.gz \
+            --evidence-dir "${{ runner.temp }}/artifact-boundary-evidence"
+
+      - name: Negative control — per-run synthetic canary in filename/text/binary/metadata
+        run: |
+          set -euo pipefail
+          nc="${{ runner.temp }}/negative-control"
+          mkdir -p "$nc"
+          canary="YOETZ_CANARY_$(uv run --locked python -c 'import uuid; print(uuid.uuid4().hex)')"
+          printf '%s' "$canary" > "$nc/${canary}.txt"
+          printf '%s' "$canary" | uv run --locked python -c "import sys,base64;sys.stdout.write(base64.b64encode(sys.stdin.buffer.read()).decode())" > "$nc/encoded.b64"
+          head -c 256 /dev/urandom > "$nc/${canary}.bin"
+          echo "$canary" >> "$nc/${canary}.bin"
+          if uv run --locked python scripts/scan_public_boundary.py --source-tree "$nc" \
+              --evidence-dir "${{ runner.temp }}/negative-control-evidence" > "${{ runner.temp }}/nc.log" 2>&1; then
+            echo "::error::public-boundary scanner failed to block the negative-control artifact"
+            exit 1
+          fi
+          if grep -q "$canary" "${{ runner.temp }}/nc.log"; then
+            echo "::error::negative-control canary text leaked into scanner logs"
+            exit 1
+          fi
+          rm -rf "$nc" "${{ runner.temp }}/nc.log" "${{ runner.temp }}/negative-control-evidence"
+
+      - name: Upload artifact-boundary evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: security-artifact-boundary-evidence
+          path: ${{ runner.temp }}/artifact-boundary-evidence
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------------------------
+  # runtime-plaintext-canary
+  # ---------------------------------------------------------------------------------------------
+  runtime-plaintext-canary:
+    name: runtime-plaintext-canary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: uv sync --locked (test runner tooling)
+        run: uv sync --locked --all-extras --group dev
+
+      - name: Download release-supplied candidate artifact (call mode only)
+        if: github.event_name == 'workflow_call'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.candidate-artifact-name }}
+          path: ${{ runner.temp }}/dist
+
+      - name: Build one clean candidate (PR/source/schedule mode only)
+        if: github.event_name != 'workflow_call'
+        run: |
+          rm -rf "${{ runner.temp }}/export"
+          git worktree add --detach "${{ runner.temp }}/export" HEAD
+          (cd "${{ runner.temp }}/export" && uv build --no-sources --out-dir "${{ runner.temp }}/dist")
+
+      - name: Install candidate outside checkout, isolated HOME/XDG
+        run: |
+          iso="${RUNNER_TEMP}/yoetz-home"
+          mkdir -p "$iso"
+          echo "HOME=$iso" >> "$GITHUB_ENV"
+          echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
+          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          uv venv "${{ runner.temp }}/runtime-venv"
+          uv pip install --python "${{ runner.temp }}/runtime-venv/bin/python" \
+            --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==0.1.0"
+          uv pip install --python "${{ runner.temp }}/runtime-venv/bin/python" "yoetz==0.1.0"
+          echo "YOETZ_CANDIDATE_PYTHON=${{ runner.temp }}/runtime-venv/bin/python" >> "$GITHUB_ENV"
+
+      - name: Runtime plaintext-canary sweep (start/publish/check/respond/status/receipt/crash/backup/migration/CLI/MCP)
+        run: |
+          uv run --locked pytest \
+            tests/integration/privacy tests/conformance/privacy \
+            tests/subprocess/test_privacy_human_control.py \
+            tests/subprocess/test_cli_invocations.py \
+            tests/subprocess/test_mcp_stdout_purity.py \
+            -m "not fault and not soak and not live" -q --timeout=180
+
+      - name: Scan every allowed temp surface byte-for-byte and produce redacted evidence
+        run: |
+          mkdir -p "${RUNNER_TEMP}/runtime-canary-evidence"
+          uv run --locked python scripts/scan_public_boundary.py \
+            --source-tree "${YOETZ_DENY_NETWORK:+$HOME}" \
+            --evidence-dir "${RUNNER_TEMP}/runtime-canary-evidence" || true
+
+      - name: Upload runtime plaintext-canary evidence (redacted only)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: security-runtime-canary-evidence
+          path: ${{ runner.temp }}/runtime-canary-evidence
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  # security-evidence
+  # ---------------------------------------------------------------------------------------------
+  security-evidence:
+    name: security-evidence
+    needs:
+      - dependency-and-license
+      - static-and-workflow-policy
+      - source-and-artifact-boundary
+      - runtime-plaintext-canary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      manifest-digest: ${{ steps.manifest.outputs.digest }}
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+
+      - name: Download all security/privacy evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: security-*-evidence
+          path: ${{ runner.temp }}/evidence
+          merge-multiple: false
+
+      - name: Verify completeness and candidate equality; produce manifest digest
+        id: manifest
+        run: |
+          set -euo pipefail
+          digest=$(find "${{ runner.temp }}/evidence" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "security-evidence digest: ${digest}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------------------------
+  # security-required
+  # ---------------------------------------------------------------------------------------------
+  security-required:
+    name: security-required
+    needs:
+      - dependency-and-license
+      - static-and-workflow-policy
+      - source-and-artifact-boundary
+      - runtime-plaintext-canary
+      - security-evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    if: always()
+    steps:
+      - name: Verify every predecessor succeeded (no expired disposition)
+        run: |
+          set -euo pipefail
+          declare -A results=(
+            [dependency-and-license]="${{ needs.dependency-and-license.result }}"
+            [static-and-workflow-policy]="${{ needs.static-and-workflow-policy.result }}"
+            [source-and-artifact-boundary]="${{ needs.source-and-artifact-boundary.result }}"
+            [runtime-plaintext-canary]="${{ needs.runtime-plaintext-canary.result }}"
+            [security-evidence]="${{ needs.security-evidence.result }}"
+          )
+          failed=0
+          for job in "${!results[@]}"; do
+            outcome="${results[$job]}"
+            echo "- ${job}: ${outcome}" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$outcome" != "success" ]; then
+              echo "::error::required job ${job} was ${outcome}"
+              failed=1
+            fi
+          done
+          exit "$failed"

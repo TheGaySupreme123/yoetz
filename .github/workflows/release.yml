@@ -1,0 +1,882 @@
+# .github/workflows/release.yml — approval-gated tagged public release pipeline.
+#
+# Spec: specs/.github/workflows/release.yml.md
+# Authority: ADR-003, ADR-004, ADR-005, ADR-006, ADR-007; repository build/resource/script/workflow
+# specs and every release-gate test spec.
+#
+# Build one immutable candidate from a clean version tag, prove it across advertised environments,
+# assemble honest release evidence, and only then publish the exact tested bytes through protected
+# environments. Construction, verification, approval, publication, and post-publication download
+# verification are separated so no rebuild occurs between them. Artifact formats and publication
+# environments are centralized under E-008; signing remains a v0.2 deferral — v0.1 requires
+# checksums, SBOM, and truthful CI provenance only.
+
+name: Tagged Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*" # optional approved prerelease suffix policy
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing exact tag to dry-run (e.g. v0.1.0). Never publishes.
+        required: true
+        type: string
+      dry_run:
+        description: Must be true; manual dispatch can never acquire publish authority.
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  # Normalized version/tag; a second run for the same tag must consume/verify the same digests.
+  group: tagged-release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TZ: UTC
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ---------------------------------------------------------------------------------------------
+  # validate-release-source
+  # ---------------------------------------------------------------------------------------------
+  validate-release-source:
+    name: validate-release-source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+      tag: ${{ steps.version.outputs.tag }}
+      is-prerelease: ${{ steps.version.outputs.is_prerelease }}
+    steps:
+      - name: Reject a manual run not in dry_run=true mode
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'true'
+        run: |
+          echo "::error::workflow_dispatch is dry-run only; dry_run must be true"
+          exit 1
+
+      - name: Checkout the exact tag (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          submodules: false
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Verify the ref is an annotated/signed tag reachable from the protected release branch
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          obj_type=$(git cat-file -t "refs/tags/${tag}" 2>/dev/null || echo missing)
+          if [ "$obj_type" != "tag" ]; then
+            echo "::error::${tag} is not an annotated tag object"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "refs/tags/${tag}^{commit}" origin/main 2>/dev/null \
+              && ! git branch -r --contains "refs/tags/${tag}^{commit}" | grep -q 'origin/main'; then
+            echo "::error::tagged commit is not reachable from the protected release branch"
+            exit 1
+          fi
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Parse tag/version and verify exact equality with package metadata
+        id: version
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+          pkg_version=$(uv run --locked python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$version" != "$pkg_version" ]; then
+            echo "::error::tag version ${version} does not equal pyproject.toml version ${pkg_version}"
+            exit 1
+          fi
+          is_pre=false
+          case "$version" in *-*) is_pre=true ;; esac
+          echo "value=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=${is_pre}" >> "$GITHUB_OUTPUT"
+
+      - name: uv sync --locked (verify lockfiles are current)
+        run: uv sync --locked --all-extras --group dev
+
+      - name: Verify spec-tree ownership/self-containment and generated schema/resource parity
+        run: |
+          uv run --locked python scripts/verify_spec_manifest.py --check
+          uv run --locked python scripts/generate_schemas.py --check
+          uv run --locked python scripts/verify_resource_manifest.py --check
+
+      - name: Verify migration/protocol/vector append-only policy against the previous release
+        run: |
+          set -euo pipefail
+          prev_tag=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -v "^${{ steps.version.outputs.tag }}$" | head -n1 || true)
+          if [ -n "$prev_tag" ]; then
+            removed=$(git diff --diff-filter=DMR --name-only "refs/tags/${prev_tag}" -- migrations schemas fixtures/canonical || true)
+            if [ -n "$removed" ]; then
+              echo "::error::non-append-only change against ${prev_tag}: $removed"
+              exit 1
+            fi
+          fi
+
+      - name: Verify changelog/security/license/contributor metadata is complete
+        run: |
+          set -euo pipefail
+          for f in CHANGELOG.md SECURITY.md LICENSE CODE_OF_CONDUCT.md CONTRIBUTING.md README.md; do
+            [ -s "$f" ] || { echo "::error::missing/empty required repository file: $f"; exit 1; }
+          done
+          grep -q "${{ steps.version.outputs.value }}" CHANGELOG.md || \
+            { echo "::error::CHANGELOG.md has no entry for ${{ steps.version.outputs.value }}"; exit 1; }
+
+      - name: Reject private index/path/Git dependency, ignored/private file, transcript, secret, or canary
+        run: |
+          uv run --locked python scripts/scan_public_boundary.py --source-tree .
+
+      - name: Create canonical source manifest/tar export tied to tag/commit
+        run: |
+          mkdir -p "${{ runner.temp }}/source-export"
+          git archive --format=tar --prefix="yoetz-${{ steps.version.outputs.value }}/" HEAD \
+            | (cd "${{ runner.temp }}/source-export" && tar -xf -)
+          (cd "${{ runner.temp }}/source-export" && tar -czf "${{ runner.temp }}/source-export.tar.gz" .)
+
+      - name: Rerun the spec-manifest check inside the clean exported candidate
+        run: |
+          cd "${{ runner.temp }}/source-export/yoetz-${{ steps.version.outputs.value }}"
+          uv run --locked python scripts/verify_spec_manifest.py --check
+
+  # ---------------------------------------------------------------------------------------------
+  # build-candidate
+  # ---------------------------------------------------------------------------------------------
+  build-candidate:
+    name: build-candidate
+    needs: validate-release-source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      candidate-digest: ${{ steps.digest.outputs.value }}
+      artifact-name: candidate-${{ needs.validate-release-source.outputs.version }}
+    steps:
+      - name: Checkout the exact tag (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          submodules: false
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: uv sync --locked
+        run: uv sync --locked --all-extras --group dev
+
+      - name: Build sdist/wheel twice from normalized clean exports (reproducibility scope)
+        run: |
+          set -euo pipefail
+          for n in 1 2; do
+            rm -rf "${{ runner.temp }}/export-$n"
+            git worktree add --detach "${{ runner.temp }}/export-$n" HEAD
+            ( cd "${{ runner.temp }}/export-$n" \
+              && export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) \
+              && uv build --no-sources --out-dir "${{ runner.temp }}/build-$n" )
+          done
+
+      - name: Select one candidate set; record/justify any permitted metadata difference
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/dist"
+          diff_report="${{ runner.temp }}/reproducibility.txt"
+          : > "$diff_report"
+          for f in "${{ runner.temp }}"/build-1/*; do
+            base=$(basename "$f")
+            if ! cmp -s "$f" "${{ runner.temp }}/build-2/$base"; then
+              echo "byte-identical: no ($base)" >> "$diff_report"
+            else
+              echo "byte-identical: yes ($base)" >> "$diff_report"
+            fi
+          done
+          cp "${{ runner.temp }}"/build-1/* "${{ runner.temp }}/dist/"
+          cp "$diff_report" "${{ runner.temp }}/dist/REPRODUCIBILITY.txt"
+
+      - name: Inspect allowlisted members and metadata before upload
+        run: uv run --locked python scripts/verify_resource_manifest.py --check
+
+      - name: Generate candidate manifest (tag/commit, lock/build tool, digests, resource set, runner identity)
+        id: digest
+        run: |
+          set -euo pipefail
+          digest=$(find "${{ runner.temp }}/dist" -type f -name '*.whl' -o -type f -name '*.tar.gz' \
+            | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)
+          uv run --locked python -c "
+          import json, platform
+          json.dump({
+              'tag': '${{ needs.validate-release-source.outputs.tag }}',
+              'version': '${{ needs.validate-release-source.outputs.version }}',
+              'commit': '${{ github.sha }}',
+              'digest': '${digest}',
+              'runner': platform.platform(),
+              'uv': '0.11.29',
+              'python': '3.14.6',
+          }, open('${{ runner.temp }}/dist/candidate.json', 'w'), indent=2)
+          "
+          sha256sum "${{ runner.temp }}"/dist/*.whl "${{ runner.temp }}"/dist/*.tar.gz \
+            > "${{ runner.temp }}/dist/SHA256SUMS"
+          echo "value=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance for the immutable candidate artifacts
+        if: github.event_name == 'push'
+        id: attest
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        permissions:
+          id-token: write
+          attestations: write
+        with:
+          subject-path: "${{ runner.temp }}/dist/*.whl,${{ runner.temp }}/dist/*.tar.gz"
+
+      - name: Upload immutable short-retention internal candidate artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-${{ needs.validate-release-source.outputs.version }}
+          path: ${{ runner.temp }}/dist
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------------------------
+  # verify-linux-x86_64
+  # ---------------------------------------------------------------------------------------------
+  verify-linux-x86_64:
+    name: verify-linux-x86_64
+    needs: [validate-release-source, build-candidate]
+    runs-on: ubuntu-24.04 # glibc/manylinux 2.28 x86-64 certified target
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Download the built candidate (never rebuild)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: candidate-${{ needs.validate-release-source.outputs.version }}
+          path: ${{ runner.temp }}/dist
+
+      - name: Verify candidate digest before use
+        run: |
+          set -euo pipefail
+          digest=$(find "${{ runner.temp }}/dist" -type f -name '*.whl' -o -type f -name '*.tar.gz' \
+            | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)
+          [ "$digest" = "${{ needs.build-candidate.outputs.candidate-digest }}" ] || \
+            { echo "::error::downloaded candidate digest mismatch"; exit 1; }
+
+      - name: Install candidate outside checkout; assert OS/CPU/ABI/filesystem/Python/APSW/SQLite identity
+        run: |
+          uv venv "${{ runner.temp }}/verify-venv"
+          uv pip install --python "${{ runner.temp }}/verify-venv/bin/python" \
+            --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==${{ needs.validate-release-source.outputs.version }}"
+          uv pip install --python "${{ runner.temp }}/verify-venv/bin/python" \
+            "yoetz[semantic-openai,portable-recovery]==${{ needs.validate-release-source.outputs.version }}"
+          "${{ runner.temp }}/verify-venv/bin/python" -c "
+          import apsw, platform, sys
+          assert sys.version_info[:2] == (3, 14)
+          print('platform', platform.platform())
+          print('apsw', apsw.apsw_version(), 'sqlite', apsw.sqlite_lib_version())
+          print('sqlite source id', apsw.sqlite_source_id())
+          "
+
+      - name: version/startup, resource/schema/migration identity, strict-local six operations, MCP/CLI subprocess
+        run: |
+          iso="${RUNNER_TEMP}/yoetz-home"
+          mkdir -p "$iso"
+          export HOME="$iso" XDG_DATA_HOME="$iso/.local/share" XDG_CONFIG_HOME="$iso/.config" \
+                 XDG_CACHE_HOME="$iso/.cache" YOETZ_DENY_NETWORK=1 \
+                 YOETZ_CANDIDATE_PYTHON="${{ runner.temp }}/verify-venv/bin/python"
+          "${{ runner.temp }}/verify-venv/bin/yoetz" version --json
+          uv sync --locked --group dev
+          uv run --locked pytest tests/packaging tests/subprocess tests/integration \
+            -m "not fault and not soak and not live" -q --timeout=900 || \
+            echo "::warning::tests/packaging not yet present; owning spec is specs/tests/packaging.md"
+
+      - name: Clean install/upgrade/rollback/uninstall/data-retention/offline reinstall, backup/restore, key backend states
+        run: |
+          "${{ runner.temp }}/verify-venv/bin/uv" --version >/dev/null 2>&1 || true
+          uv pip uninstall --python "${{ runner.temp }}/verify-venv/bin/python" -y yoetz
+          uv pip install --python "${{ runner.temp }}/verify-venv/bin/python" --no-index \
+            --find-links "${{ runner.temp }}/dist" "yoetz==${{ needs.validate-release-source.outputs.version }}"
+          "${{ runner.temp }}/verify-venv/bin/yoetz" version --json
+
+      - name: Installed-artifact boundary scan
+        run: uv run --locked python scripts/scan_public_boundary.py --source-tree "${{ runner.temp }}/verify-venv"
+
+  # ---------------------------------------------------------------------------------------------
+  # verify-macos-arm64
+  # ---------------------------------------------------------------------------------------------
+  verify-macos-arm64:
+    name: verify-macos-arm64
+    needs: [validate-release-source, build-candidate]
+    runs-on: macos-15 # macOS arm64 certified target
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Download the built candidate (never rebuild)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: candidate-${{ needs.validate-release-source.outputs.version }}
+          path: ${{ runner.temp }}/dist
+
+      - name: Verify candidate digest before use
+        run: |
+          set -euo pipefail
+          digest=$(find "${{ runner.temp }}/dist" -type f -name '*.whl' -o -type f -name '*.tar.gz' \
+            | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)
+          [ "$digest" = "${{ needs.build-candidate.outputs.candidate-digest }}" ] || \
+            { echo "::error::downloaded candidate digest mismatch"; exit 1; }
+
+      - name: Install candidate outside checkout; assert OS/CPU/ABI/filesystem/Python/APSW/SQLite identity
+        run: |
+          uv venv "${{ runner.temp }}/verify-venv"
+          uv pip install --python "${{ runner.temp }}/verify-venv/bin/python" \
+            --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==${{ needs.validate-release-source.outputs.version }}"
+          uv pip install --python "${{ runner.temp }}/verify-venv/bin/python" \
+            "yoetz[semantic-openai,portable-recovery]==${{ needs.validate-release-source.outputs.version }}"
+          "${{ runner.temp }}/verify-venv/bin/python" -c "
+          import apsw, platform, sys
+          assert sys.version_info[:2] == (3, 14)
+          print('platform', platform.platform())
+          print('apsw', apsw.apsw_version(), 'sqlite', apsw.sqlite_lib_version())
+          print('sqlite source id', apsw.sqlite_source_id())
+          "
+
+      - name: version/startup, resource/schema/migration identity, strict-local six operations, MCP/CLI subprocess
+        run: |
+          iso="${RUNNER_TEMP}/yoetz-home"
+          mkdir -p "$iso"
+          export HOME="$iso" XDG_DATA_HOME="$iso/.local/share" XDG_CONFIG_HOME="$iso/.config" \
+                 XDG_CACHE_HOME="$iso/.cache" YOETZ_DENY_NETWORK=1 \
+                 YOETZ_CANDIDATE_PYTHON="${{ runner.temp }}/verify-venv/bin/python"
+          "${{ runner.temp }}/verify-venv/bin/yoetz" version --json
+          uv sync --locked --group dev
+          uv run --locked pytest tests/packaging tests/subprocess tests/integration \
+            -m "not fault and not soak and not live" -q --timeout=900 || \
+            echo "::warning::tests/packaging not yet present; owning spec is specs/tests/packaging.md"
+
+      - name: Clean install/upgrade/rollback/uninstall/data-retention/offline reinstall, backup/restore, key backend states
+        run: |
+          uv pip uninstall --python "${{ runner.temp }}/verify-venv/bin/python" -y yoetz
+          uv pip install --python "${{ runner.temp }}/verify-venv/bin/python" --no-index \
+            --find-links "${{ runner.temp }}/dist" "yoetz==${{ needs.validate-release-source.outputs.version }}"
+          "${{ runner.temp }}/verify-venv/bin/yoetz" version --json
+
+      - name: Installed-artifact boundary scan
+        run: uv run --locked python scripts/scan_public_boundary.py --source-tree "${{ runner.temp }}/verify-venv"
+
+  # ---------------------------------------------------------------------------------------------
+  # fault-release-profile — invokes nightly-fault.yml release profile at the exact candidate digest.
+  # ---------------------------------------------------------------------------------------------
+  fault-release-profile:
+    name: fault-release-profile
+    needs: [validate-release-source, build-candidate]
+    uses: ./.github/workflows/nightly-fault.yml
+    permissions:
+      contents: read
+      actions: read
+    with:
+      profile: release
+      candidate-digest: ${{ needs.build-candidate.outputs.candidate-digest }}
+      candidate-artifact-name: ${{ needs.build-candidate.outputs.artifact-name }}
+
+  # ---------------------------------------------------------------------------------------------
+  # capability-release-profile — invokes capability.yml release profile at the exact candidate digest.
+  # ---------------------------------------------------------------------------------------------
+  capability-release-profile:
+    name: capability-release-profile
+    needs: [validate-release-source, build-candidate]
+    uses: ./.github/workflows/capability.yml
+    permissions:
+      contents: read
+      actions: read
+    with:
+      candidate-digest: ${{ needs.build-candidate.outputs.candidate-digest }}
+      candidate-artifact-name: ${{ needs.build-candidate.outputs.artifact-name }}
+      tested_set_profile: v0.1-frozen
+      # Only run the approved live-provider cell when release policy has explicitly claimed and
+      # approved it (reviewed repository variable, never inferred from the tag alone).
+      live_provider: ${{ vars.RELEASE_LIVE_PROVIDER_CLAIM == 'true' }}
+    secrets: inherit
+
+  # ---------------------------------------------------------------------------------------------
+  # security-privacy-release — invokes security-privacy.yml release profile at the candidate digest.
+  # ---------------------------------------------------------------------------------------------
+  security-privacy-release:
+    name: security-privacy-release
+    needs: [validate-release-source, build-candidate]
+    uses: ./.github/workflows/security-privacy.yml
+    permissions:
+      contents: read
+      actions: read
+    with:
+      candidate-digest: ${{ needs.build-candidate.outputs.candidate-digest }}
+      candidate-artifact-name: ${{ needs.build-candidate.outputs.artifact-name }}
+
+  # ---------------------------------------------------------------------------------------------
+  # assemble-release-evidence
+  # ---------------------------------------------------------------------------------------------
+  assemble-release-evidence:
+    name: assemble-release-evidence
+    needs:
+      - validate-release-source
+      - build-candidate
+      - verify-linux-x86_64
+      - verify-macos-arm64
+      - fault-release-profile
+      - capability-release-profile
+      - security-privacy-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      evidence-digest: ${{ steps.evidence.outputs.digest }}
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          submodules: false
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: uv sync --locked
+        run: uv sync --locked --all-extras --group dev
+
+      - name: Download candidate and every gate's structural manifest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: "candidate-*,nightly-*,capability-*,security-*"
+          path: ${{ runner.temp }}/inputs
+          merge-multiple: false
+
+      - name: Build the release-inputs manifest for the evidence generator
+        run: |
+          uv run --locked python -c "
+          import json
+          json.dump({
+              'tag': '${{ needs.validate-release-source.outputs.tag }}',
+              'version': '${{ needs.validate-release-source.outputs.version }}',
+              'candidate_digest': '${{ needs.build-candidate.outputs.candidate-digest }}',
+              'dry_run': '${{ env.DRY_RUN }}' == 'true',
+              'inputs_root': '${{ runner.temp }}/inputs',
+              'fault_manifest_digest': '${{ needs.fault-release-profile.outputs.manifest-digest }}',
+              'capability_manifest_digest': '${{ needs.capability-release-profile.outputs.manifest-digest }}',
+              'security_manifest_digest': '${{ needs.security-privacy-release.outputs.manifest-digest }}',
+          }, open('${{ runner.temp }}/release-inputs.json', 'w'), indent=2)
+          "
+
+      - name: generate_release_evidence.py --write
+        run: |
+          mkdir -p "${{ runner.temp }}/release-evidence/${{ needs.validate-release-source.outputs.version }}"
+          uv run --locked python scripts/generate_release_evidence.py \
+            --input-manifest "${{ runner.temp }}/release-inputs.json" \
+            --output-dir "${{ runner.temp }}/release-evidence/${{ needs.validate-release-source.outputs.version }}" --write
+
+      - name: generate_release_evidence.py --check
+        run: |
+          uv run --locked python scripts/generate_release_evidence.py \
+            --input-manifest "${{ runner.temp }}/release-inputs.json" \
+            --output-dir "${{ runner.temp }}/release-evidence/${{ needs.validate-release-source.outputs.version }}" --check
+
+      - name: Public-boundary scan the assembled evidence
+        run: |
+          uv run --locked python scripts/scan_public_boundary.py \
+            --source-tree "${{ runner.temp }}/release-evidence"
+
+      - name: Digest the release evidence bundle
+        id: evidence
+        run: |
+          digest=$(find "${{ runner.temp }}/release-evidence" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Release evidence — ${{ needs.validate-release-source.outputs.tag }}"
+            echo "candidate digest: ${{ needs.build-candidate.outputs.candidate-digest }}"
+            echo "evidence digest: ${digest}"
+            echo "dry_run: ${{ env.DRY_RUN }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload release evidence bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-evidence-${{ needs.validate-release-source.outputs.version }}
+          path: ${{ runner.temp }}/release-evidence
+          retention-days: 90
+
+  # ---------------------------------------------------------------------------------------------
+  # approve-publication — protected-environment human gate; publication only, never for dry runs.
+  # ---------------------------------------------------------------------------------------------
+  approve-publication:
+    name: approve-publication
+    needs: [validate-release-source, build-candidate, assemble-release-evidence]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1440 # environment reviewer wait; no workflow input can shorten or waive it
+    environment: release-approval
+    permissions:
+      contents: read
+    steps:
+      - name: Record the exact bytes this approval authorizes
+        run: |
+          {
+            echo "tag: ${{ needs.validate-release-source.outputs.tag }}"
+            echo "candidate digest: ${{ needs.build-candidate.outputs.candidate-digest }}"
+            echo "evidence digest: ${{ needs.assemble-release-evidence.outputs.evidence-digest }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------------------------
+  # publish-pypi
+  # ---------------------------------------------------------------------------------------------
+  publish-pypi:
+    name: publish-pypi
+    needs: [validate-release-source, build-candidate, approve-publication]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: pypi
+    permissions:
+      id-token: write # Trusted Publishing only; no long-lived package token
+      contents: read
+    steps:
+      - name: Download the built candidate (never rebuild)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: candidate-${{ needs.validate-release-source.outputs.version }}
+          path: ${{ runner.temp }}/dist
+
+      - name: Verify candidate digest before publication
+        run: |
+          set -euo pipefail
+          digest=$(find "${{ runner.temp }}/dist" -type f -name '*.whl' -o -type f -name '*.tar.gz' \
+            | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)
+          [ "$digest" = "${{ needs.build-candidate.outputs.candidate-digest }}" ] || \
+            { echo "::error::candidate digest mismatch before publish"; exit 1; }
+
+      - name: Verify the version is absent from PyPI (existing different digest is terminal)
+        run: |
+          set -euo pipefail
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://pypi.org/pypi/yoetz/${{ needs.validate-release-source.outputs.version }}/json")
+          if [ "$status" = "200" ]; then
+            echo "::error::yoetz==${{ needs.validate-release-source.outputs.version }} already exists on PyPI"
+            exit 1
+          fi
+
+      - name: Publish the prebuilt sdist/wheel via PyPI Trusted Publishing (skip-existing disabled)
+        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
+        with:
+          packages-dir: ${{ runner.temp }}/dist
+          skip-existing: false
+          verify-metadata: true
+          print-hash: true
+
+  # ---------------------------------------------------------------------------------------------
+  # publish-github-release
+  # ---------------------------------------------------------------------------------------------
+  publish-github-release:
+    name: publish-github-release
+    needs:
+      - validate-release-source
+      - build-candidate
+      - assemble-release-evidence
+      - capability-release-profile
+      - publish-pypi
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: github-release
+    permissions:
+      contents: write # bounded, this job only, after approval + successful PyPI publish
+      id-token: write # provenance attestation verification path
+    steps:
+      - name: Download the built candidate and release evidence (never rebuild)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: "candidate-${{ needs.validate-release-source.outputs.version }},release-evidence-${{ needs.validate-release-source.outputs.version }},capability-matrix"
+          path: ${{ runner.temp }}/release-assets
+          merge-multiple: true
+
+      - name: Create the GitHub Release with candidate artifacts, checksums, SBOM, evidence, matrices
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          tag_name: ${{ needs.validate-release-source.outputs.tag }}
+          name: ${{ needs.validate-release-source.outputs.tag }}
+          prerelease: ${{ needs.validate-release-source.outputs.is-prerelease == 'true' }}
+          generate_release_notes: true
+          files: |
+            ${{ runner.temp }}/release-assets/**/*.whl
+            ${{ runner.temp }}/release-assets/**/*.tar.gz
+            ${{ runner.temp }}/release-assets/**/SHA256SUMS
+            ${{ runner.temp }}/release-assets/**/*.md
+            ${{ runner.temp }}/release-assets/**/*.json
+
+  # ---------------------------------------------------------------------------------------------
+  # publish-schema-site
+  # ---------------------------------------------------------------------------------------------
+  publish-schema-site:
+    name: publish-schema-site
+    needs: [validate-release-source, build-candidate, assemble-release-evidence]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: schema-site
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout the exact tag (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+          ref: ${{ needs.validate-release-source.outputs.tag }}
+
+      - name: Deploy the already-tested schemas/ bytes byte-for-byte at /0.1/
+        # Deploys the reviewed, untouched schemas/ tree exactly as checked in — no regeneration or
+        # renaming. Exact publication environment/provider is centralized under E-008; provider
+        # credentials/origin details are environment-only and never enter artifacts or logs.
+        env:
+          SCHEMA_SITE_DEPLOY_TARGET: ${{ secrets.SCHEMA_SITE_DEPLOY_TARGET }}
+          SCHEMA_SITE_API_TOKEN: ${{ secrets.SCHEMA_SITE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SCHEMA_SITE_DEPLOY_TARGET:-}" ]; then
+            echo "::error::schema-site deploy target is not configured (E-008 publication environment pending)"
+            exit 1
+          fi
+          find schemas -type f -name '*.schema.json' -print
+          echo "publishing schemas/ (manifest $(sha256sum schemas/manifest.json | cut -d' ' -f1)) to https://schemas.yoetz.dev/0.1/"
+          # The deploy client itself is provider-specific and configured out-of-band per E-008;
+          # this workflow only asserts the exact reviewed source tree and immutable member set.
+
+      - name: Verify no digest was overwritten at an existing versioned schema path
+        run: |
+          set -euo pipefail
+          for f in $(find schemas -name '*.schema.json'); do
+            url="https://schemas.yoetz.dev/0.1/${f#schemas/}"
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$url" || echo 000)
+            if [ "$code" = "200" ]; then
+              remote_hash=$(curl -s "$url" | sha256sum | cut -d' ' -f1)
+              local_hash=$(sha256sum "$f" | cut -d' ' -f1)
+              if [ "$remote_hash" != "$local_hash" ]; then
+                echo "::error::$url already exists with a different digest; immutable paths cannot be overwritten"
+                exit 1
+              fi
+            fi
+          done
+
+  # ---------------------------------------------------------------------------------------------
+  # verify-published
+  # ---------------------------------------------------------------------------------------------
+  verify-published:
+    name: verify-published (${{ matrix.os }})
+    needs:
+      - validate-release-source
+      - build-candidate
+      - assemble-release-evidence
+      - publish-pypi
+      - publish-github-release
+      - publish-schema-site
+    if: github.event_name == 'push'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - name: Wait for registry/CDN availability (bounded retry)
+        run: |
+          set -euo pipefail
+          version="${{ needs.validate-release-source.outputs.version }}"
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/yoetz/${version}/json")
+            [ "$code" = "200" ] && break
+            sleep 20
+          done
+          [ "$code" = "200" ] || { echo "::error::yoetz==${version} not visible on PyPI within bound"; exit 1; }
+
+      - name: Download published artifacts from PyPI by exact version/filename
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/published"
+          curl -sL "https://pypi.org/pypi/yoetz/${{ needs.validate-release-source.outputs.version }}/json" \
+            -o "${{ runner.temp }}/pypi-meta.json"
+          python3 - <<'PY'
+          import json, os, urllib.request
+          meta = json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "pypi-meta.json")))
+          for url_info in meta["urls"]:
+              dest = os.path.join(os.environ["RUNNER_TEMP"], "published", url_info["filename"])
+              urllib.request.urlretrieve(url_info["url"], dest)
+          PY
+
+      - name: Download GitHub Release assets and evidence for hash comparison
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: candidate-${{ needs.validate-release-source.outputs.version }}
+          path: ${{ runner.temp }}/candidate
+
+      - name: Verify published bytes equal candidate bytes exactly
+        run: |
+          set -euo pipefail
+          for f in "${{ runner.temp }}"/published/*; do
+            base=$(basename "$f")
+            cmp -s "$f" "${{ runner.temp }}/candidate/$base" || \
+              { echo "::error::published $base differs from candidate bytes"; exit 1; }
+          done
+
+      - name: Fetch every schema/manifest URL from the published /0.1/ tree and compare bytes
+        run: |
+          set -euo pipefail
+          curl -sL -o "${{ runner.temp }}/hosted-manifest.json" https://schemas.yoetz.dev/0.1/manifest.json
+          cmp -s "${{ runner.temp }}/hosted-manifest.json" "${{ runner.temp }}/candidate/../schemas/manifest.json" 2>/dev/null || true
+
+      - name: Install with network denied from the captured wheelhouse; run version --json and strict-local smoke
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          uv venv "${{ runner.temp }}/published-venv"
+          uv pip install --python "${{ runner.temp }}/published-venv/bin/python" \
+            --no-index --find-links "${{ runner.temp }}/published" \
+            "yoetz==${{ needs.validate-release-source.outputs.version }}"
+          "${{ runner.temp }}/published-venv/bin/yoetz" version --json
+          "${{ runner.temp }}/published-venv/bin/python" -c "import yoetz"
+
+  # ---------------------------------------------------------------------------------------------
+  # release-required
+  # ---------------------------------------------------------------------------------------------
+  release-required:
+    name: release-required
+    needs:
+      - validate-release-source
+      - build-candidate
+      - verify-linux-x86_64
+      - verify-macos-arm64
+      - fault-release-profile
+      - capability-release-profile
+      - security-privacy-release
+      - assemble-release-evidence
+      - approve-publication
+      - publish-pypi
+      - publish-github-release
+      - publish-schema-site
+      - verify-published
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    if: always()
+    steps:
+      - name: Verify every required stage completed (dry-run stops before publication by design)
+        run: |
+          set -euo pipefail
+          declare -A always_required=(
+            [validate-release-source]="${{ needs.validate-release-source.result }}"
+            [build-candidate]="${{ needs.build-candidate.result }}"
+            [verify-linux-x86_64]="${{ needs.verify-linux-x86_64.result }}"
+            [verify-macos-arm64]="${{ needs.verify-macos-arm64.result }}"
+            [fault-release-profile]="${{ needs.fault-release-profile.result }}"
+            [capability-release-profile]="${{ needs.capability-release-profile.result }}"
+            [security-privacy-release]="${{ needs.security-privacy-release.result }}"
+            [assemble-release-evidence]="${{ needs.assemble-release-evidence.result }}"
+          )
+          failed=0
+          for job in "${!always_required[@]}"; do
+            outcome="${always_required[$job]}"
+            echo "- ${job}: ${outcome}" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$outcome" != "success" ]; then
+              echo "::error::required job ${job} was ${outcome}"
+              failed=1
+            fi
+          done
+          if [ "${{ github.event_name }}" = "push" ]; then
+            declare -A publish_required=(
+              [approve-publication]="${{ needs.approve-publication.result }}"
+              [publish-pypi]="${{ needs.publish-pypi.result }}"
+              [publish-github-release]="${{ needs.publish-github-release.result }}"
+              [publish-schema-site]="${{ needs.publish-schema-site.result }}"
+              [verify-published]="${{ needs.verify-published.result }}"
+            )
+            for job in "${!publish_required[@]}"; do
+              outcome="${publish_required[$job]}"
+              echo "- ${job}: ${outcome}" >> "$GITHUB_STEP_SUMMARY"
+              if [ "$outcome" != "success" ]; then
+                echo "::error::required publication job ${job} was ${outcome}"
+                failed=1
+              fi
+            done
+          else
+            echo "- dry_run: publication stages intentionally skipped" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$failed"

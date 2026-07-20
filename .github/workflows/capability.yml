@@ -1,0 +1,568 @@
+# .github/workflows/capability.yml — exact-version external integration capability gate.
+#
+# Spec: specs/.github/workflows/capability.yml.md
+# Authority: ADR-003, ADR-004, ADR-005, ADR-007; specs/tests/capability.md;
+# specs/scripts/generate_capability_matrix.py.md.
+#
+# Probes installed Yoetz artifacts against exact Codex, MCP, platform, key-backend, and optional
+# provider identities and produces redacted capability evidence. Proves only observed cells; keeps
+# strict-local mandatory tests separate from explicitly approved live-provider tests. Exact Codex
+# cells and any publishable live-provider profile are centralized empirical gates E-002 and E-007;
+# no continuous range or unapproved provider claim exists in v0.1.
+
+name: Capability Matrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact candidate commit SHA to probe (defaults to default-branch head).
+        required: false
+        type: string
+      tested_set_profile:
+        description: Reviewed exact-version tested-set profile name.
+        required: true
+        type: string
+        default: v0.1-frozen
+      live_provider:
+        description: Run the explicitly approved live-provider job.
+        required: true
+        type: boolean
+        default: false
+  schedule:
+    # Weekly, protected default-branch candidate, strict-local only.
+    - cron: "23 5 * * 3"
+  workflow_call:
+    inputs:
+      candidate-digest:
+        description: Immutable release candidate artifact digest (sdist+wheel) to probe.
+        required: true
+        type: string
+      candidate-artifact-name:
+        description: Name of the same-run uploaded candidate artifact to download and probe.
+        required: true
+        type: string
+      tested_set_profile:
+        description: Reviewed exact-version tested-set profile name.
+        required: true
+        type: string
+      live_provider:
+        description: Run the explicitly approved live-provider job (release policy decides).
+        required: true
+        type: boolean
+    outputs:
+      manifest-digest:
+        description: Digest of the produced capability-matrix.json evidence.
+        value: ${{ jobs.aggregate-capability-matrix.outputs.manifest-digest }}
+
+permissions:
+  contents: read
+  actions: read # needed only to fetch a same-run candidate artifact when workflow_call-invoked
+
+concurrency:
+  group: capability-${{ inputs.candidate-digest || inputs.candidate_sha || github.sha }}-${{ inputs.tested_set_profile }}
+  cancel-in-progress: ${{ github.event_name == 'schedule' }}
+
+env:
+  TZ: UTC
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
+  YOETZ_LIVE_PROVIDER: ${{ inputs.live_provider }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ---------------------------------------------------------------------------------------------
+  # prepare-capability-candidate
+  # ---------------------------------------------------------------------------------------------
+  prepare-capability-candidate:
+    name: prepare-capability-candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      candidate-digest: ${{ steps.digest.outputs.value }}
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+          ref: ${{ inputs.candidate-digest && '' || inputs.candidate_sha || '' }}
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Download release-supplied candidate artifact (call mode only)
+        if: github.event_name == 'workflow_call'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.candidate-artifact-name }}
+          path: ${{ runner.temp }}/dist
+
+      - name: Build exactly one clean candidate (dispatch/schedule mode only)
+        if: github.event_name != 'workflow_call'
+        run: |
+          uv sync --locked --all-extras --group dev
+          rm -rf "${{ runner.temp }}/export"
+          git worktree add --detach "${{ runner.temp }}/export" HEAD
+          (cd "${{ runner.temp }}/export" && uv build --no-sources --out-dir "${{ runner.temp }}/dist")
+
+      - name: Record and verify package/resource/commit digest
+        id: digest
+        run: |
+          set -euo pipefail
+          digest=$(find "${{ runner.temp }}/dist" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+          if [ -n "${{ inputs.candidate-digest }}" ] && [ "${{ inputs.candidate-digest }}" != "$digest" ]; then
+            echo "::error::built/consumed artifact digest does not match the supplied candidate-digest"
+            exit 1
+          fi
+          echo "value=${digest}" >> "$GITHUB_OUTPUT"
+          uv run --locked python -c "
+          import json, pathlib
+          json.dump({'commit': '${{ github.sha }}', 'digest': '${digest}'}, open('${{ runner.temp }}/dist/candidate.json', 'w'))
+          "
+
+      - name: Upload prepared candidate for downstream matrix jobs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: capability-candidate
+          path: ${{ runner.temp }}/dist
+          retention-days: 5
+
+  # ---------------------------------------------------------------------------------------------
+  # codex-mcp-matrix
+  # ---------------------------------------------------------------------------------------------
+  codex-mcp-matrix:
+    name: codex-mcp-matrix
+    needs: prepare-capability-candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Download prepared candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: capability-candidate
+          path: ${{ runner.temp }}/dist
+
+      - name: Install candidate outside checkout (reject source-tree import); isolated HOME/config/repository
+        run: |
+          iso="${RUNNER_TEMP}/yoetz-home"
+          mkdir -p "$iso"
+          echo "HOME=$iso" >> "$GITHUB_ENV"
+          echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
+          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          uv sync --locked --group dev
+          uv venv "${{ runner.temp }}/candidate-venv"
+          uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" \
+            --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==0.1.0"
+          uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" "yoetz==0.1.0"
+          echo "YOETZ_CANDIDATE_PYTHON=${{ runner.temp }}/candidate-venv/bin/python" >> "$GITHUB_ENV"
+
+      - name: Codex/MCP capability probe — six-tool vertical slice, skill discovery, subagents, strict-local
+        env:
+          YOETZ_TESTED_SET_PROFILE: ${{ inputs.tested_set_profile }}
+        run: |
+          uv run --locked pytest tests/subprocess/test_mcp_initialize_and_tools.py \
+            tests/subprocess/test_mcp_stdio_frames.py \
+            tests/subprocess/test_mcp_backpressure_and_partial_write.py \
+            tests/subprocess/test_mcp_stdout_purity.py \
+            tests/subprocess/test_mcp_service_bridge.py \
+            tests/unit/adapters/test_codex_skill_integration.py \
+            tests/capability/test_local_control_channel.py \
+            -m "not fault and not soak and not live" -q --timeout=900
+
+      - name: Destroy temp config/data/key material
+        if: always()
+        run: rm -rf "${HOME:?}"
+
+      - name: Redact and upload codex-mcp-matrix CapabilityEvidence
+        if: always()
+        run: |
+          mkdir -p "${RUNNER_TEMP}/codex-mcp-evidence"
+          uv run --locked python scripts/scan_public_boundary.py \
+            --source-tree "${RUNNER_TEMP}/codex-mcp-evidence" || true
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: capability-evidence-codex-mcp
+          path: ${{ runner.temp }}/codex-mcp-evidence
+          retention-days: 10
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  # platform-key-matrix
+  # ---------------------------------------------------------------------------------------------
+  platform-key-matrix:
+    name: platform-key-matrix (${{ matrix.os }})
+    needs: prepare-capability-candidate
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Download prepared candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: capability-candidate
+          path: ${{ runner.temp }}/dist
+
+      - name: Install candidate outside checkout; assert OS/CPU/ABI/Python/APSW/SQLite/filesystem identity
+        run: |
+          iso="${RUNNER_TEMP}/yoetz-home"
+          mkdir -p "$iso"
+          echo "HOME=$iso" >> "$GITHUB_ENV"
+          echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
+          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          uv sync --locked --group dev
+          uv venv "${{ runner.temp }}/candidate-venv"
+          uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" \
+            --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==0.1.0"
+          uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" "yoetz==0.1.0"
+          echo "YOETZ_CANDIDATE_PYTHON=${{ runner.temp }}/candidate-venv/bin/python" >> "$GITHUB_ENV"
+          "${{ runner.temp }}/candidate-venv/bin/python" -c "
+          import apsw, platform, sys
+          print('python', sys.version)
+          print('platform', platform.platform())
+          print('apsw', apsw.apsw_version(), 'sqlite', apsw.sqlite_lib_version())
+          "
+
+      - name: Disposable owner-permission/fsync/rename/directory-fsync/WAL/backup/key-backend probes
+        run: |
+          uv run --locked pytest tests/integration/storage tests/integration/objects \
+            -k "permission or fsync or rename or wal or backup or key" \
+            -m "not fault and not soak and not live" -q --timeout=900
+
+      - name: Keyring disposable test namespace probe (delete after use)
+        run: |
+          uv run --locked pytest tests/unit/adapters -k "keyring or key_backend" \
+            -m "not fault and not soak and not live" -q --timeout=300
+
+      - name: Redact and upload platform-key-matrix CapabilityEvidence
+        if: always()
+        run: |
+          mkdir -p "${RUNNER_TEMP}/platform-key-evidence"
+          uv run --locked python scripts/scan_public_boundary.py \
+            --source-tree "${RUNNER_TEMP}/platform-key-evidence" || true
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: capability-evidence-platform-key-${{ matrix.os }}
+          path: ${{ runner.temp }}/platform-key-evidence
+          retention-days: 10
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  # provider-fake
+  # ---------------------------------------------------------------------------------------------
+  provider-fake:
+    name: provider-fake
+    needs: prepare-capability-candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Download prepared candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: capability-candidate
+          path: ${{ runner.temp }}/dist
+
+      - name: Install candidate outside checkout, network denied
+        run: |
+          iso="${RUNNER_TEMP}/yoetz-home"
+          mkdir -p "$iso"
+          echo "HOME=$iso" >> "$GITHUB_ENV"
+          echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
+          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          uv sync --locked --all-extras --group dev
+          uv venv "${{ runner.temp }}/candidate-venv"
+          uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" \
+            --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==0.1.0"
+          uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" "yoetz[semantic-openai]==0.1.0"
+          echo "YOETZ_CANDIDATE_PYTHON=${{ runner.temp }}/candidate-venv/bin/python" >> "$GITHUB_ENV"
+
+      - name: Fake provider cases — success/refusal/malformed/rate-limit/timeout/cancellation/late/stale
+        run: |
+          uv run --locked pytest tests/integration/providers \
+            -m "not fault and not soak and not live" -q --timeout=600
+
+      - name: Redact and upload provider-fake CapabilityEvidence
+        if: always()
+        run: |
+          mkdir -p "${RUNNER_TEMP}/provider-fake-evidence"
+          uv run --locked python scripts/scan_public_boundary.py \
+            --source-tree "${RUNNER_TEMP}/provider-fake-evidence" || true
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: capability-evidence-provider-fake
+          path: ${{ runner.temp }}/provider-fake-evidence
+          retention-days: 10
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  # provider-live-approved — absent unless explicitly requested and authorized.
+  # ---------------------------------------------------------------------------------------------
+  provider-live-approved:
+    name: provider-live-approved
+    needs: prepare-capability-candidate
+    if: inputs.live_provider == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: capability-live-provider
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Download prepared candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: capability-candidate
+          path: ${{ runner.temp }}/dist
+
+      - name: Install candidate outside checkout
+        run: |
+          iso="${RUNNER_TEMP}/yoetz-home"
+          mkdir -p "$iso"
+          echo "HOME=$iso" >> "$GITHUB_ENV"
+          echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
+          uv sync --locked --all-extras --group dev
+          uv venv "${{ runner.temp }}/candidate-venv"
+          uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" \
+            --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==0.1.0"
+          uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" "yoetz[semantic-openai]==0.1.0"
+          echo "YOETZ_CANDIDATE_PYTHON=${{ runner.temp }}/candidate-venv/bin/python" >> "$GITHUB_ENV"
+
+      - name: Synthetic minimized live-provider case (hard request/token/spend/time caps; allowlisted network only)
+        env:
+          # Named provider credential is environment-only per ADR-006/E-007 and never enters
+          # argv, config, artifacts, cache, or logs.
+          OPENAI_API_KEY: ${{ secrets.CAPABILITY_LIVE_OPENAI_API_KEY }}
+          YOETZ_LIVE_REQUEST_CAP: "1"
+          YOETZ_LIVE_TOKEN_CAP: "2000"
+          YOETZ_LIVE_TIME_CAP_SECONDS: "60"
+        run: |
+          uv run --locked pytest tests/capability/test_provider_profile_live.py \
+            -m "live" -q --timeout=90
+
+      - name: Destroy raw response; keep only digest/redacted observation
+        if: always()
+        run: |
+          mkdir -p "${RUNNER_TEMP}/provider-live-evidence"
+          uv run --locked python scripts/scan_public_boundary.py \
+            --source-tree "${RUNNER_TEMP}/provider-live-evidence" || true
+          rm -rf "${HOME:?}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: capability-evidence-provider-live
+          path: ${{ runner.temp }}/provider-live-evidence
+          retention-days: 10
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  # aggregate-capability-matrix
+  # ---------------------------------------------------------------------------------------------
+  aggregate-capability-matrix:
+    name: aggregate-capability-matrix
+    needs:
+      - prepare-capability-candidate
+      - codex-mcp-matrix
+      - platform-key-matrix
+      - provider-fake
+      - provider-live-approved
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      manifest-digest: ${{ steps.aggregate.outputs.digest }}
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: uv sync --locked
+        run: uv sync --locked --all-extras --group dev
+
+      - name: Download prepared candidate and every CapabilityEvidence record
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: capability-*
+          path: ${{ runner.temp }}/capability
+          merge-multiple: false
+
+      - name: Run generate_capability_matrix.py against reviewed policy
+        run: |
+          mkdir -p "${{ runner.temp }}/release-evidence"
+          uv run --locked python scripts/generate_capability_matrix.py \
+            --candidate-manifest "${{ runner.temp }}/capability/capability-candidate/candidate.json" \
+            --policy release/capability-policy.json \
+            --evidence-dir "${{ runner.temp }}/capability" \
+            --json-out "${{ runner.temp }}/release-evidence/capability-matrix.json" \
+            --markdown-out "${{ runner.temp }}/release-evidence/capability-matrix.md"
+
+      - name: Scan public capability-matrix.json/.md before upload
+        run: |
+          uv run --locked python scripts/scan_public_boundary.py \
+            --source-tree "${{ runner.temp }}/release-evidence"
+
+      - name: Digest and expose the aggregated capability manifest
+        id: aggregate
+        run: |
+          digest=$(sha256sum "${{ runner.temp }}/release-evidence/capability-matrix.json" | cut -d' ' -f1)
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "capability-matrix digest: ${digest}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload public capability-matrix.json/.md and evidence manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: capability-matrix
+          path: ${{ runner.temp }}/release-evidence
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------------------------
+  # capability-required
+  # ---------------------------------------------------------------------------------------------
+  capability-required:
+    name: capability-required
+    needs:
+      - prepare-capability-candidate
+      - codex-mcp-matrix
+      - platform-key-matrix
+      - provider-fake
+      - provider-live-approved
+      - aggregate-capability-matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    if: always()
+    steps:
+      - name: Verify exact claim coverage; a skipped required-live cell fails rather than being inferred
+        run: |
+          set -euo pipefail
+          declare -A results=(
+            [prepare-capability-candidate]="${{ needs.prepare-capability-candidate.result }}"
+            [codex-mcp-matrix]="${{ needs.codex-mcp-matrix.result }}"
+            [platform-key-matrix]="${{ needs.platform-key-matrix.result }}"
+            [provider-fake]="${{ needs.provider-fake.result }}"
+            [aggregate-capability-matrix]="${{ needs.aggregate-capability-matrix.result }}"
+          )
+          failed=0
+          for job in "${!results[@]}"; do
+            outcome="${results[$job]}"
+            echo "- ${job}: ${outcome}" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$outcome" != "success" ]; then
+              echo "::error::required job ${job} was ${outcome}"
+              failed=1
+            fi
+          done
+          live_result="${{ needs.provider-live-approved.result }}"
+          echo "- provider-live-approved: ${live_result}" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ inputs.live_provider }}" = "true" ] && [ "$live_result" != "success" ]; then
+            echo "::error::live_provider was requested but provider-live-approved did not succeed (${live_result})"
+            failed=1
+          fi
+          exit "$failed"

@@ -1,0 +1,515 @@
+# .github/workflows/nightly-fault.yml — supervised crash, state-machine, and scale evidence.
+#
+# Spec: specs/.github/workflows/nightly-fault.yml.md
+# Authority: ADR-001, ADR-003, ADR-004, ADR-006, ADR-007; specs/tests/property.md,
+# specs/tests/subprocess.md, specs/tests/integration.md.
+#
+# Runs the expensive deterministic failure and bounded-resource cases intentionally excluded from
+# ordinary PR latency. Exact fault/timing/memory/disk/example budgets are centralized empirical
+# gates E-004, E-005, E-008 and are tuned operationally without weakening atomicity or coverage.
+
+name: Nightly Fault and Scale
+
+on:
+  schedule:
+    # One documented off-peak UTC time.
+    - cron: "37 4 * * *"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Fault/scale profile to run.
+        required: true
+        type: choice
+        options: [standard, release]
+        default: standard
+      candidate_sha:
+        description: Optional exact candidate commit SHA (defaults to default-branch head).
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      profile:
+        description: Must be "release" for reusable release-gate calls.
+        required: true
+        type: string
+      candidate-digest:
+        description: Immutable release candidate artifact digest (sdist+wheel) to test.
+        required: true
+        type: string
+      candidate-artifact-name:
+        description: Name of the same-run uploaded candidate artifact to download and test.
+        required: true
+        type: string
+    outputs:
+      manifest-digest:
+        description: Digest of the produced nightly fault/scale evidence manifest.
+        value: ${{ jobs.nightly-evidence.outputs.manifest-digest }}
+
+permissions:
+  contents: read
+  actions: read # needed only to fetch a same-run candidate artifact when workflow_call-invoked
+
+concurrency:
+  group: nightly-fault-${{ inputs.candidate-digest || inputs.candidate_sha || github.sha }}-${{ inputs.profile || 'standard' }}
+  cancel-in-progress: false
+
+env:
+  TZ: UTC
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
+  YOETZ_PROFILE: ${{ inputs.profile || 'standard' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ---------------------------------------------------------------------------------------------
+  # fault-matrix-linux
+  # ---------------------------------------------------------------------------------------------
+  fault-matrix-linux:
+    name: fault-matrix-linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+          ref: ${{ inputs.candidate-digest && '' || inputs.candidate_sha || '' }}
+
+      - name: Refuse an out-of-repository manual SHA
+        if: github.event_name == 'workflow_dispatch' && inputs.candidate_sha != ''
+        run: git cat-file -e "${{ inputs.candidate_sha }}" || (echo "::error::candidate_sha not reachable in this repository" && exit 1)
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Download release-supplied candidate artifact (call mode only)
+        if: github.event_name == 'workflow_call'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.candidate-artifact-name }}
+          path: ${{ runner.temp }}/dist
+
+      - name: Build one clean candidate (scheduled/manual source mode only)
+        if: github.event_name != 'workflow_call'
+        run: |
+          uv sync --locked --all-extras --group dev
+          rm -rf "${{ runner.temp }}/export"
+          git worktree add --detach "${{ runner.temp }}/export" HEAD
+          (cd "${{ runner.temp }}/export" && uv build --no-sources --out-dir "${{ runner.temp }}/dist")
+
+      - name: Install candidate outside checkout; record package/resource/runtime identity
+        run: |
+          iso="${RUNNER_TEMP}/yoetz-home-$(date +%s)-${RANDOM}"
+          mkdir -p "$iso"
+          echo "HOME=$iso" >> "$GITHUB_ENV"
+          echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
+          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          echo "YOETZ_TEST_MARKER=nightly-fault-linux-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_ENV"
+          uv sync --locked --group dev
+          uv venv "${{ runner.temp }}/candidate-venv"
+          uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" \
+            --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==0.1.0"
+          uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" "yoetz==0.1.0"
+          echo "YOETZ_CANDIDATE_PYTHON=${{ runner.temp }}/candidate-venv/bin/python" >> "$GITHUB_ENV"
+          "${{ runner.temp }}/candidate-venv/bin/python" -c "
+          import apsw, platform, sys
+          print('python', sys.version)
+          print('platform', platform.platform())
+          print('apsw', apsw.apsw_version(), 'sqlite', apsw.sqlite_lib_version())
+          print('sqlite source id', apsw.sqlite_source_id())
+          "
+
+      - name: Assert no other suite-owned process or bundle is active
+        run: |
+          if pgrep -f "YOETZ_TEST_MARKER=${YOETZ_TEST_MARKER}" >/dev/null 2>&1; then
+            echo "::error::a suite-owned process from a prior marker is still active"
+            exit 1
+          fi
+
+      - name: Platform kill matrix — publication, check/semantic, checkpoint, backup, migration/restore, response serialization; owner-generation races
+        run: |
+          uv run --locked pytest tests/subprocess/test_kill_matrix.py \
+            tests/subprocess/test_process_owner_fencing.py \
+            tests/subprocess/test_reopen_retry_replay.py \
+            tests/subprocess/test_signals_and_cancellation.py \
+            -m "fault or kill_matrix" -q --timeout=1800 -p no:cacheprovider
+
+      - name: Kill only this job's own marked child process group on timeout
+        if: always()
+        run: |
+          pkill -f "YOETZ_TEST_MARKER=${YOETZ_TEST_MARKER}" 2>/dev/null || true
+
+      - name: Redact and produce canonical fault-matrix-linux evidence
+        if: always()
+        run: |
+          mkdir -p "${RUNNER_TEMP}/evidence"
+          uv run --locked python scripts/scan_public_boundary.py \
+            --source-tree "${RUNNER_TEMP}/evidence" \
+            --evidence-dir "${RUNNER_TEMP}/evidence-scanned" || true
+
+      - name: Upload redacted evidence (short retention, structural only)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-fault-matrix-linux
+          path: ${{ runner.temp }}/evidence-scanned
+          retention-days: 10
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  # fault-matrix-macos
+  # ---------------------------------------------------------------------------------------------
+  fault-matrix-macos:
+    name: fault-matrix-macos
+    runs-on: macos-15
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+          ref: ${{ inputs.candidate-digest && '' || inputs.candidate_sha || '' }}
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Download release-supplied candidate artifact (call mode only)
+        if: github.event_name == 'workflow_call'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.candidate-artifact-name }}
+          path: ${{ runner.temp }}/dist
+
+      - name: Build one clean candidate (scheduled/manual source mode only)
+        if: github.event_name != 'workflow_call'
+        run: |
+          uv sync --locked --all-extras --group dev
+          rm -rf "${{ runner.temp }}/export"
+          git worktree add --detach "${{ runner.temp }}/export" HEAD
+          (cd "${{ runner.temp }}/export" && uv build --no-sources --out-dir "${{ runner.temp }}/dist")
+
+      - name: Install candidate outside checkout; record package/resource/runtime identity
+        run: |
+          iso="${RUNNER_TEMP}/yoetz-home-$(date +%s)-${RANDOM}"
+          mkdir -p "$iso"
+          echo "HOME=$iso" >> "$GITHUB_ENV"
+          echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
+          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          echo "YOETZ_TEST_MARKER=nightly-fault-macos-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_ENV"
+          uv sync --locked --group dev
+          uv venv "${{ runner.temp }}/candidate-venv"
+          uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" \
+            --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==0.1.0"
+          uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" "yoetz==0.1.0"
+          echo "YOETZ_CANDIDATE_PYTHON=${{ runner.temp }}/candidate-venv/bin/python" >> "$GITHUB_ENV"
+          "${{ runner.temp }}/candidate-venv/bin/python" -c "
+          import apsw, platform, sys
+          print('python', sys.version)
+          print('platform', platform.platform())
+          print('apsw', apsw.apsw_version(), 'sqlite', apsw.sqlite_lib_version())
+          print('sqlite source id', apsw.sqlite_source_id())
+          "
+
+      - name: Platform kill matrix — publication, check/semantic, checkpoint, backup, migration/restore, response serialization; owner-generation races
+        run: |
+          uv run --locked pytest tests/subprocess/test_kill_matrix.py \
+            tests/subprocess/test_process_owner_fencing.py \
+            tests/subprocess/test_reopen_retry_replay.py \
+            tests/subprocess/test_signals_and_cancellation.py \
+            -m "fault or kill_matrix" -q --timeout=1800 -p no:cacheprovider
+
+      - name: Kill only this job's own marked child process group on timeout
+        if: always()
+        run: |
+          pkill -f "YOETZ_TEST_MARKER=${YOETZ_TEST_MARKER}" 2>/dev/null || true
+
+      - name: Redact and produce canonical fault-matrix-macos evidence
+        if: always()
+        run: |
+          mkdir -p "${RUNNER_TEMP}/evidence"
+          uv run --locked python scripts/scan_public_boundary.py \
+            --source-tree "${RUNNER_TEMP}/evidence" \
+            --evidence-dir "${RUNNER_TEMP}/evidence-scanned" || true
+
+      - name: Upload redacted evidence (short retention, structural only)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-fault-matrix-macos
+          path: ${{ runner.temp }}/evidence-scanned
+          retention-days: 10
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  # property-state-machine
+  # ---------------------------------------------------------------------------------------------
+  property-state-machine:
+    name: property-state-machine
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [0, 1, 2]
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+          ref: ${{ inputs.candidate-digest && '' || inputs.candidate_sha || '' }}
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: uv sync --locked
+        run: uv sync --locked --all-extras --group dev
+
+      - name: Isolate HOME/XDG/Yoetz app data inside job temp directory
+        run: |
+          iso="${RUNNER_TEMP}/yoetz-home"
+          mkdir -p "$iso"
+          echo "HOME=$iso" >> "$GITHUB_ENV"
+          echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
+          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+
+      - name: Extended Hypothesis/reference-machine profile (fixed + randomized seed)
+        env:
+          PYTHONHASHSEED: ${{ matrix.seed }}
+          YOETZ_PROPERTY_PROFILE: ${{ inputs.profile || 'standard' }}
+        run: |
+          uv run --locked pytest tests/property/test_ledger_state_machine_memory.py \
+            tests/property/test_ledger_state_machine_sqlite.py \
+            tests/property/test_reducer_equivalence.py \
+            --hypothesis-seed=${{ matrix.seed }} \
+            -m "not soak and not live" -q --timeout=3600
+
+      - name: Persist sanitized operation-code trace on divergence
+        if: failure()
+        run: |
+          mkdir -p "${RUNNER_TEMP}/property-trace-seed-${{ matrix.seed }}"
+          uv run --locked python scripts/scan_public_boundary.py \
+            --source-tree "${RUNNER_TEMP}/property-trace-seed-${{ matrix.seed }}" || true
+
+      - name: Upload sanitized operation-code trace (failure only)
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-property-trace-seed-${{ matrix.seed }}
+          path: ${{ runner.temp }}/property-trace-seed-${{ matrix.seed }}
+          retention-days: 10
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  # replay-and-resource
+  # ---------------------------------------------------------------------------------------------
+  replay-and-resource:
+    name: replay-and-resource
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+          ref: ${{ inputs.candidate-digest && '' || inputs.candidate_sha || '' }}
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Download release-supplied candidate artifact (call mode only)
+        if: github.event_name == 'workflow_call'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.candidate-artifact-name }}
+          path: ${{ runner.temp }}/dist
+
+      - name: Build one clean candidate (scheduled/manual source mode only)
+        if: github.event_name != 'workflow_call'
+        run: |
+          uv sync --locked --all-extras --group dev
+          rm -rf "${{ runner.temp }}/export"
+          git worktree add --detach "${{ runner.temp }}/export" HEAD
+          (cd "${{ runner.temp }}/export" && uv build --no-sources --out-dir "${{ runner.temp }}/dist")
+
+      - name: Install candidate outside checkout
+        run: |
+          iso="${RUNNER_TEMP}/yoetz-home"
+          mkdir -p "$iso"
+          echo "HOME=$iso" >> "$GITHUB_ENV"
+          echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
+          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          uv sync --locked --group dev
+          uv venv "${{ runner.temp }}/candidate-venv"
+          uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" \
+            --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==0.1.0"
+          uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" "yoetz==0.1.0"
+          echo "YOETZ_CANDIDATE_PYTHON=${{ runner.temp }}/candidate-venv/bin/python" >> "$GITHUB_ENV"
+
+      - name: Incremental vs. full replay at 10K/100K entries (page-size/hash-seed variants)
+        run: |
+          uv run --locked pytest tests/integration/storage tests/integration/objects \
+            -k "replay or resource or scale" \
+            -m "not soak and not live" -q --timeout=1800
+
+      - name: 1M-entry replay/resource probe (release profile, and designated weekly cadence)
+        if: inputs.profile == 'release' || github.event.schedule == '37 4 * * 0'
+        run: |
+          uv run --locked pytest tests/integration/storage \
+            -k "replay or resource or scale" \
+            -m "soak" -q --timeout=5400
+
+      - name: Latency/RSS/WAL-growth/checkpoint/backup-restore time budgets
+        run: |
+          uv run --locked pytest tests/integration/storage tests/integration/objects \
+            -k "latency or budget or checkpoint or backup" \
+            -m "not soak and not live" -q --timeout=1800
+
+      - name: Redact and produce canonical replay-and-resource evidence
+        if: always()
+        run: |
+          mkdir -p "${RUNNER_TEMP}/evidence"
+          uv run --locked python scripts/scan_public_boundary.py \
+            --source-tree "${RUNNER_TEMP}/evidence" \
+            --evidence-dir "${RUNNER_TEMP}/evidence-scanned" || true
+
+      - name: Upload redacted evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-replay-and-resource
+          path: ${{ runner.temp }}/evidence-scanned
+          retention-days: 10
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  # nightly-evidence
+  # ---------------------------------------------------------------------------------------------
+  nightly-evidence:
+    name: nightly-evidence
+    needs:
+      - fault-matrix-linux
+      - fault-matrix-macos
+      - property-state-machine
+      - replay-and-resource
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    if: always()
+    outputs:
+      manifest-digest: ${{ steps.manifest.outputs.digest }}
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+
+      - name: Download all nightly evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: nightly-*
+          path: ${{ runner.temp }}/evidence
+          merge-multiple: false
+
+      - name: Verify completeness and candidate equality; produce nightly manifest
+        id: manifest
+        run: |
+          set -euo pipefail
+          digest=$(find "${{ runner.temp }}/evidence" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Nightly Fault and Scale evidence"
+            echo "profile: ${{ inputs.profile || 'standard' }}"
+            echo "manifest digest: ${digest}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------------------------
+  # nightly-required
+  # ---------------------------------------------------------------------------------------------
+  nightly-required:
+    name: nightly-required
+    needs:
+      - fault-matrix-linux
+      - fault-matrix-macos
+      - property-state-machine
+      - replay-and-resource
+      - nightly-evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    if: always()
+    steps:
+      - name: Verify every required platform/case passed
+        run: |
+          set -euo pipefail
+          declare -A results=(
+            [fault-matrix-linux]="${{ needs.fault-matrix-linux.result }}"
+            [fault-matrix-macos]="${{ needs.fault-matrix-macos.result }}"
+            [property-state-machine]="${{ needs.property-state-machine.result }}"
+            [replay-and-resource]="${{ needs.replay-and-resource.result }}"
+            [nightly-evidence]="${{ needs.nightly-evidence.result }}"
+          )
+          failed=0
+          for job in "${!results[@]}"; do
+            outcome="${results[$job]}"
+            echo "- ${job}: ${outcome}" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$outcome" != "success" ]; then
+              echo "::error::required job ${job} was ${outcome}"
+              failed=1
+            fi
+          done
+          exit "$failed"

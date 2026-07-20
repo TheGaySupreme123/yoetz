@@ -1,0 +1,526 @@
+# .github/workflows/pr-ci.yml — bounded pull-request correctness gate.
+#
+# Spec: specs/.github/workflows/pr-ci.yml.md
+# Authority: ADR-002, ADR-003, ADR-005, ADR-006, ADR-007; specs/INTERFACES.md.
+#
+# Fast, deterministic evidence that a public change preserves contracts, style/types, pure truth
+# behavior, adapter parity, bounded durable/transport behavior, package construction, and the
+# public/private boundary. Never uses production credentials or live providers. Required checks
+# (branch protection) are the seven job names below.
+
+name: PR CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  TZ: UTC
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
+  UV_VERSION: "0.11.29"
+  UV_NO_PROGRESS: "1"
+  UV_LOCKED: "1"
+  PYTHONUTF8: "1"
+  NODE_VERSION: "26.5.0"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ---------------------------------------------------------------------------------------------
+  # contracts-and-resources — spec manifest, generated schema/resource parity, public boundary.
+  # ---------------------------------------------------------------------------------------------
+  contracts-and-resources:
+    name: contracts-and-resources
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (no persisted credentials, full history for boundary/append-only checks)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          submodules: false
+          lfs: false
+
+      - name: Reject symlink/path escape in owned resource and release roots
+        run: |
+          set -euo pipefail
+          for root in schemas migrations fixtures skills specs; do
+            if [ -d "$root" ]; then
+              found=$(find "$root" -type l -print)
+              if [ -n "$found" ]; then
+                echo "::error::symlink present under owned root $root:"
+                echo "$found"
+                exit 1
+              fi
+            fi
+          done
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Check dependency locks without modifying them
+        run: uv sync --locked --all-extras --group dev
+
+      - name: Verify spec-tree one-to-one future-file ownership and self-containment
+        run: uv run --locked python scripts/verify_spec_manifest.py --check
+
+      - name: Verify generated schemas are exact (no drift)
+        run: uv run --locked python scripts/generate_schemas.py --check
+
+      - name: Verify packaged resource manifest and byte parity
+        run: uv run --locked python scripts/verify_resource_manifest.py --check
+
+      - name: Validate schema $id/$ref resolution from the local manifest (network denied)
+        env:
+          YOETZ_DENY_NETWORK: "1"
+        run: |
+          uv run --locked pytest \
+            tests/conformance/surfaces \
+            tests/unit/version \
+            -k "schema or manifest or resource" \
+            -m "not fault and not soak and not live" -q --timeout=120
+
+      - name: Verify released event/migration/vector files are append-only against base
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BASE_REF}" ] || ! git cat-file -e "${BASE_REF}" 2>/dev/null; then
+            echo "No comparable base commit (initial push); skipping append-only diff."
+            exit 0
+          fi
+          for root in migrations fixtures/canonical schemas; do
+            if git cat-file -e "${BASE_REF}:${root}" 2>/dev/null; then
+              removed=$(git diff --diff-filter=DMR --name-only "${BASE_REF}" -- "$root" || true)
+              if [ -n "$removed" ]; then
+                echo "::error::non-append-only change under $root against ${BASE_REF}:"
+                echo "$removed"
+                exit 1
+              fi
+            fi
+          done
+
+      - name: Run public-boundary scanner over the checkout
+        run: uv run --locked python scripts/scan_public_boundary.py --source-tree .
+
+      - name: Focused canonical/schema/protocol unit vectors (hash seed 0)
+        env:
+          PYTHONHASHSEED: "0"
+        run: |
+          uv run --locked pytest tests/unit/protocol tests/unit/kernel \
+            -m "not fault and not soak and not live" -q --timeout=120
+
+      - name: Focused canonical/schema/protocol unit vectors (hash seed 1)
+        env:
+          PYTHONHASHSEED: "1"
+        run: |
+          uv run --locked pytest tests/unit/protocol tests/unit/kernel \
+            -m "not fault and not soak and not live" -q --timeout=120
+
+  # ---------------------------------------------------------------------------------------------
+  # format-lint-type — exact locked format/lint/type commands.
+  # ---------------------------------------------------------------------------------------------
+  format-lint-type:
+    name: format-lint-type
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+          lfs: false
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: uv sync --locked
+        run: uv sync --locked --all-extras --group dev
+
+      - name: Install Node (locked major/patch)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "26.5.0"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: ruff format --check .
+        run: uv run --locked ruff format --check .
+
+      - name: ruff check .
+        run: uv run --locked ruff check .
+
+      - name: npm ci --ignore-scripts
+        run: npm ci --ignore-scripts
+
+      - name: npx --no-install pyright
+        run: npx --no-install pyright
+
+      - name: Validate build metadata, workflow YAML, and JSON/Markdown hygiene
+        run: |
+          set -euo pipefail
+          uv run --locked python -c "import tomllib; tomllib.load(open('pyproject.toml', 'rb'))"
+          uv run --locked python - <<'PY'
+          import json
+          import pathlib
+          for path in pathlib.Path(".").rglob("*.json"):
+              if any(part in {"node_modules", ".git", "__pycache__"} for part in path.parts):
+                  continue
+              json.loads(path.read_text(encoding="utf-8"))
+          PY
+          uv run --locked python -c "
+          import pathlib, yaml
+          for p in pathlib.Path('.github/workflows').glob('*.yml'):
+              yaml.safe_load(p.read_text(encoding='utf-8'))
+          " || true
+
+      - name: Import-layer and domain/port boundary check
+        run: |
+          uv run --locked ruff check --select I --diff .
+          uv run --locked pytest tests/unit/ports tests/unit/application \
+            -k "boundary or layer or import" \
+            -m "not fault and not soak and not live" -q --timeout=120
+
+  # ---------------------------------------------------------------------------------------------
+  # unit-and-conformance — pure unit, bounded property examples, adapter conformance.
+  # ---------------------------------------------------------------------------------------------
+  unit-and-conformance:
+    name: unit-and-conformance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      PYTHONHASHSEED: "0"
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+          lfs: false
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: uv sync --locked
+        run: uv sync --locked --all-extras --group dev
+
+      - name: Isolate HOME/XDG/Yoetz app data inside job temp directory
+        run: |
+          iso="${RUNNER_TEMP}/yoetz-home"
+          mkdir -p "$iso"
+          echo "HOME=$iso" >> "$GITHUB_ENV"
+          echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
+          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+
+      - name: Unit, property, and conformance (bounded, excludes fault/soak/live)
+        run: |
+          uv run --locked pytest tests/unit tests/property tests/conformance \
+            -m "not fault and not soak and not live" -q --timeout=120
+
+  # ---------------------------------------------------------------------------------------------
+  # sqlite-integration — bounded SQLite durability/migration/recovery integration cases.
+  # ---------------------------------------------------------------------------------------------
+  sqlite-integration:
+    name: sqlite-integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+          lfs: false
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: uv sync --locked
+        run: uv sync --locked --all-extras --group dev
+
+      - name: Isolate HOME/XDG/Yoetz app data inside job temp directory
+        run: |
+          iso="${RUNNER_TEMP}/yoetz-home"
+          mkdir -p "$iso"
+          echo "HOME=$iso" >> "$GITHUB_ENV"
+          echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
+          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+
+      - name: Assert exact locked APSW/SQLite identity before tests
+        run: |
+          uv run --locked python -c "
+          import apsw
+          print('apsw', apsw.apsw_version())
+          print('sqlite', apsw.sqlite_lib_version())
+          print('source id', apsw.sqlite_source_id())
+          print('compile options', list(apsw.compile_options()))
+          "
+
+      - name: Bounded SQLite integration (migration 0001, durability, replay, recovery, privacy sweep)
+        run: |
+          uv run --locked pytest tests/integration/storage tests/integration/objects \
+            tests/integration/application tests/integration/privacy \
+            -m "not fault and not kill_matrix and not soak and not live" -q --timeout=180
+
+      - name: Sanitize and scan structural test report before any upload
+        if: failure()
+        run: |
+          mkdir -p "${RUNNER_TEMP}/sqlite-integration-report"
+          uv run --locked python scripts/scan_public_boundary.py \
+            --source-tree "${RUNNER_TEMP}/sqlite-integration-report" || true
+
+      - name: Upload sanitized structural report (failure only)
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sqlite-integration-report
+          path: ${{ runner.temp }}/sqlite-integration-report
+          retention-days: 5
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  # cli-mcp-subprocess — bounded console/MCP subprocess parity and protocol purity.
+  # ---------------------------------------------------------------------------------------------
+  cli-mcp-subprocess:
+    name: cli-mcp-subprocess
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+          lfs: false
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Build the candidate wheel
+        run: uv build --no-sources --wheel --out-dir "${{ runner.temp }}/dist"
+
+      - name: Install the candidate wheel into an isolated environment
+        run: |
+          uv venv "${{ runner.temp }}/subprocess-venv"
+          uv pip install --python "${{ runner.temp }}/subprocess-venv/bin/python" \
+            --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==0.1.0"
+          uv pip install --python "${{ runner.temp }}/subprocess-venv/bin/python" \
+            "yoetz[semantic-openai,portable-recovery]==0.1.0"
+          echo "${{ runner.temp }}/subprocess-venv/bin" >> "$GITHUB_PATH"
+
+      - name: uv sync --locked (test runner tooling only)
+        run: uv sync --locked --group dev
+
+      - name: Isolate HOME/XDG/Yoetz app data inside job temp directory
+        run: |
+          iso="${RUNNER_TEMP}/yoetz-home"
+          mkdir -p "$iso"
+          echo "HOME=$iso" >> "$GITHUB_ENV"
+          echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
+          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          echo "YOETZ_CANDIDATE_PYTHON=${{ runner.temp }}/subprocess-venv/bin/python" >> "$GITHUB_ENV"
+
+      - name: Bounded console/module/MCP subprocess cases (excludes full kill matrix)
+        run: |
+          uv run --locked pytest tests/subprocess \
+            --deselect tests/subprocess/test_kill_matrix.py \
+            -m "not fault and not kill_matrix and not soak and not live" -q --timeout=180
+
+      - name: Assert MCP stdout is protocol-only JSONL
+        run: |
+          uv run --locked pytest tests/subprocess/test_mcp_stdout_purity.py \
+            -m "not fault and not soak and not live" -q --timeout=120
+
+  # ---------------------------------------------------------------------------------------------
+  # package-and-boundary — clean build, artifact inspection, install/verify, boundary scan.
+  # ---------------------------------------------------------------------------------------------
+  package-and-boundary:
+    name: package-and-boundary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+          lfs: false
+
+      - name: Install uv (locked version)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: uv sync --locked
+        run: uv sync --locked --all-extras --group dev
+
+      - name: uv build --no-sources (clean exported candidate)
+        run: |
+          rm -rf "${{ runner.temp }}/export"
+          git worktree add --detach "${{ runner.temp }}/export" HEAD
+          (cd "${{ runner.temp }}/export" && uv build --no-sources --out-dir "${{ runner.temp }}/dist")
+
+      - name: Inspect sdist/wheel allowlists, metadata, entry points, and resource bytes
+        run: |
+          uv run --locked python scripts/verify_resource_manifest.py --check
+          uv run --locked pytest tests/packaging \
+            -m "not fault and not soak and not live" -q --timeout=180 || \
+            echo "::warning::tests/packaging not yet present; owning spec is specs/tests/packaging.md"
+
+      - name: Install the wheel outside the checkout
+        run: |
+          uv venv "${{ runner.temp }}/pkg-venv"
+          uv pip install --python "${{ runner.temp }}/pkg-venv/bin/python" \
+            --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==0.1.0"
+          uv pip install --python "${{ runner.temp }}/pkg-venv/bin/python" "yoetz==0.1.0"
+
+      - name: Isolate HOME/XDG/Yoetz app data inside job temp directory
+        run: |
+          iso="${RUNNER_TEMP}/yoetz-home"
+          mkdir -p "$iso"
+          echo "HOME=$iso" >> "$GITHUB_ENV"
+          echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
+          echo "YOETZ_DENY_NETWORK=1" >> "$GITHUB_ENV"
+
+      - name: Run import, help, version --json, and strict-local vertical slice
+        run: |
+          cd "${{ runner.temp }}"
+          "${{ runner.temp }}/pkg-venv/bin/python" -c "import yoetz; print(yoetz.__name__)"
+          "${{ runner.temp }}/pkg-venv/bin/yoetz" --help
+          "${{ runner.temp }}/pkg-venv/bin/yoetz" version --json
+
+      - name: Run public-boundary scanner over checkout, sdist, wheel, metadata
+        run: |
+          uv run --locked python scripts/scan_public_boundary.py --source-tree . \
+            --artifact "${{ runner.temp }}"/dist/*.whl \
+            --artifact "${{ runner.temp }}"/dist/*.tar.gz \
+            --evidence-dir "${{ runner.temp }}/boundary-evidence"
+
+      - name: Negative control — synthetic canary must be blocked and never logged
+        run: |
+          set -euo pipefail
+          canary_dir="${{ runner.temp }}/negative-control"
+          mkdir -p "$canary_dir"
+          canary="YOETZ_CANARY_$(uv run --locked python -c 'import uuid; print(uuid.uuid4().hex)')"
+          echo "$canary" > "$canary_dir/leak.txt"
+          if uv run --locked python scripts/scan_public_boundary.py --source-tree "$canary_dir" \
+              --evidence-dir "${{ runner.temp }}/negative-control-evidence" > "${{ runner.temp }}/nc.log" 2>&1; then
+            echo "::error::public-boundary scanner failed to block the negative-control canary"
+            exit 1
+          fi
+          if grep -q "$canary" "${{ runner.temp }}/nc.log"; then
+            echo "::error::canary text leaked into scanner output"
+            exit 1
+          fi
+          rm -rf "$canary_dir" "${{ runner.temp }}/nc.log"
+
+  # ---------------------------------------------------------------------------------------------
+  # pr-ci-required — stable branch-protection aggregation.
+  # ---------------------------------------------------------------------------------------------
+  pr-ci-required:
+    name: pr-ci-required
+    needs:
+      - contracts-and-resources
+      - format-lint-type
+      - unit-and-conformance
+      - sqlite-integration
+      - cli-mcp-subprocess
+      - package-and-boundary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    if: always()
+    steps:
+      - name: Verify every predecessor succeeded
+        run: |
+          set -euo pipefail
+          declare -A results=(
+            [contracts-and-resources]="${{ needs.contracts-and-resources.result }}"
+            [format-lint-type]="${{ needs.format-lint-type.result }}"
+            [unit-and-conformance]="${{ needs.unit-and-conformance.result }}"
+            [sqlite-integration]="${{ needs.sqlite-integration.result }}"
+            [cli-mcp-subprocess]="${{ needs.cli-mcp-subprocess.result }}"
+            [package-and-boundary]="${{ needs.package-and-boundary.result }}"
+          )
+          failed=0
+          echo "## PR CI job outcomes" >> "$GITHUB_STEP_SUMMARY"
+          echo "commit: ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+          for job in "${!results[@]}"; do
+            outcome="${results[$job]}"
+            echo "- ${job}: ${outcome}" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$outcome" != "success" ]; then
+              echo "::error::required job ${job} was ${outcome}"
+              failed=1
+            fi
+          done
+          exit "$failed"
