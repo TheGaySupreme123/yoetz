@@ -402,6 +402,9 @@ jobs:
             -k "replay or resource or scale" \
             -m "not soak and not live" -q --timeout=1800
 
+      # TODO(wave-f): soak-marked cases are not checked in yet; marker is registered in
+      # pyproject.toml so --strict-markers collection succeeds. Until soak tests exist this
+      # step exits pytest code 5 (no tests collected) when the release/Sunday branch runs.
       - name: 1M-entry replay/resource probe (release profile, and designated weekly cadence)
         if: inputs.profile == 'release' || github.event.schedule == '37 4 * * 0'
         run: |

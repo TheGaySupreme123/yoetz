@@ -97,9 +97,10 @@ files are legal only through `repository_projection` and its exact root-path rul
 - owns no implementation/public repository file and cannot be cited as the sole behavioral contract
   for one. Coordination files have their own format; they are not forced into seven headings.
 
-Every discovered regular `specs/**/*.md` file, including the manifest and this script's spec, appears
-in exactly one row. No row names an absent spec. Ignore caches/editor/temp files only by rejecting
-them as unexpected inventory; `.gitignore` is not a classification mechanism.
+Every discovered regular Markdown file under the specs tree, including the manifest and this
+script's spec, appears in exactly one row. No row names an absent spec. Ignore caches/editor/temp
+files only by rejecting them as unexpected inventory; `.gitignore` is not a classification
+mechanism.
 
 ### Coordination-count consistency
 
@@ -120,9 +121,10 @@ error from being described as an authoritative inventory.
 Validate the declared mapping exactly:
 
 - `exact_suffix`: `spec_path == "specs/" + future_path + ".md"`. This is the preferred unambiguous
-  form: future `foo.py` → `specs/foo.py.md`; future `README.md` → `specs/README.md.md`.
+  form: future foo.py maps to specs/ + foo.py + .md; future README.md maps to specs/ + README.md +
+  .md (yielding a double .md suffix).
 - `python_shorthand`: historical Python-only form; future must end `.py` and spec equals
-  `specs/` + future with `.py` replaced by `.md` (for example `src/x.py` → `specs/src/x.md`).
+  `specs/` + future with `.py` replaced by `.md` (for example src/x.py maps to specs/src/x.md).
 - `markdown_shorthand`: historical explicitly declared public-Markdown form; future ends `.md` and
   spec equals `specs/` + future. It is never inferred from filename alone because it collides with
   an index/coordination-looking name.
@@ -185,9 +187,9 @@ spec it checks:
    public spec/ADR/schema/fixture/doc or named future file;
 2. no path/link/code reference names any configured private-drafting, assistant-session, transcript,
    absolute-home, external-local-repository, editor/debug/cache root or private-root canary;
-3. no normative phrase delegates behavior to an unavailable source (“as defined only in private
-   notes,” “see local architecture,” etc.); allowlisted external standards may support facts but
-   cannot replace a required local behavior contract;
+3. no normative phrase delegates behavior to an unavailable private drafting source or a
+   local-only architecture document; allowlisted external standards may support facts but cannot
+   replace a required local behavior contract;
 4. every imported shared name is owned by `INTERFACES.md` or a named public file spec; unresolved
    file references fail rather than becoming prose assumptions;
 5. a simulated public-tree inventory containing only manifest-listed public files resolves all

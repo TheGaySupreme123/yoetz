@@ -16,6 +16,7 @@ opaque locator ID and its SHA-256 digest may be recorded.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import tempfile
@@ -44,7 +45,14 @@ __all__ = [
     "EvidenceOutcome",
     "EvidenceRecorder",
     "Observation",
+    "bytes_digest",
     "canonical_evidence_bytes",
+    "codex_profiles_frozen",
+    "live_codex_authorized",
+    "live_keyring_authorized",
+    "live_provider_authorized",
+    "record_and_write",
+    "runtime_capability_context",
     "validate_evidence",
     "write_evidence_atomic",
 ]
@@ -646,3 +654,152 @@ def write_evidence_atomic(record: CapabilityEvidence, output_root: Path) -> Path
         tmp_path.unlink(missing_ok=True)
 
     return final_path
+
+
+def bytes_digest(data: bytes) -> str:
+    """Return a ``sha256:`` digest over exact bytes without echoing content."""
+
+    if type(data) is not bytes:
+        raise _invalid("digest_input_invalid")
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def live_codex_authorized() -> bool:
+    """Return True only when the release/capability job explicitly opts into live Codex."""
+
+    return os.environ.get("YOETZ_LIVE_CODEX") == "1"
+
+
+def live_provider_authorized() -> bool:
+    """Return True only when the approved live-provider capability job opts in."""
+
+    return os.environ.get("YOETZ_LIVE_PROVIDER", "").strip().lower() in {"1", "true", "yes"}
+
+
+def live_keyring_authorized() -> bool:
+    """Return True only when the approved live OS-keyring capability job opts in."""
+
+    return os.environ.get("YOETZ_LIVE_KEYRING", "").strip().lower() in {"1", "true", "yes"}
+
+
+def codex_profiles_frozen() -> bool:
+    """Return True when runtime-support has at least one reviewed Codex capability profile."""
+
+    from typing import cast
+
+    from yoetz.protocol.canonical import strict_json_parse
+    from yoetz.version import read_verified_resource
+
+    support = strict_json_parse(read_verified_resource("support/runtime-support.json"))
+    if type(support) is not dict:
+        return False
+    profiles = cast(dict[object, object], support).get("codex_profiles")
+    return isinstance(profiles, list) and len(cast(list[object], profiles)) > 0
+
+
+def runtime_capability_context(
+    *,
+    fixture_digest: str,
+    test_revision: str,
+    config_profile_digest: str,
+    external_tool: str,
+    external_version: str,
+    integration_channel: str,
+    protocol_version: str | None = None,
+    sdk_version: str | None = None,
+    provider_id: str | None = None,
+    key_backend: str | None = None,
+) -> CapabilityContext:
+    """Build a ``CapabilityContext`` from the installed version/runtime probes.
+
+    Digests and identities come from ``build_version_manifest`` / verified resources — never from
+    freeform ``--version`` paste. Development builds bind ``artifact_digest`` to the package and
+    resource identity rather than a release wheel digest.
+    """
+
+    from yoetz.protocol.canonical import canonical_digest
+    from yoetz.version import build_version_manifest
+
+    manifest = build_version_manifest()
+    apsw = manifest.apsw_version
+    sqlite = manifest.sqlite_version
+    sqlite_source = manifest.sqlite_source_id
+    if apsw.get("status") != "present" or sqlite.get("status") != "present":
+        raise _invalid("runtime_identity_absent")
+    if sqlite_source.get("status") != "present":
+        raise _invalid("sqlite_source_absent")
+    apsw_version = apsw["version"]
+    sqlite_version = sqlite["version"]
+    source_id = sqlite_source["source_id"]
+    if (
+        type(apsw_version) is not str
+        or type(sqlite_version) is not str
+        or type(source_id) is not str
+    ):
+        raise _invalid("runtime_identity_invalid")
+
+    artifact_digest = canonical_digest(
+        {
+            "build_identity": manifest.build_identity,
+            "package_version": manifest.package_version,
+            "resource_manifest_digest": manifest.resource_manifest_digest,
+            "support_status": manifest.support_status,
+        }
+    )
+    mcp = manifest.mcp_sdk_version
+    resolved_sdk = sdk_version
+    if resolved_sdk is None and mcp.get("status") == "present":
+        version = mcp.get("version")
+        if type(version) is str:
+            resolved_sdk = version
+
+    return CapabilityContext(
+        artifact_digest=artifact_digest,
+        resource_set_digest=manifest.resource_manifest_digest,
+        fixture_digest=fixture_digest,
+        test_revision=test_revision,
+        os_name=manifest.os_name,
+        os_version=manifest.os_version.split("-", 1)[0][:64],
+        cpu_arch=manifest.machine,
+        python_implementation=manifest.python_implementation,
+        python_version=manifest.python_version,
+        python_abi=manifest.python_abi.replace("-", "_")[:64],
+        apsw_version=apsw_version,
+        sqlite_version=sqlite_version,
+        sqlite_source_id=source_id,
+        platform_tag=manifest.platform_tag.replace(".", "_")[:64],
+        external_tool=external_tool,
+        external_version=external_version,
+        integration_channel=integration_channel,
+        config_profile_digest=config_profile_digest,
+        protocol_version=protocol_version,
+        sdk_version=resolved_sdk,
+        provider_id=provider_id,
+        key_backend=key_backend,
+    )
+
+
+def record_and_write(
+    case: CapabilityCase,
+    context: CapabilityContext,
+    observations: Sequence[Observation],
+    outcome: EvidenceOutcome,
+    reasons: Sequence[str] = (),
+    *,
+    output_root: Path,
+    evidence_locator_id: str | None = None,
+    evidence_locator_digest: str | None = None,
+) -> CapabilityEvidence:
+    """Record one complete case and atomically publish its public evidence bytes."""
+
+    recorder = EvidenceRecorder.begin(case, context)
+    for observation in observations:
+        recorder.observe(observation)
+    evidence = recorder.finish(
+        outcome,
+        reasons,
+        evidence_locator_id=evidence_locator_id,
+        evidence_locator_digest=evidence_locator_digest,
+    )
+    write_evidence_atomic(evidence, output_root)
+    return evidence

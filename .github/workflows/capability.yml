@@ -129,8 +129,17 @@ jobs:
           fi
           echo "value=${digest}" >> "$GITHUB_OUTPUT"
           uv run --locked python -c "
-          import json, pathlib
-          json.dump({'commit': '${{ github.sha }}', 'digest': '${digest}'}, open('${{ runner.temp }}/dist/candidate.json', 'w'))
+          import json
+          json.dump(
+              {
+                  'artifact_digest': 'sha256:${digest}',
+                  'commit': '${{ github.sha }}',
+                  'digest': '${digest}',
+              },
+              open('${{ runner.temp }}/dist/candidate.json', 'w'),
+              separators=(',', ':'),
+              sort_keys=True,
+          )
           "
 
       - name: Upload prepared candidate for downstream matrix jobs
@@ -188,7 +197,7 @@ jobs:
           uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" "yoetz==0.1.0"
           echo "YOETZ_CANDIDATE_PYTHON=${{ runner.temp }}/candidate-venv/bin/python" >> "$GITHUB_ENV"
 
-      - name: Codex/MCP capability probe — six-tool vertical slice, skill discovery, subagents, strict-local
+      - name: Codex/MCP framing probes (subprocess + unit; strict-local)
         env:
           YOETZ_TESTED_SET_PROFILE: ${{ inputs.tested_set_profile }}
         run: |
@@ -198,8 +207,18 @@ jobs:
             tests/subprocess/test_mcp_stdout_purity.py \
             tests/subprocess/test_mcp_service_bridge.py \
             tests/unit/adapters/test_codex_skill_integration.py \
-            tests/capability/test_local_control_channel.py \
-            -m "not fault and not soak and not live" -q --timeout=900
+            -m "not fault and not soak and not live and not live_provider and not live_keyring" \
+            -q --timeout=900
+
+      - name: Capability inventory — strict-local (excludes live provider/keyring/soak)
+        env:
+          YOETZ_TESTED_SET_PROFILE: ${{ inputs.tested_set_profile }}
+          YOETZ_CAPABILITY_EVIDENCE_DIR: ${{ runner.temp }}/codex-mcp-evidence
+        run: |
+          mkdir -p "${{ runner.temp }}/codex-mcp-evidence"
+          uv run --locked pytest tests/capability \
+            -m "not fault and not soak and not live and not live_provider and not live_keyring" \
+            -q --timeout=900
 
       - name: Destroy temp config/data/key material
         if: always()
@@ -282,12 +301,14 @@ jobs:
         run: |
           uv run --locked pytest tests/integration/storage tests/integration/objects \
             -k "permission or fsync or rename or wal or backup or key" \
-            -m "not fault and not soak and not live" -q --timeout=900
+            -m "not fault and not soak and not live and not live_provider and not live_keyring" \
+            -q --timeout=900
 
       - name: Keyring disposable test namespace probe (delete after use)
         run: |
           uv run --locked pytest tests/unit/adapters -k "keyring or key_backend" \
-            -m "not fault and not soak and not live" -q --timeout=300
+            -m "not fault and not soak and not live and not live_provider and not live_keyring" \
+            -q --timeout=300
 
       - name: Redact and upload platform-key-matrix CapabilityEvidence
         if: always()
@@ -355,7 +376,8 @@ jobs:
       - name: Fake provider cases — success/refusal/malformed/rate-limit/timeout/cancellation/late/stale
         run: |
           uv run --locked pytest tests/integration/providers \
-            -m "not fault and not soak and not live" -q --timeout=600
+            -m "not fault and not soak and not live and not live_provider and not live_keyring" \
+            -q --timeout=600
 
       - name: Redact and upload provider-fake CapabilityEvidence
         if: always()
@@ -431,7 +453,7 @@ jobs:
           YOETZ_LIVE_TIME_CAP_SECONDS: "60"
         run: |
           uv run --locked pytest tests/capability/test_provider_profile_live.py \
-            -m "live" -q --timeout=90
+            -m "live or live_provider" -q --timeout=90
 
       - name: Destroy raw response; keep only digest/redacted observation
         if: always()
@@ -486,22 +508,31 @@ jobs:
       - name: uv sync --locked
         run: uv sync --locked --all-extras --group dev
 
-      - name: Download prepared candidate and every CapabilityEvidence record
+      - name: Download prepared candidate
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: capability-*
-          path: ${{ runner.temp }}/capability
-          merge-multiple: false
+          name: capability-candidate
+          path: ${{ runner.temp }}/capability-candidate
+
+      - name: Download CapabilityEvidence records (exclude candidate artifact JSON)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: capability-evidence-*
+          path: ${{ runner.temp }}/capability-evidence
+          merge-multiple: true
+          if-no-files-found: ignore
 
       - name: Run generate_capability_matrix.py against reviewed policy
         run: |
+          mkdir -p "${{ runner.temp }}/capability-evidence"
           mkdir -p "${{ runner.temp }}/release-evidence"
           uv run --locked python scripts/generate_capability_matrix.py \
-            --candidate-manifest "${{ runner.temp }}/capability/capability-candidate/candidate.json" \
+            --candidate-manifest "${{ runner.temp }}/capability-candidate/candidate.json" \
             --policy release/capability-policy.json \
-            --evidence-dir "${{ runner.temp }}/capability" \
+            --evidence-dir "${{ runner.temp }}/capability-evidence" \
             --json-out "${{ runner.temp }}/release-evidence/capability-matrix.json" \
-            --markdown-out "${{ runner.temp }}/release-evidence/capability-matrix.md"
+            --markdown-out "${{ runner.temp }}/release-evidence/capability-matrix.md" \
+            --write
 
       - name: Scan public capability-matrix.json/.md before upload
         run: |

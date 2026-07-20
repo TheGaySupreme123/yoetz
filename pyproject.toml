@@ -68,4 +68,8 @@ testpaths = ["tests"]
 markers = [
     "fault: destructive or abrupt-fault subprocess case; excluded from bounded PR runs",
     "kill_matrix: full deterministic durability kill matrix; serial release/nightly profile only",
+    "live: opt-in live external integration; excluded from default CI",
+    "live_keyring: live OS keyring probe; opt-in / release only",
+    "live_provider: approved live provider profile probe; release environment only",
+    "soak: long-running scale/resource soak; nightly/release profile only",
 ]

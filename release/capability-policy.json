@@ -1,0 +1,7 @@
+{
+  "evidence_freshness_window_seconds": 2592000,
+  "live_provider_required": false,
+  "profile": "v0.1-frozen",
+  "required_cases": [],
+  "schema": "yoetz.capability-policy/1"
+}
