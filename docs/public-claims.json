@@ -34,7 +34,7 @@
       "requirements": [
         "ADR-005",
         "ADR-010",
-        "specs/tests/capability/README.md"
+        "specs/tests/capability.md"
       ],
       "tests": [
         "tests/capability/test_codex_integration_matrix.py",

@@ -668,7 +668,13 @@ def privacy_receipts_get(
 
 
 @app.command("version")
-def version_command(json_output: _JSON = False) -> None:
+def version_command(
+    json_output: _JSON = False,
+    resources: Annotated[
+        bool,
+        typer.Option("--resources", help="Enumerate every reviewed installed resource identity."),
+    ] = False,
+) -> None:
     """Show installed public package/runtime identity."""
 
     if not json_output:
@@ -678,8 +684,11 @@ def version_command(json_output: _JSON = False) -> None:
         package = importlib.import_module("yoetz")
         module = importlib.import_module("yoetz.version")
         builder = cast(Callable[[], object], getattr(package, "get_version_manifest"))
-        serializer = cast(Callable[[object], bytes], getattr(module, "version_manifest_json"))
-        _safe_write(sys.stdout.buffer, serializer(builder()) + b"\n")
+        serializer = cast(
+            Callable[..., bytes],
+            getattr(module, "version_manifest_json"),
+        )
+        _safe_write(sys.stdout.buffer, serializer(builder(), include_resources=resources) + b"\n")
     except ImportError:
         _stdout_json({"package_name": "yoetz", "package_version": __version__})
 
