@@ -1,0 +1,112 @@
+# Key recovery runbook
+
+This runbook explains how to respond safely to a locked key, a missing key, a key-backend failure,
+or a wrong/tampered recovery secret or artifact, and how machine-bound versus portable recovery
+works. It never suggests exporting a plaintext key, resetting a key over encrypted data, placing a
+secret in a shell or environment variable, or claims that encrypted data is recoverable without the
+correct bundle master key (BMK) or recovery artifact.
+
+## 1. Threat and recovery scope
+
+Terms used below: the **bundle master key (BMK)** protects one task bundle's objects; a **nonsecret
+key slot/fingerprint** identifies which key entry a bundle expects; the **OS backend** is your
+platform's verified keyring; **passphrase mode** wraps the installation vault key with an
+Argon2id-derived key instead of the OS keyring; a **recovery secret** and its **portable recovery
+artifact** together let you unwrap a BMK on a different machine.
+
+A raw BMK or any derived key is **never** shown, exported, or logged. Attacks against a compromised
+live account, root, or process memory are outside what at-rest encryption protects against. Logical
+redaction is not forensic erasure — see [`backup-restore.md`](backup-restore.md).
+
+## 2. Identify key mode and failure reason
+
+Run the operation that failed with `--json` and read its bounded reason code before acting:
+
+| Reason | Meaning | Safe action |
+|---|---|---|
+| `key_locked` | Expected backend/entry exists but is denied or locked | Unlock/authorize the verified backend, then retry the *same* operation. Never create a replacement key. |
+| `key_missing` | Expected key-slot entry is absent | Check you are on the correct OS profile/account/backend and backup mode. Do not initialize or reset. |
+| `unsupported_backend` / `backend_unverified` | Backend is not on the supported list | Install/configure a supported backend through the public package policy. There is no plaintext fallback. |
+| `key_id_mismatch` / `recovered_key_cannot_decrypt` | Wrong bundle/key, or corruption | Quarantine and stop; see [`quarantine-recovery.md`](quarantine-recovery.md). |
+| `recovery_secret_wrong` | Secret entered incorrectly | Re-enter it safely; this is distinct from artifact tamper. |
+| `recovery_artifact_tampered` / `format_unsupported` | Artifact itself is bad | Stop and use another verified artifact/package; never hand-edit its KDF, nonce, or header. |
+
+## 3. `key_locked`
+
+The key exists but access is currently denied (for example, the OS keyring session is locked).
+Unlock or authorize the verified backend through its normal platform mechanism, then retry the exact
+same Yoetz operation. Never create a replacement key entry to work around a locked backend.
+
+## 4. `key_missing` / backend unavailable
+
+Confirm you are running as the same OS user/profile and backend that originally held the key, and
+confirm which recovery mode the backup manifest declares. A `machine_bound` backup cannot be
+restored anywhere the original key entry is absent — copying keychain or Secret Service internals,
+or copying the whole backup directory, does not make it portable. Do not initialize a new vault or
+reset a key "to fix it" — that does not recover the existing encrypted data.
+
+## 5. Machine-bound backup restore
+
+Restore must occur on the same installation/profile with the original verified key-backend entry
+present, and the manifest's nonsecret key slot/fingerprint must match. Preview the restore; if the
+entry is unavailable, there is no local workaround. Follow the verified new-target restore procedure
+in [`backup-restore.md`](backup-restore.md) and compare object authentication and full replay before
+the route switch.
+
+## 6. Portable recovery artifact restore
+
+Requires a finalized backup manifest with `mode=portable_recovery`, the matching separate recovery
+artifact (digest/format/task/key identity must all match), and the recovery secret. Inspect and
+confirm the restore plan first. Supply the secret only through the interactive protected prompt —
+never through argv, an environment variable, JSON, a config file, shell history, chat, or an issue
+tracker.
+
+The adapter authenticates the artifact's metadata, derives the wrapping key using the recorded
+Argon2id policy, unwraps the BMK into the verified destination backend, proves sample-then-full
+object decryption and authentication plus a complete replay, and only then switches the route. A
+wrong secret creates no persistent replacement key or target activation — it is safe to retry. A
+tampered artifact is a distinct failure and is not retried indefinitely as "wrong secret." The
+secret and any transient handles are released promptly; CPython cannot guarantee perfect memory
+zeroization, so this runbook says "minimize lifetime," never "guaranteed erase."
+
+## 7. Clean-profile recovery drill
+
+Before calling any backup "portable" in your own documentation:
+
+1. Use a synthetic or controlled bundle and its finalized backup/artifact.
+2. Provision a clean, supported profile with **no** original key entry present.
+3. Install the exact supported package artifact offline and verify its versions.
+4. Restore using the recovery artifact and secret into a new target.
+5. Verify the key slot, object authentication, canonical chains, and full replay/frontier/receipt.
+6. Close and reopen the restored bundle, and repeat the read/check cycle.
+7. Retain only redacted structural drill evidence and digests; destroy the test state afterward.
+
+Never upload production user data to "prove" a drill. Repeat the drill after any recovery-format,
+KDF, backend, or platform change.
+
+## 8. Key and recovery custody
+
+Separate the custody of backup ciphertext, the recovery artifact, and the recovery secret according
+to your own threat model — Yoetz does not prescribe one storage policy. A checksum detects
+accidental change; it is not a signature and not a secret. Never store a secret beside its artifact
+in a Yoetz configuration file or a repository.
+
+## 9. Permanent loss and honest next steps
+
+If the BMK and every valid portable-recovery path are unavailable, the encrypted object content is
+**not recoverable by Yoetz**. Preserve the catalog, bundle, backup, and structural evidence — do not
+promise recovery, do not attempt brute force, and do not reset a key over the existing bundle. A new
+task/key may be created only as a clearly separate history after you accept the loss and its
+limitations; it can never validate or replace the old receipts.
+
+## 10. Prohibited actions and safe support evidence
+
+Never demonstrate a literal recovery secret in a command example, a support ticket, or a log. Share
+only: the error reason code, package/object/recovery format identities, a nonsecret fingerprint hash
+if your policy allows it, the backend classification, artifact/manifest digests, platform identity,
+and which drill step you reached. Never share a key, secret, wrapped BMK bytes, artifact bytes, a
+keychain label/account name, a path, database/object bytes, configuration/environment content, or a
+raw exception/log line.
+
+See also: [`backup-restore.md`](backup-restore.md) and
+[`quarantine-recovery.md`](quarantine-recovery.md).

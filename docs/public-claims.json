@@ -1,0 +1,933 @@
+{
+  "schema": "yoetz.public-claims/1",
+  "version": "0.1.0",
+  "claims": [
+    {
+      "claim_id": "integration.codex_exact_version_support",
+      "statement": "Yoetz records Codex integration and JSONL import support as an exact tested executable set (target/maximum-tested 0.144.5); a version newer than maximum-tested is reported untested, never supported, and the exact release cell separately records whether a trigger-only compaction-recovery hook is present, which is a recovery ergonomic carrying no observation or coverage claim.",
+      "scope": {
+        "operations": [
+          "import_codex_jsonl",
+          "integration_preview",
+          "integration_install",
+          "integration_status",
+          "integration_remove"
+        ],
+        "platforms": [
+          "macosx_11_0_arm64",
+          "manylinux_2_28_x86_64"
+        ],
+        "versions": [
+          "codex>=0.139.0,<=0.144.5"
+        ]
+      },
+      "limitations": [
+        "capability_evidence_required_per_release",
+        "no_intermediate_version_inference",
+        "trigger_hook_optional_and_non_observational"
+      ],
+      "surfaces": [
+        "README.md",
+        "docs/protocol/compatibility.md",
+        "docs/runbooks/codex-integration.md"
+      ],
+      "requirements": [
+        "ADR-005",
+        "ADR-010",
+        "specs/tests/capability/README.md"
+      ],
+      "tests": [
+        "tests/capability/test_codex_integration_matrix.py",
+        "tests/capability/test_codex_trigger_hook_profiles.py"
+      ],
+      "evidence_kinds": [
+        "capability_run",
+        "conformance_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "ops.six_operation_parity",
+      "statement": "Yoetz exposes exactly six workflow operations (start, publish_work, check, respond, status, receipt) with identical request/result contracts across the CLI and MCP surfaces; import, review, backup, restore, migrate, version, and harness integration are CLI support commands, never additional MCP tools.",
+      "scope": {
+        "operations": [
+          "start",
+          "publish_work",
+          "check",
+          "respond",
+          "status",
+          "receipt"
+        ],
+        "transports": [
+          "local_cli",
+          "cooperative_mcp"
+        ]
+      },
+      "limitations": [
+        "support_commands_are_not_workflow_operations"
+      ],
+      "surfaces": [
+        "README.md",
+        "docs/protocol/README.md"
+      ],
+      "requirements": [
+        "ADR-002",
+        "ADR-010",
+        "specs/INTERFACES.md"
+      ],
+      "tests": [
+        "tests/conformance/protocol/test_operation_parity.py",
+        "tests/integration/mcp/test_tool_registry.py"
+      ],
+      "evidence_kinds": [
+        "conformance_test",
+        "integration_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "packaging.source_package_resource_parity",
+      "statement": "Every packaged resource (guidance, schemas, fixtures, skill files, support manifests) is byte-identical between the source tree and the built sdist/wheel, verified by digest against the resource manifest at build and at runtime startup.",
+      "scope": {
+        "artifacts": [
+          "sdist",
+          "wheel"
+        ]
+      },
+      "limitations": [
+        "digest_verified_not_content_reviewed_per_install"
+      ],
+      "surfaces": [
+        "README.md",
+        "docs/protocol/compatibility.md"
+      ],
+      "requirements": [
+        "ADR-007",
+        "specs/scripts/generate_release_evidence.py.md"
+      ],
+      "tests": [
+        "tests/packaging/test_build_artifacts.py",
+        "tests/packaging/test_checksums_sbom_and_provenance.py"
+      ],
+      "evidence_kinds": [
+        "packaging_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "platform.advertised_runtime_cells",
+      "statement": "Yoetz advertises write support only for the exact tested platform/runtime cell (CPython 3.14.6, APSW 3.53.3.1, SQLite source ID 2026-06-26 d4c0e51e4aeb96955b99185ab9cde75c339e2c29c3f3f12428d364a10d782c62, macOS 11.0+ arm64 or glibc 2.28+ x86-64); any other combination is either read-only inspection or untested, never assumed supported.",
+      "scope": {
+        "platforms": [
+          "macosx_11_0_arm64",
+          "manylinux_2_28_x86_64"
+        ],
+        "runtime": [
+          "cpython-3.14.6",
+          "apsw-3.53.3.1"
+        ]
+      },
+      "limitations": [
+        "unknown_build_read_only",
+        "write_fails_closed_outside_allowlist"
+      ],
+      "surfaces": [
+        "README.md",
+        "docs/protocol/compatibility.md"
+      ],
+      "requirements": [
+        "ADR-003",
+        "ADR-007"
+      ],
+      "tests": [
+        "tests/conformance/storage/test_sqlite_build_verification.py",
+        "tests/packaging/test_build_artifacts.py"
+      ],
+      "evidence_kinds": [
+        "conformance_test",
+        "packaging_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "privacy.assisted_review_user_controlled",
+      "statement": "Every installation seeds zero-egress local_only with no human prompt required; only after a technical user deliberately selects and confirms the inspectable assisted_review recipe for an endpoint with a current data-use record stating training prohibited, retention none or bounded, and provider human access prohibited or restricted, do ordinary in-policy checks and retries run without a repeated human prompt, and the data-use record is recommendation evidence, never a technical proof of provider conduct.",
+      "scope": {
+        "profiles": [
+          "local_only",
+          "trusted_provider"
+        ],
+        "review_context": [
+          "structural",
+          "assisted"
+        ]
+      },
+      "limitations": [
+        "eligibility_removed_on_stale_or_unknown_posture",
+        "recommendation_not_proof_of_provider_conduct"
+      ],
+      "surfaces": [
+        "PRIVACY.md",
+        "docs/protocol/data-egress-and-privacy.md",
+        "docs/protocol/privacy-setup-wizard.md"
+      ],
+      "requirements": [
+        "ADR-006",
+        "ADR-009"
+      ],
+      "tests": [
+        "tests/conformance/privacy/test_privacy_profiles.py",
+        "tests/subprocess/test_service_lock_and_confidential_unlock.py",
+        "tests/unit/privacy/test_policy_and_contracts.py"
+      ],
+      "evidence_kinds": [
+        "conformance_test",
+        "subprocess_test",
+        "unit_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "privacy.audit_content_storage_boundary",
+      "statement": "Content-bearing v0.1 disclosure proposals are encrypted as ObjectKind.privacy_audit objects in their owning task bundle and referenced from the installation privacy catalog; taskless channel-unavailable decisions and machine policy diffs are structural-only rows with no content object, and v0.1 has no taskless content-bearing encrypted-audit storage.",
+      "scope": {
+        "sinks": [
+          "local_model",
+          "agent_context",
+          "local_human_view",
+          "trusted_human_control"
+        ],
+        "channels": [
+          "llm_inference"
+        ]
+      },
+      "limitations": [
+        "no_individual_audit_content_deletion",
+        "no_taskless_content_encryption_in_v01"
+      ],
+      "surfaces": [
+        "docs/protocol/data-egress-and-privacy.md"
+      ],
+      "requirements": [
+        "ADR-009",
+        "specs/src/yoetz/application/egress.md"
+      ],
+      "tests": [
+        "tests/conformance/privacy/test_never_send_scope_and_channels.py",
+        "tests/integration/privacy/test_egress_gateway.py"
+      ],
+      "evidence_kinds": [
+        "conformance_test",
+        "integration_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "privacy.confirm_every_attempt",
+      "statement": "Under confirm_every_request, one foreground preview and decision authorizes exactly one physical dispatch; every consumed-attempt retry, including of identical bytes, requires a fresh exact foreground decision, and only a crash/resume that occurs before authorization consumption continues the same existing authority rather than minting a retry.",
+      "scope": {
+        "profiles": [
+          "confirm_every_request"
+        ]
+      },
+      "limitations": [
+        "resume_before_consumption_only_exception"
+      ],
+      "surfaces": [
+        "docs/protocol/data-egress-and-privacy.md",
+        "docs/protocol/privacy-setup-wizard.md"
+      ],
+      "requirements": [
+        "ADR-006",
+        "ADR-009"
+      ],
+      "tests": [
+        "tests/conformance/privacy/test_privacy_profiles.py",
+        "tests/integration/privacy/test_egress_gateway.py"
+      ],
+      "evidence_kinds": [
+        "conformance_test",
+        "integration_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "privacy.independent_network_channels",
+      "statement": "The global network_egress_permitted ceiling authorizes nothing by itself; llm_inference, product_telemetry, crash_diagnostics, update_checks, and capability_testing each require independent policy and evidence, and the local_only profile governs the llm_inference branch only.",
+      "scope": {
+        "channels": [
+          "llm_inference",
+          "product_telemetry",
+          "crash_diagnostics",
+          "update_checks",
+          "capability_testing"
+        ]
+      },
+      "limitations": [
+        "ceiling_true_authorizes_no_channel"
+      ],
+      "surfaces": [
+        "PRIVACY.md",
+        "docs/protocol/data-egress-and-privacy.md"
+      ],
+      "requirements": [
+        "ADR-009"
+      ],
+      "tests": [
+        "tests/conformance/privacy/test_never_send_scope_and_channels.py",
+        "tests/unit/privacy/test_policy_and_contracts.py"
+      ],
+      "evidence_kinds": [
+        "conformance_test",
+        "unit_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "privacy.keyring_initialization_presence_gate",
+      "statement": "Automatic pristine OS-keyring initialization is advertised only for an exact release cell that proves both a keyring create/load capability and an artifact-verified UserPresencePort capability; an existing keyring-backed vault may become ready for local work without current presence, but external activation, credential mutation, and privacy widening remain fenced until fresh validation, and v0.1 claims no asynchronous presence watcher.",
+      "scope": {
+        "surfaces": [
+          "service_startup",
+          "service_initialize_passphrase"
+        ]
+      },
+      "limitations": [
+        "existing_vault_ready_local_only",
+        "no_asynchronous_presence_watcher"
+      ],
+      "surfaces": [
+        "docs/protocol/local-service-security.md"
+      ],
+      "requirements": [
+        "ADR-004",
+        "ADR-008"
+      ],
+      "tests": [
+        "tests/conformance/claims/test_local_service_security_doc.py",
+        "tests/subprocess/test_service_lock_and_confidential_unlock.py"
+      ],
+      "evidence_kinds": [
+        "conformance_test",
+        "subprocess_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "privacy.local_human_widening_only",
+      "statement": "Ordinary agent, MCP, provider, and import schemas cannot loosen privacy policy; tightening may apply immediately once the service proves it cannot widen, and every widening requires strong trusted local-human authority, with the exact foreground consent for one already-authorized confirm_every_request preview separately limited and never itself a grant of policy authority.",
+      "scope": {
+        "surfaces": [
+          "privacy_propose",
+          "privacy_tighten",
+          "privacy_decide_policy"
+        ]
+      },
+      "limitations": [
+        "same_uid_automation_not_excluded_by_tty_consent"
+      ],
+      "surfaces": [
+        "docs/protocol/data-egress-and-privacy.md",
+        "docs/protocol/privacy-setup-wizard.md"
+      ],
+      "requirements": [
+        "ADR-008",
+        "ADR-009"
+      ],
+      "tests": [
+        "tests/subprocess/test_service_lock_and_confidential_unlock.py",
+        "tests/unit/privacy/test_policy_and_contracts.py"
+      ],
+      "evidence_kinds": [
+        "subprocess_test",
+        "unit_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "privacy.local_model_same_fences",
+      "statement": "A separately configured local semantic model receives only an exact AF_UNIX disclosure path through the same classification, minimization, and never-send fence as any other sink; Yoetz never launches or downloads that runtime, and the separate process's own network authority is outside Yoetz's process claim.",
+      "scope": {
+        "sinks": [
+          "local_model"
+        ]
+      },
+      "limitations": [
+        "runtime_network_authority_not_yoetz_evidence"
+      ],
+      "surfaces": [
+        "docs/protocol/data-egress-and-privacy.md"
+      ],
+      "requirements": [
+        "ADR-006",
+        "ADR-009"
+      ],
+      "tests": [
+        "tests/capability/test_privacy_provider_and_local_model_profiles.py",
+        "tests/conformance/privacy/test_never_send_scope_and_channels.py"
+      ],
+      "evidence_kinds": [
+        "capability_run",
+        "conformance_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "privacy.local_only_no_external_llm_content",
+      "statement": "The local_only profile prevents external LLM-provider construction and external user/task-content disclosure; it does not by itself claim that a separately authorized bounded structural telemetry, diagnostics, update, or capability channel is off.",
+      "scope": {
+        "profiles": [
+          "local_only"
+        ]
+      },
+      "limitations": [
+        "does_not_cover_non_llm_channels_by_itself"
+      ],
+      "surfaces": [
+        "PRIVACY.md",
+        "docs/protocol/data-egress-and-privacy.md"
+      ],
+      "requirements": [
+        "ADR-009"
+      ],
+      "tests": [
+        "tests/conformance/privacy/test_privacy_profiles.py"
+      ],
+      "evidence_kinds": [
+        "conformance_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "privacy.never_send_non_overridable",
+      "statement": "Every frozen forbidden-data kind in candidate or user content is blocked from all network channels and from the local-model, agent-context, local-human-view, and trusted-human-control disclosure sinks under every DisclosureProvenance value including self_authored; separately provisioned provider-authentication metadata follows its own narrowly bound transport rule and is not part of this set.",
+      "scope": {
+        "sinks": [
+          "local_model",
+          "agent_context",
+          "local_human_view",
+          "trusted_human_control"
+        ],
+        "channels": [
+          "llm_inference",
+          "product_telemetry",
+          "crash_diagnostics",
+          "update_checks",
+          "capability_testing"
+        ]
+      },
+      "limitations": [
+        "provider_auth_metadata_governed_separately"
+      ],
+      "surfaces": [
+        "PRIVACY.md",
+        "docs/protocol/data-egress-and-privacy.md"
+      ],
+      "requirements": [
+        "ADR-004",
+        "ADR-009"
+      ],
+      "tests": [
+        "fixtures/privacy/PRIV-005-never-send.case.json",
+        "tests/conformance/privacy/test_never_send_scope_and_channels.py"
+      ],
+      "evidence_kinds": [
+        "conformance_test",
+        "fixture"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "privacy.no_raw_traceback_capture",
+      "statement": "v0.1 diagnostics retain only bounded structural correlation and reason identity; Yoetz proves that raw exception messages, local variables, source or path excerpts, and full tracebacks are absent from every plaintext and encrypted diagnostic surface, not merely disabled by default, and a future encrypted diagnostic artifact would require a separate reviewed, privacy-authorized feature.",
+      "scope": {
+        "surfaces": [
+          "logging",
+          "crash_diagnostics"
+        ]
+      },
+      "limitations": [
+        "no_future_artifact_without_new_review"
+      ],
+      "surfaces": [
+        "docs/protocol/local-service-security.md"
+      ],
+      "requirements": [
+        "ADR-004",
+        "ADR-008"
+      ],
+      "tests": [
+        "tests/subprocess/test_service_secret_boundary.py",
+        "tests/unit/observability/test_logging_allowlist.py"
+      ],
+      "evidence_kinds": [
+        "subprocess_test",
+        "unit_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "privacy.one_attempt_provider_credentials",
+      "statement": "Each physical provider attempt uses a fresh, exact endpoint/profile/request-body-digest/deadline-bound credential callback consumed once by the custom transport, and no SDK client or default-header object retains the real credential; that credential's one authentication-header transmission targets only the exact profile-bound HTTPS endpoint using platform CA trust and hostname validation, with no certificate or SPKI-pinning claim made.",
+      "scope": {
+        "adapters": [
+          "openai_responses"
+        ]
+      },
+      "limitations": [
+        "no_certificate_or_spki_pinning_claim"
+      ],
+      "surfaces": [
+        "docs/protocol/data-egress-and-privacy.md",
+        "docs/protocol/local-service-security.md"
+      ],
+      "requirements": [
+        "ADR-006",
+        "ADR-009"
+      ],
+      "tests": [
+        "tests/capability/test_privacy_provider_and_local_model_profiles.py",
+        "tests/integration/privacy/test_egress_gateway.py"
+      ],
+      "evidence_kinds": [
+        "capability_run",
+        "integration_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "privacy.policy_approved_outbound_only",
+      "statement": "Provider adapters accept only an exact bounded ApprovedOutboundCase, and composition grants them no repository, database, environment, or transcript handle; this claim is limited to the closed set of reviewed bundled adapters and is not an operating-system or process sandbox isolation claim.",
+      "scope": {
+        "adapters": [
+          "openai_responses",
+          "local_model",
+          "fake"
+        ]
+      },
+      "limitations": [
+        "not_os_or_process_sandbox_isolation",
+        "reviewed_bundled_adapters_only"
+      ],
+      "surfaces": [
+        "PRIVACY.md",
+        "docs/protocol/data-egress-and-privacy.md"
+      ],
+      "requirements": [
+        "ADR-006",
+        "ADR-009"
+      ],
+      "tests": [
+        "tests/capability/test_privacy_provider_and_local_model_profiles.py",
+        "tests/integration/privacy/test_egress_gateway.py"
+      ],
+      "evidence_kinds": [
+        "capability_run",
+        "integration_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "privacy.structural_egress_receipts",
+      "statement": "Every successfully reserved terminal pre-dispatch outbound decision and every physical network attempt, including taskless channels, produces a durable plaintext-free structural receipt; awaiting-human, approved, and receipt-repair states are never represented as a finished outcome, the sole no-receipt exception is an initial audit-reservation failure occurring before preview, authorization, or dispatch, and a keyed exact-final-request-body commitment is present only for a physical attempt and explicitly excludes credential metadata and HTTP/TLS framing.",
+      "scope": {
+        "receipts": [
+          "EgressReceipt",
+          "LocalDisclosureReceipt"
+        ]
+      },
+      "limitations": [
+        "initial_reservation_failure_is_sole_no_receipt_exception",
+        "nonterminal_states_never_a_finished_outcome"
+      ],
+      "surfaces": [
+        "docs/protocol/data-egress-and-privacy.md"
+      ],
+      "requirements": [
+        "ADR-009"
+      ],
+      "tests": [
+        "tests/conformance/privacy/test_privacy_profiles.py",
+        "tests/integration/privacy/test_egress_gateway.py"
+      ],
+      "evidence_kinds": [
+        "conformance_test",
+        "integration_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "privacy.trusted_local_service_boundary",
+      "statement": "The persistent per-user local service alone owns vault keys, decrypted vault state, policy authority, and the egress gateway; CLI, MCP, and future UI clients are bounded control surfaces that never open storage, hold a key handle, or unlock the vault directly.",
+      "scope": {
+        "components": [
+          "service",
+          "cli",
+          "mcp"
+        ]
+      },
+      "limitations": [
+        "same_uid_process_not_excluded"
+      ],
+      "surfaces": [
+        "PRIVACY.md",
+        "docs/protocol/local-service-security.md"
+      ],
+      "requirements": [
+        "ADR-001",
+        "ADR-008"
+      ],
+      "tests": [
+        "tests/conformance/claims/test_local_service_security_doc.py",
+        "tests/subprocess/test_service_lock_and_confidential_unlock.py"
+      ],
+      "evidence_kinds": [
+        "conformance_test",
+        "subprocess_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "privacy.v01_non_llm_channels_unavailable",
+      "statement": "v0.1 owns no production telemetry, crash-upload, update-check, or capability-test transport; setup rejects proposed enablement and stores no dormant consent, a forced or imported enabled row yields a pre-dispatch channel_unavailable decision with no authorization consumption, dispatch fields, request commitment, or network I/O, and later transport support requires a fresh local-human confirmation rather than silently activating an old draft or answer.",
+      "scope": {
+        "channels": [
+          "product_telemetry",
+          "crash_diagnostics",
+          "update_checks",
+          "capability_testing"
+        ]
+      },
+      "limitations": [
+        "policy_vocabulary_without_transport_in_v01"
+      ],
+      "surfaces": [
+        "docs/protocol/data-egress-and-privacy.md",
+        "docs/protocol/privacy-setup-wizard.md"
+      ],
+      "requirements": [
+        "ADR-009"
+      ],
+      "tests": [
+        "tests/conformance/privacy/test_never_send_scope_and_channels.py",
+        "tests/unit/privacy/test_policy_and_contracts.py"
+      ],
+      "evidence_kinds": [
+        "conformance_test",
+        "unit_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "privacy.zero_network_configuration",
+      "statement": "With profile=local_only, network_egress_permitted=false, and all five channels disabled, Yoetz and its clients perform no AF_INET, AF_INET6, DNS, redirect, external-provider, telemetry, crash-upload, update-check, capability-test, or model-download traffic; the claim names the exact platform/release profile, the Yoetz-owned service/client/confidential-helper processes, the startup-through-locked-or-ready operation interval, and the allowlisted local IPC involved, and does not imply the ambient network authority of the OS credential agent or a separately running local-model process.",
+      "scope": {
+        "profiles": [
+          "local_only"
+        ],
+        "channels": [
+          "llm_inference",
+          "product_telemetry",
+          "crash_diagnostics",
+          "update_checks",
+          "capability_testing"
+        ]
+      },
+      "limitations": [
+        "external_os_agents_outside_process_claim",
+        "separate_local_model_runtime_outside_process_claim"
+      ],
+      "surfaces": [
+        "PRIVACY.md",
+        "docs/protocol/data-egress-and-privacy.md",
+        "docs/protocol/local-service-security.md"
+      ],
+      "requirements": [
+        "ADR-009"
+      ],
+      "tests": [
+        "tests/capability/test_privacy_provider_and_local_model_profiles.py",
+        "tests/conformance/privacy/test_never_send_scope_and_channels.py",
+        "tests/conformance/privacy/test_privacy_profiles.py"
+      ],
+      "evidence_kinds": [
+        "capability_run",
+        "conformance_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "protocol.coverage_bounded_findings_and_receipts",
+      "statement": "Every finding and receipt carries an exact Coverage vector across six dimensions, combined only by conservative weakest-dependency rules, never averaged; wording that says a check found no issue is always bounded to its exact coverage and is never rendered as verified, proved, authenticated, or complete.",
+      "scope": {
+        "surfaces": [
+          "check",
+          "receipt"
+        ]
+      },
+      "limitations": [
+        "coverage_never_averaged"
+      ],
+      "surfaces": [
+        "README.md",
+        "docs/protocol/README.md"
+      ],
+      "requirements": [
+        "ADR-002",
+        "specs/INTERFACES.md"
+      ],
+      "tests": [
+        "tests/conformance/protocol/test_receipt_wording.py",
+        "tests/unit/protocol/test_coverage.py"
+      ],
+      "evidence_kinds": [
+        "conformance_test",
+        "unit_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "protocol.deterministic_replay",
+      "statement": "Replaying the same accepted canonical event ledger through the same registered engine and policy version always reproduces the same projection, findings, and coverage; an unknown or redacted event is retained as an explicit gap rather than silently reinterpreted.",
+      "scope": {
+        "surfaces": [
+          "projection_rebuild"
+        ]
+      },
+      "limitations": [
+        "gaps_never_silently_reinterpreted"
+      ],
+      "surfaces": [
+        "README.md",
+        "docs/protocol/compatibility.md"
+      ],
+      "requirements": [
+        "ADR-002",
+        "ADR-003"
+      ],
+      "tests": [
+        "fixtures/replay/all-event-families.case.json",
+        "tests/property/test_replay_determinism.py"
+      ],
+      "evidence_kinds": [
+        "fixture",
+        "property_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "protocol.idempotent_retry_after_ambiguous_response",
+      "statement": "When a client loses a response to timeout, cancellation, or a dropped connection, retrying the exact same canonical request under the same operation identity always returns the original durable result rather than creating a duplicate logical operation.",
+      "scope": {
+        "operations": [
+          "start",
+          "publish_work",
+          "check",
+          "respond",
+          "receipt"
+        ]
+      },
+      "limitations": [
+        "requires_exact_same_canonical_request"
+      ],
+      "surfaces": [
+        "README.md",
+        "docs/protocol/README.md"
+      ],
+      "requirements": [
+        "ADR-002",
+        "ADR-003"
+      ],
+      "tests": [
+        "tests/integration/storage/test_idempotent_retry.py",
+        "tests/subprocess/test_cli_invocations.py"
+      ],
+      "evidence_kinds": [
+        "integration_test",
+        "subprocess_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "recovery.machine_bound_vs_portable",
+      "statement": "A machine-bound backup can be restored only where the original verified key-backend entry remains available; a backup is called portable only after a clean-profile restore drill using a separate authenticated recovery artifact and secret, and neither mode is described as protecting against a compromised active account, root, or memory adversary.",
+      "scope": {
+        "surfaces": [
+          "backup",
+          "restore"
+        ]
+      },
+      "limitations": [
+        "not_protection_against_compromised_account_or_root",
+        "portable_requires_drill_evidence"
+      ],
+      "surfaces": [
+        "docs/runbooks/backup-restore.md",
+        "docs/runbooks/key-recovery.md"
+      ],
+      "requirements": [
+        "ADR-003",
+        "ADR-004"
+      ],
+      "tests": [
+        "tests/conformance/storage/test_recovery_matrix.py",
+        "tests/subprocess/test_backup_restore_drills.py"
+      ],
+      "evidence_kinds": [
+        "conformance_test",
+        "subprocess_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "semantic.review_packet_and_agent_loop",
+      "statement": "An assisted semantic review receives the recorded goal, obligations, claims, material timeline, deterministic findings and their machine-readable bases, change and coverage facts, and bounded problem-local recorded excerpts selected under policy; missing content is always reported through an explicit omission reason rather than represented as unchanged or observed, and a post-validated reviewer challenge reaches the main agent only as an ordinary semantic finding, resolved through the existing respond, publish_work, and recheck loop with no model waiver authority and no provider-driven source-fetch channel.",
+      "scope": {
+        "review_context": [
+          "assisted",
+          "expanded",
+          "custom"
+        ]
+      },
+      "limitations": [
+        "no_live_repository_or_filesystem_fetch",
+        "no_model_waiver_authority"
+      ],
+      "surfaces": [
+        "docs/adr/ADR-006-semantic-provider-profile.md",
+        "docs/protocol/data-egress-and-privacy.md"
+      ],
+      "requirements": [
+        "ADR-006",
+        "ADR-009"
+      ],
+      "tests": [
+        "tests/capability/test_privacy_provider_and_local_model_profiles.py",
+        "tests/conformance/privacy/test_privacy_profiles.py",
+        "tests/integration/privacy/test_egress_gateway.py"
+      ],
+      "evidence_kinds": [
+        "capability_run",
+        "conformance_test",
+        "integration_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "storage.encrypted_payload_at_rest",
+      "statement": "Every event payload, captured command output or evidence, semantic case or response, receipt content, and service-owned bundle key is encrypted at rest under the ADR-004 key hierarchy; this protects against casual or at-rest disclosure such as a stolen disk or another local user, and explicitly does not protect against a compromised active user account, malicious root, or inspection of the ready service's own memory.",
+      "scope": {
+        "components": [
+          "adapters/objects/encrypted_files.py",
+          "adapters/keys"
+        ]
+      },
+      "limitations": [
+        "not_protection_against_compromised_account_root_or_memory"
+      ],
+      "surfaces": [
+        "PRIVACY.md",
+        "docs/protocol/local-service-security.md"
+      ],
+      "requirements": [
+        "ADR-004"
+      ],
+      "tests": [
+        "tests/conformance/storage/test_encrypted_object_lifecycle.py",
+        "tests/unit/adapters/test_object_envelope.py"
+      ],
+      "evidence_kinds": [
+        "conformance_test",
+        "unit_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "storage.generation_fenced_single_writer",
+      "statement": "Exactly one service instance owns each catalog and task-bundle writer connection at a time, enforced by a monotonic owner-generation compare-and-swap; a stale or duplicate service process can never open a writer or commit a write after a generation advance.",
+      "scope": {
+        "components": [
+          "adapters/sqlite/repository.py",
+          "adapters/runtime.py"
+        ]
+      },
+      "limitations": [
+        "diagnostics_are_not_authorization"
+      ],
+      "surfaces": [
+        "README.md",
+        "docs/protocol/compatibility.md"
+      ],
+      "requirements": [
+        "ADR-001",
+        "ADR-003"
+      ],
+      "tests": [
+        "tests/conformance/storage/test_generation_fencing.py",
+        "tests/subprocess/test_service_lock_and_confidential_unlock.py"
+      ],
+      "evidence_kinds": [
+        "conformance_test",
+        "subprocess_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "storage.no_forensic_erasure_claim",
+      "statement": "Deleting or redacting an object removes it from ordinary logical access, but Yoetz makes no forensic-erasure claim: prior WAL pages, backups, snapshots, or storage-media remanence may still contain recoverable ciphertext.",
+      "scope": {
+        "surfaces": [
+          "redaction_recorded",
+          "backup",
+          "restore"
+        ]
+      },
+      "limitations": [
+        "logical_deletion_only"
+      ],
+      "surfaces": [
+        "docs/runbooks/backup-restore.md",
+        "docs/runbooks/key-recovery.md"
+      ],
+      "requirements": [
+        "ADR-004"
+      ],
+      "tests": [
+        "tests/conformance/storage/test_redaction_and_gc.py"
+      ],
+      "evidence_kinds": [
+        "conformance_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
+      "claim_id": "support.structural_subject_state_capture",
+      "statement": "For an exact passing Git/platform/artifact capability cell, yoetz state capture reads one explicitly named local worktree and returns only bounded versioned state digests and closed metadata, with no network access, ledger write, path or source or filename output, MCP exposure, or upgrade to a stronger provenance or verification claim; an unsupported or unsafe cell is not advertised and returns no state digest.",
+      "scope": {
+        "surfaces": [
+          "state_capture"
+        ]
+      },
+      "limitations": [
+        "no_mcp_exposure",
+        "not_a_disclosure_sink"
+      ],
+      "surfaces": [
+        "docs/protocol/data-egress-and-privacy.md"
+      ],
+      "requirements": [
+        "ADR-011"
+      ],
+      "tests": [
+        "tests/packaging/test_service_boundary_imports.py",
+        "tests/subprocess/test_cli_invocations.py"
+      ],
+      "evidence_kinds": [
+        "capability_run",
+        "packaging_test",
+        "subprocess_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    }
+  ]
+}
