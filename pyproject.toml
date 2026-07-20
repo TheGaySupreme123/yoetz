@@ -61,7 +61,8 @@ venvPath = "."
 venv = ".venv"
 
 [tool.pytest.ini_options]
-addopts = ["--strict-config", "--strict-markers"]
+addopts = ["--strict-config", "--strict-markers", "--import-mode=importlib"]
+pythonpath = ["tests"]
 testpaths = ["tests"]
 markers = [
     "fault: destructive or abrupt-fault subprocess case; excluded from bounded PR runs",
