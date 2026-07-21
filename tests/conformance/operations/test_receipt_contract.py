@@ -171,12 +171,13 @@ class _ProjectionSpy:
         return None
 
 
-class _BlockingDocumentProjectionSpy(_ProjectionSpy):
+class _BlockingDocumentProjectionSpy:
     """Approve nothing under ``/document`` so JSON receipt projection must fail closed."""
 
-    async def prepare_local_disclosure(
-        self, candidate: CandidateContext
-    ) -> LocalDisclosureBlocked:
+    def __init__(self) -> None:
+        self.candidates: list[CandidateContext] = []
+
+    async def prepare_local_disclosure(self, candidate: CandidateContext) -> LocalDisclosureBlocked:
         self.candidates.append(candidate)
         sink = candidate.local_sink
         assert sink is not None
@@ -230,6 +231,9 @@ class _BlockingDocumentProjectionSpy(_ProjectionSpy):
             omissions,
             receipt,
         )
+
+    async def close(self) -> None:
+        return None
 
 
 def _versions() -> ReceiptVersionSlice:
@@ -292,8 +296,8 @@ def _frontier(value: Frontier | FrontierModel) -> JsonValue:
 def _build_app(
     *,
     seed_offset: int = 0,
-    projection: _ProjectionSpy | None = None,
-) -> tuple[Application, _WorkflowRuntime, _ProjectionSpy]:
+    projection: _ProjectionSpy | _BlockingDocumentProjectionSpy | None = None,
+) -> tuple[Application, _WorkflowRuntime, _ProjectionSpy | _BlockingDocumentProjectionSpy]:
     start_app, start_runtime, clock, catalog = start_composition()
     projection = _ProjectionSpy() if projection is None else projection
     ids = start_runtime.ids
