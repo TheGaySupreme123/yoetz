@@ -317,12 +317,14 @@ jobs:
           nc="${{ runner.temp }}/negative-control"
           mkdir -p "$nc"
           canary="YOETZ_CANARY_$(uv run --locked python -c 'import uuid; print(uuid.uuid4().hex)')"
+          canary_file="${{ runner.temp }}/negative-control.canary"
+          printf '%s' "$canary" > "$canary_file"
           printf '%s' "$canary" > "$nc/${canary}.txt"
           printf '%s' "$canary" | uv run --locked python -c "import sys,base64;sys.stdout.write(base64.b64encode(sys.stdin.buffer.read()).decode())" > "$nc/encoded.b64"
           head -c 256 /dev/urandom > "$nc/${canary}.bin"
           echo "$canary" >> "$nc/${canary}.bin"
           if uv run --locked python scripts/scan_public_boundary.py \
-              --evidence-dir "$nc" > "${{ runner.temp }}/nc.log" 2>&1; then
+              --evidence-dir "$nc" --canary-file "$canary_file" > "${{ runner.temp }}/nc.log" 2>&1; then
             echo "::error::public-boundary scanner failed to block the negative-control artifact"
             exit 1
           fi
@@ -330,7 +332,7 @@ jobs:
             echo "::error::negative-control canary text leaked into scanner logs"
             exit 1
           fi
-          rm -rf "$nc" "${{ runner.temp }}/nc.log"
+          rm -rf "$nc" "$canary_file" "${{ runner.temp }}/nc.log"
 
       - name: Upload artifact-boundary evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

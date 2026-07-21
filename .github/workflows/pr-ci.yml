@@ -472,9 +472,11 @@ jobs:
           canary_dir="${{ runner.temp }}/negative-control"
           mkdir -p "$canary_dir"
           canary="YOETZ_CANARY_$(uv run --locked python -c 'import uuid; print(uuid.uuid4().hex)')"
+          canary_file="${{ runner.temp }}/negative-control.canary"
+          printf '%s' "$canary" > "$canary_file"
           echo "$canary" > "$canary_dir/leak.txt"
           if uv run --locked python scripts/scan_public_boundary.py \
-              --evidence-dir "$canary_dir" > "${{ runner.temp }}/nc.log" 2>&1; then
+              --evidence-dir "$canary_dir" --canary-file "$canary_file" > "${{ runner.temp }}/nc.log" 2>&1; then
             echo "::error::public-boundary scanner failed to block the negative-control canary"
             exit 1
           fi
@@ -482,7 +484,7 @@ jobs:
             echo "::error::canary text leaked into scanner output"
             exit 1
           fi
-          rm -rf "$canary_dir" "${{ runner.temp }}/nc.log"
+          rm -rf "$canary_dir" "$canary_file" "${{ runner.temp }}/nc.log"
 
   # ---------------------------------------------------------------------------------------------
   # pr-ci-required — stable branch-protection aggregation.
