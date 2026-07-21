@@ -310,9 +310,13 @@ def _plain_wire_value(value: object) -> JsonValue:
     if isinstance(value, ControlError):
         return {"code": value.reason, "retryable": value.retryable}
     if isinstance(value, BaseModel):
+        # Match public_model_to_wire: keep explicit nulls required by closed schemas,
+        # omit unset optional fields (optional_non_null must stay absent, not null).
         return cast(
             JsonValue,
-            value.model_dump(mode="json", by_alias=True, exclude_none=True),
+            value.model_dump(
+                mode="json", by_alias=True, exclude_unset=True, exclude_none=False
+            ),
         )
     if is_dataclass(value) and not isinstance(value, type):
         converted: dict[str, JsonValue] = {}
