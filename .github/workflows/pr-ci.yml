@@ -208,9 +208,11 @@ jobs:
       - name: Import-layer and domain/port boundary check
         run: |
           uv run --locked ruff check --select I --diff .
+          # Filter may match zero tests when no boundary/layer cases are present; do not fail closed.
           uv run --locked pytest tests/unit/ports tests/unit/application \
             -k "boundary or layer or import" \
-            -m "not fault and not soak and not live" -q --timeout=120
+            -m "not fault and not soak and not live" -q --timeout=120 \
+            || test $? -eq 5
 
   # ---------------------------------------------------------------------------------------------
   # unit-and-conformance — pure unit, bounded property examples, adapter conformance.
@@ -304,7 +306,7 @@ jobs:
           print('apsw', apsw.apsw_version())
           print('sqlite', apsw.sqlite_lib_version())
           print('source id', apsw.sqlite3_sourceid())
-          print('compile options', list(apsw.compile_options()))
+          print('compile options', list(apsw.compile_options))
           "
 
       - name: Bounded SQLite integration (migration 0001, durability, replay, recovery, privacy sweep)

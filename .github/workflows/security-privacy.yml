@@ -160,7 +160,7 @@ jobs:
       - name: Generate CycloneDX SBOM
         run: |
           uv export --locked --no-emit-project --format requirements-txt > "${RUNNER_TEMP}/requirements.txt"
-          uvx cyclonedx-py==${CYCLONEDX_PY_VERSION} requirements "${RUNNER_TEMP}/requirements.txt" \
+          uvx --from "cyclonedx-bom==${CYCLONEDX_PY_VERSION}" cyclonedx-py requirements "${RUNNER_TEMP}/requirements.txt" \
             --output-format json --output-file "${RUNNER_TEMP}/sbom.cdx.json"
 
       - name: Verify license inventory (every shipped/native component once, with license)

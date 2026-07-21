@@ -5,6 +5,7 @@ confidentiality, JSON/human output modes, and the exit code matrix.
 from __future__ import annotations
 
 import json
+import re
 import typing
 from collections.abc import Awaitable, Callable
 from typing import cast
@@ -56,12 +57,14 @@ def test_command_matrix_matches_six_operations() -> None:
 
     # Every operation command is a real, independently invokable subcommand -- not merely
     # mentioned in the root summary line -- and exposes the ordinary workflow flags.
+    # Rich help may soft-wrap option names; strip ANSI and whitespace before matching.
     for command in _OPERATION_COMMANDS:
         sub = runner.invoke(cli.app, [command, "--help"])
         assert sub.exit_code == 0, command
-        assert "--json" in sub.stdout
-        assert "--input" in sub.stdout
-        assert "--request" in sub.stdout
+        plain = "".join(re.sub(r"\x1b\[[0-9;]*m", "", sub.stdout).split())
+        assert "--json" in plain, command
+        assert "--input" in plain, command
+        assert "--request" in plain, command
 
     # A command that appears only in help text but not in the actual Typer app fails: every name
     # advertised in root help must itself be a registered command group or leaf command.
