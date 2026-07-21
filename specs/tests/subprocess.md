@@ -18,6 +18,7 @@ strict resource caps.
 ```text
 tests/subprocess/
   test_cli_invocations.py
+  test_cli_menu.py
   test_cli_streams_and_exits.py
   test_module_entrypoint_parity.py
   test_mcp_initialize_and_tools.py
@@ -53,6 +54,7 @@ tests/subprocess/helpers/child.py
 tests/subprocess/helpers/fault_controller.py
 tests/subprocess/helpers/frame_driver.py
 tests/subprocess/test_cli_invocations.py
+tests/subprocess/test_cli_menu.py
 tests/subprocess/test_cli_streams_and_exits.py
 tests/subprocess/test_kill_matrix.py
 tests/subprocess/test_mcp_backpressure_and_partial_write.py

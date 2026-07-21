@@ -8,8 +8,8 @@ This is the complete one-to-one ledger between the natural-language specificatio
 files planned for the public v0.1 repository. It is declarative: adding, removing, renaming, or
 splitting a future file requires changing this reviewed table and its owning spec together.
 
-The inventory contains 558 spec files: 544 exact future-file owners,
-10 directory indexes, and 4 coordination files. The 544 future paths are unique. The twelve
+The inventory contains 560 spec files: 546 exact future-file owners,
+10 directory indexes, and 4 coordination files. The 546 future paths are unique. The thirteen
 already-authored public ADRs are current decision authorities, not future-file candidates, so
 they are intentionally outside the mirrored ownership universe. Ignored local architecture/
 strategy inputs are neither inventoried nor authoritative.
@@ -253,6 +253,7 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/src/yoetz/cli/__init__.md` | `future_file` | `src/yoetz/cli/__init__.py` | `python_shorthand` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/cli/app.md` | `future_file` | `src/yoetz/cli/app.py` | `python_shorthand` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/cli/exits.md` | `future_file` | `src/yoetz/cli/exits.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/cli/menu.md` | `future_file` | `src/yoetz/cli/menu.py` | `python_shorthand` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/cli/privacy_control.md` | `future_file` | `src/yoetz/cli/privacy_control.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/cli/render.md` | `future_file` | `src/yoetz/cli/render.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/cli/setup.py.md` | `future_file` | `src/yoetz/cli/setup.py` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
@@ -522,6 +523,7 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/tests/subprocess/helpers/fault_controller.py.md` | `future_file` | `tests/subprocess/helpers/fault_controller.py` | `exact_suffix` | — | `C–F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/subprocess/helpers/frame_driver.py.md` | `future_file` | `tests/subprocess/helpers/frame_driver.py` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/subprocess/test_cli_invocations.py.md` | `future_file` | `tests/subprocess/test_cli_invocations.py` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
+| `specs/tests/subprocess/test_cli_menu.py.md` | `future_file` | `tests/subprocess/test_cli_menu.py` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/subprocess/test_cli_streams_and_exits.py.md` | `future_file` | `tests/subprocess/test_cli_streams_and_exits.py` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/subprocess/test_kill_matrix.py.md` | `future_file` | `tests/subprocess/test_kill_matrix.py` | `exact_suffix` | — | `C–F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/subprocess/test_mcp_backpressure_and_partial_write.py.md` | `future_file` | `tests/subprocess/test_mcp_backpressure_and_partial_write.py` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |

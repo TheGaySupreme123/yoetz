@@ -1,9 +1,9 @@
 # src/yoetz/cli/app.py — local-service CLI client and service command tree
 
-**Wave:** D/F | **ADRs:** ADR-001, ADR-002, ADR-005, ADR-007, ADR-008 |
-**Imports (spec-tree):** `cli/render.md`, `cli/exits.md`, `cli/unlock.md`, `service/client.md`,
-`mcp/server.md`, `ports/subject_state.md`, `adapters/git_subject_state.md` | **Imported by:**
-console/module entrypoints and CLI tests
+**Wave:** D/F | **ADRs:** ADR-001, ADR-002, ADR-005, ADR-007, ADR-008, ADR-013 |
+**Imports (spec-tree):** `cli/render.md`, `cli/exits.md`, `cli/unlock.md`, `cli/menu.md`,
+`service/client.md`, `mcp/server.md`, `ports/subject_state.md`, `adapters/git_subject_state.md` |
+**Imported by:** console/module entrypoints and CLI tests
 
 ## Purpose
 
@@ -27,6 +27,8 @@ objects, or fall back to direct execution.
   over `cli/setup.py` for preview-gated MCP registration and the first-run wizard — for
   registration the CLI may *discover* candidate binaries but a mutation still requires an explicit
   selection plus digest-bound confirmation;
+  `menu` (ADR-013), thin wiring over `cli/menu.py` for the interactive control menu — a usage
+  failure (exit 2) on a non-TTY, never a prompt;
   `service run|status|lock|stop|unlock|initialize-passphrase` plus trusted-foreground
   `service idle-relock <60..86400|disabled>`;
   `provider credential set|rotate` for foreground confidential provisioning; and
@@ -38,10 +40,12 @@ objects, or fall back to direct execution.
 
 ## Behavior
 
-Root bare-invocation (ADR-012): the app drops `no_args_is_help`; the root callback reproduces the
-historical help output for every bare invocation except when stdin and stdout are both real TTYs
-and the `setup_marker_path()` marker is absent, in which case it launches the interactive
-`setup run` wizard once. `--help`, named subcommands, and every non-TTY invocation are unchanged.
+Root bare-invocation (ADR-012 as amended by ADR-013): the app drops `no_args_is_help`; the root
+callback reproduces the historical help output for every non-TTY bare invocation. When stdin and
+stdout are both real TTYs, a bare invocation with the `setup_marker_path()` marker absent launches
+the interactive `setup run` wizard once and then opens the `cli/menu.py` menu; with the marker
+present it opens the menu directly. `--help`, named subcommands, and every non-TTY invocation are
+unchanged.
 
 Except for the explicitly client-local ADR-011 `state capture` support command, every normal
 workflow/support command strictly parses its request, connects to the deterministic same-UID
@@ -165,6 +169,8 @@ the identical operation request ID.
 - `tests/subprocess/test_setup_wizard_cli.py` covers the `setup`/`integrate mcp` wiring and the
   non-TTY bare-invocation help fallback; `tests/conformance/surfaces/test_cli_contract_matrix.py`
   freezes `setup` in the support-command matrix.
+- `tests/subprocess/test_cli_menu.py` covers the `menu` command TTY gate and the bare-TTY
+  menu dispatch (ADR-013).
 - `tests/packaging/test_service_boundary_imports.py` covers import trust boundary.
 - `tests/subprocess/test_cli_invocations.py` covers state capture, dirty/staged/untracked changes,
   no-content/path output, caps, changing input, and zero Git/ledger mutation.

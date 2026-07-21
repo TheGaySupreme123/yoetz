@@ -754,6 +754,15 @@ def privacy_receipts_get(
     _finish(run_async(lambda: _privacy_receipts_get(receipt_id, json_output)))
 
 
+@app.command("menu")
+def menu_command() -> None:
+    """Open the interactive menu for setup, connections, privacy, and service."""
+
+    module = importlib.import_module("yoetz.cli.menu")
+    operation = cast(Callable[[], int], getattr(module, "run_menu"))
+    _finish(operation())
+
+
 @app.command("version")
 def version_command(
     json_output: _JSON = False,
@@ -793,8 +802,9 @@ def root(
         raise typer.Exit(0)
     if context.invoked_subcommand is not None:
         return
-    # Bare invocation: an interactive terminal with no completion marker gets the
-    # first-run wizard once; every other invocation keeps the historical help text.
+    # Bare invocation (ADR-013): an interactive terminal with no completion marker
+    # gets the first-run wizard once and then lands in the menu; a terminal with the
+    # marker goes straight to the menu; every non-TTY invocation keeps the help text.
     module = importlib.import_module("yoetz.cli.setup")
     offer = cast(Callable[[], bool], getattr(module, "should_offer_first_run"))
     if offer():
@@ -809,6 +819,11 @@ def root(
                 )
             )
         )
+    menu_module = importlib.import_module("yoetz.cli.menu")
+    available = cast(Callable[[], bool], getattr(menu_module, "menu_available"))
+    if available():
+        run_menu = cast(Callable[[], int], getattr(menu_module, "run_menu"))
+        _finish(run_menu())
         return
     typer.echo(context.get_help())
     raise typer.Exit(0)

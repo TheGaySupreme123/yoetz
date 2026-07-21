@@ -8,6 +8,15 @@ released versions.
 
 ### Added
 
+- Interactive control menu (ADR-013): bare `yoetz` on an interactive terminal now opens a
+  navigable menu (first-run still gets the setup wizard once, then lands in the menu), and the
+  new `yoetz menu` command opens it explicitly. The menu shows a status overview (service
+  reachability, vault mode, Codex MCP registration, first-run posture) and dispatches to the
+  existing operations — setup wizard, harness MCP/skill integration, provider-credential
+  ceremonies, privacy posture reads, and service unlock/lock/stop — with every preview/confirm
+  gate and confidential ceremony unchanged. Non-TTY, piped, and CI invocations keep the
+  historical help output byte-for-byte.
+
 - First-run setup wizard (ADR-012): bare `yoetz` on an interactive terminal with no completion
   marker launches `yoetz setup run` — Codex PATH discovery with an explicit choice when several
   installs exist, preview-and-confirm MCP registration (`codex mcp get` first; foreign entries
