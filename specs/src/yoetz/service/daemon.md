@@ -36,6 +36,12 @@ clients, or an already-open database.
 
 1. Parse/validate service configuration and verified per-user data/runtime paths; configure
    allowlisted diagnostics; suppress core dumps where supported.
+   Production `_SystemClock.now_utc` truncates to whole milliseconds so throttle
+   wall-anomaly formatting cannot false-positive into the maximum unlock delay on restart.
+   For an already committed passphrase vault, restart loads the live throttle via
+   `open_for_restart` and checks installation identity; it does not require the mutable
+   throttle `record_digest` to still equal the frozen installation `mode_binding_digest`
+   (that equality is required only at passphrase mode publication).
    The daemon-private installation-state marker is canonical owner-only JSON plus one LF:
    `{schema_version:"1", installation_id, vault_mode:"os_keyring"|"passphrase",
    root_envelope_base64:null|<standard-base64 canonical envelope>, mode_binding_digest,
@@ -64,9 +70,14 @@ clients, or an already-open database.
    reason; a usable keyring without verified presence reports `human_authority_unavailable`. Both
    remain `uninitialized/locked` with no vault/keyring mutation and never select passphrase mode
    until the local human explicitly completes the distinct `vault_initialize` ceremony.
-6. Successful vault unlock constructs the installation catalog/runtime, application facade,
-   central egress-policy gateway, and only the credential-free reviewed bundled provider factories
-   allowed by active policy, once. No provider credential is retrieved at startup; the gateway
+6. Successful vault unlock calls the daemon-private `ready_composition` factory, which opens or
+   initializes `catalog.sqlite3`, seeds the current installation ID plus owner generation, constructs
+   the local bundle runtime and application facade, reconciles the central egress-policy gateway, and
+   selects only the credential-free reviewed bundled provider factories allowed by active policy,
+   once. The denied machine privacy policy is seeded only when no durable current policy exists for
+   the installation scope; later unlocks reuse that durable policy and never re-mint seed identity
+   (`policy_id`/`created_at`) that would conflict with `seed_if_absent`. No provider credential is
+   retrieved at startup; the gateway
    mints one body/profile/deadline-bound opaque handle per authorized physical attempt, never from
    config/environment bytes.
    `activate_ready_application` holds the daemon activation mutex, requires lifecycle `unlocking`,
@@ -221,6 +232,9 @@ secret memory in reverse ownership order.
 
 ## Tests
 
+- `tests/integration/service/test_ready_composition.py` covers unfenced catalog writer admission,
+  the ready catalog generation seed used by the runtime ready gate, privacy-seed reuse across ready
+  rebuilds, and in-process daemon unlock → `START` projection.
 - `tests/integration/service/test_daemon_clients.py` exercises every method through concurrent CLI,
   MCP, and synthetic UI clients against one application/runtime.
 - `tests/subprocess/test_service_daemon_lifecycle.py` covers startup, second-daemon rejection,

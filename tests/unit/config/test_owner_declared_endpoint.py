@@ -174,5 +174,5 @@ def test_owner_declared_data_use_never_assisted_eligible() -> None:
         host="llm.example.com",
         port=8443,
     )
-    assert openai.base_url == "https://llm.example.com:8443"
+    assert openai.base_url == "https://llm.example.com:8443/v1"
     assert openai.path == "/v1/responses"

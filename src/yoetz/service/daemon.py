@@ -91,7 +91,6 @@ from yoetz.service.confidential_protocol import (
     SecretRequiredPhase,
     ServerCloseEnvelope,
     ServerErrorEnvelope,
-    ServerPhaseEnvelope,
     ServerResultEnvelope,
     VaultInitializePreview,
     VaultUnlockPreview,
@@ -117,6 +116,7 @@ from yoetz.service.lifecycle import (
     ServiceLifecycle,
     SessionSecurityEvent,
 )
+from yoetz.service.ready_composition import build_ready_application_factory
 from yoetz.service.secret_ingress import SecretIngressService
 from yoetz.service.unlock import UnlockCoordinator, UnlockThrottleRecord, UnlockThrottleStore
 from yoetz.service.vault import VaultMode, VaultService
@@ -865,7 +865,11 @@ class _ListenerBinders:
 
 class _SystemClock:
     def now_utc(self) -> datetime:
-        return datetime.now(UTC)
+        # RFC3339 millis contract rejects sub-millisecond timestamps; truncate like
+        # observability._SystemClock so throttle wall-anomaly checks do not false-positive
+        # into a 300s unlock lockout on every restart.
+        now = datetime.now(UTC)
+        return now.replace(microsecond=(now.microsecond // 1_000) * 1_000)
 
     def monotonic_seconds(self) -> float:
         return time.monotonic()
@@ -1209,11 +1213,14 @@ class _HumanConnectionServer:
             ceremony_id = cast(str, getattr(response, "ceremony_id"))
             await _write_human_envelope(stream, response)
             while True:
-                if type(response) is ServerPhaseEnvelope and isinstance(
-                    response.phase, SecretRequiredPhase
-                ):
-                    error_step = response.step + 1
-                    response = await self._service.secret_completed(response.ceremony_id)
+                # ServerOpenedEnvelope (step 1) and later ServerPhaseEnvelope both carry
+                # SecretRequiredPhase; the daemon must await YZS1 completion either way.
+                phase = getattr(response, "phase", None)
+                if isinstance(phase, SecretRequiredPhase):
+                    error_step = cast(int, getattr(response, "step")) + 1
+                    response = await self._service.secret_completed(
+                        cast(str, getattr(response, "ceremony_id"))
+                    )
                 else:
                     incoming = await _read_human_envelope(stream)
                     if type(incoming) is ClientActionEnvelope:
@@ -1324,11 +1331,34 @@ async def _production_composition(
             clock=clock,
         )
         if mode is VaultMode.PASSPHRASE:
+            # mode_binding_digest is the *initial* throttle digest frozen at passphrase
+            # publication (vault.md). Later unlock attempts advance record_digest, so restart
+            # must not require equality with the live throttle record — only that passphrase
+            # mode has a marker and the throttle store opens for this installation.
+            if marker is None:
+                raise RuntimeError("installation_throttle_binding_invalid")
             record = throttle.open_for_restart()
-            if marker is None or record.record_digest != marker.mode_binding_digest:
+            if record.installation_id != installation_id:
                 raise RuntimeError("installation_throttle_binding_invalid")
         relay = _ReadyActivationRelay()
         secret_ingress = SecretIngressService(clock, secret_memory, listener=listeners.secret)
+        diagnostics = _NullDiagnostics()
+        ready_application_factory = (
+            _ready_application_factory
+            if _ready_application_factory is not None
+            else cast(
+                _ReadyApplicationFactory,
+                build_ready_application_factory(
+                    lifecycle=lifecycle,
+                    vault=vault,
+                    config=config,
+                    paths=paths,
+                    clock=clock,
+                    secret_memory=secret_memory,
+                    diagnostics=diagnostics,
+                ),
+            )
+        )
         unlock = UnlockCoordinator(
             clock=clock,
             throttle=throttle,
@@ -1353,11 +1383,11 @@ async def _production_composition(
             human_control_service=human,
             session_monitor=SessionEventMonitor(),
             vault=vault,
-            ready_application_factory=_ready_application_factory,
+            ready_application_factory=ready_application_factory,
             secret_ingress_service=secret_ingress,
             unlock_service=unlock,
             secret_memory=secret_memory,
-            diagnostics=_NullDiagnostics(),
+            diagnostics=diagnostics,
             human_connection_handler=_HumanConnectionServer(human),
             ready_activation_relay=relay,
             ready_close_relay=ready_close_relay,

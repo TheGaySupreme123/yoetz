@@ -414,6 +414,10 @@ class SqliteStartCatalog:
         self._lease_owner_id = ids.new(IdKind.SERVICE_INSTANCE)
         validate_id(IdKind.SERVICE_INSTANCE, self._lease_owner_id)
 
+    @property
+    def generation(self) -> int:
+        return self._owner_generation()
+
     async def commit_identity(self, value: StartIdentityInput) -> StartIdentityCommitments:
         if type(value) is not StartIdentityInput:
             raise _error(PublicErrorCode.INVALID_REQUEST)

@@ -694,6 +694,18 @@ class Application:
             completed = cast(LocalDisclosureApproved | LocalDisclosureBlocked, decision)
         else:
             raise TypeError("local_disclosure_result_invalid")
+        # Digest-bound JSON receipt documents cannot be partly rewritten with omission
+        # markers; fail closed when any present document content leaf is blocked.
+        if (
+            method is ControlMethod.RECEIPT
+            and source.get("format") == "json"
+            and any(
+                omission.json_pointer == "/document"
+                or omission.json_pointer.startswith("/document/")
+                for omission in completed.omissions
+            )
+        ):
+            raise ControlError("privacy_projection_unavailable", retryable=True)
         projected: JsonValue = source
         for omission in completed.omissions:
             projected = _replace_pointer(

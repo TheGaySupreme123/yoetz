@@ -25,8 +25,9 @@ calling Python objects directly or inventing a secret-bearing/private service me
   peer handle, bounded `receive(max_bytes)`, backpressure-aware `send_all`, and `aclose`.
 - `parse_control_request(ControlFrame) -> ControlRequest` and
   `parse_control_result(ControlFrame) -> ControlResult`. Workflow bodies become the existing exact
-  request/result models, service status/lock results become `ServiceStatus`, and every other closed
-  support body remains a deeply frozen `JsonObject`.
+  request/result models after thawing the deeply frozen `JsonObject` body into plain JSON
+  mappings/lists (pydantic rejects `JsonObject` itself), service status/lock results become
+  `ServiceStatus`, and every other closed support body remains a deeply frozen `JsonObject`.
 - `async client_handshake(stream, client_kind, client_version) -> ControlSession`.
 - `async server_handshake(stream, peer_identity, service_status) -> ControlSession`.
 - `validate_request(ControlRequest)`, `validate_result(ControlResult)`, and

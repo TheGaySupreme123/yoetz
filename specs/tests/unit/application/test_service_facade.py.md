@@ -25,7 +25,9 @@ The contract slice proves `disabled|optional|required` maps exactly to the three
 that a non-bool `max_findings` is limited to `1..10`. It proves only
 `cli + human_readable + output_is_controlling_tty` resolves to `local_human_view`; machine mode,
 missing/non-TTY output, MCP, UI, wrong runtime types, and the explicit fail-safe default resolve to
-`agent_context` or reject before projection. The daemon integration suite separately proves the
+`agent_context` or reject before projection. It also proves JSON `receipt` projection fails closed
+with `privacy_projection_unavailable` when any `/document` content leaf is blocked, rather than
+emitting a partly rewritten digest-bound document. The daemon integration suite separately proves the
 exact context reaches `project_result_for_client` and cannot cross-pair client kinds.
 
 ## Errors and edge cases

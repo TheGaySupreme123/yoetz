@@ -169,7 +169,9 @@ contradictory record. `installation_mac_handle` accepts only `catalog_lookup`, `
 `privacy_audit` and returns the already-bound opaque handle; requesting `bundle_commitment` or
 calling a handle with another purpose's domain fails closed. The service composition injects only
 the catalog handle into start-catalog adapters, only the log handle into observability privacy, and
-only the audit handle into the privacy gateway/audit path. For each physical outbound attempt,
+only the audit handle into the privacy gateway/audit path. The `privacy_audit` handle admits only
+the closed audit domains used by catalog privacy persistence: egress request, lookup, proposal,
+control request, internal result, projection, local approval, and receipt cursor. For each physical outbound attempt,
 `provider_credential(binding)` returns a fresh one-use `ProviderCredentialHandle` restricted to the
 exact provider/model/endpoint-profile/version, purpose plus authorization-scope/purpose digests,
 dispatch ID, final request-body digest, service generation, and deadline in

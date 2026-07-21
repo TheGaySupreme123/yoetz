@@ -92,7 +92,18 @@ _INSTALLATION_DOMAINS: Final[Mapping[MacKeyPurpose, frozenset[bytes]]] = {
         }
     ),
     MacKeyPurpose.LOG_CORRELATION: frozenset({b"yoetz/session-log-id/v1\x00"}),
-    MacKeyPurpose.PRIVACY_AUDIT: frozenset({b"yoetz/privacy-egress-request/v1\x00"}),
+    MacKeyPurpose.PRIVACY_AUDIT: frozenset(
+        {
+            b"yoetz/privacy-audit/control-request/v1\x00",
+            b"yoetz/privacy-audit/internal-result/v1\x00",
+            b"yoetz/privacy-audit/local-approval/v1\x00",
+            b"yoetz/privacy-audit/lookup/v1\x00",
+            b"yoetz/privacy-audit/projection/v1\x00",
+            b"yoetz/privacy-audit/proposal/v1\x00",
+            b"yoetz/privacy-audit/receipt-cursor/v1\x00",
+            b"yoetz/privacy-egress-request/v1\x00",
+        }
+    ),
 }
 _PROVIDER_TOKEN68 = frozenset(
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~+/"

@@ -143,6 +143,12 @@ purpose `client_result_projection` and a trusted `ProjectionAuditContext` to
   `local_disclosure_receipt_id`, policy ID/version/digest, sorted included/blocked categories, and
   sorted omitted JSON Pointers.
 
+The sole replacement exception is `ReceiptSuccessModel.document` when `format="json"`: that value
+is the exact canonical stored receipt document bound by `receipt_digest`. If any present
+`/document` content leaf is blocked or unclassifiable, projection fails closed with retryable
+`privacy_projection_unavailable` before success serialization and never emits a partly rewritten
+JSON receipt. Markdown/text `human_text` remains an ordinary replaceable content leaf.
+
 There is no free-form marker, null substitution, whole-result fallback that can conceal which
 field was removed, or bridge-local discretion. If no content category is allowed, the caller still
 receives the structural result plus markers and receipt. Initial audit reservation failure returns

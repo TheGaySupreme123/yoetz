@@ -314,6 +314,43 @@ def test_wire_frames_convert_to_exact_typed_request_and_result() -> None:
     assert type(parsed_result.body) is ServiceStatus
 
 
+def test_workflow_start_request_round_trips_through_frozen_json_object() -> None:
+    from yoetz.protocol.models import StartRequest
+
+    start = StartRequest.model_validate(
+        {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "request_id": _REQUEST_ID,
+            "mode": "create",
+            "task_title": "Make documentation fully consistent",
+            "actor": {"actor_id": "harness:pytest", "actor_type": "harness"},
+            "client": {
+                "kind": "yoetz_cli",
+                "version": "0.1.0",
+                "integration": "local_cli",
+            },
+            "requested_view": "compact",
+        }
+    )
+    request = ControlCallRequest(
+        kind="call",
+        protocol_version="1.0",
+        rpc_id=_rpc_id(9),
+        service_instance_id=_SERVICE_ID,
+        service_generation="1",
+        method=ControlMethod.START,
+        body=start,
+    )
+    parsed = parse_control_request(decode_control_frame(encode_control_frame(request)))
+    assert isinstance(parsed, ControlCallRequest)
+    assert parsed.method is ControlMethod.START
+    assert isinstance(parsed.body, StartRequest)
+    assert parsed.body.request_id == start.request_id
+    assert parsed.body.task_title == start.task_title
+    assert parsed.body.mode == start.mode
+
+
 class _MemoryStream:
     def __init__(self, peer_identity: object) -> None:
         self.peer_identity = peer_identity
