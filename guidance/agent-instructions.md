@@ -28,7 +28,7 @@ Never fabricate a session ID, publication, finding, verdict, or receipt. If a ca
 
 # Non-default actions need consent
 
-Ordinary MCP tools and privacy tighten are default-safe. For anything else, run `yoetz consent catalog` / `status`. If consent is required, show `danger_text` and wait for the human to repeat `confirmation_phrase`. Never take secrets via chat, MCP, argv, env, or config—only inherited FDs when the catalog lists them. No `--yolo`.
+Ordinary MCP tools and privacy tighten are default-safe. For anything else, run `yoetz consent catalog` / `status`. Only ops with `implemented=true` may be prepared. If consent is required, show `danger_text` and wait for the human to repeat `confirmation_phrase`. Substitute the human-typed phrase into `approve_command` (do not auto-fill from status). Never take secrets via chat, MCP, argv, env, or config—only inherited FDs when the catalog lists them. Locked vaults need a local TTY unlock; elevated consent initializes an uninitialized vault or sets credentials, it does not unlock. No `--yolo`.
 
 # Read more
 

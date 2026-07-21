@@ -1118,6 +1118,18 @@ no server-side `edit` action. Idle-policy secret reauthentication uses only wire
 logs, traces, transcripts, and LLM context. Same-UID raw connection/TTY emulation remains an
 explicit threat-model limit, not a claimed cryptographic exclusion.
 
+Elevated consent (`service/elevated_bootstrap.py`, CLI `yoetz consent` /
+`yoetz elevated-bootstrap`) is a separate owner-only pending-file lane outside
+`ControlClientPort`. It catalogues non-default ops (`yoetz.consent.catalog/1`), creates
+digest-bound pending challenges (`yoetz.elevated-bootstrap.pending/1`), and after exact phrase
+approval may read secrets only from inherited FDs other than `0`/`1`/`2` for implemented
+`secret_ingress` ops. Agent projection may include structural `danger_text`, digests, and a
+confirmation phrase for human display, plus an `approve_command` template that must use a
+`<confirmation_phrase>` placeholder (never a pre-filled live phrase). Pending consent is
+single-shot. Phrase-only irreversible ops remain catalogued with `implemented=false` until
+owning mutation paths consume a durable grant. This lane never carries secrets on MCP/argv/env/
+config/stdin and does not unlock an already-locked vault.
+
 `HumanControlService` implements trusted `HumanPrivacyControlPort`. Policy widening/provider
 credential/admin changes require exact OS `UserPresencePort` or established passphrase-mode
 reauthentication. A `confirm_every_request` prepared disclosure already within all durable policy

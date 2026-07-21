@@ -38,9 +38,11 @@ Required sections, in this order:
 6. **Never invent Yoetz state** — no fabricated session IDs, findings, or receipts; if a call fails,
    say Yoetz was unavailable.
 7. **Non-default actions need consent** — ordinary MCP tools and privacy tighten are default-safe;
-   otherwise use `yoetz consent catalog` / `status`, show `danger_text`, wait for the repeated
-   `confirmation_phrase`, and never take secrets via chat/MCP/argv/env/config (inherited FDs only
-   when the catalog lists them; no `--yolo`) (ADR-015/016).
+   otherwise use `yoetz consent catalog` / `status`, prepare only when catalog `implemented=true`,
+   show `danger_text`, wait for the repeated `confirmation_phrase`, substitute the human-typed
+   phrase into `approve_command` (never auto-fill), and never take secrets via chat/MCP/argv/env/
+   config (inherited FDs only when the catalog lists them; no `--yolo`; elevated consent does not
+   unlock an already-locked vault) (ADR-015/016).
 8. **Read more** — the three `yoetz://guidance/<name>` resource URIs and one line each on when to
    read them.
 

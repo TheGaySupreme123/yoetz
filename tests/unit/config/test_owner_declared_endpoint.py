@@ -46,6 +46,9 @@ def test_parse_https_origin_accepts_host_and_optional_port() -> None:
         "https://llm.example.com#frag",
         "https://",
         "not-a-url",
+        "https://host:99999",
+        "https://host:abc",
+        "https://host:0",
     ],
 )
 def test_parse_https_origin_rejects_unsafe_shapes(value: str) -> None:

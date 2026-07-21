@@ -219,8 +219,9 @@ def _control_failure(error: ControlError) -> int:
     code = public_error_code_for_control_reason(error.reason)
     guidance = {
         PublicErrorCode.VAULT_LOCKED: (
-            "vault_locked: unlock or initialize from a local terminal, or use "
-            "'yoetz elevated-bootstrap status' when no user-owned TTY is available"
+            "vault_locked: unlock from a local terminal "
+            "(`yoetz service unlock`); if uninitialized with no TTY, "
+            "`yoetz consent prepare vault_initialize` then approve with a passphrase FD"
         ),
         PublicErrorCode.SERVICE_UNAVAILABLE: (
             "service_unavailable: run 'yoetz service run' under your selected user supervisor"
@@ -1025,7 +1026,7 @@ def elevated_status(json_output: _JSON = True) -> None:
 
     module = importlib.import_module("yoetz.cli.elevated")
     payload = cast(Callable[[], object], getattr(module, "status_elevated"))()
-    _human_or_json(payload, json_output=True)
+    _human_or_json(payload, json_output=json_output)
 
 
 @elevated_app.command("catalog")
@@ -1034,7 +1035,7 @@ def elevated_catalog(json_output: _JSON = True) -> None:
 
     module = importlib.import_module("yoetz.cli.elevated")
     payload = cast(Callable[[], object], getattr(module, "catalog_elevated"))()
-    _human_or_json(payload, json_output=True)
+    _human_or_json(payload, json_output=json_output)
 
 
 @elevated_app.command("prepare")
@@ -1056,6 +1057,7 @@ def elevated_prepare(
         str | None,
         typer.Option("--target-digest", help="Exact plan/preview digest when required."),
     ] = None,
+    json_output: _JSON = True,
 ) -> None:
     """Create a pending consent challenge (no secrets)."""
 
@@ -1082,7 +1084,7 @@ def elevated_prepare(
     except elevated_error as exc:
         _stderr(f"elevated_bootstrap: {getattr(exc, 'reason', 'failed')}")
         raise SystemExit(2) from None
-    _human_or_json(payload, json_output=True)
+    _human_or_json(payload, json_output=json_output)
 
 
 @elevated_app.command("approve")
@@ -1093,6 +1095,7 @@ def elevated_approve(
     passphrase_fd: Annotated[int | None, typer.Option("--passphrase-fd")] = None,
     reauth_fd: Annotated[int | None, typer.Option("--reauth-fd")] = None,
     credential_fd: Annotated[int | None, typer.Option("--credential-fd")] = None,
+    json_output: _JSON = True,
 ) -> None:
     """Approve exact pending consent and complete via inherited secret FDs."""
 
@@ -1114,7 +1117,7 @@ def elevated_approve(
         except elevated_error as exc:
             _stderr(f"elevated_bootstrap: {getattr(exc, 'reason', 'failed')}")
             return 2
-        _human_or_json(payload, json_output=True)
+        _human_or_json(payload, json_output=json_output)
         return 0
 
     _finish(run_async(_run))

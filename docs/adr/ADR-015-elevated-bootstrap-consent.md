@@ -23,20 +23,22 @@ chat paste.
 
 1. **Ordinary path unchanged.** Interactive local users keep the ADR-008 `/dev/tty` ceremony.
 
-2. **Scoped elevated bootstrap only.** Exact operations: `vault_initialize` and
-   `provider_credential_set`. Not vault unlock loops, privacy widening, idle-relock weakening,
-   portable recovery, or a general `--yolo`.
+2. **Scoped elevated bootstrap only (ADR-015 lane).** Exact *implemented* secret-ingress
+   operations: `vault_initialize`, `provider_credential_set`, and (per ADR-016 catalog)
+   `provider_credential_rotate`. Not vault unlock loops, privacy widening, idle-relock weakening,
+   portable recovery, phrase-only irreversible ops, or a general `--yolo`. ADR-016 catalogues
+   additional ops with `implemented=false` until durable grant consumption exists.
 
 3. **Consent challenge, then FD secrets.** Flow:
    - `yoetz elevated-bootstrap prepare …` creates one owner-only pending record with danger text,
      `danger_digest`, and a random confirmation phrase (no secrets).
-   - MCP `status` / agent instructions surface structural pending facts and the exact approve
-     command template — never tokens, secrets, paths, or proofs.
+   - MCP / agent instructions surface structural pending facts and an approve-command template
+     with a `<confirmation_phrase>` placeholder — never tokens, secrets, paths, proofs, or a
+     pre-filled live phrase in the command template (phrase is shown separately for human display).
    - Human reviews danger text in the host UI/chat and supplies the confirmation phrase.
-   - `yoetz elevated-bootstrap approve … --confirm "…" --passphrase-fd N` (and for credentials,
-     `--reauth-fd` / `--credential-fd`) verifies pending digests/phrase, then drives the existing
-     YZH1/YZS1 / `UnlockCoordinator` / `VaultService` path with secret bytes read only from
-     inherited FDs (not 0/1/2).
+   - `yoetz consent approve … --confirm "…" --passphrase-fd N` (and for credentials,
+     `--reauth-fd` / `--credential-fd`) verifies pending digests/phrase (single-shot consume), then
+     drives the existing YZH1/YZS1 path with secret bytes read only from inherited FDs (not 0/1/2).
 
 4. **ADR-008 amendment (narrow).** The rejected “generic inherited password FD” alternative is
    opened **only** for this founder-authorized elevated-bootstrap approve path after exact

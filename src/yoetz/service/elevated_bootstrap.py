@@ -5,6 +5,7 @@ Pending consent is owner-only file state. Secrets enter only through inherited F
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import secrets
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Final, Literal
 
 from yoetz.config.paths import ensure_owner_only_dir, state_dir
+from yoetz.domain.values import ProtocolValueError, validate_sha256_digest
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 
 __all__ = [
@@ -62,6 +64,16 @@ _PHRASE_BYTES: Final = 3
 _PENDING_NAME: Final = "elevated-bootstrap-pending.json"
 _AUDIT_NAME: Final = "elevated-bootstrap-audit.jsonl"
 _FORBIDDEN: Final = ("mcp", "argv", "env", "stdin", "config", "transcript")
+_CONFIRM_PLACEHOLDER: Final = "<confirmation_phrase>"
+_PROVIDER_BINDING_KEYS: Final = (
+    "provider_id",
+    "model_id",
+    "endpoint_profile_id",
+    "endpoint_profile_version",
+    "purpose",
+    "scope_digest",
+    "purpose_digest",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,7 +173,8 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         requires_provider_binding=False,
         requires_target_digest_arg=True,
         secret_fds=(),
-        implemented=True,
+        # Catalogued for ADR-016; prepare refuses until owning CLIs consume a durable grant.
+        implemented=False,
     ),
     ConsentOperationSpec(
         operation="restore_execute",
@@ -174,7 +187,7 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         requires_provider_binding=False,
         requires_target_digest_arg=True,
         secret_fds=(),
-        implemented=True,
+        implemented=False,
     ),
     ConsentOperationSpec(
         operation="migrate_execute",
@@ -187,7 +200,7 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         requires_provider_binding=False,
         requires_target_digest_arg=True,
         secret_fds=(),
-        implemented=True,
+        implemented=False,
     ),
     ConsentOperationSpec(
         operation="skill_install",
@@ -200,7 +213,7 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         requires_provider_binding=False,
         requires_target_digest_arg=True,
         secret_fds=(),
-        implemented=True,
+        implemented=False,
     ),
     ConsentOperationSpec(
         operation="harness_mcp_register",
@@ -213,7 +226,7 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         requires_provider_binding=False,
         requires_target_digest_arg=True,
         secret_fds=(),
-        implemented=True,
+        implemented=False,
     ),
 )
 
@@ -336,8 +349,11 @@ def prepare_pending(
         raise ElevatedBootstrapError("provider_binding_required")
     if not spec.requires_provider_binding and provider_binding is not None:
         raise ElevatedBootstrapError("provider_binding_forbidden")
-    if type(target_digest) is not str or not target_digest.startswith("sha256:"):
-        raise ElevatedBootstrapError("target_digest_invalid")
+    binding = _validated_provider_binding(provider_binding) if provider_binding is not None else None
+    try:
+        validated_digest = validate_sha256_digest(target_digest)
+    except ProtocolValueError as exc:
+        raise ElevatedBootstrapError("target_digest_invalid") from exc
     existing = load_pending(_state=_state)
     if existing is not None and existing.expires_at_unix > int(time.time()):
         raise ElevatedBootstrapError("pending_already_active")
@@ -351,10 +367,10 @@ def prepare_pending(
         risk_class=spec.risk_class,
         danger_text=text,
         confirmation_phrase=phrase,
-        target_digest=target_digest,
+        target_digest=validated_digest,
         pending_id=pending_id,
         expires_at_unix=expires,
-        provider_binding=provider_binding,
+        provider_binding=binding,
         secret_fds=spec.secret_fds,
     )
     pending = PendingElevatedConsent(
@@ -366,8 +382,8 @@ def prepare_pending(
         confirmation_phrase=phrase,
         created_at_unix=now,
         expires_at_unix=expires,
-        target_digest=target_digest,
-        provider_binding=dict(provider_binding) if provider_binding is not None else None,
+        target_digest=validated_digest,
+        provider_binding=binding,
         secret_fds=spec.secret_fds,
     )
     _write_pending(pending, _state=_state)
@@ -385,6 +401,24 @@ def prepare_pending(
     return pending
 
 
+def _validated_provider_binding(binding: Mapping[str, str]) -> dict[str, str]:
+    if set(binding) != set(_PROVIDER_BINDING_KEYS):
+        raise ElevatedBootstrapError("provider_binding_invalid")
+    normalized: dict[str, str] = {}
+    for key in _PROVIDER_BINDING_KEYS:
+        value = binding[key]
+        if type(value) is not str or not value:
+            raise ElevatedBootstrapError("provider_binding_invalid")
+        if key in {"scope_digest", "purpose_digest"}:
+            try:
+                normalized[key] = validate_sha256_digest(value)
+            except ProtocolValueError as exc:
+                raise ElevatedBootstrapError("provider_binding_invalid") from exc
+        else:
+            normalized[key] = value
+    return normalized
+
+
 def load_pending(*, _state: Path | None = None) -> PendingElevatedConsent | None:
     path = pending_path(_state=_state)
     if not path.is_file():
@@ -397,9 +431,12 @@ def load_pending(*, _state: Path | None = None) -> PendingElevatedConsent | None
         raise ElevatedBootstrapError("pending_corrupt")
     source = raw
     try:
+        if source.get("schema") != _SCHEMA:
+            raise ElevatedBootstrapError("pending_corrupt")
         operation = str(source["operation"])
         if operation not in _OPS:
             raise ElevatedBootstrapError("pending_corrupt")
+        spec = _OPS[operation]
         binding_raw = source.get("provider_binding")
         binding: dict[str, str] | None
         if binding_raw is None:
@@ -407,27 +444,47 @@ def load_pending(*, _state: Path | None = None) -> PendingElevatedConsent | None
         elif isinstance(binding_raw, dict) and all(
             isinstance(k, str) and isinstance(v, str) for k, v in binding_raw.items()
         ):
-            binding = {str(k): str(v) for k, v in binding_raw.items()}
+            try:
+                binding = _validated_provider_binding(
+                    {str(k): str(v) for k, v in binding_raw.items()}
+                )
+            except ElevatedBootstrapError as exc:
+                raise ElevatedBootstrapError("pending_corrupt") from exc
         else:
             raise ElevatedBootstrapError("pending_corrupt")
-        fds_raw = source.get("secret_fds", ())
+        if spec.requires_provider_binding and binding is None:
+            raise ElevatedBootstrapError("pending_corrupt")
+        if not spec.requires_provider_binding and binding is not None:
+            raise ElevatedBootstrapError("pending_corrupt")
+        fds_raw = source.get("secret_fds")
         if not isinstance(fds_raw, list) or not all(isinstance(item, str) for item in fds_raw):
             raise ElevatedBootstrapError("pending_corrupt")
-        risk = str(source.get("risk_class", _OPS[operation].risk_class))
+        secret_fds = tuple(str(item) for item in fds_raw)
+        risk = str(source["risk_class"])
+        danger_text = str(source["danger_text"])
+        if (
+            risk != spec.risk_class
+            or danger_text != spec.danger_text
+            or secret_fds != spec.secret_fds
+        ):
+            raise ElevatedBootstrapError("pending_tampered")
+        target_digest = validate_sha256_digest(str(source["target_digest"]))
         pending = PendingElevatedConsent(
             pending_id=str(source["pending_id"]),
             operation=operation,  # type: ignore[arg-type]
             risk_class=risk,  # type: ignore[arg-type]
-            danger_text=str(source["danger_text"]),
+            danger_text=danger_text,
             danger_digest=str(source["danger_digest"]),
             confirmation_phrase=str(source["confirmation_phrase"]),
             created_at_unix=int(source["created_at_unix"]),
             expires_at_unix=int(source["expires_at_unix"]),
-            target_digest=str(source["target_digest"]),
+            target_digest=target_digest,
             provider_binding=binding,
-            secret_fds=tuple(str(item) for item in fds_raw),
+            secret_fds=secret_fds,
         )
-    except (KeyError, TypeError, ValueError) as exc:
+    except ElevatedBootstrapError:
+        raise
+    except (KeyError, TypeError, ValueError, ProtocolValueError) as exc:
         raise ElevatedBootstrapError("pending_corrupt") from exc
     expected = _danger_digest(
         operation=pending.operation,
@@ -440,7 +497,7 @@ def load_pending(*, _state: Path | None = None) -> PendingElevatedConsent | None
         provider_binding=pending.provider_binding,
         secret_fds=pending.secret_fds,
     )
-    if expected != pending.danger_digest:
+    if not _exact_match(expected, pending.danger_digest):
         raise ElevatedBootstrapError("pending_tampered")
     if pending.expires_at_unix <= int(time.time()):
         clear_pending(_state=_state)
@@ -460,6 +517,12 @@ def clear_pending(*, _state: Path | None = None) -> None:
         raise ElevatedBootstrapError("pending_clear_failed") from exc
 
 
+def _exact_match(left: str, right: str) -> bool:
+    if type(left) is not str or type(right) is not str or len(left) != len(right):
+        return False
+    return hmac.compare_digest(left, right)
+
+
 def approve_pending(
     *,
     pending_id: str,
@@ -470,12 +533,14 @@ def approve_pending(
     pending = load_pending(_state=_state)
     if pending is None:
         raise ElevatedBootstrapError("pending_absent")
-    if pending.pending_id != pending_id:
+    if not _exact_match(pending.pending_id, pending_id):
         raise ElevatedBootstrapError("pending_id_mismatch")
-    if pending.danger_digest != danger_digest:
+    if not _exact_match(pending.danger_digest, danger_digest):
         raise ElevatedBootstrapError("danger_digest_mismatch")
-    if confirm != pending.confirmation_phrase:
+    if not _exact_match(pending.confirmation_phrase, confirm):
         raise ElevatedBootstrapError("confirmation_mismatch")
+    if not operation_spec(pending.operation).implemented:
+        raise ElevatedBootstrapError("operation_not_implemented")
     _audit(
         {
             "event": "approve_accepted",
@@ -486,6 +551,8 @@ def approve_pending(
         },
         _state=_state,
     )
+    # Single-shot: consume pending immediately so a second approve cannot reuse it.
+    clear_pending(_state=_state)
     return pending
 
 
@@ -529,16 +596,18 @@ def read_secret_fd(fd: int, *, maximum: int) -> bytearray:
 
 
 def _approve_command(pending: PendingElevatedConsent) -> list[str]:
+    # Phrase is a placeholder: agents must substitute the phrase the human typed.
+    # Pre-filling the live phrase would make approve agent-complete without human review.
     approve = [
         "yoetz",
-        "elevated-bootstrap",
+        "consent",
         "approve",
         "--pending-id",
         pending.pending_id,
         "--danger-digest",
         pending.danger_digest,
         "--confirm",
-        pending.confirmation_phrase,
+        _CONFIRM_PLACEHOLDER,
     ]
     next_fd = 3
     for name in pending.secret_fds:
@@ -584,7 +653,10 @@ def projection_for_status(pending: PendingElevatedConsent | None) -> dict[str, J
         "user_steps": [
             "Show danger_text to the human.",
             "Ask them to repeat confirmation_phrase exactly.",
-            "Run only approve_command; supply secret FDs only if listed.",
+            (
+                "Substitute the human-typed phrase for <confirmation_phrase> in approve_command; "
+                "do not auto-fill from this projection. Supply secret FDs only if listed."
+            ),
         ],
     }
 
@@ -604,7 +676,7 @@ def catalog_payload() -> dict[str, JsonValue]:
                 "requires_target_digest_arg": spec.requires_target_digest_arg,
                 "secret_fds": list(spec.secret_fds),
                 "prepare_hint": (
-                    f"yoetz elevated-bootstrap prepare {spec.operation}"
+                    f"yoetz consent prepare {spec.operation}"
                     + (" --target-digest <sha256:...>" if spec.requires_target_digest_arg else "")
                 ),
             }

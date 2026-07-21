@@ -8,9 +8,9 @@ This is the complete one-to-one ledger between the natural-language specificatio
 files planned for the public v0.1 repository. It is declarative: adding, removing, renaming, or
 splitting a future file requires changing this reviewed table and its owning spec together.
 
-The inventory contains 565 spec files: 551 exact future-file owners,
-10 directory indexes, and 4 coordination files. The 551 future paths are unique. The fourteen
-already-authored public ADRs are current decision authorities, not future-file candidates, so
+The inventory contains 569 spec files: 555 exact future-file owners,
+10 directory indexes, and 4 coordination files. The 555 future paths are unique. The already-
+authored public ADRs are current decision authorities, not future-file candidates, so
 they are intentionally outside the mirrored ownership universe. Ignored local architecture/
 strategy inputs are neither inventoried nor authoritative.
 

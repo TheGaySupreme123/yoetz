@@ -44,18 +44,22 @@ without making ordinary cooperative workflow painful.
 
 ## Decisions
 
-1. **Consent catalog is authoritative.** `yoetz elevated-bootstrap catalog` (and `status`) lists
-   every non-default operation, its risk class, whether FDs are required, and the prepare template.
-   Agents must consult the catalog before attempting a non-default action.
+1. **Consent catalog is authoritative.** `yoetz consent catalog` (alias
+   `yoetz elevated-bootstrap catalog`) and `status` list every non-default operation, its risk
+   class, whether FDs are required, the prepare template, and an `implemented` flag. Agents must
+   consult the catalog before attempting a non-default action. Ops with `implemented=false` must
+   not be prepared; they are reserved until durable grant consumption exists at the owning
+   mutation boundary.
 
-2. **One pending consent at a time.** Same singleton + TTL model as ADR-015. Approve clears on
-   success or failure.
+2. **One pending consent at a time.** Same singleton + TTL model as ADR-015. Approve consumes
+   pending immediately on accept (single-shot); ceremony failure requires a new prepare.
 
 3. **No standing danger mode.** Rejected again: a session-wide bypass is how secrets and
    irreversible actions leak past review.
 
 4. **Easy path ≠ weak path.** “Easy” means fewer steps and clearer copy, not fewer checks. Phrase
-   confirmation binds the exact `danger_digest` / `target_digest`.
+   confirmation binds the exact `danger_digest` / `target_digest`. `approve_command` uses a
+   `<confirmation_phrase>` placeholder; agents must not auto-fill the live phrase from status.
 
 5. **Ordinary TTY remains preferred** when a controlling user-owned `/dev/tty` exists. Elevated
    consent is for cloud/no-TTY orchestration and for surfacing non-default risk to agents.
@@ -64,12 +68,18 @@ without making ordinary cooperative workflow painful.
    ops. Path-safety refusals (shared temp, sync folders, symlinks, broad perms) stay non-overridable
    without a separate reviewed exception — consent cannot waive path safety.
 
+7. **Inherited FDs stay narrow.** Secret FD ingress applies only to catalogued `secret_ingress` /
+   `secret_reauth` ops after digest-bound phrase consent (ADR-008 amendment). Phrase-only ops never
+   take secret FDs and are not `implemented` until execute paths consume a durable grant.
+
 ## Consequences
 
-Agents get a single, teachable rule: if it is not default-safe, prepare consent, show the human the
-danger text, wait for the phrase, then approve with FDs only when the catalog says so. Humans get
-short reviewable prompts without pasting secrets. ADR-015 bootstrap ops remain the first
-implemented secret-ingress lane; additional operations adopt the same registry over time.
+Agents get a single, teachable rule: if it is not default-safe, consult the catalog; if
+`implemented`, prepare consent, show the human the danger text, wait for the phrase, then approve
+with FDs only when the catalog says so. Humans get short reviewable prompts without pasting
+secrets. ADR-015 bootstrap ops (plus credential rotate) are the implemented secret-ingress lane;
+phrase-only irreversible ops remain catalogued but `implemented=false` until grant consumption
+lands.
 
 ## Alternatives considered
 

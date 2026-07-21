@@ -125,9 +125,10 @@ foreground controlling TTY; read directly from `/dev/tty` in no-echo mode; rejec
 redirection, pipes, environment/config/argument input, and noninteractive execution; establish a
 separately typed peer-authenticated connection; and erase mutable buffers best-effort after the
 service consumes them. No MCP registry, `ServiceClient`, or public application method can reach
-this channel. **Amendment (ADR-015):** the founder-authorized `yoetz elevated-bootstrap`
-path may, after exact digest-bound human consent, admit secrets for `vault_initialize` and
-`provider_credential_set` only from inherited file descriptors on `approve` — still never via
+this channel. **Amendment (ADR-015/016):** the founder-authorized `yoetz consent` /
+`elevated-bootstrap` path may, after exact digest-bound human consent, admit secrets for
+catalogued `secret_ingress` operations (`vault_initialize`, `provider_credential_set`,
+`provider_credential_rotate`) only from inherited file descriptors on `approve` — still never via
 MCP, argv, environment secret values, config, or chat paste. Provider credentials become opaque adapter-scoped handles in the service vault;
 provider adapters and normal clients never receive reusable credential bytes.
 
@@ -195,7 +196,7 @@ CLI and MCP processes would handle keys or prompts, an MCP agent could influence
 multiple clients would retain decrypted state, and service behavior would depend on client
 lifetime. A noninteractive MCP process has no acceptable human prompt.
 
-### D. Inherited secret descriptor for headless passphrase unlock — evaluated, not selected
+### D. Inherited secret descriptor for headless passphrase unlock — evaluated, not selected as a *generic* path
 
 An anonymous, one-shot descriptor inherited directly from an explicitly configured trusted
 supervisor can avoid argv/env/config/history exposure, but descriptor provenance, inheritance,
@@ -204,7 +205,11 @@ Resolved decision F-008 requires unattended readiness but does not require unatt
 transport. v0.1 therefore supports headless readiness only for an already initialized verified
 OS-keyring vault. A pristine headless install cannot auto-select keyring mode without the exact verified
 presence cell, and a passphrase-locked headless service remains locked; there is no generic
-password-fd option.
+password-fd option. **Amendment (ADR-015/016):** after exact digest-bound human consent, the
+elevated consent approve path may admit secrets on inherited FDs only for catalogued
+`secret_ingress` / `secret_reauth` operations (implemented: vault initialize and provider
+credential set/rotate). This is not a generic headless unlock FD API and does not unlock an
+already-locked vault without a local TTY ceremony.
 
 ### E. Native vault subprocess — stronger remaining option, not selected for v0.1
 

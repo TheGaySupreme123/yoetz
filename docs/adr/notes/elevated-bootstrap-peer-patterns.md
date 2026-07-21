@@ -34,25 +34,31 @@ Claude Code permission-mode docs, MCP elicitation spec, and Cursor Cloud environ
   - Secrets and network policy are environment configuration; they do not authorize a specific
     vault initialization or provider-credential operation.
 
-## Mapping to ADR-015 choices
+## Mapping to ADR-015/016 choices
 
 - `prepare` mirrors peer approval prompts: the agent can request elevation and surface operation,
-  `danger_text`, `danger_digest`, confirmation phrase, expiry/state, and command template only.
-- The human phrase binds reviewer intent to the exact digest, like an approval/elicitation accept,
-  but only for `vault_initialize` and `provider_credential_set`.
-- `approve` consumes one pending record and supplies secret bytes only on inherited FDs, preserving
-  ADR-008's service/vault boundary while allowing the no-TTY cloud case.
+  `danger_text`, `danger_digest`, confirmation phrase (for display), expiry/state, and command
+  template with a `<confirmation_phrase>` placeholder only.
+- The human phrase binds reviewer intent to the exact digest for implemented secret-ingress ops
+  (`vault_initialize`, `provider_credential_set`, `provider_credential_rotate`). Phrase-only
+  irreversible ops are catalogued with `implemented=false` until durable grant consumption exists.
+- `approve` consumes one pending record (single-shot) and supplies secret bytes only on inherited
+  FDs, preserving ADR-008's service/vault boundary while allowing the no-TTY cloud case.
 - There is no standing Yoetz `--yolo`, bypass mode, secret bearer token, or generic headless
-  passphrase API; broader containment remains the host sandbox/VM/egress policy.
+  passphrase/unlock API; broader containment remains the host sandbox/VM/egress policy.
 
 ## MCP/status should tell agents
 
 - Report `elevated_bootstrap.required` or pending state, operation, `danger_text`,
-  `danger_digest`, confirmation phrase, expiry/state, and exact `approve_command` template.
+  `danger_digest`, confirmation phrase (display only), expiry/state, and `approve_command`
+  template with `<confirmation_phrase>` placeholder — never pre-fill the live phrase into the
+  command.
 - Instruct the agent to stop ordinary work, show those fields to the human, wait for the repeated
-  phrase, then run only that approve command with inherited secret FDs.
+  phrase, substitute only the human-typed phrase, then run approve with inherited secret FDs when
+  listed. Refuse prepare when catalog `implemented` is false.
 - Return a blocked reason when FD delivery, pending state, digest match, or phrase match is
-  unavailable; do not suggest alternate secret channels.
+  unavailable; do not suggest alternate secret channels. Locked vaults need local TTY unlock;
+  elevated consent does not unlock.
 - After completion, expose only sanitized structural success/failure/audit facts.
 
 ## NEVER over MCP/chat

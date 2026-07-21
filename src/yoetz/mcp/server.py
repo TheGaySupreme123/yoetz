@@ -228,10 +228,10 @@ def _control_error_result(error: ControlError, request_id: str | None) -> types.
         return structured_error_result(
             PublicErrorCode.VAULT_LOCKED,
             (
-                "The local service vault is locked or uninitialized. Unlock or initialize "
-                "from a local terminal, or when no user-owned controlling TTY is available "
-                "follow consent via `yoetz consent status` / `catalog` "
-                "(ADR-015/016); never send secrets over MCP."
+                "The local service vault is locked or uninitialized. Unlock from a local "
+                "terminal (`yoetz service unlock`). If the vault is still uninitialized and no "
+                "user-owned TTY is available, prepare `vault_initialize` via "
+                "`yoetz consent catalog` / `prepare` (ADR-015); never send secrets over MCP."
             ),
             request_id=request_id,
         )

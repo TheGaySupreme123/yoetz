@@ -34,7 +34,6 @@ from yoetz.service.elevated_bootstrap import (
     PendingElevatedConsent,
     approve_pending,
     catalog_payload,
-    clear_pending,
     operation_spec,
     prepare_pending,
     projection_for_status,
@@ -100,20 +99,8 @@ async def approve_elevated(
                 raise ElevatedBootstrapError("credential_fds_required")
             result = await _complete_provider_credential(pending, reauth_fd, credential_fd)
             outcome = "completed"
-        elif pending.risk_class == "phrase_only":
-            result = {
-                "grant": "phrase_accepted",
-                "target_digest": pending.target_digest,
-                "operation": pending.operation,
-                "next": (
-                    "Continue the owning CLI with the reviewed plan/preview digest; "
-                    "do not invent a secret channel."
-                ),
-            }
-            outcome = "consented"
         else:
             raise ElevatedBootstrapError("operation_not_implemented")
-        clear_pending()
         return {
             "schema": "yoetz.elevated-bootstrap.result/1",
             "pending_id": pending.pending_id,
@@ -124,7 +111,7 @@ async def approve_elevated(
             "result": result,
         }
     except Exception:
-        clear_pending()
+        # Pending already consumed by approve_pending; leave cleared on failure.
         raise
 
 
@@ -134,6 +121,8 @@ def _target_digest(
     target_digest: str | None,
 ) -> str:
     spec = operation_spec(operation)
+    if not spec.implemented:
+        raise ElevatedBootstrapError("operation_not_implemented")
     if operation == "vault_initialize":
         return canonical_digest({"expected_mode": "uninitialized", "kind": "empty_vault"})
     if operation in {"provider_credential_set", "provider_credential_rotate"}:
@@ -153,7 +142,7 @@ def _target_digest(
             }
         )
     if spec.requires_target_digest_arg:
-        if target_digest is None or not target_digest.startswith("sha256:"):
+        if target_digest is None:
             raise ElevatedBootstrapError("target_digest_required")
         return target_digest
     raise ElevatedBootstrapError("operation_invalid")
@@ -246,6 +235,8 @@ async def _complete_provider_credential(
                 raise
     except ConfidentialClientError as exc:
         raise ElevatedBootstrapError(f"ceremony_{exc.reason}") from exc
+    except HumanCeremonyCliError as exc:
+        raise ElevatedBootstrapError(exc.reason) from exc
     finally:
         await client.close()
         _overwrite(reauth)

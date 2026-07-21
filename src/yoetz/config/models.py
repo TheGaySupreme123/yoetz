@@ -221,6 +221,8 @@ def parse_https_origin(value: object) -> tuple[str, int]:
         raise ConfigError("https_origin_invalid")
     try:
         parsed = urlparse(value)
+        # urllib raises ValueError lazily from .port for out-of-range / non-numeric ports
+        port = 443 if parsed.port is None else parsed.port
     except ValueError as exc:
         raise ConfigError("https_origin_invalid") from exc
     if (
@@ -235,7 +237,6 @@ def parse_https_origin(value: object) -> tuple[str, int]:
         or _HOSTNAME.fullmatch(parsed.hostname) is None
     ):
         raise ConfigError("https_origin_invalid")
-    port = 443 if parsed.port is None else parsed.port
     if type(port) is not int or not 1 <= port <= 65535:
         raise ConfigError("https_origin_invalid")
     return parsed.hostname.casefold(), port

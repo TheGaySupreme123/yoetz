@@ -132,8 +132,8 @@ implicit composition detail:
 
 ## Status board
 
-The manifest is the canonical inventory. At this draft checkpoint it classifies 565 spec files:
-551 unique future-file owners, 10 directory indexes, and 4 coordination files. Every future owner
+The manifest is the canonical inventory. At this draft checkpoint it classifies 569 spec files:
+555 unique future-file owners, 10 directory indexes, and 4 coordination files. Every future owner
 has all seven required sections; all local Open questions are closed or routed to the central
 decision ledger.
 
@@ -141,18 +141,18 @@ decision ledger.
 |---|---:|---|
 | Repository root | 15 | — |
 | `.github/` workflows | 9 | — |
-| `docs/` public protocol and runbooks | 11 | The fourteen already-authored ADRs remain current authorities outside the future-file universe. |
+| `docs/` public protocol and runbooks | 11 | Already-authored ADRs remain current authorities outside the future-file universe. |
 | `schemas/` | 53 | 1 directory index |
 | `fixtures/` | 49 | 1 directory index |
 | `migrations/` | 2 | — |
 | `guidance/` harness-neutral agent guidance | 4 | 1 directory index; owned once and shipped byte-identically to every harness and to MCP (ADR-010) |
 | `skills/` | 2 | Per-harness header and manifest only; v0.1 ships exactly one harness, `codex` |
 | `support/` | 4 | Includes the ADR-012 npm launcher (`support/npm-launcher/`), publish-ready but deliberately unpublished. |
-| `src/yoetz/` Python/code files | 139 | — |
+| `src/yoetz/` Python/code files | 141 | — |
 | `src/yoetz/resources/` | 72 | The resource manifest plus exactly 71 installed entries. |
 | `scripts/` | 6 | — |
-| `tests/` | 185 | 7 suite indexes |
-| **Total future files** | **551** | **10 indexes + 4 coordination files = 565 spec files** |
+| `tests/` | 187 | 7 suite indexes |
+| **Total future files** | **555** | **10 indexes + 4 coordination files = 569 spec files** |
 
 All rows remain `draft` until the founder freeze; “present” is not the same as “reviewed” or
 “locked.” Empirical release cells and independent threat review remain later evidence gates even
