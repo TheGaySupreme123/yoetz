@@ -116,6 +116,7 @@ from yoetz.service.lifecycle import (
     ServiceLifecycle,
     SessionSecurityEvent,
 )
+from yoetz.service.ready_composition import build_ready_application_factory
 from yoetz.service.secret_ingress import SecretIngressService
 from yoetz.service.unlock import UnlockCoordinator, UnlockThrottleRecord, UnlockThrottleStore
 from yoetz.service.vault import VaultMode, VaultService
@@ -222,52 +223,6 @@ class _Diagnostics(Protocol):
 
 type _HumanConnectionHandler = Callable[[ControlStream], Awaitable[None]]
 type _ReadyApplicationFactory = Callable[[int, int], Awaitable[_ReadyApplication]]
-
-
-class _BootstrapReadyApplication:
-    """Minimal ready application used until full production composition is wired.
-
-    Satisfies the daemon's ready-application protocol so vault initialize/unlock can
-    publish lifecycle READY. Workflow dispatch still fails closed until a full
-    ``ReadyApplicationFactory`` builds catalog/runtime/privacy.
-    """
-
-    async def projection_binding_facts(
-        self,
-        method: ControlMethod,
-        request: object,
-        result: object,
-    ) -> ProjectionBindingFacts:
-        del method, result
-        request_id = getattr(request, "request_id", None)
-        return ProjectionBindingFacts(request_id if type(request_id) is str else None, None)
-
-    async def project_result_for_client(
-        self,
-        context: ClientProjectionContext,
-        binding: ControlProjectionBinding,
-        result: object,
-    ) -> ProjectedControlBody:
-        del context, binding
-        if isinstance(result, JsonObject):
-            return result
-        raise ControlError("method_forbidden")
-
-    async def close(self) -> None:
-        return None
-
-
-async def _bootstrap_ready_application_factory(
-    service_generation: int, vault_generation: int
-) -> _ReadyApplication:
-    if (
-        type(service_generation) is not int
-        or type(vault_generation) is not int
-        or service_generation <= 0
-        or vault_generation <= 0
-    ):
-        raise LifecycleError("invalid_transition")
-    return _BootstrapReadyApplication()
 
 
 class _ReadyActivationRelay:
@@ -1387,6 +1342,23 @@ async def _production_composition(
                 raise RuntimeError("installation_throttle_binding_invalid")
         relay = _ReadyActivationRelay()
         secret_ingress = SecretIngressService(clock, secret_memory, listener=listeners.secret)
+        diagnostics = _NullDiagnostics()
+        ready_application_factory = (
+            _ready_application_factory
+            if _ready_application_factory is not None
+            else cast(
+                _ReadyApplicationFactory,
+                build_ready_application_factory(
+                    lifecycle=lifecycle,
+                    vault=vault,
+                    config=config,
+                    paths=paths,
+                    clock=clock,
+                    secret_memory=secret_memory,
+                    diagnostics=diagnostics,
+                ),
+            )
+        )
         unlock = UnlockCoordinator(
             clock=clock,
             throttle=throttle,
@@ -1411,15 +1383,11 @@ async def _production_composition(
             human_control_service=human,
             session_monitor=SessionEventMonitor(),
             vault=vault,
-            ready_application_factory=(
-                _ready_application_factory
-                if _ready_application_factory is not None
-                else _bootstrap_ready_application_factory
-            ),
+            ready_application_factory=ready_application_factory,
             secret_ingress_service=secret_ingress,
             unlock_service=unlock,
             secret_memory=secret_memory,
-            diagnostics=_NullDiagnostics(),
+            diagnostics=diagnostics,
             human_connection_handler=_HumanConnectionServer(human),
             ready_activation_relay=relay,
             ready_close_relay=ready_close_relay,

@@ -35,6 +35,7 @@ __all__ = [
     "SqliteWriterThread",
     "StorageUnsafeError",
     "assert_active_bundle_generation",
+    "open_catalog_writer",
     "open_read_only",
     "open_writer",
     "verify_schema_identity",
@@ -69,6 +70,10 @@ _READ_ONLY_ALLOWED_PRAGMAS: Final = frozenset(
 _WRITER_ALLOWED_PRAGMAS: Final = _READ_ONLY_ALLOWED_PRAGMAS | frozenset(
     {"application_id", "user_version", "wal_checkpoint"}
 )
+_WRITER_SAFE_CONFIGURATION_PRAGMAS: Final = {
+    "foreign_keys": frozenset({None, "ON", "1"}),
+    "trusted_schema": frozenset({None, "OFF", "0"}),
+}
 _STORAGE_UNSAFE_REASONS: Final = frozenset(
     {
         "application_id_mismatch",
@@ -389,7 +394,14 @@ def _writer_authorizer(
         return apsw.SQLITE_DENY
     if action == apsw.SQLITE_FUNCTION and second == "load_extension":
         return apsw.SQLITE_DENY
-    if action == apsw.SQLITE_PRAGMA and first not in _WRITER_ALLOWED_PRAGMAS:
+    if action == apsw.SQLITE_PRAGMA:
+        if first in _WRITER_ALLOWED_PRAGMAS:
+            return apsw.SQLITE_OK
+        if (
+            first in _WRITER_SAFE_CONFIGURATION_PRAGMAS
+            and second in _WRITER_SAFE_CONFIGURATION_PRAGMAS[first]
+        ):
+            return apsw.SQLITE_OK
         return apsw.SQLITE_DENY
     return apsw.SQLITE_OK
 
@@ -503,6 +515,12 @@ def _open_recovery_writer(  # pyright: ignore[reportUnusedFunction]
     path: Path,
 ) -> apsw.Connection:
     """Open the sole pre-fence writer used by migration/ownership recovery."""
+
+    return _open_verified_writer(path, require_fence=False)
+
+
+def open_catalog_writer(path: Path) -> apsw.Connection:
+    """Open the generation-owned catalog writer before any bundle fence exists."""
 
     return _open_verified_writer(path, require_fence=False)
 
