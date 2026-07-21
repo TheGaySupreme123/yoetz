@@ -22,10 +22,13 @@ rule; it runs the same two commands a human would, behind the same preview/conse
 ## Behavior
 
 Classification of a `get` result: nonzero exit → `absent`; exit 0 with strict-UTF-8 JSON object
-whose command tokens (a `command` string plus optional string `args`, or a `command` string
-list) end with exactly `("yoetz", "mcp", "serve")` → `yoetz_owned`; any other readable object →
-`foreign_present`; undecodable/non-object JSON → `McpRegistrationError(parse_failed)`. The
-default runner maps timeout to `timeout` and OS/spawn failure to `harness_unavailable`.
+whose command tokens end with exactly `("yoetz", "mcp", "serve")` → `yoetz_owned`; any other
+readable object → `foreign_present`; undecodable/non-object JSON →
+`McpRegistrationError(parse_failed)`. Command tokens are read from top-level `command`/`args`
+(Codex ≤0.144.5) or, when present, from nested `transport.command`/`transport.args`
+(Codex ≥0.144.6 `mcp get --json` shape): a `command` string plus optional string `args`, or a
+`command` string list. The default runner maps timeout to `timeout` and OS/spawn failure to
+`harness_unavailable`.
 
 `preview_registration` classifies state, selects `register` for `absent` and `noop` otherwise,
 attaches the `foreign_entry_present` warning for a foreign state, and computes `preview_digest`
@@ -59,9 +62,10 @@ else raises `registration_failed` with the verified state token.
 
 ## Tests
 
-- `tests/unit/adapters/test_codex_mcp_registration.py` — all three states, both entry shapes,
-  parse failures, acceptance/digest gates, verify-by-reread success and failure, foreign
-  refusal before any `add`, and the owned no-op, all through a scripted runner.
+- `tests/unit/adapters/test_codex_mcp_registration.py` — all three states, top-level and nested
+  `transport` entry shapes, parse failures, acceptance/digest gates, verify-by-reread success
+  and failure, foreign refusal before any `add`, and the owned no-op, all through a scripted
+  runner.
 
 ## Open questions
 

@@ -15,10 +15,11 @@ Pytest module; no exports.
 
 ## Behavior
 
-Covers: nonzero `get` classifies `absent` with the exact argv recorded; both accepted entry
-shapes classify `yoetz_owned`; different/unreadable commands classify `foreign_present`;
-non-JSON, non-object, and non-UTF-8 stdout raise `parse_failed`; previews select
-`register`/`noop` with the foreign warning; apply refuses without acceptance
+Covers: nonzero `get` classifies `absent` with the exact argv recorded; accepted entry shapes
+(top-level `command`/`args`, `command` list, and Codex ≥0.144.6 nested `transport`) classify
+`yoetz_owned`; different/unreadable commands (including foreign nested `transport`) classify
+`foreign_present`; non-JSON, non-object, and non-UTF-8 stdout raise `parse_failed`; previews
+select `register`/`noop` with the foreign warning; apply refuses without acceptance
 (`confirmation_required`) and with a wrong digest (`preview_stale`); a successful apply runs
 exactly `mcp add yoetz -- yoetz mcp serve` and only reports success after re-reading
 `yoetz_owned`; a verify that still shows `absent` raises `registration_failed`; a foreign entry

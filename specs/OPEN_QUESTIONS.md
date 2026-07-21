@@ -147,7 +147,9 @@ that evidence.
   lifecycle/reason status, while all six task operations fail closed when required keys are locked.
 - Generic headless passphrase input and inherited-secret descriptors. v0.1 unattended readiness
   uses only an existing vault through a release-tested OS keyring; passphrase mode requires the
-  confidential human ceremony.
+  confidential human ceremony. **Scoped exception (ADR-015):** cloud-agent elevated bootstrap may
+  use inherited FDs for `vault_initialize` / `provider_credential_set` only after exact
+  digest-bound human consent; this is not a general headless vault API.
 - A native vault broker/subprocess; v0.1 uses the in-service `SecretMemoryPort` boundary.
 - Sigstore or other signing claims until verification is documented and tested.
 - A combined rendered skill handbook; v0.1 ships the two separately owned reference documents.

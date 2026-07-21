@@ -26,6 +26,10 @@ Forbidden: “Yoetz verified the work.”
 
 Never fabricate a session ID, publication, finding, verdict, or receipt. If a call fails or Yoetz is unavailable, say that no live Yoetz record or receipt is available.
 
+# Elevated bootstrap (no TTY)
+
+When vault setup needs consent without a user TTY, run `yoetz elevated-bootstrap status` (and `prepare` if needed). If `elevated_bootstrap.required`, stop and show the human `danger_text`, `danger_digest`, and `confirmation_phrase`. Never take secrets via chat, MCP, argv, env, config, or files. After consent, run only `approve_command` with secrets on inherited FDs; otherwise report blocked.
+
 # Read more
 
 - `yoetz://guidance/workflow.md` — the cooperative workflow, resume behavior, and final response.

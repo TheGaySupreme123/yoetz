@@ -1,6 +1,6 @@
 # guidance/agent-instructions.md — the always-delivered agent instructions
 
-**Wave:** D | **ADRs:** ADR-002, ADR-005, ADR-009, ADR-010 | **Imports (spec-tree):**
+**Wave:** D | **ADRs:** ADR-002, ADR-005, ADR-009, ADR-010, ADR-015 | **Imports (spec-tree):**
 `guidance/README.md`, `guidance/workflow.md`, `guidance/publication-policy.md`,
 `guidance/coverage-and-receipts.md` | **Imported by:** `mcp/descriptors.md`, `mcp/resources.md`,
 every harness skill spec, packaging and capability tests
@@ -37,7 +37,11 @@ Required sections, in this order:
    permitted and one forbidden example.
 6. **Never invent Yoetz state** — no fabricated session IDs, findings, or receipts; if a call fails,
    say Yoetz was unavailable.
-7. **Read more** — the three `yoetz://guidance/<name>` resource URIs and one line each on when to
+7. **Elevated bootstrap (no TTY)** — when vault setup needs consent without a user TTY, point agents
+   to `yoetz elevated-bootstrap status` / `prepare`, require human phrase confirmation of
+   `danger_text` / `danger_digest` / `confirmation_phrase`, forbid secret channels, and require the
+   exact `approve_command` with inherited FDs only (ADR-015).
+8. **Read more** — the three `yoetz://guidance/<name>` resource URIs and one line each on when to
    read them.
 
 ## Behavior

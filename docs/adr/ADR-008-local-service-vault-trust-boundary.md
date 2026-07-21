@@ -125,7 +125,10 @@ foreground controlling TTY; read directly from `/dev/tty` in no-echo mode; rejec
 redirection, pipes, environment/config/argument input, and noninteractive execution; establish a
 separately typed peer-authenticated connection; and erase mutable buffers best-effort after the
 service consumes them. No MCP registry, `ServiceClient`, or public application method can reach
-this channel. Provider credentials become opaque adapter-scoped handles in the service vault;
+this channel. **Amendment (ADR-015):** the founder-authorized `yoetz elevated-bootstrap`
+path may, after exact digest-bound human consent, admit secrets for `vault_initialize` and
+`provider_credential_set` only from inherited file descriptors on `approve` — still never via
+MCP, argv, environment secret values, config, or chat paste. Provider credentials become opaque adapter-scoped handles in the service vault;
 provider adapters and normal clients never receive reusable credential bytes.
 
 `UnlockCoordinator` solely owns the persistent passphrase throttle: admission delay, in-progress

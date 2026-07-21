@@ -93,6 +93,10 @@ privacy_receipts_app = typer.Typer(
 backup_app = typer.Typer(help="Preview or execute a backup.", no_args_is_help=True)
 restore_app = typer.Typer(help="Preview or execute a restore.", no_args_is_help=True)
 migrate_app = typer.Typer(help="Preview or execute a migration.", no_args_is_help=True)
+elevated_app = typer.Typer(
+    help="Founder-authorized elevated bootstrap for cloud agents (ADR-015).",
+    no_args_is_help=True,
+)
 
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(state_app, name="state")
@@ -108,6 +112,7 @@ privacy_app.add_typer(privacy_receipts_app, name="receipts")
 app.add_typer(backup_app, name="backup")
 app.add_typer(restore_app, name="restore")
 app.add_typer(migrate_app, name="migrate")
+app.add_typer(elevated_app, name="elevated-bootstrap")
 
 
 def run_async(operation: Callable[[], Awaitable[int]]) -> int:
@@ -209,7 +214,10 @@ def _usage_failure() -> int:
 def _control_failure(error: ControlError) -> int:
     code = public_error_code_for_control_reason(error.reason)
     guidance = {
-        PublicErrorCode.VAULT_LOCKED: "vault_locked: run 'yoetz service unlock' from a local terminal",
+        PublicErrorCode.VAULT_LOCKED: (
+            "vault_locked: unlock or initialize from a local terminal, or use "
+            "'yoetz elevated-bootstrap status' when no user-owned TTY is available"
+        ),
         PublicErrorCode.SERVICE_UNAVAILABLE: (
             "service_unavailable: run 'yoetz service run' under your selected user supervisor"
         ),
@@ -1005,3 +1013,91 @@ def main() -> None:
     except Exception:
         _stderr("internal_error: the command could not be completed")
         raise SystemExit(70) from None
+
+
+@elevated_app.command("status")
+def elevated_status(json_output: _JSON = True) -> None:
+    """Show structural elevated-bootstrap consent status for agents."""
+
+    module = importlib.import_module("yoetz.cli.elevated")
+    payload = cast(Callable[[], object], getattr(module, "status_elevated"))()
+    _human_or_json(payload, json_output=True)
+
+
+@elevated_app.command("prepare")
+def elevated_prepare(
+    operation: Annotated[
+        str,
+        typer.Argument(help="vault_initialize | provider_credential_set"),
+    ],
+    provider_id: Annotated[str | None, typer.Option("--provider-id")] = None,
+    model_id: Annotated[str | None, typer.Option("--model-id")] = None,
+    endpoint_profile_id: Annotated[str | None, typer.Option("--endpoint-profile-id")] = None,
+    endpoint_profile_version: Annotated[
+        str | None, typer.Option("--endpoint-profile-version")
+    ] = None,
+    purpose: Annotated[str | None, typer.Option("--purpose")] = None,
+    scope_digest: Annotated[str | None, typer.Option("--scope-digest")] = None,
+    purpose_digest: Annotated[str | None, typer.Option("--purpose-digest")] = None,
+) -> None:
+    """Create a pending elevated-bootstrap consent challenge (no secrets)."""
+
+    module = importlib.import_module("yoetz.cli.elevated")
+    errors = importlib.import_module("yoetz.service.elevated_bootstrap")
+    elevated_error = cast(type[Exception], getattr(errors, "ElevatedBootstrapError"))
+    prepare = cast(Callable[..., object], getattr(module, "prepare_elevated"))
+    binding: dict[str, str] | None = None
+    if operation == "provider_credential_set":
+        required = {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "endpoint_profile_id": endpoint_profile_id,
+            "endpoint_profile_version": endpoint_profile_version,
+            "purpose": purpose,
+            "scope_digest": scope_digest,
+            "purpose_digest": purpose_digest,
+        }
+        if any(value is None or value == "" for value in required.values()):
+            _finish(_usage_failure())
+        binding = {key: cast(str, value) for key, value in required.items()}
+    try:
+        payload = prepare(operation, provider_binding=binding)
+    except elevated_error as exc:
+        _stderr(f"elevated_bootstrap: {getattr(exc, 'reason', 'failed')}")
+        raise SystemExit(2) from None
+    _human_or_json(payload, json_output=True)
+
+
+@elevated_app.command("approve")
+def elevated_approve(
+    pending_id: Annotated[str, typer.Option("--pending-id")],
+    danger_digest: Annotated[str, typer.Option("--danger-digest")],
+    confirm: Annotated[str, typer.Option("--confirm")],
+    passphrase_fd: Annotated[int | None, typer.Option("--passphrase-fd")] = None,
+    reauth_fd: Annotated[int | None, typer.Option("--reauth-fd")] = None,
+    credential_fd: Annotated[int | None, typer.Option("--credential-fd")] = None,
+) -> None:
+    """Approve exact pending consent and complete via inherited secret FDs."""
+
+    module = importlib.import_module("yoetz.cli.elevated")
+    errors = importlib.import_module("yoetz.service.elevated_bootstrap")
+    elevated_error = cast(type[Exception], getattr(errors, "ElevatedBootstrapError"))
+    approve = cast(Callable[..., Awaitable[object]], getattr(module, "approve_elevated"))
+
+    async def _run() -> int:
+        try:
+            payload = await approve(
+                pending_id=pending_id,
+                danger_digest=danger_digest,
+                confirm=confirm,
+                passphrase_fd=passphrase_fd,
+                reauth_fd=reauth_fd,
+                credential_fd=credential_fd,
+            )
+        except elevated_error as exc:
+            _stderr(f"elevated_bootstrap: {getattr(exc, 'reason', 'failed')}")
+            return 2
+        _human_or_json(payload, json_output=True)
+        return 0
+
+    _finish(run_async(_run))
