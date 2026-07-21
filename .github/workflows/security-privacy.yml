@@ -185,7 +185,7 @@ jobs:
              "${RUNNER_TEMP}"/sbom.cdx.json "${RUNNER_TEMP}"/licenses.json \
              "${RUNNER_TEMP}/dependency-evidence/"
           uv run --locked python scripts/scan_public_boundary.py \
-            --source-tree "${RUNNER_TEMP}/dependency-evidence"
+            --evidence-dir "${RUNNER_TEMP}/dependency-evidence"
 
       - name: Upload dependency/license/SBOM evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -321,8 +321,8 @@ jobs:
           printf '%s' "$canary" | uv run --locked python -c "import sys,base64;sys.stdout.write(base64.b64encode(sys.stdin.buffer.read()).decode())" > "$nc/encoded.b64"
           head -c 256 /dev/urandom > "$nc/${canary}.bin"
           echo "$canary" >> "$nc/${canary}.bin"
-          if uv run --locked python scripts/scan_public_boundary.py --source-tree "$nc" \
-              --evidence-dir "${{ runner.temp }}/negative-control-evidence" > "${{ runner.temp }}/nc.log" 2>&1; then
+          if uv run --locked python scripts/scan_public_boundary.py \
+              --evidence-dir "$nc" > "${{ runner.temp }}/nc.log" 2>&1; then
             echo "::error::public-boundary scanner failed to block the negative-control artifact"
             exit 1
           fi
@@ -330,7 +330,7 @@ jobs:
             echo "::error::negative-control canary text leaked into scanner logs"
             exit 1
           fi
-          rm -rf "$nc" "${{ runner.temp }}/nc.log" "${{ runner.temp }}/negative-control-evidence"
+          rm -rf "$nc" "${{ runner.temp }}/nc.log"
 
       - name: Upload artifact-boundary evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

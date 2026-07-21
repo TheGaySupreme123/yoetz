@@ -473,8 +473,8 @@ jobs:
           mkdir -p "$canary_dir"
           canary="YOETZ_CANARY_$(uv run --locked python -c 'import uuid; print(uuid.uuid4().hex)')"
           echo "$canary" > "$canary_dir/leak.txt"
-          if uv run --locked python scripts/scan_public_boundary.py --source-tree "$canary_dir" \
-              --evidence-dir "${{ runner.temp }}/negative-control-evidence" > "${{ runner.temp }}/nc.log" 2>&1; then
+          if uv run --locked python scripts/scan_public_boundary.py \
+              --evidence-dir "$canary_dir" > "${{ runner.temp }}/nc.log" 2>&1; then
             echo "::error::public-boundary scanner failed to block the negative-control canary"
             exit 1
           fi
