@@ -220,7 +220,7 @@ def test_injected_canary_is_detected_and_never_leaked_in_the_report(
     findings = scanner.scan_bytes(entry, scanner.load_rules(), target_label="t", canary=canary)
     canary_findings = [f for f in findings if f.rule_id == "CANARY-EXACT-001"]
     assert len(canary_findings) == 1
-    report_bytes = scanner.build_report("t", "artifact", findings)
+    report_bytes = scanner.build_report("t", "artifact", findings, canary=canary)
     assert canary not in report_bytes
     report = json.loads(report_bytes)
     assert report["finding_count"] == len(findings)
@@ -235,6 +235,25 @@ def test_injected_canary_is_detected_and_never_leaked_in_the_report(
             "severity",
             "target_label",
         }
+
+
+def test_canary_in_filename_is_blocked_and_redacted_from_report(
+    scanner: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    canary = "YOETZ_CANARY_3f9c2a7e1b6d4f58aabbccddeeff00"
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    (evidence / f"{canary}.txt").write_text(canary, encoding="utf-8")
+    canary_file = tmp_path / "canary.bin"
+    canary_file.write_text(canary, encoding="utf-8")
+
+    rc = scanner.main(["--evidence-dir", str(evidence), "--canary-file", str(canary_file)])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert canary not in captured.out
+    assert canary not in captured.err
+    assert "CANARY-EXACT-001" in captured.err
+    assert "<redacted-canary>" in captured.err
 
 
 def test_report_never_carries_an_absolute_repository_path(scanner: ModuleType) -> None:
