@@ -6,6 +6,23 @@ released versions.
 
 ## Unreleased
 
+### Added
+
+- First-run setup wizard (ADR-012): bare `yoetz` on an interactive terminal with no completion
+  marker launches `yoetz setup run` — Codex PATH discovery with an explicit choice when several
+  installs exist, preview-and-confirm MCP registration (`codex mcp get` first; foreign entries
+  preserved, never replaced; success verified by re-reading state), a service reachability check,
+  and printed next steps for the privacy-setup and provider-credential ceremonies, which remain
+  human-driven. `yoetz setup status` reports the same posture read-only; every non-TTY bare
+  invocation still prints help.
+- `yoetz integrate <harness> mcp status|preview|install`: digest-bound, preview-gated MCP server
+  registration as a first-class command, backed by the new sibling `HarnessMcpPort` and Codex
+  discovery/registration adapters.
+- Publish-ready npm launcher at `support/npm-launcher/` for a future `npx yoetz`: a
+  dependency-free delegator to the exact pinned `uvx yoetz==<version>`, kept deliberately
+  unpublished (`"private": true`) until a separate release decision.
+- A README Getting started section documenting the install and first-run path.
+
 ### Changed
 
 - Strengthened contribution intake: issue-first process with duplicate search, design gates for

@@ -25,6 +25,9 @@ temp directory (ADR-003 decision 4 and this file's path-safety rules). This is t
 - `service_generation_path() -> Path` — fixed
   `state_dir() / "service-generation.json"`; no override/caller basename. Parent is verified
   owner-only `0700`; file is regular, single-link, owner-only `0600`, opened no-follow.
+- `setup_marker_path() -> Path` — fixed `state_dir() / "setup-wizard.json"` (ADR-012 first-run
+  wizard completion marker); same verified owner-only parent contract, no override. Read/write
+  logic lives in `cli/setup.py`, which fails closed when this path is unsafe.
 - `unlock_throttle_path() -> Path` — fixed `state_dir() / "unlock-throttle.json"`; same verified
   local owner-only parent and `0600` regular/single-link/no-follow contract, no override.
 - `verify_private_local_bundle(path: Path) -> None` — the safety gate registered by

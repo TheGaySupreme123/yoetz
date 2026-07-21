@@ -30,6 +30,7 @@ _SUPPORT_COMMANDS = (
     "mcp",
     "state",
     "integrate",
+    "setup",
     "service",
     "provider",
     "privacy",
@@ -68,6 +69,16 @@ def test_command_matrix_matches_six_operations() -> None:
     group_names = {group.name for group in cli.app.registered_groups}
     for command in _OPERATION_COMMANDS + _SUPPORT_COMMANDS:
         assert command in command_names or command in group_names, command
+
+
+def test_bare_invocation_without_tty_still_prints_help() -> None:
+    """The ADR-012 first-run exception is bounded to an interactive terminal with no
+    completion marker; every non-TTY bare invocation (CI, pipes, CliRunner) keeps the
+    historical help-printing behavior and exit code 0."""
+
+    result = CliRunner().invoke(cli.app, [])
+    assert result.exit_code == 0
+    assert "Usage" in result.stdout
 
 
 def test_privacy_command_and_recipe_matrix() -> None:

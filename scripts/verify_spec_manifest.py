@@ -135,7 +135,7 @@ _COORDINATION_ALLOWLIST: Final = frozenset(
     }
 )
 _RECOGNIZED_FUTURE_EXTENSIONS: Final = frozenset(
-    {".py", ".sql", ".json", ".toml", ".yml", ".yaml", ".lock", ".md", ".txt", ".typed"}
+    {".py", ".sql", ".json", ".toml", ".yml", ".yaml", ".lock", ".md", ".txt", ".typed", ".js"}
 )
 _STATUS_VALUES: Final = frozenset({"draft", "reviewed", "locked"})
 _BACKTICK_CELL = re.compile(r"^`([^`|]*)`$")

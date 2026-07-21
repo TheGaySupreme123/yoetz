@@ -23,6 +23,7 @@ __all__ = [
     "ensure_owner_only_dir",
     "log_dir",
     "service_generation_path",
+    "setup_marker_path",
     "state_dir",
     "task_bundle_dir",
     "unlock_throttle_path",
@@ -214,6 +215,16 @@ def service_generation_path(*, _probe: _PathProbe | None = None) -> Path:
     ensure_owner_only_dir(root)
     verify_private_local_bundle(root, _probe=_probe)
     return root / "service-generation.json"
+
+
+def setup_marker_path(*, _probe: _PathProbe | None = None) -> Path:
+    """Return the fixed first-run setup-wizard completion marker path."""
+
+    root = state_dir(_probe=_probe)
+    verify_private_local_bundle(root, _probe=_probe)
+    ensure_owner_only_dir(root)
+    verify_private_local_bundle(root, _probe=_probe)
+    return root / "setup-wizard.json"
 
 
 def unlock_throttle_path(*, _probe: _PathProbe | None = None) -> Path:

@@ -1,0 +1,17 @@
+{
+  "name": "yoetz",
+  "version": "0.1.0",
+  "description": "Delegation launcher for the Python yoetz distribution via uv. Installs nothing itself.",
+  "private": true,
+  "license": "Apache-2.0",
+  "bin": {
+    "yoetz": "./bin/yoetz.js"
+  },
+  "files": [
+    "bin/yoetz.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  }
+}

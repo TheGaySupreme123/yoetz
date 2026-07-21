@@ -1,6 +1,6 @@
 # Yoetz v0.1 — decision ledger and implementation-freeze gates
 
-**Wave:** A–F | **ADRs:** ADR-001 through ADR-009 | **Imports (spec-tree):** all owning specs |
+**Wave:** A–F | **ADRs:** ADR-001 through ADR-012 | **Imports (spec-tree):** all owning specs |
 **Imported by:** `specs/README.md`, ADR ratification, implementation-freeze review
 
 ## Purpose
@@ -148,9 +148,6 @@ that evidence.
   uses only an existing vault through a release-tested OS keyring; passphrase mode requires the
   confidential human ceremony.
 - A native vault broker/subprocess; v0.1 uses the in-service `SecretMemoryPort` boundary.
-- A public npm/`npx yoetz` launcher. v0.1 remains a Python distribution with `uv` as its supported
-  install and tool runner; any npm launcher needs its own provenance, delegation, upgrade, and
-  platform contract.
 - Sigstore or other signing claims until verification is documented and tested.
 - A combined rendered skill handbook; v0.1 ships the two separately owned reference documents.
 - Global/user Codex skill installation scope; v0.1 mutates only one explicitly selected trusted
@@ -174,8 +171,17 @@ that evidence.
   contributor experience of repository documents, but it is not an authority for Yoetz runtime,
   protocol, privacy, or security architecture.
 - **F-005:** The official npm Pyright package remains an exactly pinned contributor/CI tool only.
-  Node/npm are not Yoetz runtime requirements, and a public `npx yoetz` launcher is deferred as a
-  separate distribution surface rather than hidden inside the type-checker decision.
+  Node/npm are not Yoetz runtime requirements. The formerly deferred `npx yoetz` launcher is now
+  built as its own reviewed distribution surface under ADR-012: a dependency-free delegation-only
+  package at `support/npm-launcher/` pinned to the exact PyPI version, kept deliberately
+  unpublished (`"private": true`) until a separate publication decision.
+- **F-020 (ADR-012, 2026-07-21):** Founder-authorized first-run setup wizard. `yoetz setup
+  run|status` and `yoetz integrate <harness> mcp status|preview|install` automate Codex discovery
+  and the runbook's check-then-add MCP registration behind preview→confirm→execute; bare `yoetz`
+  on an interactive terminal with no completion marker launches the wizard once (every non-TTY
+  bare invocation still prints help). Foreign same-name MCP entries are preserved, never
+  replaced; privacy setup and provider credentials remain their existing trusted ceremonies, which
+  the wizard points to but never automates.
 - **F-006:** Private vulnerability reporting uses GitHub's private vulnerability-reporting surface
   plus `security@yoetz.dev`; private conduct reports use the distinct `conduct@yoetz.dev` route;
   ordinary support and bug reports use repository issues. E-012 verifies these routes before

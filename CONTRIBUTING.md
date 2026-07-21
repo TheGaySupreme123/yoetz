@@ -90,8 +90,11 @@ Silence, ignoring a thread, or “will do later” without maintainer agreement 
   manifest) — regenerate it through its owning script.
 - Don't invent a second formatter, linter, or type-checker configuration; the pinned tools in
   `pyproject.toml` and the development-only `package.json` are the only ones this project uses.
-- Don't add a public npm launcher or similar new distribution surface without its own spec — the
-  end-user install path is Python/`uv` (see [`README.md`](README.md)).
+- Don't add a new distribution surface without its own spec and design-gate acknowledgement. The
+  end-user install path is Python/`uv` (see [`README.md`](README.md)); the one reviewed exception
+  is the delegation-only npm launcher at `support/npm-launcher/` (ADR-012), which must stay
+  unpublished (`"private": true`) — publishing it is a separate deliberate release decision,
+  never a side effect of another change.
 
 ## Security and conduct
 

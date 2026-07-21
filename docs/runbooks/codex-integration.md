@@ -94,6 +94,13 @@ entry already exists, preserve it and stop unless a separately reviewed operatio
 exact Yoetz-owned registration being intentionally replaced. Current Codex `mcp add` behavior
 replaces a same-name global entry, so this preflight check matters.
 
+This check-then-add sequence is also available as
+`yoetz integrate codex mcp status|preview|install` and is what `yoetz setup run` performs after
+Codex discovery (ADR-012). Automating it changes no rule above — it is the same two commands,
+gated by an explicit digest-bound confirmation, run by Yoetz instead of by hand; an existing
+foreign entry is still preserved and refused, success is verified by re-reading the entry, and
+"registered" still never implies Codex will successfully connect at runtime.
+
 If the host is configured with Yoetz as an optional server and it is unavailable, Codex work
 continues and the skill discloses no live ledger/check/receipt data. If configured as required,
 server failure blocks only the Codex surfaces that the tested capability profile proves are
@@ -130,6 +137,7 @@ manage any MCP configuration yourself if you want it removed too.
 | Write/swap interrupted | Run `status`; preserve any staged content; do not delete it yourself. |
 | Skill not discovered, or duplicate `$yoetz` names loaded | Check the exact scope, loaded skill roots, managed path, trust, version, and capability matrix; reload Codex. |
 | MCP name already present | Preserve it and review ownership rather than running `mcp add`. |
+| `setup` skipped MCP registration | Codex not on PATH, or the entry is foreign-owned; run `yoetz integrate codex mcp status --json` for the exact state. |
 | MCP unavailable | Diagnose through separate MCP configuration/startup steps. |
 | Trigger absent or failed | Use the manual re-grounding procedure; never edit hook configuration through this integration. |
 

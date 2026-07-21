@@ -30,6 +30,7 @@ tests/subprocess/
   test_service_daemon_lifecycle.py
   test_service_secret_boundary.py
   test_service_unlock_boundary.py
+  test_setup_wizard_cli.py
   test_privacy_human_control.py
   test_process_owner_fencing.py
   test_kill_matrix.py
@@ -67,6 +68,7 @@ tests/subprocess/test_service_daemon_lifecycle.py
 tests/subprocess/test_service_lock_and_confidential_unlock.py
 tests/subprocess/test_service_secret_boundary.py
 tests/subprocess/test_service_unlock_boundary.py
+tests/subprocess/test_setup_wizard_cli.py
 tests/subprocess/test_signals_and_cancellation.py
 ```
 

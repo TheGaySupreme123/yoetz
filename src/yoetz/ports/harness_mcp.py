@@ -1,0 +1,197 @@
+"""Harness-neutral MCP server registration boundary, separate from skill install."""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+from enum import Enum
+from typing import Final, Literal, Protocol
+
+from yoetz.domain.values import JsonObject, JsonValue, validate_sha256_digest
+from yoetz.ports.integrations import HarnessId
+from yoetz.protocol.canonical import canonical_encode
+from yoetz.protocol.errors import PROTOCOL_REASON_CODES, ProtocolValueError
+
+__all__ = [
+    "MCP_SERVE_COMMAND",
+    "MCP_SERVER_NAME",
+    "HarnessBinary",
+    "HarnessMcpPort",
+    "McpRegistrationAction",
+    "McpRegistrationCommand",
+    "McpRegistrationError",
+    "McpRegistrationPreview",
+    "McpRegistrationReason",
+    "McpRegistrationResult",
+    "McpRegistrationState",
+]
+
+MCP_SERVER_NAME: Final = "yoetz"
+MCP_SERVE_COMMAND: Final = ("yoetz", "mcp", "serve")
+
+_MAX_PATH_CHARS: Final = 4_096
+_MAX_VERSION_CHARS: Final = 64
+_MAX_WARNINGS: Final = 16
+_TOKEN_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$", re.ASCII)
+
+type Compatibility = Literal["supported", "untested"]
+
+
+def _port_error(reason: str) -> ProtocolValueError:
+    if reason not in PROTOCOL_REASON_CODES:
+        reason = "invalid_event_value_type"
+    return ProtocolValueError(reason)
+
+
+class McpRegistrationState(str, Enum):  # noqa: UP042 - exact wire-valued Enum is required
+    ABSENT = "absent"
+    YOETZ_OWNED = "yoetz_owned"
+    FOREIGN_PRESENT = "foreign_present"
+
+
+class McpRegistrationAction(str, Enum):  # noqa: UP042 - exact wire-valued Enum is required
+    REGISTER = "register"
+    NOOP = "noop"
+
+
+class McpRegistrationReason(str, Enum):  # noqa: UP042 - exact wire-valued Enum is required
+    CONFIRMATION_REQUIRED = "confirmation_required"
+    PREVIEW_STALE = "preview_stale"
+    HARNESS_UNAVAILABLE = "harness_unavailable"
+    PARSE_FAILED = "parse_failed"
+    TIMEOUT = "timeout"
+    REGISTRATION_FAILED = "registration_failed"
+    FOREIGN_ENTRY_PRESENT = "foreign_entry_present"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class HarnessBinary:
+    """One discovered harness executable; the path is never echoed in repr."""
+
+    harness_id: HarnessId
+    executable_path: str
+    reported_version: str | None
+    compatibility: Compatibility
+
+    def __post_init__(self) -> None:
+        if type(self.harness_id) is not HarnessId:
+            raise _port_error("integration_harness_invalid")
+        if (
+            type(self.executable_path) is not str
+            or not 1 <= len(self.executable_path) <= _MAX_PATH_CHARS
+            or any(ord(char) < 32 or ord(char) == 127 for char in self.executable_path)
+        ):
+            raise _port_error("integration_target_invalid")
+        if self.reported_version is not None and (
+            type(self.reported_version) is not str
+            or not 1 <= len(self.reported_version) <= _MAX_VERSION_CHARS
+            or not self.reported_version.isascii()
+            or not self.reported_version.isprintable()
+        ):
+            raise _port_error("integration_value_invalid")
+        if self.compatibility not in {"supported", "untested"}:
+            raise _port_error("integration_compatibility_invalid")
+
+    def __repr__(self) -> str:
+        return (
+            "HarnessBinary("
+            f"harness_id={self.harness_id.value!r}, "
+            f"reported_version={self.reported_version!r}, "
+            f"compatibility={self.compatibility!r}, executable_path=<redacted>)"
+        )
+
+    __str__ = __repr__
+
+
+@dataclass(frozen=True, slots=True)
+class McpRegistrationPreview:
+    harness_id: HarnessId
+    action: McpRegistrationAction
+    state_before: McpRegistrationState
+    warnings: tuple[str, ...]
+    preview_digest: str
+
+    def __post_init__(self) -> None:
+        if type(self.harness_id) is not HarnessId:
+            raise _port_error("integration_harness_invalid")
+        if type(self.action) is not McpRegistrationAction:
+            raise _port_error("integration_action_invalid")
+        if type(self.state_before) is not McpRegistrationState:
+            raise _port_error("integration_state_invalid")
+        if type(self.warnings) is not tuple or len(self.warnings) > _MAX_WARNINGS:
+            raise _port_error("integration_value_invalid")
+        previous: str | None = None
+        for warning in self.warnings:
+            if type(warning) is not str or not warning or not warning.isascii():
+                raise _port_error("integration_value_invalid")
+            if previous is not None and warning <= previous:
+                raise _port_error("integration_value_invalid")
+            previous = warning
+        validate_sha256_digest(self.preview_digest)
+
+
+@dataclass(frozen=True, slots=True)
+class McpRegistrationCommand:
+    preview_digest: str
+    explicitly_accepted: bool
+
+    def __post_init__(self) -> None:
+        validate_sha256_digest(self.preview_digest)
+        if type(self.explicitly_accepted) is not bool:
+            raise _port_error("integration_action_invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class McpRegistrationResult:
+    harness_id: HarnessId
+    action: McpRegistrationAction
+    state_before: McpRegistrationState
+    state_after: McpRegistrationState
+    preview_digest: str
+
+    def __post_init__(self) -> None:
+        if type(self.harness_id) is not HarnessId:
+            raise _port_error("integration_harness_invalid")
+        if type(self.action) is not McpRegistrationAction:
+            raise _port_error("integration_action_invalid")
+        if (
+            type(self.state_before) is not McpRegistrationState
+            or type(self.state_after) is not McpRegistrationState
+        ):
+            raise _port_error("integration_state_invalid")
+        validate_sha256_digest(self.preview_digest)
+
+
+@dataclass(frozen=True, slots=True)
+class McpRegistrationError(Exception):
+    reason: McpRegistrationReason
+    safe_details: Mapping[str, JsonValue]
+
+    def __post_init__(self) -> None:
+        if type(self.reason) is not McpRegistrationReason:
+            raise _port_error("integration_reason_invalid")
+        try:
+            details = JsonObject(self.safe_details)
+        except ProtocolValueError as exc:
+            raise _port_error("integration_error_invalid") from exc
+        if (
+            len(details) > 16
+            or len(canonical_encode(details)) > 4_096
+            or any(_TOKEN_RE.fullmatch(key) is None for key in details)
+        ):
+            raise _port_error("integration_error_invalid")
+        object.__setattr__(self, "safe_details", details)
+        Exception.__init__(self, self.reason.value)
+
+
+class HarnessMcpPort(Protocol):
+    async def status_registration(self, binary: HarnessBinary) -> McpRegistrationState: ...
+
+    async def preview_registration(self, binary: HarnessBinary) -> McpRegistrationPreview: ...
+
+    async def apply_registration(
+        self,
+        binary: HarnessBinary,
+        command: McpRegistrationCommand,
+    ) -> McpRegistrationResult: ...

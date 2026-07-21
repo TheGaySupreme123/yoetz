@@ -17,6 +17,8 @@ Required test modules and shared support files:
 tests/unit/
   adapters/
     test_codex_jsonl.py
+    test_codex_discovery.py
+    test_codex_mcp_registration.py
     test_codex_skill_integration.py
     test_git_subject_state.py
   protocol/
@@ -43,6 +45,7 @@ tests/unit/
     test_receipt_builder.py
   application/
     test_error_mapping.py
+    test_harness_mcp_service.py
     test_integrations.py
     test_service_facade.py
     test_unit_of_work.py
@@ -89,10 +92,13 @@ fixtures into the suite without adding hidden state.
 This index covers exactly these separately owned future files:
 
 ```text
+tests/unit/adapters/test_codex_discovery.py
+tests/unit/adapters/test_codex_mcp_registration.py
 tests/unit/adapters/test_codex_skill_integration.py
 tests/unit/adapters/test_codex_jsonl.py
 tests/unit/adapters/test_git_subject_state.py
 tests/unit/application/test_error_mapping.py
+tests/unit/application/test_harness_mcp_service.py
 tests/unit/application/test_integrations.py
 tests/unit/application/test_semantic_post_validation.py
 tests/unit/application/test_service_facade.py

@@ -13,10 +13,11 @@ specs, packaging/capability tests, and release workflow/script specs.
 2. **Project & build tooling:** `uv==0.11.29` for env/lock/run/tool-install/build; build backend
    requirement `uv_build>=0.11.29,<0.12`; prereleases are disallowed; committed `uv.lock`;
    conventional `src/` layout.
-3. **CLI framework:** Typer `0.27.0`, `pretty_exceptions_enable=False`,
-   `no_args_is_help=True`; no Click-internal coupling. Async bridge: exactly one top-level
-   `anyio.run(...)` per process entry (CLI command, MCP bridge, or foreground service); no nested
-   event-loop helpers.
+3. **CLI framework:** Typer `0.27.0`, `pretty_exceptions_enable=False`; no Click-internal
+   coupling. Async bridge: exactly one top-level `anyio.run(...)` per process entry (CLI command,
+   MCP bridge, or foreground service); no nested event-loop helpers. Amended by ADR-012: bare
+   invocation prints help in every case except the bounded first-run TTY exception on the root
+   command only (interactive terminal, setup marker absent), which launches `yoetz setup run`.
 4. **Console script:** distribution and executable both `yoetz`
    (`yoetz.cli.app:main`). `python -m yoetz` delegates to the same entry.
 5. **Wheel strategy:** yoetz itself is a pure-Python wheel; platform specificity comes from
@@ -34,9 +35,10 @@ specs, packaging/capability tests, and release workflow/script specs.
    npm Pyright `1.1.411` via a development-only private `package.json`, strict mode. The locked
    contributor/CI toolchain is Node `26.5.0` with npm `12.0.1`; `npm ci --ignore-scripts` followed
    by `npm run typecheck` is the reproducible invocation. Node/npm are not end-user runtime
-   requirements. A public npm package or `npx yoetz` launcher is a separate distribution surface
-   and is deferred until it has its own provenance, Python/uv delegation, upgrade, and platform
-   contract.
+   requirements. Amended by ADR-012: the npm launcher now exists at `support/npm-launcher/` with
+   its own provenance/delegation/upgrade contract — a dependency-free delegator to
+   `uvx yoetz==<version>` — and remains deliberately unpublished (`"private": true`); publishing
+   is a separate future release decision.
 8. **Release artifacts:** sdist + wheel, SHA-256 checksums, CycloneDX SBOM via `uv export`,
    dependency lock, support matrix, conformance summary, known limitations, changelog, security
    policy. Sigstore signing deferred until a documented verification command exists (a signature
@@ -45,7 +47,9 @@ specs, packaging/capability tests, and release workflow/script specs.
    foreground `yoetz service run` entrypoint suitable for a user-selected external
    supervisor, `codex mcp add/remove yoetz`, and data-retention behavior on uninstall. Native
    launchd/systemd-user installer commands are deferred; uninstall never deletes bundles/vault/
-   keyring entries.
+   keyring entries. Amended by ADR-012: the `codex mcp get`/`codex mcp add` sequence is also
+   available as the preview-gated `yoetz integrate <harness> mcp` commands and the `yoetz setup`
+   wizard; the manual commands remain valid and the runbook's preservation rules are unchanged.
 10. **Diagnostics:** `yoetz version --json` emits the full `VersionManifest`; startup safety
     validation is mandatory but the public `doctor` command stays v0.2.
 11. **Public schema hosting without runtime coupling:** the checked-in `schemas/` tree is mounted

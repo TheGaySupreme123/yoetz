@@ -1659,6 +1659,25 @@ partial, unmanaged, unsafe, or changed-after-preview copies are preserved. v0.1 
 profile's exact `skill_root` — `.agents/skills/yoetz/` for `codex` — inside one explicitly supplied
 trusted project; it never edits harness/MCP configuration, Git state, package resources, or
 arbitrary skills.
+MCP server registration is a sibling port, never an `IntegrationsPort` overload (ADR-012).
+`HarnessMcpPort` methods are `status_registration`, `preview_registration`, and
+`apply_registration`, each taking a `HarnessBinary` (harness ID, redacted-repr executable path,
+optional reported version, `supported|untested` compatibility). Shared names are
+`MCP_SERVER_NAME` (exactly `yoetz`), `MCP_SERVE_COMMAND` (exactly `("yoetz", "mcp", "serve")`),
+`McpRegistrationState` (`absent|yoetz_owned|foreign_present`), `McpRegistrationAction`
+(`register|noop`), `McpRegistrationReason` (`confirmation_required|preview_stale|
+harness_unavailable|parse_failed|timeout|registration_failed|foreign_entry_present`),
+`McpRegistrationPreview`, `McpRegistrationCommand`, `McpRegistrationResult`, and
+`McpRegistrationError`. `HarnessMcpService` owns confirmation
+(`McpRegistrationConfirmation` with channel exactly `interactive|noninteractive_flag`) and
+diagnostics (`McpRegistrationDiagnostic`, `HarnessMcpDiagnosticSink`); every registration
+mutation is digest-bound to a freshly recomputed preview, a foreign same-name entry is
+preserved without any force path, and success is verified by re-reading state. The setup-wizard
+schema tokens are `yoetz.setup-wizard-marker/1`, `yoetz.setup-wizard-report/1`,
+`yoetz.setup-status/1`, and `yoetz.mcp-registration-preview/1`; the marker lives at
+`state_dir()/setup-wizard.json` via `config.paths.setup_marker_path`. The CLI surfaces are
+`yoetz setup run|status` and `yoetz integrate <harness> mcp status|preview|install` (ADR-012).
+
 Every `integration_preview` preview/status body and every `integration_execute` body carries an
 explicit required `harness` discriminator. Its frozen v0.1 schema value is exactly `codex`; omission,
 defaulting, environment inference, and unknown values fail at control-schema admission before an
@@ -1819,6 +1838,8 @@ facade and are never MCP tools.
   not a `LocalDisclosureSink` and creates no disclosure receipt.
 - `cli/app.py`: Typer client surface with the six operations and registered support/service/privacy
   command trees; ordinary `--json`/stdin never carry unlock, credential, or reauthentication bytes.
+  Includes the ADR-012 `setup` sub-app and `integrate <harness> mcp` sub-app; bare invocation
+  prints help except the bounded interactive first-run case, which launches the wizard once.
 - `cli/exits.py`: `exit_code_for(PublicErrorCode | success) -> int`.
 - `config/models.py`: service-owned nonsecret service/storage/verification/logging defaults plus a
   one-time denied first-run privacy seed and exact provider/local-model profile identifiers. The

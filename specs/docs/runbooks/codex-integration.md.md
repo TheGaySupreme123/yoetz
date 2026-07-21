@@ -96,6 +96,12 @@ proves it is the exact Yoetz-owned registration being intentionally replaced. Cu
 `mcp add` replaces a same-name global entry. Never claim skill install changed config or produced a
 receipt.
 
+The same check-then-add sequence is also available as
+`yoetz integrate codex mcp status|preview|install` and is what `yoetz setup run` performs after
+Codex discovery (ADR-012). Automation changes no rule above: identical commands, gated by an
+explicit digest-bound confirmation; a foreign entry is preserved and refused; success is verified
+by re-reading the entry; "registered" never implies Codex will successfully connect.
+
 The exact capability profile also reports the compaction-recovery trigger as present or absent. A
 present v0.1 trigger only prompts the agent to re-ground through `status`; it records no observation,
 changes no coverage, and remains optional. Skill installation does not configure the hook. If the
@@ -116,7 +122,9 @@ Decision table: target untrusted/unsafe → correct explicit root/permissions, n
 incompatible → use supported package/Codex pair; write/swap interrupted → status, preserve staging;
 skill not discovered or duplicate `$yoetz` names are loaded → check exact scope, loaded skill roots,
 managed path, trust/version/capability and Codex reload; MCP name already present → preserve it and
-review ownership rather than running `mcp add`; MCP unavailable → separate config/startup diagnostics.
+review ownership rather than running `mcp add`; `setup` skipped MCP registration → Codex not on
+PATH or the entry is foreign-owned, run `yoetz integrate codex mcp status --json` for the exact
+state; MCP unavailable → separate config/startup diagnostics.
 Trigger absent/failed → use manual re-grounding; do not edit hook config through this integration or
 claim that a trigger observed work.
 

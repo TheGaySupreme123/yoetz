@@ -18,7 +18,7 @@ runtime input, test oracle, or publication dependency after this tree freezes.
 
 The public authority order is:
 
-1. `docs/adr/ADR-001` … `ADR-011` decisions at their recorded status, with unresolved
+1. `docs/adr/ADR-001` … `ADR-012` decisions at their recorded status, with unresolved
    ratification gates centralized in `specs/OPEN_QUESTIONS.md`;
 2. `specs/INTERFACES.md` for shared/public/cross-adapter names and semantics;
 3. the one owning file spec recorded in `specs/FILE_MANIFEST.md`;
@@ -121,11 +121,19 @@ implicit composition detail:
     client-local owner for structural Git state capture under ADR-011. It fills the existing
     `SubjectStateRef` freshness anchor without returning repository content, adding an MCP tool, or
     creating general live artifact inspection.
+11. ADR-012 first-run setup surfaces — `src/yoetz/ports/harness_mcp.py` (MCP registration is a
+    sibling port, not an `IntegrationsPort` overload), `src/yoetz/application/harness_mcp.py`
+    (digest-bound confirmation service), `src/yoetz/adapters/integrations/codex_discovery.py`
+    (pure PATH observation, no capability claim) and `codex_mcp.py` (the runbook's check-then-add
+    sequence, verify-by-reread, no force path), `src/yoetz/cli/setup.py` (wizard orchestration
+    kept out of `app.py`), and `support/npm-launcher/` (`package.json`, `bin/yoetz.js`,
+    `README.md` — a dependency-free, deliberately unpublished delegation launcher whose behavior
+    cannot be an implicit detail of the dev-only root `package.json`).
 
 ## Status board
 
-The manifest is the canonical inventory. At this draft checkpoint it classifies 545 spec files:
-531 unique future-file owners, 10 directory indexes, and 4 coordination files. Every future owner
+The manifest is the canonical inventory. At this draft checkpoint it classifies 558 spec files:
+544 unique future-file owners, 10 directory indexes, and 4 coordination files. Every future owner
 has all seven required sections; all local Open questions are closed or routed to the central
 decision ledger.
 
@@ -133,18 +141,18 @@ decision ledger.
 |---|---:|---|
 | Repository root | 15 | — |
 | `.github/` workflows | 9 | — |
-| `docs/` public protocol and runbooks | 11 | The eleven already-authored ADRs remain current authorities outside the future-file universe. |
+| `docs/` public protocol and runbooks | 11 | The twelve already-authored ADRs remain current authorities outside the future-file universe. |
 | `schemas/` | 53 | 1 directory index |
 | `fixtures/` | 49 | 1 directory index |
 | `migrations/` | 2 | — |
 | `guidance/` harness-neutral agent guidance | 4 | 1 directory index; owned once and shipped byte-identically to every harness and to MCP (ADR-010) |
 | `skills/` | 2 | Per-harness header and manifest only; v0.1 ships exactly one harness, `codex` |
-| `support/` | 1 | — |
-| `src/yoetz/` Python/code files | 130 | — |
+| `support/` | 4 | Includes the ADR-012 npm launcher (`support/npm-launcher/`), publish-ready but deliberately unpublished. |
+| `src/yoetz/` Python/code files | 135 | — |
 | `src/yoetz/resources/` | 72 | The resource manifest plus exactly 71 installed entries. |
 | `scripts/` | 6 | — |
-| `tests/` | 177 | 7 suite indexes |
-| **Total future files** | **531** | **10 indexes + 4 coordination files = 545 spec files** |
+| `tests/` | 182 | 7 suite indexes |
+| **Total future files** | **544** | **10 indexes + 4 coordination files = 558 spec files** |
 
 All rows remain `draft` until the founder freeze; “present” is not the same as “reviewed” or
 “locked.” Empirical release cells and independent threat review remain later evidence gates even

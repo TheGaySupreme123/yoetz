@@ -23,6 +23,7 @@ tests/packaging/
   test_upgrade_and_backward_read.py
   test_uninstall_and_data_retention.py
   test_offline_reinstall.py
+  test_npm_launcher.py
   test_platform_and_sqlite_gate.py
   test_dependency_lock_and_licenses.py
   test_private_boundary_and_secret_scan.py
@@ -42,6 +43,7 @@ tests/packaging/test_build_artifacts.py
 tests/packaging/test_checksums_sbom_and_provenance.py
 tests/packaging/test_clean_install.py
 tests/packaging/test_dependency_lock_and_licenses.py
+tests/packaging/test_npm_launcher.py
 tests/packaging/test_offline_reinstall.py
 tests/packaging/test_platform_and_sqlite_gate.py
 tests/packaging/test_privacy_docs_and_resources.py

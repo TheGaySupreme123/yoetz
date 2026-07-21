@@ -1,0 +1,109 @@
+# ADR-012 — First-run setup wizard, automated MCP registration, and the npm launcher
+
+**Status:** Working decision (2026-07-21), founder-authorized amendment of ADR-007 decisions 3, 7,
+and 9. Release ratification still requires the packaging evidence gates those decisions already
+carry; nothing here manufactures platform or capability evidence.
+**Owning public specs:** `specs/src/yoetz/ports/harness_mcp.py.md`,
+`specs/src/yoetz/application/harness_mcp.py.md`,
+`specs/src/yoetz/adapters/integrations/codex_discovery.py.md`,
+`specs/src/yoetz/adapters/integrations/codex_mcp.py.md`, `specs/src/yoetz/cli/setup.py.md`,
+`specs/support/npm-launcher/package.json.md`, `specs/support/npm-launcher/bin/yoetz.js.md`,
+`specs/support/npm-launcher/README.md.md`, plus the amended `specs/src/yoetz/cli/app.md`,
+`specs/src/yoetz/config/paths.md`, and `specs/docs/runbooks/codex-integration.md.md`.
+**Relates to:** ADR-005 (Codex capability identity), ADR-007 (packaging/release), ADR-009
+(privacy/egress), ADR-010 (harness integration port).
+
+## Context
+
+A fresh `uvx yoetz` landed a new user in front of a help screen and a runbook: find Codex, run
+`codex mcp get`/`codex mcp add` by hand, start the service, run privacy setup, then the
+credential ceremony. Every one of those steps was correct and deliberately manual, but nothing
+connected them, and the npm ecosystem had no path at all — ADR-007 deferred `npx yoetz` until it
+had "its own provenance, Python/uv delegation, upgrade, and platform contract". This ADR supplies
+exactly those contracts and connects the steps without weakening any existing trust boundary.
+
+## Decisions
+
+1. **`yoetz setup` is a new top-level support sub-app** with `run` (the wizard) and `status`
+   (read-only posture). The wizard orchestrates only operations a local human could already run by
+   hand: Codex discovery, the runbook's check-then-add MCP registration behind
+   preview→confirm→execute, a service reachability check, and printed instructions for the
+   privacy-setup and provider-credential ceremonies. It introduces no new trust boundary, no new
+   secret channel, and no new claim vocabulary.
+
+2. **Bounded bare-invocation change (amends ADR-007 decision 3).** The root Typer app drops
+   `no_args_is_help=True`; the root callback reproduces the historical help output for every bare
+   invocation except one case: stdin and stdout are both real TTYs **and** the completion marker
+   (`state_dir()/setup-wizard.json`, schema `yoetz.setup-wizard-marker/1`) is absent. Only then
+   does bare `yoetz` launch the interactive wizard. Non-TTY, CI, piped, `--help`, and every named
+   subcommand invocation are byte-for-byte unchanged. The marker is permanent once a mutating
+   wizard run completes — a decline counts as completion; re-runs happen only via explicit
+   `yoetz setup run`. An unsafe or unreadable state directory never triggers the wizard.
+
+3. **MCP registration becomes a first-class preview-gated operation** (`yoetz integrate <harness>
+   mcp status|preview|install`), automating the exact two-command sequence the Codex runbook
+   already mandates: `codex mcp get yoetz --json` first; `codex mcp add yoetz -- yoetz mcp serve`
+   only when no entry exists; a foreign same-name entry is preserved and refused with
+   `foreign_entry_present` — there is no force path. Success is verified by re-reading state, not
+   by trusting the add exit code. Registration remains a fact separate from skill installation and
+   from Codex capability support (E-002/E-013 are untouched); "registered" never implies "Codex
+   will successfully connect".
+
+4. **A sibling port, not an `IntegrationsPort` extension (amends ADR-010 by addition only).**
+   `HarnessMcpPort` (`ports/harness_mcp.py`) owns registration with its own closed types
+   (`HarnessBinary`, `McpRegistrationState/Action/Reason`, digest-bound preview/command/result).
+   Skill install types carry trusted-project file semantics (`project_root`, `file_changes`,
+   managed markers) that registration must not reuse. ADR-010's guarantee is preserved: adding a
+   harness is still one `HarnessId` value plus adapters, with no port or registry change.
+
+5. **Discovery is pure observation.** `discover_codex_binaries` scans `$PATH` for executable
+   `codex` entries, dedupes by resolved target while keeping the PATH-visible name, probes
+   `codex --version` with a bounded timeout, and always reports `untested` compatibility (E-002:
+   a version string is not support evidence). Multiple candidates produce an explicit numbered
+   interactive choice; non-interactive runs fail closed and require `--codex-path`. Even a single
+   candidate requires explicit confirmation before the registration mutation.
+
+6. **The npm launcher exists, publish-ready and deliberately unpublished (amends ADR-007
+   decision 7).** `support/npm-launcher/` contains a dependency-free `package.json` (registry name
+   `yoetz`, version locked to the PyPI version) and `bin/yoetz.js`, which requires `uv` on PATH
+   (printing install guidance and exiting nonzero otherwise) and delegates to
+   `uvx yoetz==<version>` with untouched arguments and the child's exact exit code. It bundles no
+   Python, downloads nothing itself, and duplicates no wizard logic — first-run behavior lives
+   once, in the Python CLI. `"private": true` is the load-bearing unpublished guarantee; flipping
+   it is a separate deliberate release decision with its own review, never a side effect.
+
+7. **The confidential boundaries are restated, not flipped.** The wizard never accepts a secret by
+   flag, environment, stdin, or file; the provider credential is provisioned only through the
+   existing `yoetz provider credential set` ceremony, and privacy policy only through
+   `yoetz privacy setup` and the trusted decision commands. The wizard checks service
+   reachability and stops with exact instructions when the service is absent — the CLI still never
+   spawns the service (ADR-008). These are existing invariants recorded here so a future
+   contributor does not "fix" the wizard by automating a ceremony.
+
+## Consequences
+
+A new user's path is now: `npx yoetz` or `uvx yoetz` → interactive wizard → confirmed Codex MCP
+registration → printed, exact next commands for the service, privacy policy, and credential.
+Each mutating step is previewed, digest-bound, and individually declinable; `yoetz setup status`
+reports the same posture read-only at any time. The CLI support-command matrix grows by one
+(`setup`), recorded in the conformance contract test in the same change.
+
+The cost is one bounded exception to the previously uniform bare-invocation behavior, and a second
+distribution surface to keep in version lockstep — enforced by a packaging test that compares the
+npm launcher version to the Python package version.
+
+## Alternatives considered
+
+**Reuse `IntegrationsPort` for registration.** Rejected: the skill types' project-root and
+file-inventory fields would be dead or misleading for a global registration, and overloading them
+would weaken the ADR-010 fork guarantee.
+
+**Trigger the wizard from the npm bootstrap script.** Rejected: it cannot serve `uvx yoetz`
+users and would duplicate first-run logic in two languages with drift risk.
+
+**Offer a force-replace for foreign MCP entries.** Rejected for v0.1: the runbook's
+preserve-and-review rule stands; a foreign entry is reported with a manual follow-up instead.
+
+**A `YOETZ_SKIP_SETUP_WIZARD` environment opt-out.** Rejected: the non-TTY guard already covers
+automation, and the marker covers humans; an ambient env escape would make first-run silently
+skippable by inherited shell configuration.

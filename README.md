@@ -22,6 +22,37 @@ Start here:
   [`docs/adr/ADR-009-data-egress-privacy.md`](docs/adr/ADR-009-data-egress-privacy.md) — the
   user-facing privacy promise and its enforceable technical boundary.
 
+## Getting started
+
+The supported install path is Python via [`uv`](https://docs.astral.sh/uv/):
+
+```text
+uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"
+yoetz
+```
+
+(`uvx yoetz` works for a one-off run. `npx yoetz` will delegate to the same `uvx` path once the
+prepared npm launcher in [`support/npm-launcher/`](support/npm-launcher/) is published; it is
+deliberately unpublished today.)
+
+The first bare `yoetz` on an interactive terminal starts a **setup wizard**
+([ADR-012](docs/adr/ADR-012-first-run-setup-wizard.md)). It discovers installed Codex CLI
+binaries on your PATH (showing a choice when several exist), previews and — only after your
+explicit confirmation — registers `yoetz mcp serve` with the chosen Codex
+(`codex mcp get` first; an existing foreign entry is always preserved, never replaced), checks
+whether the local service is reachable, and prints the exact next commands for the parts that
+stay deliberately human-driven:
+
+1. `yoetz service run` — start the persistent local service under a supervisor you choose;
+2. `yoetz privacy setup` — review recipes, provider binding, and egress policy (zero-egress
+   until you commit otherwise);
+3. `yoetz provider credential set` — provision the LLM API credential through the confidential
+   terminal ceremony (never a flag, file, or environment variable).
+
+Re-run any time with `yoetz setup run`; inspect posture read-only with `yoetz setup status`;
+manage registration directly with `yoetz integrate codex mcp status|preview|install`. Every
+non-interactive bare invocation (CI, pipes) still prints help.
+
 The working v0.1 architecture uses one trusted persistent local service. CLI, MCP, and future UI
 processes are communication surfaces; they do not own encryption keys, decrypted state, storage
 writers, privacy authority, or provider access. External disclosure is denied by default and must

@@ -106,6 +106,13 @@ The through-line is that "Codex is first" had been encoded as "Codex is the only
 
 ## Consequences
 
+**Amendment (ADR-012, 2026-07-21):** MCP server registration is added as a *sibling* port,
+`HarnessMcpPort` (`ports/harness_mcp.py`), with its own Codex adapters
+(`codex_discovery.py`, `codex_mcp.py`). It deliberately does not extend `IntegrationsPort`:
+registration is global, file-free, and marker-free, so reusing the skill-install types would
+misuse fields designed for on-disk trusted-project content. The guarantee below is unchanged —
+adding a harness is still one `HarnessId` value plus adapters, with no shared-type edits.
+
 A fork can make Yoetz first-party on another harness by writing one adapter and one profile. It
 edits no port, no registry, no guidance, and no schema. That is the property this ADR exists to
 guarantee, and it follows from the ports/adapters pattern the rest of the tree already uses.

@@ -65,7 +65,8 @@ invalid. `Status` is `draft|reviewed|locked`; validation does not upgrade it.
 `Spec path` is repository-relative, NFC UTF-8 POSIX, begins `specs/`, names a regular non-symlink
 Markdown file, and contains no absolute/traversal/backslash/control/repeated/case-colliding segment.
 `Future path` follows the same safety rules but must not begin `specs/`. Every recognized future file
-extension is explicit (`.py`, `.sql`, `.json`, `.toml`, `.yml`, `.yaml`, `.lock`, `.md`, `.txt`, or
+extension is explicit (`.py`, `.sql`, `.json`, `.toml`, `.yml`, `.yaml`, `.lock`, `.md`, `.txt`,
+`.js` for the ADR-012 npm launcher script, or
 other extension allowlisted in repository metadata). Extensionless and leading-dot root repository
 files are legal only through `repository_projection` and its exact root-path rule below.
 

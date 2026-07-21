@@ -23,6 +23,10 @@ objects, or fall back to direct execution.
   `integrate <harness> skill preview|install|status|remove`, where `<harness>` is an exact
   registered `HarnessId` (v0.1: exactly `codex`) that the user always names and the CLI never infers
   from cwd, environment, installed editors, or running processes;
+  `integrate <harness> mcp status|preview|install` and `setup run|status` (ADR-012), thin wiring
+  over `cli/setup.py` for preview-gated MCP registration and the first-run wizard — for
+  registration the CLI may *discover* candidate binaries but a mutation still requires an explicit
+  selection plus digest-bound confirmation;
   `service run|status|lock|stop|unlock|initialize-passphrase` plus trusted-foreground
   `service idle-relock <60..86400|disabled>`;
   `provider credential set|rotate` for foreground confidential provisioning; and
@@ -33,6 +37,11 @@ objects, or fall back to direct execution.
   secret environment reader.
 
 ## Behavior
+
+Root bare-invocation (ADR-012): the app drops `no_args_is_help`; the root callback reproduces the
+historical help output for every bare invocation except when stdin and stdout are both real TTYs
+and the `setup_marker_path()` marker is absent, in which case it launches the interactive
+`setup run` wizard once. `--help`, named subcommands, and every non-TTY invocation are unchanged.
 
 Except for the explicitly client-local ADR-011 `state capture` support command, every normal
 workflow/support command strictly parses its request, connects to the deterministic same-UID
@@ -153,6 +162,9 @@ the identical operation request ID.
 - That suite also covers `service idle-relock` target grammar, preview, approve/deny,
   OS-presence/passphrase authorization, generation scope, and forbidden ordinary/MCP routes.
 - `tests/conformance/surfaces/test_cli_mcp_parity.py` covers exact operation parity.
+- `tests/subprocess/test_setup_wizard_cli.py` covers the `setup`/`integrate mcp` wiring and the
+  non-TTY bare-invocation help fallback; `tests/conformance/surfaces/test_cli_contract_matrix.py`
+  freezes `setup` in the support-command matrix.
 - `tests/packaging/test_service_boundary_imports.py` covers import trust boundary.
 - `tests/subprocess/test_cli_invocations.py` covers state capture, dirty/staged/untracked changes,
   no-content/path output, caps, changing input, and zero Git/ledger mutation.

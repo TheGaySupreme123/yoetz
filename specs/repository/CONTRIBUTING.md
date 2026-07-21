@@ -106,7 +106,8 @@ The contributor type checker is the exactly pinned official npm Pyright distribu
 `npx --no-install pyright`; Node/npm are contributor and CI prerequisites only. T3 Code, OpenCode,
 and Codex may inspire clarity of contributor experience and agent-facing docs, but their runtime
 architectures and closed-contribution postures are not Yoetz design inputs. End users follow the
-Python/`uv` install path; a public npm launcher is deferred.
+Python/`uv` install path; the delegation-only npm launcher at `support/npm-launcher/` (ADR-012)
+is the one reviewed additional surface and stays unpublished until a separate release decision.
 
 Agents and humans share the short contract in root `AGENTS.md`; `CONTRIBUTING.md` remains the
 human process source of truth.

@@ -68,7 +68,7 @@ _DEADLINE = Annotated[
 app = typer.Typer(
     name="yoetz",
     help="Local-first evidence ledger and review engine.",
-    no_args_is_help=True,
+    no_args_is_help=False,
     invoke_without_command=True,
     pretty_exceptions_enable=False,
     add_completion=False,
@@ -77,6 +77,10 @@ mcp_app = typer.Typer(help="Run protocol bridges.", no_args_is_help=True)
 state_app = typer.Typer(help="Capture bounded local structural state.", no_args_is_help=True)
 integrate_app = typer.Typer(help="Manage explicit harness integrations.", no_args_is_help=True)
 integrate_skill_app = typer.Typer(help="Manage the Yoetz harness skill.", no_args_is_help=True)
+integrate_mcp_app = typer.Typer(
+    help="Manage the Yoetz MCP server registration.", no_args_is_help=True
+)
+setup_app = typer.Typer(help="Guided first-run harness and provider setup.", no_args_is_help=True)
 service_app = typer.Typer(help="Manage the foreground local service.", no_args_is_help=True)
 provider_app = typer.Typer(help="Manage provider setup.", no_args_is_help=True)
 credential_app = typer.Typer(
@@ -94,6 +98,8 @@ app.add_typer(mcp_app, name="mcp")
 app.add_typer(state_app, name="state")
 app.add_typer(integrate_app, name="integrate")
 integrate_app.add_typer(integrate_skill_app, name="skill")
+integrate_app.add_typer(integrate_mcp_app, name="mcp")
+app.add_typer(setup_app, name="setup")
 app.add_typer(service_app, name="service")
 app.add_typer(provider_app, name="provider")
 provider_app.add_typer(credential_app, name="credential")
@@ -458,6 +464,87 @@ for _action in ("preview", "install", "status", "remove"):
     integrate_skill_app.command(_action)(_integration_command(_action))
 
 
+_CODEX_PATH = Annotated[
+    str | None,
+    typer.Option("--codex-path", help="Exact codex executable to configure."),
+]
+_ACCEPT = Annotated[
+    bool,
+    typer.Option("--accept", help="Explicitly accept the previewed registration."),
+]
+
+
+def _setup_operation(name: str) -> Callable[..., Awaitable[int]]:
+    module = importlib.import_module("yoetz.cli.setup")
+    return cast(Callable[..., Awaitable[int]], getattr(module, name))
+
+
+def _integration_mcp_command(action: str) -> Callable[..., None]:
+    def command(
+        context: typer.Context,
+        codex_path: _CODEX_PATH = None,
+        accept: _ACCEPT = False,
+        preview_digest: Annotated[
+            str | None,
+            typer.Option("--preview-digest", help="Exact preview digest to bind."),
+        ] = None,
+        json_output: _JSON = False,
+    ) -> None:
+        harness = cast(str, context.find_root().find_object(str) or context.obj)
+        operation = _setup_operation("integrate_mcp")
+        _finish(
+            run_async(
+                lambda: operation(
+                    action,
+                    harness,
+                    codex_path=codex_path,
+                    accept=accept,
+                    preview_digest=preview_digest,
+                    json_output=json_output,
+                )
+            )
+        )
+
+    return command
+
+
+for _mcp_action in ("preview", "install", "status"):
+    integrate_mcp_app.command(_mcp_action)(_integration_mcp_command(_mcp_action))
+
+
+@setup_app.command("run")
+def setup_run(
+    non_interactive: Annotated[
+        bool,
+        typer.Option("--non-interactive", help="Never prompt; report without mutating."),
+    ] = False,
+    codex_path: _CODEX_PATH = None,
+    accept: _ACCEPT = False,
+    json_output: _JSON = False,
+) -> None:
+    """Run the guided first-run setup wizard."""
+
+    operation = _setup_operation("run_setup_wizard")
+    _finish(
+        run_async(
+            lambda: operation(
+                non_interactive=non_interactive,
+                codex_path=codex_path,
+                accept=accept,
+                json_output=json_output,
+            )
+        )
+    )
+
+
+@setup_app.command("status")
+def setup_status(json_output: _JSON = False) -> None:
+    """Show read-only setup posture without mutating anything."""
+
+    operation = _setup_operation("setup_status")
+    _finish(run_async(lambda: operation(json_output=json_output)))
+
+
 async def _trusted_call(operation: Callable[[], Awaitable[object]], json_output: bool) -> int:
     try:
         result = await operation()
@@ -695,6 +782,7 @@ def version_command(
 
 @app.callback()
 def root(
+    context: typer.Context,
     version: Annotated[
         bool,
         typer.Option("--version", is_eager=True, help="Show the installed package version."),
@@ -703,6 +791,27 @@ def root(
     if version:
         typer.echo(__version__)
         raise typer.Exit(0)
+    if context.invoked_subcommand is not None:
+        return
+    # Bare invocation: an interactive terminal with no completion marker gets the
+    # first-run wizard once; every other invocation keeps the historical help text.
+    module = importlib.import_module("yoetz.cli.setup")
+    offer = cast(Callable[[], bool], getattr(module, "should_offer_first_run"))
+    if offer():
+        operation = _setup_operation("run_setup_wizard")
+        _finish(
+            run_async(
+                lambda: operation(
+                    non_interactive=False,
+                    codex_path=None,
+                    accept=False,
+                    json_output=False,
+                )
+            )
+        )
+        return
+    typer.echo(context.get_help())
+    raise typer.Exit(0)
 
 
 def main() -> None:
