@@ -9,6 +9,7 @@ from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal, cast
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -16,11 +17,15 @@ from yoetz.domain.privacy import ProviderDataUseProfile
 from yoetz.protocol.models import MAX_FINDINGS_DEFAULT, MAX_FINDINGS_LIMIT
 
 __all__ = [
+    "OFFICIAL_OPENAI_ENDPOINT_PROFILE_ID",
+    "OWNER_DECLARED_ENDPOINT_PROFILE_ID",
+    "OWNER_DECLARED_PROVIDER_ID",
     "PROFILE_CAPABILITIES",
     "ConfigError",
     "LocalModelProfileConfig",
     "LoggingConfig",
     "NetworkPolicy",
+    "OwnerDeclaredEndpointConfig",
     "PrivacyBootstrapConfig",
     "ProfileCapabilities",
     "ProviderDataUseProfile",
@@ -29,7 +34,12 @@ __all__ = [
     "StorageConfig",
     "VerificationConfig",
     "YoetzConfig",
+    "parse_https_origin",
 ]
+
+OFFICIAL_OPENAI_ENDPOINT_PROFILE_ID: Final = "openai-responses"
+OWNER_DECLARED_ENDPOINT_PROFILE_ID: Final = "owner-declared-openai-responses"
+OWNER_DECLARED_PROVIDER_ID: Final = "openai-compatible"
 
 _MODEL_CONFIG: Final = ConfigDict(
     strict=True,
@@ -64,8 +74,11 @@ _CONFIG_ERROR_REASONS: Final = frozenset(
         "config_value_invalid",
         "durability_unsupported",
         "external_profile_forbids_local_model",
+        "https_origin_invalid",
         "local_model_locator_forbidden",
         "max_findings_out_of_range",
+        "owner_declared_endpoint_forbidden",
+        "owner_declared_endpoint_required",
         "payload_logging_forbidden",
         "privacy_bootstrap_unsafe",
         "provider_required_for_semantic",
@@ -76,6 +89,26 @@ _CONFIG_ERROR_REASONS: Final = frozenset(
         "test_fake_forbids_provider",
         "unknown_config_key",
     }
+)
+_OWNER_DECLARED_FORBIDDEN_KEYS: Final = frozenset(
+    {
+        "api_key",
+        "authorization",
+        "base_url",
+        "credential",
+        "headers",
+        "host",
+        "http_origin",
+        "path",
+        "port",
+        "query",
+        "token",
+        "url",
+    }
+)
+_HOSTNAME = re.compile(
+    r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*$",
+    re.ASCII,
 )
 
 
@@ -177,6 +210,70 @@ def _validate_identifier(value: object) -> None:
         raise ConfigError("config_value_invalid")
 
 
+def parse_https_origin(value: object) -> tuple[str, int]:
+    """Validate a constrained HTTPS origin (scheme+host+optional port only).
+
+    Rejects ``http``, userinfo, path (other than empty/``/``), query, fragment, and credentials.
+    Returns ``(hostname, port)`` with default port ``443``.
+    """
+
+    if type(value) is not str or not 8 <= len(value) <= 512:
+        raise ConfigError("https_origin_invalid")
+    try:
+        parsed = urlparse(value)
+    except ValueError as exc:
+        raise ConfigError("https_origin_invalid") from exc
+    if (
+        parsed.scheme != "https"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+        or type(parsed.hostname) is not str
+        or not parsed.hostname
+        or _HOSTNAME.fullmatch(parsed.hostname) is None
+    ):
+        raise ConfigError("https_origin_invalid")
+    port = 443 if parsed.port is None else parsed.port
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise ConfigError("https_origin_invalid")
+    return parsed.hostname.casefold(), port
+
+
+class OwnerDeclaredEndpointConfig(StrictConfigModel):
+    """Owner-supplied HTTPS origin for the exact owner-declared Responses profile kind."""
+
+    https_origin: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_raw(cls, value: object) -> object:
+        _scan_secret_keys(value)
+        source = _mapping(value)
+        forbidden = sorted(
+            key
+            for key in _keys(value)
+            if type(key) is str and key.casefold() in _OWNER_DECLARED_FORBIDDEN_KEYS
+        )
+        if forbidden:
+            raise ConfigError("unknown_config_key", safe_name=forbidden[0][:256])
+        _reject_unknown(value, frozenset({"https_origin"}))
+        if "https_origin" not in source:
+            raise ConfigError("https_origin_invalid")
+        host, port = parse_https_origin(source["https_origin"])
+        origin = f"https://{host}" if port == 443 else f"https://{host}:{port}"
+        return {"https_origin": origin}
+
+    @property
+    def host(self) -> str:
+        return parse_https_origin(self.https_origin)[0]
+
+    @property
+    def port(self) -> int:
+        return parse_https_origin(self.https_origin)[1]
+
+
 class StorageConfig(StrictConfigModel):
     data_dir: Path | None = None
     durability: Literal["full"] = "full"
@@ -229,11 +326,21 @@ class ProviderProfileConfig(StrictConfigModel):
     capability_profile: str
     timeout_seconds: int = Field(default=60, ge=1, le=300)
     max_retries: int = Field(default=2, ge=0, le=2)
+    owner_declared_endpoint: OwnerDeclaredEndpointConfig | None = None
 
     @model_validator(mode="before")
     @classmethod
     def _validate_raw(cls, value: object) -> object:
         _scan_secret_keys(value)
+        # Free-form locators stay forbidden on the ordinary provider surface (ADR-006/014).
+        locator_keys = sorted(
+            key
+            for key in _keys(value)
+            if type(key) is str
+            and key.casefold() in _LOCAL_LOCATOR_KEYS.union({"https_origin", "http_origin"})
+        )
+        if locator_keys:
+            raise ConfigError("unknown_config_key", safe_name=locator_keys[0][:256])
         allowed = frozenset(
             {
                 "provider_id",
@@ -243,6 +350,7 @@ class ProviderProfileConfig(StrictConfigModel):
                 "capability_profile",
                 "timeout_seconds",
                 "max_retries",
+                "owner_declared_endpoint",
             }
         )
         _reject_unknown(value, allowed)
@@ -257,6 +365,15 @@ class ProviderProfileConfig(StrictConfigModel):
             if key in source:
                 _validate_identifier(source[key])
         return value
+
+    @model_validator(mode="after")
+    def _validate_owner_declared(self) -> ProviderProfileConfig:
+        owner_declared = self.endpoint_profile_id == OWNER_DECLARED_ENDPOINT_PROFILE_ID
+        if owner_declared and self.owner_declared_endpoint is None:
+            raise ConfigError("owner_declared_endpoint_required")
+        if not owner_declared and self.owner_declared_endpoint is not None:
+            raise ConfigError("owner_declared_endpoint_forbidden")
+        return self
 
 
 class LocalModelProfileConfig(StrictConfigModel):

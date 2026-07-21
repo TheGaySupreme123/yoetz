@@ -48,6 +48,9 @@ from yoetz.protocol.canonical import (
 from yoetz.protocol.models import MAX_REVIEW_CHALLENGES, SemanticStatus
 
 __all__ = [
+    "OFFICIAL_OPENAI_HOST",
+    "OFFICIAL_OPENAI_PATH",
+    "OFFICIAL_OPENAI_PORT",
     "OPENAI_CREDENTIAL_MAX_BYTES",
     "OPENAI_CREDENTIAL_MIN_BYTES",
     "OPENAI_MAX_OUTPUT_TOKENS",
@@ -60,6 +63,7 @@ __all__ = [
     "classify_provider_failure",
     "normalize_judgment",
     "normalize_response",
+    "owner_declared_data_use_profile",
     "render_case",
     "validate_openai_credential",
 ]
@@ -72,11 +76,18 @@ OPENAI_MAX_RESPONSE_BODY_BYTES: Final = 1_048_576
 _TOKEN68_BODY_BYTES: Final = frozenset(
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~+/"
 )
-_HOST: Final = "api.openai.com"
-_PORT: Final = 443
-_PATH: Final = "/v1/responses"
+OFFICIAL_OPENAI_HOST: Final = "api.openai.com"
+OFFICIAL_OPENAI_PORT: Final = 443
+OFFICIAL_OPENAI_PATH: Final = "/v1/responses"
+_HOST: Final = OFFICIAL_OPENAI_HOST
+_PORT: Final = OFFICIAL_OPENAI_PORT
+_PATH: Final = OFFICIAL_OPENAI_PATH
 _IDENTITY_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$", re.ASCII)
 _MODEL_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$", re.ASCII)
+_HOSTNAME_PATTERN: Final = re.compile(
+    r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*$",
+    re.ASCII,
+)
 
 type _Conclusion = Literal["no_material_discrepancy", "challenges_returned", "insufficient_packet"]
 type _NextStep = Literal[
@@ -180,7 +191,7 @@ def validate_openai_credential(view: memoryview) -> None:
 
 @dataclass(frozen=True, slots=True)
 class OpenAIProfile:
-    """Frozen, exact, nonsecret identity/capability profile for the approved OpenAI endpoint."""
+    """Frozen, exact, nonsecret identity/capability profile for a Responses endpoint."""
 
     provider_id: str
     model: str
@@ -189,6 +200,8 @@ class OpenAIProfile:
     timeout_seconds: int
     supports_structured_outputs: bool
     data_use_profile: ProviderDataUseProfile
+    host: str = _HOST
+    port: int = _PORT
 
     def __post_init__(self) -> None:
         if (
@@ -214,18 +227,45 @@ class OpenAIProfile:
             raise ValueError("openai_profile_capability_invalid")
         if type(self.data_use_profile) is not ProviderDataUseProfile:
             raise ValueError("openai_profile_data_use_invalid")
-
-    @property
-    def host(self) -> str:
-        return _HOST
-
-    @property
-    def port(self) -> int:
-        return _PORT
+        if type(self.host) is not str or _HOSTNAME_PATTERN.fullmatch(self.host) is None:
+            raise ValueError("openai_profile_host_invalid")
+        if type(self.port) is not int or not 1 <= self.port <= 65535:
+            raise ValueError("openai_profile_port_invalid")
 
     @property
     def path(self) -> str:
         return _PATH
+
+    @property
+    def base_url(self) -> str:
+        if self.port == 443:
+            return f"https://{self.host}"
+        return f"https://{self.host}:{self.port}"
+
+
+def owner_declared_data_use_profile(
+    *,
+    reviewed_at: object,
+    expires_at: object,
+    evidence_digest: str,
+) -> ProviderDataUseProfile:
+    """Unknown data-use facts for owner-declared hosts (never assisted-eligible)."""
+
+    from datetime import datetime
+
+    if type(reviewed_at) is not datetime or type(expires_at) is not datetime:
+        raise TypeError("openai_data_use_time_invalid")
+    return ProviderDataUseProfile(
+        data_use_profile_id="owner-declared-unknown",
+        data_use_profile_version="1.0.0",
+        customer_content_training="unknown",
+        retention="unknown",
+        retention_days_ceiling=None,
+        provider_human_access="unknown",
+        reviewed_at=reviewed_at,
+        expires_at=expires_at,
+        evidence_digest=evidence_digest,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -549,8 +589,11 @@ class OneAttemptCredentialTransport(httpx.AsyncBaseTransport):
         "_body_sha256",
         "_consumed",
         "_credential",
+        "_host",
         "_inner",
+        "_path",
         "_pending_request",
+        "_port",
     )
 
     def __init__(
@@ -559,13 +602,25 @@ class OneAttemptCredentialTransport(httpx.AsyncBaseTransport):
         rendered: RenderedOpenAIRequest,
         credential: ProviderCredentialHandle,
         binding: ProviderAttemptAuthBinding,
+        host: str = _HOST,
+        port: int = _PORT,
+        path: str = _PATH,
     ) -> None:
         if binding.request_body_digest != rendered.body_sha256:
             raise ValueError("openai_transport_binding_mismatch")
+        if type(host) is not str or _HOSTNAME_PATTERN.fullmatch(host) is None:
+            raise ValueError("openai_transport_host_invalid")
+        if type(port) is not int or not 1 <= port <= 65535:
+            raise ValueError("openai_transport_port_invalid")
+        if path != _PATH:
+            raise ValueError("openai_transport_path_invalid")
         self._body = rendered.body
         self._body_sha256 = rendered.body_sha256
         self._credential = credential
         self._binding = binding
+        self._host = host
+        self._port = port
+        self._path = path
         self._consumed = False
         self._inner = httpx.AsyncHTTPTransport(verify=True, trust_env=False, retries=0)
         self._pending_request: httpx.Request | None = None
@@ -579,9 +634,9 @@ class OneAttemptCredentialTransport(httpx.AsyncBaseTransport):
         if (
             request.method != "POST"
             or url.scheme != "https"
-            or url.host != _HOST
-            or (url.port or _PORT) != _PORT
-            or url.path != _PATH
+            or url.host != self._host
+            or (url.port or self._port) != self._port
+            or url.path != self._path
         ):
             raise ValueError("openai_transport_destination_mismatch")
         if request.headers.get("content-encoding"):
@@ -682,7 +737,7 @@ class OpenAIResponsesEvaluator:
         http_client = httpx.AsyncClient(transport=self._transport, trust_env=False)
         client: Any = openai_module.AsyncOpenAI(
             api_key="yoetz-fixed-nonsecret-sentinel",
-            base_url=f"https://{self._profile.host}",
+            base_url=self._profile.base_url,
             timeout=remaining,
             max_retries=0,
             http_client=http_client,

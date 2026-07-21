@@ -46,6 +46,10 @@ _STATUS_SCHEMA: Final = "yoetz.setup-status/1"
 _NEXT_SERVICE: Final = "run 'yoetz service run' under your selected user supervisor"
 _NEXT_UNLOCK: Final = "run 'yoetz service unlock' from a local terminal if the vault is locked"
 _NEXT_PRIVACY: Final = "run 'yoetz privacy setup' to review recipes and provider binding"
+_NEXT_PROVIDER_TOML: Final = (
+    "run 'yoetz provider endpoint' (or edit config.toml) to choose Official OpenAI "
+    "or an owner-declared HTTPS origin+model — never put API keys in TOML"
+)
 _NEXT_CREDENTIAL: Final = (
     "run 'yoetz provider credential set' from a local terminal to provision the "
     "provider credential through the confidential ceremony"
@@ -262,12 +266,18 @@ async def run_setup_wizard(
 
     service = await _service_reachability()
 
+    if interactive:
+        from yoetz.cli.provider_binding import prompt_provider_endpoint_binding
+
+        prompt_provider_endpoint_binding()
+
     next_steps: list[JsonValue] = []
     if not service["reachable"]:
         next_steps.append(_NEXT_SERVICE)
     if service.get("vault_mode") == "passphrase" or not service["reachable"]:
         next_steps.append(_NEXT_UNLOCK)
     next_steps.append(_NEXT_PRIVACY)
+    next_steps.append(_NEXT_PROVIDER_TOML)
     next_steps.append(_NEXT_CREDENTIAL)
 
     mutating_run = interactive or accept

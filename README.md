@@ -40,15 +40,52 @@ The first bare `yoetz` on an interactive terminal starts a **setup wizard**
 binaries on your PATH (showing a choice when several exist), previews and — only after your
 explicit confirmation — registers `yoetz mcp serve` with the chosen Codex
 (`codex mcp get` first; an existing foreign entry is always preserved, never replaced), checks
-whether the local service is reachable, and prints the exact next commands for the parts that
-stay deliberately human-driven:
+whether the local service is reachable, optionally collects the nonsecret Official OpenAI vs
+custom HTTPS origin+model binding (writes service `config.toml`; never secrets), and prints the
+exact next commands for the parts that stay deliberately human-driven:
 
 1. `yoetz service run` — start the persistent local service under a supervisor you choose;
 2. `yoetz privacy setup` — review recipes, provider binding, and egress policy (zero-egress
    until you commit otherwise);
-3. `yoetz provider credential set` — provision the LLM API credential through the confidential
+3. `yoetz provider endpoint` (or edit `config.toml`) — Official OpenAI **or** owner-declared
+   HTTPS origin+model; see examples below;
+4. `yoetz provider credential set` — provision the LLM API credential through the confidential
    terminal ceremony (never a flag, file, or environment variable).
 
+### Example `config.toml` (Official OpenAI)
+
+```toml
+schema_version = "1"
+profile = "local-openai"
+
+[provider]
+provider_id = "openai"
+endpoint_profile_id = "openai-responses"
+endpoint_profile_version = "1.0.0"
+model = "gpt-4.1-mini"
+capability_profile = "openai-responses-structured-1"
+```
+
+### Example `config.toml` (owner-declared HTTPS origin)
+
+```toml
+schema_version = "1"
+profile = "local-openai"
+
+[provider]
+provider_id = "openai-compatible"
+endpoint_profile_id = "owner-declared-openai-responses"
+endpoint_profile_version = "1.0.0"
+model = "my-proxy-model"
+capability_profile = "openai-responses-structured-1"
+
+[provider.owner_declared_endpoint]
+https_origin = "https://llm.example.com:8443"
+# no api_key / headers / path / http — credentials stay in the ceremony
+```
+
+Later, bare `yoetz` opens the interactive menu ([ADR-013](docs/adr/ADR-013-interactive-control-menu.md)),
+including the same LLM endpoint binding under **LLM provider**.
 Re-run any time with `yoetz setup run`; inspect posture read-only with `yoetz setup status`;
 manage registration directly with `yoetz integrate codex mcp status|preview|install`. Every
 non-interactive bare invocation (CI, pipes) still prints help.

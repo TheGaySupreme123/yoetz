@@ -122,6 +122,12 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    consume-first admits one attempt that may send, must be best-effort closed/nonselectable, and
    records its actual terminal or unknown receipt. Tightening never claims to retract bytes already
    admitted.
+   **Desired-state TOML (ADR-014):** `yoetz privacy export-desired` / `apply-desired` may declare
+   nonsecret policy intent in a sidecar TOML document. Apply classifies against the effective
+   store: equivalent is a no-op; tighten routes to the existing tighten gate; widen never commits
+   from the file alone and requires the ordinary propose→decide path. The generation-1
+   `[privacy]` bootstrap seed in service `config.toml` remains fail-safe only and is not
+   continuing disclosure authority.
 7. **Human approval is resumable authority:** content-bearing previews and decisions are encrypted
    durable `ObjectKind.privacy_audit` objects in the owning task bundle. Taskless v0.1 decisions and
    machine policy diffs are closed nonsecret structural catalog rows; a future taskless

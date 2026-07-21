@@ -100,16 +100,24 @@ this table; it does not decide whether a separately reviewed bounded non-LLM cha
 ### `ProviderProfileConfig`
 
 - `provider_id: str`, `endpoint_profile_id: str`, `endpoint_profile_version: str`, and `model: str`
-  are structural identifiers matched against an installed, release-tested profile. No raw/base URL
-  field exists; the service resolves the exact profile to its trusted endpoint.
+  are structural identifiers matched against an installed, release-tested profile. There is still
+  **no free `base_url` / host / port / headers field** on the ordinary provider surface.
+- Optional nested `owner_declared_endpoint: OwnerDeclaredEndpointConfig | None` is accepted **only**
+  when `endpoint_profile_id == "owner-declared-openai-responses"` (ADR-014). That nested object
+  carries exactly `https_origin` — HTTPS scheme, host, optional port; no userinfo, query, fragment,
+  or path other than empty/`/`. Path on the wire remains the profile-fixed `/v1/responses`.
+  Presence on any other endpoint profile → `ConfigError("owner_declared_endpoint_forbidden")`;
+  absence on the owner-declared profile → `ConfigError("owner_declared_endpoint_required")`.
+  Invalid origins → `ConfigError("https_origin_invalid")`.
+- Official OpenAI continues to use `endpoint_profile_id = "openai-responses"` with the bundled host
+  `api.openai.com` resolved by the adapter, not from TOML.
 - `timeout_seconds: int = 60`; `max_retries: int = 2` (Yoetz-owned budget, ADR-006) —
   both bounded (`1..300`, `0..2`).
 - `capability_profile: str` is required and must match the endpoint/model tuple.
 - The installed profile named by that tuple carries a versioned `ProviderDataUseProfile` with
   customer-content-training, retention, provider-human-access, review/expiry, and evidence-digest
-  facts. Config does not let a user self-assert those facts. Unknown/stale posture removes the
-  upstream `assisted` recommendation badge but does not make an otherwise exact custom profile look
-  like verified no-training behavior.
+  facts. Config does not let a user self-assert those facts. Owner-declared hosts default to
+  `unknown` data-use facts and never earn the upstream `assisted` recommendation badge.
 - **No secret or confidential locator fields exist.** There is no `api_key`, `token`, `password`,
   credential reference, socket path, header, or generic URL field, and
   `extra="forbid"` rejects any attempt to add one. A cross-field validator additionally scans

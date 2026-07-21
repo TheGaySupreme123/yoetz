@@ -1847,10 +1847,15 @@ facade and are never MCP tools.
   the `PrivacyProfile` enum; provider credentials and unlock/recovery material cannot be represented
   by config or environment. Ordinary clients never load this object. `release-probe` is available
   only to the service-start release harness and cannot loosen user policy. Shared config values are
-  `YoetzConfig`, `MinimalConfig`, `ConfigError`, and `PathSafetyError`. Its composition-only
+  `YoetzConfig`, `MinimalConfig`, `ConfigError`, `PathSafetyError`, `OwnerDeclaredEndpointConfig`,
+  `parse_https_origin`, and the exact endpoint profile ids `openai-responses` /
+  `owner-declared-openai-responses` (ADR-014). Constrained `https_origin` is the only owner-supplied
+  locator; free `base_url` remains forbidden. Its composition-only
   `NetworkPolicy` values are exactly `denied|candidate_external|explicit_per_probe`;
   `SemanticPolicy` values are exactly
   `optional_local_model|optional_external|scripted_fake|no_implicit_model`.
+- `config/write.py` / `config/privacy_desired.py`: atomic nonsecret TOML writers and privacy
+  desired-state export/apply classification (widen never silent).
 - `config/paths.py`: platformdirs-based `bundle_root()`, `catalog_path()`, path safety checks
   (rejects repo/sync/network/world-readable locations).
 - `observability/logging.py`: structured stderr logging, allowlisted fields only; shared `LogMode`

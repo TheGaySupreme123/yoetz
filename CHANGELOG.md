@@ -8,6 +8,16 @@ released versions.
 
 ### Added
 
+- TOML alternate settings surface and owner-declared OpenAI-compatible endpoints (ADR-014 /
+  issue #2): `config.toml` may bind Official OpenAI (`openai-responses`) or
+  `owner-declared-openai-responses` with constrained `[provider.owner_declared_endpoint].https_origin`
+  (HTTPS host+optional port only; no secrets, headers, or free `base_url`). Wizard and menu collect
+  the same nonsecret choice; `yoetz provider endpoint` writes it. Owner-declared data-use defaults
+  to `unknown` (never inherits `assisted`). Privacy desired-state TOML via
+  `yoetz privacy export-desired` / `apply-desired` classifies tighten vs widen and never silently
+  widens egress. Credentials, vault unlock, MCP registration, and widening decide remain
+  ceremony-only.
+
 - Interactive control menu (ADR-013): bare `yoetz` on an interactive terminal now opens a
   navigable menu (first-run still gets the setup wizard once, then lands in the menu), and the
   new `yoetz menu` command opens it explicitly. The menu shows a status overview (service

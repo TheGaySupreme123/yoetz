@@ -8,8 +8,8 @@ This is the complete one-to-one ledger between the natural-language specificatio
 files planned for the public v0.1 repository. It is declarative: adding, removing, renaming, or
 splitting a future file requires changing this reviewed table and its owning spec together.
 
-The inventory contains 560 spec files: 546 exact future-file owners,
-10 directory indexes, and 4 coordination files. The 546 future paths are unique. The thirteen
+The inventory contains 565 spec files: 551 exact future-file owners,
+10 directory indexes, and 4 coordination files. The 551 future paths are unique. The fourteen
 already-authored public ADRs are current decision authorities, not future-file candidates, so
 they are intentionally outside the mirrored ownership universe. Ignored local architecture/
 strategy inputs are neither inventoried nor authoritative.
@@ -255,6 +255,7 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/src/yoetz/cli/exits.md` | `future_file` | `src/yoetz/cli/exits.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/cli/menu.md` | `future_file` | `src/yoetz/cli/menu.py` | `python_shorthand` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/cli/privacy_control.md` | `future_file` | `src/yoetz/cli/privacy_control.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/cli/provider_binding.md` | `future_file` | `src/yoetz/cli/provider_binding.py` | `python_shorthand` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/cli/render.md` | `future_file` | `src/yoetz/cli/render.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/cli/setup.py.md` | `future_file` | `src/yoetz/cli/setup.py` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/cli/unlock.md` | `future_file` | `src/yoetz/cli/unlock.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
@@ -263,6 +264,8 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/src/yoetz/config/models.md` | `future_file` | `src/yoetz/config/models.py` | `python_shorthand` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/config/paths.md` | `future_file` | `src/yoetz/config/paths.py` | `python_shorthand` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/config/privacy.md` | `future_file` | `src/yoetz/config/privacy.py` | `python_shorthand` | — | `C` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/config/privacy_desired.md` | `future_file` | `src/yoetz/config/privacy_desired.py` | `python_shorthand` | — | `C` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/config/write.md` | `future_file` | `src/yoetz/config/write.py` | `python_shorthand` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/domain/__init__.md` | `future_file` | `src/yoetz/domain/__init__.py` | `python_shorthand` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/domain/events.md` | `future_file` | `src/yoetz/domain/events.py` | `python_shorthand` | — | `B` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/domain/findings.md` | `future_file` | `src/yoetz/domain/findings.py` | `python_shorthand` | — | `B` | `draft` | Owns exactly this future public repository file. |
@@ -556,7 +559,9 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/tests/unit/application/test_verdict_rules.py.md` | `future_file` | `tests/unit/application/test_verdict_rules.py` | `exact_suffix` | — | `C/D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/config/test_load_precedence.py.md` | `future_file` | `tests/unit/config/test_load_precedence.py` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/config/test_models.py.md` | `future_file` | `tests/unit/config/test_models.py` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
+| `specs/tests/unit/config/test_owner_declared_endpoint.py.md` | `future_file` | `tests/unit/config/test_owner_declared_endpoint.py` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/config/test_paths.py.md` | `future_file` | `tests/unit/config/test_paths.py` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
+| `specs/tests/unit/config/test_privacy_desired.py.md` | `future_file` | `tests/unit/config/test_privacy_desired.py` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/domain/test_event_payloads.py.md` | `future_file` | `tests/unit/domain/test_event_payloads.py` | `exact_suffix` | — | `A/B` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/domain/test_findings.py.md` | `future_file` | `tests/unit/domain/test_findings.py` | `exact_suffix` | — | `B` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/domain/test_receipts.py.md` | `future_file` | `tests/unit/domain/test_receipts.py` | `exact_suffix` | — | `B` | `draft` | Owns exactly this future public repository file. |

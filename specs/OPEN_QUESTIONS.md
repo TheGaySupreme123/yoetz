@@ -1,6 +1,6 @@
 # Yoetz v0.1 — decision ledger and implementation-freeze gates
 
-**Wave:** A–F | **ADRs:** ADR-001 through ADR-012 | **Imports (spec-tree):** all owning specs |
+**Wave:** A–F | **ADRs:** ADR-001 through ADR-014 | **Imports (spec-tree):** all owning specs |
 **Imported by:** `specs/README.md`, ADR ratification, implementation-freeze review
 
 ## Purpose
@@ -107,6 +107,7 @@ that evidence.
 | E-013 | Exact harness lifecycle trigger points a trigger hook may bind to, context compaction among them | Codex `0.144.5` currently exposes `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, and `Stop`, but names alone are not support evidence. A v0.1 exact capability cell may declare a trigger-only hook only after an installed-artifact run freezes event, payload/privacy boundary, permitted action, coalescing/loop guard, and failure behavior. Unproven cells remain `None`; every v0.1 observation arm is absent. | ADR-010 installed-artifact capability evidence and exact harness support-matrix cell. |
 | E-014 | Publication-ceremony budget and work-package grouping examples | Dogfood must measure publications per work package, model-authored event bytes, token/latency overhead, abandoned or stale-ledger rate, skipped checks, and user-visible chatter. Large inventories must compare grouped work packages with per-file publication amplification; no threshold is inferred from file count alone. | Harness-neutral capability/conformance fixtures plus bounded dogfood evidence used to freeze guidance examples and budgets. |
 | E-015 | Exact structural subject-state capture matrix | No support claim until installed-artifact tests freeze Git/object-format and OS cells, symlink/submodule/racy-worktree behavior, file/byte caps, exclusions, sanitized environment, path/content-free output, and no network or trusted-service reachability. | ADR-011 CLI/subprocess, packaging-boundary, privacy, and capability evidence. |
+| E-016 | TOML as alternate nonsecret settings surface, including official OpenAI vs owner-declared OpenAI-compatible HTTPS origin+model | **Working (ADR-014).** Config validates constrained `https_origin`, rejects secrets/free `base_url`, mutual-excludes official vs owner-declared, and writes the same fields from wizard/menu/`yoetz provider endpoint`. Owner-declared data-use defaults to `unknown` (never `assisted`). Privacy desired-state export/apply classifies widen vs tighten and never silently widens. Remaining: optional live owner-declared host probe before advertising verified interoperability beyond the protocol cell. | ADR-014, ADR-006/009 amendments, config/privacy/openai_responses specs, unit fixtures; live probe optional. |
 
 ### Independent review blocker
 

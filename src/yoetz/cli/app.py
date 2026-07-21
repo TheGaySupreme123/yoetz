@@ -685,6 +685,171 @@ credential_app.command("set")(_provider_credential_command("set"))
 credential_app.command("rotate")(_provider_credential_command("rotate"))
 
 
+@provider_app.command("endpoint")
+def provider_endpoint(
+    official: Annotated[
+        bool, typer.Option("--official", help="Bind the bundled Official OpenAI Responses profile.")
+    ] = False,
+    https_origin: Annotated[
+        str | None,
+        typer.Option(
+            "--https-origin",
+            help="Owner-declared HTTPS origin (https://host[:port] only).",
+        ),
+    ] = None,
+    model: Annotated[str | None, typer.Option("--model", help="Model identifier.")] = None,
+    interactive: Annotated[
+        bool, typer.Option("--interactive/--no-interactive", help="Prompt on a TTY.")
+    ] = True,
+    json_output: _JSON = False,
+) -> None:
+    """Write nonsecret Official OpenAI or owner-declared endpoint binding to config.toml."""
+
+    from yoetz.cli.provider_binding import (
+        apply_provider_endpoint_choice,
+        prompt_provider_endpoint_binding,
+    )
+    from yoetz.config.models import ConfigError
+
+    try:
+        if interactive and not official and https_origin is None and model is None:
+            if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                _finish(_usage_failure())
+                return
+            prompt_provider_endpoint_binding()
+            _finish(0)
+            return
+        if model is None:
+            _finish(_usage_failure())
+            return
+        if official and https_origin is not None:
+            _finish(_usage_failure())
+            return
+        if official:
+            path, provider = apply_provider_endpoint_choice("official_openai", model=model)
+        elif https_origin is not None:
+            path, provider = apply_provider_endpoint_choice(
+                "owner_declared", model=model, https_origin=https_origin
+            )
+        else:
+            _finish(_usage_failure())
+            return
+        payload = {
+            "config_path": str(path),
+            "endpoint_profile_id": provider.endpoint_profile_id,
+            "endpoint_profile_version": provider.endpoint_profile_version,
+            "model": provider.model,
+            "provider_id": provider.provider_id,
+        }
+        if provider.owner_declared_endpoint is not None:
+            payload["https_origin"] = provider.owner_declared_endpoint.https_origin
+        _human_or_json(payload, json_output=json_output)
+        _finish(0)
+    except ConfigError as error:
+        typer.echo(f"invalid_request: {error.reason_code}", err=True)
+        _finish(2)
+
+
+@privacy_app.command("export-desired")
+def privacy_export_desired(
+    output: Annotated[Path, typer.Option("--output", help="Destination TOML path.")],
+    json_output: _JSON = False,
+) -> None:
+    """Export effective nonsecret privacy policy as desired-state TOML (never secrets)."""
+
+    async def _run() -> int:
+        from yoetz.adapters.privacy.catalog import decode_privacy_policy_canonical
+        from yoetz.config.privacy_desired import write_privacy_desired_toml
+
+        try:
+            client = await build_service_client()
+            try:
+                effective = await client.privacy_get_effective(JsonObject({}))
+            finally:
+                await client.close()
+        except ControlError as error:
+            return _control_failure(error)
+        plain = _plain_json(effective)
+        if type(plain) is not dict or "policy" not in plain:
+            return _usage_failure()
+        try:
+            policy = decode_privacy_policy_canonical(
+                canonical_encode(cast(JsonValue, plain["policy"]))
+            )
+        except Exception:
+            return _usage_failure()
+        path = write_privacy_desired_toml(policy, output)
+        _human_or_json({"path": str(path), "schema": "yoetz.privacy-desired/1"}, json_output)
+        return 0
+
+    _finish(run_async(_run))
+
+
+@privacy_app.command("apply-desired")
+def privacy_apply_desired(
+    input_path: Annotated[Path, typer.Option("--input", help="Desired-state TOML path.")],
+    json_output: _JSON = False,
+) -> None:
+    """Classify privacy desired-state TOML: tighten may proceed via gates; widen never silent."""
+
+    async def _run() -> int:
+        from yoetz.adapters.privacy.catalog import decode_privacy_policy_canonical
+        from yoetz.application.privacy_policy import is_privacy_tightening
+        from yoetz.config.models import ConfigError
+        from yoetz.config.privacy_desired import load_privacy_desired_canonical
+
+        try:
+            candidate = decode_privacy_policy_canonical(load_privacy_desired_canonical(input_path))
+        except ConfigError as error:
+            typer.echo(f"invalid_request: {error.reason_code}", err=True)
+            return 2
+        try:
+            client = await build_service_client()
+            try:
+                effective = await client.privacy_get_effective(JsonObject({}))
+            finally:
+                await client.close()
+        except ControlError as error:
+            return _control_failure(error)
+        plain = _plain_json(effective)
+        if type(plain) is not dict or "policy" not in plain:
+            return _usage_failure()
+        try:
+            current = decode_privacy_policy_canonical(
+                canonical_encode(cast(JsonValue, plain["policy"]))
+            )
+        except Exception:
+            return _usage_failure()
+        if current == candidate:
+            _human_or_json({"outcome": "equivalent"}, json_output=json_output)
+            return 0
+        if is_privacy_tightening(current, candidate):
+            _human_or_json(
+                {
+                    "next": "yoetz privacy tighten",
+                    "note": "desired-state is a tighten; apply via the existing tighten gate",
+                    "outcome": "tighten",
+                },
+                json_output=json_output,
+            )
+            return 0
+        typer.echo(
+            "widening_requires_decide: editing desired-state TOML cannot silently widen egress; "
+            "run 'yoetz privacy propose' then 'yoetz privacy decide-policy'.",
+            err=True,
+        )
+        _human_or_json(
+            {
+                "next": "yoetz privacy propose → yoetz privacy decide-policy",
+                "outcome": "widen",
+            },
+            json_output=json_output,
+        )
+        return 2
+
+    _finish(run_async(_run))
+
+
 def _privacy_decision_command(kind: str) -> Callable[..., None]:
     def command(
         pending_id: Annotated[str, typer.Argument(help="Exact pending privacy decision ID.")],

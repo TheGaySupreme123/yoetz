@@ -54,7 +54,9 @@ tests/unit/
   config/
     test_load_precedence.py
     test_models.py
+    test_owner_declared_endpoint.py
     test_paths.py
+    test_privacy_desired.py
   observability/
     test_logging_allowlist.py
     test_privacy.py
@@ -106,7 +108,9 @@ tests/unit/application/test_unit_of_work.py
 tests/unit/application/test_verdict_rules.py
 tests/unit/config/test_load_precedence.py
 tests/unit/config/test_models.py
+tests/unit/config/test_owner_declared_endpoint.py
 tests/unit/config/test_paths.py
+tests/unit/config/test_privacy_desired.py
 tests/unit/domain/test_event_payloads.py
 tests/unit/domain/test_findings.py
 tests/unit/domain/test_receipts.py

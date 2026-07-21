@@ -75,7 +75,7 @@ from yoetz.protocol.canonical import (
     strict_json_parse,
 )
 
-__all__ = ["CatalogPrivacyAudit", "CatalogPrivacyPolicyStore"]
+__all__ = ["CatalogPrivacyAudit", "CatalogPrivacyPolicyStore", "decode_privacy_policy_canonical"]
 
 _LOOKUP_DOMAIN = b"yoetz/privacy-audit/lookup/v1\x00"
 _PROPOSAL_DOMAIN = b"yoetz/privacy-audit/proposal/v1\x00"
@@ -292,6 +292,12 @@ def _policy_from_bytes(data: bytes) -> PrivacyPolicy:
         parse_rfc3339_millis(source["created_at"]),
         cast(str | None, source["supersedes_policy_digest"]),
     )
+
+
+def decode_privacy_policy_canonical(data: bytes) -> PrivacyPolicy:
+    """Decode a canonical privacy-policy JSON document (desired-state apply path)."""
+
+    return _policy_from_bytes(data)
 
 
 @contextmanager

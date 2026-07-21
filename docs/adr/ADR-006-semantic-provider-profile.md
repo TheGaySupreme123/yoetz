@@ -18,8 +18,11 @@ and semantic/privacy capability and conformance tests.
 2. **First external adapter:** official `openai` Python SDK (pinned `2.46.0`), Responses API with
    structured outputs (`responses.parse` + frozen `ProviderJudgmentModel` schema). A release names
    an exact tested provider/model/endpoint-profile tuple. A generic or merely
-   "OpenAI-compatible" URL is never trusted; an alternate endpoint requires its own exact,
-   versioned, executable capability profile.
+   "OpenAI-compatible" URL is never trusted as an ambient override. One exact, versioned profile
+   kind — `owner-declared-openai-responses` (ADR-014) — may bind an owner-supplied constrained
+   HTTPS origin from service TOML (`[provider.owner_declared_endpoint].https_origin`); it reuses
+   the Responses protocol cell, never inherits official OpenAI data-use / `assisted` eligibility,
+   and still requires capability evidence for any advertised interoperability claim.
 3. **Local-model adapter:** v0.1 includes the contract for a separately configured local semantic
    evaluator. Its endpoint is an owner-only, service-approved AF_UNIX socket profile; it performs no
    DNS, AF_INET/AF_INET6 connection, redirect, proxy lookup, or fallback. It is a local disclosure

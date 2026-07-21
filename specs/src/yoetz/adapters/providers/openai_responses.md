@@ -75,30 +75,30 @@ content rule.
 
 ### Construction and profile validation
 
-`OpenAIProfile` is a nonsecret identity object. It is responsible for binding the exact provider
-identity and capability profile that Yoetz is willing to trust. At construction time the profile
-must be validated for:
+`OpenAIProfile` is a nonsecret identity object. It binds the exact provider identity and capability
+profile Yoetz is willing to trust. Construction validates:
 
 - a non-empty exact provider/model name;
 - explicit timeout bounds;
 - explicit endpoint profile identifier and version;
 - capability flags that allow the exact JSON schema subset Yoetz expects;
-- a bounded data-retention and request-ID reporting posture.
-- one exact current `ProviderDataUseProfile`: customer-content training
-  `prohibited|permitted|unknown`, retention `none|bounded|unbounded|unknown` plus a ceiling only
-  when bounded, provider-human access `prohibited|restricted|permitted|unknown`, review/expiry
-  timestamps, and an
-  artifact-bound evidence digest;
-- exact HTTPS scheme, DNS host, port, path, `POST` method, platform CA trust, and hostname/SNI
-  verification; no user/config-supplied URL, alternate address, proxy, or redirect, and no v0.1
-  claim of certificate or SPKI pinning;
+- one exact current `ProviderDataUseProfile` (customer-content training / retention /
+  provider-human access / review-expiry / evidence digest);
+- HTTPS destination: host + port (defaults `api.openai.com:443` for the official preset;
+  owner-declared profile `owner-declared-openai-responses` supplies host/port from validated
+  config `https_origin` per ADR-014) with path fixed to `/v1/responses`, `POST`, platform CA
+  trust, and hostname/SNI verification — no free user URL, proxy, or redirect, and no v0.1
+  certificate/SPKI pinning claim;
 - exact `max_output_tokens=2048`, raw response-body cap `1_048_576`, and identity-only content
   encoding.
 
+`owner_declared_data_use_profile(...)` builds the unknown training/retention/human-access record
+that never passes `recommendation_eligible`. `OneAttemptCredentialTransport` checks the request
+destination against the bound host/port/path (not only a module-global official host).
+
 The adapter fails fast if the profile claims structured outputs but does not actually support them
-in the tested environment. An “OpenAI-compatible” base URL is not accepted by default; it must
-first have its own named, versioned, executable capability profile accepted by the semantic port
-and release evidence.
+in the tested environment. An ambient “OpenAI-compatible” base URL is not accepted; the only
+alternate is the exact owner-declared profile kind above.
 
 The data-use record is inspectable recommendation evidence, not a provider capability inferred from
 the name and not a technical no-training proof. Upstream `assisted` eligibility requires a current

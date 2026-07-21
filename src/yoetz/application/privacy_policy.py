@@ -58,6 +58,7 @@ __all__ = [
     "ReviewRecipeView",
     "TightenPrivacyPolicyRequest",
     "decide_privacy_policy",
+    "is_privacy_tightening",
     "privacy_get_effective",
     "privacy_get_setup",
     "privacy_propose_policy",
@@ -413,6 +414,12 @@ def _channel_subset(candidate: ChannelPolicy, current: ChannelPolicy) -> bool:
 
 def _scope_rank(value: str) -> int:
     return {"machine": 0, "workspace": 1, "task": 2, "request": 3}[value]
+
+
+def is_privacy_tightening(current: PrivacyPolicy, candidate: PrivacyPolicy) -> bool:
+    """True when ``candidate`` is a non-widening subset/equivalent of ``current``."""
+
+    return _is_tightening(current, candidate)
 
 
 def _is_tightening(current: PrivacyPolicy, candidate: PrivacyPolicy) -> bool:

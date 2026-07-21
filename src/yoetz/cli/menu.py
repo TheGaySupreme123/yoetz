@@ -296,16 +296,21 @@ def _harness_menu() -> None:
 def _provider_menu() -> None:
     typer.echo("")
     typer.echo("LLM provider connection")
-    typer.echo("  The identifiers below are nonsecret; they come from your endpoint profile")
-    typer.echo("  ('yoetz privacy setup' shows the active binding). The credential itself is")
-    typer.echo("  typed only inside the confidential prompt that follows.")
-    typer.echo("  1  Set a provider credential")
-    typer.echo("  2  Rotate a provider credential")
+    typer.echo("  Nonsecret endpoint binding is editable in config.toml (or option 1).")
+    typer.echo("  Credentials are typed only inside the confidential ceremony.")
+    typer.echo("  1  Set Official OpenAI or custom HTTPS origin+model (writes TOML)")
+    typer.echo("  2  Set a provider credential")
+    typer.echo("  3  Rotate a provider credential")
     typer.echo("  b  Back")
-    choice = _ask(("1", "2", _BACK))
+    choice = _ask(("1", "2", "3", _BACK))
     if choice == _BACK:
         return
-    action: Literal["set", "rotate"] = "set" if choice == "1" else "rotate"
+    if choice == "1":
+        from yoetz.cli.provider_binding import prompt_provider_endpoint_binding
+
+        prompt_provider_endpoint_binding()
+        return
+    action: Literal["set", "rotate"] = "set" if choice == "2" else "rotate"
     values: dict[str, str] = {}
     for field, label in _CREDENTIAL_FIELDS:
         values[field] = cast(str, typer.prompt(f"  {label}")).strip()

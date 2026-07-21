@@ -36,8 +36,11 @@ registration step through `HarnessMcpService`+`CodexMcpAdapter` — `yoetz_owned
 never replaced), otherwise an interactive confirm (or the `--accept` flag) gates one
 digest-bound `register`; adapter failures become `failed` with the reason token; (4) probes
 service reachability via `build_service_client().service_status()` (a `ControlError` is
-`reachable: false`; the CLI never spawns the service); (5) assembles `next_steps` naming the
+`reachable: false`; the CLI never spawns the service); (5) on an interactive TTY, offers the
+nonsecret Official OpenAI vs owner-declared HTTPS origin+model prompt (writes `config.toml` via
+`cli/provider_binding`; never accepts secrets); (6) assembles `next_steps` naming the
 exact follow-up commands — `yoetz service run`, `yoetz service unlock`, `yoetz privacy setup`,
+`yoetz provider endpoint` / TOML edit, and `yoetz provider credential set`.
 `yoetz provider credential set` — pointing at, never automating, the trusted ceremonies;
 (6) on a mutating run (interactive, or `--accept`) writes the marker `{outcome, schema}` as
 canonical JSON, mode 0600, at `setup_marker_path()`; a dry run (`--non-interactive` without
