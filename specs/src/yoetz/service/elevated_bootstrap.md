@@ -1,16 +1,16 @@
 # src/yoetz/service/elevated_bootstrap.py — ADR-015 elevated-bootstrap pending consent store
 
-**Wave:** D | **ADRs:** ADR-015 | **Imports (spec-tree):** `config/paths.md`,
+**Wave:** D | **ADRs:** ADR-015, ADR-016 | **Imports (spec-tree):** `config/paths.md`,
 `protocol/canonical.md`, `protocol/json_types.md` | **Imported by:** `cli/elevated.md`,
 agent status projection
 
 ## Purpose
 
-Owns the founder-authorized elevated-bootstrap consent challenge for cloud-agent first-run setup.
-It creates and validates one ephemeral owner-only pending record, exposes only structural status for
-agents, reads approved secrets only from inherited file descriptors, and appends structural audit
-events without secret material. It is the ADR-015 exception to the ordinary ADR-008 TTY ceremony,
-not a general headless vault or provider-secret API.
+Owns the human-review consent challenge for non-default Yoetz actions (ADR-016 risk classes),
+including the ADR-015 secret-ingress bootstrap lane. It catalogues operations, creates and validates
+one ephemeral owner-only pending record, exposes structural status for agents, reads approved
+secrets only from inherited file descriptors when required, and appends structural audit events
+without secret material.
 
 ## Public surface
 

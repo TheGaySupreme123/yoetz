@@ -1,4 +1,4 @@
-"""CLI for founder-authorized elevated bootstrap (ADR-015)."""
+"""CLI for human-review consent on non-default actions (ADR-015 / ADR-016)."""
 
 from __future__ import annotations
 
@@ -33,7 +33,9 @@ from yoetz.service.elevated_bootstrap import (
     ElevatedOperation,
     PendingElevatedConsent,
     approve_pending,
+    catalog_payload,
     clear_pending,
+    operation_spec,
     prepare_pending,
     projection_for_status,
     read_secret_fd,
@@ -42,6 +44,7 @@ from yoetz.service.elevated_bootstrap import (
 
 __all__ = [
     "approve_elevated",
+    "catalog_elevated",
     "prepare_elevated",
     "status_elevated",
 ]
@@ -54,14 +57,19 @@ def status_elevated() -> dict[str, JsonValue]:
     return status_payload()
 
 
+def catalog_elevated() -> dict[str, JsonValue]:
+    return catalog_payload()
+
+
 def prepare_elevated(
     operation: ElevatedOperation,
     *,
     provider_binding: Mapping[str, str] | None = None,
+    target_digest: str | None = None,
 ) -> dict[str, JsonValue]:
-    target_digest = _target_digest(operation, provider_binding)
+    digest = _target_digest(operation, provider_binding, target_digest)
     pending = prepare_pending(
-        operation, target_digest=target_digest, provider_binding=provider_binding
+        operation, target_digest=digest, provider_binding=provider_binding
     )
     return {
         "schema": "yoetz.elevated-bootstrap.prepare-result/1",
@@ -86,16 +94,32 @@ async def approve_elevated(
             if passphrase_fd is None:
                 raise ElevatedBootstrapError("passphrase_fd_required")
             result = await _complete_vault_initialize(pending, passphrase_fd)
-        else:
+            outcome = "completed"
+        elif pending.operation in {"provider_credential_set", "provider_credential_rotate"}:
             if reauth_fd is None or credential_fd is None:
                 raise ElevatedBootstrapError("credential_fds_required")
             result = await _complete_provider_credential(pending, reauth_fd, credential_fd)
+            outcome = "completed"
+        elif pending.risk_class == "phrase_only":
+            result = {
+                "grant": "phrase_accepted",
+                "target_digest": pending.target_digest,
+                "operation": pending.operation,
+                "next": (
+                    "Continue the owning CLI with the reviewed plan/preview digest; "
+                    "do not invent a secret channel."
+                ),
+            }
+            outcome = "consented"
+        else:
+            raise ElevatedBootstrapError("operation_not_implemented")
         clear_pending()
         return {
             "schema": "yoetz.elevated-bootstrap.result/1",
             "pending_id": pending.pending_id,
             "operation": pending.operation,
-            "outcome": "completed",
+            "risk_class": pending.risk_class,
+            "outcome": outcome,
             "danger_digest": pending.danger_digest,
             "result": result,
         }
@@ -105,24 +129,34 @@ async def approve_elevated(
 
 
 def _target_digest(
-    operation: ElevatedOperation, provider_binding: Mapping[str, str] | None
+    operation: ElevatedOperation,
+    provider_binding: Mapping[str, str] | None,
+    target_digest: str | None,
 ) -> str:
+    spec = operation_spec(operation)
     if operation == "vault_initialize":
         return canonical_digest({"expected_mode": "uninitialized", "kind": "empty_vault"})
-    assert provider_binding is not None
-    return canonical_digest(
-        {
-            "action": "set",
-            "endpoint_profile_id": provider_binding["endpoint_profile_id"],
-            "endpoint_profile_version": provider_binding["endpoint_profile_version"],
-            "kind": "provider_credential",
-            "model_id": provider_binding["model_id"],
-            "provider_id": provider_binding["provider_id"],
-            "purpose": provider_binding["purpose"],
-            "purpose_digest": provider_binding["purpose_digest"],
-            "scope_digest": provider_binding["scope_digest"],
-        }
-    )
+    if operation in {"provider_credential_set", "provider_credential_rotate"}:
+        assert provider_binding is not None
+        action = "set" if operation == "provider_credential_set" else "rotate"
+        return canonical_digest(
+            {
+                "action": action,
+                "endpoint_profile_id": provider_binding["endpoint_profile_id"],
+                "endpoint_profile_version": provider_binding["endpoint_profile_version"],
+                "kind": "provider_credential",
+                "model_id": provider_binding["model_id"],
+                "provider_id": provider_binding["provider_id"],
+                "purpose": provider_binding["purpose"],
+                "purpose_digest": provider_binding["purpose_digest"],
+                "scope_digest": provider_binding["scope_digest"],
+            }
+        )
+    if spec.requires_target_digest_arg:
+        if target_digest is None or not target_digest.startswith("sha256:"):
+            raise ElevatedBootstrapError("target_digest_required")
+        return target_digest
+    raise ElevatedBootstrapError("operation_invalid")
 
 
 async def _complete_vault_initialize(
@@ -168,6 +202,12 @@ async def _complete_provider_credential(
     if pending.provider_binding is None:
         raise ElevatedBootstrapError("provider_binding_required")
     binding = pending.provider_binding
+    action = "set" if pending.operation == "provider_credential_set" else "rotate"
+    kind = (
+        HumanCeremonyKind.PROVIDER_CREDENTIAL_SET
+        if action == "set"
+        else HumanCeremonyKind.PROVIDER_CREDENTIAL_ROTATE
+    )
     reauth = read_secret_fd(reauth_fd, maximum=_PASSPHRASE_MAX)
     credential = read_secret_fd(credential_fd, maximum=_CREDENTIAL_MAX)
     try:
@@ -178,7 +218,7 @@ async def _complete_provider_credential(
         _overwrite(credential)
         raise ElevatedBootstrapError("secret_rejected") from exc
     target = ProviderCredentialTarget(
-        action="set",
+        action=action,
         provider_id=binding["provider_id"],
         model_id=binding["model_id"],
         endpoint_profile_id=binding["endpoint_profile_id"],
@@ -189,12 +229,12 @@ async def _complete_provider_credential(
     )
     client = HumanControlClient()
     try:
-        session = await client.open(HumanCeremonyKind.PROVIDER_CREDENTIAL_SET, target)
+        session = await client.open(kind, target)
         async with session:
             try:
                 result = await _drive_with_fd_secrets(
                     session,
-                    HumanCeremonyKind.PROVIDER_CREDENTIAL_SET,
+                    kind,
                     target,
                     {
                         ConfidentialSecretPurpose.PROVIDER_REAUTHENTICATION: reauth,

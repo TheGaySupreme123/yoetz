@@ -1,7 +1,7 @@
 # ADR-015 — Founder-authorized elevated bootstrap consent for cloud agents
 
-**Status:** Working decision — implementing under explicit founder authorization to unblock
-cloud-agent first-run setup while keeping the ordinary TTY ceremony as the default path.
+**Status:** Superseded in scope by ADR-016 for the general non-default consent catalog; the
+bootstrap secret-ingress lane and FD rules below remain binding.
 **Owning public specs:** `specs/src/yoetz/service/elevated_bootstrap.md`,
 `specs/src/yoetz/cli/elevated.md`, amendments to ADR-008, ADR-009 agent-context wording for
 structural consent projection only, `guidance/agent-instructions.md`, `OPEN_QUESTIONS.md`.

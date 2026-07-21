@@ -94,7 +94,10 @@ backup_app = typer.Typer(help="Preview or execute a backup.", no_args_is_help=Tr
 restore_app = typer.Typer(help="Preview or execute a restore.", no_args_is_help=True)
 migrate_app = typer.Typer(help="Preview or execute a migration.", no_args_is_help=True)
 elevated_app = typer.Typer(
-    help="Founder-authorized elevated bootstrap for cloud agents (ADR-015).",
+    help=(
+        "Human-review consent for non-default actions (ADR-015/016). "
+        "Secrets never over chat/MCP; phrase confirm + optional inherited FDs."
+    ),
     no_args_is_help=True,
 )
 
@@ -113,6 +116,7 @@ app.add_typer(backup_app, name="backup")
 app.add_typer(restore_app, name="restore")
 app.add_typer(migrate_app, name="migrate")
 app.add_typer(elevated_app, name="elevated-bootstrap")
+app.add_typer(elevated_app, name="consent")
 
 
 def run_async(operation: Callable[[], Awaitable[int]]) -> int:
@@ -1017,10 +1021,19 @@ def main() -> None:
 
 @elevated_app.command("status")
 def elevated_status(json_output: _JSON = True) -> None:
-    """Show structural elevated-bootstrap consent status for agents."""
+    """Show pending consent status plus the non-default operation catalog."""
 
     module = importlib.import_module("yoetz.cli.elevated")
     payload = cast(Callable[[], object], getattr(module, "status_elevated"))()
+    _human_or_json(payload, json_output=True)
+
+
+@elevated_app.command("catalog")
+def elevated_catalog(json_output: _JSON = True) -> None:
+    """List default-safe vs consent-required operations for agents."""
+
+    module = importlib.import_module("yoetz.cli.elevated")
+    payload = cast(Callable[[], object], getattr(module, "catalog_elevated"))()
     _human_or_json(payload, json_output=True)
 
 
@@ -1028,7 +1041,7 @@ def elevated_status(json_output: _JSON = True) -> None:
 def elevated_prepare(
     operation: Annotated[
         str,
-        typer.Argument(help="vault_initialize | provider_credential_set"),
+        typer.Argument(help="Consent catalog operation name (see `catalog`)."),
     ],
     provider_id: Annotated[str | None, typer.Option("--provider-id")] = None,
     model_id: Annotated[str | None, typer.Option("--model-id")] = None,
@@ -1039,15 +1052,19 @@ def elevated_prepare(
     purpose: Annotated[str | None, typer.Option("--purpose")] = None,
     scope_digest: Annotated[str | None, typer.Option("--scope-digest")] = None,
     purpose_digest: Annotated[str | None, typer.Option("--purpose-digest")] = None,
+    target_digest: Annotated[
+        str | None,
+        typer.Option("--target-digest", help="Exact plan/preview digest when required."),
+    ] = None,
 ) -> None:
-    """Create a pending elevated-bootstrap consent challenge (no secrets)."""
+    """Create a pending consent challenge (no secrets)."""
 
     module = importlib.import_module("yoetz.cli.elevated")
     errors = importlib.import_module("yoetz.service.elevated_bootstrap")
     elevated_error = cast(type[Exception], getattr(errors, "ElevatedBootstrapError"))
     prepare = cast(Callable[..., object], getattr(module, "prepare_elevated"))
     binding: dict[str, str] | None = None
-    if operation == "provider_credential_set":
+    if operation in {"provider_credential_set", "provider_credential_rotate"}:
         required = {
             "provider_id": provider_id,
             "model_id": model_id,
@@ -1061,7 +1078,7 @@ def elevated_prepare(
             _finish(_usage_failure())
         binding = {key: cast(str, value) for key, value in required.items()}
     try:
-        payload = prepare(operation, provider_binding=binding)
+        payload = prepare(operation, provider_binding=binding, target_digest=target_digest)
     except elevated_error as exc:
         _stderr(f"elevated_bootstrap: {getattr(exc, 'reason', 'failed')}")
         raise SystemExit(2) from None

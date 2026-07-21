@@ -230,8 +230,8 @@ def _control_error_result(error: ControlError, request_id: str | None) -> types.
             (
                 "The local service vault is locked or uninitialized. Unlock or initialize "
                 "from a local terminal, or when no user-owned controlling TTY is available "
-                "follow elevated-bootstrap consent via `yoetz elevated-bootstrap status` "
-                "(ADR-015); never send secrets over MCP."
+                "follow consent via `yoetz consent status` / `catalog` "
+                "(ADR-015/016); never send secrets over MCP."
             ),
             request_id=request_id,
         )
