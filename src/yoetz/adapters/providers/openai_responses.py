@@ -238,9 +238,11 @@ class OpenAIProfile:
 
     @property
     def base_url(self) -> str:
+        # OpenAI Python SDK appends `/responses` to base_url; include `/v1` so the
+        # wire path matches the transport-enforced `/v1/responses` destination.
         if self.port == 443:
-            return f"https://{self.host}"
-        return f"https://{self.host}:{self.port}"
+            return f"https://{self.host}/v1"
+        return f"https://{self.host}:{self.port}/v1"
 
 
 def owner_declared_data_use_profile(

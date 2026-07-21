@@ -36,6 +36,12 @@ clients, or an already-open database.
 
 1. Parse/validate service configuration and verified per-user data/runtime paths; configure
    allowlisted diagnostics; suppress core dumps where supported.
+   Production `_SystemClock.now_utc` truncates to whole milliseconds so throttle
+   wall-anomaly formatting cannot false-positive into the maximum unlock delay on restart.
+   For an already committed passphrase vault, restart loads the live throttle via
+   `open_for_restart` and checks installation identity; it does not require the mutable
+   throttle `record_digest` to still equal the frozen installation `mode_binding_digest`
+   (that equality is required only at passphrase mode publication).
    The daemon-private installation-state marker is canonical owner-only JSON plus one LF:
    `{schema_version:"1", installation_id, vault_mode:"os_keyring"|"passphrase",
    root_envelope_base64:null|<standard-base64 canonical envelope>, mode_binding_digest,

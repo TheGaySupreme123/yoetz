@@ -91,7 +91,6 @@ from yoetz.service.confidential_protocol import (
     SecretRequiredPhase,
     ServerCloseEnvelope,
     ServerErrorEnvelope,
-    ServerPhaseEnvelope,
     ServerResultEnvelope,
     VaultInitializePreview,
     VaultUnlockPreview,
@@ -223,6 +222,52 @@ class _Diagnostics(Protocol):
 
 type _HumanConnectionHandler = Callable[[ControlStream], Awaitable[None]]
 type _ReadyApplicationFactory = Callable[[int, int], Awaitable[_ReadyApplication]]
+
+
+class _BootstrapReadyApplication:
+    """Minimal ready application used until full production composition is wired.
+
+    Satisfies the daemon's ready-application protocol so vault initialize/unlock can
+    publish lifecycle READY. Workflow dispatch still fails closed until a full
+    ``ReadyApplicationFactory`` builds catalog/runtime/privacy.
+    """
+
+    async def projection_binding_facts(
+        self,
+        method: ControlMethod,
+        request: object,
+        result: object,
+    ) -> ProjectionBindingFacts:
+        del method, result
+        request_id = getattr(request, "request_id", None)
+        return ProjectionBindingFacts(request_id if type(request_id) is str else None, None)
+
+    async def project_result_for_client(
+        self,
+        context: ClientProjectionContext,
+        binding: ControlProjectionBinding,
+        result: object,
+    ) -> ProjectedControlBody:
+        del context, binding
+        if isinstance(result, JsonObject):
+            return result
+        raise ControlError("method_forbidden")
+
+    async def close(self) -> None:
+        return None
+
+
+async def _bootstrap_ready_application_factory(
+    service_generation: int, vault_generation: int
+) -> _ReadyApplication:
+    if (
+        type(service_generation) is not int
+        or type(vault_generation) is not int
+        or service_generation <= 0
+        or vault_generation <= 0
+    ):
+        raise LifecycleError("invalid_transition")
+    return _BootstrapReadyApplication()
 
 
 class _ReadyActivationRelay:
@@ -865,7 +910,11 @@ class _ListenerBinders:
 
 class _SystemClock:
     def now_utc(self) -> datetime:
-        return datetime.now(UTC)
+        # RFC3339 millis contract rejects sub-millisecond timestamps; truncate like
+        # observability._SystemClock so throttle wall-anomaly checks do not false-positive
+        # into a 300s unlock lockout on every restart.
+        now = datetime.now(UTC)
+        return now.replace(microsecond=(now.microsecond // 1_000) * 1_000)
 
     def monotonic_seconds(self) -> float:
         return time.monotonic()
@@ -1209,11 +1258,14 @@ class _HumanConnectionServer:
             ceremony_id = cast(str, getattr(response, "ceremony_id"))
             await _write_human_envelope(stream, response)
             while True:
-                if type(response) is ServerPhaseEnvelope and isinstance(
-                    response.phase, SecretRequiredPhase
-                ):
-                    error_step = response.step + 1
-                    response = await self._service.secret_completed(response.ceremony_id)
+                # ServerOpenedEnvelope (step 1) and later ServerPhaseEnvelope both carry
+                # SecretRequiredPhase; the daemon must await YZS1 completion either way.
+                phase = getattr(response, "phase", None)
+                if isinstance(phase, SecretRequiredPhase):
+                    error_step = cast(int, getattr(response, "step")) + 1
+                    response = await self._service.secret_completed(
+                        cast(str, getattr(response, "ceremony_id"))
+                    )
                 else:
                     incoming = await _read_human_envelope(stream)
                     if type(incoming) is ClientActionEnvelope:
@@ -1324,8 +1376,14 @@ async def _production_composition(
             clock=clock,
         )
         if mode is VaultMode.PASSPHRASE:
+            # mode_binding_digest is the *initial* throttle digest frozen at passphrase
+            # publication (vault.md). Later unlock attempts advance record_digest, so restart
+            # must not require equality with the live throttle record — only that passphrase
+            # mode has a marker and the throttle store opens for this installation.
+            if marker is None:
+                raise RuntimeError("installation_throttle_binding_invalid")
             record = throttle.open_for_restart()
-            if marker is None or record.record_digest != marker.mode_binding_digest:
+            if record.installation_id != installation_id:
                 raise RuntimeError("installation_throttle_binding_invalid")
         relay = _ReadyActivationRelay()
         secret_ingress = SecretIngressService(clock, secret_memory, listener=listeners.secret)
@@ -1353,7 +1411,11 @@ async def _production_composition(
             human_control_service=human,
             session_monitor=SessionEventMonitor(),
             vault=vault,
-            ready_application_factory=_ready_application_factory,
+            ready_application_factory=(
+                _ready_application_factory
+                if _ready_application_factory is not None
+                else _bootstrap_ready_application_factory
+            ),
             secret_ingress_service=secret_ingress,
             unlock_service=unlock,
             secret_memory=secret_memory,

@@ -534,7 +534,7 @@ def _expected_result_type(kind: HumanCeremonyKind) -> type[HumanResult]:
 async def _cancel_quietly(session: HumanControlSession) -> None:
     try:
         await session.cancel()
-    except ConfidentialClientError, OSError, RuntimeError:
+    except (ConfidentialClientError, OSError, RuntimeError):
         pass
 
 
