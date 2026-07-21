@@ -227,7 +227,12 @@ def _control_error_result(error: ControlError, request_id: str | None) -> types.
     if error.reason == "vault_locked":
         return structured_error_result(
             PublicErrorCode.VAULT_LOCKED,
-            "The local service vault is locked; unlock it from a local terminal.",
+            (
+                "The local service vault is locked or uninitialized. Unlock from a local "
+                "terminal (`yoetz service unlock`). If the vault is still uninitialized and no "
+                "user-owned TTY is available, prepare `vault_initialize` via "
+                "`yoetz consent catalog` / `prepare` (ADR-015); never send secrets over MCP."
+            ),
             request_id=request_id,
         )
     if error.reason == "request_cancelled":

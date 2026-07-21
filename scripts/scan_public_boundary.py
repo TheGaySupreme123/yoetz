@@ -486,12 +486,62 @@ def _digest(data: bytes) -> str:
     return f"sha256:{hashlib.sha256(data).hexdigest()}"
 
 
+_CANARY_PLACEHOLDER: Final = "<redacted-canary>"
+
+
+def _redact_canary_text(value: str, canary: bytes | None) -> str:
+    """Strip exact canary text from report/console fields; never echo the secret."""
+
+    if not canary:
+        return value
+    try:
+        token = canary.decode("utf-8")
+    except UnicodeDecodeError:
+        return value
+    if not token:
+        return value
+    return value.replace(token, _CANARY_PLACEHOLDER)
+
+
+def _redact_finding(finding: BoundaryFinding, canary: bytes | None) -> BoundaryFinding:
+    if not canary:
+        return finding
+    return BoundaryFinding(
+        rule_id=finding.rule_id,
+        category=finding.category,
+        severity=finding.severity,
+        target_label=_redact_canary_text(finding.target_label, canary),
+        relative_path=_redact_canary_text(finding.relative_path, canary),
+        location_bucket=finding.location_bucket,
+        file_digest=finding.file_digest,
+        match_count=finding.match_count,
+    )
+
+
 def scan_filename(
-    entry: FileEntry, rules: Sequence[BoundaryRule], *, target_label: str
+    entry: FileEntry,
+    rules: Sequence[BoundaryRule],
+    *,
+    target_label: str,
+    canary: bytes | None = None,
 ) -> tuple[BoundaryFinding, ...]:
     """Apply every ``filename``-scoped rule to one entry's relative path."""
 
     findings: list[BoundaryFinding] = []
+    path_bytes = entry.relative_path.encode("utf-8", errors="surrogateescape")
+    if canary and canary in path_bytes:
+        findings.append(
+            BoundaryFinding(
+                rule_id="CANARY-EXACT-001",
+                category="injected_canary",
+                severity="critical",
+                target_label=target_label,
+                relative_path=entry.relative_path,
+                location_bucket="filename",
+                file_digest=_digest(entry.data),
+                match_count=path_bytes.count(canary),
+            )
+        )
     for rule in rules:
         if rule.detector != "filename":
             continue
@@ -580,7 +630,7 @@ def scan_archive_member(
 ) -> tuple[BoundaryFinding, ...]:
     """Apply filename and content detectors to one archive member."""
 
-    return scan_filename(member, rules, target_label=archive_label) + scan_bytes(
+    return scan_filename(member, rules, target_label=archive_label, canary=canary) + scan_bytes(
         member, rules, target_label=archive_label, canary=canary
     )
 
@@ -611,10 +661,17 @@ def _finding_sort_key(finding: BoundaryFinding) -> tuple[str, str, str]:
     return (finding.rule_id, finding.target_label, finding.relative_path)
 
 
-def build_report(target_label: str, target_kind: str, findings: Sequence[BoundaryFinding]) -> bytes:
+def build_report(
+    target_label: str,
+    target_kind: str,
+    findings: Sequence[BoundaryFinding],
+    *,
+    canary: bytes | None = None,
+) -> bytes:
     """Render a canonical, redacted JSON scan report: no matched bytes, no absolute paths."""
 
-    ordered = sorted(findings, key=_finding_sort_key)
+    sanitized = tuple(_redact_finding(finding, canary) for finding in findings)
+    ordered = sorted(sanitized, key=_finding_sort_key)
     document: dict[str, JsonValue] = {
         "findings": [
             {
@@ -632,7 +689,7 @@ def build_report(target_label: str, target_kind: str, findings: Sequence[Boundar
         "finding_count": len(ordered),
         "schema": "yoetz.public-boundary-report/1",
         "target_kind": target_kind,
-        "target_label": target_label,
+        "target_label": _redact_canary_text(target_label, canary),
     }
     return canonical_encode(document)
 
@@ -717,7 +774,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         total_files += len(entries)
         for entry in entries:
-            all_findings.extend(scan_filename(entry, rules, target_label=target.label))
+            all_findings.extend(
+                scan_filename(entry, rules, target_label=target.label, canary=canary)
+            )
             all_findings.extend(scan_bytes(entry, rules, target_label=target.label, canary=canary))
         if target.kind == "artifact":
             all_findings.extend(scan_metadata(entries, rules, target_label=target.label))
@@ -726,12 +785,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         ",".join(target.label for target in targets),
         ",".join(sorted({target.kind for target in targets})),
         all_findings,
+        canary=canary,
     )
     if args.json_out is not None:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
         args.json_out.write_bytes(report_bytes)
 
-    ordered_findings = sorted(all_findings, key=_finding_sort_key)
+    ordered_findings = sorted(
+        (_redact_finding(finding, canary) for finding in all_findings),
+        key=_finding_sort_key,
+    )
     if not ordered_findings and not incomplete:
         print(f"scan_public_boundary: PASS ({total_files} file(s) scanned)")
         return 0

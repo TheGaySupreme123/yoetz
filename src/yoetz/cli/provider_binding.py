@@ -42,7 +42,7 @@ def _load_base(path: Path | None) -> YoetzConfig:
     try:
         raw = tomllib.loads(target.read_bytes().decode("utf-8"))
         return YoetzConfig.model_validate(raw, strict=True)
-    except (ConfigError, OSError, UnicodeError, tomllib.TOMLDecodeError, ValueError):
+    except ConfigError, OSError, UnicodeError, tomllib.TOMLDecodeError, ValueError:
         return YoetzConfig()
 
 

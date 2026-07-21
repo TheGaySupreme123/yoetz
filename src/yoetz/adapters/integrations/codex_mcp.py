@@ -66,8 +66,15 @@ def _default_runner(argv: tuple[str, ...]) -> CommandOutput:
 
 
 def _entry_command_tokens(entry: Mapping[str, object]) -> tuple[str, ...] | None:
-    command = entry.get("command")
-    args = entry.get("args")
+    # Codex ≤0.144.5 returned top-level command/args; ≥0.144.6 nests them under transport.
+    transport = entry.get("transport")
+    source: Mapping[str, object] = entry
+    if isinstance(transport, Mapping):
+        nested = cast(Mapping[str, object], transport)
+        if "command" in nested or "args" in nested:
+            source = nested
+    command = source.get("command")
+    args = source.get("args")
     if isinstance(command, str):
         tokens: list[str] = [command]
         if args is None:

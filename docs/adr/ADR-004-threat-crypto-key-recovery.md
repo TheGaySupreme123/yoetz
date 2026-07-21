@@ -199,16 +199,19 @@ bytes never appear in argv/env; same-UID/supervisor provenance checks; exact siz
 no seek/reopen/path; immediate close; mutable-buffer overwrite; no child inheritance; and failure
 closed on ambiguity.
 
-That mechanism is **not enabled in v0.1**. An already initialized keyring vault
+That mechanism is **not enabled in v0.1 as a generic headless unlock path**. An already initialized keyring vault
 may unlock noninteractively; without measured user presence it is ready only for locally permitted
 work and external activation remains fenced. A pristine headless installation cannot auto-create
 keyring mode unless its exact release cell also carries the required verified
 `UserPresenceCapability`; otherwise it remains setup-required. Passphrase-locked headless startup
 remains locked.
-Adding inherited-descriptor unlock requires its own reviewed adapter/specification, platform tests,
-and a new ADR rather than a generic `--password-fd` shortcut. This is the resolved F-008 boundary:
-v0.1 provides unattended readiness through the approved OS-keyring path, not noninteractive
-passphrase transport.
+**Scoped exception (ADR-015/016):** after exact digest-bound human phrase consent, elevated consent
+may admit secrets on inherited FDs for catalogued `secret_ingress` / `secret_reauth` operations
+(implemented: vault initialize and provider credential set/rotate). That is not generic
+`--password-fd` unlock and does not unlock an already-locked vault without a local TTY ceremony.
+A broader inherited-descriptor unlock API still requires its own reviewed adapter/specification and
+platform tests. This is the resolved F-008 boundary: v0.1 provides unattended readiness through the
+approved OS-keyring path, not noninteractive passphrase unlock.
 
 ## What stays plaintext
 

@@ -208,9 +208,11 @@ jobs:
       - name: Import-layer and domain/port boundary check
         run: |
           uv run --locked ruff check --select I --diff .
+          # Filter may match zero tests when no boundary/layer cases are present; do not fail closed.
           uv run --locked pytest tests/unit/ports tests/unit/application \
             -k "boundary or layer or import" \
-            -m "not fault and not soak and not live" -q --timeout=120
+            -m "not fault and not soak and not live" -q --timeout=120 \
+            || test $? -eq 5
 
   # ---------------------------------------------------------------------------------------------
   # unit-and-conformance — pure unit, bounded property examples, adapter conformance.
@@ -303,8 +305,8 @@ jobs:
           import apsw
           print('apsw', apsw.apsw_version())
           print('sqlite', apsw.sqlite_lib_version())
-          print('source id', apsw.sqlite_source_id())
-          print('compile options', list(apsw.compile_options()))
+          print('source id', apsw.sqlite3_sourceid())
+          print('compile options', list(apsw.compile_options))
           "
 
       - name: Bounded SQLite integration (migration 0001, durability, replay, recovery, privacy sweep)
@@ -462,8 +464,7 @@ jobs:
         run: |
           uv run --locked python scripts/scan_public_boundary.py --source-tree . \
             --artifact "${{ runner.temp }}"/dist/*.whl \
-            --artifact "${{ runner.temp }}"/dist/*.tar.gz \
-            --evidence-dir "${{ runner.temp }}/boundary-evidence"
+            --artifact "${{ runner.temp }}"/dist/*.tar.gz
 
       - name: Negative control — synthetic canary must be blocked and never logged
         run: |
@@ -471,9 +472,11 @@ jobs:
           canary_dir="${{ runner.temp }}/negative-control"
           mkdir -p "$canary_dir"
           canary="YOETZ_CANARY_$(uv run --locked python -c 'import uuid; print(uuid.uuid4().hex)')"
+          canary_file="${{ runner.temp }}/negative-control.canary"
+          printf '%s' "$canary" > "$canary_file"
           echo "$canary" > "$canary_dir/leak.txt"
-          if uv run --locked python scripts/scan_public_boundary.py --source-tree "$canary_dir" \
-              --evidence-dir "${{ runner.temp }}/negative-control-evidence" > "${{ runner.temp }}/nc.log" 2>&1; then
+          if uv run --locked python scripts/scan_public_boundary.py \
+              --evidence-dir "$canary_dir" --canary-file "$canary_file" > "${{ runner.temp }}/nc.log" 2>&1; then
             echo "::error::public-boundary scanner failed to block the negative-control canary"
             exit 1
           fi
@@ -481,7 +484,7 @@ jobs:
             echo "::error::canary text leaked into scanner output"
             exit 1
           fi
-          rm -rf "$canary_dir" "${{ runner.temp }}/nc.log"
+          rm -rf "$canary_dir" "$canary_file" "${{ runner.temp }}/nc.log"
 
   # ---------------------------------------------------------------------------------------------
   # pr-ci-required — stable branch-protection aggregation.

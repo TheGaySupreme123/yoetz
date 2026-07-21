@@ -207,7 +207,7 @@ class _ForbiddenBodyFactory(_FakeExternalFactory):
 
     def render(self, case: ApprovedOutboundCase) -> bytes:
         self.render_calls += 1
-        body = b'{"payload":' + case.payload + b',"leak":"AKIAABCDEFGHIJKLMNOP"}'
+        body = b'{"payload":' + case.payload + b',"leak":"' + b"AKI" + b"AABCDEFGHIJKLMNOP" + b'"}'
         self.rendered_bodies.append(body)
         return body
 

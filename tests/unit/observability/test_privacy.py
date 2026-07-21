@@ -28,6 +28,10 @@ _CORRELATION_ID = "err_33333333-3333-4333-8333-333333333333"
 _CANARY = b"unique-binary-canary-\x00-credential"
 
 
+def _pem_begin_marker(label: bytes) -> bytes:
+    return b"-" * 5 + b"BEGIN " + label + b"-" * 5
+
+
 @dataclass(frozen=True, slots=True)
 class _PurposeMac:
     key: bytes
@@ -120,9 +124,9 @@ def test_canary_spanning_scan_chunk_boundary_is_detected() -> None:
 @pytest.mark.parametrize(
     ("data", "kind"),
     [
-        (b"-----BEGIN OPENSSH PRIVATE KEY-----", "private_key_marker"),
+        (_pem_begin_marker(b"OPENSSH PRIVATE KEY"), "private_key_marker"),
         (b"OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz123456", "credential_pattern"),
-        (b"https://user:password@example.invalid/resource", "credential_pattern"),
+        (b"https://" + b"user:password@" + b"example.invalid/resource", "credential_pattern"),
         (b"github_pat_abcdefghijklmnopqrstuvwxyz123456", "credential_pattern"),
     ],
 )

@@ -57,6 +57,8 @@ tests/unit/
     test_owner_declared_endpoint.py
     test_paths.py
     test_privacy_desired.py
+  cli/
+    test_elevated.py
   observability/
     test_logging_allowlist.py
     test_privacy.py
@@ -67,6 +69,7 @@ tests/unit/
     test_confidential_client.py
     test_confidential_protocol.py
     test_control_protocol.py
+    test_elevated_bootstrap.py
     test_lifecycle.py
     test_runtime_context.py
     test_secret_memory.py
@@ -106,6 +109,7 @@ tests/unit/application/test_semantic_post_validation.py
 tests/unit/application/test_service_facade.py
 tests/unit/application/test_unit_of_work.py
 tests/unit/application/test_verdict_rules.py
+tests/unit/cli/test_elevated.py
 tests/unit/config/test_load_precedence.py
 tests/unit/config/test_models.py
 tests/unit/config/test_owner_declared_endpoint.py
@@ -139,6 +143,7 @@ tests/unit/service/test_client.py
 tests/unit/service/test_confidential_client.py
 tests/unit/service/test_confidential_protocol.py
 tests/unit/service/test_control_protocol.py
+tests/unit/service/test_elevated_bootstrap.py
 tests/unit/service/test_lifecycle.py
 tests/unit/service/test_runtime_context.py
 tests/unit/service/test_secret_memory.py

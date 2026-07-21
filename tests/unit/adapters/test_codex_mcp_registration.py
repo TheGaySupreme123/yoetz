@@ -54,6 +54,15 @@ def test_status_yoetz_owned_on_exact_command_match() -> None:
     for payload in (
         {"command": "yoetz", "args": ["mcp", "serve"]},
         {"command": ["yoetz", "mcp", "serve"]},
+        {
+            "name": "yoetz",
+            "enabled": True,
+            "transport": {
+                "type": "stdio",
+                "command": "yoetz",
+                "args": ["mcp", "serve"],
+            },
+        },
     ):
         runner = _Runner([CommandOutput(0, json.dumps(payload).encode("utf-8"))])
         state = anyio.run(lambda: CodexMcpAdapter(runner).status_registration(_BINARY))
@@ -66,6 +75,10 @@ def test_status_foreign_on_different_or_unreadable_command() -> None:
         {"command": "yoetz", "args": ["serve", "--http"]},
         {"name": "yoetz"},
         {"command": 7},
+        {
+            "name": "yoetz",
+            "transport": {"type": "stdio", "command": "other", "args": ["mcp", "serve"]},
+        },
     ):
         runner = _Runner([CommandOutput(0, json.dumps(payload).encode("utf-8"))])
         state = anyio.run(lambda: CodexMcpAdapter(runner).status_registration(_BINARY))

@@ -85,6 +85,8 @@ from yoetz.service.confidential_protocol import (
     PrivacyDecisionResult,
     PrivacyPendingTarget,
     ProviderCredentialResult,
+    ProviderCredentialRotatePreview,
+    ProviderCredentialSetPreview,
     ProviderCredentialTarget,
     SecretRequiredPhase,
     ServerCloseEnvelope,
@@ -1090,19 +1092,50 @@ class _LockedHumanEffects:
 
     async def prepare(self, request: ClientOpenEnvelope) -> tuple[HumanPreview, str, int | None]:
         target = request.target
-        if type(target) is not EmptyVaultTarget:
-            raise HumanControlError("kind_forbidden")
         mode = self._vault.mode.value
-        if target.expected_mode != mode:
-            raise HumanControlError("target_invalid")
-        digest = canonical_digest({"expected_mode": target.expected_mode, "kind": target.kind})
-        if request.ceremony_kind is HumanCeremonyKind.VAULT_INITIALIZE:
-            return VaultInitializePreview(), digest, None
-        if request.ceremony_kind is HumanCeremonyKind.VAULT_UNLOCK:
-            return VaultUnlockPreview(), digest, None
-        if request.ceremony_kind is HumanCeremonyKind.KEYRING_RETRY:
-            operation = "pristine_create" if mode == "uninitialized" else "existing_load"
-            return KeyringRetryPreview(operation), digest, None
+        if type(target) is EmptyVaultTarget:
+            if target.expected_mode != mode:
+                raise HumanControlError("target_invalid")
+            digest = canonical_digest({"expected_mode": target.expected_mode, "kind": target.kind})
+            if request.ceremony_kind is HumanCeremonyKind.VAULT_INITIALIZE:
+                return VaultInitializePreview(), digest, None
+            if request.ceremony_kind is HumanCeremonyKind.VAULT_UNLOCK:
+                return VaultUnlockPreview(), digest, None
+            if request.ceremony_kind is HumanCeremonyKind.KEYRING_RETRY:
+                operation = "pristine_create" if mode == "uninitialized" else "existing_load"
+                return KeyringRetryPreview(operation), digest, None
+            raise HumanControlError("kind_forbidden")
+        if type(target) is ProviderCredentialTarget:
+            if not self._vault.ready or mode != "passphrase":
+                raise HumanControlError("kind_forbidden")
+            if request.ceremony_kind not in {
+                HumanCeremonyKind.PROVIDER_CREDENTIAL_SET,
+                HumanCeremonyKind.PROVIDER_CREDENTIAL_ROTATE,
+            }:
+                raise HumanControlError("kind_forbidden")
+            if (request.ceremony_kind is HumanCeremonyKind.PROVIDER_CREDENTIAL_SET) != (
+                target.action == "set"
+            ):
+                raise HumanControlError("target_invalid")
+            digest = canonical_digest(
+                {
+                    "action": target.action,
+                    "endpoint_profile_id": target.endpoint_profile_id,
+                    "endpoint_profile_version": target.endpoint_profile_version,
+                    "kind": target.kind,
+                    "model_id": target.model_id,
+                    "provider_id": target.provider_id,
+                    "purpose": target.purpose,
+                    "purpose_digest": target.purpose_digest,
+                    "scope_digest": target.scope_digest,
+                }
+            )
+            preview: HumanPreview
+            if target.action == "set":
+                preview = ProviderCredentialSetPreview(target)
+            else:
+                preview = ProviderCredentialRotatePreview(target)
+            return preview, digest, None
         raise HumanControlError("kind_forbidden")
 
     async def complete_portable_recovery(
@@ -1118,8 +1151,22 @@ class _LockedHumanEffects:
         proof: HumanAuthorizationProof,
         now_monotonic: float,
     ) -> ProviderCredentialResult:
-        del target, secret, proof, now_monotonic
-        raise HumanControlError("kind_forbidden")
+        from yoetz.service.vault import ProviderCredentialBinding
+
+        binding = ProviderCredentialBinding(
+            target.provider_id,
+            target.model_id,
+            target.endpoint_profile_id,
+            target.endpoint_profile_version,
+            target.purpose,
+            target.scope_digest,
+            target.purpose_digest,
+        )
+        await self._vault.store_provider_credential(
+            target.action, binding, secret, proof, now_monotonic
+        )
+        generation = self._vault._provider_generations.get(binding, 1)  # pyright: ignore[reportPrivateUsage]
+        return ProviderCredentialResult(target.action, generation, "stored")
 
     async def decide_privacy(
         self,

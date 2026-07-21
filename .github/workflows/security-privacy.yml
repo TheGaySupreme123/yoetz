@@ -150,13 +150,17 @@ jobs:
             -o "${RUNNER_TEMP}/pip-audit-install.json" --format json
 
       - name: npm audit (production dependency tree)
-        run: npm audit --omit=dev --audit-level=high --json > "${RUNNER_TEMP}/npm-audit.json" || \
-          (npm audit --omit=dev --audit-level=high; exit 1)
+        run: |
+          set -euo pipefail
+          if ! npm audit --omit=dev --audit-level=high --json > "${RUNNER_TEMP}/npm-audit.json"; then
+            npm audit --omit=dev --audit-level=high || true
+            exit 1
+          fi
 
       - name: Generate CycloneDX SBOM
         run: |
           uv export --locked --no-emit-project --format requirements-txt > "${RUNNER_TEMP}/requirements.txt"
-          uvx cyclonedx-py==${CYCLONEDX_PY_VERSION} requirements "${RUNNER_TEMP}/requirements.txt" \
+          uvx --from "cyclonedx-bom==${CYCLONEDX_PY_VERSION}" cyclonedx-py requirements "${RUNNER_TEMP}/requirements.txt" \
             --output-format json --output-file "${RUNNER_TEMP}/sbom.cdx.json"
 
       - name: Verify license inventory (every shipped/native component once, with license)
@@ -181,7 +185,7 @@ jobs:
              "${RUNNER_TEMP}"/sbom.cdx.json "${RUNNER_TEMP}"/licenses.json \
              "${RUNNER_TEMP}/dependency-evidence/"
           uv run --locked python scripts/scan_public_boundary.py \
-            --source-tree "${RUNNER_TEMP}/dependency-evidence"
+            --evidence-dir "${RUNNER_TEMP}/dependency-evidence"
 
       - name: Upload dependency/license/SBOM evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -234,7 +238,7 @@ jobs:
           for wf in .github/workflows/*.yml; do
             echo "checking $wf"
             grep -q "^permissions:" "$wf" || { echo "::error file=$wf::missing top-level permissions block"; fail=1; }
-            if grep -Eq "pull_request_target" "$wf"; then
+            if grep -Eq '^[[:space:]]*pull_request_target[[:space:]]*:' "$wf"; then
               echo "::error file=$wf::pull_request_target is forbidden"; fail=1
             fi
             if grep -Eq 'uses:\s*[A-Za-z0-9._-]+/[A-Za-z0-9._-]+@(v[0-9]|main|master)\b' "$wf"; then
@@ -305,8 +309,7 @@ jobs:
         run: |
           uv run --locked python scripts/scan_public_boundary.py --source-tree . \
             --artifact "${{ runner.temp }}"/dist/*.whl \
-            --artifact "${{ runner.temp }}"/dist/*.tar.gz \
-            --evidence-dir "${{ runner.temp }}/artifact-boundary-evidence"
+            --artifact "${{ runner.temp }}"/dist/*.tar.gz
 
       - name: Negative control — per-run synthetic canary in filename/text/binary/metadata
         run: |
@@ -314,12 +317,14 @@ jobs:
           nc="${{ runner.temp }}/negative-control"
           mkdir -p "$nc"
           canary="YOETZ_CANARY_$(uv run --locked python -c 'import uuid; print(uuid.uuid4().hex)')"
+          canary_file="${{ runner.temp }}/negative-control.canary"
+          printf '%s' "$canary" > "$canary_file"
           printf '%s' "$canary" > "$nc/${canary}.txt"
           printf '%s' "$canary" | uv run --locked python -c "import sys,base64;sys.stdout.write(base64.b64encode(sys.stdin.buffer.read()).decode())" > "$nc/encoded.b64"
           head -c 256 /dev/urandom > "$nc/${canary}.bin"
           echo "$canary" >> "$nc/${canary}.bin"
-          if uv run --locked python scripts/scan_public_boundary.py --source-tree "$nc" \
-              --evidence-dir "${{ runner.temp }}/negative-control-evidence" > "${{ runner.temp }}/nc.log" 2>&1; then
+          if uv run --locked python scripts/scan_public_boundary.py \
+              --evidence-dir "$nc" --canary-file "$canary_file" > "${{ runner.temp }}/nc.log" 2>&1; then
             echo "::error::public-boundary scanner failed to block the negative-control artifact"
             exit 1
           fi
@@ -327,7 +332,7 @@ jobs:
             echo "::error::negative-control canary text leaked into scanner logs"
             exit 1
           fi
-          rm -rf "$nc" "${{ runner.temp }}/nc.log" "${{ runner.temp }}/negative-control-evidence"
+          rm -rf "$nc" "$canary_file" "${{ runner.temp }}/nc.log"
 
       - name: Upload artifact-boundary evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -335,6 +340,7 @@ jobs:
           name: security-artifact-boundary-evidence
           path: ${{ runner.temp }}/artifact-boundary-evidence
           retention-days: 14
+          if-no-files-found: ignore
 
   # ---------------------------------------------------------------------------------------------
   # runtime-plaintext-canary

@@ -131,7 +131,7 @@ jobs:
           print('python', sys.version)
           print('platform', platform.platform())
           print('apsw', apsw.apsw_version(), 'sqlite', apsw.sqlite_lib_version())
-          print('sqlite source id', apsw.sqlite_source_id())
+          print('sqlite source id', apsw.sqlite3_sourceid())
           "
 
       - name: Assert no other suite-owned process or bundle is active
@@ -234,7 +234,7 @@ jobs:
           print('python', sys.version)
           print('platform', platform.platform())
           print('apsw', apsw.apsw_version(), 'sqlite', apsw.sqlite_lib_version())
-          print('sqlite source id', apsw.sqlite_source_id())
+          print('sqlite source id', apsw.sqlite3_sourceid())
           "
 
       - name: Platform kill matrix — publication, check/semantic, checkpoint, backup, migration/restore, response serialization; owner-generation races

@@ -84,8 +84,9 @@ def test_bare_tty_invocation_with_marker_opens_menu(
     assert "Refresh status" in result.output
 
 
-def test_bare_invocation_without_tty_still_prints_help(menu_env: Path,
-                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bare_invocation_without_tty_still_prints_help(
+    menu_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(menu, "menu_available", lambda: False)
     result = _RUNNER.invoke(cli.app, [])
     assert result.exit_code == 0

@@ -46,20 +46,34 @@ class ServiceProcessStatus(TypedDict):
 
 
 def isolated_environment(root: Path) -> dict[str, str]:
+    """Build an owner-only XDG layout that path safety will accept.
+
+    Pytest's default basetemp lives under shared ``/tmp``, which
+    ``verify_private_local_bundle`` rejects as ``path_shared_temp``. Keep the
+    runtime directory under a shared temp (sockets only) and place the private
+    installation tree under the caller's home cache instead.
+    """
+
+    del root  # callers pass tmp_path labels; private data cannot live there on Linux.
     runtime_parent = Path("/private/tmp") if Path("/private/tmp").is_dir() else Path("/tmp")
     runtime = Path(tempfile.mkdtemp(prefix="yzrt-", dir=runtime_parent))
+    base = Path.home() / ".cache" / "yoetz-subprocess-isolation"
+    base.mkdir(mode=0o700, parents=True, exist_ok=True)
+    base.chmod(0o700)
+    installation = Path(tempfile.mkdtemp(prefix="installation-", dir=base))
+    installation.chmod(0o700)
     paths = {
-        "HOME": root / "home",
-        "TMPDIR": root / "tmp",
-        "XDG_CACHE_HOME": root / "cache",
-        "XDG_CONFIG_HOME": root / "config",
-        "XDG_DATA_HOME": root / "data",
+        "HOME": installation / "home",
+        "TMPDIR": installation / "tmp",
+        "XDG_CACHE_HOME": installation / "cache",
+        "XDG_CONFIG_HOME": installation / "config",
+        "XDG_DATA_HOME": installation / "data",
         "XDG_RUNTIME_DIR": runtime,
-        "XDG_STATE_HOME": root / "state",
+        "XDG_STATE_HOME": installation / "state",
     }
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    root.chmod(0o700)
     for path in paths.values():
+        if path == runtime:
+            continue
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
         path.chmod(0o700)
     return {
@@ -70,6 +84,7 @@ def isolated_environment(root: Path) -> dict[str, str]:
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONHASHSEED": "0",
         "TZ": "UTC",
+        "_YOETZ_TEST_INSTALLATION": os.fspath(installation),
     }
 
 
@@ -80,6 +95,11 @@ def cleanup_environment(environment: dict[str, str]) -> None:
     ):
         raise AssertionError("suite runtime ownership invalid")
     shutil.rmtree(runtime, ignore_errors=False)
+    installation = Path(environment["_YOETZ_TEST_INSTALLATION"])
+    base = Path.home() / ".cache" / "yoetz-subprocess-isolation"
+    if installation.parent != base or not installation.name.startswith("installation-"):
+        raise AssertionError("suite installation ownership invalid")
+    shutil.rmtree(installation, ignore_errors=False)
 
 
 def spawn_service(environment: dict[str, str]) -> subprocess.Popen[bytes]:
