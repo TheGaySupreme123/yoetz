@@ -630,9 +630,9 @@ def scan_archive_member(
 ) -> tuple[BoundaryFinding, ...]:
     """Apply filename and content detectors to one archive member."""
 
-    return scan_filename(
+    return scan_filename(member, rules, target_label=archive_label, canary=canary) + scan_bytes(
         member, rules, target_label=archive_label, canary=canary
-    ) + scan_bytes(member, rules, target_label=archive_label, canary=canary)
+    )
 
 
 _METADATA_PATH_MARKERS: Final = ("dist-info/RECORD", "PKG-INFO", "METADATA", "direct_url.json")
