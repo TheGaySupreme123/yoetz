@@ -552,22 +552,18 @@ def _initialize_fresh_bundle(path: Path, *, command: object, clock: ClockPort) -
         _close_db(db)
 
 
-def _admitted_writers_for_session(catalog_path: Path, session_id: str) -> frozenset[str]:
+def _admitted_writers_for_session(catalog_db: apsw.Connection, session_id: str) -> frozenset[str]:
     """Load durable writer IDs attached to one active session from completed starts."""
 
-    db = open_read_only(catalog_path)
-    try:
-        rows = db.execute(
-            "SELECT DISTINCT writer_id FROM start_operations "
-            "WHERE session_id = ? AND state = 'complete'",
-            (session_id,),
-        ).fetchall()
-        writers = frozenset(cast(str, row[0]) for row in rows)
-        if any(type(item) is not str for item in writers):
-            raise ValueError("admitted_writer_ids_invalid")
-        return writers
-    finally:
-        _close_db(db)
+    rows = catalog_db.execute(
+        "SELECT DISTINCT writer_id FROM start_operations "
+        "WHERE session_id = ? AND state = 'complete'",
+        (session_id,),
+    ).fetchall()
+    writers = frozenset(cast(str, row[0]) for row in rows)
+    if any(type(item) is not str for item in writers):
+        raise ValueError("admitted_writer_ids_invalid")
+    return writers
 
 
 def _inspect_common(
@@ -612,6 +608,7 @@ def build_runtime_adapter_factories(
     clock: ClockPort,
     ids: IdPort,
     secret_memory: object,
+    catalog_db: apsw.Connection,
 ) -> RuntimeAdapterFactories:
     """Build durable local runtime adapter callbacks for one ready generation."""
 
@@ -628,7 +625,7 @@ def build_runtime_adapter_factories(
             catalog_path=catalog_path,
             bundle_base=paths.bundle,
             route=route,
-            admitted_writer_ids=_admitted_writers_for_session(catalog_path, session_id),
+            admitted_writer_ids=_admitted_writers_for_session(catalog_db, session_id),
             fresh_allocation=False,
         )
 
@@ -1105,6 +1102,7 @@ async def provide_service_ready_context(
         clock=clock,
         ids=ids,
         secret_memory=secret_memory,
+        catalog_db=cast(apsw.Connection, getattr(catalog, "_db")),
     )
     runtime = await open_local_bundle_runtime(
         runtime_context,
