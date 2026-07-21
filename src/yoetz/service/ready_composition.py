@@ -552,12 +552,30 @@ def _initialize_fresh_bundle(path: Path, *, command: object, clock: ClockPort) -
         _close_db(db)
 
 
+def _admitted_writers_for_session(catalog_path: Path, session_id: str) -> frozenset[str]:
+    """Load durable writer IDs attached to one active session from completed starts."""
+
+    db = open_read_only(catalog_path)
+    try:
+        rows = db.execute(
+            "SELECT DISTINCT writer_id FROM start_operations "
+            "WHERE session_id = ? AND state = 'complete'",
+            (session_id,),
+        ).fetchall()
+        writers = frozenset(cast(str, row[0]) for row in rows)
+        if any(type(item) is not str for item in writers):
+            raise ValueError("admitted_writer_ids_invalid")
+        return writers
+    finally:
+        _close_db(db)
+
+
 def _inspect_common(
     *,
     catalog_path: Path,
     bundle_base: Path,
     route: object,
-    writer_id: str | None,
+    admitted_writer_ids: frozenset[str],
     fresh_allocation: bool,
 ) -> _BundleInspection:
     task_id = cast(str, getattr(route, "task_id"))
@@ -570,13 +588,16 @@ def _inspect_common(
         route_identity_digest=cast(str, getattr(route, "route_identity_digest")),
     )
     verdict = recovery_module.validate_recovery_tail(state)
-    writers = frozenset({writer_id}) if writer_id is not None else frozenset[str]()
+    if type(admitted_writer_ids) is not frozenset or any(
+        type(item) is not str for item in admitted_writer_ids
+    ):
+        raise ValueError("admitted_writer_ids_invalid")
     return _BundleInspection(
         route,
         bundle_root,
         bundle_root / _LEDGER_NAME,
         catalog_path,
-        writers,
+        admitted_writer_ids,
         fresh_allocation,
         state,
         verdict,
@@ -602,11 +623,12 @@ def build_runtime_adapter_factories(
 
     async def inspect_route(route: object, access: RouteAccess) -> object:
         del access
+        session_id = cast(str, getattr(route, "session_id"))
         return _inspect_common(
             catalog_path=catalog_path,
             bundle_base=paths.bundle,
             route=route,
-            writer_id=None,
+            admitted_writer_ids=_admitted_writers_for_session(catalog_path, session_id),
             fresh_allocation=False,
         )
 
@@ -626,11 +648,12 @@ def build_runtime_adapter_factories(
             bundle_root.mkdir(mode=0o700, parents=True, exist_ok=False)
             bundle_root.chmod(0o700)
             _initialize_fresh_bundle(ledger_path, command=command, clock=clock)
+        writer_id = cast(str, getattr(command, "writer_id"))
         return _inspect_common(
             catalog_path=catalog_path,
             bundle_base=paths.bundle,
             route=route,
-            writer_id=cast(str, getattr(command, "writer_id")),
+            admitted_writer_ids=frozenset({writer_id}),
             fresh_allocation=fresh,
         )
 
