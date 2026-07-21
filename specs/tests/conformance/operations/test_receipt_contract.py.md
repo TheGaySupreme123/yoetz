@@ -14,6 +14,8 @@ the exact 11-field `ReceiptVersionSlice`, including `resource_manifest_digest`.
 ## Public surface
 
 - `test_receipt_request_result_parity` — JSON/structured receipt results match.
+- `test_json_receipt_projection_fails_closed_when_document_leaves_blocked` — blocked
+  `/document` leaves fail closed with `privacy_projection_unavailable` instead of rewriting.
 - `test_frontier_and_own_event_exclusion_parity` — the subject frontier is exact.
 - `test_receipt_wording_is_weaker_than_document` — human text never outruns the document.
 - `test_reviewed_receipt_vectors_match_exact_document_and_compact_bytes` — each golden fixture

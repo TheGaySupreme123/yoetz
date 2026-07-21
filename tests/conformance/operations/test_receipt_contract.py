@@ -35,7 +35,10 @@ from yoetz.domain.privacy import (
     AuthorizationScopeKind,
     CandidateContext,
     ConsentSource,
+    DataCategory,
     LocalDisclosureApproved,
+    LocalDisclosureBlocked,
+    LocalDisclosureOmission,
     LocalDisclosureReceipt,
     PrivacyOutcome,
     ReceiptCounts,
@@ -52,7 +55,7 @@ from yoetz.domain.receipts import (
     render_receipt_compact,
 )
 from yoetz.domain.values import Frontier, session_id
-from yoetz.ports.control import ControlClientKind, ControlMethod
+from yoetz.ports.control import ControlClientKind, ControlError, ControlMethod
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.ledger import CheckCommitResult
@@ -168,6 +171,67 @@ class _ProjectionSpy:
         return None
 
 
+class _BlockingDocumentProjectionSpy(_ProjectionSpy):
+    """Approve nothing under ``/document`` so JSON receipt projection must fail closed."""
+
+    async def prepare_local_disclosure(
+        self, candidate: CandidateContext
+    ) -> LocalDisclosureBlocked:
+        self.candidates.append(candidate)
+        sink = candidate.local_sink
+        assert sink is not None
+        omissions = tuple(
+            sorted(
+                (
+                    LocalDisclosureOmission(
+                        item.origin_ref,
+                        item.category,
+                        "local_disclosure_not_authorized",
+                    )
+                    for item in candidate.items
+                    if item.origin_ref == "/document" or item.origin_ref.startswith("/document/")
+                ),
+                key=lambda item: item.json_pointer.encode(),
+            )
+        )
+        assert omissions, "seeded JSON receipt must expose at least one document content leaf"
+        proposal_id = protocol_id("ppr_", 1900 + len(self.candidates))
+        policy = ReceiptPolicyBinding(
+            protocol_id("pvy_", 1950 + len(self.candidates)), 1, _DIGEST, _DIGEST
+        )
+        receipt = LocalDisclosureReceipt(
+            "1.0.0",
+            protocol_id("egr_", 1960 + len(self.candidates)),
+            candidate.request_id,
+            proposal_id,
+            sink,
+            PrivacyOutcome.COMPLETED,
+            datetime(2026, 7, 19, 12, 0, tzinfo=UTC),
+            candidate.scope,
+            candidate.purpose,
+            policy,
+            ConsentSource.BASELINE_POLICY,
+            (),
+            (DataCategory.FINDING_SUMMARY,),
+            ReceiptCounts(0, 0, 0, 0, 0, 0, 0),
+            ReceiptTransformations(0, 0, 0),
+            ReceiptSecretScan("1.0.0", _DIGEST, 0, True),
+            None,
+            1,
+        )
+        return LocalDisclosureBlocked(
+            proposal_id,
+            candidate.request_id,
+            sink,
+            candidate.purpose,
+            candidate.scope,
+            _DIGEST,
+            _WORKSPACE,
+            omissions,
+            receipt,
+        )
+
+
 def _versions() -> ReceiptVersionSlice:
     return ReceiptVersionSlice(
         package_name="yoetz",
@@ -225,9 +289,13 @@ def _frontier(value: Frontier | FrontierModel) -> JsonValue:
     return cast(JsonValue, value.model_dump(mode="json"))
 
 
-def _build_app(*, seed_offset: int = 0) -> tuple[Application, _WorkflowRuntime, _ProjectionSpy]:
+def _build_app(
+    *,
+    seed_offset: int = 0,
+    projection: _ProjectionSpy | None = None,
+) -> tuple[Application, _WorkflowRuntime, _ProjectionSpy]:
     start_app, start_runtime, clock, catalog = start_composition()
-    projection = _ProjectionSpy()
+    projection = _ProjectionSpy() if projection is None else projection
     ids = start_runtime.ids
     runtime = _WorkflowRuntime(clock, ids)
     app = Application(
@@ -390,6 +458,52 @@ async def test_receipt_request_result_parity() -> None:
     assert cli_projected.root.privacy_projection.sink == "local_human_view"
     assert mcp_projected.root.privacy_projection.sink == "agent_context"
     assert len(projection.candidates) == 2
+
+
+async def test_json_receipt_projection_fails_closed_when_document_leaves_blocked() -> None:
+    """Digest-bound JSON receipts must not emit partly rewritten documents under omission."""
+
+    app, _runtime, projection = _build_app(
+        seed_offset=11, projection=_BlockingDocumentProjectionSpy()
+    )
+    started, checked, _obligation = await _bootstrap_finding(app, seed=1100)
+    receipt_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 1110)),
+        "task_id": started.task_id,
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "expected_frontier": _frontier(checked.result_frontier),
+        "format": "json",
+        "include": "standard",
+        "redaction_profile": "full_local",
+    }
+    receipt = await _receipt(app, receipt_wire)
+    facts = await app.projection_binding_facts(ControlMethod.RECEIPT, receipt_wire, receipt)
+    binding = ControlProjectionBinding(
+        protocol_id("rpc_", 1111),
+        ControlMethod.RECEIPT,
+        protocol_id("svc_", 1112),
+        1,
+        facts.original_request_id,
+        facts.route_identity_digest,
+        canonical_encode(
+            {
+                "rpc_id": protocol_id("rpc_", 1111),
+                "method": "receipt",
+                "service_instance_id": protocol_id("svc_", 1112),
+                "service_generation": "1",
+            }
+        ),
+    )
+    with pytest.raises(ControlError, match="privacy_projection_unavailable"):
+        await app.project_result_for_client(
+            ClientProjectionContext(
+                ControlClientKind.MCP_BRIDGE, ProjectionRenderMode.MACHINE_READABLE, False
+            ),
+            binding,
+            receipt,
+        )
+    assert len(projection.candidates) == 1
 
 
 async def test_frontier_and_own_event_exclusion_parity() -> None:
