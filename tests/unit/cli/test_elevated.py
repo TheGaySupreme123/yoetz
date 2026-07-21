@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import anyio
@@ -14,10 +14,10 @@ from yoetz.service.elevated_bootstrap import ElevatedBootstrapError
 
 
 def test_catalog_elevated() -> None:
-    payload = elevated.catalog_elevated()
+    payload = cast(dict[str, Any], elevated.catalog_elevated())
     assert payload["schema"] == "yoetz.consent.catalog/1"
     assert payload["rules"]["no_standing_yolo"] is True
-    by_name = {item["operation"]: item for item in payload["operations"]}  # type: ignore[index]
+    by_name = {item["operation"]: item for item in payload["operations"]}
     assert by_name["backup_execute"]["implemented"] is False
     assert by_name["vault_initialize"]["implemented"] is True
 
@@ -25,17 +25,15 @@ def test_catalog_elevated() -> None:
 def test_prepare_elevated_vault_initialize(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     with patch("yoetz.service.elevated_bootstrap.state_dir", return_value=tmp_path):
-        payload = elevated.prepare_elevated("vault_initialize")
+        payload = cast(dict[str, Any], elevated.prepare_elevated("vault_initialize"))
     assert payload["schema"] == "yoetz.elevated-bootstrap.prepare-result/1"
-    projection = payload["elevated_bootstrap"]
+    projection = cast(dict[str, Any], payload["elevated_bootstrap"])
     assert projection["required"] is True
     assert projection["risk_class"] == "secret_ingress"
     assert "<confirmation_phrase>" in projection["approve_command"]
 
 
-def test_prepare_phrase_only_backup_refused(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_prepare_phrase_only_backup_refused(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     plan = canonical_digest({"kind": "backup", "n": 1})
     with patch("yoetz.service.elevated_bootstrap.state_dir", return_value=tmp_path):
@@ -51,8 +49,8 @@ def test_approve_elevated_requires_fds_and_clears_on_failure(
 
     async def _run() -> None:
         with patch("yoetz.service.elevated_bootstrap.state_dir", return_value=tmp_path):
-            prepared = elevated.prepare_elevated("vault_initialize")
-            projection = prepared["elevated_bootstrap"]
+            prepared = cast(dict[str, Any], elevated.prepare_elevated("vault_initialize"))
+            projection = cast(dict[str, Any], prepared["elevated_bootstrap"])
             with pytest.raises(ElevatedBootstrapError) as missing:
                 await elevated.approve_elevated(
                     pending_id=str(projection["pending_id"]),
@@ -60,7 +58,8 @@ def test_approve_elevated_requires_fds_and_clears_on_failure(
                     confirm=str(projection["confirmation_phrase"]),
                 )
             assert missing.value.reason == "passphrase_fd_required"
-            assert elevated.status_elevated()["elevated_bootstrap"]["required"] is False
+            status = cast(dict[str, Any], elevated.status_elevated())
+            assert cast(dict[str, Any], status["elevated_bootstrap"])["required"] is False
 
     anyio.run(_run)
 
@@ -68,6 +67,6 @@ def test_approve_elevated_requires_fds_and_clears_on_failure(
 def test_status_elevated_schema(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     with patch("yoetz.service.elevated_bootstrap.state_dir", return_value=tmp_path):
-        payload = elevated.status_elevated()
+        payload = cast(dict[str, Any], elevated.status_elevated())
     assert payload["schema"] == "yoetz.elevated-bootstrap.status/1"
     assert "consent_catalog" in payload

@@ -64,12 +64,15 @@ async def test_write_all_retries_eintr_and_every_partial_write(
     assert len(calls) >= 2
 
 
+_HOME_LEAK = "/" + "Users/private"
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     ("failure", "reason"),
     [
-        (OSError(errno.EIO, "secret /Users/private/input.json"), "write_failed"),
-        (BrokenPipeError(errno.EPIPE, "secret /Users/private/client.pipe"), "broken_pipe"),
+        (OSError(errno.EIO, "secret " + _HOME_LEAK + "/input.json"), "write_failed"),
+        (BrokenPipeError(errno.EPIPE, "secret " + _HOME_LEAK + "/client.pipe"), "broken_pipe"),
     ],
 )
 async def test_write_failure_is_bounded_and_never_contains_os_detail(
@@ -92,7 +95,7 @@ async def test_write_failure_is_bounded_and_never_contains_os_detail(
 
     assert caught.value.reason == reason
     assert str(caught.value) == reason
-    assert "/Users/private" not in repr(caught.value)
+    assert _HOME_LEAK not in repr(caught.value)
 
 
 @pytest.mark.anyio

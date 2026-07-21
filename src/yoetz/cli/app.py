@@ -792,7 +792,9 @@ def privacy_export_desired(
         except Exception:
             return _usage_failure()
         path = write_privacy_desired_toml(policy, output)
-        _human_or_json({"path": str(path), "schema": "yoetz.privacy-desired/1"}, json_output)
+        _human_or_json(
+            {"path": str(path), "schema": "yoetz.privacy-desired/1"}, json_output=json_output
+        )
         return 0
 
     _finish(run_async(_run))

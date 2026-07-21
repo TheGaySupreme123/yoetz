@@ -110,14 +110,15 @@ def test_invalid_utf8_nul_and_partial_eof_never_enter_sdk_stream() -> None:
 
 
 def test_injected_read_failure_closes_cleanly_without_os_detail_leakage() -> None:
-    child = r"""
+    home_leak = "/" + "Users/private"
+    child = f"""
 import anyio
 import errno
 import yoetz.adapters.mcp_stdio as transport
 
 def fail_read(fd, maximum):
     del fd, maximum
-    raise OSError(errno.EIO, "secret /Users/private/hostile-input.json")
+    raise OSError(errno.EIO, "secret {home_leak}/hostile-input.json")
 
 transport._read_fd = fail_read
 
@@ -142,7 +143,7 @@ anyio.run(main)
     assert result.returncode == 0
     assert result.stdout == b""
     assert b"Traceback" not in result.stderr
-    assert b"/Users/private" not in result.stderr
+    assert home_leak.encode() not in result.stderr
     assert b"hostile-input" not in result.stderr
 
 

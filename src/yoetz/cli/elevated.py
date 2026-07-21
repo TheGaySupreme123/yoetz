@@ -5,7 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Final, cast
 
-from yoetz.cli.unlock import HumanCeremonyCliError, _overwrite, _verify_preview
+from yoetz.cli.unlock import (
+    HumanCeremonyCliError,
+    _overwrite,  # pyright: ignore[reportPrivateUsage]
+    _verify_preview,  # pyright: ignore[reportPrivateUsage]
+)
 from yoetz.protocol.canonical import JsonValue, canonical_digest
 from yoetz.service.confidential_client import (
     ConfidentialClientError,
@@ -67,9 +71,7 @@ def prepare_elevated(
     target_digest: str | None = None,
 ) -> dict[str, JsonValue]:
     digest = _target_digest(operation, provider_binding, target_digest)
-    pending = prepare_pending(
-        operation, target_digest=digest, provider_binding=provider_binding
-    )
+    pending = prepare_pending(operation, target_digest=digest, provider_binding=provider_binding)
     return {
         "schema": "yoetz.elevated-bootstrap.prepare-result/1",
         "elevated_bootstrap": projection_for_status(pending),
@@ -85,9 +87,7 @@ async def approve_elevated(
     reauth_fd: int | None = None,
     credential_fd: int | None = None,
 ) -> dict[str, JsonValue]:
-    pending = approve_pending(
-        pending_id=pending_id, danger_digest=danger_digest, confirm=confirm
-    )
+    pending = approve_pending(pending_id=pending_id, danger_digest=danger_digest, confirm=confirm)
     try:
         if pending.operation == "vault_initialize":
             if passphrase_fd is None:
@@ -288,5 +288,5 @@ async def _drive_with_fd_secrets(
 async def _cancel_quietly(session: HumanControlSession) -> None:
     try:
         await session.cancel()
-    except (ConfidentialClientError, OSError, RuntimeError):
+    except ConfidentialClientError, OSError, RuntimeError:
         pass

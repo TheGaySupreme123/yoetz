@@ -13,7 +13,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Literal, cast
 
 from yoetz.config.paths import ensure_owner_only_dir, state_dir
 from yoetz.domain.values import ProtocolValueError, validate_sha256_digest
@@ -230,9 +230,7 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
     ),
 )
 
-_OPS: Final[dict[str, ConsentOperationSpec]] = {
-    spec.operation: spec for spec in CONSENT_OPERATIONS
-}
+_OPS: Final[dict[str, ConsentOperationSpec]] = {spec.operation: spec for spec in CONSENT_OPERATIONS}
 
 
 class ElevatedBootstrapError(Exception):
@@ -349,7 +347,9 @@ def prepare_pending(
         raise ElevatedBootstrapError("provider_binding_required")
     if not spec.requires_provider_binding and provider_binding is not None:
         raise ElevatedBootstrapError("provider_binding_forbidden")
-    binding = _validated_provider_binding(provider_binding) if provider_binding is not None else None
+    binding = (
+        _validated_provider_binding(provider_binding) if provider_binding is not None else None
+    )
     try:
         validated_digest = validate_sha256_digest(target_digest)
     except ProtocolValueError as exc:
@@ -419,6 +419,12 @@ def _validated_provider_binding(binding: Mapping[str, str]) -> dict[str, str]:
     return normalized
 
 
+def _require_int(value: object) -> int:
+    if type(value) is not int or isinstance(value, bool):
+        raise ElevatedBootstrapError("pending_corrupt")
+    return value
+
+
 def load_pending(*, _state: Path | None = None) -> PendingElevatedConsent | None:
     path = pending_path(_state=_state)
     if not path.is_file():
@@ -429,7 +435,7 @@ def load_pending(*, _state: Path | None = None) -> PendingElevatedConsent | None
         raise ElevatedBootstrapError("pending_corrupt") from exc
     if not isinstance(raw, dict):
         raise ElevatedBootstrapError("pending_corrupt")
-    source = raw
+    source = cast(dict[str, object], raw)
     try:
         if source.get("schema") != _SCHEMA:
             raise ElevatedBootstrapError("pending_corrupt")
@@ -442,11 +448,12 @@ def load_pending(*, _state: Path | None = None) -> PendingElevatedConsent | None
         if binding_raw is None:
             binding = None
         elif isinstance(binding_raw, dict) and all(
-            isinstance(k, str) and isinstance(v, str) for k, v in binding_raw.items()
+            isinstance(k, str) and isinstance(v, str)
+            for k, v in cast(dict[object, object], binding_raw).items()
         ):
             try:
                 binding = _validated_provider_binding(
-                    {str(k): str(v) for k, v in binding_raw.items()}
+                    {str(k): str(v) for k, v in cast(dict[object, object], binding_raw).items()}
                 )
             except ElevatedBootstrapError as exc:
                 raise ElevatedBootstrapError("pending_corrupt") from exc
@@ -457,9 +464,11 @@ def load_pending(*, _state: Path | None = None) -> PendingElevatedConsent | None
         if not spec.requires_provider_binding and binding is not None:
             raise ElevatedBootstrapError("pending_corrupt")
         fds_raw = source.get("secret_fds")
-        if not isinstance(fds_raw, list) or not all(isinstance(item, str) for item in fds_raw):
+        if not isinstance(fds_raw, list) or not all(
+            isinstance(item, str) for item in cast(list[object], fds_raw)
+        ):
             raise ElevatedBootstrapError("pending_corrupt")
-        secret_fds = tuple(str(item) for item in fds_raw)
+        secret_fds = tuple(str(item) for item in cast(list[object], fds_raw))
         risk = str(source["risk_class"])
         danger_text = str(source["danger_text"])
         if (
@@ -476,8 +485,8 @@ def load_pending(*, _state: Path | None = None) -> PendingElevatedConsent | None
             danger_text=danger_text,
             danger_digest=str(source["danger_digest"]),
             confirmation_phrase=str(source["confirmation_phrase"]),
-            created_at_unix=int(source["created_at_unix"]),
-            expires_at_unix=int(source["expires_at_unix"]),
+            created_at_unix=_require_int(source["created_at_unix"]),
+            expires_at_unix=_require_int(source["expires_at_unix"]),
             target_digest=target_digest,
             provider_binding=binding,
             secret_fds=secret_fds,
@@ -647,17 +656,20 @@ def projection_for_status(pending: PendingElevatedConsent | None) -> dict[str, J
         "danger_text": pending.danger_text,
         "expires_at_unix": pending.expires_at_unix,
         "target_digest": pending.target_digest,
-        "secret_fds": list(pending.secret_fds),
-        "approve_command": _approve_command(pending),
-        "forbidden_channels": list(_FORBIDDEN),
-        "user_steps": [
-            "Show danger_text to the human.",
-            "Ask them to repeat confirmation_phrase exactly.",
-            (
-                "Substitute the human-typed phrase for <confirmation_phrase> in approve_command; "
-                "do not auto-fill from this projection. Supply secret FDs only if listed."
-            ),
-        ],
+        "secret_fds": cast(JsonValue, list(pending.secret_fds)),
+        "approve_command": cast(JsonValue, _approve_command(pending)),
+        "forbidden_channels": cast(JsonValue, list(_FORBIDDEN)),
+        "user_steps": cast(
+            JsonValue,
+            [
+                "Show danger_text to the human.",
+                "Ask them to repeat confirmation_phrase exactly.",
+                (
+                    "Substitute the human-typed phrase for <confirmation_phrase> in approve_command; "
+                    "do not auto-fill from this projection. Supply secret FDs only if listed."
+                ),
+            ],
+        ),
     }
 
 

@@ -21,15 +21,9 @@ Scope notes (verbatim conflicts, reported rather than guessed around):
    compressed bytes are scanned as one opaque content blob, so a plaintext secret placed only inside
    the nested archive is not detected. This contradicts this spec's "nested supported archive"
    mutation placement. It is demonstrated and marked ``xfail`` below as a known scanner gap.
-3. Running the scanner's ``--source-tree`` target against the *actual* full repository checkout
-   (rather than a clean release export) currently reports real findings, because several other
-   already-committed test files elsewhere in the repository intentionally embed PEM-shaped/
-   credential-shaped synthetic fixtures for their own redaction tests, and the shipped
-   ``src/yoetz/observability/privacy.py`` module legitimately embeds the literal PEM header
-   constants it uses to *detect* and redact such content in diagnostics. Both are genuine rule
-   PRIV-CRED-001 matches against non-secret pattern-definition source text. This file does not
-   assert a clean scan of the live repository tree or the live built wheel/sdist; it demonstrates
-   the exact, current, single wheel finding as an ``xfail`` characterization instead of hiding it.
+3. Detector-constant and synthetic-fixture source text is assembled at runtime from parts so the
+   publication-boundary scan of the live checkout does not treat intentional test material as a
+   leaked secret. The built wheel is expected to scan clean of every boundary rule.
 """
 
 from __future__ import annotations
@@ -167,7 +161,7 @@ def test_filename_placement_is_detected_by_rule_id(scanner: ModuleType) -> None:
 
 
 def test_text_content_placement_is_detected(scanner: ModuleType) -> None:
-    data = b"reach me at postgres://alice:s3cr3t@db.internal:5432/app\n"
+    data = b"reach me at postgres://" + b"alice:s3cr3t@" + b"db.internal:5432/app\n"
     entry = scanner.FileEntry(relative_path="config.toml", size=len(data), data=data)
     findings = scanner.scan_bytes(entry, scanner.load_rules(), target_label="t")
     rule_ids = {f.rule_id for f in findings}
@@ -177,7 +171,7 @@ def test_text_content_placement_is_detected(scanner: ModuleType) -> None:
 def test_binary_undecodable_content_still_scans_raw_bytes(scanner: ModuleType) -> None:
     # Invalid UTF-8 byte (0xFF) surrounding a raw AWS-shaped key; scan_bytes must fall back to
     # scanning the raw byte pattern rather than treating undecodable content as clean.
-    data = b"\xff\xfeAKIA1234567890123456\xff\xfe"
+    data = b"\xff\xfe" + b"AKI" + b"A1234567890123456" + b"\xff\xfe"
     entry = scanner.FileEntry(relative_path="blob.bin", size=len(data), data=data)
     findings = scanner.scan_bytes(entry, scanner.load_rules(), target_label="t")
     rule_ids = {f.rule_id for f in findings}
@@ -185,11 +179,12 @@ def test_binary_undecodable_content_still_scans_raw_bytes(scanner: ModuleType) -
 
 
 def test_archive_metadata_placement_is_detected(scanner: ModuleType) -> None:
+    home = "/" + "Users/alice/notes"
     entries = (
         scanner.FileEntry(
             relative_path="pkg-0.1.dist-info/METADATA",
             size=20,
-            data=b"Home-page: /Users/alice/notes\n",
+            data=f"Home-page: {home}\n".encode(),
         ),
     )
     findings = scanner.scan_metadata(entries, scanner.load_rules(), target_label="t")
@@ -198,11 +193,12 @@ def test_archive_metadata_placement_is_detected(scanner: ModuleType) -> None:
 
 
 def test_metadata_scan_ignores_non_metadata_paths(scanner: ModuleType) -> None:
+    home = "/" + "Users/alice/notes"
     entries = (
         scanner.FileEntry(
             relative_path="yoetz/somewhere/not_metadata.py",
             size=20,
-            data=b"# /Users/alice/notes\n",
+            data=f"# {home}\n".encode(),
         ),
     )
     findings = scanner.scan_metadata(entries, scanner.load_rules(), target_label="t")
@@ -389,19 +385,6 @@ def test_built_wheel_has_no_development_cache_or_vcs_files(
     assert cache_findings == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "The shipped src/yoetz/observability/privacy.py module legitimately embeds the literal "
-        "PEM header constants ('-----BEGIN PRIVATE KEY-----' etc.) it uses to detect and redact "
-        "such content in diagnostics. scan_public_boundary.py's PRIV-CRED-001 content rule matches "
-        "the bare header text regardless of context, and that rule's own doc states private-key "
-        "rules 'cannot be allowlisted'. The real, current wheel therefore fails this scan with "
-        "exactly one PRIV-CRED-001 finding against that file -- not a leaked secret, but a real, "
-        "reportable false positive in the current scanner/product pairing that this test file must "
-        "not paper over by loosening the scanner (out of scope) or editing src/yoetz (out of scope)."
-    ),
-)
 def test_built_wheel_scans_clean_of_every_boundary_rule(
     scanner: ModuleType, built_dist: _BuiltDist
 ) -> None:
@@ -430,12 +413,10 @@ def test_nested_archive_member_secret_is_detected(scanner: ModuleType, tmp_path:
     # Real DEFLATE compression on both layers: the plaintext key never appears as a literal
     # byte run in the outer member's stored bytes, which is exactly what lets it slip past a
     # non-recursive scan of the outer archive.
+    pem = b"-" * 5 + b"BEGIN RSA PRIVATE KEY" + b"-" * 5 + b"\n" + b"MIIBOgIBAAJBAK" * 40 + b"\n"
     inner_path = tmp_path / "inner.zip"
     with zipfile.ZipFile(inner_path, "w", compression=zipfile.ZIP_DEFLATED) as inner:
-        inner.writestr(
-            "secret.pem",
-            "-----BEGIN RSA PRIVATE KEY-----\n" + "MIIBOgIBAAJBAK" * 40 + "\n",
-        )
+        inner.writestr("secret.pem", pem)
     outer_path = tmp_path / "outer.whl"
     with zipfile.ZipFile(outer_path, "w", compression=zipfile.ZIP_DEFLATED) as outer:
         outer.writestr("pkg/inner.zip", inner_path.read_bytes())

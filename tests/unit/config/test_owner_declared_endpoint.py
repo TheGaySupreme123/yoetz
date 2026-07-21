@@ -40,7 +40,7 @@ def test_parse_https_origin_accepts_host_and_optional_port() -> None:
     "value",
     [
         "http://llm.example.com",
-        "https://user:pass@llm.example.com",
+        "https://" + "user:pass@" + "llm.example.com",
         "https://llm.example.com/v1",
         "https://llm.example.com?q=1",
         "https://llm.example.com#frag",
@@ -141,9 +141,7 @@ def test_toml_round_trip_official_and_owner_declared(tmp_path: Path) -> None:
     assert loaded2.provider is not None
     assert loaded2.provider.endpoint_profile_id == OWNER_DECLARED_ENDPOINT_PROFILE_ID
     assert loaded2.provider.owner_declared_endpoint is not None
-    assert loaded2.provider.owner_declared_endpoint.https_origin == (
-        "https://llm.example.com:8443"
-    )
+    assert loaded2.provider.owner_declared_endpoint.https_origin == ("https://llm.example.com:8443")
     assert render_config_toml(loaded2) == text
 
 

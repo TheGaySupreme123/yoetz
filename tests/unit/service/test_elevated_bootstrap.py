@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -34,11 +35,11 @@ _BINDING = {
 
 
 def test_catalog_lists_risk_classes_and_default_safe() -> None:
-    catalog = catalog_payload()
+    catalog = cast(dict[str, Any], catalog_payload())
     assert catalog["schema"] == "yoetz.consent.catalog/1"
     assert "mcp.start" in catalog["default_safe"]
     assert catalog["rules"]["no_standing_yolo"] is True
-    by_name = {item["operation"]: item for item in catalog["operations"]}  # type: ignore[index]
+    by_name = {item["operation"]: item for item in catalog["operations"]}
     assert by_name["vault_initialize"]["implemented"] is True
     assert by_name["provider_credential_rotate"]["implemented"] is True
     assert by_name["backup_execute"]["implemented"] is False
@@ -46,20 +47,19 @@ def test_catalog_lists_risk_classes_and_default_safe() -> None:
 
 
 def test_prepare_vault_initialize_projection_and_approve(tmp_path: Path) -> None:
-    pending = prepare_pending(
-        "vault_initialize", target_digest=_TARGET, _state=tmp_path
-    )
+    pending = prepare_pending("vault_initialize", target_digest=_TARGET, _state=tmp_path)
     assert pending.operation == "vault_initialize"
     assert pending.risk_class == "secret_ingress"
     assert pending.secret_fds == ("passphrase-fd",)
     assert pending.expires_at_unix - pending.created_at_unix == 15 * 60
 
-    projection = projection_for_status(pending)
+    projection = cast(dict[str, Any], projection_for_status(pending))
     assert projection["required"] is True
     assert projection["risk_class"] == "secret_ingress"
-    assert projection["approve_command"][-2:] == ["--passphrase-fd", "3"]
-    assert "<confirmation_phrase>" in projection["approve_command"]
-    assert pending.confirmation_phrase not in projection["approve_command"]
+    approve_command = cast(list[str], projection["approve_command"])
+    assert approve_command[-2:] == ["--passphrase-fd", "3"]
+    assert "<confirmation_phrase>" in approve_command
+    assert pending.confirmation_phrase not in approve_command
     assert "user_steps" in projection
 
     approved = approve_pending(
@@ -111,9 +111,7 @@ def test_prepare_provider_binding_rules(tmp_path: Path) -> None:
 
 def test_target_digest_must_be_sha256(tmp_path: Path) -> None:
     with pytest.raises(ElevatedBootstrapError) as exc:
-        prepare_pending(
-            "vault_initialize", target_digest="sha256:not-hex", _state=tmp_path
-        )
+        prepare_pending("vault_initialize", target_digest="sha256:not-hex", _state=tmp_path)
     assert exc.value.reason == "target_digest_invalid"
 
 
@@ -205,6 +203,8 @@ def test_read_secret_fd_empty_and_oversized() -> None:
 
 
 def test_status_includes_catalog(tmp_path: Path) -> None:
-    payload = status_payload(_state=tmp_path)
-    assert payload["elevated_bootstrap"]["required"] is False
-    assert payload["consent_catalog"]["schema"] == "yoetz.consent.catalog/1"
+    payload = cast(dict[str, Any], status_payload(_state=tmp_path))
+    elevated = cast(dict[str, Any], payload["elevated_bootstrap"])
+    catalog = cast(dict[str, Any], payload["consent_catalog"])
+    assert elevated["required"] is False
+    assert catalog["schema"] == "yoetz.consent.catalog/1"

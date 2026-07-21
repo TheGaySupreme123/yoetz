@@ -11,6 +11,7 @@ registry, not module walking.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import tempfile
@@ -779,18 +780,73 @@ def _normalize(raw: dict[str, object], entry: _RegistryEntry) -> dict[str, JsonV
 # --------------------------------------------------------------------------
 
 
-def build_schema_documents() -> tuple[SchemaDocument, ...]:
-    """Generate the complete, ordered set of public schema documents from the frozen registry."""
+def _load_disk_document(entry: _RegistryEntry, schema_root: Path) -> SchemaDocument:
+    """Load one registry-owned schema document from reviewed on-disk bytes."""
+
+    candidate = schema_root / entry.relative_path
+    if candidate.is_symlink() or not candidate.is_file():
+        raise SchemaGenerationError("schema_missing", entries=(entry.relative_path,))
+    try:
+        schema_bytes = candidate.read_bytes()
+        parsed = cast(object, json.loads(schema_bytes.decode("utf-8")))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SchemaGenerationError("schema_unreadable", entries=(entry.relative_path,)) from exc
+    if not isinstance(parsed, dict):
+        raise SchemaGenerationError("schema_invalid", entries=(entry.relative_path,))
+    normalized = cast(dict[str, JsonValue], parsed)
+    schema_id = cast(str, normalized.get("$id", ""))
+    expected_id = SCHEMA_NAMESPACE + entry.relative_path
+    if schema_id != expected_id:
+        raise SchemaGenerationError("schema_id_mismatch", entries=(entry.relative_path,))
+    if canonical_encode(cast(JsonValue, normalized)) != schema_bytes:
+        raise SchemaGenerationError("schema_bytes_not_canonical", entries=(entry.relative_path,))
+    return SchemaDocument(
+        schema_kind=entry.schema_kind,
+        artifact_role=entry.artifact_role,
+        schema_name=entry.schema_name,
+        schema_version=entry.schema_version,
+        schema_id=schema_id,
+        relative_path=entry.relative_path,
+        canonical_digest=canonical_digest_hex(schema_bytes),
+        schema_bytes=schema_bytes,
+        json_schema=normalized,
+    )
+
+
+def build_schema_documents(*, schema_root: Path | None = None) -> tuple[SchemaDocument, ...]:
+    """Build the ordered schema document set from the frozen registry.
+
+    - ``schema_root`` set (``--check``): load every registry path from disk and validate. This covers
+      hand-maintained ``loader=None`` entries and avoids false drift when the generator's Pydantic
+      projection differs from already-reviewed committed bytes.
+    - ``schema_root`` omitted (``--write``): introspect loader-backed types only; ``loader=None``
+      entries fail closed with ``owning_type_not_yet_available`` (never fabricate them).
+    """
 
     _install_type_shims()
+
+    if schema_root is not None:
+        seen_paths: set[str] = set()
+        seen_ids: set[str] = set()
+        documents: list[SchemaDocument] = []
+        for entry in _REGISTRY:
+            if entry.relative_path in seen_paths:
+                raise SchemaGenerationError("duplicate_path", entries=(entry.relative_path,))
+            seen_paths.add(entry.relative_path)
+            document = _load_disk_document(entry, schema_root)
+            if document.schema_id in seen_ids:
+                raise SchemaGenerationError("duplicate_schema_id", entries=(document.schema_id,))
+            seen_ids.add(document.schema_id)
+            documents.append(document)
+        return tuple(sorted(documents, key=lambda doc: doc.relative_path.encode("utf-8")))
 
     pending = tuple(entry.relative_path for entry in _REGISTRY if entry.loader is None)
     if pending:
         raise SchemaGenerationError("owning_type_not_yet_available", entries=pending)
 
-    seen_paths: set[str] = set()
-    seen_ids: set[str] = set()
-    documents: list[SchemaDocument] = []
+    seen_paths = set()
+    seen_ids = set()
+    documents = []
 
     for entry in _REGISTRY:
         if entry.relative_path in seen_paths:
@@ -813,8 +869,6 @@ def build_schema_documents() -> tuple[SchemaDocument, ...]:
         seen_ids.add(schema_id)
 
         rendered = render_schema(cast(Mapping[str, JsonValue], normalized))
-        digest = canonical_digest_hex(rendered)
-
         documents.append(
             SchemaDocument(
                 schema_kind=entry.schema_kind,
@@ -823,7 +877,7 @@ def build_schema_documents() -> tuple[SchemaDocument, ...]:
                 schema_version=entry.schema_version,
                 schema_id=schema_id,
                 relative_path=entry.relative_path,
-                canonical_digest=digest,
+                canonical_digest=canonical_digest_hex(rendered),
                 schema_bytes=rendered,
                 json_schema=cast(Mapping[str, JsonValue], normalized),
             )
@@ -947,7 +1001,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     root = args.output_root.resolve() if args.output_root is not None else _default_schema_root()
 
     try:
-        documents = build_schema_documents()
+        # --check may load hand-maintained registry entries (loader=None) from disk.
+        # --write still requires owning Python types and never fabricates those files.
+        documents = build_schema_documents(schema_root=root if args.check else None)
         for document in documents:
             validate_schema_document(document)
     except SchemaGenerationError as exc:
