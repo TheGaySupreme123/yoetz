@@ -74,7 +74,10 @@ clients, or an already-open database.
    initializes `catalog.sqlite3`, seeds the current installation ID plus owner generation, constructs
    the local bundle runtime and application facade, reconciles the central egress-policy gateway, and
    selects only the credential-free reviewed bundled provider factories allowed by active policy,
-   once. No provider credential is retrieved at startup; the gateway
+   once. The denied machine privacy policy is seeded only when no durable current policy exists for
+   the installation scope; later unlocks reuse that durable policy and never re-mint seed identity
+   (`policy_id`/`created_at`) that would conflict with `seed_if_absent`. No provider credential is
+   retrieved at startup; the gateway
    mints one body/profile/deadline-bound opaque handle per authorized physical attempt, never from
    config/environment bytes.
    `activate_ready_application` holds the daemon activation mutex, requires lifecycle `unlocking`,
@@ -229,8 +232,9 @@ secret memory in reverse ownership order.
 
 ## Tests
 
-- `tests/integration/service/test_ready_composition.py` covers unfenced catalog writer admission and
-  the ready catalog generation seed used by the runtime ready gate.
+- `tests/integration/service/test_ready_composition.py` covers unfenced catalog writer admission,
+  the ready catalog generation seed used by the runtime ready gate, privacy-seed reuse across ready
+  rebuilds, and in-process daemon unlock → `START` projection.
 - `tests/integration/service/test_daemon_clients.py` exercises every method through concurrent CLI,
   MCP, and synthetic UI clients against one application/runtime.
 - `tests/subprocess/test_service_daemon_lifecycle.py` covers startup, second-daemon rejection,

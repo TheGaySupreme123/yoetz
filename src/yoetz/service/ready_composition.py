@@ -894,26 +894,42 @@ async def build_privacy_coordinator(
         clock=clock,
         ids=ids,
     )
-    policy_id = ids.new(IdKind.PRIVACY_POLICY)
-    seed_digest = canonical_digest(
-        {
-            "installation_id": installation_id,
-            "profile": "local_only",
-            "schema": "yoetz.privacy-policy.bootstrap/1",
-        }
-    )
-    policy = await seed_policy_if_absent(
-        _denied_policy(
-            installation_id=installation_id,
-            policy_id=policy_id,
-            policy_digest=seed_digest,
-            created_at=clock.now_utc(),
-        ),
-        policies,
-    )
-    effective = await policies.effective_policy(
-        AuthorizationScope(AuthorizationScopeKind.MACHINE, installation_id)
-    )
+    machine_scope = AuthorizationScope(AuthorizationScopeKind.MACHINE, installation_id)
+    # Bootstrap seed is first-run only. Later unlocks must reuse the durable machine policy;
+    # minting a fresh policy_id/created_at each ready build would conflict with seed_if_absent's
+    # identity-equal check and fail unlock after the first successful ready activation.
+    try:
+        effective = await policies.effective_policy(machine_scope)
+        policy = effective.policy
+    except ValueError as exc:
+        if exc.args != ("privacy_policy_missing",):
+            raise
+        seed_digest = canonical_digest(
+            {
+                "installation_id": installation_id,
+                "profile": "local_only",
+                "schema": "yoetz.privacy-policy.bootstrap/1",
+            }
+        )
+        try:
+            policy = await seed_policy_if_absent(
+                _denied_policy(
+                    installation_id=installation_id,
+                    policy_id=ids.new(IdKind.PRIVACY_POLICY),
+                    policy_digest=seed_digest,
+                    created_at=clock.now_utc(),
+                ),
+                policies,
+            )
+        except ValueError as seed_exc:
+            # Concurrent first-run race: another ready build committed a different identity.
+            # Never overwrite; load the durable winner.
+            if seed_exc.args != ("privacy_policy_seed_conflict",):
+                raise
+            effective = await policies.effective_policy(machine_scope)
+            policy = effective.policy
+        else:
+            effective = await policies.effective_policy(machine_scope)
     authority = HumanAuthorityCapability(
         "established_passphrase",
         canonical_digest(

@@ -293,6 +293,17 @@ def _fail(reason: str) -> Never:
     raise ControlProtocolError(reason)
 
 
+def _plain_mapping_for_model(value: object) -> Mapping[str, JsonValue]:
+    """Thaw a deeply frozen wire body into plain dicts/lists for pydantic models."""
+
+    if not isinstance(value, Mapping):
+        _fail("frame_invalid")
+    thawed = strict_json_parse(canonical_encode(cast(JsonValue, value)))
+    if type(thawed) is not dict:
+        _fail("frame_invalid")
+    return cast(Mapping[str, JsonValue], thawed)
+
+
 def _plain_wire_value(value: object) -> JsonValue:
     if isinstance(value, Enum):
         return cast(JsonValue, value.value)
@@ -558,7 +569,7 @@ def parse_control_request(frame: ControlFrame) -> ControlRequest:
         body = (
             JsonObject(cast(Mapping[str, JsonValue], raw_body))
             if model is None
-            else model.model_validate(raw_body)
+            else model.model_validate(_plain_mapping_for_model(raw_body))
         )
         deadline = wire.get("deadline_ms")
         return ControlCallRequest(
@@ -604,7 +615,7 @@ def parse_control_result(frame: ControlFrame) -> ControlResult:
             body = (
                 JsonObject(cast(Mapping[str, JsonValue], raw_body))
                 if model is None
-                else model.model_validate(raw_body)
+                else model.model_validate(_plain_mapping_for_model(raw_body))
             )
         return ControlResult(
             protocol_version="1.0",

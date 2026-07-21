@@ -34,6 +34,7 @@ from yoetz.service.daemon import ServiceComposition, ServiceDaemon
 from yoetz.service.lifecycle import ServiceLifecycle
 from yoetz.service.ready_composition import (
     IdPort,
+    build_privacy_coordinator,
     build_ready_application_factory,
     open_ready_catalog,
 )
@@ -158,6 +159,63 @@ def test_open_catalog_writer_allows_unfenced_catalog_initialization(tmp_path: Pa
         assert row == ("7",)
     finally:
         db.close(force=True)
+
+
+@pytest.mark.anyio
+async def test_build_privacy_coordinator_reuses_durable_seed_on_second_ready(
+    tmp_path: Path,
+) -> None:
+    tmp_path.chmod(0o700)
+    clock = _Clock()
+    memory = LocalSecretMemory()
+    vault = VaultService(
+        installation_id=_INSTALLATION_ID,
+        service_generation=1,
+        mode=VaultMode.UNINITIALIZED,
+        secret_memory=memory,
+        clock=clock,
+        vault_store_factory=lambda: EncryptedVaultStore(tmp_path / "vault"),
+        pristine_state_digest="sha256:" + "7" * 64,
+    )
+    initialize = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"correct horse battery"))
+    await vault.initialize_passphrase(initialize, "sha256:" + "8" * 64)
+    catalog_path = tmp_path / "catalog.sqlite3"
+    db = open_catalog_writer(catalog_path)
+    try:
+        initialize_catalog(db)
+        with db:
+            db.execute(
+                "INSERT INTO catalog_meta(key, value) VALUES ('installation_id', ?)",
+                (_INSTALLATION_ID,),
+            )
+            db.execute(
+                "INSERT INTO catalog_meta(key, value) VALUES ('owner_generation', '1')"
+            )
+        first = await build_privacy_coordinator(
+            catalog_db=db,
+            installation_id=_INSTALLATION_ID,
+            service_generation=1,
+            vault_generation=vault.generation,
+            vault=vault,
+            clock=clock,
+            ids=IdPort(),
+        )
+        second = await build_privacy_coordinator(
+            catalog_db=db,
+            installation_id=_INSTALLATION_ID,
+            service_generation=2,
+            vault_generation=vault.generation,
+            vault=vault,
+            clock=clock,
+            ids=IdPort(),
+        )
+        assert first[1].policy_id == second[1].policy_id
+        assert first[1].created_at == second[1].created_at
+        assert first[1].policy_digest == second[1].policy_digest
+    finally:
+        db.close(force=True)
+        await vault.close()
+        memory.close()
 
 
 @pytest.mark.anyio
