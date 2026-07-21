@@ -319,7 +319,7 @@ jobs:
           assert sys.version_info[:2] == (3, 14)
           print('platform', platform.platform())
           print('apsw', apsw.apsw_version(), 'sqlite', apsw.sqlite_lib_version())
-          print('sqlite source id', apsw.sqlite_source_id())
+          print('sqlite source id', apsw.sqlite3_sourceid())
           "
 
       - name: version/startup, resource/schema/migration identity, strict-local six operations, MCP/CLI subprocess
@@ -399,7 +399,7 @@ jobs:
           assert sys.version_info[:2] == (3, 14)
           print('platform', platform.platform())
           print('apsw', apsw.apsw_version(), 'sqlite', apsw.sqlite_lib_version())
-          print('sqlite source id', apsw.sqlite_source_id())
+          print('sqlite source id', apsw.sqlite3_sourceid())
           "
 
       - name: version/startup, resource/schema/migration identity, strict-local six operations, MCP/CLI subprocess

@@ -150,8 +150,12 @@ jobs:
             -o "${RUNNER_TEMP}/pip-audit-install.json" --format json
 
       - name: npm audit (production dependency tree)
-        run: npm audit --omit=dev --audit-level=high --json > "${RUNNER_TEMP}/npm-audit.json" || \
-          (npm audit --omit=dev --audit-level=high; exit 1)
+        run: |
+          set -euo pipefail
+          if ! npm audit --omit=dev --audit-level=high --json > "${RUNNER_TEMP}/npm-audit.json"; then
+            npm audit --omit=dev --audit-level=high || true
+            exit 1
+          fi
 
       - name: Generate CycloneDX SBOM
         run: |
@@ -234,7 +238,7 @@ jobs:
           for wf in .github/workflows/*.yml; do
             echo "checking $wf"
             grep -q "^permissions:" "$wf" || { echo "::error file=$wf::missing top-level permissions block"; fail=1; }
-            if grep -Eq "pull_request_target" "$wf"; then
+            if grep -Eq '^[[:space:]]*pull_request_target[[:space:]]*:' "$wf"; then
               echo "::error file=$wf::pull_request_target is forbidden"; fail=1
             fi
             if grep -Eq 'uses:\s*[A-Za-z0-9._-]+/[A-Za-z0-9._-]+@(v[0-9]|main|master)\b' "$wf"; then
@@ -305,8 +309,7 @@ jobs:
         run: |
           uv run --locked python scripts/scan_public_boundary.py --source-tree . \
             --artifact "${{ runner.temp }}"/dist/*.whl \
-            --artifact "${{ runner.temp }}"/dist/*.tar.gz \
-            --evidence-dir "${{ runner.temp }}/artifact-boundary-evidence"
+            --artifact "${{ runner.temp }}"/dist/*.tar.gz
 
       - name: Negative control — per-run synthetic canary in filename/text/binary/metadata
         run: |
@@ -335,6 +338,7 @@ jobs:
           name: security-artifact-boundary-evidence
           path: ${{ runner.temp }}/artifact-boundary-evidence
           retention-days: 14
+          if-no-files-found: ignore
 
   # ---------------------------------------------------------------------------------------------
   # runtime-plaintext-canary

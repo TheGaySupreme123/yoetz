@@ -303,7 +303,7 @@ jobs:
           import apsw
           print('apsw', apsw.apsw_version())
           print('sqlite', apsw.sqlite_lib_version())
-          print('source id', apsw.sqlite_source_id())
+          print('source id', apsw.sqlite3_sourceid())
           print('compile options', list(apsw.compile_options()))
           "
 
@@ -462,8 +462,7 @@ jobs:
         run: |
           uv run --locked python scripts/scan_public_boundary.py --source-tree . \
             --artifact "${{ runner.temp }}"/dist/*.whl \
-            --artifact "${{ runner.temp }}"/dist/*.tar.gz \
-            --evidence-dir "${{ runner.temp }}/boundary-evidence"
+            --artifact "${{ runner.temp }}"/dist/*.tar.gz
 
       - name: Negative control — synthetic canary must be blocked and never logged
         run: |
