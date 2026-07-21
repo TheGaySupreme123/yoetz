@@ -70,11 +70,14 @@ class _GenerationStore:
 
 class _Lookup:
     def mac(self, domain: bytes, message: bytes) -> str:
-        return "hmac-sha256:" + hmac.new(
-            b"catalog-test-key",
-            domain + message,
-            hashlib.sha256,
-        ).hexdigest()
+        return (
+            "hmac-sha256:"
+            + hmac.new(
+                b"catalog-test-key",
+                domain + message,
+                hashlib.sha256,
+            ).hexdigest()
+        )
 
 
 def _accept_private_path(_path: Path) -> None:
@@ -118,7 +121,9 @@ def _sqlite_policy(  # pyright: ignore[reportUnusedFunction]
         _accept_private_path,
     )
     factory = cast(_SupportPolicyFactory, getattr(connection_module, "_SqliteSupportPolicy"))
-    installer = cast(Callable[[object | None], None], getattr(connection_module, "_install_support_policy"))
+    installer = cast(
+        Callable[[object | None], None], getattr(connection_module, "_install_support_policy")
+    )
     db = apsw.Connection(":memory:")
     try:
         raw_options: object = db.pragma("compile_options")
@@ -150,12 +155,8 @@ def test_open_catalog_writer_allows_unfenced_catalog_initialization(tmp_path: Pa
                 "INSERT INTO catalog_meta(key, value) VALUES ('installation_id', ?)",
                 (_INSTALLATION_ID,),
             )
-            db.execute(
-                "INSERT INTO catalog_meta(key, value) VALUES ('owner_generation', '7')"
-            )
-        row = db.execute(
-            "SELECT value FROM catalog_meta WHERE key='owner_generation'"
-        ).fetchone()
+            db.execute("INSERT INTO catalog_meta(key, value) VALUES ('owner_generation', '7')")
+        row = db.execute("SELECT value FROM catalog_meta WHERE key='owner_generation'").fetchone()
         assert row == ("7",)
     finally:
         db.close(force=True)
@@ -188,9 +189,7 @@ async def test_build_privacy_coordinator_reuses_durable_seed_on_second_ready(
                 "INSERT INTO catalog_meta(key, value) VALUES ('installation_id', ?)",
                 (_INSTALLATION_ID,),
             )
-            db.execute(
-                "INSERT INTO catalog_meta(key, value) VALUES ('owner_generation', '1')"
-            )
+            db.execute("INSERT INTO catalog_meta(key, value) VALUES ('owner_generation', '1')")
         first = await build_privacy_coordinator(
             catalog_db=db,
             installation_id=_INSTALLATION_ID,

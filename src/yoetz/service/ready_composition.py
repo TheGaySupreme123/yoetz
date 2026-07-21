@@ -212,7 +212,9 @@ def _install_sqlite_support_policy() -> None:
         raise RuntimeError("sqlite_compile_options_invalid")
     options = frozenset(cast(list[str], raw_option_items))
     factory = cast(_SqliteSupportPolicyFactory, getattr(connection_module, "_SqliteSupportPolicy"))
-    installer = cast(Callable[[object | None], None], getattr(connection_module, "_install_support_policy"))
+    installer = cast(
+        Callable[[object | None], None], getattr(connection_module, "_install_support_policy")
+    )
     policy = factory(
         manifest_id=build_version_manifest().resource_manifest_digest,
         required_options=options,
@@ -230,7 +232,9 @@ def _install_recovery_persistence(persistence: object) -> None:
 
 
 def _open_recovery_writer(path: Path) -> apsw.Connection:
-    opener = cast(Callable[[Path], apsw.Connection], getattr(connection_module, "_open_recovery_writer"))
+    opener = cast(
+        Callable[[Path], apsw.Connection], getattr(connection_module, "_open_recovery_writer")
+    )
     return opener(path)
 
 
@@ -423,9 +427,7 @@ class _RecoveryPersistence:
             raise ValueError("recovery_value_invalid")
         return replace(state, tail_state=recovery_module.RecoveryTailState.CLEAN)
 
-    def rebuild_projection(
-        self, state: object, fence: OwnershipFence, *, now: datetime
-    ) -> object:
+    def rebuild_projection(self, state: object, fence: OwnershipFence, *, now: datetime) -> object:
         del fence, now
         if type(state) is not recovery_module.RecoveryState:
             raise ValueError("recovery_value_invalid")
@@ -575,7 +577,9 @@ def _inspect_common(
     fresh_allocation: bool,
 ) -> _BundleInspection:
     task_id = cast(str, getattr(route, "task_id"))
-    bundle_root = _safe_bundle_root(bundle_base, cast(str, getattr(route, "bundle_relpath")), task_id)
+    bundle_root = _safe_bundle_root(
+        bundle_base, cast(str, getattr(route, "bundle_relpath")), task_id
+    )
     state = recovery_module.inspect_recovery_state(
         bundle_root,
         catalog_path=catalog_path,
@@ -638,7 +642,11 @@ def build_runtime_adapter_factories(
             route_identity_digest=cast(str, getattr(command, "route_identity_digest")),
             state=TaskRouteState.ACTIVE,
         )
-        bundle_root = _safe_bundle_root(paths.bundle, cast(str, getattr(command, "bundle_relpath")), cast(str, getattr(command, "task_id")))
+        bundle_root = _safe_bundle_root(
+            paths.bundle,
+            cast(str, getattr(command, "bundle_relpath")),
+            cast(str, getattr(command, "task_id")),
+        )
         ledger_path = bundle_root / _LEDGER_NAME
         fresh = not ledger_path.exists()
         if fresh:
@@ -1016,9 +1024,7 @@ def _receipt_versions(manifest: Mapping[str, CanonicalJsonValue]) -> ReceiptVers
         object_format_version=cast(str, manifest["object_format_version"]),
         catalog_schema_version=cast(str, manifest["catalog_schema_version"]),
         bundle_schema_version=cast(str, manifest["bundle_schema_version"]),
-        policy_versions=tuple(
-            sorted(policy_versions, key=lambda item: item.policy_id.encode())
-        ),
+        policy_versions=tuple(sorted(policy_versions, key=lambda item: item.policy_id.encode())),
         schema_versions=tuple(sorted(schema_versions, key=lambda item: item.schema_id.encode())),
         resource_manifest_digest=cast(str, manifest["resource_manifest_digest"]),
     )
@@ -1028,7 +1034,9 @@ async def _semantic_not_configured(
     frozen: FrozenCase, findings: tuple[object, ...]
 ) -> FinalSemanticEvaluation:
     del frozen, findings
-    return FinalSemanticEvaluation(SemanticStatus.NOT_CONFIGURED, SemanticReason.PROVIDER_NOT_CONFIGURED)
+    return FinalSemanticEvaluation(
+        SemanticStatus.NOT_CONFIGURED, SemanticReason.PROVIDER_NOT_CONFIGURED
+    )
 
 
 def _profile(config: YoetzConfig) -> RuntimeProfile:
