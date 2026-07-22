@@ -195,8 +195,22 @@ class ProviderCredentialBinding:
             "purpose_digest": self.purpose_digest,
         }
 
-    def target_digest(self) -> str:
-        return canonical_digest(cast(JsonValue, self.record_binding()))
+    def target_digest(self, action: Literal["set", "rotate"]) -> str:
+        if action not in {"set", "rotate"}:
+            raise ValueError("provider_credential_action_invalid")
+        return canonical_digest(
+            {
+                "action": action,
+                "endpoint_profile_id": self.endpoint_profile_id,
+                "endpoint_profile_version": self.endpoint_profile_version,
+                "kind": "provider_credential",
+                "model_id": self.model_id,
+                "provider_id": self.provider_id,
+                "purpose": self.purpose,
+                "purpose_digest": self.purpose_digest,
+                "scope_digest": self.authorization_scope_digest,
+            }
+        )
 
 
 def provider_credential_profile_binding(
@@ -550,22 +564,29 @@ class VaultService:
             try:
                 proof.consume(
                     expected_purpose,
-                    binding.target_digest(),
+                    binding.target_digest(action),
                     self._service_generation,
                     generation,
                     None,
                     now_monotonic,
                 )
-                current = self._provider_generations.get(binding)
+                current = store.record_generation(
+                    VaultRecordKind.PROVIDER_CREDENTIAL,
+                    binding.record_binding(),
+                )
                 if action == "set":
-                    if current is not None:
-                        raise VaultError("record_binding_mismatch")
-                    store.create_record(
-                        VaultRecordKind.PROVIDER_CREDENTIAL,
-                        binding.record_binding(),
-                        payload,
-                    )
-                    self._provider_generations[binding] = 1
+                    if current is None:
+                        store.create_record(
+                            VaultRecordKind.PROVIDER_CREDENTIAL,
+                            binding.record_binding(),
+                            payload,
+                        )
+                        self._provider_generations[binding] = 1
+                    else:
+                        store.replace_credential_record(
+                            binding.record_binding(), payload, expected_generation=current
+                        )
+                        self._provider_generations[binding] = current + 1
                 else:
                     if current is None:
                         raise VaultError("record_missing")

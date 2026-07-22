@@ -417,6 +417,10 @@ async def test_provider_secret_reauthentication_is_exact_and_proof_is_single_use
     assert cast(SecretRequiredPhase, credential_phase.phase).binding.purpose is (
         ConfidentialSecretPurpose.PROVIDER_CREDENTIAL
     )
+    assert (
+        cast(SecretRequiredPhase, credential_phase.phase).binding.secret_challenge
+        != cast(SecretRequiredPhase, phase.phase).binding.secret_challenge
+    )
     result = await service.secret_completed(opened.ceremony_id)
     assert type(result) is ServerResultEnvelope
     assert result.result == ProviderCredentialResult("set", 1, "stored")

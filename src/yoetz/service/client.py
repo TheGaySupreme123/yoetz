@@ -116,7 +116,7 @@ _LIFECYCLE_METHODS: Final = frozenset(
     {ControlMethod.SERVICE_STATUS, ControlMethod.SERVICE_LOCK, ControlMethod.SERVICE_STOP}
 )
 _PRIVATE_CONSTRUCTOR_TOKEN: Final = object()
-_SERVICE_START_TIMEOUT_SECONDS: Final = 10.0
+_SERVICE_START_TIMEOUT_SECONDS: Final = 30.0
 _SERVICE_START_POLL_SECONDS: Final = 0.05
 _SECRET_ENV_MARKERS: Final = (
     "API_KEY",
@@ -125,6 +125,22 @@ _SECRET_ENV_MARKERS: Final = (
     "PASSWORD",
     "SECRET",
     "TOKEN",
+)
+_SERVICE_CONFIG_ENV_NAMES: Final = frozenset(
+    {
+        "YOETZ_CONFIG",
+        "YOETZ_LOG_LEVEL",
+        "YOETZ_PROFILE",
+        "YOETZ_PROVIDER_ENDPOINT_PROFILE_ID",
+        "YOETZ_PROVIDER_ENDPOINT_PROFILE_VERSION",
+        "YOETZ_PROVIDER_ID",
+        "YOETZ_PROVIDER_MODEL",
+        "YOETZ_PROVIDER_TIMEOUT_SECONDS",
+        "YOETZ_STORAGE_DATA_DIR",
+        "YOETZ_STORAGE_DURABILITY",
+        "YOETZ_VERIFICATION_MAX_FINDINGS",
+        "YOETZ_VERIFICATION_SEMANTIC",
+    }
 )
 
 
@@ -140,6 +156,7 @@ def _service_environment() -> dict[str, str]:
         name: value
         for name, value in os.environ.items()
         if not any(marker in name.upper() for marker in _SECRET_ENV_MARKERS)
+        and (not name.startswith("YOETZ_") or name in _SERVICE_CONFIG_ENV_NAMES)
     }
 
 

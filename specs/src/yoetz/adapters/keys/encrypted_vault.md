@@ -15,6 +15,7 @@ without exposing plaintext or requiring another migration resource/database.
   `create_record(kind, structural_binding: dict[str, str], payload: SecretHandle, *,
   generation: int = 1) -> str`, `load_record(kind, structural_binding) -> SecretHandle`,
   `replace_credential_record(structural_binding, payload, *, expected_generation: int) -> str`,
+  `record_generation(kind, structural_binding) -> int | None`,
   `verify_sentinel(structural_binding) -> None`,
   `delete_after_migration(kind, structural_binding, *, expected_generation: int) -> None`, and
   `close() -> None`. The mapping arguments are not open metadata: their exact key sets and value
@@ -68,6 +69,8 @@ publishes and directory-fsyncs the generation-CAS index; a crash before the inde
 an unreferenced encrypted record. Bundle-key records are immutable generation 1. Credential
 replacement requires explicit human authorization, a fresh record DEK/nonce, generation+1, and an
 exact current-index CAS. No plaintext temp exists.
+`record_generation` performs the same closed binding validation and keyed record-ID lookup and
+returns only the authenticated index generation (or absence); it exposes no binding or payload.
 
 `verify_sentinel` proves only that the indexed sentinel record has the expected keyed structural
 binding and passes frame digest, RFC-3394 unwrap, and AES-GCM authentication under the current IVK.

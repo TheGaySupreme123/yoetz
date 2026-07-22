@@ -9,9 +9,11 @@
 Collects bounded first-install initialization, unlock, recovery, provider-credential, security-
 policy authorization, or reauthentication input from a foreground local human and sends exactly
 one accepted secret directly to the service's confidential ingress when the selected ceremony
-requires one. It is the only CLI module that may handle these values and never exposes a normal
-argument/stdin/environment API for a secret or decision. Nonsecret closed ceremony targets may be
-supplied by their dedicated trusted-foreground command.
+requires one. It is the only CLI module that may handle these values. The ADR-012 `yoetz --set
+--api-key VALUE` path may supply its credential plus a platform-store-generated auto-unlock
+passphrase directly as mutable buffers; all other missing secrets and every human decision remain
+trusted-foreground prompts. Nonsecret closed ceremony targets may be supplied by their dedicated
+trusted-foreground command.
 
 ## Public surface
 
@@ -78,6 +80,12 @@ receives a separate `provider_credential` binding and prompts for the credential
 only stored/rotated plus activation status. Any failure sends no credential or preserves the old
 record; no provider secret appears in normal CLI parsing/output.
 
+When setup supplies both the credential and the established passphrase reauthentication buffer,
+the helper still opens and verifies the same service-minted YZH1 preview and sends the two distinct
+one-shot YZS1 frames, but uses a non-prompting terminal facade and requires no `/dev/tty`. It is
+legal only when every possible secret for that closed ceremony is already supplied; otherwise the
+normal foreground TTY guard applies. Each mutable buffer is overwritten after its one use.
+
 `change_idle_relock_policy` accepts only an already parsed canonical integer `60..86400` or the
 literal `disabled`, then opens the closed YZH1 target `{kind:"idle_relock_policy", operation:"set",
 seconds:N}` or `{kind:"idle_relock_policy", operation:"disable"}`. It verifies that the server
@@ -110,8 +118,8 @@ against malicious same-UID automation; documentation states the limit.
 ## Errors and edge cases
 
 No controlling TTY/foreground mismatch/redirection/pipeline/noninteractive mode fails before a
-prompt. Signals/EOF/timeout restore echo and overwrite. Secret never appears in traceback/rendering.
-No headless/password-FD fallback ships in v0.1.
+prompt. The only non-prompting exception is the fully supplied ADR-012 setup path above.
+Signals/EOF/timeout restore echo and overwrite. Secret never appears in traceback/rendering.
 If the service no longer proves pristine `uninitialized` state, initialization fails before either
 prompt. An existing keyring/passphrase vault is never offered this command as unlock/reset fallback.
 Presence-capability failure is never rendered as a keyring corruption or as permission to auto-

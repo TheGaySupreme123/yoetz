@@ -516,7 +516,15 @@ class HumanControlService:
         self, session: _Ceremony, purpose: ConfidentialSecretPurpose
     ) -> SecretRequiredPhase:
         challenge = session.unlock_challenge
-        secret_challenge = challenge.challenge if challenge is not None else secrets.token_hex(32)
+        # Reauthentication and the provider credential are two distinct one-shot YZS1 frames.
+        # The credential frame must not reuse the unlock challenge consumed by the preceding
+        # reauthentication frame, or replay protection rejects it before accepting the socket.
+        secret_challenge = (
+            challenge.challenge
+            if challenge is not None
+            and purpose is not ConfidentialSecretPurpose.PROVIDER_CREDENTIAL
+            else secrets.token_hex(32)
+        )
         binding = SecretIngressBinding(
             binding_version=1,
             ceremony_id=session.binding.ceremony_id,

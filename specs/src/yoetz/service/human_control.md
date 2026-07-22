@@ -54,7 +54,8 @@ Next phases are exact:
   `provider_reauthentication` YZS1 secret. `UnlockCoordinator` applies any passphrase throttle and
   delegates the exact source/challenge to `VaultService`, which alone mints the common proof; that
   proof remains internal and live only inside this ceremony. It then mints a
-  `provider_credential` binding and accepts one credential secret. Human control passes the exact
+  `provider_credential` binding with a fresh secret challenge distinct from the already consumed
+  reauthentication challenge and accepts one credential secret. Human control passes the exact
   action, frozen `ProviderCredentialBinding`, secret handle, proof, and monotonic time to
   `VaultService.store_provider_credential`; the vault validates/consumes the proof in the same
   non-interleavable mutation section as the record-generation CAS. Failed rotation preserves the
@@ -111,7 +112,8 @@ choice; it never automatically advances from retry into secret collection.
 
 - Stale generation, changed excerpt/destination/diff/binding, expiry, disconnect, relock, or replay
   consumes the ceremony and commits nothing.
-- Credential set rejects an existing record; rotate requires one and performs atomic replace.
+- Credential set creates a missing exact profile record or replaces an existing exact profile
+  record through generation-CAS; rotate requires one and performs atomic replace.
   Provider profile/policy mismatch or missing reauthentication creates no credential binding.
 - Keyring retry is available only for a re-proven pristine `uninitialized` re-probe/create attempt
   or committed `os_keyring` load attempt. It cannot create for an existing vault, select

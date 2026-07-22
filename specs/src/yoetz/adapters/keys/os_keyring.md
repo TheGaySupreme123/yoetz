@@ -29,6 +29,11 @@ records behind `VaultService`.
   release cell, and verified `UserPresenceCapability` evidence digest. It contains no key or live
   human attestation and cannot authorize another action.
 - Structural `OSKeyringProbe` and bounded `OSKeyringError`; no backend private text/path/account.
+- `AutoUnlockPassphraseStore(bundle_path, *, backend=None)` with `available`, `load()`, and
+  `load_or_create()`. This separate setup convenience stores one generated printable passphrase
+  in an approved macOS Keychain, Windows Credential Locker, or Linux Secret Service/KWallet
+  backend under a bundle-path-digest account; it never changes the strict first-install IVK
+  authority above.
 
 ## Behavior
 
@@ -76,6 +81,12 @@ passphrase. Provider credentials are stored encrypted in the vault, not separate
 Existing-mode `load` does not require first-install authority: an already committed keyring vault
 may unlock without current presence, while service composition separately fences external
 activation.
+
+When the user supplies `yoetz --set --api-key`, setup may generate a high-entropy passphrase,
+round-trip it through `AutoUnlockPassphraseStore`, and use it to initialize the ordinary encrypted
+passphrase vault. On later service starts the daemon loads that passphrase, unlocks the vault, and
+immediately overwrites its mutable copy. Unsupported/unavailable platform stores fall back to the
+existing explicit hidden passphrase ceremony; no plaintext file or environment fallback exists.
 
 ## Errors and edge cases
 

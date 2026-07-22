@@ -201,6 +201,8 @@ section, consumes that exact proof, rechecks the target/generations, and perform
 record-generation CAS. No record mutation can commit without proof consumption. Any failure after
 consumption leaves the proof spent and preserves the prior committed record; retry requires a new
 ceremony, proof, and credential handle.
+`set` creates a missing exact profile credential or replaces its current authenticated index
+generation; repeating `yoetz --set` therefore updates the key. `rotate` remains existing-only.
 
 `mint_human_authorization(source, challenge)` is the sole constructor of
 `HumanAuthorizationProof`. It accepts exactly one matching internal authorization source: an

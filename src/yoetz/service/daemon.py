@@ -29,6 +29,7 @@ from yoetz.adapters.control.unix_socket import (
     remove_stale_endpoint,
 )
 from yoetz.adapters.keys.encrypted_vault import EncryptedVaultStore
+from yoetz.adapters.keys.os_keyring import AutoUnlockPassphraseStore
 from yoetz.adapters.keys.secret_memory import LocalSecretMemory
 from yoetz.adapters.keys.vault_passphrase import VaultRootEnvelope
 from yoetz.adapters.session_events import SessionEventMonitor
@@ -59,7 +60,7 @@ from yoetz.ports.control import (
     ServiceStopResult,
 )
 from yoetz.ports.diagnostics import StartupCheckResult
-from yoetz.ports.secret_memory import HumanAuthorizationProof, SecretHandle
+from yoetz.ports.secret_memory import HumanAuthorizationProof, SecretHandle, SecretPurpose
 from yoetz.protocol.canonical import (
     JsonValue,
     canonical_digest,
@@ -338,11 +339,24 @@ class ServiceDaemon:
                             "active" if monitor.capability.active else "unavailable"
                         )
 
-                if self._application is not None and self._composition.vault.ready:
-                    await lifecycle.transition(
-                        ServiceState.READY,
-                        vault_generation=self._composition.vault.generation,
+                if (
+                    self._composition.vault.ready
+                    and self._application is None
+                    and self._composition.ready_application_factory is not None
+                ):
+                    await lifecycle.transition(ServiceState.LOCKED)
+                    await lifecycle.transition(ServiceState.UNLOCKING)
+                    await self.activate_ready_application(
+                        lifecycle.instance.generation,
+                        self._composition.vault.generation,
                     )
+
+                if self._application is not None and self._composition.vault.ready:
+                    if lifecycle.state is not ServiceState.READY:
+                        await lifecycle.transition(
+                            ServiceState.READY,
+                            vault_generation=self._composition.vault.generation,
+                        )
                     self._state_reason = "none"
                 else:
                     await lifecycle.transition(ServiceState.LOCKED)
@@ -1357,6 +1371,18 @@ async def _production_composition(
             record = throttle.open_for_restart()
             if record.installation_id != installation_id:
                 raise RuntimeError("installation_throttle_binding_invalid")
+            auto_passphrase = AutoUnlockPassphraseStore(paths.bundle).load()
+            if auto_passphrase is not None:
+                try:
+                    handle = secret_memory.capture(SecretPurpose.VAULT_UNLOCK, auto_passphrase)
+                    await vault.unlock(handle)
+                except Exception:
+                    # A missing, locked, stale, or mismatched platform credential never prevents
+                    # the service from starting in its ordinary locked state.
+                    pass
+                finally:
+                    for index in range(len(auto_passphrase)):
+                        auto_passphrase[index] = 0
         relay = _ReadyActivationRelay()
         secret_ingress = SecretIngressService(clock, secret_memory, listener=listeners.secret)
         diagnostics = _NullDiagnostics()

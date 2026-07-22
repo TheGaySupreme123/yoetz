@@ -15,7 +15,7 @@ vault, or direct-execution fallback.
 
 - `class ServiceClient(ControlClientPort)` implementing the port.
 - `async connect_service(client_kind: ControlClientKind) -> ServiceClient`.
-- `async connect_service_on_demand(client_kind, *, timeout_seconds=10.0) -> ServiceClient` —
+- `async connect_service_on_demand(client_kind, *, timeout_seconds=30.0) -> ServiceClient` —
   connect first; only an absent endpoint starts the fixed detached current-install service and
   retries the authenticated connection.
 - Six exact async workflow methods matching `Application`: `start`, `publish_work`, `check`,
@@ -49,8 +49,10 @@ environment mapping, provider client, `Application`, or adapter factory.
 Unix-socket adapter to authenticate the service peer as the current effective UID, then performs
 the frozen handshake. It never starts a service automatically. `connect_service_on_demand` is the
 explicit exception: it launches exactly `sys.executable -m yoetz service run`, with no shell/caller
-locator and with secret-shaped inherited environment names removed. Concurrent launches rely on
-the existing singleton. A missing endpoint is a bounded
+locator, with secret-shaped inherited environment names removed, and with unrelated `YOETZ_*`
+application variables removed while retaining only the closed service-config environment names.
+This prevents an adjacent Yoetz application `.env` from making strict service config loading fail.
+Concurrent launches rely on the existing singleton. A missing endpoint is a bounded
 `service_unavailable` result with human guidance owned by the surface renderer.
 
 Each operation validates its already typed body, allocates a fresh transport RPC ID, preserves the

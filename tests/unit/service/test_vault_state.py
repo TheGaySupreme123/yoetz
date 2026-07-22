@@ -139,7 +139,7 @@ async def test_provider_credential_is_exact_attempt_bound_and_one_use(tmp_path: 
     proof = HumanAuthorizationProof(
         "proof-test",
         "provider_credential_set",
-        binding.target_digest(),
+        binding.target_digest("set"),
         7,
         service.generation,
         None,
@@ -150,6 +150,22 @@ async def test_provider_credential_is_exact_attempt_bound_and_one_use(tmp_path: 
         SecretPurpose.PROVIDER_CREDENTIAL, bytearray(b"sk-test-token-value")
     )
     await service.store_provider_credential("set", binding, credential, proof, 10.0)
+    replacement_proof = HumanAuthorizationProof(
+        "proof-test-replacement",
+        "provider_credential_set",
+        binding.target_digest("set"),
+        7,
+        service.generation,
+        None,
+        10.0,
+        20.0,
+    )
+    replacement = memory.capture(
+        SecretPurpose.PROVIDER_CREDENTIAL, bytearray(b"sk-replacement-value")
+    )
+    await service.store_provider_credential(
+        "set", binding, replacement, replacement_proof, 11.0
+    )
     attempt = ProviderAttemptAuthBinding(
         binding.provider_id,
         binding.model_id,
@@ -168,7 +184,7 @@ async def test_provider_credential_is_exact_attempt_bound_and_one_use(tmp_path: 
     class Callback:
         async def inject_and_start(self, credential_view: memoryview) -> str:
             assert hashlib.sha256(credential_view).digest()
-            assert bytes(credential_view) == b"sk-test-token-value"
+            assert bytes(credential_view) == b"sk-replacement-value"
             return "started"
 
     assert await handle.authorize_attempt(attempt, Callback()) == "started"

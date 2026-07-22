@@ -50,10 +50,12 @@ exactly those contracts and connects the steps without weakening any existing tr
    from Codex capability support (E-002/E-013 are untouched); "registered" never implies "Codex
    will successfully connect".
 
-The short `yoetz --set --fireworks --model MODEL [--api-key VALUE]` path is an interactive
-provider-only entry into the same setup ceremonies. It derives internal provider bindings. The
-API key uses hidden TTY input when omitted; an explicit value is never echoed and is moved into the
-one-shot mutable ceremony buffer immediately, with the documented shell-history/process-list risk.
+The short `yoetz --set --fireworks --model MODEL [--api-key VALUE]` path is a provider-only entry
+into the same setup ceremonies. It derives internal provider bindings. The API key uses hidden TTY
+input when omitted; when Fireworks, model, and key are all supplied, setup may run without a TTY
+because no prompt remains. An explicit value is never echoed and is moved into the one-shot mutable
+ceremony buffer immediately, with the documented shell-history/process-list risk. Repeating the
+same command updates the exact stored profile credential through generation-CAS.
 
 4. **A sibling port, not an `IntegrationsPort` extension (amends ADR-010 by addition only).**
    `HarnessMcpPort` (`ports/harness_mcp.py`) owns registration with its own closed types

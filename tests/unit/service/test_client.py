@@ -273,11 +273,15 @@ def test_on_demand_service_environment_strips_secret_shaped_names(
 
     monkeypatch.setenv("FIREWORKS_API_KEY", "must-not-cross")
     monkeypatch.setenv("UNRELATED_TOKEN", "must-not-cross")
+    monkeypatch.setenv("YOETZ_UNRELATED_APP_SETTING", "must-not-cross")
+    monkeypatch.setenv("YOETZ_LOG_LEVEL", "warning")
     monkeypatch.setenv("PATH", "/safe/bin")
     environment = client_module._service_environment()  # pyright: ignore[reportPrivateUsage]
     assert environment["PATH"] == "/safe/bin"
+    assert environment["YOETZ_LOG_LEVEL"] == "warning"
     assert "FIREWORKS_API_KEY" not in environment
     assert "UNRELATED_TOKEN" not in environment
+    assert "YOETZ_UNRELATED_APP_SETTING" not in environment
     assert "must-not-cross" not in environment.values()
 
 

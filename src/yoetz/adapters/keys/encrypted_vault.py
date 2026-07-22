@@ -270,6 +270,20 @@ class EncryptedVaultStore:
             finally:
                 _overwrite(plaintext)
 
+    def record_generation(
+        self,
+        kind: VaultRecordKind,
+        structural_binding: Mapping[str, str],
+    ) -> int | None:
+        """Return the authenticated index generation for one exact record binding."""
+
+        binding = _validate_binding(kind, structural_binding)
+        with self._lock:
+            _, locator = self._ready_keys()
+            _, _, record_id = _record_identity(locator, kind, binding)
+            current = self._index.get(record_id)
+            return None if current is None else current.generation
+
     def verify_sentinel(self, structural_binding: Mapping[str, str]) -> None:
         handle = self.load_record(VaultRecordKind.VAULT_SENTINEL, structural_binding)
         handle.consume(SecretConsumer.VAULT_ROOT, lambda view: None)

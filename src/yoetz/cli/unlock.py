@@ -7,7 +7,7 @@ import os
 import termios
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Any, Final, Literal, Self, cast
+from typing import Any, Final, Literal, Protocol, Self, cast
 
 from yoetz.protocol.canonical import JsonValue, canonical_digest
 from yoetz.service.confidential_client import (
@@ -285,6 +285,34 @@ class _ForegroundTerminal:
         return self._read_line(prompt, maximum, hidden=True)
 
 
+class _CeremonyTerminal(Protocol):
+    """Small terminal surface shared by prompted and fully supplied ceremonies."""
+
+    def write(self, value: str) -> None: ...
+
+    def read_choice(self, prompt: str, allowed: tuple[bytes, ...]) -> bytes: ...
+
+    def read_secret(self, prompt: str, maximum: int) -> bytearray: ...
+
+
+class _SuppliedSecretTerminal:
+    """Non-prompting facade used only when every possible secret was supplied."""
+
+    __slots__ = ()
+
+    def write(self, value: str) -> None:
+        if type(value) is not str:
+            raise TypeError("terminal_text_invalid")
+
+    def read_choice(self, prompt: str, allowed: tuple[bytes, ...]) -> bytes:
+        del prompt, allowed
+        raise HumanCeremonyCliError("input_invalid")
+
+    def read_secret(self, prompt: str, maximum: int) -> bytearray:
+        del prompt, maximum
+        raise HumanCeremonyCliError("input_invalid")
+
+
 def _target_json(target: HumanOpenTarget) -> dict[str, JsonValue]:
     if type(target) is EmptyVaultTarget:
         return {"expected_mode": target.expected_mode, "kind": target.kind}
@@ -388,7 +416,7 @@ def _verify_preview(
     return preview
 
 
-def _render_preview(terminal: _ForegroundTerminal, preview: HumanPreview) -> None:
+def _render_preview(terminal: _CeremonyTerminal, preview: HumanPreview) -> None:
     terminal.write("Yoetz trusted foreground ceremony\n")
     if type(preview) is VaultInitializePreview:
         terminal.write("Action: initialize passphrase vault (irreversible mode selection)\n")
@@ -469,7 +497,7 @@ def _needs_confirmation(
 
 
 def _read_secret(
-    terminal: _ForegroundTerminal,
+    terminal: _CeremonyTerminal,
     kind: HumanCeremonyKind,
     target: HumanOpenTarget,
     purpose: ConfidentialSecretPurpose,
@@ -540,29 +568,44 @@ async def _cancel_quietly(session: HumanControlSession) -> None:
 
 async def _drive_session(
     session: HumanControlSession,
-    terminal: _ForegroundTerminal,
+    terminal: _CeremonyTerminal,
     kind: HumanCeremonyKind,
     target: HumanOpenTarget,
     current: HumanPhase | HumanResult,
     provider_credential: bytearray | None = None,
+    passphrase: bytearray | None = None,
+    provider_reauthentication: bytearray | None = None,
 ) -> tuple[HumanResult, Literal["approve", "deny"] | None]:
     decision: Literal["approve", "deny"] | None = None
     for _ in range(8):
         if type(current) is _expected_result_type(kind):
             return cast(HumanResult, current), decision
         if type(current) is SecretRequiredPhase:
-            if (
-                current.binding.purpose is ConfidentialSecretPurpose.PROVIDER_CREDENTIAL
-                and provider_credential is not None
-            ):
-                _validate_secret(provider_credential, current.binding.purpose)
-                secret_buffer = provider_credential
+            purpose = current.binding.purpose
+            supplied: bytearray | None = None
+            if purpose is ConfidentialSecretPurpose.PROVIDER_CREDENTIAL:
+                supplied = provider_credential
+            elif purpose in {
+                ConfidentialSecretPurpose.VAULT_INITIALIZE,
+                ConfidentialSecretPurpose.VAULT_UNLOCK,
+            }:
+                supplied = passphrase
+            elif purpose is ConfidentialSecretPurpose.PROVIDER_REAUTHENTICATION:
+                supplied = provider_reauthentication
+            if supplied is not None:
+                _validate_secret(supplied, purpose)
+                secret_buffer = supplied
             else:
-                secret_buffer = _read_secret(terminal, kind, target, current.binding.purpose)
+                secret_buffer = _read_secret(terminal, kind, target, purpose)
             await _send_secret(session, current, secret_buffer)
         elif type(current) is AuthorizationRequiredPhase:
             authorization_source: Literal["os_user_presence", "secret_reauthentication"]
-            if "os_user_presence" in current.available_sources:
+            if (
+                provider_reauthentication is not None
+                and "secret_reauthentication" in current.available_sources
+            ):
+                authorization_source = "secret_reauthentication"
+            elif "os_user_presence" in current.available_sources:
                 authorization_source = "os_user_presence"
             elif "secret_reauthentication" in current.available_sources:
                 authorization_source = "secret_reauthentication"
@@ -589,57 +632,94 @@ async def run_human_ceremony(
     kind: HumanCeremonyKind,
     target: HumanOpenTarget,
     provider_credential: bytearray | None = None,
+    passphrase: bytearray | None = None,
+    provider_reauthentication: bytearray | None = None,
 ) -> HumanResult:
     """Run one exact foreground YZH1/YZS1 ceremony and return structural state only."""
 
     if type(kind) is not HumanCeremonyKind:
         raise TypeError("human_ceremony_kind_invalid")
-    if provider_credential is not None and kind not in {
+    provider_kind = kind in {
         HumanCeremonyKind.PROVIDER_CREDENTIAL_SET,
         HumanCeremonyKind.PROVIDER_CREDENTIAL_ROTATE,
-    }:
-        _overwrite(provider_credential)
+    }
+    passphrase_kind = kind in {
+        HumanCeremonyKind.VAULT_INITIALIZE,
+        HumanCeremonyKind.VAULT_UNLOCK,
+    }
+    if (
+        (provider_credential is not None and not provider_kind)
+        or (provider_reauthentication is not None and not provider_kind)
+        or (passphrase is not None and not passphrase_kind)
+    ):
+        for supplied in (provider_credential, passphrase, provider_reauthentication):
+            if supplied is not None:
+                _overwrite(supplied)
         raise ValueError("provider_credential_target_invalid")
+    fully_supplied = (
+        passphrase is not None
+        if passphrase_kind
+        else provider_kind
+        and provider_credential is not None
+        and provider_reauthentication is not None
+    )
     client = HumanControlClient()
+
+    async def complete(terminal: _CeremonyTerminal) -> HumanResult:
+        session = await client.open(kind, target)
+        async with session:
+            try:
+                preview = _verify_preview(kind, target, session)
+                _render_preview(terminal, preview)
+                result, _decision = await _drive_session(
+                    session,
+                    terminal,
+                    kind,
+                    target,
+                    session.opened.phase,
+                    provider_credential,
+                    passphrase,
+                    provider_reauthentication,
+                )
+                return result
+            except BaseException:
+                await _cancel_quietly(session)
+                raise
+
     try:
+        if fully_supplied:
+            try:
+                return await complete(_SuppliedSecretTerminal())
+            finally:
+                await client.close()
         with _ForegroundTerminal() as terminal:
             try:
-                session = await client.open(kind, target)
-                async with session:
-                    try:
-                        preview = _verify_preview(kind, target, session)
-                        _render_preview(terminal, preview)
-                        result, _decision = await _drive_session(
-                            session,
-                            terminal,
-                            kind,
-                            target,
-                            session.opened.phase,
-                            provider_credential,
-                        )
-                        return result
-                    except BaseException:
-                        await _cancel_quietly(session)
-                        raise
+                return await complete(terminal)
             finally:
                 await client.close()
     finally:
         if provider_credential is not None:
             _overwrite(provider_credential)
+        if passphrase is not None:
+            _overwrite(passphrase)
+        if provider_reauthentication is not None:
+            _overwrite(provider_reauthentication)
 
 
-async def initialize_passphrase_vault() -> VaultStateResult:
+async def initialize_passphrase_vault(passphrase: bytearray | None = None) -> VaultStateResult:
     result = await run_human_ceremony(
         HumanCeremonyKind.VAULT_INITIALIZE,
         EmptyVaultTarget(expected_mode="uninitialized"),
+        passphrase=passphrase,
     )
     return cast(VaultStateResult, result)
 
 
-async def unlock_vault() -> VaultStateResult:
+async def unlock_vault(passphrase: bytearray | None = None) -> VaultStateResult:
     result = await run_human_ceremony(
         HumanCeremonyKind.VAULT_UNLOCK,
         EmptyVaultTarget(expected_mode="passphrase"),
+        passphrase=passphrase,
     )
     return cast(VaultStateResult, result)
 
@@ -662,11 +742,15 @@ async def portable_recovery(target: PortableRecoveryTarget) -> PortableRecoveryR
 async def set_provider_credential(
     target: ProviderCredentialTarget,
     provider_credential: bytearray | None = None,
+    provider_reauthentication: bytearray | None = None,
 ) -> ProviderCredentialResult:
     if target.action != "set":
         raise ValueError("provider_credential_target_invalid")
     result = await run_human_ceremony(
-        HumanCeremonyKind.PROVIDER_CREDENTIAL_SET, target, provider_credential
+        HumanCeremonyKind.PROVIDER_CREDENTIAL_SET,
+        target,
+        provider_credential,
+        provider_reauthentication=provider_reauthentication,
     )
     return cast(ProviderCredentialResult, result)
 

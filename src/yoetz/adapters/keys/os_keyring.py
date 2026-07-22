@@ -5,9 +5,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from threading import Lock
 from typing import Final, Protocol, cast
 
@@ -31,6 +33,7 @@ from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.ids import IdKind, validate_id
 
 __all__ = [
+    "AutoUnlockPassphraseStore",
     "FirstInstallKeyringAuthority",
     "KeyringInitializationBinding",
     "OSKeyringError",
@@ -40,6 +43,16 @@ __all__ = [
 ]
 
 _SERVICE_NAME: Final = "yoetz.vault-root.v1"
+_AUTO_UNLOCK_SERVICE_NAME: Final = "yoetz.auto-unlock.v1"
+_AUTO_UNLOCK_BACKENDS: Final = frozenset(
+    {
+        "keyring.backends.SecretService.Keyring",
+        "keyring.backends.Windows.WinVaultKeyring",
+        "keyring.backends.kwallet.DBusKeyring",
+        "keyring.backends.libsecret.Keyring",
+        "keyring.backends.macOS.Keyring",
+    }
+)
 _APPROVED_BACKENDS: Final = frozenset(
     {"keyring.backends.macOS.Keyring", "keyring.backends.SecretService.Keyring"}
 )
@@ -163,6 +176,85 @@ class FirstInstallKeyringAuthority:
 
 
 _AUTHORITY_TOKEN: Final = object()
+
+
+def _overwrite(value: bytearray) -> None:
+    for index in range(len(value)):
+        value[index] = 0
+
+
+class AutoUnlockPassphraseStore:
+    """Platform-credential-store persistence for one generated Yoetz vault passphrase.
+
+    The keyring username is a digest of the absolute service bundle path, so independent Yoetz
+    data roots never share an auto-unlock secret and the filesystem path is not disclosed to the
+    credential-store label.
+    """
+
+    __slots__ = ("_backend", "_backend_id", "_username")
+
+    def __init__(self, bundle_path: object, *, backend: object | None = None) -> None:
+        if not isinstance(bundle_path, Path) or not bundle_path.is_absolute():
+            raise ValueError("auto_unlock_scope_invalid")
+        self._backend = backend if backend is not None else keyring.get_keyring()
+        self._backend_id = f"{type(self._backend).__module__}.{type(self._backend).__qualname__}"
+        encoded = os.fsencode(os.path.abspath(bundle_path))
+        self._username = "bundle-" + hashlib.sha256(encoded).hexdigest()
+
+    @property
+    def available(self) -> bool:
+        return self._backend_id in _AUTO_UNLOCK_BACKENDS and all(
+            callable(getattr(self._backend, name, None))
+            for name in ("get_password", "set_password")
+        )
+
+    def load(self) -> bytearray | None:
+        if not self.available:
+            return None
+        try:
+            encoded = cast(AnyKeyringBackend, self._backend).get_password(
+                _AUTO_UNLOCK_SERVICE_NAME, self._username
+            )
+        except Exception:
+            return None
+        if encoded is None:
+            return None
+        try:
+            value = bytearray(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+        except (ValueError, TypeError):
+            return None
+        if not 32 <= len(value) <= 128 or any(byte < 0x20 or byte > 0x7E for byte in value):
+            _overwrite(value)
+            return None
+        return value
+
+    def load_or_create(self) -> bytearray:
+        existing = self.load()
+        if existing is not None:
+            return existing
+        if not self.available:
+            raise OSKeyringError("unsupported")
+        generated = bytearray(base64.urlsafe_b64encode(os.urandom(48)).rstrip(b"="))
+        encoded = base64.urlsafe_b64encode(generated).rstrip(b"=").decode("ascii")
+        try:
+            backend = cast(AnyKeyringBackend, self._backend)
+            backend.set_password(_AUTO_UNLOCK_SERVICE_NAME, self._username, encoded)
+            verified = backend.get_password(_AUTO_UNLOCK_SERVICE_NAME, self._username)
+            if verified != encoded:
+                raise OSKeyringError("unverified")
+        except OSKeyringError:
+            _overwrite(generated)
+            raise
+        except Exception:
+            _overwrite(generated)
+            raise OSKeyringError("locked") from None
+        return generated
+
+
+class AnyKeyringBackend(Protocol):
+    def get_password(self, service: str, username: str) -> str | None: ...
+
+    def set_password(self, service: str, username: str, password: str) -> None: ...
 
 
 class OSVaultRootKeySource:

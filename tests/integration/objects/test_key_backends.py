@@ -16,6 +16,7 @@ from yoetz.adapters.keys.encrypted_vault import (
     VaultRecordKind,
 )
 from yoetz.adapters.keys.os_keyring import (
+    AutoUnlockPassphraseStore,
     KeyringInitializationBinding,
     OSKeyringState,
     OSVaultRootKeySource,
@@ -51,6 +52,25 @@ class _AtomicBackend:
 
     def delete_password(self, service: str, username: str) -> None:
         del self.values[(service, username)]
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        self.values[(service, username)] = password
+
+
+def test_auto_unlock_passphrase_round_trips_through_approved_platform_store(
+    tmp_path: Path,
+) -> None:
+    backend = _AtomicBackend()
+    store = AutoUnlockPassphraseStore(tmp_path.resolve(), backend=backend)
+    store._backend_id = "keyring.backends.macOS.Keyring"  # pyright: ignore[reportPrivateUsage]
+
+    created = store.load_or_create()
+    loaded = store.load()
+
+    assert 32 <= len(created) <= 128
+    assert loaded == created
+    assert "bundle-" in next(iter(backend.values))[1]
+    assert bytes(created) not in repr(store).encode()
 
 
 def test_bundle_hkdf_and_aes_kw_known_answers() -> None:

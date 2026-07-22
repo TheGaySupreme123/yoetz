@@ -356,6 +356,27 @@ async def test_unlock_activation_constructs_exact_generation_once(tmp_path: Path
 
 
 @pytest.mark.anyio
+async def test_preunlocked_vault_activates_ready_application_on_daemon_start(
+    tmp_path: Path,
+) -> None:
+    application = _Application()
+    calls: list[tuple[int, int]] = []
+
+    async def factory(service_generation: int, vault_generation: int) -> _Application:
+        calls.append((service_generation, vault_generation))
+        return application
+
+    daemon, vault = _locked_daemon(tmp_path, factory)
+    vault.ready = True
+
+    await daemon.start()
+
+    assert calls == [(7, 3)]
+    assert daemon.status().state is ServiceState.READY
+    await daemon.close()
+
+
+@pytest.mark.anyio
 async def test_unlock_activation_revalidates_after_factory_and_closes_partial(
     tmp_path: Path,
 ) -> None:
