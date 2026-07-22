@@ -59,7 +59,11 @@ invokes those trusted ceremonies directly and records only structural outcomes;
 canonical JSON, mode 0600, at `setup_marker_path()`; a dry run (`--non-interactive` without
 `--accept`) writes nothing; (9) emits the report (schema `yoetz.setup-wizard-report/1`) as
 canonical JSON in JSON/non-TTY mode or a bounded human summary interactively, and returns 0 for
-every completed run — partial outcomes are reported honestly, not encoded as failures.
+every completed run — partial outcomes are reported honestly, not encoded as failures. The human
+summary reports MCP registration, skill support, and local service state as separate structural
+lines. Successful MCP registration is phrased as recorded registration with automatic activation
+not tested; skill support states when no tested capability profile exists. The summary never claims
+or implies that Yoetz is set up or ready on a harness merely because an MCP entry exists.
 
 `setup_status` reports discovered binaries with per-binary registration state (adapter errors
 become `registration_state: null` plus the reason token), marker presence, and service

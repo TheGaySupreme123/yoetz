@@ -63,6 +63,12 @@ findings a `check` already recorded, while `view=candidate_findings` runs the de
 against the current record and returns candidates only — no verdict, no IDs, nothing recorded. An
 agent that does not know the second exists pays a full `check` to ask a question, or asks nothing.
 
+The `start` description also states *when* to call it, not only what it returns: for material
+multi-step, delegated, resumable, or verification-heavy work, before substantive work, skipping
+trivial questions or edits. The cue is front-loaded because tool descriptions are among the most
+context-durable texts Yoetz has, and intake salience failed when the description explained only
+record semantics.
+
 The `status` description also states *when* to call it, not only what it returns: when the agent is
 uncertain about what it has already done or already committed to, rather than reconstructing that
 from memory. The cue lives in a tool description because tool descriptions are the most
@@ -113,15 +119,20 @@ verdict means the work is correct.
    (`status`); `receipt` is not read-only because it appends `receipt_recorded`. Every tool states
    `idempotentHint` explicitly.
 6. No descriptor claims observation, enforcement, or verification.
-7. The `status` description carries the re-grounding cue: it states the uncertainty condition under
+7. The `start` description carries the intake cue: it begins with the material-task condition under
+   which an agent should call `start` — before substantive work on material multi-step, delegated,
+   resumable, or verification-heavy tasks, skipping trivial work — and then states what `start`
+   records.
+8. The `status` description carries the re-grounding cue: it states the uncertainty condition under
    which an agent should call `status` — uncertainty about what it has already done or committed to
    — and not only what `status` returns.
 
 ## Tests
 
 - `tests/conformance/surfaces/test_mcp_contract_matrix.py` — exact frozen descriptor set, order,
-  and annotation values; wording lint over every description and the instructions text; the `status`
-  description states the re-grounding condition under which to call it, not only its return.
+  and annotation values; wording lint over every description and the instructions text; the `start`
+  description begins with the intake condition; the `status` description states the re-grounding
+  condition under which to call it, not only its return.
 - `tests/subprocess/test_mcp_initialize_and_tools.py` — the negotiated `instructions` bytes equal
   the packaged resource bytes; a corrupted resource fails startup rather than serving unverified
   text.

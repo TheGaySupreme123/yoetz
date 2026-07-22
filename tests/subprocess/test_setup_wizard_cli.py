@@ -176,7 +176,10 @@ def test_interactive_wizard_selects_harness_then_installation_and_requires_y_or_
     assert "Codex executable: /b/codex" in result.stdout
     assert "Apply this registration? [Y/N]" in result.stdout
     assert "Please enter Y or N." in result.stdout
-    assert "Harness MCP registration: registered" in result.stdout
+    assert "MCP registration: registered; automatic activation not tested" in result.stdout
+    assert "Skill support: no tested capability profile; automatic activation not tested" in (
+        result.stdout
+    )
 
 
 def test_interactive_registration_n_declines_without_mutation(
@@ -193,7 +196,10 @@ def test_interactive_registration_n_declines_without_mutation(
 
     assert result.exit_code == 0
     assert "Apply this registration? [Y/N]" in result.stdout
-    assert "Harness MCP registration: declined" in result.stdout
+    assert "MCP registration: declined" in result.stdout
+    assert "Skill support: no tested capability profile; automatic activation not tested" in (
+        result.stdout
+    )
     for calls in cast(list[list[tuple[str, ...]]], wizard_env["calls"]):
         assert all(call[1:3] == ("mcp", "get") for call in calls)
 

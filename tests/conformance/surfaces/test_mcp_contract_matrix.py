@@ -100,7 +100,10 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(item.name for item in TOOL_DESCRIPTORS) == _EXPECTED_TOOL_NAMES
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == _EXPECTED_TOOL_NAMES
     assert TOOL_DESCRIPTOR_SET_DIGEST == (
-        "sha256:f693c0eaedcefe93fcbeed79466be8771153e3ca9e2eb556ab63299fb0d1530a"
+        "sha256:fed4821789eb054b73919233b785c2750696f65af7ebe2ea3d98dbc407bbae6f"
+    )
+    assert descriptor_for("start").description.startswith(
+        "Call for material multi-step, delegated, resumable, or verification-heavy work"
     )
     assert {item.name for item in TOOL_DESCRIPTORS if item.annotations.read_only} == {"status"}
     assert all(not item.annotations.destructive for item in TOOL_DESCRIPTORS)

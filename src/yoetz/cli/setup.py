@@ -298,7 +298,9 @@ async def _interactive_provider_setup(
                     try:
                         auto_passphrase = auto_store.load_or_create()
                     except OSKeyringError:
-                        typer.echo("Platform credential store unavailable; choose a vault passphrase")
+                        typer.echo(
+                            "Platform credential store unavailable; choose a vault passphrase"
+                        )
                         await initialize_passphrase_vault()
                     else:
                         typer.echo("Secure vault setup (platform credential store auto-unlock)")
@@ -314,7 +316,9 @@ async def _interactive_provider_setup(
                 )
                 auto_passphrase = auto_store.load()
                 if auto_passphrase is None:
-                    typer.echo("Unlock Yoetz to finish provider setup (hidden local-terminal input)")
+                    typer.echo(
+                        "Unlock Yoetz to finish provider setup (hidden local-terminal input)"
+                    )
                     await unlock_vault()
                 else:
                     typer.echo("Unlocking Yoetz from the platform credential store")
@@ -328,9 +332,7 @@ async def _interactive_provider_setup(
         if selected_model is None:
             selected_model = typer.prompt("Fireworks model id").strip()
         try:
-            written, _provider = apply_provider_endpoint_choice(
-                "fireworks", model=selected_model
-            )
+            written, _provider = apply_provider_endpoint_choice("fireworks", model=selected_model)
         except (OSError, ValueError) as error:
             provider_report["credential_reason"] = getattr(
                 error, "reason_code", "provider_binding_invalid"
@@ -564,10 +566,15 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
     if isinstance(registration, dict):
         outcome = registration.get("outcome")
         reason = registration.get("reason")
-        line = f"  Harness MCP registration: {outcome}"
+        # MCP registration alone is not product readiness or automatic activation.
+        if outcome in {"registered", "already_registered"}:
+            line = f"  MCP registration: {outcome}; automatic activation not tested"
+        else:
+            line = f"  MCP registration: {outcome}"
         if reason:
             line += f" ({reason})"
         typer.echo(line)
+    typer.echo("  Skill support: no tested capability profile; automatic activation not tested")
     if isinstance(service, dict):
         reachable = service.get("reachable")
         typer.echo(f"  Local service reachable: {'yes' if reachable else 'no'}")
