@@ -56,14 +56,18 @@ __all__ = [
     "OPENAI_MAX_OUTPUT_TOKENS",
     "OPENAI_MAX_RESPONSE_BODY_BYTES",
     "OneAttemptCredentialTransport",
+    "OpenAIChatCompletionsEvaluator",
     "OpenAIProfile",
     "OpenAIResponsesEvaluator",
     "ProviderDataUseProfile",
     "RenderedOpenAIRequest",
     "classify_provider_failure",
     "normalize_judgment",
+    "normalize_chat_response",
     "normalize_response",
     "owner_declared_data_use_profile",
+    "unknown_data_use_profile",
+    "render_chat_case",
     "render_case",
     "validate_openai_credential",
 ]
@@ -82,6 +86,16 @@ OFFICIAL_OPENAI_PATH: Final = "/v1/responses"
 _HOST: Final = OFFICIAL_OPENAI_HOST
 _PORT: Final = OFFICIAL_OPENAI_PORT
 _PATH: Final = OFFICIAL_OPENAI_PATH
+_ALLOWED_PATHS: Final = frozenset(
+    {
+        "/v1/responses",
+        "/v1/chat/completions",
+        "/inference/v1/responses",
+        "/inference/v1/chat/completions",
+        "/v1beta/openai/chat/completions",
+        "/api/v1/chat/completions",
+    }
+)
 _IDENTITY_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$", re.ASCII)
 _MODEL_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$", re.ASCII)
 _HOSTNAME_PATTERN: Final = re.compile(
@@ -162,6 +176,11 @@ _JUDGMENT_JSON_SCHEMA: Final[dict[str, JsonValue]] = {
     },
 }
 
+_CHAT_SYSTEM_INSTRUCTION: Final = _SYSTEM_INSTRUCTION + (
+    " Return exactly one JSON object with top-level keys `conclusion` and "
+    "`reviewer_challenges`; do not wrap it in Markdown or explanatory text."
+)
+
 
 def validate_openai_credential(view: memoryview) -> None:
     """Byte-exact, non-normalizing, offline token68 validator for the OpenAI credential profile.
@@ -203,6 +222,7 @@ class OpenAIProfile:
     host: str = _HOST
     port: int = _PORT
     base_path_prefix: str = "/v1"
+    api_style: Literal["responses", "chat_completions"] = "responses"
 
     def __post_init__(self) -> None:
         if (
@@ -232,17 +252,19 @@ class OpenAIProfile:
             raise ValueError("openai_profile_host_invalid")
         if type(self.port) is not int or not 1 <= self.port <= 65535:
             raise ValueError("openai_profile_port_invalid")
-        if self.base_path_prefix not in {"/v1", "/inference/v1"}:
+        if self.base_path_prefix not in {"/v1", "/inference/v1", "/v1beta/openai", "/api/v1"}:
             raise ValueError("openai_profile_path_invalid")
+        if self.api_style not in {"responses", "chat_completions"}:
+            raise ValueError("openai_profile_api_style_invalid")
 
     @property
     def path(self) -> str:
-        return f"{self.base_path_prefix}/responses"
+        suffix = "responses" if self.api_style == "responses" else "chat/completions"
+        return f"{self.base_path_prefix}/{suffix}"
 
     @property
     def base_url(self) -> str:
-        # OpenAI Python SDK appends `/responses` to base_url; include `/v1` so the
-        # wire path matches the transport-enforced `/v1/responses` destination.
+        # The OpenAI Python SDK appends the profile's API-style suffix to this exact base path.
         if self.port == 443:
             return f"https://{self.host}{self.base_path_prefix}"
         return f"https://{self.host}:{self.port}{self.base_path_prefix}"
@@ -256,12 +278,29 @@ def owner_declared_data_use_profile(
 ) -> ProviderDataUseProfile:
     """Unknown data-use facts for owner-declared hosts (never assisted-eligible)."""
 
+    return unknown_data_use_profile(
+        data_use_profile_id="owner-declared-unknown",
+        reviewed_at=reviewed_at,
+        expires_at=expires_at,
+        evidence_digest=evidence_digest,
+    )
+
+
+def unknown_data_use_profile(
+    *,
+    data_use_profile_id: str,
+    reviewed_at: object,
+    expires_at: object,
+    evidence_digest: str,
+) -> ProviderDataUseProfile:
+    """Build a conservative data-use profile when no reviewed terms are available."""
+
     from datetime import datetime
 
     if type(reviewed_at) is not datetime or type(expires_at) is not datetime:
         raise TypeError("openai_data_use_time_invalid")
     return ProviderDataUseProfile(
-        data_use_profile_id="owner-declared-unknown",
+        data_use_profile_id=data_use_profile_id,
         data_use_profile_version="1.0.0",
         customer_content_training="unknown",
         retention="unknown",
@@ -320,6 +359,9 @@ def _build_body_object(case: ApprovedOutboundCase) -> dict[str, JsonValue]:
 
 
 _PROMPT_DIGEST: Final = "sha256:" + hashlib.sha256(_SYSTEM_INSTRUCTION.encode("utf-8")).hexdigest()
+_CHAT_PROMPT_DIGEST: Final = (
+    "sha256:" + hashlib.sha256(_CHAT_SYSTEM_INSTRUCTION.encode("utf-8")).hexdigest()
+)
 _SCHEMA_DIGEST: Final = canonical_digest(_JUDGMENT_JSON_SCHEMA)
 
 
@@ -355,6 +397,52 @@ def render_case(case: ApprovedOutboundCase) -> RenderedOpenAIRequest:
     )
 
 
+def _build_chat_body_object(case: ApprovedOutboundCase) -> dict[str, JsonValue]:
+    try:
+        payload = case.payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("openai_chat_case_payload_invalid") from exc
+    return {
+        "model": case.provider_binding.model_id,
+        "messages": [
+            {"role": "system", "content": _CHAT_SYSTEM_INSTRUCTION},
+            {"role": "user", "content": payload},
+        ],
+        "max_tokens": OPENAI_MAX_OUTPUT_TOKENS,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "yoetz_semantic_judgment",
+                "strict": True,
+                "schema": _JUDGMENT_JSON_SCHEMA,
+            },
+        },
+    }
+
+
+def render_chat_case(case: ApprovedOutboundCase) -> RenderedOpenAIRequest:
+    """Render the common OpenAI Chat Completions request shape for reviewed providers."""
+
+    if type(case) is not ApprovedOutboundCase:
+        raise TypeError("openai_chat_case_invalid")
+    if case.provider_binding.transport != "external":
+        raise ValueError("openai_chat_case_binding_invalid")
+    body = canonical_encode(_build_chat_body_object(case))
+    if len(body) > OPENAI_MAX_RESPONSE_BODY_BYTES:
+        raise ValueError("openai_chat_rendered_body_too_large")
+    return RenderedOpenAIRequest(
+        body=body,
+        body_sha256="sha256:" + hashlib.sha256(body).hexdigest(),
+        provider_id=case.provider_binding.provider_id,
+        model=case.provider_binding.model_id,
+        endpoint_profile_id=case.provider_binding.endpoint_profile_id,
+        endpoint_profile_version=case.provider_binding.endpoint_profile_version,
+        prompt_digest="sha256:"
+        + hashlib.sha256(_CHAT_SYSTEM_INSTRUCTION.encode("utf-8")).hexdigest(),
+        schema_digest=_SCHEMA_DIGEST,
+    )
+
+
 def _provenance(
     profile: OpenAIProfile,
     status: SemanticStatus,
@@ -362,6 +450,7 @@ def _provenance(
     latency_ms: int,
     provider_request_id: str | None = None,
     failure_class: SemanticFailureClass | None = None,
+    prompt_digest: str = _PROMPT_DIGEST,
 ) -> ProviderAttemptProvenance:
     return ProviderAttemptProvenance(
         provider=profile.provider_id,
@@ -369,7 +458,7 @@ def _provenance(
         endpoint_profile_version=profile.endpoint_profile_version,
         model=profile.model,
         sdk_version="2.46.0",
-        prompt_digest=_PROMPT_DIGEST,
+        prompt_digest=prompt_digest,
         schema_digest=_SCHEMA_DIGEST,
         policy_digest="sha256:" + "0" * 64,
         privacy_policy_digest="sha256:" + "0" * 64,
@@ -529,8 +618,111 @@ def normalize_response(
     )
 
 
+def normalize_chat_response(
+    response: object,
+    profile: OpenAIProfile,
+    *,
+    latency_ms: int,
+    late: bool = False,
+) -> SemanticResult:
+    """Normalize one OpenAI Chat Completions response without retaining raw provider text."""
+
+    provider_request_id = getattr(response, "id", None)
+    if type(provider_request_id) is not str:
+        provider_request_id = None
+    choices = getattr(response, "choices", None)
+    if type(choices) not in {list, tuple} or not choices:
+        return SemanticResultInvalid(
+            _provenance(
+                profile,
+                SemanticStatus.INVALID,
+                latency_ms=latency_ms,
+                provider_request_id=provider_request_id,
+                failure_class=SemanticFailureClass.RESPONSE_SCHEMA,
+                prompt_digest=_CHAT_PROMPT_DIGEST,
+            ),
+            raw_size=0,
+        )
+    message = getattr(choices[0], "message", None)
+    refusal = getattr(message, "refusal", None)
+    if type(refusal) is str and refusal:
+        return SemanticResultRefused(
+            _provenance(
+                profile,
+                SemanticStatus.REFUSED,
+                latency_ms=latency_ms,
+                provider_request_id=provider_request_id,
+                prompt_digest=_CHAT_PROMPT_DIGEST,
+            )
+        )
+    raw_text = getattr(message, "content", None)
+    if type(raw_text) is not str or not raw_text:
+        return SemanticResultInvalid(
+            _provenance(
+                profile,
+                SemanticStatus.INVALID,
+                latency_ms=latency_ms,
+                provider_request_id=provider_request_id,
+                failure_class=SemanticFailureClass.RESPONSE_SCHEMA,
+                prompt_digest=_CHAT_PROMPT_DIGEST,
+            ),
+            raw_size=len(raw_text) if type(raw_text) is str else 0,
+        )
+    raw_bytes = raw_text.encode("utf-8")
+    if len(raw_bytes) > OPENAI_MAX_RESPONSE_BODY_BYTES:
+        return SemanticResultInvalid(
+            _provenance(
+                profile,
+                SemanticStatus.INVALID,
+                latency_ms=latency_ms,
+                provider_request_id=provider_request_id,
+                failure_class=SemanticFailureClass.RESPONSE_SCHEMA,
+                prompt_digest=_CHAT_PROMPT_DIGEST,
+            ),
+            raw_size=OPENAI_MAX_RESPONSE_BODY_BYTES + 1,
+        )
+    try:
+        judgment = normalize_judgment(strict_json_parse(raw_bytes))
+    except ValueError, TypeError, LookupError:
+        return SemanticResultInvalid(
+            _provenance(
+                profile,
+                SemanticStatus.INVALID,
+                latency_ms=latency_ms,
+                provider_request_id=provider_request_id,
+                failure_class=SemanticFailureClass.RESPONSE_SCHEMA,
+                prompt_digest=_CHAT_PROMPT_DIGEST,
+            ),
+            raw_size=len(raw_bytes),
+        )
+    if late:
+        return SemanticResultLate(
+            _provenance(
+                profile,
+                SemanticStatus.LATE,
+                latency_ms=latency_ms,
+                provider_request_id=provider_request_id,
+                prompt_digest=_CHAT_PROMPT_DIGEST,
+            )
+        )
+    return SemanticResultSuccess(
+        judgment,
+        _provenance(
+            profile,
+            SemanticStatus.SUCCEEDED,
+            latency_ms=latency_ms,
+            provider_request_id=provider_request_id,
+            prompt_digest=_CHAT_PROMPT_DIGEST,
+        ),
+    )
+
+
 def classify_provider_failure(
-    error: BaseException, profile: OpenAIProfile, *, latency_ms: int
+    error: BaseException,
+    profile: OpenAIProfile,
+    *,
+    latency_ms: int,
+    prompt_digest: str = _PROMPT_DIGEST,
 ) -> SemanticResult:
     """Map a native provider/transport failure to the public taxonomy without leaking its text."""
 
@@ -541,6 +733,7 @@ def classify_provider_failure(
                 SemanticStatus.TIMEOUT,
                 latency_ms=latency_ms,
                 failure_class=SemanticFailureClass.TIMEOUT,
+                prompt_digest=prompt_digest,
             )
         )
     if isinstance(error, httpx.TransportError):
@@ -550,6 +743,7 @@ def classify_provider_failure(
                 SemanticStatus.UNAVAILABLE,
                 latency_ms=latency_ms,
                 failure_class=SemanticFailureClass.TRANSPORT,
+                prompt_digest=prompt_digest,
             )
         )
 
@@ -574,6 +768,7 @@ def classify_provider_failure(
             SemanticStatus.UNAVAILABLE,
             latency_ms=latency_ms,
             failure_class=failure_class,
+            prompt_digest=prompt_digest,
         )
     )
 
@@ -617,7 +812,7 @@ class OneAttemptCredentialTransport(httpx.AsyncBaseTransport):
             raise ValueError("openai_transport_host_invalid")
         if type(port) is not int or not 1 <= port <= 65535:
             raise ValueError("openai_transport_port_invalid")
-        if path != _PATH:
+        if path not in _ALLOWED_PATHS:
             raise ValueError("openai_transport_path_invalid")
         self._body = rendered.body
         self._body_sha256 = rendered.body_sha256
@@ -763,3 +958,91 @@ class OpenAIResponsesEvaluator:
 
         elapsed_ms = max(0, int((self._clock.monotonic_seconds() - now_monotonic) * 1_000))
         return normalize_response(response, self._profile, latency_ms=elapsed_ms)
+
+
+class OpenAIChatCompletionsEvaluator:
+    """One-attempt evaluator for reviewed OpenAI-compatible Chat Completions endpoints."""
+
+    __slots__ = ("_clock", "_profile", "_safety_margin_seconds", "_transport")
+
+    def __init__(
+        self,
+        profile: OpenAIProfile,
+        transport: OneAttemptCredentialTransport,
+        clock: ClockPort,
+        *,
+        safety_margin_seconds: float = 0.0,
+    ) -> None:
+        if type(profile) is not OpenAIProfile or profile.api_style != "chat_completions":
+            raise TypeError("openai_chat_profile_invalid")
+        if type(transport) is not OneAttemptCredentialTransport:
+            raise TypeError("openai_chat_transport_invalid")
+        if safety_margin_seconds < 0.0:
+            raise ValueError("openai_chat_safety_margin_invalid")
+        self._profile = profile
+        self._transport = transport
+        self._clock = clock
+        self._safety_margin_seconds = safety_margin_seconds
+
+    async def evaluate(self, case: ApprovedProviderCase, deadline: Deadline) -> SemanticResult:
+        if type(case) is not ApprovedOutboundCase:
+            raise TypeError("openai_chat_case_invalid")
+        if type(deadline) is not Deadline:
+            raise TypeError("openai_chat_deadline_invalid")
+
+        now_monotonic = self._clock.monotonic_seconds()
+        remaining = deadline.remaining_seconds(now_monotonic) - self._safety_margin_seconds
+        if deadline.expired(now_monotonic) or remaining <= 0.0:
+            return SemanticResultTimeout(
+                _provenance(
+                    self._profile,
+                    SemanticStatus.TIMEOUT,
+                    latency_ms=0,
+                    failure_class=SemanticFailureClass.TIMEOUT,
+                    prompt_digest=_CHAT_PROMPT_DIGEST,
+                )
+            )
+        body_object = _build_chat_body_object(case)
+        try:
+            openai_module = importlib.import_module("openai")
+        except ImportError:
+            return SemanticResultUnavailable(
+                _provenance(
+                    self._profile,
+                    SemanticStatus.UNAVAILABLE,
+                    latency_ms=0,
+                    failure_class=SemanticFailureClass.UNSUPPORTED_PROFILE,
+                    prompt_digest=_CHAT_PROMPT_DIGEST,
+                )
+            )
+
+        http_client = httpx.AsyncClient(transport=self._transport, trust_env=False)
+        client: Any = openai_module.AsyncOpenAI(
+            api_key="yoetz-fixed-nonsecret-sentinel",
+            base_url=self._profile.base_url,
+            timeout=remaining,
+            max_retries=0,
+            http_client=http_client,
+        )
+        try:
+            response = await client.chat.completions.create(
+                model=body_object["model"],
+                messages=body_object["messages"],
+                max_tokens=body_object["max_tokens"],
+                response_format=body_object["response_format"],
+            )
+        except Exception as exc:  # noqa: BLE001 - classified below, never re-raised raw
+            elapsed_ms = max(0, int((self._clock.monotonic_seconds() - now_monotonic) * 1_000))
+            result = classify_provider_failure(
+                exc,
+                self._profile,
+                latency_ms=elapsed_ms,
+                prompt_digest=_CHAT_PROMPT_DIGEST,
+            )
+            return result
+        finally:
+            await client.close()
+            await http_client.aclose()
+
+        elapsed_ms = max(0, int((self._clock.monotonic_seconds() - now_monotonic) * 1_000))
+        return normalize_chat_response(response, self._profile, latency_ms=elapsed_ms)

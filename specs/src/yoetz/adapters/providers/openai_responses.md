@@ -7,9 +7,9 @@
 
 ## Purpose
 
-This file implements the native semantic-evaluation adapter for the approved OpenAI profile. It is
-the live provider bridge that turns an already approved outbound case into a structured judgment and then
-normalizes it into Yoetz’s closed semantic-result union with provisional
+This file implements the provider bridge for the approved OpenAI Responses profile and the exact
+reviewed OpenAI-compatible Chat Completions profiles. It turns an already approved outbound case
+into a structured judgment and then normalizes it into Yoetz’s closed semantic-result union with provisional
 `ProviderAttemptProvenance`. It never manufactures final receipt-bound provenance.
 
 ## Public surface
@@ -17,10 +17,12 @@ normalizes it into Yoetz’s closed semantic-result union with provisional
 | Name | Signature (natural language) |
 |---|---|
 | `OpenAIResponsesEvaluator` | implementation of `SemanticEvaluatorPort` for the native OpenAI profile |
+| `OpenAIChatCompletionsEvaluator` | one-attempt implementation for the exact Anthropic, Gemini, OpenRouter, and Vercel AI Gateway Chat Completions profiles |
 | `OpenAIProfile` | frozen exact nonsecret model/endpoint-profile/capability identity |
 | imported `ProviderDataUseProfile` | domain-owned versioned training/retention/human-access metadata bound to the endpoint profile |
 | `RenderedOpenAIRequest` | exact final application JSON body bytes plus body SHA-256 and nonsecret profile/dispatch binding |
 | `render_case(case)` | deterministically convert an approved case into `RenderedOpenAIRequest` |
+| `render_chat_case(case)` | deterministically render the common OpenAI Chat Completions request shape |
 | `OneAttemptCredentialTransport` | adapter-private custom HTTP transport that consumes one bound credential handle for one request |
 | `validate_openai_credential(view)` | byte-exact offline validator used inside confidential vault storage |
 | `OPENAI_CREDENTIAL_MIN_BYTES`, `OPENAI_CREDENTIAL_MAX_BYTES` | exact values `16` and `512` |
@@ -86,8 +88,9 @@ profile Yoetz is willing to trust. Construction validates:
   provider-human access / review-expiry / evidence digest);
 - HTTPS destination: host + port (defaults `api.openai.com:443` for the official preset;
   owner-declared profile `owner-declared-openai-responses` supplies host/port from validated
-  config `https_origin` per ADR-014) with profile-fixed path `/v1/responses` or the reviewed
-  Fireworks `/inference/v1/responses`, `POST`, platform CA
+  config `https_origin` per ADR-014) with profile-fixed path `/v1/responses`, the reviewed
+  Fireworks `/inference/v1/responses`, or one exact Chat Completions path under `/v1`,
+  `/v1beta/openai`, or `/api/v1`, `POST`, platform CA
   trust, and hostname/SNI verification — no free user URL, proxy, or redirect, and no v0.1
   certificate/SPKI pinning claim;
 - exact `max_output_tokens=2048`, raw response-body cap `1_048_576`, and identity-only content
@@ -99,7 +102,7 @@ destination against the bound host/port/path (not only a module-global official 
 
 The adapter fails fast if the profile claims structured outputs but does not actually support them
 in the tested environment. An ambient “OpenAI-compatible” base URL is not accepted; the only
-alternate is the exact owner-declared profile kind above.
+alternate is the exact owner-declared profile kind or one of the bundled provider profiles above.
 
 The data-use record is inspectable recommendation evidence, not a provider capability inferred from
 the name and not a technical no-training proof. Upstream `assisted` eligibility requires a current
@@ -213,6 +216,18 @@ bytes, aborts at cap+1, and never hands an oversized or compressed body to the S
 `1_048_576` cap applies after any future explicitly reviewed decoding path; v0.1 performs none.
 Oversize/encoding violations normalize to bounded invalid/unavailable status with structural
 `raw_size=1_048_577`, retain no body/prefix, and cannot influence semantic findings.
+
+### OpenAI-compatible Chat Completions rendering
+
+`render_chat_case(case)` uses the same bounded reviewer instruction and judgment schema in the
+OpenAI Chat Completions envelope: `messages` contains one system message and one user message,
+`max_tokens` is exactly `2048`, and `response_format` requests the reviewed JSON schema. The
+normalizer reads only `choices[0].message.content` or its refusal surface and retains no provider
+plaintext. Anthropic's official compatibility layer documents this route as primarily a testing/
+compatibility surface and notes that some native Claude features are unavailable; selecting the
+Anthropic preset therefore proves request-shape compatibility and does not claim native Claude API
+feature parity or live provider capability. Gemini, OpenRouter, and Vercel AI Gateway are likewise
+advertised only as exact endpoint/profile choices until their capability fixtures are recorded.
 
 ### Response normalization
 

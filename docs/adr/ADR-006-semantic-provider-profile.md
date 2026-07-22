@@ -22,7 +22,15 @@ and semantic/privacy capability and conformance tests.
    kind — `owner-declared-openai-responses` (ADR-014) — may bind an owner-supplied constrained
    HTTPS origin from service TOML (`[provider.owner_declared_endpoint].https_origin`); it reuses
    the Responses protocol cell, never inherits official OpenAI data-use / `assisted` eligibility,
-   and still requires capability evidence for any advertised interoperability claim.
+   and still requires capability evidence for any advertised interoperability claim. The reviewed
+   setup surface also contains exact OpenAI-compatible Chat Completions profiles for Anthropic
+   Claude (`api.anthropic.com/v1`), Google Gemini
+   (`generativelanguage.googleapis.com/v1beta/openai`), OpenRouter (`openrouter.ai/api/v1`), and
+   Vercel AI Gateway (`ai-gateway.vercel.sh/v1`). They share the adapter's bounded Chat
+   Completions envelope and one-attempt transport, but each is a separate versioned endpoint
+   profile; no generic compatibility URL is admitted. Anthropic's compatibility documentation
+   limits this surface relative to native Claude, so the profile is a request-shape integration
+   choice, not a native-feature or live-capability claim.
 3. **Local-model adapter:** v0.1 includes the contract for a separately configured local semantic
    evaluator. Its endpoint is an owner-only, service-approved AF_UNIX socket profile; it performs no
    DNS, AF_INET/AF_INET6 connection, redirect, proxy lookup, or fallback. It is a local disclosure
@@ -126,6 +134,12 @@ and semantic/privacy capability and conformance tests.
     prove provider behavior. Unknown, known-broad, or stale status removes the recommendation badge
     and trips that guard; an informed user may explicitly turn the guard off through a custom policy,
     and a fork may change the rule without inheriting upstream privacy/support evidence.
+15. **Provider setup presets are endpoint facts, not egress consent:** setup may write one of the
+    six bundled provider bindings (Official OpenAI, Fireworks, Anthropic, Gemini, OpenRouter, or
+    Vercel AI Gateway) with a nonsecret model and exact endpoint profile. The safe installation seed
+    remains zero-egress; selecting a preset does not enable a privacy channel, mint a credential, or
+    imply a successful live request. Capability fixtures and an explicit local-human privacy
+    transition remain required before dispatch.
 
 ## Review packet and agent loop
 

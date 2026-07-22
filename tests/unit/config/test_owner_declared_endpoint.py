@@ -5,14 +5,16 @@ from __future__ import annotations
 import tomllib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from yoetz.adapters.providers.openai_responses import (
     OpenAIProfile,
     owner_declared_data_use_profile,
+    render_chat_case,
 )
-from yoetz.cli.provider_binding import apply_provider_endpoint_choice
+from yoetz.cli.provider_binding import ProviderEndpointChoice, apply_provider_endpoint_choice
 from yoetz.config.models import (
     OWNER_DECLARED_ENDPOINT_PROFILE_ID,
     ConfigError,
@@ -24,12 +26,26 @@ from yoetz.config.write import (
     fireworks_provider,
     official_openai_provider,
     owner_declared_openai_provider,
+    provider_preset,
     render_config_toml,
     write_provider_binding,
+)
+from yoetz.domain.privacy import ApprovedOutboundCase, DataCategory, ProviderBinding
+from yoetz.protocol.canonical import canonical_encode
+from yoetz.service.ready_composition import (
+    _external_provider_factory_builders,  # pyright: ignore[reportPrivateUsage]
 )
 
 _DIGEST = "sha256:" + "a" * 64
 _NOW = datetime(2026, 7, 1, tzinfo=UTC)
+
+
+class _CompositionClock:
+    def now_utc(self) -> datetime:
+        return _NOW
+
+    def monotonic_seconds(self) -> float:
+        return 1.0
 
 
 def test_parse_https_origin_accepts_host_and_optional_port() -> None:
@@ -164,9 +180,7 @@ def test_fireworks_binding_uses_reviewed_responses_base_path(tmp_path: Path) -> 
         path=tmp_path / "fireworks.toml",
     )
     assert path.is_file()
-    assert provider == fireworks_provider(
-        model="accounts/fireworks/models/qwen3-235b-a22b"
-    )
+    assert provider == fireworks_provider(model="accounts/fireworks/models/qwen3-235b-a22b")
     profile = OpenAIProfile(
         provider_id="fireworks",
         model=provider.model,
@@ -184,6 +198,121 @@ def test_fireworks_binding_uses_reviewed_responses_base_path(tmp_path: Path) -> 
     )
     assert profile.base_url == "https://api.fireworks.ai/inference/v1"
     assert profile.path == "/inference/v1/responses"
+
+
+@pytest.mark.parametrize(
+    ("choice", "model"),
+    [
+        ("official_openai", "gpt-4.1-mini"),
+        ("fireworks", "accounts/fireworks/models/qwen3-235b-a22b"),
+        ("anthropic", "claude-sonnet-4-6"),
+        ("google_gemini", "gemini-3.6-flash"),
+        ("openrouter", "openai/gpt-5.2"),
+        ("vercel_ai_gateway", "anthropic/claude-sonnet-4-6"),
+    ],
+)
+def test_reviewed_provider_choices_write_exact_openai_compatible_endpoint(
+    tmp_path: Path, choice: ProviderEndpointChoice, model: str
+) -> None:
+    preset = provider_preset(choice)
+    path, provider = apply_provider_endpoint_choice(
+        choice, model=model, path=tmp_path / f"{choice}.toml"
+    )
+    assert provider == ProviderProfileConfig(
+        provider_id=preset.provider_id,
+        endpoint_profile_id=preset.endpoint_profile_id,
+        endpoint_profile_version=preset.endpoint_profile_version,
+        model=model,
+        capability_profile=preset.capability_profile,
+    )
+    assert path.read_text().count("owner_declared_endpoint") == 0
+    assert path.read_text().count("api_key") == 0
+    profile = OpenAIProfile(
+        provider_id=preset.provider_id,
+        model=model,
+        endpoint_profile_id=preset.endpoint_profile_id,
+        endpoint_profile_version=preset.endpoint_profile_version,
+        timeout_seconds=60,
+        supports_structured_outputs=True,
+        data_use_profile=owner_declared_data_use_profile(
+            reviewed_at=_NOW,
+            expires_at=_NOW + timedelta(days=30),
+            evidence_digest=_DIGEST,
+        ),
+        host=preset.host,
+        base_path_prefix=preset.base_path_prefix,
+        api_style=preset.api_style,
+    )
+    suffix = "responses" if preset.api_style == "responses" else "chat/completions"
+    assert profile.path == f"{preset.base_path_prefix}/{suffix}"
+
+
+def test_chat_renderer_uses_common_openai_compatible_shape() -> None:
+    payload = canonical_encode({"goal": "synthetic", "claims": [], "obligations": []})
+    case = ApprovedOutboundCase(
+        case_id="cas_80000000-0000-4000-8000-000000000001",
+        request_id="req_80000000-0000-4000-8000-000000000001",
+        payload=payload,
+        media_type="application/json",
+        schema_id="yoetz-semantic-case-1.0.0",
+        included_item_ids=("goal-1",),
+        approved_categories=(DataCategory.TASK_DESCRIPTION,),
+        blocked_categories=(),
+        byte_count=len(payload),
+        token_count=8,
+        provider_binding=ProviderBinding(
+            "anthropic",
+            "claude-sonnet-4-6",
+            "anthropic-openai-chat-completions",
+            "1.0.0",
+            "external",
+        ),
+        purpose="semantic-review",
+        authorization_id="aut_80000000-0000-4000-8000-000000000001",
+        policy_digest=_DIGEST,
+        case_digest=_DIGEST,
+    )
+    rendered = render_chat_case(case)
+    assert rendered.body_sha256.startswith("sha256:")
+    assert b"chat/completions" not in rendered.body
+    assert b"claude-sonnet-4-6" in rendered.body
+    assert b"synthetic" in rendered.body
+
+
+@pytest.mark.parametrize(
+    ("choice", "expected_path"),
+    [
+        ("anthropic", "/v1/chat/completions"),
+        ("google_gemini", "/v1beta/openai/chat/completions"),
+        ("openrouter", "/api/v1/chat/completions"),
+        ("vercel_ai_gateway", "/v1/chat/completions"),
+    ],
+)
+def test_ready_composition_installs_chat_provider_factory(
+    choice: ProviderEndpointChoice, expected_path: str
+) -> None:
+    preset = provider_preset(choice)
+    config = YoetzConfig(
+        profile="local-openai",
+        provider=ProviderProfileConfig(
+            provider_id=preset.provider_id,
+            endpoint_profile_id=preset.endpoint_profile_id,
+            endpoint_profile_version=preset.endpoint_profile_version,
+            model=preset.default_model,
+            capability_profile=preset.capability_profile,
+        ),
+    )
+    builders = _external_provider_factory_builders(  # pyright: ignore[reportPrivateUsage]
+        config, _CompositionClock()
+    )
+    assert len(builders) == 1
+    binding = next(iter(builders))
+    assert binding.provider_id == preset.provider_id
+    assert binding.endpoint_profile_id == preset.endpoint_profile_id
+    factory = next(iter(builders.values()))()
+    profile = cast(OpenAIProfile, getattr(factory, "_profile"))
+    assert profile.host == preset.host
+    assert profile.path == expected_path
 
 
 def test_owner_declared_data_use_never_assisted_eligible() -> None:

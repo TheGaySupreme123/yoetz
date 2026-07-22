@@ -56,7 +56,7 @@ _NEXT_SERVICE: Final = "run 'yoetz service run' under your selected user supervi
 _NEXT_UNLOCK: Final = "run 'yoetz service unlock' from a local terminal if the vault is locked"
 _NEXT_PRIVACY: Final = "run 'yoetz privacy setup' to review recipes and provider binding"
 _NEXT_PROVIDER_TOML: Final = (
-    "run 'yoetz provider endpoint' (or edit config.toml) to choose Official OpenAI "
+    "run 'yoetz provider endpoint' (or edit config.toml) to choose a reviewed provider "
     "or an owner-declared HTTPS origin+model — never put API keys in TOML"
 )
 _NEXT_CREDENTIAL: Final = (
@@ -317,6 +317,7 @@ async def _interactive_provider_setup(
 
     from yoetz.adapters.keys.os_keyring import AutoUnlockPassphraseStore, OSKeyringError
     from yoetz.cli.provider_binding import (
+        ProviderEndpointChoice,
         apply_provider_endpoint_choice,
         prompt_provider_endpoint_binding,
     )
@@ -327,7 +328,9 @@ async def _interactive_provider_setup(
         unlock_vault,
     )
     from yoetz.config.load import load_config
+    from yoetz.config.models import ConfigError
     from yoetz.config.paths import bundle_root
+    from yoetz.config.write import provider_preset
     from yoetz.service.confidential_protocol import ProviderCredentialTarget
     from yoetz.service.vault import provider_credential_profile_binding
 
@@ -385,19 +388,25 @@ async def _interactive_provider_setup(
     except HumanCeremonyCliError as error:
         provider_report["credential_reason"] = error.reason
 
-    if provider_choice == "fireworks":
+    if provider_choice is not None:
         selected_model = model
-        if selected_model is None:
-            selected_model = typer.prompt("Fireworks model id").strip()
         try:
-            written, _provider = apply_provider_endpoint_choice("fireworks", model=selected_model)
-        except (OSError, ValueError) as error:
+            preset = provider_preset(provider_choice)
+            choice = cast(ProviderEndpointChoice, preset.choice)
+            if selected_model is None:
+                selected_model = typer.prompt(
+                    f"{preset.provider_id} model id", default=preset.default_model
+                ).strip()
+            if not selected_model:
+                raise ConfigError("config_value_invalid")
+            written, _provider = apply_provider_endpoint_choice(choice, model=selected_model)
+        except (ConfigError, OSError, ValueError) as error:
             provider_report["credential_reason"] = getattr(
                 error, "reason_code", "provider_binding_invalid"
             )
             wipe_auto_passphrase()
             return service, provider_report
-        typer.echo(f"Fireworks model: {selected_model}")
+        typer.echo(f"{preset.provider_id} model: {selected_model}")
     else:
         written = prompt_provider_endpoint_binding()
     if written is None:
@@ -457,15 +466,27 @@ async def _interactive_provider_setup(
 async def run_provider_setup(
     *,
     fireworks: bool = False,
+    provider: str | None = None,
     model: str | None = None,
     api_key: str | None = None,
 ) -> int:
     """Run only the simple local provider setup path used by ``yoetz --set``."""
 
-    fully_supplied = fireworks and model is not None and api_key is not None
+    if fireworks and provider is not None:
+        return _usage_failure("--fireworks and --provider are mutually exclusive")
+    provider_choice = "fireworks" if fireworks else provider
+    if provider_choice is not None:
+        from yoetz.config.models import ConfigError
+        from yoetz.config.write import provider_preset
+
+        try:
+            provider_choice = provider_preset(provider_choice).choice
+        except ConfigError, TypeError:
+            return _usage_failure("--provider must name a reviewed provider preset")
+    fully_supplied = provider_choice is not None and model is not None and api_key is not None
     if not _is_interactive_terminal() and not fully_supplied:
         return _usage_failure(
-            "--set requires a local terminal unless --fireworks, --model, and --api-key "
+            "--set requires a local terminal unless --provider, --model, and --api-key "
             "are all supplied"
         )
     typer.echo("Yoetz LLM setup")
@@ -474,19 +495,19 @@ async def run_provider_setup(
     if not service.get("reachable"):
         typer.echo("provider_setup_failed: service_unavailable", err=True)
         return 20
-    service, provider = await _interactive_provider_setup(
+    service, provider_report = await _interactive_provider_setup(
         service,
-        provider_choice="fireworks" if fireworks else None,
+        provider_choice=provider_choice,
         model=model,
         api_key=api_key,
     )
-    binding = provider.get("binding")
-    credential = provider.get("credential")
+    binding = provider_report.get("binding")
+    credential = provider_report.get("credential")
     typer.echo("")
     typer.echo(f"Provider binding: {binding}")
-    typer.echo(f"API key: {credential}")
+    typer.echo(f"Credential: {credential}")
     if binding != "configured" or credential != "stored":
-        reason = provider.get("credential_reason")
+        reason = provider_report.get("credential_reason")
         if type(reason) is str:
             typer.echo(f"Reason: {reason}")
         return 20

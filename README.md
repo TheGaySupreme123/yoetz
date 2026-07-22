@@ -42,7 +42,7 @@ to use when several Codex CLI binaries are found on your PATH or in the standard
 Desktop location (or the Windows Store Codex App package), then previews and — only after an
 explicit `Y` confirmation — registers `yoetz mcp serve` with the chosen Codex
 (`codex mcp get` first; an existing foreign entry is always preserved, never replaced), checks
-whether the local service is reachable, optionally collects the nonsecret Official OpenAI vs
+whether the local service is reachable, optionally collects a nonsecret reviewed provider or
 custom HTTPS origin+model binding (writes service `config.toml`; never secrets), and prints the
 exact next commands for the parts that stay deliberately human-driven:
 
@@ -52,8 +52,8 @@ the standalone Codex CLI and does not fabricate an app installation that OpenAI 
 1. `yoetz service run` — start the persistent local service under a supervisor you choose;
 2. `yoetz privacy setup` — review recipes, provider binding, and egress policy (zero-egress
    until you commit otherwise);
-3. `yoetz provider endpoint` (or edit `config.toml`) — Official OpenAI **or** owner-declared
-   HTTPS origin+model; see examples below;
+3. `yoetz provider endpoint` (or edit `config.toml`) — choose a reviewed endpoint or an
+   owner-declared HTTPS origin+model; see examples below;
 4. `yoetz provider credential set` — provision the LLM API credential through the confidential
    terminal ceremony (never a flag, file, or environment variable).
 
@@ -70,6 +70,22 @@ endpoint_profile_version = "1.0.0"
 model = "gpt-4.1-mini"
 capability_profile = "openai-responses-structured-1"
 ```
+
+The reviewed endpoint choices are available interactively or explicitly with a nonsecret model:
+
+| choice | endpoint path | example |
+|---|---|---|
+| Official OpenAI | `api.openai.com/v1/responses` | `yoetz provider endpoint --official --model gpt-4.1-mini --no-interactive` |
+| Fireworks | `api.fireworks.ai/inference/v1/responses` | `yoetz provider endpoint --fireworks --model accounts/fireworks/models/qwen3-235b-a22b --no-interactive` |
+| Anthropic Claude | `api.anthropic.com/v1/chat/completions` | `yoetz provider endpoint --provider anthropic --model claude-sonnet-4-6 --no-interactive` |
+| Google Gemini | `generativelanguage.googleapis.com/v1beta/openai/chat/completions` | `yoetz provider endpoint --provider google_gemini --model gemini-3.6-flash --no-interactive` |
+| OpenRouter | `openrouter.ai/api/v1/chat/completions` | `yoetz provider endpoint --provider openrouter --model openai/gpt-5.2 --no-interactive` |
+| Vercel AI Gateway | `ai-gateway.vercel.sh/v1/chat/completions` | `yoetz provider endpoint --provider vercel_ai_gateway --model anthropic/claude-sonnet-4-6 --no-interactive` |
+
+These commands configure only endpoint/model metadata. Enter credentials later through the hidden
+`yoetz provider credential set` terminal ceremony; keys are never written to TOML, environment,
+logs, or command examples. Anthropic's OpenAI-compatible layer is a compatibility/testing path
+with fewer native Claude features, so selecting it is not a live capability guarantee.
 
 ### Example `config.toml` (owner-declared HTTPS origin)
 

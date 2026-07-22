@@ -5,10 +5,11 @@ from __future__ import annotations
 import base64
 import os
 from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 
 import apsw
 
@@ -19,6 +20,16 @@ from yoetz.adapters.privacy.catalog import CatalogPrivacyAudit, CatalogPrivacyPo
 from yoetz.adapters.privacy.gateway import PolicyEnforcingOutboundGateway
 from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer
 from yoetz.adapters.providers.local_model import InstalledLocalModelProfileRegistry
+from yoetz.adapters.providers.openai_responses import (
+    OneAttemptCredentialTransport,
+    OpenAIChatCompletionsEvaluator,
+    OpenAIProfile,
+    OpenAIResponsesEvaluator,
+    RenderedOpenAIRequest,
+    render_case,
+    render_chat_case,
+    unknown_data_use_profile,
+)
 from yoetz.adapters.runtime import RuntimeAdapterFactories, open_local_bundle_runtime
 from yoetz.adapters.sqlite.connection import (
     open_catalog_writer,
@@ -36,11 +47,17 @@ from yoetz.application.service import (
     ServiceReadyContext,
     VerificationPolicy,
 )
-from yoetz.config.models import YoetzConfig
+from yoetz.config.models import (
+    OWNER_DECLARED_ENDPOINT_PROFILE_ID,
+    YoetzConfig,
+    parse_https_origin,
+)
 from yoetz.config.paths import ensure_owner_only_dir, verify_private_local_bundle
 from yoetz.config.privacy import safe_privacy_bootstrap, seed_policy_if_absent
+from yoetz.config.write import PROVIDER_PRESETS, ProviderPreset
 from yoetz.domain.events import RuntimeProfile
 from yoetz.domain.privacy import (
+    ApprovedOutboundCase,
     AuthorizationScope,
     AuthorizationScopeKind,
     ChannelPolicy,
@@ -49,6 +66,8 @@ from yoetz.domain.privacy import (
     EgressChannel,
     PrivacyPolicy,
     PrivacyProfile,
+    ProviderBinding,
+    RequestCommitment,
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
@@ -79,6 +98,7 @@ from yoetz.ports.runtime import (
     TaskRuntime,
 )
 from yoetz.ports.secret_memory import ProviderAttemptAuthBinding, ProviderCredentialHandle
+from yoetz.ports.semantic import SemanticEvaluatorPort
 from yoetz.ports.start_catalog import WORKSPACE_REF_DOMAIN, TaskRoute, TaskRouteState
 from yoetz.protocol.canonical import JsonValue as CanonicalJsonValue
 from yoetz.protocol.canonical import canonical_digest, strict_json_parse
@@ -163,6 +183,56 @@ class _CredentialMinter:
 
     async def mint(self, binding: ProviderAttemptAuthBinding) -> ProviderCredentialHandle:
         return await self._vault.provider_credential(binding)
+
+
+class _ConfiguredOpenAIProviderFactory:
+    """Credential-free composition for one exact bundled OpenAI-compatible profile."""
+
+    __slots__ = ("_clock", "_profile", "_rendered")
+
+    def __init__(self, profile: OpenAIProfile, clock: ClockPort) -> None:
+        self._profile = profile
+        self._clock = clock
+        self._rendered: ContextVar[RenderedOpenAIRequest | None] = ContextVar(
+            "yoetz_rendered_openai_request", default=None
+        )
+
+    def render(self, case: ApprovedOutboundCase) -> bytes:
+        rendered = (
+            render_case(case) if self._profile.api_style == "responses" else render_chat_case(case)
+        )
+        self._rendered.set(rendered)
+        return rendered.body
+
+    def build_evaluator(
+        self,
+        binding: ProviderAttemptAuthBinding,
+        credential: ProviderCredentialHandle,
+        request_commitment: RequestCommitment,
+    ) -> SemanticEvaluatorPort:
+        del request_commitment
+        rendered = self._rendered.get()
+        self._rendered.set(None)
+        if rendered is None:
+            raise ValueError("provider_rendered_request_missing")
+        if (
+            rendered.provider_id != binding.provider_id
+            or rendered.model != binding.model_id
+            or rendered.endpoint_profile_id != binding.endpoint_profile_id
+            or rendered.endpoint_profile_version != binding.endpoint_profile_version
+        ):
+            raise ValueError("provider_rendered_request_binding_mismatch")
+        transport = OneAttemptCredentialTransport(
+            rendered=rendered,
+            credential=credential,
+            binding=binding,
+            host=self._profile.host,
+            port=self._profile.port,
+            path=self._profile.path,
+        )
+        if self._profile.api_style == "responses":
+            return OpenAIResponsesEvaluator(self._profile, transport, self._clock)
+        return OpenAIChatCompletionsEvaluator(self._profile, transport, self._clock)
 
 
 class _NoopAuditObjectStore:
@@ -834,6 +904,83 @@ def build_runtime_adapter_factories(
     )
 
 
+def _external_provider_factory_builders(
+    config: YoetzConfig | None, clock: ClockPort
+) -> Mapping[ProviderBinding, Callable[[], _ConfiguredOpenAIProviderFactory]]:
+    """Compose only exact, nonsecret OpenAI-compatible endpoint profiles."""
+
+    if config is None or config.provider is None:
+        return {}
+    provider = config.provider
+    preset: ProviderPreset | None = None
+    api_style: Literal["responses", "chat_completions"]
+    if provider.endpoint_profile_id == OWNER_DECLARED_ENDPOINT_PROFILE_ID:
+        host, port = parse_https_origin(
+            provider.owner_declared_endpoint.https_origin
+            if provider.owner_declared_endpoint is not None
+            else ""
+        )
+        base_path_prefix = "/v1"
+        api_style = "responses"
+    else:
+        preset = next(
+            (
+                item
+                for item in PROVIDER_PRESETS.values()
+                if item.provider_id == provider.provider_id
+                and item.endpoint_profile_id == provider.endpoint_profile_id
+            ),
+            None,
+        )
+        if preset is None:
+            return {}
+        if (
+            provider.endpoint_profile_version != preset.endpoint_profile_version
+            or provider.capability_profile != preset.capability_profile
+        ):
+            return {}
+        host = preset.host
+        port = 443
+        base_path_prefix = preset.base_path_prefix
+        api_style = preset.api_style
+
+    now = clock.now_utc()
+    data_use_profile = unknown_data_use_profile(
+        data_use_profile_id=f"{provider.endpoint_profile_id}-unknown",
+        reviewed_at=now,
+        expires_at=now + timedelta(days=1),
+        evidence_digest=canonical_digest(
+            {
+                "endpoint_profile_id": provider.endpoint_profile_id,
+                "endpoint_profile_version": provider.endpoint_profile_version,
+                "provider_id": provider.provider_id,
+                "source": "yoetz-data-use-unreviewed/1",
+            }
+        ),
+    )
+    profile = OpenAIProfile(
+        provider_id=provider.provider_id,
+        model=provider.model,
+        endpoint_profile_id=provider.endpoint_profile_id,
+        endpoint_profile_version=provider.endpoint_profile_version,
+        timeout_seconds=provider.timeout_seconds,
+        supports_structured_outputs=True,
+        data_use_profile=data_use_profile,
+        host=host,
+        port=port,
+        base_path_prefix=base_path_prefix,
+        api_style=api_style,
+    )
+    binding = ProviderBinding(
+        provider_id=provider.provider_id,
+        model_id=provider.model,
+        endpoint_profile_id=provider.endpoint_profile_id,
+        endpoint_profile_version=provider.endpoint_profile_version,
+        transport="external",
+    )
+    return {binding: lambda profile=profile: _ConfiguredOpenAIProviderFactory(profile, clock)}
+
+
 def _denied_policy(
     *,
     installation_id: str,
@@ -899,6 +1046,7 @@ async def build_privacy_coordinator(
     vault: _Vault,
     clock: ClockPort,
     ids: IdPort,
+    config: YoetzConfig | None = None,
 ) -> tuple[object, PrivacyPolicy, object]:
     """Build and reconcile the fail-closed local privacy coordinator."""
 
@@ -912,7 +1060,7 @@ async def build_privacy_coordinator(
         clock,
     )
     gateway = PolicyEnforcingOutboundGateway(
-        external_factory_builders={},
+        external_factory_builders=_external_provider_factory_builders(config, clock),
         local_model_registry=InstalledLocalModelProfileRegistry(),
         local_model_resolver=None,
         credential_minter=_CredentialMinter(vault),
@@ -1087,6 +1235,7 @@ async def provide_service_ready_context(
         vault=vault,
         clock=clock,
         ids=ids,
+        config=config,
     )
     runtime_context = ServiceRuntimeContext(
         service_instance_id=cast(str, getattr(lifecycle.instance, "instance_id")),

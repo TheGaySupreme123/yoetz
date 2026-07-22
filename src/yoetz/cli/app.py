@@ -741,6 +741,13 @@ def provider_endpoint(
             help="Bind the reviewed Fireworks Responses profile.",
         ),
     ] = False,
+    provider_name: Annotated[
+        str | None,
+        typer.Option(
+            "--provider",
+            help="Reviewed preset: official_openai, fireworks, anthropic, google_gemini, openrouter, or vercel_ai_gateway.",
+        ),
+    ] = None,
     https_origin: Annotated[
         str | None,
         typer.Option(
@@ -754,19 +761,22 @@ def provider_endpoint(
     ] = True,
     json_output: _JSON = False,
 ) -> None:
-    """Write nonsecret Official OpenAI or owner-declared endpoint binding to config.toml."""
+    """Write a nonsecret reviewed provider or owner-declared endpoint binding to config.toml."""
 
     from yoetz.cli.provider_binding import (
+        ProviderEndpointChoice,
         apply_provider_endpoint_choice,
         prompt_provider_endpoint_binding,
     )
     from yoetz.config.models import ConfigError
+    from yoetz.config.write import provider_preset
 
     try:
         if (
             interactive
             and not official
             and not fireworks
+            and provider_name is None
             and https_origin is None
             and model is None
         ):
@@ -779,13 +789,22 @@ def provider_endpoint(
         if model is None:
             _finish(_usage_failure())
             return
-        if (official and fireworks) or ((official or fireworks) and https_origin is not None):
+        if (
+            sum(value is not None for value in (provider_name, https_origin))
+            + int(official)
+            + int(fireworks)
+            > 1
+        ):
             _finish(_usage_failure())
             return
         if official:
             path, provider = apply_provider_endpoint_choice("official_openai", model=model)
         elif fireworks:
             path, provider = apply_provider_endpoint_choice("fireworks", model=model)
+        elif provider_name is not None:
+            preset = provider_preset(provider_name)
+            choice = cast(ProviderEndpointChoice, preset.choice)
+            path, provider = apply_provider_endpoint_choice(choice, model=model)
         elif https_origin is not None:
             path, provider = apply_provider_endpoint_choice(
                 "owner_declared", model=model, https_origin=https_origin
@@ -1033,6 +1052,13 @@ def root(
         bool,
         typer.Option("--fireworks", help="Use the bundled Fireworks Responses profile."),
     ] = False,
+    provider_name: Annotated[
+        str | None,
+        typer.Option(
+            "--provider",
+            help="Reviewed provider preset used with --set.",
+        ),
+    ] = None,
     model: Annotated[
         str | None,
         typer.Option("--model", help="Provider model identifier used with --set."),
@@ -1052,10 +1078,19 @@ def root(
         if context.invoked_subcommand is not None:
             raise typer.BadParameter("--set cannot be combined with a subcommand")
         operation = _setup_operation("run_provider_setup")
-        _finish(run_async(lambda: operation(fireworks=fireworks, model=model, api_key=api_key)))
+        _finish(
+            run_async(
+                lambda: operation(
+                    fireworks=fireworks,
+                    provider=provider_name,
+                    model=model,
+                    api_key=api_key,
+                )
+            )
+        )
         return
-    if fireworks or model is not None or api_key is not None:
-        raise typer.BadParameter("--fireworks, --model, and --api-key require --set")
+    if provider_name is not None or fireworks or model is not None or api_key is not None:
+        raise typer.BadParameter("--provider, --fireworks, --model, and --api-key require --set")
     if context.invoked_subcommand is not None:
         return
     # Bare invocation (ADR-013): an interactive terminal with no completion marker

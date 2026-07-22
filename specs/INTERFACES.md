@@ -1802,8 +1802,10 @@ facade and are never MCP tools.
   `ApprovedLocalDisclosureCase`. The local-model adapter is exact AF_UNIX with no
   DNS/AF_INET/redirect/proxy/download fallback. The OpenAI adapter is credential-free at registry
   time; each physical attempt uses one per-attempt SDK client with a nonsecret sentinel plus a
-  custom transport holding the body/profile/deadline-bound one-shot credential callback. No real
-  credential enters SDK client/default-header state. Its registered shared credential validator is
+  custom transport holding the body/profile/deadline-bound one-shot credential callback. The same
+  adapter owns exact OpenAI-compatible Chat Completions profiles for Anthropic, Gemini, OpenRouter,
+  and Vercel AI Gateway; these use the common `messages`/`response_format` request shape and their
+  fixed service endpoint paths. No real credential enters SDK client/default-header state. Its registered shared credential validator is
   `validate_openai_credential(view)` with `OPENAI_CREDENTIAL_MIN_BYTES=16` and
   `OPENAI_CREDENTIAL_MAX_BYTES=512`: byte-exact token68 with trailing `=` only, no
   trim/normalization/log/network probe.
@@ -1871,9 +1873,11 @@ facade and are never MCP tools.
   by config or environment. Ordinary clients never load this object. `release-probe` is available
   only to the service-start release harness and cannot loosen user policy. Shared config values are
   `YoetzConfig`, `MinimalConfig`, `ConfigError`, `PathSafetyError`, `OwnerDeclaredEndpointConfig`,
-  `parse_https_origin`, and the exact endpoint profile ids `openai-responses` /
-  `owner-declared-openai-responses` (ADR-014). Constrained `https_origin` is the only owner-supplied
-  locator; free `base_url` remains forbidden. Its composition-only
+  `parse_https_origin`, and the exact endpoint profile ids `openai-responses`,
+  `fireworks-responses`, `anthropic-openai-chat-completions`,
+  `google-gemini-openai-chat-completions`, `openrouter-openai-chat-completions`,
+  `vercel-ai-gateway-openai-chat-completions`, and `owner-declared-openai-responses` (ADR-014).
+  Constrained `https_origin` is the only owner-supplied locator; free `base_url` remains forbidden. Its composition-only
   `NetworkPolicy` values are exactly `denied|candidate_external|explicit_per_probe`;
   `SemanticPolicy` values are exactly
   `optional_local_model|optional_external|scripted_fake|no_implicit_model`.

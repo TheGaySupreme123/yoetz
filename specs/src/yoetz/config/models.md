@@ -110,7 +110,13 @@ this table; it does not decide whether a separately reviewed bounded non-LLM cha
   absence on the owner-declared profile → `ConfigError("owner_declared_endpoint_required")`.
   Invalid origins → `ConfigError("https_origin_invalid")`.
 - Official OpenAI continues to use `endpoint_profile_id = "openai-responses"` with the bundled host
-  `api.openai.com` resolved by the adapter, not from TOML.
+  `api.openai.com` resolved by the adapter, not from TOML. The bundled Chat Completions profiles
+  are `anthropic-openai-chat-completions` at `api.anthropic.com/v1`,
+  `google-gemini-openai-chat-completions` at
+  `generativelanguage.googleapis.com/v1beta/openai`,
+  `openrouter-openai-chat-completions` at `openrouter.ai/api/v1`, and
+  `vercel-ai-gateway-openai-chat-completions` at `ai-gateway.vercel.sh/v1`; these are exact
+  service-owned facts, not a generic OpenAI-compatible URL escape hatch.
 - `timeout_seconds: int = 60`; `max_retries: int = 2` (Yoetz-owned budget, ADR-006) —
   both bounded (`1..300`, `0..2`).
 - `capability_profile: str` is required and must match the endpoint/model tuple.

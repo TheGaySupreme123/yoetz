@@ -15,12 +15,12 @@ and enter existing hidden-TTY confidential ceremonies; noninteractive setup does
 
 ## Public surface
 
-- `run_provider_setup(fireworks=False, model=None, api_key=None) -> int` — the short path used
-  by `yoetz --set`; it starts the local service on demand, performs required vault setup/unlock,
-  optionally applies the fixed Fireworks profile and model without asking for internal binding
-  identifiers, then enters the credential ceremony. An explicit API-key value is never echoed and
-  is converted immediately to the mutable one-shot credential buffer; omission uses hidden input.
-  A fully supplied `--fireworks --model --api-key` invocation does not require a TTY or prompt.
+- `run_provider_setup(fireworks=False, provider=None, model=None, api_key=None) -> int` — the
+  short path used by `yoetz --set`; it starts the local service on demand, performs required vault
+  setup/unlock, optionally applies one exact reviewed provider preset and model without asking for
+  internal binding identifiers, then enters the credential ceremony. An explicit API-key value is
+  never echoed and is converted immediately to the mutable one-shot credential buffer; omission
+  uses hidden input.
 
 - `SETUP_MARKER_SCHEMA` — exactly `yoetz.setup-wizard-marker/1`.
 - `setup_marker_present() -> bool` — marker existence, failing closed (`True`) on
@@ -49,7 +49,8 @@ prompt with no default (or the `--accept` flag) gates one
 digest-bound `register`; adapter failures become `failed` with the reason token; (5) on an
 interactive run, uses the fixed on-demand connector and reports exact service state; a
 noninteractive status probe never starts it; (6) on an interactive TTY, offers Official OpenAI,
-the fixed Fireworks Responses profile, or an owner-declared HTTPS origin+model (writes
+Fireworks, Anthropic Claude, Google Gemini, OpenRouter, Vercel AI Gateway, or an
+owner-declared HTTPS origin+model (writes
 `config.toml` via `cli/provider_binding`), then enters the existing hidden-TTY vault/provider
 ceremonies when needed; (7) assembles `next_steps` naming the
 exact follow-up commands — `yoetz service run`, `yoetz service unlock`, `yoetz privacy setup`,
@@ -88,10 +89,11 @@ warnings, and `preview_digest`; `install` optionally binds `--preview-digest` (m
 
 ## Errors and edge cases
 
-- The short `--set` surface has the sole explicit `--api-key VALUE` exception authorized by
-  ADR-012. It warns about shell-history/process-list exposure, never echoes the value, and passes
-  it only through mutable confidential-ceremony buffers. Repeating the same command replaces the
-  exact stored profile credential through generation-CAS.
+- The short `--set` surface preserves the ADR-012 explicit `--api-key VALUE` compatibility
+  exception. It never echoes the value, warns through the existing ADR contract about
+  shell-history/process-list exposure, and passes it only through mutable confidential-ceremony
+  buffers. Omission always uses hidden local-terminal input; provider selection never changes that
+  credential boundary.
 - TTY probing failures degrade to non-interactive behavior; nothing prompts without a TTY.
 - Marker write failures (unsafe path, I/O error) report `marker_written: false` without
   failing the run.

@@ -339,9 +339,15 @@ def test_root_set_fireworks_dispatches_simple_provider_setup(
     received: dict[str, object] = {}
 
     async def fake_provider_setup(
-        *, fireworks: bool, model: str | None, api_key: str | None
+        *,
+        fireworks: bool,
+        provider: str | None,
+        model: str | None,
+        api_key: str | None,
     ) -> int:
-        received.update(fireworks=fireworks, model=model, api_key=api_key)
+        received.update(
+            fireworks=fireworks, provider=provider, model=model, api_key=api_key
+        )
         return 0
 
     monkeypatch.setattr(setup_module, "run_provider_setup", fake_provider_setup)
@@ -352,16 +358,15 @@ def test_root_set_fireworks_dispatches_simple_provider_setup(
             "--fireworks",
             "--model",
             "accounts/fireworks/models/minimax-m3",
-            "--api-key",
-            "fw-test-value",
         ],
     )
 
     assert result.exit_code == 0
     assert received == {
         "fireworks": True,
+        "provider": None,
         "model": "accounts/fireworks/models/minimax-m3",
-        "api_key": "fw-test-value",
+        "api_key": None,
     }
 
 
