@@ -120,7 +120,7 @@ def _enable_supported_profile(
     monkeypatch.setattr(plugin_mod, "load_packaged_skill_source", _fake_load)
 
 
-def test_render_plugin_tree_wires_three_hooks() -> None:
+def test_render_plugin_tree_wires_observation_and_compat_hooks() -> None:
     tree = render_plugin_tree(resource_source=_resources())
     assert ".codex-plugin/plugin.json" in tree
     assert "hooks/hooks.json" in tree
@@ -130,6 +130,10 @@ def test_render_plugin_tree_wires_three_hooks() -> None:
     assert "yoetz hooks user-prompt-submit" in hooks
     assert "yoetz hooks post-tool-use" in hooks
     assert "yoetz hooks session-start" in hooks
+    assert "yoetz hooks observe --event SessionStart" in hooks
+    assert "yoetz hooks observe --event PreToolUse" in hooks
+    assert "yoetz hooks observe --event PermissionRequest" in hooks
+    assert "yoetz hooks observe --event SubagentStop" in hooks
     assert "mcp__yoetz__start" in hooks
     assert "resume|compact" in hooks
 

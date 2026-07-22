@@ -274,6 +274,47 @@ def _confirm_registration() -> bool:
         typer.echo("Please enter Y or N.")
 
 
+def _confirm_project_setup(*, include_observation: bool) -> bool:
+    """One confirmed operation covering MCP/plugin/guidance/hooks/observation consent."""
+
+    typer.echo("This confirmation covers:")
+    typer.echo("  - MCP registration")
+    typer.echo("  - Plugin / guidance / hooks installation (when applied separately)")
+    if include_observation:
+        typer.echo(
+            "  - Observation consent for this workspace "
+            "(structural Codex events only; never raw path logged)"
+        )
+        typer.echo("  - Advice readiness once observation evidence exists")
+    while True:
+        raw = typer.prompt("Confirm Codex project setup? [Y/N]", show_default=False)
+        answer = raw.strip().upper()
+        if answer == "Y":
+            return True
+        if answer == "N":
+            return False
+        typer.echo("Please enter Y or N.")
+
+
+def _grant_observation_consent(workspace: Path | None = None) -> dict[str, JsonValue]:
+    """Record observation consent via private workspace commitment (never log raw path)."""
+
+    try:
+        from yoetz.adapters.integrations.observation_local import LocalObservationStore
+
+        store = LocalObservationStore()
+        root = (workspace if workspace is not None else Path.cwd()).resolve()
+        commitment = store.workspace_commitment(str(root))
+        store.grant_consent(commitment)
+        return {"outcome": "granted", "workspace_commitment": commitment}
+    except Exception as error:
+        return {
+            "outcome": "failed",
+            "reason": type(error).__name__,
+            "workspace_commitment": None,
+        }
+
+
 def _emit_registration_preview(binary: HarnessBinary) -> None:
     typer.echo("Proposed change: register the Yoetz MCP server with Codex:")
     typer.echo("  MCP server name: yoetz")
@@ -559,7 +600,7 @@ async def _register_step(
     accepted = accept
     if interactive and not accepted:
         _emit_registration_preview(binary)
-        accepted = _confirm_registration()
+        accepted = _confirm_project_setup(include_observation=True)
     if not accepted:
         return _registration_report(preview.state_before, outcome="declined")
     try:
@@ -575,7 +616,11 @@ async def _register_step(
         return _registration_report(
             preview.state_before, outcome="failed", reason=error.reason.value
         )
-    return _registration_report(result.state_after, outcome="registered")
+    report = _registration_report(result.state_after, outcome="registered")
+    if interactive or accept:
+        observation = _grant_observation_consent()
+        report["observation_consent"] = observation
+    return report
 
 
 async def run_setup_wizard(
@@ -691,6 +736,17 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
                 f"{hooks.get('presence') or 'absent'}; "
                 f"trust {hooks.get('trust_state') or 'unknown'}"
             )
+    if isinstance(registration, dict):
+        observation = registration.get("observation_consent")
+        if isinstance(observation, dict):
+            outcome = observation.get("outcome")
+            if outcome == "granted":
+                typer.echo(
+                    "  Observation consent: granted "
+                    "(structural events only; coverage requires real evidence)"
+                )
+            elif outcome is not None:
+                typer.echo(f"  Observation consent: {outcome}")
     if isinstance(service, dict):
         reachable = service.get("reachable")
         typer.echo(f"  Local service reachable: {'yes' if reachable else 'no'}")

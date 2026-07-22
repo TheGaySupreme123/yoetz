@@ -101,7 +101,11 @@ elevated_app = typer.Typer(
     no_args_is_help=True,
 )
 hooks_app = typer.Typer(
-    help="Codex lifecycle hook commands (activation, correlation, re-ground).",
+    help="Codex lifecycle hook commands (activation, correlation, re-ground, observe).",
+    no_args_is_help=True,
+)
+observe_app = typer.Typer(
+    help="Live Codex observation consent and status (local control; not MCP).",
     no_args_is_help=True,
 )
 
@@ -122,6 +126,7 @@ app.add_typer(migrate_app, name="migrate")
 app.add_typer(elevated_app, name="elevated-bootstrap")
 app.add_typer(elevated_app, name="consent")
 app.add_typer(hooks_app, name="hooks")
+app.add_typer(observe_app, name="observe")
 
 
 def run_async(operation: Callable[[], Awaitable[int]]) -> int:
@@ -317,6 +322,87 @@ def hooks_session_start() -> None:
     """Re-ground after SessionStart resume/compact; clear removes mapping."""
 
     _finish(_hooks_operation("handle_session_start")())
+
+
+@hooks_app.command("observe")
+def hooks_observe(
+    event: Annotated[str, typer.Option("--event", help="Codex hook event name.")],
+) -> None:
+    """Unified bounded observation ingress for Codex lifecycle hooks."""
+
+    module = importlib.import_module("yoetz.cli.observe_hooks")
+    handler = cast(Callable[..., int], getattr(module, "handle_observe"))
+    _finish(handler(event_name=event))
+
+
+def _observe_operation(name: str) -> Callable[..., int]:
+    module = importlib.import_module("yoetz.cli.observe")
+    return cast(Callable[..., int], getattr(module, name))
+
+
+@observe_app.command("status")
+def observe_status_cmd(
+    workspace: Annotated[
+        str | None, typer.Option("--workspace", help="Workspace path (commitment only stored).")
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Show observation consent and lifecycle status for a workspace."""
+
+    _finish(_observe_operation("observe_status")(workspace=workspace, json_output=json_output))
+
+
+@observe_app.command("grant")
+def observe_grant_cmd(
+    workspace: Annotated[str, typer.Option("--workspace", help="Workspace path to consent.")],
+) -> None:
+    """One-time observation consent; stores a private workspace commitment only."""
+
+    _finish(_observe_operation("grant_observation")(workspace=workspace))
+
+
+@observe_app.command("pause")
+def observe_pause_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+) -> None:
+    """Pause new observation ingest while retaining consent and evidence."""
+
+    _finish(_observe_operation("pause_observation")(workspace=workspace))
+
+
+@observe_app.command("resume")
+def observe_resume_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+) -> None:
+    """Resume observation ingest after pause."""
+
+    _finish(_observe_operation("resume_observation")(workspace=workspace))
+
+
+@observe_app.command("revoke")
+def observe_revoke_cmd(
+    workspace: Annotated[str, typer.Option("--workspace")],
+) -> None:
+    """Stop new ingest permanently; retained evidence is kept."""
+
+    _finish(_observe_operation("revoke_observation")(workspace=workspace))
+
+
+@observe_app.command("reconcile")
+def observe_reconcile_cmd(
+    session_file: Annotated[str, typer.Option("--session-file", help="Codex session JSONL path.")],
+    workspace: Annotated[str | None, typer.Option("--workspace")] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Advance the session-stream cursor for a consented workspace."""
+
+    _finish(
+        _observe_operation("reconcile_session_stream")(
+            session_file=session_file,
+            workspace=workspace,
+            json_output=json_output,
+        )
+    )
 
 
 def _workflow_command(method: str, request_type: type[BaseModel]) -> Callable[..., None]:

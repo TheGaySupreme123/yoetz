@@ -204,7 +204,9 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/src/yoetz/adapters/integrations/codex_lifecycle.py.md` | `future_file` | `src/yoetz/adapters/integrations/codex_lifecycle.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/integrations/codex_mcp.py.md` | `future_file` | `src/yoetz/adapters/integrations/codex_mcp.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/integrations/codex_plugin.py.md` | `future_file` | `src/yoetz/adapters/integrations/codex_plugin.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/adapters/integrations/codex_session_stream.py.md` | `future_file` | `src/yoetz/adapters/integrations/codex_session_stream.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/integrations/codex_skill.py.md` | `future_file` | `src/yoetz/adapters/integrations/codex_skill.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/adapters/integrations/observation_local.py.md` | `future_file` | `src/yoetz/adapters/integrations/observation_local.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/keys/__init__.md` | `future_file` | `src/yoetz/adapters/keys/__init__.py` | `python_shorthand` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/keys/encrypted_vault.md` | `future_file` | `src/yoetz/adapters/keys/encrypted_vault.py` | `python_shorthand` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/keys/os_keyring.md` | `future_file` | `src/yoetz/adapters/keys/os_keyring.py` | `python_shorthand` | — | `C` | `draft` | Owns exactly this future public repository file. |
@@ -261,6 +263,8 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/src/yoetz/cli/exits.md` | `future_file` | `src/yoetz/cli/exits.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/cli/hooks.py.md` | `future_file` | `src/yoetz/cli/hooks.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/cli/menu.md` | `future_file` | `src/yoetz/cli/menu.py` | `python_shorthand` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/cli/observe.py.md` | `future_file` | `src/yoetz/cli/observe.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/cli/observe_hooks.py.md` | `future_file` | `src/yoetz/cli/observe_hooks.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/cli/privacy_control.md` | `future_file` | `src/yoetz/cli/privacy_control.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/cli/provider_binding.md` | `future_file` | `src/yoetz/cli/provider_binding.py` | `python_shorthand` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/cli/render.md` | `future_file` | `src/yoetz/cli/render.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
@@ -565,6 +569,7 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/tests/unit/adapters/test_codex_lifecycle.py.md` | `future_file` | `tests/unit/adapters/test_codex_lifecycle.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/adapters/test_codex_mcp_registration.py.md` | `future_file` | `tests/unit/adapters/test_codex_mcp_registration.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/adapters/test_codex_plugin.py.md` | `future_file` | `tests/unit/adapters/test_codex_plugin.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/tests/unit/adapters/test_codex_session_stream.py.md` | `future_file` | `tests/unit/adapters/test_codex_session_stream.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/adapters/test_codex_skill_integration.py.md` | `future_file` | `tests/unit/adapters/test_codex_skill_integration.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/adapters/test_git_subject_state.py.md` | `future_file` | `tests/unit/adapters/test_git_subject_state.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/application/test_error_mapping.py.md` | `future_file` | `tests/unit/application/test_error_mapping.py` | `exact_suffix` | — | `C/D` | `draft` | Owns exactly this future public repository file. |
@@ -576,6 +581,8 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/tests/unit/application/test_verdict_rules.py.md` | `future_file` | `tests/unit/application/test_verdict_rules.py` | `exact_suffix` | — | `C/D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/cli/test_elevated.py.md` | `future_file` | `tests/unit/cli/test_elevated.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/cli/test_hooks.py.md` | `future_file` | `tests/unit/cli/test_hooks.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/tests/unit/cli/test_observe_cli.py.md` | `future_file` | `tests/unit/cli/test_observe_cli.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/tests/unit/cli/test_observe_hooks.py.md` | `future_file` | `tests/unit/cli/test_observe_hooks.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/config/test_load_precedence.py.md` | `future_file` | `tests/unit/config/test_load_precedence.py` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/config/test_models.py.md` | `future_file` | `tests/unit/config/test_models.py` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/config/test_owner_declared_endpoint.py.md` | `future_file` | `tests/unit/config/test_owner_declared_endpoint.py` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
