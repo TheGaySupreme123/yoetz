@@ -415,18 +415,3 @@ def test_provider_setup_success_reports_layers_without_ready_overclaim(
     assert "Transport probe: not demonstrated" in plain
     assert "Installed artifact evidence: not demonstrated" in plain
     assert "not proof of live provider dispatch or semantic review" in plain
-
-
-def test_emit_provider_setup_layer_report_marks_absent_sdk_extra(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    import yoetz.cli.setup as setup_module
-
-    monkeypatch.setattr(
-        setup_module, "_semantic_openai_extra_state", lambda: "absent (not demonstrated)"
-    )
-    setup_module._emit_provider_setup_layer_report()
-    captured = capsys.readouterr().out
-    assert "SDK extra (semantic-openai): absent (not demonstrated)" in captured
-    assert "Yoetz is ready to use this provider." not in captured

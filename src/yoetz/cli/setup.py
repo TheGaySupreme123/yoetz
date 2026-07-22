@@ -470,9 +470,7 @@ def _semantic_openai_extra_state() -> str:
 def _emit_provider_setup_layer_report() -> None:
     """Honestly separate binding/credential storage from undemonstrated runtime layers."""
 
-    typer.echo(
-        "Provider binding and vault credential storage succeeded; that layer is supported."
-    )
+    typer.echo("Provider binding and vault credential storage succeeded; that layer is supported.")
     typer.echo("Other layers (ready vs not demonstrated by this path):")
     typer.echo(f"  SDK extra (semantic-openai): {_semantic_openai_extra_state()}")
     typer.echo(

@@ -408,11 +408,7 @@ def _inline_nested_local_defs(parent_key: str, body: JsonValue) -> JsonValue:
                 if target is None:
                     raise RuntimeError("mcp_schema_nested_def_missing")
                 return resolve(_mutable_json(target))
-            return {
-                key: resolve(item)
-                for key, item in mapping.items()
-                if key != "$defs"
-            }
+            return {key: resolve(item) for key, item in mapping.items() if key != "$defs"}
         if isinstance(candidate, tuple | list):
             sequence = cast(tuple[JsonValue, ...] | list[JsonValue], candidate)
             return [resolve(item) for item in sequence]
@@ -495,9 +491,7 @@ def _mcp_presentation_schema(name: str, version: str) -> Mapping[str, JsonValue]
     document = schema_document_for(name, version)
     root = _mutable_json(document.json_schema)
     project_ordinary = name == "publish-work-request"
-    documents = _external_schema_documents(
-        root, project_ordinary_event_draft=project_ordinary
-    )
+    documents = _external_schema_documents(root, project_ordinary_event_draft=project_ordinary)
     bundled = _rewrite_schema_refs(
         root,
         current_uri=document.schema_id,
@@ -552,7 +546,9 @@ def presentation_schema_metrics(schema: Mapping[str, JsonValue]) -> dict[str, in
             defs = mapping.get("$defs")
             child_nest = 0
             if isinstance(defs, Mapping):
-                child_nest = max(visit(item) for item in cast(Mapping[str, JsonValue], defs).values())
+                child_nest = max(
+                    visit(item) for item in cast(Mapping[str, JsonValue], defs).values()
+                )
                 nest = max(nest, child_nest + 1)
             for key, item in mapping.items():
                 if key != "$defs":

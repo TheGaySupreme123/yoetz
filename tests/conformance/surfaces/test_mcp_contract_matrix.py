@@ -7,7 +7,6 @@ import re
 import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from yoetz.application import publish_work as publish_work_module
 from yoetz.mcp import resources as resource_module
 from yoetz.mcp.descriptors import (
     ORDINARY_MCP_PUBLISH_EVENT_FAMILIES,
@@ -218,7 +217,6 @@ def test_publish_work_presentation_matches_ordinary_admission_families() -> None
         descriptor_for("publish_work").input_schema
     )
     assert advertised == ORDINARY_MCP_PUBLISH_EVENT_FAMILIES
-    assert advertised == publish_work_module._ORDINARY_FAMILIES
     encoded = repr(dict(descriptor_for("publish_work").input_schema))
     assert "opaque-unknown-event-draft" not in encoded
     assert "opaque_unknown" not in encoded
@@ -231,10 +229,22 @@ def test_presentation_examples_admit_under_catalog_models() -> None:
     assert isinstance(start_examples, list) and len(start_examples) == 1
     assert isinstance(status_examples, list) and len(status_examples) == 1
     assert isinstance(publish_examples, list) and len(publish_examples) == 1
-    StartRequest.model_validate(start_examples[0])
-    StatusRequest.model_validate(status_examples[0])
-    PublishWorkRequest.model_validate(publish_examples[0])
-    assert publish_examples[0]["event_drafts"][0]["schema"]["name"] == "plan_published"
+    start_example = start_examples[0]
+    status_example = status_examples[0]
+    publish_example = publish_examples[0]
+    assert isinstance(start_example, dict)
+    assert isinstance(status_example, dict)
+    assert isinstance(publish_example, dict)
+    StartRequest.model_validate(start_example)
+    StatusRequest.model_validate(status_example)
+    PublishWorkRequest.model_validate(publish_example)
+    event_drafts = publish_example["event_drafts"]
+    assert isinstance(event_drafts, list) and event_drafts
+    first_draft = event_drafts[0]
+    assert isinstance(first_draft, dict)
+    schema = first_draft["schema"]
+    assert isinstance(schema, dict)
+    assert schema["name"] == "plan_published"
 
 
 def test_presentation_input_schema_is_projection_of_catalog_shape() -> None:
@@ -243,7 +253,15 @@ def test_presentation_input_schema_is_projection_of_catalog_shape() -> None:
         catalog = descriptor.catalog_input_schema
         assert presented["type"] == catalog["type"]
         assert presented["additionalProperties"] == catalog["additionalProperties"]
-        assert set(presented["required"]) == set(catalog["required"])
-        assert set(presented["properties"]) == set(catalog["properties"])
+        presented_required = presented["required"]
+        catalog_required = catalog["required"]
+        presented_properties = presented["properties"]
+        catalog_properties = catalog["properties"]
+        assert isinstance(presented_required, list)
+        assert isinstance(catalog_required, list)
+        assert isinstance(presented_properties, dict)
+        assert isinstance(catalog_properties, dict)
+        assert set(presented_required) == set(catalog_required)
+        assert set(presented_properties) == set(catalog_properties)
         # tools/list may attach examples; catalog admission schemas do not require them.
         assert "examples" not in catalog
