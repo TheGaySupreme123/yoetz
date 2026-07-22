@@ -47,6 +47,7 @@ __all__ = [
     "Observation",
     "bytes_digest",
     "canonical_evidence_bytes",
+    "capability_evidence_output_root",
     "codex_profiles_frozen",
     "live_codex_authorized",
     "live_keyring_authorized",
@@ -697,6 +698,26 @@ def codex_profiles_frozen() -> bool:
     return isinstance(profiles, list) and len(cast(list[object], profiles)) > 0
 
 
+def capability_evidence_output_root(tmp_path: Path) -> Path:
+    """Return the directory that should receive public capability evidence for this run.
+
+    When ``YOETZ_CAPABILITY_EVIDENCE_DIR`` is set (capability CI), write durable evidence there so
+    ``generate_capability_matrix.py`` can aggregate it. Otherwise use an isolated temp directory.
+    """
+
+    configured = os.environ.get("YOETZ_CAPABILITY_EVIDENCE_DIR", "").strip()
+    if configured:
+        root = Path(configured)
+        if root.is_symlink():
+            raise _invalid("output_root_is_symlink")
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(root, 0o700)
+        return root
+    evidence_root = Path(tmp_path) / "evidence"
+    evidence_root.mkdir(mode=0o700, exist_ok=True)
+    return evidence_root
+
+
 def runtime_capability_context(
     *,
     fixture_digest: str,
@@ -715,6 +736,10 @@ def runtime_capability_context(
     Digests and identities come from ``build_version_manifest`` / verified resources — never from
     freeform ``--version`` paste. Development builds bind ``artifact_digest`` to the package and
     resource identity rather than a release wheel digest.
+
+    When ``YOETZ_CANDIDATE_ARTIFACT_DIGEST`` is set (capability CI), that exact candidate digest
+    replaces the development package identity so matrix aggregation can bind evidence to the
+    prepared candidate without inventing support.
     """
 
     from yoetz.protocol.canonical import canonical_digest
@@ -738,14 +763,18 @@ def runtime_capability_context(
     ):
         raise _invalid("runtime_identity_invalid")
 
-    artifact_digest = canonical_digest(
-        {
-            "build_identity": manifest.build_identity,
-            "package_version": manifest.package_version,
-            "resource_manifest_digest": manifest.resource_manifest_digest,
-            "support_status": manifest.support_status,
-        }
-    )
+    candidate_override = os.environ.get("YOETZ_CANDIDATE_ARTIFACT_DIGEST", "").strip()
+    if candidate_override:
+        artifact_digest = _digest(candidate_override, "artifact_digest_invalid")
+    else:
+        artifact_digest = canonical_digest(
+            {
+                "build_identity": manifest.build_identity,
+                "package_version": manifest.package_version,
+                "resource_manifest_digest": manifest.resource_manifest_digest,
+                "support_status": manifest.support_status,
+            }
+        )
     mcp = manifest.mcp_sdk_version
     resolved_sdk = sdk_version
     if resolved_sdk is None and mcp.get("status") == "present":

@@ -14,6 +14,7 @@ the minimum supported, maximum tested, denied, and untested surfaces advertised 
 
 ```text
 tests/capability/
+  test_codex_conduit_harness.py
   test_codex_config_and_startup.py
   test_codex_six_tools.py
   test_codex_optional_required_failure.py
@@ -22,6 +23,7 @@ tests/capability/
   test_codex_resume_reattach.py
   test_codex_jsonl_import.py
   test_codex_timeout_cancellation.py
+  test_mcp_gate1_protocol_conformance.py
   test_mcp_protocol_and_sdk.py
   test_local_control_channel.py
   test_platform_filesystem_keyring.py
@@ -56,6 +58,7 @@ This index covers exactly these separately owned future files:
 
 ```text
 tests/capability/evidence.py
+tests/capability/test_codex_conduit_harness.py
 tests/capability/test_codex_config_and_startup.py
 tests/capability/test_codex_jsonl_import.py
 tests/capability/test_codex_optional_required_failure.py
@@ -65,6 +68,7 @@ tests/capability/test_codex_six_tools.py
 tests/capability/test_codex_skill_discovery.py
 tests/capability/test_codex_timeout_cancellation.py
 tests/capability/test_local_control_channel.py
+tests/capability/test_mcp_gate1_protocol_conformance.py
 tests/capability/test_mcp_protocol_and_sdk.py
 tests/capability/test_platform_filesystem_keyring.py
 tests/capability/test_privacy_provider_and_local_model_profiles.py

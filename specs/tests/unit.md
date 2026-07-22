@@ -16,6 +16,7 @@ Required test modules and shared support files:
 ```text
 tests/unit/
   adapters/
+    test_codex_capability_harness.py
     test_codex_jsonl.py
     test_codex_discovery.py
     test_codex_lifecycle.py
@@ -100,6 +101,7 @@ fixtures into the suite without adding hidden state.
 This index covers exactly these separately owned future files:
 
 ```text
+tests/unit/adapters/test_codex_capability_harness.py
 tests/unit/adapters/test_codex_discovery.py
 tests/unit/adapters/test_codex_jsonl.py
 tests/unit/adapters/test_codex_lifecycle.py

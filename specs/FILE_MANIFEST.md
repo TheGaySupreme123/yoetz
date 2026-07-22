@@ -8,8 +8,8 @@ This is the complete one-to-one ledger between the natural-language specificatio
 files planned for the public v0.1 repository. It is declarative: adding, removing, renaming, or
 splitting a future file requires changing this reviewed table and its owning spec together.
 
-The inventory contains 576 spec files: 562 exact future-file owners,
-10 directory indexes, and 4 coordination files. The 562 future paths are unique. The already-
+The inventory contains 580 spec files: 566 exact future-file owners,
+10 directory indexes, and 4 coordination files. The 566 future paths are unique. The already-
 authored public ADRs are current decision authorities, not future-file candidates, so
 they are intentionally outside the mirrored ownership universe. Ignored local architecture/
 strategy inputs are neither inventoried nor authoritative.
@@ -198,6 +198,7 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/src/yoetz/adapters/importers/__init__.md` | `future_file` | `src/yoetz/adapters/importers/__init__.py` | `python_shorthand` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/importers/codex_jsonl.md` | `future_file` | `src/yoetz/adapters/importers/codex_jsonl.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/integrations/__init__.md` | `future_file` | `src/yoetz/adapters/integrations/__init__.py` | `python_shorthand` | — | `F` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/adapters/integrations/codex_capability_harness.py.md` | `future_file` | `src/yoetz/adapters/integrations/codex_capability_harness.py` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/integrations/codex_discovery.py.md` | `future_file` | `src/yoetz/adapters/integrations/codex_discovery.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/integrations/codex_lifecycle.py.md` | `future_file` | `src/yoetz/adapters/integrations/codex_lifecycle.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/integrations/codex_mcp.py.md` | `future_file` | `src/yoetz/adapters/integrations/codex_mcp.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
@@ -416,6 +417,7 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/tests/builders/operations.py.md` | `future_file` | `tests/builders/operations.py` | `exact_suffix` | — | `D–F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/capability.md` | `index_only` | — | `none` | `tests/capability/` | `D–F` | `draft` | Enumerates this directory family and owns no future file. |
 | `specs/tests/capability/evidence.py.md` | `future_file` | `tests/capability/evidence.py` | `exact_suffix` | — | `D–F` | `draft` | Owns exactly this future public repository file. |
+| `specs/tests/capability/test_codex_conduit_harness.py.md` | `future_file` | `tests/capability/test_codex_conduit_harness.py` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/capability/test_codex_config_and_startup.py.md` | `future_file` | `tests/capability/test_codex_config_and_startup.py` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/capability/test_codex_jsonl_import.py.md` | `future_file` | `tests/capability/test_codex_jsonl_import.py` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/capability/test_codex_optional_required_failure.py.md` | `future_file` | `tests/capability/test_codex_optional_required_failure.py` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
@@ -425,6 +427,7 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/tests/capability/test_codex_skill_discovery.py.md` | `future_file` | `tests/capability/test_codex_skill_discovery.py` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/capability/test_codex_timeout_cancellation.py.md` | `future_file` | `tests/capability/test_codex_timeout_cancellation.py` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/capability/test_local_control_channel.py.md` | `future_file` | `tests/capability/test_local_control_channel.py` | `exact_suffix` | — | `C/F` | `draft` | Owns exactly this future public repository file. |
+| `specs/tests/capability/test_mcp_gate1_protocol_conformance.py.md` | `future_file` | `tests/capability/test_mcp_gate1_protocol_conformance.py` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/capability/test_mcp_protocol_and_sdk.py.md` | `future_file` | `tests/capability/test_mcp_protocol_and_sdk.py` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/capability/test_platform_filesystem_keyring.py.md` | `future_file` | `tests/capability/test_platform_filesystem_keyring.py` | `exact_suffix` | — | `C/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/capability/test_privacy_provider_and_local_model_profiles.py.md` | `future_file` | `tests/capability/test_privacy_provider_and_local_model_profiles.py` | `exact_suffix` | — | `E/F` | `draft` | Owns exactly this future public repository file. |
@@ -551,6 +554,7 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/tests/subprocess/test_setup_wizard_cli.py.md` | `future_file` | `tests/subprocess/test_setup_wizard_cli.py` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/subprocess/test_signals_and_cancellation.py.md` | `future_file` | `tests/subprocess/test_signals_and_cancellation.py` | `exact_suffix` | — | `C–F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit.md` | `index_only` | — | `none` | `tests/unit/` | `A–F` | `draft` | Enumerates this directory family and owns no future file. |
+| `specs/tests/unit/adapters/test_codex_capability_harness.py.md` | `future_file` | `tests/unit/adapters/test_codex_capability_harness.py` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/adapters/test_codex_discovery.py.md` | `future_file` | `tests/unit/adapters/test_codex_discovery.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/adapters/test_codex_jsonl.py.md` | `future_file` | `tests/unit/adapters/test_codex_jsonl.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/adapters/test_codex_lifecycle.py.md` | `future_file` | `tests/unit/adapters/test_codex_lifecycle.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |

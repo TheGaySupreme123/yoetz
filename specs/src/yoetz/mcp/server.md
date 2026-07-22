@@ -116,8 +116,9 @@ registered tools remain structured tool results.
   fatal startup on a corrupted guidance resource.
 - `tests/subprocess/test_mcp_stdout_purity.py` covers protocol-only stdout.
 - `tests/packaging/test_service_boundary_imports.py` proves bridge imports exclude trusted modules.
-- `tests/capability/test_mcp_protocol_and_sdk.py` covers an unprofiled host completing the workflow
-  with no installed skill.
+- `tests/capability/test_mcp_protocol_and_sdk.py` covers pinned SDK/protocol identity probes.
+- `tests/capability/test_mcp_gate1_protocol_conformance.py` covers Gate-1 protocol conformance and
+  MCP conduit behavior (tools/call, resources, framing); it says nothing about model activation.
 
 ## Open questions
 

@@ -73,8 +73,12 @@ public `CapabilityEvidence` record contains digests and bounded observations. Th
 config/data/key material after report finalization.
 
 MCP SDK/protocol cases exercise framing, validation ownership, structured results, `isError`, EOF,
-cancellation, malformed frames, stdout purity, and any accepted protocol fallback. A documented API
-shape without an observed installed run is not pass.
+cancellation, malformed frames, stdout purity, tools/call for all six tools, resource list/read,
+idempotent retry, and any accepted protocol fallback via Gate-1 capability tests. Evidence is
+written under `YOETZ_CAPABILITY_EVIDENCE_DIR` and bound to `YOETZ_CANDIDATE_ARTIFACT_DIGEST` from
+the prepared candidate. A documented API shape without an observed installed run is not pass.
+Gate-2 Codex app-server conduit and Gate-3 real-model activation remain planned-only in
+`release/capability-policy.json` and fail closed when no Codex artifact/driver exists.
 
 ### Platform/key matrix
 

@@ -5,8 +5,10 @@ stdio/schema specs | **Imported by:** MCP support matrix
 
 ## Purpose
 
-Prove the installed candidate behaves with the exact pinned MCP SDK and negotiated protocol,
-including the places where Yoetz deliberately owns validation/framing rather than SDK defaults.
+Prove the installed candidate negotiates with the exact pinned MCP SDK and protocol identity
+probes. Full Gate-1 protocol conformance (tools/call, resources, idempotent retry, EOF, stdout
+purity) lives in `tests/capability/test_mcp_gate1_protocol_conformance.py`. This file remains the
+SDK pin / negotiation / annotation identity gate and does not claim model activation.
 
 ## Public surface
 
