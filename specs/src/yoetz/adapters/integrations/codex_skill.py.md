@@ -39,6 +39,8 @@ Git, stage/commit files, update `.gitignore`, download anything, or manage arbit
 - `load_packaged_skill_source(resource_source=None) -> SkillSource` — verifies installed resource manifest before
   returning the exact inventory, composed of the Codex skill header plus the neutral guidance
   members.
+- `load_packaged_skill_members(resource_source=None) -> Mapping[str, bytes]` — same verification,
+  returning immutable member path→bytes for plugin bundling without duplicating SKILL contents.
 - `inspect_destination(target, source) -> DestinationInspection` — descriptor-safe read-only state.
 - `build_managed_marker(source, scope) -> bytes` — canonical `.yoetz-install.json`.
 - `recover_interrupted_swap(target, expected_preview=None) -> DestinationInspection` — conservative

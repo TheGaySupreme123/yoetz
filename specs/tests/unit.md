@@ -18,7 +18,9 @@ tests/unit/
   adapters/
     test_codex_jsonl.py
     test_codex_discovery.py
+    test_codex_lifecycle.py
     test_codex_mcp_registration.py
+    test_codex_plugin.py
     test_codex_skill_integration.py
     test_git_subject_state.py
   protocol/
@@ -59,6 +61,7 @@ tests/unit/
     test_privacy_desired.py
   cli/
     test_elevated.py
+    test_hooks.py
   observability/
     test_logging_allowlist.py
     test_privacy.py
@@ -98,9 +101,11 @@ This index covers exactly these separately owned future files:
 
 ```text
 tests/unit/adapters/test_codex_discovery.py
-tests/unit/adapters/test_codex_mcp_registration.py
-tests/unit/adapters/test_codex_skill_integration.py
 tests/unit/adapters/test_codex_jsonl.py
+tests/unit/adapters/test_codex_lifecycle.py
+tests/unit/adapters/test_codex_mcp_registration.py
+tests/unit/adapters/test_codex_plugin.py
+tests/unit/adapters/test_codex_skill_integration.py
 tests/unit/adapters/test_git_subject_state.py
 tests/unit/application/test_error_mapping.py
 tests/unit/application/test_harness_mcp_service.py
@@ -110,6 +115,7 @@ tests/unit/application/test_service_facade.py
 tests/unit/application/test_unit_of_work.py
 tests/unit/application/test_verdict_rules.py
 tests/unit/cli/test_elevated.py
+tests/unit/cli/test_hooks.py
 tests/unit/config/test_load_precedence.py
 tests/unit/config/test_models.py
 tests/unit/config/test_owner_declared_endpoint.py

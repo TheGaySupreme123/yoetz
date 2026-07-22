@@ -47,6 +47,7 @@ __all__ = [
     "SkillResourceSource",
     "build_managed_marker",
     "inspect_destination",
+    "load_packaged_skill_members",
     "load_packaged_skill_source",
     "recover_interrupted_swap",
 ]
@@ -298,6 +299,14 @@ def load_packaged_skill_source(resource_source: SkillResourceSource | None = Non
     """Verify the package manifest and return immutable structural skill source metadata."""
 
     return _load_source_bundle(resource_source).source
+
+
+def load_packaged_skill_members(
+    resource_source: SkillResourceSource | None = None,
+) -> Mapping[str, bytes]:
+    """Verify the package and return immutable skill member path → bytes."""
+
+    return _load_source_bundle(resource_source).members
 
 
 def build_managed_marker(source: SkillSource, scope: IntegrationScope) -> bytes:
