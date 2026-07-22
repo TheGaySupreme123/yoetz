@@ -71,7 +71,10 @@ The v0.1 document leads with the install/first-run story after its one-paragraph
 text-only because the maintained Mermaid workflow lives in ADR-006. It states that routine checks,
 retries, agent responses, and rechecks need no human after a standing policy is committed, while
 setup/widening, credential changes, confirm-every-request, and finding waiver preserve explicit
-human authority.
+human authority. The first-run story uses the human-facing brand names `Yoetz` and `Codex`, lists
+automatically detected supported harnesses before any per-installation choice, and describes the
+explicit no-default `Y`/`N` registration confirmation without changing lowercase command, MCP, or
+wire identifiers.
 It labels the three support routes clearly and never asks security or conduct reporters to use a
 public issue. E-012 verifies the private routes before release.
 

@@ -1,6 +1,6 @@
 # ADR-012 — First-run setup wizard, automated MCP registration, and the npm launcher
 
-**Status:** Working decision (2026-07-21), founder-authorized amendment of ADR-007 decisions 3, 7,
+**Status:** Working decision (2026-07-22), founder-authorized amendment of ADR-007 decisions 3, 7,
 and 9. Release ratification still requires the packaging evidence gates those decisions already
 carry; nothing here manufactures platform or capability evidence.
 **Owning public specs:** `specs/src/yoetz/ports/harness_mcp.py.md`,
@@ -59,9 +59,14 @@ exactly those contracts and connects the steps without weakening any existing tr
 5. **Discovery is pure observation.** `discover_codex_binaries` scans `$PATH` for executable
    `codex` entries, dedupes by resolved target while keeping the PATH-visible name, probes
    `codex --version` with a bounded timeout, and always reports `untested` compatibility (E-002:
-   a version string is not support evidence). Multiple candidates produce an explicit numbered
-   interactive choice; non-interactive runs fail closed and require `--codex-path`. Even a single
-   candidate requires explicit confirmation before the registration mutation.
+   a version string is not support evidence). Interactive setup first presents the automatically
+   detected supported harnesses — exactly **Codex** in v0.1 — as a numbered choice, then presents a
+   separate numbered installation choice when several Codex executables exist. Human-facing copy
+   uses the brand names **Yoetz** and **Codex**; the executable, command, and MCP server identifiers
+   remain the protocol-owned lowercase `yoetz`/`codex` tokens. Non-interactive runs fail closed on
+   multiple installations and require `--codex-path`. Every registration preview requires an
+   explicit `Y` or `N` answer with no implicit default; `--accept` remains the explicit automation
+   path.
 
 6. **The npm launcher exists, publish-ready and deliberately unpublished (amends ADR-007
    decision 7).** `support/npm-launcher/` contains a dependency-free `package.json` (registry name
@@ -82,8 +87,9 @@ exactly those contracts and connects the steps without weakening any existing tr
 
 ## Consequences
 
-A new user's path is now: `npx yoetz` or `uvx yoetz` → interactive wizard → confirmed Codex MCP
-registration → printed, exact next commands for the service, privacy policy, and credential.
+A new user's path is now: `npx yoetz` or `uvx yoetz` → interactive wizard → detected-harness
+selection (Codex in v0.1) → installation selection when needed → explicit `Y`/`N` confirmation →
+Codex MCP registration → printed, exact next commands for the service, privacy policy, and credential.
 Each mutating step is previewed, digest-bound, and individually declinable; `yoetz setup status`
 reports the same posture read-only at any time. The CLI support-command matrix grows by one
 (`setup`), recorded in the conformance contract test in the same change.

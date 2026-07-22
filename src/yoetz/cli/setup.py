@@ -42,6 +42,7 @@ __all__ = [
 SETUP_MARKER_SCHEMA: Final = "yoetz.setup-wizard-marker/1"
 _REPORT_SCHEMA: Final = "yoetz.setup-wizard-report/1"
 _STATUS_SCHEMA: Final = "yoetz.setup-status/1"
+_HARNESS_DISPLAY_NAMES: Final[dict[HarnessId, str]] = {HarnessId.CODEX: "Codex"}
 
 _NEXT_SERVICE: Final = "run 'yoetz service run' under your selected user supervisor"
 _NEXT_UNLOCK: Final = "run 'yoetz service unlock' from a local terminal if the vault is locked"
@@ -101,6 +102,13 @@ def should_offer_first_run() -> bool:
     return interactive and not setup_marker_present()
 
 
+def _is_interactive_terminal() -> bool:
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except OSError, ValueError:
+        return False
+
+
 def _write_setup_marker(outcome: str) -> bool:
     try:
         path = setup_marker_path()
@@ -136,6 +144,32 @@ def _explicit_binary(codex_path: str) -> HarnessBinary | None:
     )
 
 
+def _choose_harness(
+    binaries: tuple[HarnessBinary, ...],
+    *,
+    codex_path: str | None,
+    interactive: bool,
+) -> HarnessId | None:
+    """Choose one detected supported harness before selecting its installation."""
+
+    if codex_path is not None:
+        return HarnessId.CODEX
+    if not binaries:
+        return None
+    if not interactive:
+        return HarnessId.CODEX
+
+    harness = HarnessId.CODEX
+    count = len(binaries)
+    suffix = "installation" if count == 1 else "installations"
+    typer.echo("Automatically detected harnesses:")
+    typer.echo(f"  1. {_HARNESS_DISPLAY_NAMES[harness]} ({count} {suffix})")
+    raw = typer.prompt("Select a harness to connect to Yoetz", default="1")
+    if raw != "1":
+        raise _UsageExit(_usage_failure("the harness selection is not one of the listed numbers"))
+    return harness
+
+
 def _choose_binary(
     binaries: tuple[HarnessBinary, ...],
     *,
@@ -157,14 +191,34 @@ def _choose_binary(
         raise _UsageExit(
             _usage_failure("multiple codex executables found; select one with --codex-path")
         )
-    typer.echo("Multiple codex executables were found:")
+    typer.echo("Detected Codex installations:")
     for index, binary in enumerate(binaries, start=1):
         version = binary.reported_version or "unknown version"
         typer.echo(f"  {index}. {binary.executable_path} ({version})")
-    raw = typer.prompt("Select the codex to configure", default="1")
+    raw = typer.prompt("Select the Codex installation to configure", default="1")
     if not raw.isdecimal() or not 1 <= int(raw) <= len(binaries):
         raise _UsageExit(_usage_failure("the harness selection is not one of the listed numbers"))
     return binaries[int(raw) - 1]
+
+
+def _confirm_registration() -> bool:
+    """Require an explicit capital-insensitive Y or N with no default answer."""
+
+    while True:
+        raw = typer.prompt("Apply this registration? [Y/N]", show_default=False)
+        answer = raw.strip().upper()
+        if answer == "Y":
+            return True
+        if answer == "N":
+            return False
+        typer.echo("Please enter Y or N.")
+
+
+def _emit_registration_preview(binary: HarnessBinary) -> None:
+    typer.echo("Proposed change: register the Yoetz MCP server with Codex:")
+    typer.echo("  MCP server name: yoetz")
+    typer.echo("  Command: yoetz mcp serve")
+    typer.echo(f"  Codex executable: {binary.executable_path}")
 
 
 async def _service_reachability() -> dict[str, JsonValue]:
@@ -219,9 +273,8 @@ async def _register_step(
         )
     accepted = accept
     if interactive and not accepted:
-        typer.echo("Proposed change: register 'yoetz mcp serve' as MCP server 'yoetz' with:")
-        typer.echo(f"  {binary.executable_path}")
-        accepted = typer.confirm("Apply this registration?", default=False)
+        _emit_registration_preview(binary)
+        accepted = _confirm_registration()
     if not accepted:
         return _registration_report(preview.state_before, outcome="declined")
     try:
@@ -249,13 +302,19 @@ async def run_setup_wizard(
 ) -> int:
     """Run the guided first-run setup and report each step honestly."""
 
-    try:
-        interactive = not non_interactive and sys.stdin.isatty() and sys.stdout.isatty()
-    except OSError, ValueError:
-        interactive = False
+    interactive = not non_interactive and _is_interactive_terminal()
     binaries = discover_codex_binaries()
     try:
-        chosen = _choose_binary(binaries, codex_path=codex_path, interactive=interactive)
+        harness = _choose_harness(
+            binaries,
+            codex_path=codex_path,
+            interactive=interactive,
+        )
+        chosen = (
+            None
+            if harness is None
+            else _choose_binary(binaries, codex_path=codex_path, interactive=interactive)
+        )
     except _UsageExit as failure:
         return failure.code
 
@@ -306,13 +365,13 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
     if isinstance(registration, dict):
         outcome = registration.get("outcome")
         reason = registration.get("reason")
-        line = f"  harness MCP registration: {outcome}"
+        line = f"  Harness MCP registration: {outcome}"
         if reason:
             line += f" ({reason})"
         typer.echo(line)
     if isinstance(service, dict):
         reachable = service.get("reachable")
-        typer.echo(f"  local service reachable: {'yes' if reachable else 'no'}")
+        typer.echo(f"  Local service reachable: {'yes' if reachable else 'no'}")
     steps = report["next_steps"]
     if isinstance(steps, list) and steps:
         typer.echo("Next steps:")
@@ -368,10 +427,7 @@ async def integrate_mcp(
 
     if harness != "codex" or action not in {"status", "preview", "install"}:
         return _usage_failure("the harness or action is not supported")
-    try:
-        interactive = sys.stdin.isatty() and sys.stdout.isatty()
-    except OSError, ValueError:
-        interactive = False
+    interactive = _is_interactive_terminal()
     binaries = discover_codex_binaries()
     try:
         chosen = _choose_binary(binaries, codex_path=codex_path, interactive=False)
@@ -405,9 +461,8 @@ async def integrate_mcp(
             return _mcp_error_exit("foreign_entry_present")
         accepted = accept
         if interactive and not accepted:
-            typer.echo("Proposed change: register 'yoetz mcp serve' as MCP server 'yoetz' with:")
-            typer.echo(f"  {chosen.executable_path}")
-            accepted = typer.confirm("Apply this registration?", default=False)
+            _emit_registration_preview(chosen)
+            accepted = _confirm_registration()
         if not accepted:
             return _mcp_error_exit("confirmation_required")
         if preview.action is McpRegistrationAction.NOOP:

@@ -134,6 +134,60 @@ def test_multiple_candidates_fail_closed_non_interactively(
     assert "--codex-path" in result.stderr
 
 
+def test_interactive_wizard_selects_harness_then_installation_and_requires_y_or_n(
+    wizard_env: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wizard_env["binaries"] = (_binary("/a/codex"), _binary("/b/codex"))
+    wizard_env["outputs"] = [
+        CommandOutput(1, b""),  # preview get: absent
+        CommandOutput(1, b""),  # apply re-preview get: absent
+        CommandOutput(0, b""),  # add
+        _yoetz_entry(),  # verify get
+    ]
+
+    import yoetz.cli.provider_binding as provider_binding
+    import yoetz.cli.setup as setup_module
+
+    monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(provider_binding, "prompt_provider_endpoint_binding", lambda: None)
+
+    result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\n2\nmaybe\nY\n")
+
+    assert result.exit_code == 0
+    assert "Automatically detected harnesses:" in result.stdout
+    assert "1. Codex (2 installations)" in result.stdout
+    assert "Select a harness to connect to Yoetz" in result.stdout
+    assert "Detected Codex installations:" in result.stdout
+    assert "Select the Codex installation to configure" in result.stdout
+    assert "register the Yoetz MCP server with Codex" in result.stdout
+    assert "MCP server name: yoetz" in result.stdout
+    assert "Command: yoetz mcp serve" in result.stdout
+    assert "Codex executable: /b/codex" in result.stdout
+    assert "Apply this registration? [Y/N]" in result.stdout
+    assert "Please enter Y or N." in result.stdout
+    assert "Harness MCP registration: registered" in result.stdout
+
+
+def test_interactive_registration_n_declines_without_mutation(
+    wizard_env: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.cli.provider_binding as provider_binding
+    import yoetz.cli.setup as setup_module
+
+    monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(provider_binding, "prompt_provider_endpoint_binding", lambda: None)
+
+    result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\nN\n")
+
+    assert result.exit_code == 0
+    assert "Apply this registration? [Y/N]" in result.stdout
+    assert "Harness MCP registration: declined" in result.stdout
+    for calls in cast(list[list[tuple[str, ...]]], wizard_env["calls"]):
+        assert all(call[1:3] == ("mcp", "get") for call in calls)
+
+
 def test_no_codex_found_still_completes_with_guidance(wizard_env: dict[str, object]) -> None:
     wizard_env["binaries"] = ()
     result = _RUNNER.invoke(cli.app, ["setup", "run", "--non-interactive", "--json"])

@@ -20,6 +20,9 @@ Covers: a non-interactive run without `--accept` is a dry run (declined registra
 next steps naming `yoetz service run`, `yoetz privacy setup`, and `yoetz provider credential
 set`); `--accept` registers through the exact get/get/add/get sequence and writes the
 `yoetz.setup-wizard-marker/1` marker; a foreign entry is preserved with only `get` invocations;
+an interactive run lists the detected `Codex` harness for connection to `Yoetz`, separately lists
+multiple Codex installations, prints a branded preview, rejects answers other than explicit `Y` or
+`N`, and registers only after `Y`;
 multiple candidates fail closed non-interactively with a `--codex-path` message and exit 2; zero
 candidates still complete with `codex_not_found` guidance; `setup status` is read-only with the
 `yoetz.setup-status/1` schema; the `integrate codex mcp` status/preview/install matrix including

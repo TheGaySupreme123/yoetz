@@ -36,9 +36,10 @@ prepared npm launcher in [`support/npm-launcher/`](support/npm-launcher/) is pub
 deliberately unpublished today.)
 
 The first bare `yoetz` on an interactive terminal starts a **setup wizard**
-([ADR-012](docs/adr/ADR-012-first-run-setup-wizard.md)). It discovers installed Codex CLI
-binaries on your PATH (showing a choice when several exist), previews and — only after your
-explicit confirmation — registers `yoetz mcp serve` with the chosen Codex
+([ADR-012](docs/adr/ADR-012-first-run-setup-wizard.md)). It lists automatically detected supported
+harnesses (Codex in v0.1), asks which one to connect to Yoetz, separately asks which installation
+to use when several Codex CLI binaries are on your PATH, then previews and — only after an explicit
+`Y` confirmation — registers `yoetz mcp serve` with the chosen Codex
 (`codex mcp get` first; an existing foreign entry is always preserved, never replaced), checks
 whether the local service is reachable, optionally collects the nonsecret Official OpenAI vs
 custom HTTPS origin+model binding (writes service `config.toml`; never secrets), and prints the

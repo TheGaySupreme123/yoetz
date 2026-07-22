@@ -27,30 +27,38 @@ The wizard connects existing safe operations; it automates no ceremony and spawn
 
 ## Behavior
 
-The wizard: (1) discovers Codex binaries; (2) selects one — explicit `--codex-path` (must be an
-existing executable file), the single candidate, an interactive numbered choice for several, or
-a fail-closed usage error (`exit 2`, message naming `--codex-path`) when several exist
-non-interactively; zero candidates skip registration with reason `codex_not_found`; (3) runs the
+The wizard: (1) discovers Codex binaries; (2) on an interactive run with discovered candidates,
+presents the automatically detected supported harnesses as a numbered human-facing list — exactly
+`Codex` in v0.1 — and asks which harness to connect to `Yoetz`; (3) selects one installation —
+explicit `--codex-path` (must be an existing executable file), the single candidate, a separate
+interactive numbered choice for several, or a fail-closed usage error (`exit 2`, message naming
+`--codex-path`) when several exist non-interactively; zero candidates skip registration with reason
+`codex_not_found`; (4) runs the
 registration step through `HarnessMcpService`+`CodexMcpAdapter` — `yoetz_owned` reports
 `already_registered`, `foreign_present` reports `skipped`/`foreign_entry_present` (preserved,
-never replaced), otherwise an interactive confirm (or the `--accept` flag) gates one
-digest-bound `register`; adapter failures become `failed` with the reason token; (4) probes
+never replaced), otherwise a branded `Yoetz`/`Codex` preview followed by an explicit `Y` or `N`
+prompt with no default (or the `--accept` flag) gates one
+digest-bound `register`; adapter failures become `failed` with the reason token; (5) probes
 service reachability via `build_service_client().service_status()` (a `ControlError` is
-`reachable: false`; the CLI never spawns the service); (5) on an interactive TTY, offers the
+`reachable: false`; the CLI never spawns the service); (6) on an interactive TTY, offers the
 nonsecret Official OpenAI vs owner-declared HTTPS origin+model prompt (writes `config.toml` via
-`cli/provider_binding`; never accepts secrets); (6) assembles `next_steps` naming the
+`cli/provider_binding`; never accepts secrets); (7) assembles `next_steps` naming the
 exact follow-up commands — `yoetz service run`, `yoetz service unlock`, `yoetz privacy setup`,
 `yoetz provider endpoint` / TOML edit, and `yoetz provider credential set`.
 `yoetz provider credential set` — pointing at, never automating, the trusted ceremonies;
-(6) on a mutating run (interactive, or `--accept`) writes the marker `{outcome, schema}` as
+(8) on a mutating run (interactive, or `--accept`) writes the marker `{outcome, schema}` as
 canonical JSON, mode 0600, at `setup_marker_path()`; a dry run (`--non-interactive` without
-`--accept`) writes nothing; (7) emits the report (schema `yoetz.setup-wizard-report/1`) as
+`--accept`) writes nothing; (9) emits the report (schema `yoetz.setup-wizard-report/1`) as
 canonical JSON in JSON/non-TTY mode or a bounded human summary interactively, and returns 0 for
 every completed run — partial outcomes are reported honestly, not encoded as failures.
 
 `setup_status` reports discovered binaries with per-binary registration state (adapter errors
 become `registration_state: null` plus the reason token), marker presence, and service
 reachability; it mutates nothing.
+
+Human-facing setup copy capitalizes the product names `Yoetz` and `Codex`. Lowercase `yoetz` and
+`codex` remain unchanged in executable names, subcommands, MCP server identifiers, wire values, and
+canonical JSON.
 
 `integrate_mcp` resolves one binary (explicit path, or exactly one discovered; zero or several
 are usage failures), then: `status` prints the state token; `preview` prints action, state,
@@ -70,6 +78,9 @@ warnings, and `preview_digest`; `install` optionally binds `--preview-digest` (m
   failing the run.
 - Executable paths appear only in the local human/JSON report on the user's own terminal
   (`local_human_view`); they never enter diagnostics or exceptions.
+- Automatic discovery considers the reviewed PATH-visible executable name `codex` only. Custom
+  wrappers with arbitrary names remain selectable through explicit `--codex-path`; discovery never
+  executes wildcard `codex-*` programs merely because their names share a prefix.
 
 ## Invariants
 
