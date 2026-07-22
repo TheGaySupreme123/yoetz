@@ -738,3 +738,12 @@ agent uses them.” The run cannot make a broader claim about the unexercised se
 checker, or receipt architecture. The next release claim must distinguish registration, protocol
 availability, skill support, automatic activation, live workflow participation, and receipt-backed
 completion.
+
+## Residuals (still unproven)
+
+- Spontaneous activation without Yoetz-specific wording remains unproven. The tier-0 intake cue in
+  `guidance/agent-instructions.md` is retained as the delivery floor; a controlled dogfood matrix
+  is still required before claiming that hosts will call `start` on material tasks without an
+  explicit Yoetz prompt.
+- Provider binding/credential storage is not live dispatch or semantic review; setup must keep
+  reporting those layers separately.

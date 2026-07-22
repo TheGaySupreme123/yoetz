@@ -10,6 +10,7 @@ hidden-input confidential helper and never enter wizard arguments, config, or MC
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import sys
 from pathlib import Path
@@ -454,6 +455,38 @@ async def _interactive_provider_setup(
     return await _service_reachability(), provider_report
 
 
+def _semantic_openai_extra_state() -> str:
+    """Report whether the optional ``semantic-openai`` import surface is present.
+
+    Presence is a structural import fact only. It does not prove wire dispatch, auth, or a
+    successful semantic review.
+    """
+
+    if importlib.util.find_spec("openai") is None:
+        return "absent (not demonstrated)"
+    return "present (importable; wire dispatch not demonstrated)"
+
+
+def _emit_provider_setup_layer_report() -> None:
+    """Honestly separate binding/credential storage from undemonstrated runtime layers."""
+
+    typer.echo(
+        "Provider binding and vault credential storage succeeded; that layer is supported."
+    )
+    typer.echo("Other layers (ready vs not demonstrated by this path):")
+    typer.echo(f"  SDK extra (semantic-openai): {_semantic_openai_extra_state()}")
+    typer.echo(
+        "  Semantic evaluator: not composed "
+        "(_semantic_not_configured in ready composition; not demonstrated)"
+    )
+    typer.echo("  Privacy policy: not demonstrated")
+    typer.echo("  Transport probe: not demonstrated")
+    typer.echo("  Installed artifact evidence: not demonstrated")
+    typer.echo(
+        "Stored binding/credential is not proof of live provider dispatch or semantic review."
+    )
+
+
 async def run_provider_setup(
     *,
     fireworks: bool = False,
@@ -490,7 +523,7 @@ async def run_provider_setup(
         if type(reason) is str:
             typer.echo(f"Reason: {reason}")
         return 20
-    typer.echo("Yoetz is ready to use this provider.")
+    _emit_provider_setup_layer_report()
     return 0
 
 
