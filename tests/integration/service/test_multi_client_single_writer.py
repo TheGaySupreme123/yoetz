@@ -177,7 +177,7 @@ async def test_concurrent_clients_coalesce_on_one_writer_and_key_context() -> No
             }
         ),
         {
-            "bundle_schema_version": "1",
+            "bundle_schema_version": "2",
             "engine_version": "0.1.0",
             "projection_version": "1",
             "protocol_version": "0.1",

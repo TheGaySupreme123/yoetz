@@ -3,7 +3,8 @@
 **Wave:** C | **ADRs:** ADR-003 | **Imports (spec-tree):**
 `specs/src/yoetz/adapters/sqlite/connection.md`,
 `specs/src/yoetz/ports/maintenance.py.md` (`MaintenanceHandle` only),
-`specs/migrations/catalog/0001.sql.md`, `specs/migrations/bundle/0001.sql.md` | **Imported by:**
+`specs/migrations/catalog/0001.sql.md`, `specs/migrations/bundle/0001.sql.md`,
+`specs/migrations/bundle/0002.sql.md` | **Imported by:**
 `specs/src/yoetz/adapters/sqlite/start_catalog.md`,
 `specs/src/yoetz/adapters/sqlite/repository.md`,
 `specs/src/yoetz/adapters/sqlite/maintenance.py.md`, `specs/src/yoetz/application/start.md`
@@ -21,8 +22,8 @@ unknown schemas, and the absolute rule that canonical event bytes are never rewr
 ## Public surface
 
 - `CATALOG_MIGRATIONS: tuple[Migration, ...]` and `BUNDLE_MIGRATIONS: tuple[Migration, ...]` —
-  ordered frozen migration registries; v0.1 each contains exactly `Migration("0001", ddl)`
-  as registered in `specs/INTERFACES.md`.
+  ordered frozen migration registries; catalog is exactly `Migration("0001", ddl)`; bundle is
+  contiguous `0001` then `0002` (observation tables) as registered in `specs/INTERFACES.md`.
 - `initialize_catalog(db) -> None`, `initialize_bundle(db, bundle_meta_seed) -> None` — run all
   registered migrations on a fresh (`uninitialized`) database.
 - `run_migrations(db, registry, *, maintenance: MaintenanceHandle) -> MigrationReport` — upgrade
@@ -31,10 +32,10 @@ unknown schemas, and the absolute rule that canonical event bytes are never rewr
   SQLite maintenance adapter.
 - `current_schema_version(registry) -> int`.
 
-Reviewable DDL lives in `specs/migrations/catalog/0001.sql.md` and
-`specs/migrations/bundle/0001.sql.md`; their future SQL files are mirrored byte-identically under
-`src/yoetz/resources/migrations/`. Packaging and startup tests assert
-source/resource/registry equality before any SQL executes.
+Reviewable DDL lives in `specs/migrations/catalog/0001.sql.md`,
+`specs/migrations/bundle/0001.sql.md`, and `specs/migrations/bundle/0002.sql.md`; their future SQL
+files are mirrored byte-identically under `src/yoetz/resources/migrations/`. Packaging and startup
+tests assert source/resource/registry equality before any SQL executes.
 
 ## Behavior
 
@@ -561,10 +562,11 @@ creates, repairs, or analyzes an access path at open time.
 
 ### `initialize_bundle(db, bundle_meta_seed)`
 
-Runs on a fresh database inside one transaction (`BEGIN IMMEDIATE` … `COMMIT`): executes
-migration `0001` DDL, seeds `counters` with `('ingestion_sequence', 1)`, and inserts the required
-`bundle_meta` keys — protocol version, storage schema version, task ID, current global head
-sequence (`0`)/head digest (`"genesis"`), active projection generation, accepted SQLite
+Runs on a fresh database inside one transaction (`BEGIN IMMEDIATE` … `COMMIT`): executes every
+registered bundle migration in order (`0001` then `0002`), seeds `counters` with
+`('ingestion_sequence', 1)`, and inserts the required `bundle_meta` keys — protocol version,
+storage schema version equal to `current_schema_version(BUNDLE_MIGRATIONS)`, task ID, current
+global head sequence (`0`)/head digest (`"genesis"`), active projection generation, accepted SQLite
 support-manifest ID, encryption-format ID (`yoetz-object/1`), commitment-key ID, plus the
 ADR-001 ownership row (`owner_generation`, `owner_nonce`, `heartbeat_at`), and route facts
 `route_generation`, `route_identity_digest`, and `route_state`, plus
@@ -601,15 +603,17 @@ tests; it is not computed from database row order. No other `p1_` row exists aft
 2. `verify_schema_identity` first. `state="current"` → no-op report. `state="uninitialized"` →
    delegate to `initialize_*`. Newer unknown version → `StorageUnsafeError("schema_newer_than_
    binary")`, fail closed for writes (a payload-safe structural inspect may be offered only if
-   explicitly tested). Unknown *older* version not in the registry → same failure with reason
+   explicitly tested). Older versions in the contiguous registry advance by applying pending
+   numbered SQL files; a non-contiguous gap or missing next version fails closed with
    `schema_version_unknown`.
 3. **Backup first**: require the same fenced catalog operation to be at `backup_ready` with a
    completed, verified backup-manifest digest already committed by the owning maintenance adapter.
    The runner records that manifest ID in the migration report. It never imports or recursively
    calls the concrete maintenance adapter. No verified backup, no migration.
 4. Apply each pending migration inside one transaction where SQLite permits the DDL
-   transactionally; bump `PRAGMA user_version` and the `storage_schema_version` /
-   `catalog_meta.storage_schema_version` metadata **together in that same step**.
+   transactionally; bump `PRAGMA user_version` (via the migration SQL) and the
+   `storage_schema_version` / `catalog_meta.storage_schema_version` metadata **together in that
+   same step**.
 5. Canonical bytes are never rewritten: a migration MUST NOT touch `events.canonical_entry`,
    `entry_digest`, or any recorded digest/commitment column value. The runner asserts after each
    migration that `count(*)` and `sum(length(canonical_entry))` over `events` are unchanged and

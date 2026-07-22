@@ -1834,8 +1834,9 @@ facade and are never MCP tools.
   `ports/maintenance.py` `MaintenanceHandle` after the catalog generation CAS, and owns catalog
   route-switch recovery.
 - `adapters/sqlite/migrations.py`: owns frozen shared `Migration` and `MigrationReport` values;
-  exact `CATALOG_MIGRATIONS` and `BUNDLE_MIGRATIONS` registries (each only migration `0001` in
-  v0.1); and `initialize_catalog`, `initialize_bundle`, `run_migrations`, and
+  exact `CATALOG_MIGRATIONS` and `BUNDLE_MIGRATIONS` registries (`catalog`=`0001`; `bundle`=
+  `0001` then observation `0002` in v0.1); and `initialize_catalog`, `initialize_bundle`,
+  `run_migrations`, and
   `current_schema_version`. No caller may extend a registry dynamically or execute unregistered
   SQL bytes.
 - `adapters/objects/envelope.py`: `yoetz-object/1` AEAD envelope encode/decode (ADR-004).

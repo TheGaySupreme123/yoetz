@@ -280,8 +280,13 @@ class HarnessHookProfile:
             raise _port_error("integration_hook_invalid")
         if self.failure_policy != "best_effort":
             raise _port_error("integration_hook_invalid")
-        if type(self.observation_events) is not tuple or self.observation_events:
+        if type(self.observation_events) is not tuple:
             raise _port_error("integration_hook_invalid")
+        object.__setattr__(
+            self,
+            "observation_events",
+            _sorted_unique_strings(self.observation_events, maximum=64, token=True),
+        )
 
 
 @dataclass(frozen=True, slots=True)

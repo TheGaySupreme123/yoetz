@@ -112,7 +112,7 @@ _ALLOWED_SOURCE_ROOTS: Final = (
 _MAX_TEXT_BYTES: Final = 2_000_000
 _MAX_BINARY_BYTES: Final = 20_000_000
 
-# The reviewed, explicit v0.1 inventory: 71 entries across 6 canonical source roots. Every entry
+# The reviewed, explicit v0.1 inventory: 72 entries across 6 canonical source roots. Every entry
 # is deliberately listed here; nothing is discovered by scanning the repository.
 _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     (
@@ -164,6 +164,7 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ("guidance/publication-policy.md", "guidance", "text/markdown", True),
     ("guidance/workflow.md", "guidance", "text/markdown", True),
     ("migrations/bundle/0001.sql", "migration", "application/sql", True),
+    ("migrations/bundle/0002.sql", "migration", "application/sql", True),
     ("migrations/catalog/0001.sql", "migration", "application/sql", True),
     (
         "schemas/common/actor-assertion-1.0.0.schema.json",

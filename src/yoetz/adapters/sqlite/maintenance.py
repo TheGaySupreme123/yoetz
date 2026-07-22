@@ -554,7 +554,7 @@ def _verify_database_snapshot(path: Path, manifest: BackupManifest) -> None:
         if database.pragma("application_id") != _YOETZ_APPLICATION_ID:
             raise MaintenanceError(MaintenanceReason.DATABASE_INVALID, False, {})
         version = database.pragma("user_version")
-        if type(version) is not int or not 1 <= version <= 1:
+        if type(version) is not int or not 1 <= version <= 2:
             raise MaintenanceError(MaintenanceReason.DATABASE_INVALID, False, {})
         if database.execute("PRAGMA quick_check").fetchone() != ("ok",):
             raise MaintenanceError(MaintenanceReason.DATABASE_INVALID, False, {})

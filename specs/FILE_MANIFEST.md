@@ -8,8 +8,8 @@ This is the complete one-to-one ledger between the natural-language specificatio
 files planned for the public v0.1 repository. It is declarative: adding, removing, renaming, or
 splitting a future file requires changing this reviewed table and its owning spec together.
 
-The inventory contains 582 spec files: 568 exact future-file owners,
-10 directory indexes, and 4 coordination files. The 568 future paths are unique. The already-
+The inventory contains 585 spec files: 571 exact future-file owners,
+10 directory indexes, and 4 coordination files. The 571 future paths are unique. The already-
 authored public ADRs are current decision authorities, not future-file candidates, so
 they are intentionally outside the mirrored ownership universe. Ignored local architecture/
 strategy inputs are neither inventoried nor authoritative.
@@ -111,6 +111,7 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/guidance/publication-policy.md` | `future_file` | `guidance/publication-policy.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/guidance/workflow.md` | `future_file` | `guidance/workflow.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/migrations/bundle/0001.sql.md` | `future_file` | `migrations/bundle/0001.sql` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
+| `specs/migrations/bundle/0002.sql.md` | `future_file` | `migrations/bundle/0002.sql` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/migrations/catalog/0001.sql.md` | `future_file` | `migrations/catalog/0001.sql` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/repository/.gitignore.md` | `future_file` | `.gitignore` | `repository_projection` | — | `A/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/repository/.python-version.md` | `future_file` | `.python-version` | `repository_projection` | — | `F` | `draft` | Owns exactly this future public repository file. |
@@ -215,6 +216,7 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/src/yoetz/adapters/memory/importer.md` | `future_file` | `src/yoetz/adapters/memory/importer.py` | `python_shorthand` | — | `B/C/D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/memory/ledger.md` | `future_file` | `src/yoetz/adapters/memory/ledger.py` | `python_shorthand` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/memory/objects.md` | `future_file` | `src/yoetz/adapters/memory/objects.py` | `python_shorthand` | — | `C` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/adapters/memory/observation.md` | `future_file` | `src/yoetz/adapters/memory/observation.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/memory/privacy.md` | `future_file` | `src/yoetz/adapters/memory/privacy.py` | `python_shorthand` | — | `C–E` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/memory/start_catalog.md` | `future_file` | `src/yoetz/adapters/memory/start_catalog.py` | `python_shorthand` | — | `B/C` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/objects/__init__.md` | `future_file` | `src/yoetz/adapters/objects/__init__.py` | `python_shorthand` | — | `F` | `draft` | Owns exactly this future public repository file. |
@@ -338,6 +340,7 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/src/yoetz/resources/guidance/workflow.md` | `future_file` | `src/yoetz/resources/guidance/workflow.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/resources/manifest.json.md` | `future_file` | `src/yoetz/resources/manifest.json` | `exact_suffix` | — | `A/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/resources/migrations/bundle/0001.sql.md` | `future_file` | `src/yoetz/resources/migrations/bundle/0001.sql` | `exact_suffix` | — | `C/F` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/resources/migrations/bundle/0002.sql.md` | `future_file` | `src/yoetz/resources/migrations/bundle/0002.sql` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/resources/migrations/catalog/0001.sql.md` | `future_file` | `src/yoetz/resources/migrations/catalog/0001.sql` | `exact_suffix` | — | `C/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/resources/schemas/common/actor-assertion-1.0.0.schema.json.md` | `future_file` | `src/yoetz/resources/schemas/common/actor-assertion-1.0.0.schema.json` | `exact_suffix` | — | `A/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/resources/schemas/common/client-info-1.0.0.schema.json.md` | `future_file` | `src/yoetz/resources/schemas/common/client-info-1.0.0.schema.json` | `exact_suffix` | — | `A/F` | `draft` | Owns exactly this future public repository file. |

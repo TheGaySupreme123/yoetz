@@ -114,15 +114,16 @@ def test_compatibility_doc_names_only_the_current_release_axes() -> None:
 
 
 def test_root_and_installed_migration_trees_are_byte_identical() -> None:
-    for family in ("catalog", "bundle"):
-        root_file = _REPO_ROOT / "migrations" / family / "0001.sql"
-        installed_file = (
-            _REPO_ROOT / "src" / "yoetz" / "resources" / "migrations" / family / "0001.sql"
-        )
-        assert root_file.read_bytes() == installed_file.read_bytes()
+    for family, versions in (("catalog", ("0001",)), ("bundle", ("0001", "0002"))):
+        for version in versions:
+            root_file = _REPO_ROOT / "migrations" / family / f"{version}.sql"
+            installed_file = (
+                _REPO_ROOT / "src" / "yoetz" / "resources" / "migrations" / family / f"{version}.sql"
+            )
+            assert root_file.read_bytes() == installed_file.read_bytes()
 
 
-def test_each_migration_family_has_exactly_one_contiguous_version(installed: _Installed) -> None:
+def test_each_migration_family_has_contiguous_versions(installed: _Installed) -> None:
     probe = (
         "from yoetz.adapters.sqlite.migrations import ("
         "BUNDLE_MIGRATIONS, CATALOG_MIGRATIONS, current_schema_version)\n"
@@ -136,19 +137,20 @@ def test_each_migration_family_has_exactly_one_contiguous_version(installed: _In
     )
     payload = _run_probe(installed, probe)
     assert payload["catalog_versions"] == ["0001"]
-    assert payload["bundle_versions"] == ["0001"]
+    assert payload["bundle_versions"] == ["0001", "0002"]
     assert payload["catalog_current"] == 1
-    assert payload["bundle_current"] == 1
+    assert payload["bundle_current"] == 2
 
 
 def test_migration_ddl_contains_no_destructive_statement(installed: _Installed) -> None:
-    for family in ("catalog", "bundle"):
-        text = (
-            _REPO_ROOT / "src" / "yoetz" / "resources" / "migrations" / family / "0001.sql"
-        ).read_text(encoding="utf-8")
-        upper = text.upper()
-        for forbidden in (r"DROP\s+TABLE", r"DELETE\s+FROM", r"\bUPDATE\b", r"\bTRUNCATE\b"):
-            assert re.search(forbidden, upper) is None, (family, forbidden)
+    for family, versions in (("catalog", ("0001",)), ("bundle", ("0001", "0002"))):
+        for version in versions:
+            text = (
+                _REPO_ROOT / "src" / "yoetz" / "resources" / "migrations" / family / f"{version}.sql"
+            ).read_text(encoding="utf-8")
+            upper = text.upper()
+            for forbidden in (r"DROP\s+TABLE", r"DELETE\s+FROM", r"\bUPDATE\b", r"\bTRUNCATE\b"):
+                assert re.search(forbidden, upper) is None, (family, version, forbidden)
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +158,9 @@ def test_migration_ddl_contains_no_destructive_statement(installed: _Installed) 
 # ---------------------------------------------------------------------------
 
 
-def test_fresh_catalog_and_bundle_initialize_at_schema_version_one(installed: _Installed) -> None:
+def test_fresh_catalog_and_bundle_initialize_at_current_schema_version(
+    installed: _Installed,
+) -> None:
     probe = (
         "import apsw, json\n"
         "from yoetz.adapters.sqlite.migrations import initialize_catalog, initialize_bundle\n"
@@ -165,7 +169,7 @@ def test_fresh_catalog_and_bundle_initialize_at_schema_version_one(installed: _I
         "initialize_catalog(catalog)\n"
         "catalog_identity = verify_schema_identity(catalog)\n"
         "bundle = apsw.Connection(':memory:')\n"
-        "initialize_bundle(bundle, {'protocol_version': '0.1', 'storage_schema_version': '1'})\n"
+        "initialize_bundle(bundle, {'protocol_version': '0.1', 'storage_schema_version': '2'})\n"
         "bundle_identity = verify_schema_identity(bundle)\n"
         "print(json.dumps({\n"
         "    'catalog_state': catalog_identity.state,\n"
@@ -179,7 +183,7 @@ def test_fresh_catalog_and_bundle_initialize_at_schema_version_one(installed: _I
         "catalog_state": "current",
         "catalog_version": 1,
         "bundle_state": "current",
-        "bundle_version": 1,
+        "bundle_version": 2,
     }
 
 
@@ -263,9 +267,8 @@ def test_wrong_application_id_is_rejected_as_unsafe(installed: _Installed) -> No
 def test_unknown_older_than_current_user_version_requires_initialization_not_silent_read(
     installed: _Installed,
 ) -> None:
-    # user_version between 1 and current-1 cannot exist yet (current == 1), so the only "known
-    # lower" state reachable today is 0 (uninitialized); run_migrations must refuse to silently
-    # treat that as current.
+    # Catalog current remains 1, so the only reachable "older" catalog state is 0
+    # (uninitialized); run_migrations must refuse to silently treat that as current.
     probe = (
         "import apsw, json\n"
         "from yoetz.adapters.sqlite.migrations import run_migrations, CATALOG_MIGRATIONS\n"

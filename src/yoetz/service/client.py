@@ -864,6 +864,41 @@ class ServiceClient(ControlClientPort):
             ControlMethod.INTEGRATION_EXECUTE, request, deadline_ms=deadline_ms
         )
 
+    async def observation_ingest(
+        self, request: JsonObject, *, deadline_ms: int | None = None
+    ) -> JsonObject:
+        return await self._support(
+            ControlMethod.OBSERVATION_INGEST, request, deadline_ms=deadline_ms
+        )
+
+    async def observation_status(
+        self, request: JsonObject, *, deadline_ms: int | None = None
+    ) -> JsonObject:
+        return await self._support(
+            ControlMethod.OBSERVATION_STATUS, request, deadline_ms=deadline_ms
+        )
+
+    async def observation_pause(
+        self, request: JsonObject, *, deadline_ms: int | None = None
+    ) -> JsonObject:
+        return await self._support(
+            ControlMethod.OBSERVATION_PAUSE, request, deadline_ms=deadline_ms
+        )
+
+    async def observation_resume(
+        self, request: JsonObject, *, deadline_ms: int | None = None
+    ) -> JsonObject:
+        return await self._support(
+            ControlMethod.OBSERVATION_RESUME, request, deadline_ms=deadline_ms
+        )
+
+    async def observation_revoke(
+        self, request: JsonObject, *, deadline_ms: int | None = None
+    ) -> JsonObject:
+        return await self._support(
+            ControlMethod.OBSERVATION_REVOKE, request, deadline_ms=deadline_ms
+        )
+
     async def privacy_get_setup(
         self, request: JsonObject, *, deadline_ms: int | None = None
     ) -> JsonObject:

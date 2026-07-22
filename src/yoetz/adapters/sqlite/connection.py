@@ -52,7 +52,9 @@ BUSY_TIMEOUT_MS: Final = 5_000
 STATEMENT_CACHE_SIZE: Final = 100
 WRITER_QUEUE_DEPTH: Final = 64
 
-_SUPPORTED_SCHEMA_VERSION: Final = 1
+_SUPPORTED_CATALOG_SCHEMA_VERSION: Final = 1
+_SUPPORTED_BUNDLE_SCHEMA_VERSION: Final = 2
+_SUPPORTED_SCHEMA_VERSION: Final = _SUPPORTED_BUNDLE_SCHEMA_VERSION
 _PROTOCOL_VERSION: Final = "0.1"
 _SQLITE_OPEN_WRITER: Final = apsw.SQLITE_OPEN_READWRITE | apsw.SQLITE_OPEN_CREATE
 _READ_ONLY_ALLOWED_PRAGMAS: Final = frozenset(
@@ -342,10 +344,16 @@ def verify_schema_identity(db: apsw.Connection) -> SchemaIdentity:
         raise StorageUnsafeError("application_id_mismatch")
 
     user_version = _pragma_int(db, "user_version")
-    if user_version > _SUPPORTED_SCHEMA_VERSION:
+    if "bundle_meta" in tables:
+        supported = _SUPPORTED_BUNDLE_SCHEMA_VERSION
+    elif "catalog_meta" in tables:
+        supported = _SUPPORTED_CATALOG_SCHEMA_VERSION
+    else:
+        supported = _SUPPORTED_SCHEMA_VERSION
+    if user_version > supported:
         raise StorageUnsafeError("schema_newer_than_binary")
     state: Literal["current", "migration_required"]
-    state = "current" if user_version == _SUPPORTED_SCHEMA_VERSION else "migration_required"
+    state = "current" if user_version == supported else "migration_required"
 
     if "bundle_meta" in tables:
         metadata = _metadata(db, "bundle_meta")

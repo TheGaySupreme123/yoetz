@@ -39,6 +39,11 @@ _SUPPORT_METHODS = (
     "integration_preview",
     "migrate_execute",
     "migrate_preview",
+    "observation_ingest",
+    "observation_pause",
+    "observation_resume",
+    "observation_revoke",
+    "observation_status",
     "privacy_get_effective",
     "privacy_get_setup",
     "privacy_propose_policy",
@@ -201,8 +206,8 @@ def test_control_request_and_result_unions_are_exact_and_disjoint() -> None:
     requests = cast(list[dict[str, Any]], request_schema["oneOf"])
     results = cast(list[dict[str, Any]], result_schema["oneOf"])
 
-    assert len(requests) == 26
-    assert len(results) == 50
+    assert len(requests) == 31
+    assert len(results) == 60
     call_methods: list[str] = []
     cancel_count = 0
     for branch in requests:

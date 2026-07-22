@@ -206,7 +206,7 @@ def _context(capabilities: frozenset[RuntimeCapability]) -> ServiceRuntimeContex
         catalog_generation=3,
         capabilities=capabilities,
         version_manifest={
-            "bundle_schema_version": "1",
+            "bundle_schema_version": "2",
             "engine_version": "0.1.0",
             "projection_version": "1",
             "protocol_version": "0.1",

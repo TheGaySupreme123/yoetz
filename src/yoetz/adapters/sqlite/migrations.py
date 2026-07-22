@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from importlib import resources
 from time import monotonic_ns
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import apsw
 
@@ -68,6 +68,7 @@ CATALOG_MIGRATIONS: Final[tuple[Migration, ...]] = (
 )
 BUNDLE_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration("0001", _load_resource("bundle", "0001")),
+    Migration("0002", _load_resource("bundle", "0002")),
 )
 
 
@@ -158,9 +159,12 @@ def initialize_bundle(db: apsw.Connection, bundle_meta_seed: Mapping[str, str]) 
     if "import_schema_version" in seed and seed["import_schema_version"] != "1":
         raise ValueError("import_schema_version_mismatch")
     seed["import_schema_version"] = "1"
+    target_version = current_schema_version(BUNDLE_MIGRATIONS)
+    seed["storage_schema_version"] = str(target_version)
 
     with db:
-        _execute(db, BUNDLE_MIGRATIONS[0])
+        for migration in BUNDLE_MIGRATIONS:
+            _execute(db, migration)
         db.executemany(
             "INSERT INTO bundle_meta(key, value) VALUES (?, ?)",
             sorted(seed.items()),
@@ -205,7 +209,7 @@ def run_migrations(
     *,
     maintenance: MaintenanceHandle,
 ) -> MigrationReport:
-    """Return the bounded v0.1 migration result for an already initialized database."""
+    """Return the bounded migration result for an already initialized database."""
 
     del maintenance
     started = monotonic_ns()
@@ -216,14 +220,41 @@ def run_migrations(
         raise RuntimeError("schema_initialization_required")
     if current > target:
         raise RuntimeError("schema_newer_than_binary")
+    applied: list[str] = []
     if current < target:
-        raise RuntimeError("schema_version_unknown")
+        pending = tuple(item for item in registry if int(item.version) > current)
+        if not pending or int(pending[0].version) != current + 1:
+            raise RuntimeError("schema_version_unknown")
+        with db:
+            for migration in pending:
+                _execute(db, migration)
+                applied.append(migration.version)
+            tables = {
+                cast(str, row[0])
+                for row in db.execute(
+                    "SELECT name FROM sqlite_schema "
+                    "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                )
+            }
+            if "bundle_meta" in tables:
+                db.execute(
+                    "INSERT INTO bundle_meta(key, value) VALUES('storage_schema_version', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (str(target),),
+                )
+            elif "catalog_meta" in tables:
+                db.execute(
+                    "INSERT INTO catalog_meta(key, value) VALUES('storage_schema_version', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (str(target),),
+                )
+        current = _pragma_int(db, "user_version")
     _verify_identity(db, target)
     elapsed_ms = max(0, (monotonic_ns() - started) // 1_000_000)
     return MigrationReport(
-        from_version=current,
+        from_version=current if not applied else int(applied[0]) - 1,
         to_version=target,
-        applied_versions=(),
+        applied_versions=tuple(applied),
         backup_manifest_digest=None,
         duration_ms=elapsed_ms,
     )

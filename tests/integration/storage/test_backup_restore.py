@@ -150,7 +150,7 @@ def _backup_set(tmp_path: Path) -> tuple[Path, BackupManifest, BackupObjectEntry
         {
             "task_id": task,
             "owner_generation": "1",
-            "storage_schema_version": "1",
+            "storage_schema_version": "2",
             "protocol_version": "0.1",
         },
     )
@@ -193,7 +193,7 @@ def _backup_set(tmp_path: Path) -> tuple[Path, BackupManifest, BackupObjectEntry
         database_size=len(database_bytes),
         database_digest=_digest(database_bytes),
         objects=(entry,),
-        version_manifest=JsonObject({"protocol": "0.1", "storage": "1"}),
+        version_manifest=JsonObject({"protocol": "0.1", "storage": "2"}),
         mode=BackupMode.MACHINE_BOUND,
         key_fingerprint="key.test",
         key_locator_classification="machine_bound",
@@ -356,7 +356,7 @@ def _harness() -> _Harness:
         {
             "task_id": task,
             "owner_generation": "1",
-            "storage_schema_version": "1",
+            "storage_schema_version": "2",
             "protocol_version": "0.1",
         },
     )
