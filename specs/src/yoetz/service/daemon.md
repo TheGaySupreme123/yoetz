@@ -128,6 +128,15 @@ another receipt. No logger, tracer, renderer, MCP bridge, or socket writer sees 
 content-capable result. Requests from all clients
 share runtime/task caches, writer queues, key handles, policy, and provider coordinator.
 
+When a workflow `Application` method raises `PublicOperationError`, `dispatch` catches it before the
+generic `Exception` → `internal_error` path. It binds a correlation ID when unbound, builds the
+method's exact Result RootModel with `ok:false`, the public error object, and the request's
+`request_id` when present, then returns a success-framed control result (`outcome=ok`) carrying that
+failure body. Privacy projection is skipped for these `ok:false` failures: there is no content-
+bearing success body to project, and collapsing a known public code such as `EVENT_INVALID`
+(`unsorted_set_field`) into control `internal_error` is forbidden. Set-field order is never
+auto-sorted; callers must present canonical ASCII order.
+
 The `context` is the exact service-internal `ClientProjectionContext` from
 `application/service.md`; the daemon rejects a context whose client kind differs from the
 authenticated control session. If the trusted adapter supplies no presentation facts, the daemon
@@ -209,6 +218,8 @@ secret memory in reverse ownership order.
   the process never double-forks.
 - Fatal internal exceptions produce only bounded structural correlation identity, trigger drain,
   and exit 70 without formatting, emitting, or capturing a traceback.
+- Workflow `PublicOperationError` (for example `EVENT_INVALID` with `reason_code=unsorted_set_field`)
+  is framed as `outcome=ok` / `ok:false` and never as control `internal_error`.
 
 ## Invariants
 
@@ -236,7 +247,8 @@ secret memory in reverse ownership order.
   the ready catalog generation seed used by the runtime ready gate, privacy-seed reuse across ready
   rebuilds, and in-process daemon unlock → `START` projection.
 - `tests/integration/service/test_daemon_clients.py` exercises every method through concurrent CLI,
-  MCP, and synthetic UI clients against one application/runtime.
+  MCP, and synthetic UI clients against one application/runtime, including mapping workflow
+  `PublicOperationError` to success-framed `ok:false` results without privacy projection.
 - `tests/subprocess/test_service_daemon_lifecycle.py` covers startup, second-daemon rejection,
   locked/setup-required service, the pristine two-capability gate, existing-keyring ready-local,
   signals, crashes, and supervisor-style foreground execution.

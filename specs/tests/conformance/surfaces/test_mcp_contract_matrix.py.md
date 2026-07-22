@@ -18,6 +18,9 @@ and fallback errors match the public contract.
 - `test_fallback_error_object_is_admitted` — the last-resort error object is accepted.
 - `test_public_error_and_validation_summaries_are_sanitized` — public error envelopes expose only
   allowlisted paths/reason codes and their text never exceeds structured content.
+- `test_forbidden_client_id_projects_parent_path_in_safe_details` — invented `client.id`
+  (`extra_forbidden` on `("client", "id")`) projects usable `/client` in safe details without
+  echoing the untrusted leaf or allowlisting a generic `id` segment.
 - `test_unknown_tool_message_is_sanitized` — unknown-tool public messages never echo the raw name;
   over stdio, unregistered tools/call names are JSON-RPC errors (see subprocess malicious-name
   coverage).
@@ -27,6 +30,14 @@ and fallback errors match the public contract.
   the packaged resources, and no resource read reaches the service or creates a receipt.
 - `test_resource_uri_is_a_key_not_a_path` — unknown, templated, traversing, and relative URIs are
   bounded structural errors with no filesystem access.
+- `test_advertised_input_schemas_honor_presentation_keyword_budgets` — tools/list presentation
+  schemas stay within frozen `oneOf` / `$defs` / size budgets and inline common shapes.
+- `test_publish_work_presentation_matches_ordinary_admission_families` — advertised publish_work
+  event-draft families exactly equal ordinary MCP admission (no opaque branch).
+- `test_presentation_examples_admit_under_catalog_models` — start, status, and plan_published
+  publish_work examples admit under `*.model_validate`.
+- `test_presentation_input_schema_is_projection_of_catalog_shape` — presentation keeps the catalog
+  request root shape; catalog schemas remain admission authority.
 
 ## Behavior
 
@@ -45,6 +56,8 @@ The test asserts:
 - validation and transport noise remain bounded;
 - every public error branch has an admissible structured envelope and a deterministic sanitized
   summary containing only allowlisted field paths and bounded reason codes;
+- an invented wrapper field such as `client.id` yields `extra_forbidden` with projected field
+  `/client` (parent path), never a field-less `INVALID_REQUEST` and never an echoed untrusted leaf;
 - unknown tool, unknown method, malformed request, and valid application error remain four distinct
   outcomes with no tool-side mutation for the first three.
 
@@ -72,6 +85,8 @@ The test asserts:
 6. Every agent-read string is verified reviewed bytes and passes the honesty lint.
 7. Resources are static product documents: no service reach, no user content, no receipt, no
    seventh operation.
+8. Advertised input schemas are presentation projections under frozen keyword budgets; catalog
+   models remain admission authority and presentation examples must admit under them.
 
 ## Tests
 

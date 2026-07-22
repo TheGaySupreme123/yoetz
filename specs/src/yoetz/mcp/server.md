@@ -60,6 +60,11 @@ exists.
 Configured semantic failure preserves the service's deterministic `incomplete_check` result,
 including the exact validated semantic status/reason pair and no semantic findings.
 
+The ordinary service path returns workflow failures as `ok:false` public Result models. As defense
+in depth, if a `PublicOperationError` escapes the client boundary, `_dispatch` binds a correlation
+ID when unbound and maps it through `tool_error_envelope` into the same structured tool failure
+shape—preserving codes such as `EVENT_INVALID`—rather than collapsing them to `INTERNAL_ERROR`.
+
 The existing bounded stdio transport, nested fallback, cancellation, output-schema validation,
 and stdout-only-protocol rules remain binding. Client cancellation is forwarded structurally, but
 EOF/disconnect never asserts remote commit cancellation; request-ID replay resolves ambiguity.
@@ -84,6 +89,8 @@ registered tools remain structured tool results.
 - Missing service never prevents MCP initialization or static guidance list/read; only a tool call
   attempts the lazy service connection.
 - Unexpected bridge/client/SDK errors use prevalidated `INTERNAL_ERROR`; no raw exception/request.
+  Known `PublicOperationError` application failures are not unexpected: they use
+  `tool_error_envelope` / the service's `ok:false` body and keep their public code.
 - Service reconnect requires fresh same-UID handshake/generation and identical operation request.
 - Clean EOF closes the bridge only; persistent service remains alive.
 - A missing or digest-mismatched descriptor, instruction, or guidance resource fails startup. The
@@ -111,7 +118,9 @@ registered tools remain structured tool results.
   absence of service/secret tools, the exact declared capability set, and that resources add no
   operation.
 - `tests/subprocess/test_mcp_service_bridge.py` covers absent/locked/ready/reconnect/response loss,
-  and that resource list/read succeed in every one of those service states.
+  that resource list/read succeed in every one of those service states, and that escaped
+  `PublicOperationError` (for example `EVENT_INVALID` / `unsorted_set_field`) stays structured rather
+  than becoming `INTERNAL_ERROR`.
 - `tests/subprocess/test_mcp_initialize_and_tools.py` covers the negotiated `instructions` bytes and
   fatal startup on a corrupted guidance resource.
 - `tests/subprocess/test_mcp_stdout_purity.py` covers protocol-only stdout.

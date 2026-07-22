@@ -163,9 +163,7 @@ async def test_provider_credential_is_exact_attempt_bound_and_one_use(tmp_path: 
     replacement = memory.capture(
         SecretPurpose.PROVIDER_CREDENTIAL, bytearray(b"sk-replacement-value")
     )
-    await service.store_provider_credential(
-        "set", binding, replacement, replacement_proof, 11.0
-    )
+    await service.store_provider_credential("set", binding, replacement, replacement_proof, 11.0)
     attempt = ProviderAttemptAuthBinding(
         binding.provider_id,
         binding.model_id,

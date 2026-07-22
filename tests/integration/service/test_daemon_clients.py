@@ -24,8 +24,9 @@ from yoetz.ports.control import (
     ControlMethod,
     ServiceState,
 )
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id
-from yoetz.protocol.models import StartRequest, StartResult
+from yoetz.protocol.models import PublishWorkRequest, PublishWorkResult, StartRequest, StartResult
 from yoetz.service.daemon import ServiceComposition, ServiceDaemon
 from yoetz.service.lifecycle import LifecycleError, ServiceLifecycle
 from yoetz.service.vault import VaultMode
@@ -107,8 +108,10 @@ class _Vault:
 class _Application:
     def __init__(self) -> None:
         self.start_calls = 0
+        self.publish_work_calls = 0
         self.projections: list[ClientProjectionContext] = []
         self.close_count = 0
+        self.publish_work_error: PublicOperationError | None = None
 
     async def start(self, request: object) -> StartResult:
         assert isinstance(request, StartRequest)
@@ -128,6 +131,14 @@ class _Application:
                 },
             }
         )
+
+    async def publish_work(self, request: object) -> PublishWorkResult:
+        assert isinstance(request, PublishWorkRequest)
+        self.publish_work_calls += 1
+        await asyncio.sleep(0)
+        if self.publish_work_error is not None:
+            raise self.publish_work_error
+        raise AssertionError("publish_work_error_required")
 
     async def review(self, request: object) -> JsonObject:
         assert isinstance(request, JsonObject)
@@ -150,9 +161,9 @@ class _Application:
         result: object,
     ) -> ProjectedControlBody:
         method = binding.method
-        assert method in {ControlMethod.START, ControlMethod.REVIEW}
+        assert method in {ControlMethod.START, ControlMethod.REVIEW, ControlMethod.PUBLISH_WORK}
         self.projections.append(context)
-        assert isinstance(result, StartResult | JsonObject)
+        assert isinstance(result, StartResult | PublishWorkResult | JsonObject)
         return result
 
     async def close(self) -> None:
@@ -174,6 +185,44 @@ def _start_body() -> StartRequest:
             "mode": "create",
             "task_title": "shared service",
             "requested_view": "compact",
+        }
+    )
+
+
+def _publish_work_body() -> PublishWorkRequest:
+    return PublishWorkRequest.model_validate(
+        {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "request_id": "req_00000000-0000-4000-8000-000000000010",
+            "session_id": "ses_00000000-0000-4000-8000-000000000011",
+            "writer_id": "wri_00000000-0000-4000-8000-000000000012",
+            "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
+            "event_drafts": [
+                {
+                    "event_id": "evt_00000000-0000-4000-8000-000000000013",
+                    "schema": {"name": "plan_published", "version": "1.0.0"},
+                    "occurred_at": "2026-01-01T00:00:00.000Z",
+                    # Deliberately unsorted: application rejects with unsorted_set_field.
+                    "causal_parents": [
+                        "evt_00000000-0000-4000-8000-000000000002",
+                        "evt_00000000-0000-4000-8000-000000000001",
+                    ],
+                    "payload": {
+                        "plan_version": 1,
+                        "summary": "Plan",
+                        "obligation_refs": [],
+                    },
+                    "artifact_refs": [],
+                    "evidence_refs": [],
+                }
+            ],
+            "actor": {"actor_id": "harness:test", "actor_type": "harness"},
+            "client": {
+                "kind": "test_client",
+                "version": "0.1.0",
+                "integration": "local_cli",
+            },
         }
     )
 
@@ -252,6 +301,36 @@ async def test_cli_mcp_and_ui_share_one_ready_application_and_projection() -> No
     assert all(result.outcome == "ok" for result in results)
     assert application.start_calls == 3
     assert application.projections == [ClientProjectionContext.fail_safe(kind) for kind in kinds]
+
+
+@pytest.mark.anyio
+async def test_public_operation_error_surfaces_as_ok_false_not_internal_error() -> None:
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    application.publish_work_error = PublicOperationError(
+        PublicErrorCode.EVENT_INVALID,
+        "The event batch is invalid.",
+        False,
+        safe_details={"reason_code": "unsorted_set_field"},
+    )
+    body = _publish_work_body()
+
+    result = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.PUBLISH_WORK, body),
+    )
+
+    assert result.outcome == "ok"
+    assert isinstance(result.body, PublishWorkResult)
+    assert result.body.root.ok is False
+    assert result.body.root.error.code is PublicErrorCode.EVENT_INVALID
+    assert result.body.root.error.safe_details == {"reason_code": "unsorted_set_field"}
+    assert result.body.root.request_id == body.request_id
+    assert result.body.root.error.correlation_id.startswith("err_")
+    assert application.publish_work_calls == 1
+    assert application.projections == []
+    assert not isinstance(result.body, ControlError)
+    await daemon.close()
 
 
 @pytest.mark.anyio

@@ -1845,8 +1845,12 @@ facade and are never MCP tools.
   names, descriptions, and annotations, plus the `instructions` text. All are loaded from the
   packaged `guidance/` resources and verified against the resource manifest before use; none is
   composed at runtime from user, task, provider, or environment values. Shared values are
-  `ToolDescriptor`, `TOOL_DESCRIPTORS` (frozen, in the same order `tools/list` returns), and
-  `server_instructions()`. `status` carries `readOnlyHint=true`; `receipt` carries
+  `ToolDescriptor`, `TOOL_DESCRIPTORS` (frozen, in the same order `tools/list` returns),
+  `server_instructions()`, `ORDINARY_MCP_PUBLISH_EVENT_FAMILIES`, and
+  `PRESENTATION_INPUT_SCHEMA_BUDGETS`. `ToolDescriptor.input_schema` is the tools/list presentation
+  projection (inlined common shapes, ordinary publish event families, minimal examples);
+  `catalog_input_schema` / full catalog request schemas remain admission authority via
+  `*.model_validate`. `status` carries `readOnlyHint=true`; `receipt` carries
   `readOnlyHint=false` because it stages an object and appends a `receipt_recorded` event. Every
   tool carries an explicit `idempotentHint=true`. No descriptor carries a
   `destructiveHint`, because no Yoetz operation deletes recorded evidence. Descriptor and

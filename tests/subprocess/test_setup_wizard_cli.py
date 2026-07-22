@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import cast
 
@@ -17,6 +18,13 @@ from yoetz.ports.integrations import HarnessId, IntegrationError, IntegrationRea
 from yoetz.service.client import ServiceClient
 
 _RUNNER = CliRunner()
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _plain(text: str) -> str:
+    """Strip ANSI SGR sequences so Rich usage panels stay assertable."""
+
+    return _ANSI_ESCAPE.sub("", text)
 
 
 def _binary(path: str = "/opt/harness/bin/codex") -> HarnessBinary:
@@ -366,6 +374,44 @@ def test_root_set_fireworks_dispatches_simple_provider_setup(
 
 
 def test_provider_flags_require_set() -> None:
-    result = _RUNNER.invoke(cli.app, ["--fireworks"])
+    # Rich may colorize option tokens inside the Error panel (e.g. FORCE_COLOR CI),
+    # splitting "--set" across ANSI codes; assert on the stripped combined output.
+    result = _RUNNER.invoke(cli.app, ["--fireworks"], env={"NO_COLOR": "1"})
     assert result.exit_code == 2
-    assert "require --set" in result.stderr
+    assert "require --set" in _plain(result.output)
+
+
+def test_provider_setup_success_reports_layers_without_ready_overclaim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.cli.setup as setup_module
+
+    async def fake_reachability(*, start_if_absent: bool = False) -> dict[str, object]:
+        del start_if_absent
+        return {"reachable": True, "state": "ready"}
+
+    async def fake_interactive(
+        service: dict[str, object],
+        *,
+        provider_choice: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        del provider_choice, model, api_key
+        return service, {"binding": "configured", "credential": "stored"}
+
+    monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(setup_module, "_service_reachability", fake_reachability)
+    monkeypatch.setattr(setup_module, "_interactive_provider_setup", fake_interactive)
+
+    result = _RUNNER.invoke(cli.app, ["--set", "--fireworks", "--model", "m"])
+    plain = _plain(result.output)
+    assert result.exit_code == 0
+    assert "Yoetz is ready to use this provider." not in plain
+    assert "Provider binding and vault credential storage succeeded" in plain
+    assert "SDK extra (semantic-openai):" in plain
+    assert "_semantic_not_configured" in plain
+    assert "Privacy policy: not demonstrated" in plain
+    assert "Transport probe: not demonstrated" in plain
+    assert "Installed artifact evidence: not demonstrated" in plain
+    assert "not proof of live provider dispatch or semantic review" in plain

@@ -35,7 +35,9 @@ The reference contains:
 - the six coverage dimensions, exact enum values, and default ordering;
 - why coverage is a vector rather than a score;
 - weakest-material-dependency examples;
-- deterministic-vs-semantic origin and provenance rules;
+- deterministic-vs-semantic origin and provenance rules, including that TOML/path/metadata
+  construction is not proof of SDK wire dispatch or semantic review (cooperative/evidence
+  boundary);
 - freshness, redaction, unknown-schema, and import-gap examples;
 - finding disposition semantics;
 - reviewer-challenge response patterns (`accept/act`, `provide evidence`, `revise claim`, `dispute

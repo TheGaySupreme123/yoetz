@@ -21,6 +21,12 @@ and enter existing hidden-TTY confidential ceremonies; noninteractive setup does
   identifiers, then enters the credential ceremony. An explicit API-key value is never echoed and
   is converted immediately to the mutable one-shot credential buffer; omission uses hidden input.
   A fully supplied `--fireworks --model --api-key` invocation does not require a TTY or prompt.
+  On success it reports layer-separated honesty only: binding/credential storage as the supported
+  demonstrated layer, then separately whether the optional `semantic-openai` SDK extra is
+  importable, that production ready composition still uses `_semantic_not_configured`, and that
+  privacy policy, transport probe, and installed-artifact evidence were not demonstrated. It never
+  claims the provider is ready for live dispatch or semantic review from storage alone, and it
+  does not wire new provider factories to manufacture readiness.
 
 - `SETUP_MARKER_SCHEMA` — exactly `yoetz.setup-wizard-marker/1`.
 - `setup_marker_present() -> bool` — marker existence, failing closed (`True`) on
@@ -114,7 +120,8 @@ warnings, and `preview_digest`; `install` optionally binds `--preview-digest` (m
 
 - `tests/subprocess/test_setup_wizard_cli.py` — dry run, accept-and-register with marker,
   foreign preservation, multi-candidate fail-closed, no-codex guidance, read-only status, the
-  `integrate mcp` matrix, secret-option absence, and non-TTY help fallback.
+  `integrate mcp` matrix, secret-option absence, non-TTY help fallback, and the `--set` success
+  path's layer-separated provider readiness wording (no “ready to use this provider” overclaim).
 - `tests/conformance/surfaces/test_cli_contract_matrix.py` — `setup` in the frozen command
   matrix and the bare-invocation help regression.
 

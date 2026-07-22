@@ -12,6 +12,7 @@ from pydantic import BaseModel
 import yoetz.mcp.server as bridge
 from yoetz.ports.control import ControlError
 from yoetz.protocol.canonical import JsonValue
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import (
     CheckRequest,
     CheckResult,
@@ -130,7 +131,7 @@ def _failure[ResultT: BaseModel](result_type: type[ResultT], request_id: str) ->
 
 
 class _FakeClient:
-    def __init__(self, failure: ControlError | None = None) -> None:
+    def __init__(self, failure: ControlError | PublicOperationError | None = None) -> None:
         self.failure = failure
         self.calls: list[tuple[str, object]] = []
         self.closed = False
@@ -251,6 +252,33 @@ async def test_locked_error_is_structured_and_resources_never_connect(
     assert result.structuredContent is not None
     assert result.structuredContent["error"]["code"] == "VAULT_LOCKED"
     assert "unlock" not in {tool.name for tool in await bridge.list_tools()}
+
+
+@pytest.mark.anyio
+async def test_public_operation_error_keeps_event_invalid_not_internal_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(
+        PublicOperationError(
+            PublicErrorCode.EVENT_INVALID,
+            "The event batch is invalid.",
+            False,
+            safe_details={"reason_code": "unsorted_set_field"},
+        )
+    )
+    _install_clients(monkeypatch, [client])
+    runtime = bridge.build_bridge_runtime()
+
+    result = await bridge.dispatch_publish_work(_requests()["publish_work"], runtime)
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    error = result.structuredContent["error"]
+    assert error["code"] == "EVENT_INVALID"
+    assert error["safe_details"] == {"reason_code": "unsorted_set_field"}
+    assert error["code"] != "INTERNAL_ERROR"
+    assert result.structuredContent["request_id"] == _requests()["publish_work"]["request_id"]
+    await bridge.close_bridge_runtime(runtime)
 
 
 @pytest.mark.anyio

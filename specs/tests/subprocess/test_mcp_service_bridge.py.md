@@ -17,6 +17,8 @@ Assert no service spawn/unlock tools, structured errors, reconnect/idempotent re
 ## Errors and edge cases
 
 Response loss, service crash/generation change, malformed MCP/control result, cancellation.
+Escaped `PublicOperationError` (for example `EVENT_INVALID` with `unsorted_set_field`) maps through
+`tool_error_envelope` and must not become `INTERNAL_ERROR`.
 
 ## Invariants
 

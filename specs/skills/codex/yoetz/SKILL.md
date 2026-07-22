@@ -54,7 +54,9 @@ The skill file itself is deliberately thin. It contains exactly:
 
 1. When Codex should activate the skill, and when it should not.
 2. Startup/availability disclosure.
-3. Codex-specific tool/command compatibility and the required MCP server name.
+3. Codex-specific tool/command compatibility and the required MCP server name. State that every
+   tool request's `client` is exactly `{kind, version, integration}` and never send `client.id` or
+   any other client field.
 4. Links into the installed shared guidance, at the narrow section relevant to each step.
 
 Everything else is owned by `guidance/` and installed alongside, not restated:

@@ -1,6 +1,6 @@
 # guidance/agent-instructions.md — the always-delivered agent instructions
 
-**Wave:** D | **ADRs:** ADR-002, ADR-005, ADR-009, ADR-010, ADR-015, ADR-016 | **Imports (spec-tree):**
+**Wave:** D | **ADRs:** ADR-002, ADR-005, ADR-009, ADR-010, ADR-012, ADR-015, ADR-016 | **Imports (spec-tree):**
 `guidance/README.md`, `guidance/workflow.md`, `guidance/publication-policy.md`,
 `guidance/coverage-and-receipts.md` | **Imported by:** `mcp/descriptors.md`, `mcp/resources.md`,
 every harness skill spec, packaging and capability tests
@@ -41,13 +41,17 @@ Required sections, in this order:
 6. **Word conclusions honestly** — never stronger than the receipt's weakest coverage; one
    permitted and one forbidden example.
 7. **Never invent Yoetz state** — no fabricated session IDs, findings, or receipts; if a call fails,
-   say Yoetz was unavailable.
+   say Yoetz was unavailable. State that every tool request's `client` is exactly
+   `{kind, version, integration}` and never accept or document `client.id` (or any other client
+   field) as valid.
 8. **Non-default actions need consent** — ordinary MCP tools and privacy tighten are default-safe;
    otherwise use `yoetz consent catalog` / `status`, prepare only when catalog `implemented=true`,
    show `danger_text`, wait for the repeated `confirmation_phrase`, substitute the human-typed
    phrase into `approve_command` (never auto-fill), and never take secrets via chat/MCP/argv/env/
    config (inherited FDs only when the catalog lists them; no `--yolo`; elevated consent does not
-   unlock an already-locked vault) (ADR-015/016).
+   unlock an already-locked vault) (ADR-015/016). The sole argv exception is the ADR-012 narrow
+   `yoetz --set --api-key` compatibility path, which carries shell-history/process-list risk and
+   must not be generalized.
 9. **Read more** — the three `yoetz://guidance/<name>` resource URIs and one line each on when to
    read them.
 

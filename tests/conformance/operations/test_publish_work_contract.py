@@ -187,6 +187,26 @@ def test_state_sensitive_family_requires_expected_frontier() -> None:
     assert caught.value.code is PublicErrorCode.EVENT_INVALID
 
 
+def test_unsorted_causal_parents_reject_as_event_invalid_unsorted_set_field() -> None:
+    base = _request_for_record("plan_published")
+    draft = dict(cast(dict[str, object], base.event_drafts[0]))
+    draft["causal_parents"] = (
+        "evt_00000000-0000-4000-8000-000000000002",
+        "evt_00000000-0000-4000-8000-000000000001",
+    )
+    request = base.model_copy(update={"event_drafts": (draft,)})
+
+    with pytest.raises(PublicOperationError) as caught:
+        prepare_publication(
+            request,
+            channel=PublicationChannel.LOCAL_CLI,
+            app=cast(Application, _App()),
+        )
+
+    assert caught.value.code is PublicErrorCode.EVENT_INVALID
+    assert caught.value.safe_details == {"reason_code": "unsorted_set_field"}
+
+
 def _unknown_import_request() -> PublishWorkRequestModel:
     return PublishWorkRequestModel.model_validate(
         {

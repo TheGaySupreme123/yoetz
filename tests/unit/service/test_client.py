@@ -259,9 +259,7 @@ async def test_on_demand_connect_spawns_only_after_absent_service(
 
     monkeypatch.setattr(client_module, "connect_service", scripted_connect)
     monkeypatch.setattr(client_module, "_spawn_service_process", spawn)
-    connected = await connect_service_on_demand(
-        ControlClientKind.MCP_BRIDGE, timeout_seconds=0.2
-    )
+    connected = await connect_service_on_demand(ControlClientKind.MCP_BRIDGE, timeout_seconds=0.2)
     assert connected is expected
     assert spawned == 1
 

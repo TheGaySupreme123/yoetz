@@ -31,7 +31,9 @@ required for that harness to work.
 
 The schema is for provenance and wording only. It does not authorize operations or imply trust.
 Coverage and authorship assurance derive from `integration` and server-side observation, never from
-`kind`, so no `kind` value can strengthen a claim. Extra properties are forbidden.
+`kind`, so no `kind` value can strengthen a claim. Extra properties are forbidden. There is no `id`
+(or any other) client field: the exact shape is `{kind, version, integration}` only. Callers and
+guidance must never invent or document `client.id`.
 
 ## Errors and edge cases
 

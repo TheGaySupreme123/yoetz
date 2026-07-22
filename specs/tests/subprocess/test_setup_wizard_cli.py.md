@@ -28,7 +28,11 @@ candidates still complete with `codex_not_found` guidance; `setup status` is rea
 `yoetz.setup-status/1` schema; the `integrate codex mcp` status/preview/install matrix including
 digest binding; install without acceptance and against a foreign entry fails closed with exit 2;
 no secret-shaped option appears in any `setup` help text; a bare non-TTY invocation prints help
-with exit 0.
+with exit 0; `--fireworks` / `--model` / `--api-key` without `--set` exit 2 with a usage failure
+whose plain (ANSI-stripped) output contains `require --set`; a successful `--set` path reports
+layer-separated provider readiness (binding/credential supported; SDK extra / semantic evaluator /
+privacy policy / transport probe / installed artifact separately as present or not demonstrated)
+and never prints “Yoetz is ready to use this provider.”
 
 ## Errors and edge cases
 

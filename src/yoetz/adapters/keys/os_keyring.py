@@ -221,7 +221,7 @@ class AutoUnlockPassphraseStore:
             return None
         try:
             value = bytearray(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return None
         if not 32 <= len(value) <= 128 or any(byte < 0x20 or byte > 0x7E for byte in value):
             _overwrite(value)

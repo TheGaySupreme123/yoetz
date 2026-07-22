@@ -15,7 +15,7 @@ Use the exact enum values returned by the protocol; this reference does not crea
 
 ## Evidence and provenance
 
-Deterministic evidence says what a reviewed rule computed from the accepted record. Semantic evidence retains provider, model, policy, request, response, and review provenance. Imported evidence never gains cooperative authorship merely because Yoetz stores it. A digest records identity, not content inspection.
+Deterministic evidence says what a reviewed rule computed from the accepted record. Semantic evidence retains provider, model, policy, request, response, and review provenance. Imported evidence never gains cooperative authorship merely because Yoetz stores it. A digest records identity, not content inspection. TOML, path, or metadata construction is not proof of SDK wire dispatch or semantic review (Yoetz cooperative/evidence boundary).
 
 ## Freshness, redaction, and unknown input
 
