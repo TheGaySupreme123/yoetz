@@ -94,8 +94,9 @@ queue is allowed.
   `SERVICE_UNAVAILABLE` and reconnects; a successor never accepts an old session.
 - Response loss after service completion is ambiguous to the client; replaying the operation's
   identical request ID is the only resolution.
-- Workflow errors remain exact public error envelopes. Control failures never masquerade as
-  workflow verdicts.
+- Workflow errors remain exact public error envelopes carried as `outcome=ok` Result bodies with
+  `ok:false`. Control failures never masquerade as workflow verdicts, and workflow
+  `PublicOperationError` never masquerades as control `internal_error`.
 
 ## Invariants
 

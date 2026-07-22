@@ -28,7 +28,7 @@ Forbidden: "Yoetz verified the work."
 
 # Never invent Yoetz state
 
-Never fabricate a session ID, publication, finding, verdict, or receipt. If a call fails or Yoetz is unavailable, say that no live Yoetz record or receipt is available.
+Never fabricate a session ID, publication, finding, verdict, or receipt. If a call fails or Yoetz is unavailable, say that no live Yoetz record or receipt is available. Every tool request's `client` is exactly `{kind, version, integration}` — never send `client.id` or any other client field.
 
 # Non-default actions need consent
 

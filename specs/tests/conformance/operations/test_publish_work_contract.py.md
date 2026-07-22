@@ -27,6 +27,8 @@ The test asserts:
 ## Errors and edge cases
 
 - A wrapper that drops or reorders accepted events fails.
+- Unsorted set fields such as `causal_parents` reject as `EVENT_INVALID` with
+  `reason_code=unsorted_set_field` and are never auto-sorted.
 
 ## Invariants
 

@@ -23,6 +23,7 @@ from yoetz.mcp.errors import (
     build_public_error_result,
     safe_validation_locations,
     sanitize_unknown_tool_name,
+    tool_error_envelope,
 )
 from yoetz.mcp.resources import (
     GuidanceResource,
@@ -36,7 +37,7 @@ from yoetz.mcp.resources import (
 )
 from yoetz.mcp.summaries import render_safe_compact_summary
 from yoetz.ports.control import ControlClientKind, ControlError
-from yoetz.protocol.errors import PublicErrorCode
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id, safe_request_id_from
 from yoetz.protocol.models import (
     CheckRequest,
@@ -311,6 +312,22 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
         wire = public_model_to_wire(result)
         validated = result_type.model_validate(wire)
         return result_from_public_model(validated)
+    except PublicOperationError as exc:
+        # Defense in depth: the ordinary client normally returns ok:false bodies, but if a
+        # PublicOperationError escapes the service boundary, keep the exact public code.
+        try:
+            bound = (
+                exc
+                if exc.correlation_id is not None
+                else exc.bind_correlation_id(new_id(IdKind.CORRELATION))
+            )
+            return _result_from_wire(tool_error_envelope(bound, request_id=request_id))
+        except Exception:
+            return structured_error_result(
+                PublicErrorCode.INTERNAL_ERROR,
+                "The bridge could not complete the operation.",
+                request_id=request_id,
+            )
     except ControlError as exc:
         return _control_error_result(exc, request_id)
     except Exception:

@@ -23,7 +23,9 @@ Client crash, response loss, locked/draining, one misbehaving client, provider u
 Block a ready factory mid-construction while a concurrent explicit lock starts; lock must wait,
 observe the published ready generation, drain it, close the application once, and leave lifecycle
 locked with the vault not ready. Revalidation failure after factory return closes the partial
-application and reports only `unlock_failed`.
+application and reports only `unlock_failed`. Workflow `PublicOperationError` with
+`EVENT_INVALID` / `unsorted_set_field` returns success-framed `ok:false` and skips privacy
+projection; it must not become control `internal_error`.
 
 ## Invariants
 

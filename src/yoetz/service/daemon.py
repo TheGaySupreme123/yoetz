@@ -11,13 +11,14 @@ import signal
 import stat
 import struct
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Never, Protocol, cast
+from typing import Final, Never, Protocol, cast
 
 import anyio
+from pydantic import BaseModel
 
 from yoetz import __version__
 from yoetz.adapters.control.unix_socket import (
@@ -67,7 +68,16 @@ from yoetz.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
+from yoetz.protocol.errors import PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id, validate_id
+from yoetz.protocol.models import (
+    CheckResult,
+    PublishWorkResult,
+    ReceiptResult,
+    RespondResult,
+    StartResult,
+    StatusResult,
+)
 from yoetz.service.confidential_protocol import (
     HUMAN_PROTOCOL_MAGIC,
     HUMAN_PROTOCOL_VERSION,
@@ -150,6 +160,14 @@ _STRUCTURAL_METHODS = frozenset(
 _PROJECTION_EXEMPT_METHODS = _STRUCTURAL_METHODS | {
     ControlMethod.PRIVACY_RECEIPTS_LIST,
     ControlMethod.PRIVACY_RECEIPTS_GET,
+}
+_WORKFLOW_RESULT_MODELS: Final[Mapping[ControlMethod, type[BaseModel]]] = {
+    ControlMethod.START: StartResult,
+    ControlMethod.PUBLISH_WORK: PublishWorkResult,
+    ControlMethod.CHECK: CheckResult,
+    ControlMethod.RESPOND: RespondResult,
+    ControlMethod.STATUS: StatusResult,
+    ControlMethod.RECEIPT: ReceiptResult,
 }
 
 
@@ -509,6 +527,8 @@ class ServiceDaemon:
         except LifecycleError as exc:
             reason = "service_draining" if exc.reason == "service_draining" else "vault_locked"
             return self._error_result(request, ControlError(reason, retryable=True))
+        except PublicOperationError as exc:
+            return self._public_operation_failure_result(request, exc)
         except ControlProtocolError, TypeError, ValueError:
             return self._error_result(request, ControlError("frame_invalid"))
         except Exception:
@@ -748,6 +768,39 @@ class ServiceDaemon:
         )
         validate_result(result)
         return result
+
+    def _public_operation_failure_result(
+        self, request: ControlCallRequest, error: PublicOperationError
+    ) -> ControlResult:
+        """Frame a bound public application failure as outcome=ok with ok:false body.
+
+        Workflow PublicOperationError values are already client-safe. They must not collapse into
+        control ``internal_error``, and they never enter privacy projection (no content-bearing
+        success body exists to project).
+        """
+
+        result_type = _WORKFLOW_RESULT_MODELS.get(request.method)
+        if result_type is None or type(error) is not PublicOperationError:
+            return self._error_result(request, ControlError("internal_error"))
+        try:
+            bound = (
+                error
+                if error.correlation_id is not None
+                else error.bind_correlation_id(new_id(IdKind.CORRELATION))
+            )
+            request_id = getattr(request.body, "request_id", None)
+            candidate: dict[str, object] = {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "ok": False,
+                "error": bound.as_public_dict(),
+            }
+            if type(request_id) is str:
+                candidate["request_id"] = request_id
+            body = result_type.model_validate(candidate)
+            return self._result(request, body)
+        except Exception:
+            return self._error_result(request, ControlError("internal_error"))
 
     def _validate_success_body(self, request: ControlCallRequest, body: object) -> None:
         self._result(request, body)

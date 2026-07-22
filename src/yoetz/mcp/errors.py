@@ -87,13 +87,19 @@ _SAFE_VALIDATION_REASONS: Final[Mapping[str, str]] = MappingProxyType(
 _MAX_VALIDATION_LOCATIONS: Final = 8
 
 
-def _pointer_for_location(location: object) -> str | None:
+def _pointer_for_location(
+    location: object, *, project_parent_on_unsafe_leaf: bool = False
+) -> str | None:
     if not isinstance(location, Sequence) or isinstance(location, str | bytes | bytearray):
         return None
     segments: list[str] = []
     for item in cast(Sequence[str | int], location):
         if type(item) is str:
             if item not in _SAFE_LOCATION_SEGMENTS:
+                # Forbidden extras often name an untrusted key (e.g. client.id). Prefer the
+                # allowlisted parent path over dropping the whole location or allowlisting "id".
+                if project_parent_on_unsafe_leaf and segments:
+                    break
                 return None
             segments.append(item)
         elif type(item) is int and 0 <= item <= 100:
@@ -119,9 +125,14 @@ def safe_validation_locations(exc: object) -> tuple[dict[str, str], ...]:
     except BaseException:
         return ()
     for item in errors:
-        pointer = _pointer_for_location(item.get("loc"))
         raw_reason = item.get("type")
-        if pointer is None or type(raw_reason) is not str:
+        if type(raw_reason) is not str:
+            continue
+        pointer = _pointer_for_location(
+            item.get("loc"),
+            project_parent_on_unsafe_leaf=raw_reason == "extra_forbidden",
+        )
+        if pointer is None:
             continue
         reason = _SAFE_VALIDATION_REASONS.get(raw_reason, "invalid_type_or_value")
         projected.append({"field": pointer, "reason": reason})

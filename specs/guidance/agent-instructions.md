@@ -41,7 +41,9 @@ Required sections, in this order:
 6. **Word conclusions honestly** — never stronger than the receipt's weakest coverage; one
    permitted and one forbidden example.
 7. **Never invent Yoetz state** — no fabricated session IDs, findings, or receipts; if a call fails,
-   say Yoetz was unavailable.
+   say Yoetz was unavailable. State that every tool request's `client` is exactly
+   `{kind, version, integration}` and never accept or document `client.id` (or any other client
+   field) as valid.
 8. **Non-default actions need consent** — ordinary MCP tools and privacy tighten are default-safe;
    otherwise use `yoetz consent catalog` / `status`, prepare only when catalog `implemented=true`,
    show `danger_text`, wait for the repeated `confirmation_phrase`, substitute the human-typed

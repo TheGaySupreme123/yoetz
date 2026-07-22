@@ -18,6 +18,9 @@ and fallback errors match the public contract.
 - `test_fallback_error_object_is_admitted` — the last-resort error object is accepted.
 - `test_public_error_and_validation_summaries_are_sanitized` — public error envelopes expose only
   allowlisted paths/reason codes and their text never exceeds structured content.
+- `test_forbidden_client_id_projects_parent_path_in_safe_details` — invented `client.id`
+  (`extra_forbidden` on `("client", "id")`) projects usable `/client` in safe details without
+  echoing the untrusted leaf or allowlisting a generic `id` segment.
 - `test_unknown_tool_message_is_sanitized` — unknown-tool public messages never echo the raw name;
   over stdio, unregistered tools/call names are JSON-RPC errors (see subprocess malicious-name
   coverage).
@@ -45,6 +48,8 @@ The test asserts:
 - validation and transport noise remain bounded;
 - every public error branch has an admissible structured envelope and a deterministic sanitized
   summary containing only allowlisted field paths and bounded reason codes;
+- an invented wrapper field such as `client.id` yields `extra_forbidden` with projected field
+  `/client` (parent path), never a field-less `INVALID_REQUEST` and never an echoed untrusted leaf;
 - unknown tool, unknown method, malformed request, and valid application error remain four distinct
   outcomes with no tool-side mutation for the first three.
 

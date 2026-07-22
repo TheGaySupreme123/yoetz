@@ -344,7 +344,8 @@ validated as a shape, not accepted as truth. The implementation may preserve a d
 `asserted_by` marker, but the server assigns the durable assurance level.
 
 `ClientInfoModel` records which client or harness surfaced the request. It is used for tracing,
-compatibility, and receipt wording, not authorization.
+compatibility, and receipt wording, not authorization. Its exact closed shape is
+`{kind, version, integration}`; there is no `id` field, and extra keys are forbidden.
 
 Each result model mirrors the request identity and exposes only the bounded fields needed by its
 operation. Results may include coverage, versions, verdicts, warnings, and a payload object, but

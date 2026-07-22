@@ -1450,6 +1450,7 @@ def test_actor_and_client_models_validate_shape_without_granting_assurance() -> 
         {"kind": "test_client", "version": "", "integration": "local_cli"},
         {"kind": "test_client", "version": "0.1.0", "integration": "unknown"},
         {**client_wire, "authorship_assurance": "verified"},
+        {**client_wire, "id": "invented-client-id"},
     )
     for invalid_client in invalid_clients:
         with pytest.raises(ValidationError):

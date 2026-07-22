@@ -88,6 +88,38 @@ def test_public_error_and_validation_summaries_are_sanitized() -> None:
     assert "never-echo-this" not in repr(locations)
 
 
+def test_forbidden_client_id_projects_parent_path_in_safe_details() -> None:
+    class _ClientInfo(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        kind: str
+        version: str
+        integration: str
+
+    class _Request(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        client: _ClientInfo
+
+    with pytest.raises(ValidationError) as captured:
+        _Request.model_validate(
+            {
+                "client": {
+                    "kind": "cooperative_agent",
+                    "version": "0.1.0",
+                    "integration": "cooperative_mcp",
+                    "id": "invented-client-id",
+                }
+            }
+        )
+    locations = safe_validation_locations(captured.value)
+    assert locations == ({"field": "/client", "reason": "extra_forbidden"},)
+    assert "/client/id" not in repr(locations)
+    assert "invented-client-id" not in repr(locations)
+    # "id" must not be a generally trusted location segment.
+    assert '"id"' not in repr(locations)
+
+
 def test_unknown_tool_message_is_sanitized() -> None:
     raw_name = "../../private/secret-tool"
     message = sanitize_unknown_tool_name(raw_name)
