@@ -30,6 +30,14 @@ and fallback errors match the public contract.
   the packaged resources, and no resource read reaches the service or creates a receipt.
 - `test_resource_uri_is_a_key_not_a_path` — unknown, templated, traversing, and relative URIs are
   bounded structural errors with no filesystem access.
+- `test_advertised_input_schemas_honor_presentation_keyword_budgets` — tools/list presentation
+  schemas stay within frozen `oneOf` / `$defs` / size budgets and inline common shapes.
+- `test_publish_work_presentation_matches_ordinary_admission_families` — advertised publish_work
+  event-draft families exactly equal ordinary MCP admission (no opaque branch).
+- `test_presentation_examples_admit_under_catalog_models` — start, status, and plan_published
+  publish_work examples admit under `*.model_validate`.
+- `test_presentation_input_schema_is_projection_of_catalog_shape` — presentation keeps the catalog
+  request root shape; catalog schemas remain admission authority.
 
 ## Behavior
 
@@ -77,6 +85,8 @@ The test asserts:
 6. Every agent-read string is verified reviewed bytes and passes the honesty lint.
 7. Resources are static product documents: no service reach, no user content, no receipt, no
    seventh operation.
+8. Advertised input schemas are presentation projections under frozen keyword budgets; catalog
+   models remain admission authority and presentation examples must admit under them.
 
 ## Tests
 

@@ -7,12 +7,17 @@ import re
 import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from yoetz.application import publish_work as publish_work_module
 from yoetz.mcp import resources as resource_module
 from yoetz.mcp.descriptors import (
+    ORDINARY_MCP_PUBLISH_EVENT_FAMILIES,
+    PRESENTATION_INPUT_SCHEMA_BUDGETS,
     TOOL_DESCRIPTOR_DIGESTS,
     TOOL_DESCRIPTOR_SET_DIGEST,
     TOOL_DESCRIPTORS,
     descriptor_for,
+    ordinary_publish_families_in_presentation,
+    presentation_schema_metrics,
     server_instructions,
 )
 from yoetz.mcp.errors import (
@@ -29,6 +34,7 @@ from yoetz.mcp.resources import (
 )
 from yoetz.mcp.summaries import render_safe_compact_summary
 from yoetz.protocol.errors import PublicErrorCode
+from yoetz.protocol.models import PublishWorkRequest, StartRequest, StatusRequest
 from yoetz.protocol.schemas import validate_schema_instance
 
 _EXPECTED_TOOL_NAMES = ("start", "publish_work", "check", "respond", "status", "receipt")
@@ -189,3 +195,55 @@ def test_resource_uri_is_a_key_not_a_path(monkeypatch: pytest.MonkeyPatch) -> No
         with pytest.raises(GuidanceResourceError, match="guidance_resource_uri_unregistered"):
             read_resource(uri)
     assert reads == []
+
+
+def test_advertised_input_schemas_honor_presentation_keyword_budgets() -> None:
+    for descriptor in TOOL_DESCRIPTORS:
+        schema_name = f"{descriptor.name.replace('_', '-')}-request"
+        metrics = presentation_schema_metrics(descriptor.input_schema)
+        budget = PRESENTATION_INPUT_SCHEMA_BUDGETS[schema_name]
+        assert metrics["oneof_nodes"] <= budget["max_oneof_nodes"]
+        assert metrics["oneof_branches"] <= budget["max_oneof_branches"]
+        assert metrics["defs_count"] <= budget["max_defs_count"]
+        assert metrics["defs_nest_depth"] <= budget["max_defs_nest_depth"]
+        assert metrics["encoded_bytes"] <= budget["max_encoded_bytes"]
+        encoded = repr(dict(descriptor.input_schema))
+        assert "common/client-info" not in encoded
+        assert "common/actor-assertion" not in encoded
+        assert "common/frontier" not in encoded
+
+
+def test_publish_work_presentation_matches_ordinary_admission_families() -> None:
+    advertised = ordinary_publish_families_in_presentation(
+        descriptor_for("publish_work").input_schema
+    )
+    assert advertised == ORDINARY_MCP_PUBLISH_EVENT_FAMILIES
+    assert advertised == publish_work_module._ORDINARY_FAMILIES
+    encoded = repr(dict(descriptor_for("publish_work").input_schema))
+    assert "opaque-unknown-event-draft" not in encoded
+    assert "opaque_unknown" not in encoded
+
+
+def test_presentation_examples_admit_under_catalog_models() -> None:
+    start_examples = descriptor_for("start").input_schema["examples"]
+    status_examples = descriptor_for("status").input_schema["examples"]
+    publish_examples = descriptor_for("publish_work").input_schema["examples"]
+    assert isinstance(start_examples, list) and len(start_examples) == 1
+    assert isinstance(status_examples, list) and len(status_examples) == 1
+    assert isinstance(publish_examples, list) and len(publish_examples) == 1
+    StartRequest.model_validate(start_examples[0])
+    StatusRequest.model_validate(status_examples[0])
+    PublishWorkRequest.model_validate(publish_examples[0])
+    assert publish_examples[0]["event_drafts"][0]["schema"]["name"] == "plan_published"
+
+
+def test_presentation_input_schema_is_projection_of_catalog_shape() -> None:
+    for descriptor in TOOL_DESCRIPTORS:
+        presented = descriptor.input_schema
+        catalog = descriptor.catalog_input_schema
+        assert presented["type"] == catalog["type"]
+        assert presented["additionalProperties"] == catalog["additionalProperties"]
+        assert set(presented["required"]) == set(catalog["required"])
+        assert set(presented["properties"]) == set(catalog["properties"])
+        # tools/list may attach examples; catalog admission schemas do not require them.
+        assert "examples" not in catalog

@@ -22,10 +22,14 @@ It owns strings only. It performs no dispatch, holds no client, and reaches no s
 
 | Name | Signature (natural language) |
 |---|---|
-| `ToolDescriptor` | frozen name, title, description, input/output schema refs, and annotations for one tool |
+| `ToolDescriptor` | frozen name, title, description, input/output schema refs, and annotations for one tool; `input_schema` is the tools/list presentation projection; `catalog_input_schema` is the full catalog bundle |
 | `TOOL_DESCRIPTORS` | frozen tuple of the six descriptors, in the exact order `tools/list` returns |
+| `ORDINARY_MCP_PUBLISH_EVENT_FAMILIES` | frozen ordinary cooperative MCP publish event family names |
+| `PRESENTATION_INPUT_SCHEMA_BUDGETS` | frozen per-request-schema keyword budgets for advertised input schemas |
 | `server_instructions()` | return the verified bytes decoded as strict UTF-8 for initialize |
 | `descriptor_for(name)` | exact lookup; unknown name is a programming error, not a runtime fallback |
+| `presentation_schema_metrics(schema)` | keyword-budget metrics for one advertised schema |
+| `ordinary_publish_families_in_presentation(schema)` | event families present in an advertised publish_work schema |
 
 ## Behavior
 
@@ -81,11 +85,26 @@ Descriptor text is static reviewed product text. It is never composed at runtime
 provider, policy, or environment values, so no descriptor can leak state or vary between
 installations.
 
-Each descriptor retains the canonical input/output schema URI and exposes the corresponding
-verified local schema object for `tools/list`. The served MCP schema recursively inlines every
-checked-in Yoetz `$ref`; an MCP client can validate tool calls and results with network access
-disabled and never resolves `schemas.yoetz.dev` at runtime. Descriptor identity has one reviewed SHA-256 golden
-per tool and one ordered-set SHA-256 golden; drift fails module initialization.
+Each descriptor retains the canonical input/output schema URI. `tools/list` advertises a
+**presentation** projection of the catalog request schema, not a second admission authority:
+
+- common `client`, `actor`, and `frontier` shapes are inlined where practical so hosts do not have
+  to chase cross-document `$ref` graphs;
+- nested `$defs` inside bundled documents are flattened to one `$defs` depth;
+- advertised `publish_work` restricts `event_draft` `oneOf` to the ordinary cooperative MCP
+  families already enforced by `application/publish_work.md` (`plan_published`,
+  `obligation_published`, `assignment_recorded`, `decision_recorded`, `action_recorded`,
+  `result_recorded`, `evidence_recorded`, `claim_recorded`, `plan_revised`) and omits the reserved
+  opaque-unknown branch;
+- `start`, `status`, and `publish_work` presentation schemas carry minimal valid `examples`
+  (including one `plan_published` draft).
+
+`PublishWorkRequest.model_validate` / full catalog schemas remain the admission authority for
+tool-call validation. Output schemas stay full catalog bundles. An MCP client can validate with
+network access disabled and never resolves `schemas.yoetz.dev` at runtime. Descriptor identity has
+one reviewed SHA-256 golden per tool and one ordered-set SHA-256 golden; drift fails module
+initialization. Presentation keyword budgets (`oneOf` nodes/branches, `$defs` count/nest depth,
+encoded size) are frozen and regression-tested.
 
 ### Honesty lint
 
@@ -128,13 +147,19 @@ verdict means the work is correct.
 8. The `status` description carries the re-grounding cue: it states the uncertainty condition under
    which an agent should call `status` — uncertainty about what it has already done or committed to
    — and not only what `status` returns.
+9. Advertised input schemas are presentation projections: they stay within the frozen keyword
+   budgets, inline common client/actor/frontier shapes, and for `publish_work` advertise exactly the
+   ordinary MCP event families. Catalog request schemas remain admission authority; presentation
+   `examples` must admit under those models.
 
 ## Tests
 
 - `tests/conformance/surfaces/test_mcp_contract_matrix.py` — exact frozen descriptor set, order,
   and annotation values; wording lint over every description and the instructions text; the `start`
   description begins with the intake condition; the `status` description states the re-grounding
-  condition under which to call it, not only its return.
+  condition under which to call it, not only its return; presentation keyword budgets; ordinary
+  publish family dual-surface drift; presentation examples admit under catalog models; presentation
+  root shape remains a projection of the catalog request schema.
 - `tests/subprocess/test_mcp_initialize_and_tools.py` — the negotiated `instructions` bytes equal
   the packaged resource bytes; a corrupted resource fails startup rather than serving unverified
   text.
