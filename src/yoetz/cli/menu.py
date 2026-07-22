@@ -35,17 +35,6 @@ _HARNESS: Final = "codex"
 _BACK: Final = "b"
 _QUIT: Final = "q"
 
-_CREDENTIAL_FIELDS: Final = (
-    ("provider_id", "Provider ID"),
-    ("model_id", "Model ID"),
-    ("endpoint_profile_id", "Endpoint profile ID"),
-    ("endpoint_profile_version", "Endpoint profile version"),
-    ("purpose", "Purpose"),
-    ("scope_digest", "Scope digest"),
-    ("purpose_digest", "Purpose digest"),
-)
-
-
 def menu_available() -> bool:
     """True only when stdin and stdout are both real TTYs."""
 
@@ -298,9 +287,9 @@ def _provider_menu() -> None:
     typer.echo("LLM provider connection")
     typer.echo("  Nonsecret endpoint binding is editable in config.toml (or option 1).")
     typer.echo("  Credentials are typed only inside the confidential ceremony.")
-    typer.echo("  1  Set Official OpenAI or custom HTTPS origin+model (writes TOML)")
-    typer.echo("  2  Set a provider credential")
-    typer.echo("  3  Rotate a provider credential")
+    typer.echo("  1  Choose provider and model (writes TOML)")
+    typer.echo("  2  Add API key for the configured provider")
+    typer.echo("  3  Replace API key for the configured provider")
     typer.echo("  b  Back")
     choice = _ask(("1", "2", "3", _BACK))
     if choice == _BACK:
@@ -311,22 +300,30 @@ def _provider_menu() -> None:
         prompt_provider_endpoint_binding()
         return
     action: Literal["set", "rotate"] = "set" if choice == "2" else "rotate"
-    values: dict[str, str] = {}
-    for field, label in _CREDENTIAL_FIELDS:
-        values[field] = cast(str, typer.prompt(f"  {label}")).strip()
-
+    from yoetz.config.load import load_config
     from yoetz.service.confidential_protocol import ProviderCredentialTarget
+    from yoetz.service.vault import provider_credential_profile_binding
 
     try:
+        provider = load_config({}, {}, None).provider
+        if provider is None:
+            typer.echo("provider_not_configured: choose provider and model first", err=True)
+            return
+        binding = provider_credential_profile_binding(
+            provider.provider_id,
+            provider.model,
+            provider.endpoint_profile_id,
+            provider.endpoint_profile_version,
+        )
         target = ProviderCredentialTarget(
             action=action,
-            provider_id=values["provider_id"],
-            model_id=values["model_id"],
-            endpoint_profile_id=values["endpoint_profile_id"],
-            endpoint_profile_version=values["endpoint_profile_version"],
-            purpose=values["purpose"],
-            scope_digest=values["scope_digest"],
-            purpose_digest=values["purpose_digest"],
+            provider_id=binding.provider_id,
+            model_id=binding.model_id,
+            endpoint_profile_id=binding.endpoint_profile_id,
+            endpoint_profile_version=binding.endpoint_profile_version,
+            purpose=binding.purpose,
+            scope_digest=binding.authorization_scope_digest,
+            purpose_digest=binding.purpose_digest,
         )
     except ValueError:
         typer.echo("invalid_request: one of the identifiers is not valid", err=True)

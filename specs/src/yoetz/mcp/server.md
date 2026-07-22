@@ -22,7 +22,8 @@ operations and the same guidance here, with no skill installed and nothing to co
   resource registry, and one private lazy `ServiceClient(client_kind=mcp_bridge)` slot. The slot is
   initially empty and is touched only by tool dispatch, never resource dispatch.
 - `async ensure_service_client(runtime) -> ServiceClient` — lazily connect/reconnect the one MCP
-  client for a tool call and convert absent/locked/draining/generation-change outcomes to the bounded
+  client for a tool call, starting the fixed service process when absent, and convert
+  locked/draining/generation-change outcomes to the bounded
   bridge error contract without affecting static resources.
 - Exactly six workflow tools. No service start/status/lock/stop/unlock, secret input, provider
   credential, recovery, setup, or privacy-policy mutation tool.
@@ -66,7 +67,8 @@ EOF/disconnect never asserts remote commit cancellation; request-ID replay resol
 ## Errors and edge cases
 
 - Invalid request/unknown tool remains structured and sanitized.
-- Missing service does not launch it; locked does not offer an MCP unlock argument.
+- Missing service triggers only the reviewed fixed on-demand launcher; locked does not offer an MCP
+  unlock argument.
 - Missing service never prevents MCP initialization or static guidance list/read; only a tool call
   attempts the lazy service connection.
 - Unexpected bridge/client/SDK errors use prevalidated `INTERNAL_ERROR`; no raw exception/request.
@@ -88,7 +90,8 @@ EOF/disconnect never asserts remote commit cancellation; request-ID replay resol
 6. Resources are static product documents only: they reach no service, carry no user content, create
    no disclosure receipt, and add no seventh operation.
 7. Every agent-read string is verified reviewed bytes, never runtime-composed.
-8. Service absence can fail a tool call but cannot fail static-resource startup or reads.
+8. Service absence may trigger one bounded on-demand start for a tool call but cannot affect static
+   resource startup or reads.
 
 ## Tests
 

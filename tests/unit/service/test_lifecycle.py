@@ -10,6 +10,7 @@ import pytest
 from yoetz.ports.control import ServiceState
 from yoetz.ports.secret_memory import HumanAuthorizationProof
 from yoetz.service.lifecycle import (
+    IDLE_STOP_SECONDS,
     IdleRelockPolicy,
     LifecycleError,
     ServiceLifecycle,
@@ -214,7 +215,42 @@ async def test_drain_deadline_fails_instead_of_claiming_locked() -> None:
 
 
 def test_idle_policy_is_closed_and_restart_default_is_safe() -> None:
+    assert IDLE_STOP_SECONDS == 1_800
     assert IdleRelockPolicy().seconds == 900
     assert IdleRelockPolicy(None).canonical_value() == {"mode": "disabled"}
     with pytest.raises(ValueError, match="idle_relock_policy_invalid"):
         IdleRelockPolicy(59)
+
+
+@pytest.mark.anyio
+async def test_idle_stop_waits_for_client_disconnect_then_stops_after_thirty_minutes() -> None:
+    clock = _Clock()
+    lifecycle = _lifecycle(clock)
+    await lifecycle.acquire_singleton()
+    await lifecycle.transition(ServiceState.LOCKED)
+    await lifecycle.client_connected()
+    clock.monotonic += 3_600.0
+    monitor = asyncio.create_task(lifecycle.run_idle_monitor(poll_seconds=0.001))
+    await asyncio.sleep(0.01)
+    assert not monitor.done()
+
+    await lifecycle.client_disconnected()
+    clock.monotonic += 1_801.0
+    await asyncio.wait_for(monitor, timeout=1.0)
+    assert lifecycle.state is ServiceState.DRAINING
+
+
+@pytest.mark.anyio
+async def test_connected_client_prevents_idle_relock() -> None:
+    clock = _Clock()
+    lifecycle = _lifecycle(clock)
+    await lifecycle.acquire_singleton()
+    await lifecycle.transition(ServiceState.READY, vault_generation=1)
+    await lifecycle.client_connected()
+    clock.monotonic += 901.0
+    monitor = asyncio.create_task(lifecycle.run_idle_monitor(poll_seconds=0.001))
+    await asyncio.sleep(0.01)
+    assert lifecycle.state is ServiceState.READY
+    monitor.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await monitor

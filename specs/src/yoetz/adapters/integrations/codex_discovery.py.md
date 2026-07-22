@@ -19,11 +19,25 @@ support and mutates nothing.
 
 ## Behavior
 
-The default probe splits `$PATH` on `os.pathsep` (empty entries dropped) and runs
+The default probe splits `$PATH` on `os.pathsep` (empty entries dropped), then augments it with
+reviewed app-bundle resource directories. On macOS it appends
+`/Applications/ChatGPT.app/Contents/Resources`. On Windows it runs one bounded, read-only,
+non-interactive PowerShell package query for the Microsoft Store package family
+`OpenAI.Codex_2p2nqsd0c76g0` and appends each returned `InstallLocation/resources` directory.
+PowerShell absence, timeout, nonzero exit, invalid UTF-8, overlong/control-character output, a
+missing package, or a missing resource directory yields no app candidate rather than an invented
+path. The official app is not currently distributed for Linux, so Linux adds no synthetic app
+directory and still discovers every reviewed CLI candidate on PATH.
+
+On POSIX, each directory considers exactly the executable names `codex` and `codex-testing`. On
+Windows each logical installation considers `.exe`, then `.cmd`, then the extensionless form and
+keeps only the first existing executable form, preventing npm shims for one install from appearing
+twice. Discovery never performs wildcard or prefix matching: names such as `codex-testing-update`
+are not candidates. For each exact candidate it runs
 `<candidate> --version` with `shell=False`, stdin devnull, captured output, and a 5-second
 timeout; a nonzero exit, OS/subprocess error, or non-UTF-8 output yields `None`. Discovery walks
-PATH entries in order, forms the absolute candidate `<entry>/codex`, resolves it strictly for a
-dedupe key (so aliased installs count once) while keeping the PATH-visible name as
+PATH entries in order, forms each absolute candidate, resolves it strictly for a dedupe key (so
+aliased installs count once) while keeping the PATH-visible name as
 `executable_path` (that is what registration must invoke), keeps only regular executable files,
 parses the first output line for the first `\d+.\d+.\d+` token as `reported_version`, caps
 results at 16 candidates, and returns them sorted by `executable_path`. Every candidate reports
@@ -39,8 +53,9 @@ results at 16 candidates, and returns them sorted by `executable_path`. Every ca
 
 ## Invariants
 
-1. Discovery never executes anything except `<candidate> --version`, never writes, and never
-   claims `supported` (E-002: a version string is not capability evidence).
+1. Discovery executes only the bounded read-only Windows package-location query when applicable
+   and exact allowlisted `<candidate> --version` probes; it never writes and never claims
+   `supported` (E-002: a version string is not capability evidence).
 2. Results are deterministic for a fixed probe: dedupe by resolved target, stable sort order,
    bounded count.
 3. The PATH-visible executable name is preserved; symlink targets are dedupe keys only.
@@ -48,7 +63,9 @@ results at 16 candidates, and returns them sorted by `executable_path`. Every ca
 ## Tests
 
 - `tests/unit/adapters/test_codex_discovery.py` — empty/single/multiple/dedupe/non-executable
-  cases, version parsing, and a no-mutation check, all through a fake probe.
+  cases, exact `codex-testing` inclusion with prefix-neighbor exclusion, standard macOS Desktop
+  augmentation, Windows Store app plus `.exe`/`.cmd` handling, Linux CLI behavior, version parsing,
+  and a no-mutation check.
 
 ## Open questions
 

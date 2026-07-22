@@ -29,7 +29,8 @@ explicit and automatic relock, session/suspend events, bounded drain, and endpoi
   `60..86400`, or disabled only through fresh local-human reauthorization. The internal disabled
   representation is `seconds=None`; wire targets/results use the explicit tagged form owned by
   `service/confidential_protocol.md`, never JSON null/infinity.
-- Constants `LOCK_DRAIN_SECONDS = 5`, `STOP_DRAIN_SECONDS = 30`.
+- Constants `LOCK_DRAIN_SECONDS = 5`, `STOP_DRAIN_SECONDS = 30`,
+  `IDLE_STOP_SECONDS = 1800`.
 - `class LifecycleError(Exception)` — bounded reasons including `service_already_running`,
   `invalid_transition`, `vault_locked`, `service_draining`, `session_monitor_unavailable`,
   `human_authorization_required`, `human_authorization_stale`.
@@ -94,7 +95,9 @@ an unlock alias and cannot apply to an existing keyring/passphrase mode.
 
 ### Admission, lock, and stop
 
-`admit` is possible only in `ready`, except structural service status. It increments connected,
+`admit` is possible only in `ready`, except structural service status. `client_connected` /
+`client_disconnected` hold the process-idle lease for authenticated ordinary/human connections.
+Admission increments connected,
 in-flight, provider-call, secret-consumer, writer-queue, and shielded-commit counters under one
 lock. An idle interval begins only when every such counter/lease is zero.
 
@@ -118,6 +121,10 @@ locked state. Default idle relock is 15 minutes of true quiescence; a connected 
 long-running operation is not idle. Changing/turning off this policy requires an OS user-presence
 assertion or confidential reauthentication proof; an MCP request or boolean CLI confirmation is
 insufficient.
+
+Independently, 30 minutes with no connected local client and no admission requests a bounded full
+stop from ready or locked state. Disconnect/activity resets the full interval. Restart restores the
+same fixed policy and advances the service generation.
 
 `change_idle_relock_policy(proposed, proof)` is the only mutation path. It is service-internal,
 callable only by the still-live `idle_relock_policy_change` branch of `HumanControlService`, and

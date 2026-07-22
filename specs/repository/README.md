@@ -74,7 +74,10 @@ setup/widening, credential changes, confirm-every-request, and finding waiver pr
 human authority. The first-run story uses the human-facing brand names `Yoetz` and `Codex`, lists
 automatically detected supported harnesses before any per-installation choice, and describes the
 explicit no-default `Y`/`N` registration confirmation without changing lowercase command, MCP, or
-wire identifiers.
+wire identifiers. On macOS the install story may state that discovery includes both the shell PATH
+and the standard Codex Desktop application location; on Windows it may name the reviewed Microsoft
+Store package-family query. It must state that Linux has no official Codex App distribution rather
+than implying a nonexistent app path, while preserving the same CLI selection flow.
 It labels the three support routes clearly and never asks security or conduct reporters to use a
 public issue. E-012 verifies the private routes before release.
 

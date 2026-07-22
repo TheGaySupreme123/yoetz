@@ -32,6 +32,9 @@ credential, or passphrase bytes.
   `provider_id`, `model_id`, `endpoint_profile_id`, `endpoint_profile_version`,
   lower-kebab `purpose`, `authorization_scope_digest`, and `purpose_digest`; never credential
   bytes. `purpose_digest` must equal the registered canonical digest of that exact purpose.
+- `provider_credential_profile_binding(...)` — the one installation-local storage binding for an
+  exact provider/model/endpoint-profile tuple. It uses purpose `llm-inference` and a canonical
+  profile-scope digest; per-request disclosure scope is bound later to the one-shot handle.
 - `class VaultError(Exception)` with bounded reasons `keyring_locked`, `keyring_unavailable`,
   `human_authority_unavailable`, `vault_uninitialized`, `vault_locked`, `unlock_wrong`,
   `vault_tampered`, `record_missing`, `record_binding_mismatch`, `secret_purpose_mismatch`,
@@ -151,7 +154,7 @@ derive or bind the complete family leaves the service locked; partial handles ar
 The encrypted vault stores authenticated records under the IVK for:
 
 - one random BMK per bundle plus structural key slot/algorithm/version binding;
-- provider credentials bound to one provider, endpoint profile, authorization scope, and purpose;
+- provider credentials bound to one exact provider/model/endpoint profile storage scope;
 - optional recovery metadata containing no recovery secret.
 
 It stores no independent `K_lookup`, log-correlation, or privacy-audit key record. Those three keys
@@ -175,8 +178,10 @@ control request, internal result, projection, local approval, and receipt cursor
 `provider_credential(binding)` returns a fresh one-use `ProviderCredentialHandle` restricted to the
 exact provider/model/endpoint-profile/version, purpose plus authorization-scope/purpose digests,
 dispatch ID, final request-body digest, service generation, and deadline in
-`ProviderAttemptAuthBinding`. Every provider/model/profile/scope/purpose field must match the
-stored `ProviderCredentialBinding` before minting. It can expose a protected view
+`ProviderAttemptAuthBinding`. Provider/model/profile fields select the stored profile credential;
+the attempt's scope/purpose/body/dispatch/generation/deadline are independently bound to the fresh
+handle before minting. Backward read may fall back to the older exact-scope development record. It
+can expose a protected view
 only inside the custom transport's header-injection callback, cannot reveal/reuse bytes or
 authorize another body/destination/attempt, and is invalid after that callback. A retry mints a new
 dispatch-bound handle. `store_provider_credential` accepts exact

@@ -54,7 +54,7 @@ from yoetz.protocol.models import (
     StatusResult,
     public_model_to_wire,
 )
-from yoetz.service.client import ServiceClient, connect_service
+from yoetz.service.client import ServiceClient, connect_service_on_demand
 
 __all__ = [
     "BRIDGE_RUNTIME",
@@ -149,7 +149,7 @@ async def ensure_service_client(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> Serv
                 return existing
         connected: ServiceClient | None = None
         try:
-            connected = await connect_service(ControlClientKind.MCP_BRIDGE)
+            connected = await connect_service_on_demand(ControlClientKind.MCP_BRIDGE)
             await connected.connect()
         except Exception:
             runtime._slot.client = None  # pyright: ignore[reportPrivateUsage]

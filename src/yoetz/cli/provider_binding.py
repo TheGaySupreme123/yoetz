@@ -15,6 +15,7 @@ import typer
 from yoetz.config.models import ConfigError, ProviderProfileConfig, YoetzConfig
 from yoetz.config.paths import config_file_path
 from yoetz.config.write import (
+    fireworks_provider,
     official_openai_provider,
     owner_declared_openai_provider,
     write_provider_binding,
@@ -27,7 +28,7 @@ __all__ = [
     "prompt_provider_endpoint_binding",
 ]
 
-ProviderEndpointChoice = Literal["official_openai", "owner_declared"]
+ProviderEndpointChoice = Literal["official_openai", "fireworks", "owner_declared"]
 
 NEXT_CREDENTIAL: Final = (
     "run 'yoetz provider credential set' from a local terminal to provision the "
@@ -59,6 +60,8 @@ def apply_provider_endpoint_choice(
         raise ConfigError("config_value_invalid")
     if choice == "official_openai":
         provider = official_openai_provider(model=model)
+    elif choice == "fireworks":
+        provider = fireworks_provider(model=model)
     else:
         if https_origin is None:
             raise ConfigError("https_origin_invalid")
@@ -73,13 +76,14 @@ def prompt_provider_endpoint_binding(*, path: Path | None = None) -> Path | None
     typer.echo("")
     typer.echo("LLM endpoint (nonsecret)")
     typer.echo("  1  Official OpenAI (api.openai.com)")
-    typer.echo("  2  Custom OpenAI-compatible HTTPS origin")
+    typer.echo("  2  Fireworks AI (api.fireworks.ai/inference/v1)")
+    typer.echo("  3  Custom OpenAI-compatible HTTPS origin")
     typer.echo("  s  Skip for now")
     raw = typer.prompt("Select", default="s").strip().lower()
     if raw in {"s", "skip", ""}:
         return None
-    if raw not in {"1", "2"}:
-        typer.echo("invalid_request: choose 1, 2, or s", err=True)
+    if raw not in {"1", "2", "3"}:
+        typer.echo("invalid_request: choose 1, 2, 3, or s", err=True)
         return None
 
     model = typer.prompt("  Model id").strip()
@@ -87,6 +91,10 @@ def prompt_provider_endpoint_binding(*, path: Path | None = None) -> Path | None
         if raw == "1":
             written, provider = apply_provider_endpoint_choice(
                 "official_openai", model=model, path=path
+            )
+        elif raw == "2":
+            written, provider = apply_provider_endpoint_choice(
+                "fireworks", model=model, path=path
             )
         else:
             origin = typer.prompt(

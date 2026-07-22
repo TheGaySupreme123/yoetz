@@ -202,6 +202,7 @@ class OpenAIProfile:
     data_use_profile: ProviderDataUseProfile
     host: str = _HOST
     port: int = _PORT
+    base_path_prefix: str = "/v1"
 
     def __post_init__(self) -> None:
         if (
@@ -231,18 +232,20 @@ class OpenAIProfile:
             raise ValueError("openai_profile_host_invalid")
         if type(self.port) is not int or not 1 <= self.port <= 65535:
             raise ValueError("openai_profile_port_invalid")
+        if self.base_path_prefix not in {"/v1", "/inference/v1"}:
+            raise ValueError("openai_profile_path_invalid")
 
     @property
     def path(self) -> str:
-        return _PATH
+        return f"{self.base_path_prefix}/responses"
 
     @property
     def base_url(self) -> str:
         # OpenAI Python SDK appends `/responses` to base_url; include `/v1` so the
         # wire path matches the transport-enforced `/v1/responses` destination.
         if self.port == 443:
-            return f"https://{self.host}/v1"
-        return f"https://{self.host}:{self.port}/v1"
+            return f"https://{self.host}{self.base_path_prefix}"
+        return f"https://{self.host}:{self.port}{self.base_path_prefix}"
 
 
 def owner_declared_data_use_profile(

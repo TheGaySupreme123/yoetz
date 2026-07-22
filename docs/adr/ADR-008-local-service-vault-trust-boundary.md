@@ -28,11 +28,18 @@ method name.
 
 ## Selected architecture
 
-The v0.1 default is one persistent service per user and installation. The service starts in
+The v0.1 default is one restartable service authority per user and installation. A user supervisor,
+interactive setup, or the fixed untrusted-client launcher may start the foreground service process;
+the launcher conveys no key, credential, provider, path, or policy authority. The service starts in
 `starting`, binds and authenticates its local control endpoint, attempts OS-keyring unlock, and
 enters either `ready` or `locked`. It remains reachable while locked so a human can inspect
 structural status and initiate the dedicated unlock flow. Only `ready` admits workflows,
 maintenance, imports, payload access, or egress.
+
+Authenticated local connections and admitted work hold a process-idle lease. Once both counts stay
+zero for 1,800 seconds, the daemon performs its bounded stop and exits. A later fixed on-demand
+launcher start advances the generation and reconnects to the singleton winner; a passphrase-backed
+successor remains locked until a local-human unlock.
 
 On a pristine first install, keyring storage usability alone does not select immutable keyring
 mode. Before creating a staging artifact, IVK, keyring entry, or mode marker, the service requires

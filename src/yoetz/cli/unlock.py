@@ -544,13 +544,21 @@ async def _drive_session(
     kind: HumanCeremonyKind,
     target: HumanOpenTarget,
     current: HumanPhase | HumanResult,
+    provider_credential: bytearray | None = None,
 ) -> tuple[HumanResult, Literal["approve", "deny"] | None]:
     decision: Literal["approve", "deny"] | None = None
     for _ in range(8):
         if type(current) is _expected_result_type(kind):
             return cast(HumanResult, current), decision
         if type(current) is SecretRequiredPhase:
-            secret_buffer = _read_secret(terminal, kind, target, current.binding.purpose)
+            if (
+                current.binding.purpose is ConfidentialSecretPurpose.PROVIDER_CREDENTIAL
+                and provider_credential is not None
+            ):
+                _validate_secret(provider_credential, current.binding.purpose)
+                secret_buffer = provider_credential
+            else:
+                secret_buffer = _read_secret(terminal, kind, target, current.binding.purpose)
             await _send_secret(session, current, secret_buffer)
         elif type(current) is AuthorizationRequiredPhase:
             authorization_source: Literal["os_user_presence", "secret_reauthentication"]
@@ -580,32 +588,44 @@ async def _drive_session(
 async def run_human_ceremony(
     kind: HumanCeremonyKind,
     target: HumanOpenTarget,
+    provider_credential: bytearray | None = None,
 ) -> HumanResult:
     """Run one exact foreground YZH1/YZS1 ceremony and return structural state only."""
 
     if type(kind) is not HumanCeremonyKind:
         raise TypeError("human_ceremony_kind_invalid")
+    if provider_credential is not None and kind not in {
+        HumanCeremonyKind.PROVIDER_CREDENTIAL_SET,
+        HumanCeremonyKind.PROVIDER_CREDENTIAL_ROTATE,
+    }:
+        _overwrite(provider_credential)
+        raise ValueError("provider_credential_target_invalid")
     client = HumanControlClient()
-    with _ForegroundTerminal() as terminal:
-        try:
-            session = await client.open(kind, target)
-            async with session:
-                try:
-                    preview = _verify_preview(kind, target, session)
-                    _render_preview(terminal, preview)
-                    result, _decision = await _drive_session(
-                        session,
-                        terminal,
-                        kind,
-                        target,
-                        session.opened.phase,
-                    )
-                    return result
-                except BaseException:
-                    await _cancel_quietly(session)
-                    raise
-        finally:
-            await client.close()
+    try:
+        with _ForegroundTerminal() as terminal:
+            try:
+                session = await client.open(kind, target)
+                async with session:
+                    try:
+                        preview = _verify_preview(kind, target, session)
+                        _render_preview(terminal, preview)
+                        result, _decision = await _drive_session(
+                            session,
+                            terminal,
+                            kind,
+                            target,
+                            session.opened.phase,
+                            provider_credential,
+                        )
+                        return result
+                    except BaseException:
+                        await _cancel_quietly(session)
+                        raise
+            finally:
+                await client.close()
+    finally:
+        if provider_credential is not None:
+            _overwrite(provider_credential)
 
 
 async def initialize_passphrase_vault() -> VaultStateResult:
@@ -639,10 +659,15 @@ async def portable_recovery(target: PortableRecoveryTarget) -> PortableRecoveryR
     return cast(PortableRecoveryResult, result)
 
 
-async def set_provider_credential(target: ProviderCredentialTarget) -> ProviderCredentialResult:
+async def set_provider_credential(
+    target: ProviderCredentialTarget,
+    provider_credential: bytearray | None = None,
+) -> ProviderCredentialResult:
     if target.action != "set":
         raise ValueError("provider_credential_target_invalid")
-    result = await run_human_ceremony(HumanCeremonyKind.PROVIDER_CREDENTIAL_SET, target)
+    result = await run_human_ceremony(
+        HumanCeremonyKind.PROVIDER_CREDENTIAL_SET, target, provider_credential
+    )
     return cast(ProviderCredentialResult, result)
 
 

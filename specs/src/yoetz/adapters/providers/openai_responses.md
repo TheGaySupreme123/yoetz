@@ -86,7 +86,8 @@ profile Yoetz is willing to trust. Construction validates:
   provider-human access / review-expiry / evidence digest);
 - HTTPS destination: host + port (defaults `api.openai.com:443` for the official preset;
   owner-declared profile `owner-declared-openai-responses` supplies host/port from validated
-  config `https_origin` per ADR-014) with path fixed to `/v1/responses`, `POST`, platform CA
+  config `https_origin` per ADR-014) with profile-fixed path `/v1/responses` or the reviewed
+  Fireworks `/inference/v1/responses`, `POST`, platform CA
   trust, and hostname/SNI verification — no free user URL, proxy, or redirect, and no v0.1
   certificate/SPKI pinning claim;
 - exact `max_output_tokens=2048`, raw response-body cap `1_048_576`, and identity-only content

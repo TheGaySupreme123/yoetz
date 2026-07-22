@@ -434,17 +434,23 @@ class ServiceDaemon:
                     self._composition.human_connection_handler,
                 )
             )
+        stop_wait = asyncio.create_task(self._stop_event.wait())
+        stop_reason = "shutdown_requested"
         try:
-            await self._stop_event.wait()
+            done, _pending = await asyncio.wait(
+                {idle, stop_wait}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if idle in done:
+                await idle
+                stop_reason = "idle_shutdown"
         finally:
-            await self.stop()
-            for task in (idle, control, human):
+            await self.stop(stop_reason)
+            for task in (idle, control, human, stop_wait):
                 if task is not None:
                     task.cancel()
-            await asyncio.gather(
-                *(task for task in (idle, control, human) if task is not None),
-                return_exceptions=True,
-            )
+            for task in (idle, control, human, stop_wait):
+                if task is not None:
+                    await asyncio.gather(task, return_exceptions=True)
 
     async def dispatch(
         self,
@@ -644,11 +650,22 @@ class ServiceDaemon:
             self._connection_tasks.add(task)
             task.add_done_callback(self._connection_tasks.discard)
 
-    @staticmethod
     async def _run_handler(
+        self,
         handler: Callable[[ControlStream], Awaitable[None]], stream: ControlStream
     ) -> None:
-        await handler(stream)
+        lifecycle = self._composition.lifecycle
+        connected = False
+        try:
+            await lifecycle.client_connected()
+            connected = True
+            await handler(stream)
+        finally:
+            if connected:
+                try:
+                    await lifecycle.client_disconnected()
+                except LifecycleError:
+                    pass
 
     async def _serve_control_connection(self, stream: ControlStream) -> None:
         session: ControlSession | None = None
@@ -1398,7 +1415,11 @@ async def _production_composition(
             await vault.close()
         if secret_memory is not None:
             secret_memory.close()
-        if lifecycle.state is ServiceState.STARTING:
+        try:
+            lifecycle_state = lifecycle.state
+        except LifecycleError:
+            lifecycle_state = None
+        if lifecycle_state is ServiceState.STARTING:
             await lifecycle.transition(ServiceState.FAILED)
         await lifecycle.close()
         raise

@@ -1,11 +1,11 @@
-"""First-run setup wizard: harness discovery, MCP registration, and honest next steps.
+"""First-run setup wizard: harness, local service, and provider connection.
 
 The wizard orchestrates only operations a human could already run by hand: it
 discovers Codex binaries, previews and (after explicit confirmation) applies the
 runbook's ``codex mcp get``/``codex mcp add`` sequence, checks whether the local
-service is reachable, and prints the exact follow-up commands for the privacy
-setup and the confidential provider-credential ceremony. It never spawns the
-service, never touches a secret, and never claims a step it did not verify.
+service is reachable, and—only on a local interactive terminal—runs the existing
+vault and provider-credential ceremonies. Secret bytes remain inside the dedicated
+hidden-input confidential helper and never enter wizard arguments, config, or MCP.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from yoetz.protocol.canonical import JsonValue, canonical_encode
 __all__ = [
     "SETUP_MARKER_SCHEMA",
     "integrate_mcp",
+    "run_provider_setup",
     "run_setup_wizard",
     "setup_marker_present",
     "setup_status",
@@ -221,23 +222,164 @@ def _emit_registration_preview(binary: HarnessBinary) -> None:
     typer.echo(f"  Codex executable: {binary.executable_path}")
 
 
-async def _service_reachability() -> dict[str, JsonValue]:
+async def _service_reachability(*, start_if_absent: bool = False) -> dict[str, JsonValue]:
     from yoetz.cli.app import build_service_client
-    from yoetz.ports.control import ControlError
+    from yoetz.ports.control import ControlClientKind, ControlError
+    from yoetz.service.client import connect_service_on_demand
 
     try:
-        client = await build_service_client()
+        client = (
+            await connect_service_on_demand(ControlClientKind.CLI)
+            if start_if_absent
+            else await build_service_client()
+        )
         try:
             status = await client.service_status()
         finally:
             await client.close()
     except ControlError:
-        return {"reachable": False, "vault_mode": None}
+        return {"reachable": False, "state": None, "vault_mode": None}
     vault_mode = getattr(status, "vault_mode", None)
+    state = getattr(getattr(status, "state", None), "value", getattr(status, "state", None))
     return {
         "reachable": True,
+        "state": state if type(state) is str else None,
         "vault_mode": vault_mode if type(vault_mode) is str else None,
     }
+
+
+async def _interactive_provider_setup(
+    service: dict[str, JsonValue],
+    *,
+    provider_choice: str | None = None,
+    model: str | None = None,
+    api_key: str | None = None,
+) -> tuple[dict[str, JsonValue], dict[str, JsonValue]]:
+    """Run trusted local setup ceremonies while keeping secrets out of wizard state."""
+
+    from yoetz.cli.provider_binding import (
+        apply_provider_endpoint_choice,
+        prompt_provider_endpoint_binding,
+    )
+    from yoetz.cli.unlock import (
+        HumanCeremonyCliError,
+        initialize_passphrase_vault,
+        set_provider_credential,
+        unlock_vault,
+    )
+    from yoetz.config.load import load_config
+    from yoetz.service.confidential_protocol import ProviderCredentialTarget
+    from yoetz.service.vault import provider_credential_profile_binding
+
+    provider_report: dict[str, JsonValue] = {
+        "binding": "skipped",
+        "credential": "skipped",
+    }
+    try:
+        if service.get("reachable") and service.get("state") == "locked":
+            if service.get("vault_mode") == "uninitialized":
+                typer.echo("")
+                typer.echo("Secure vault setup (hidden local-terminal input)")
+                await initialize_passphrase_vault()
+            elif service.get("vault_mode") == "passphrase":
+                typer.echo("")
+                typer.echo("Unlock Yoetz to finish provider setup (hidden local-terminal input)")
+                await unlock_vault()
+            service = await _service_reachability()
+    except HumanCeremonyCliError as error:
+        provider_report["credential_reason"] = error.reason
+
+    if provider_choice == "fireworks":
+        selected_model = model
+        if selected_model is None:
+            selected_model = typer.prompt("Fireworks model id").strip()
+        try:
+            written, _provider = apply_provider_endpoint_choice(
+                "fireworks", model=selected_model
+            )
+        except (OSError, ValueError) as error:
+            provider_report["credential_reason"] = getattr(
+                error, "reason_code", "provider_binding_invalid"
+            )
+            return service, provider_report
+        typer.echo(f"Fireworks model: {selected_model}")
+    else:
+        written = prompt_provider_endpoint_binding()
+    if written is None:
+        return service, provider_report
+    provider_report["binding"] = "configured"
+    config = load_config({}, {}, written)
+    provider = config.provider
+    if provider is None or service.get("state") != "ready":
+        provider_report["credential_reason"] = "service_not_ready"
+        return service, provider_report
+
+    storage = provider_credential_profile_binding(
+        provider.provider_id,
+        provider.model,
+        provider.endpoint_profile_id,
+        provider.endpoint_profile_version,
+    )
+    target = ProviderCredentialTarget(
+        action="set",
+        provider_id=storage.provider_id,
+        model_id=storage.model_id,
+        endpoint_profile_id=storage.endpoint_profile_id,
+        endpoint_profile_version=storage.endpoint_profile_version,
+        purpose=storage.purpose,
+        scope_digest=storage.authorization_scope_digest,
+        purpose_digest=storage.purpose_digest,
+    )
+    typer.echo("")
+    if api_key is None:
+        typer.echo("Provider API key (hidden local-terminal input; stored only in the Yoetz vault)")
+    else:
+        typer.echo("Provider API key supplied by --api-key; storing it only in the Yoetz vault")
+    try:
+        supplied_credential = None if api_key is None else bytearray(api_key.encode("utf-8"))
+        result = await set_provider_credential(target, supplied_credential)
+    except HumanCeremonyCliError as error:
+        provider_report["credential"] = "failed"
+        provider_report["credential_reason"] = error.reason
+    else:
+        provider_report["credential"] = result.activation_status
+    return await _service_reachability(), provider_report
+
+
+async def run_provider_setup(
+    *,
+    fireworks: bool = False,
+    model: str | None = None,
+    api_key: str | None = None,
+) -> int:
+    """Run only the simple local provider setup path used by ``yoetz --set``."""
+
+    if not _is_interactive_terminal():
+        return _usage_failure("--set requires an interactive local terminal")
+    typer.echo("Yoetz LLM setup")
+    typer.echo("The API key is entered with hidden input and stored only in the local vault.")
+    service = await _service_reachability(start_if_absent=True)
+    if not service.get("reachable"):
+        typer.echo("provider_setup_failed: service_unavailable", err=True)
+        return 20
+    service, provider = await _interactive_provider_setup(
+        service,
+        provider_choice="fireworks" if fireworks else None,
+        model=model,
+        api_key=api_key,
+    )
+    binding = provider.get("binding")
+    credential = provider.get("credential")
+    typer.echo("")
+    typer.echo(f"Provider binding: {binding}")
+    typer.echo(f"API key: {credential}")
+    if binding != "configured" or credential != "stored":
+        reason = provider.get("credential_reason")
+        if type(reason) is str:
+            typer.echo(f"Reason: {reason}")
+        return 20
+    typer.echo("Yoetz is ready to use this provider.")
+    return 0
 
 
 def _registration_report(
@@ -323,21 +465,24 @@ async def run_setup_wizard(
     else:
         registration = await _register_step(chosen, interactive=interactive, accept=accept)
 
-    service = await _service_reachability()
-
+    service = await _service_reachability(start_if_absent=interactive)
+    provider: dict[str, JsonValue] = {
+        "binding": "skipped",
+        "credential": "skipped",
+    }
     if interactive:
-        from yoetz.cli.provider_binding import prompt_provider_endpoint_binding
-
-        prompt_provider_endpoint_binding()
+        service, provider = await _interactive_provider_setup(service)
 
     next_steps: list[JsonValue] = []
     if not service["reachable"]:
         next_steps.append(_NEXT_SERVICE)
-    if service.get("vault_mode") == "passphrase" or not service["reachable"]:
+    if service.get("state") != "ready":
         next_steps.append(_NEXT_UNLOCK)
     next_steps.append(_NEXT_PRIVACY)
-    next_steps.append(_NEXT_PROVIDER_TOML)
-    next_steps.append(_NEXT_CREDENTIAL)
+    if provider.get("binding") != "configured":
+        next_steps.append(_NEXT_PROVIDER_TOML)
+    if provider.get("credential") != "stored":
+        next_steps.append(_NEXT_CREDENTIAL)
 
     mutating_run = interactive or accept
     marker_written = _write_setup_marker(str(registration["outcome"])) if mutating_run else False
@@ -346,6 +491,7 @@ async def run_setup_wizard(
         "discovered": [_binary_row(binary) for binary in binaries],
         "marker_written": marker_written,
         "next_steps": next_steps,
+        "provider": provider,
         "registration": registration,
         "schema": _REPORT_SCHEMA,
         "selected": None if chosen is None else _binary_row(chosen),
@@ -361,6 +507,7 @@ async def run_setup_wizard(
 def _emit_human_report(report: dict[str, JsonValue]) -> None:
     registration = report["registration"]
     service = report["service"]
+    provider = report["provider"]
     typer.echo("Setup summary:")
     if isinstance(registration, dict):
         outcome = registration.get("outcome")
@@ -372,6 +519,10 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
     if isinstance(service, dict):
         reachable = service.get("reachable")
         typer.echo(f"  Local service reachable: {'yes' if reachable else 'no'}")
+        typer.echo(f"  Local service state: {service.get('state') or 'unavailable'}")
+    if isinstance(provider, dict):
+        typer.echo(f"  Provider binding: {provider.get('binding')}")
+        typer.echo(f"  Provider credential: {provider.get('credential')}")
     steps = report["next_steps"]
     if isinstance(steps, list) and steps:
         typer.echo("Next steps:")

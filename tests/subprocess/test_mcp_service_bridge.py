@@ -184,7 +184,7 @@ def _install_clients(
 
     monkeypatch.setattr(
         bridge,
-        "connect_service",
+        "connect_service_on_demand",
         cast(Callable[[object], Awaitable[object]], connect),
     )
     return remaining

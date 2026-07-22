@@ -11,9 +11,10 @@ from typer.testing import CliRunner
 
 import yoetz.cli.app as cli
 from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter, CommandOutput
-from yoetz.ports.control import ControlError
+from yoetz.ports.control import ControlClientKind, ControlError
 from yoetz.ports.harness_mcp import HarnessBinary
 from yoetz.ports.integrations import HarnessId
+from yoetz.service.client import ServiceClient
 
 _RUNNER = CliRunner()
 
@@ -63,12 +64,21 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
     async def unreachable_client() -> object:
         raise ControlError("service_unavailable")
 
+    async def unreachable_on_demand(_kind: ControlClientKind) -> ServiceClient:
+        raise ControlError("service_unavailable")
+
     import yoetz.cli.setup as setup_module
+    import yoetz.service.client as service_client_module
 
     monkeypatch.setattr(setup_module, "discover_codex_binaries", fake_discover)
     monkeypatch.setattr(setup_module, "CodexMcpAdapter", fake_adapter)
     monkeypatch.setattr(setup_module, "setup_marker_path", lambda: marker)
     monkeypatch.setattr(cli, "build_service_client", unreachable_client)
+    monkeypatch.setattr(
+        service_client_module,
+        "connect_service_on_demand",
+        unreachable_on_demand,
+    )
     state["marker"] = marker
     return state
 
@@ -277,3 +287,43 @@ def test_bare_invocation_without_tty_prints_help() -> None:
     result = _RUNNER.invoke(cli.app, [])
     assert result.exit_code == 0
     assert "Usage" in result.stdout
+
+
+def test_root_set_fireworks_dispatches_simple_provider_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.cli.setup as setup_module
+
+    received: dict[str, object] = {}
+
+    async def fake_provider_setup(
+        *, fireworks: bool, model: str | None, api_key: str | None
+    ) -> int:
+        received.update(fireworks=fireworks, model=model, api_key=api_key)
+        return 0
+
+    monkeypatch.setattr(setup_module, "run_provider_setup", fake_provider_setup)
+    result = _RUNNER.invoke(
+        cli.app,
+        [
+            "--set",
+            "--fireworks",
+            "--model",
+            "accounts/fireworks/models/minimax-m3",
+            "--api-key",
+            "fw-test-value",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert received == {
+        "fireworks": True,
+        "model": "accounts/fireworks/models/minimax-m3",
+        "api_key": "fw-test-value",
+    }
+
+
+def test_provider_flags_require_set() -> None:
+    result = _RUNNER.invoke(cli.app, ["--fireworks"])
+    assert result.exit_code == 2
+    assert "require --set" in result.stderr

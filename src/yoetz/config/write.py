@@ -20,6 +20,7 @@ from yoetz.config.privacy import safe_privacy_bootstrap
 
 __all__ = [
     "default_capability_profile",
+    "fireworks_provider",
     "official_openai_provider",
     "owner_declared_openai_provider",
     "render_config_toml",
@@ -29,6 +30,7 @@ __all__ = [
 
 _OFFICIAL_CAPABILITY: Final = "openai-responses-structured-1"
 _OWNER_CAPABILITY: Final = "openai-responses-structured-1"
+_FIREWORKS_CAPABILITY: Final = "fireworks-responses-structured-1"
 
 
 def default_capability_profile() -> str:
@@ -50,6 +52,26 @@ def official_openai_provider(
         endpoint_profile_version=endpoint_profile_version,
         model=model,
         capability_profile=_OFFICIAL_CAPABILITY,
+        timeout_seconds=timeout_seconds,
+        max_retries=max_retries,
+    )
+
+
+def fireworks_provider(
+    *,
+    model: str,
+    endpoint_profile_version: str = "1.0.0",
+    timeout_seconds: int = 60,
+    max_retries: int = 2,
+) -> ProviderProfileConfig:
+    """Build the reviewed fixed Fireworks Responses endpoint binding."""
+
+    return ProviderProfileConfig(
+        provider_id="fireworks",
+        endpoint_profile_id="fireworks-responses",
+        endpoint_profile_version=endpoint_profile_version,
+        model=model,
+        capability_profile=_FIREWORKS_CAPABILITY,
         timeout_seconds=timeout_seconds,
         max_retries=max_retries,
     )

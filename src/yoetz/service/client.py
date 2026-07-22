@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
+import sys
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -95,6 +98,7 @@ __all__ = [
     "PrivacyReceiptNotFound",
     "ServiceClient",
     "connect_service",
+    "connect_service_on_demand",
 ]
 
 _MAX_IN_FLIGHT: Final = 32
@@ -112,6 +116,58 @@ _LIFECYCLE_METHODS: Final = frozenset(
     {ControlMethod.SERVICE_STATUS, ControlMethod.SERVICE_LOCK, ControlMethod.SERVICE_STOP}
 )
 _PRIVATE_CONSTRUCTOR_TOKEN: Final = object()
+_SERVICE_START_TIMEOUT_SECONDS: Final = 10.0
+_SERVICE_START_POLL_SECONDS: Final = 0.05
+_SECRET_ENV_MARKERS: Final = (
+    "API_KEY",
+    "AUTHORIZATION",
+    "CREDENTIAL",
+    "PASSWORD",
+    "SECRET",
+    "TOKEN",
+)
+
+
+def _service_environment() -> dict[str, str]:
+    """Return inherited nonsecret process context for the detached service.
+
+    The service never consumes provider credentials from ambient environment state.  Filtering
+    secret-shaped names here also prevents an unrelated harness/API credential inherited by the
+    MCP bridge from becoming visible in the service process metadata.
+    """
+
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if not any(marker in name.upper() for marker in _SECRET_ENV_MARKERS)
+    }
+
+
+def _spawn_service_process() -> None:
+    command = (sys.executable, "-m", "yoetz", "service", "run")
+    if os.name == "nt":
+        creationflags = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) | int(
+            getattr(subprocess, "DETACHED_PROCESS", 0),
+        )
+        subprocess.Popen(  # noqa: S603 - fixed interpreter/module/arguments
+            command,
+            close_fds=True,
+            creationflags=creationflags,
+            env=_service_environment(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        subprocess.Popen(  # noqa: S603 - fixed interpreter/module/arguments
+            command,
+            close_fds=True,
+            env=_service_environment(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -909,3 +965,42 @@ async def connect_service(client_kind: ControlClientKind) -> ServiceClient:
         if stream is not None:
             await stream.aclose()
         raise
+
+
+async def connect_service_on_demand(
+    client_kind: ControlClientKind,
+    *,
+    timeout_seconds: float = _SERVICE_START_TIMEOUT_SECONDS,
+) -> ServiceClient:
+    """Connect to the fixed service, starting one detached successor only when absent.
+
+    Startup is deliberately narrower than workflow authority: it supplies no path, configuration,
+    credential, vault input, or policy override.  Concurrent bridges may race to spawn; the
+    service singleton admits exactly one winner and every caller reconnects to that winner.
+    """
+
+    if type(client_kind) is not ControlClientKind:
+        raise TypeError("control_client_kind_invalid")
+    if type(timeout_seconds) is not float or not 0.1 <= timeout_seconds <= 30.0:
+        raise ValueError("service_start_timeout_invalid")
+    try:
+        return await connect_service(client_kind)
+    except ControlError as exc:
+        if exc.reason != "service_unavailable":
+            raise
+    try:
+        _spawn_service_process()
+    except OSError as exc:
+        raise ControlError("service_unavailable", retryable=True) from exc
+
+    deadline = time.monotonic() + timeout_seconds
+    last_error: ControlError | None = None
+    while time.monotonic() < deadline:
+        await asyncio.sleep(_SERVICE_START_POLL_SECONDS)
+        try:
+            return await connect_service(client_kind)
+        except ControlError as exc:
+            last_error = exc
+            if exc.reason != "service_unavailable":
+                raise
+    raise ControlError("service_unavailable", retryable=True) from last_error

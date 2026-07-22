@@ -21,6 +21,7 @@ from yoetz.config.models import (
     parse_https_origin,
 )
 from yoetz.config.write import (
+    fireworks_provider,
     official_openai_provider,
     owner_declared_openai_provider,
     render_config_toml,
@@ -154,6 +155,35 @@ def test_apply_provider_endpoint_choice_writes_binding(tmp_path: Path) -> None:
     )
     assert path.is_file()
     assert provider.endpoint_profile_id == OWNER_DECLARED_ENDPOINT_PROFILE_ID
+
+
+def test_fireworks_binding_uses_reviewed_responses_base_path(tmp_path: Path) -> None:
+    path, provider = apply_provider_endpoint_choice(
+        "fireworks",
+        model="accounts/fireworks/models/qwen3-235b-a22b",
+        path=tmp_path / "fireworks.toml",
+    )
+    assert path.is_file()
+    assert provider == fireworks_provider(
+        model="accounts/fireworks/models/qwen3-235b-a22b"
+    )
+    profile = OpenAIProfile(
+        provider_id="fireworks",
+        model=provider.model,
+        endpoint_profile_id=provider.endpoint_profile_id,
+        endpoint_profile_version=provider.endpoint_profile_version,
+        timeout_seconds=60,
+        supports_structured_outputs=True,
+        data_use_profile=owner_declared_data_use_profile(
+            reviewed_at=_NOW,
+            expires_at=_NOW + timedelta(days=30),
+            evidence_digest=_DIGEST,
+        ),
+        host="api.fireworks.ai",
+        base_path_prefix="/inference/v1",
+    )
+    assert profile.base_url == "https://api.fireworks.ai/inference/v1"
+    assert profile.path == "/inference/v1/responses"
 
 
 def test_owner_declared_data_use_never_assisted_eligible() -> None:

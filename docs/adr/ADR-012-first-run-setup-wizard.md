@@ -28,8 +28,9 @@ exactly those contracts and connects the steps without weakening any existing tr
    (read-only posture). The wizard orchestrates only operations a local human could already run by
    hand: Codex discovery, the runbook's check-then-add MCP registration behind
    preview→confirm→execute, a service reachability check, and printed instructions for the
-   privacy-setup and provider-credential ceremonies. It introduces no new trust boundary, no new
-   secret channel, and no new claim vocabulary.
+   privacy setup and the existing provider-credential ceremony. On a real local TTY it may invoke
+   the already-reviewed hidden-input vault initialize/unlock and credential ceremony; it adds no
+   secret field to wizard arguments, configuration, reports, MCP, or agent context.
 
 2. **Bounded bare-invocation change (amends ADR-007 decision 3).** The root Typer app drops
    `no_args_is_help=True`; the root callback reproduces the historical help output for every bare
@@ -49,6 +50,11 @@ exactly those contracts and connects the steps without weakening any existing tr
    from Codex capability support (E-002/E-013 are untouched); "registered" never implies "Codex
    will successfully connect".
 
+The short `yoetz --set --fireworks --model MODEL [--api-key VALUE]` path is an interactive
+provider-only entry into the same setup ceremonies. It derives internal provider bindings. The
+API key uses hidden TTY input when omitted; an explicit value is never echoed and is moved into the
+one-shot mutable ceremony buffer immediately, with the documented shell-history/process-list risk.
+
 4. **A sibling port, not an `IntegrationsPort` extension (amends ADR-010 by addition only).**
    `HarnessMcpPort` (`ports/harness_mcp.py`) owns registration with its own closed types
    (`HarnessBinary`, `McpRegistrationState/Action/Reason`, digest-bound preview/command/result).
@@ -56,8 +62,13 @@ exactly those contracts and connects the steps without weakening any existing tr
    managed markers) that registration must not reuse. ADR-010's guarantee is preserved: adding a
    harness is still one `HarnessId` value plus adapters, with no port or registry change.
 
-5. **Discovery is pure observation.** `discover_codex_binaries` scans `$PATH` for executable
-   `codex` entries, dedupes by resolved target while keeping the PATH-visible name, probes
+5. **Discovery is pure observation.** `discover_codex_binaries` scans `$PATH` plus reviewed app
+   locations: the standard macOS Codex Desktop resource directory and the resource directory from
+   the Windows Store package family `OpenAI.Codex_2p2nqsd0c76g0`, resolved by a bounded read-only
+   package query. Linux has no official Codex App distribution today, so no app path is fabricated.
+   Exact allowlisted names are `codex` and `codex-testing` on POSIX, with `.exe`/`.cmd` forms on
+   Windows. Results are deduped by resolved target while keeping the visible candidate path, then
+   version-probed
    `codex --version` with a bounded timeout, and always reports `untested` compatibility (E-002:
    a version string is not support evidence). Interactive setup first presents the automatically
    detected supported harnesses — exactly **Codex** in v0.1 — as a numbered choice, then presents a
@@ -66,7 +77,9 @@ exactly those contracts and connects the steps without weakening any existing tr
    remain the protocol-owned lowercase `yoetz`/`codex` tokens. Non-interactive runs fail closed on
    multiple installations and require `--codex-path`. Every registration preview requires an
    explicit `Y` or `N` answer with no implicit default; `--accept` remains the explicit automation
-   path.
+   path. Discovery never widens to `codex-*`: in particular, `codex-testing-update` is not executed
+   or presented as an installation. macOS and Windows therefore combine app and CLI installations;
+   Linux uses the identical selection flow for the official CLI surfaces that actually exist.
 
 6. **The npm launcher exists, publish-ready and deliberately unpublished (amends ADR-007
    decision 7).** `support/npm-launcher/` contains a dependency-free `package.json` (registry name
@@ -77,19 +90,25 @@ exactly those contracts and connects the steps without weakening any existing tr
    once, in the Python CLI. `"private": true` is the load-bearing unpublished guarantee; flipping
    it is a separate deliberate release decision with its own review, never a side effect.
 
-7. **The confidential boundaries are restated, not flipped.** The wizard never accepts a secret by
-   flag, environment, stdin, or file; the provider credential is provisioned only through the
-   existing `yoetz provider credential set` ceremony, and privacy policy only through
-   `yoetz privacy setup` and the trusted decision commands. The wizard checks service
-   reachability and stops with exact instructions when the service is absent — the CLI still never
-   spawns the service (ADR-008). These are existing invariants recorded here so a future
-   contributor does not "fix" the wizard by automating a ceremony.
+7. **The confidential boundaries remain exact.** The wizard never accepts a secret by flag,
+   ordinary stdin, environment, config, report, or MCP. A local interactive run may enter the
+   existing confidential helper, which reads vault and provider secrets with hidden `/dev/tty`
+   input and sends them only over YZS1. Noninteractive setup never provisions a credential.
+
+8. **Founder-authorized on-demand service start (2026-07-22 amendment).** A mutating interactive
+   setup run and the MCP bridge may invoke the shared fixed-command service launcher when the
+   authenticated endpoint is absent. The launcher executes only the current installed
+   `python -m yoetz service run`, supplies no caller path/config/provider/secret argument, strips
+   secret-shaped inherited environment names, detaches using the reviewed platform process flags,
+   and reconnects to the singleton winner. The service stops after 1,800 seconds of true
+   quiescence; a later MCP tool call may start a generation-fenced successor. A locked successor
+   remains locked and still requires local-human unlock.
 
 ## Consequences
 
 A new user's path is now: `npx yoetz` or `uvx yoetz` → interactive wizard → detected-harness
 selection (Codex in v0.1) → installation selection when needed → explicit `Y`/`N` confirmation →
-Codex MCP registration → printed, exact next commands for the service, privacy policy, and credential.
+Codex MCP registration → on-demand local service → local vault/provider ceremonies → privacy policy.
 Each mutating step is previewed, digest-bound, and individually declinable; `yoetz setup status`
 reports the same posture read-only at any time. The CLI support-command matrix grows by one
 (`setup`), recorded in the conformance contract test in the same change.

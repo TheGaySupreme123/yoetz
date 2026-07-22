@@ -15,6 +15,9 @@ vault, or direct-execution fallback.
 
 - `class ServiceClient(ControlClientPort)` implementing the port.
 - `async connect_service(client_kind: ControlClientKind) -> ServiceClient`.
+- `async connect_service_on_demand(client_kind, *, timeout_seconds=10.0) -> ServiceClient` —
+  connect first; only an absent endpoint starts the fixed detached current-install service and
+  retries the authenticated connection.
 - Six exact async workflow methods matching `Application`: `start`, `publish_work`, `check`,
   `respond`, `status`, `receipt`.
 - Exact ordinary support methods `import_codex_jsonl`, `review`, `backup_preview`, `backup_execute`,
@@ -44,7 +47,10 @@ environment mapping, provider client, `Application`, or adapter factory.
 
 `connect_service` derives the endpoint only through the verified platform runtime path, asks the
 Unix-socket adapter to authenticate the service peer as the current effective UID, then performs
-the frozen handshake. It never starts a service automatically. A missing endpoint is a bounded
+the frozen handshake. It never starts a service automatically. `connect_service_on_demand` is the
+explicit exception: it launches exactly `sys.executable -m yoetz service run`, with no shell/caller
+locator and with secret-shaped inherited environment names removed. Concurrent launches rely on
+the existing singleton. A missing endpoint is a bounded
 `service_unavailable` result with human guidance owned by the surface renderer.
 
 Each operation validates its already typed body, allocates a fresh transport RPC ID, preserves the
@@ -74,7 +80,8 @@ collapses `not_found` into an empty view or exposes the internal optional direct
 
 ## Errors and edge cases
 
-- Service absent → `ControlError(service_unavailable)`; no subprocess spawn/direct app fallback.
+- Direct `connect_service`: service absent → `ControlError(service_unavailable)`.
+- On-demand connect: bounded fixed-command spawn/retry; timeout → retryable `service_unavailable`.
 - Service locked → structural status remains available; workflow/support calls become the
   sanitized `vault_locked` mapping without a prompt or secret field.
 - Service draining → bounded `service_draining`. Wire `service_generation_changed` closes the stale

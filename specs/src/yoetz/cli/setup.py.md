@@ -10,9 +10,16 @@
 
 Owns the ADR-012 wizard and the client-local `integrate <harness> mcp` command bodies, kept out
 of `app.py` the way `unlock.py` and `privacy_control.py` hold their logic behind thin wiring.
-The wizard connects existing safe operations; it automates no ceremony and spawns no service.
+The wizard connects existing safe operations. A local interactive run may start the fixed service
+and enter existing hidden-TTY confidential ceremonies; noninteractive setup does neither.
 
 ## Public surface
+
+- `run_provider_setup(fireworks=False, model=None, api_key=None) -> int` — the interactive-only short path used
+  by `yoetz --set`; it starts the local service on demand, performs required vault setup/unlock,
+  optionally applies the fixed Fireworks profile and model without asking for internal binding
+  identifiers, then enters the credential ceremony. An explicit API-key value is never echoed and
+  is converted immediately to the mutable one-shot credential buffer; omission uses hidden input.
 
 - `SETUP_MARKER_SCHEMA` — exactly `yoetz.setup-wizard-marker/1`.
 - `setup_marker_present() -> bool` — marker existence, failing closed (`True`) on
@@ -38,14 +45,15 @@ registration step through `HarnessMcpService`+`CodexMcpAdapter` — `yoetz_owned
 `already_registered`, `foreign_present` reports `skipped`/`foreign_entry_present` (preserved,
 never replaced), otherwise a branded `Yoetz`/`Codex` preview followed by an explicit `Y` or `N`
 prompt with no default (or the `--accept` flag) gates one
-digest-bound `register`; adapter failures become `failed` with the reason token; (5) probes
-service reachability via `build_service_client().service_status()` (a `ControlError` is
-`reachable: false`; the CLI never spawns the service); (6) on an interactive TTY, offers the
-nonsecret Official OpenAI vs owner-declared HTTPS origin+model prompt (writes `config.toml` via
-`cli/provider_binding`; never accepts secrets); (7) assembles `next_steps` naming the
+digest-bound `register`; adapter failures become `failed` with the reason token; (5) on an
+interactive run, uses the fixed on-demand connector and reports exact service state; a
+noninteractive status probe never starts it; (6) on an interactive TTY, offers Official OpenAI,
+the fixed Fireworks Responses profile, or an owner-declared HTTPS origin+model (writes
+`config.toml` via `cli/provider_binding`), then enters the existing hidden-TTY vault/provider
+ceremonies when needed; (7) assembles `next_steps` naming the
 exact follow-up commands — `yoetz service run`, `yoetz service unlock`, `yoetz privacy setup`,
-`yoetz provider endpoint` / TOML edit, and `yoetz provider credential set`.
-`yoetz provider credential set` — pointing at, never automating, the trusted ceremonies;
+`yoetz provider endpoint` / TOML edit, and `yoetz provider credential set`; on a real TTY it
+invokes those trusted ceremonies directly and records only structural outcomes;
 (8) on a mutating run (interactive, or `--accept`) writes the marker `{outcome, schema}` as
 canonical JSON, mode 0600, at `setup_marker_path()`; a dry run (`--non-interactive` without
 `--accept`) writes nothing; (9) emits the report (schema `yoetz.setup-wizard-report/1`) as
@@ -78,15 +86,16 @@ warnings, and `preview_digest`; `install` optionally binds `--preview-digest` (m
   failing the run.
 - Executable paths appear only in the local human/JSON report on the user's own terminal
   (`local_human_view`); they never enter diagnostics or exceptions.
-- Automatic discovery considers the reviewed PATH-visible executable name `codex` only. Custom
-  wrappers with arbitrary names remain selectable through explicit `--codex-path`; discovery never
-  executes wildcard `codex-*` programs merely because their names share a prefix.
+- Automatic discovery considers the reviewed PATH-visible executable names `codex` and
+  `codex-testing` only. Other custom wrappers remain selectable through explicit `--codex-path`;
+  discovery never executes wildcard `codex-*` programs merely because their names share a prefix,
+  and specifically excludes the mutating maintenance helper `codex-testing-update`.
 
 ## Invariants
 
 1. Every mutation is preceded by a preview and an explicit acceptance bound to its digest.
-2. The wizard never spawns the service, never automates `privacy setup` or the credential
-   ceremony, and never claims an unverified step succeeded.
+2. Service start is the fixed argument-free on-demand launcher. Vault/provider secrets remain
+   confined to the existing confidential hidden-TTY helper.
 3. A dry run mutates nothing: no marker, no registration.
 4. Foreign same-name MCP entries are preserved under every path.
 

@@ -14,11 +14,13 @@ Collect Official OpenAI vs owner-declared HTTPS origin+model (never secrets) and
 - `apply_provider_endpoint_choice(choice, *, model, https_origin=None, path=None)`
 - `prompt_provider_endpoint_binding(*, path=None)`
 - `NEXT_CREDENTIAL` — exact next-step string pointing at the credential ceremony
-- `ProviderEndpointChoice` — `official_openai` | `owner_declared`
+- `ProviderEndpointChoice` — `official_openai` | `fireworks` | `owner_declared`
 
 ## Behavior
 
-Interactive prompts never ask for API keys. Writes go through `config/write.write_provider_binding`.
+Interactive prompts never ask for API keys. The reviewed Fireworks choice binds
+`api.fireworks.ai/inference/v1` without accepting a free path. Writes go through
+`config/write.write_provider_binding`.
 Credentials remain `yoetz provider credential set|rotate`. Owner-declared selections print that
 data-use posture is `unknown` and never inherits `assisted`.
 

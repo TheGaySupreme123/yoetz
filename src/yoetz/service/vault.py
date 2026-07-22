@@ -69,6 +69,7 @@ from yoetz.protocol.ids import IdKind, validate_id
 
 __all__ = [
     "ProviderCredentialBinding",
+    "provider_credential_profile_binding",
     "VaultError",
     "VaultMode",
     "VaultService",
@@ -196,6 +197,39 @@ class ProviderCredentialBinding:
 
     def target_digest(self) -> str:
         return canonical_digest(cast(JsonValue, self.record_binding()))
+
+
+def provider_credential_profile_binding(
+    provider_id: str,
+    model_id: str,
+    endpoint_profile_id: str,
+    endpoint_profile_version: str,
+) -> ProviderCredentialBinding:
+    """Build the installation-wide credential record binding for one exact provider profile.
+
+    Per-dispatch authorization scope and purpose remain bound to the one-shot credential handle;
+    they do not require storing a duplicate copy of the same account credential for every task.
+    """
+
+    purpose = "llm-inference"
+    scope_digest = canonical_digest(
+        {
+            "endpoint_profile_id": endpoint_profile_id,
+            "endpoint_profile_version": endpoint_profile_version,
+            "kind": "provider_credential_profile",
+            "model_id": model_id,
+            "provider_id": provider_id,
+        }
+    )
+    return ProviderCredentialBinding(
+        provider_id,
+        model_id,
+        endpoint_profile_id,
+        endpoint_profile_version,
+        purpose,
+        scope_digest,
+        canonical_digest({"purpose": purpose}),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -550,23 +584,33 @@ class VaultService:
     ) -> ProviderCredentialHandle:
         async with self._mutex:
             store, generation = self._ready_store()
-            stored = ProviderCredentialBinding(
+            stored = provider_credential_profile_binding(
                 binding.provider_id,
                 binding.model_id,
                 binding.endpoint_profile_id,
                 binding.endpoint_profile_version,
-                binding.purpose,
-                binding.authorization_scope_digest,
-                binding.purpose_digest,
             )
             if binding.service_generation != self._service_generation:
                 raise VaultError("record_binding_mismatch")
             try:
-                record = store.load_record(
-                    VaultRecordKind.PROVIDER_CREDENTIAL, stored.record_binding()
+                record = store.load_record(VaultRecordKind.PROVIDER_CREDENTIAL, stored.record_binding())
+            except EncryptedVaultError:
+                # Backward-read support for pre-profile-binding development vaults.
+                legacy = ProviderCredentialBinding(
+                    binding.provider_id,
+                    binding.model_id,
+                    binding.endpoint_profile_id,
+                    binding.endpoint_profile_version,
+                    binding.purpose,
+                    binding.authorization_scope_digest,
+                    binding.purpose_digest,
                 )
-            except EncryptedVaultError as exc:
-                raise VaultError("record_missing") from exc
+                try:
+                    record = store.load_record(
+                        VaultRecordKind.PROVIDER_CREDENTIAL, legacy.record_binding()
+                    )
+                except EncryptedVaultError as exc:
+                    raise VaultError("record_missing") from exc
             plaintext = record.consume(SecretConsumer.VAULT_ROOT, lambda view: bytearray(view))
             credential = self._secret_memory.capture(SecretPurpose.PROVIDER_CREDENTIAL, plaintext)
             handle = _ProviderHandle(self, generation, binding, credential, self._clock)

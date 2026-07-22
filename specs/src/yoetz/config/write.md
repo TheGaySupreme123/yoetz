@@ -11,7 +11,8 @@ Provide the sole writers that turn validated `YoetzConfig` / provider bindings i
 
 ## Public surface
 
-- `official_openai_provider(...)` / `owner_declared_openai_provider(...)` — construct exact
+- `official_openai_provider(...)` / `fireworks_provider(...)` /
+  `owner_declared_openai_provider(...)` — construct exact
   nonsecret `ProviderProfileConfig` values for Official OpenAI vs owner-declared HTTPS origin.
 - `render_config_toml(config) -> str` — deterministic TOML text; round-trips through
   `YoetzConfig.model_validate`.

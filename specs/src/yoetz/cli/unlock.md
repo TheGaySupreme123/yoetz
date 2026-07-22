@@ -20,7 +20,7 @@ supplied by their dedicated trusted-foreground command.
   supplied binding.
 - Convenience `initialize_passphrase_vault()` and `unlock_vault()` plus purpose-specific wrappers
   owned by setup/maintenance/privacy flows.
-- `retry_keyring()` — zero-secret YZH1 action; and `set_provider_credential(binding)` /
+- `retry_keyring()` — zero-secret YZH1 action; and `set_provider_credential(binding, credential=None)` /
   `rotate_provider_credential(binding)` — reauthenticate then collect one credential through exact
   service-minted bindings.
 - `change_idle_relock_policy(target: int | Literal["disabled"]) -> IdleRelockCliResult` — open the

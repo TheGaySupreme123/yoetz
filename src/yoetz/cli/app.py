@@ -703,6 +703,13 @@ def provider_endpoint(
     official: Annotated[
         bool, typer.Option("--official", help="Bind the bundled Official OpenAI Responses profile.")
     ] = False,
+    fireworks: Annotated[
+        bool,
+        typer.Option(
+            "--fireworks",
+            help="Bind the reviewed Fireworks Responses profile.",
+        ),
+    ] = False,
     https_origin: Annotated[
         str | None,
         typer.Option(
@@ -725,7 +732,7 @@ def provider_endpoint(
     from yoetz.config.models import ConfigError
 
     try:
-        if interactive and not official and https_origin is None and model is None:
+        if interactive and not official and not fireworks and https_origin is None and model is None:
             if not (sys.stdin.isatty() and sys.stdout.isatty()):
                 _finish(_usage_failure())
                 return
@@ -735,11 +742,13 @@ def provider_endpoint(
         if model is None:
             _finish(_usage_failure())
             return
-        if official and https_origin is not None:
+        if (official and fireworks) or ((official or fireworks) and https_origin is not None):
             _finish(_usage_failure())
             return
         if official:
             path, provider = apply_provider_endpoint_choice("official_openai", model=model)
+        elif fireworks:
+            path, provider = apply_provider_endpoint_choice("fireworks", model=model)
         elif https_origin is not None:
             path, provider = apply_provider_endpoint_choice(
                 "owner_declared", model=model, https_origin=https_origin
@@ -976,10 +985,44 @@ def root(
         bool,
         typer.Option("--version", is_eager=True, help="Show the installed package version."),
     ] = False,
+    set_provider: Annotated[
+        bool,
+        typer.Option(
+            "--set",
+            help="Set up the LLM model and API key through the secure local wizard.",
+        ),
+    ] = False,
+    fireworks: Annotated[
+        bool,
+        typer.Option("--fireworks", help="Use the bundled Fireworks Responses profile."),
+    ] = False,
+    model: Annotated[
+        str | None,
+        typer.Option("--model", help="Provider model identifier used with --set."),
+    ] = None,
+    api_key: Annotated[
+        str | None,
+        typer.Option(
+            "--api-key",
+            help="Provider API key value; omit to use a hidden local-terminal prompt.",
+        ),
+    ] = None,
 ) -> None:
     if version:
         typer.echo(__version__)
         raise typer.Exit(0)
+    if set_provider:
+        if context.invoked_subcommand is not None:
+            raise typer.BadParameter("--set cannot be combined with a subcommand")
+        operation = _setup_operation("run_provider_setup")
+        _finish(
+            run_async(
+                lambda: operation(fireworks=fireworks, model=model, api_key=api_key)
+            )
+        )
+        return
+    if fireworks or model is not None or api_key is not None:
+        raise typer.BadParameter("--fireworks, --model, and --api-key require --set")
     if context.invoked_subcommand is not None:
         return
     # Bare invocation (ADR-013): an interactive terminal with no completion marker

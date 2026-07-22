@@ -38,12 +38,16 @@ deliberately unpublished today.)
 The first bare `yoetz` on an interactive terminal starts a **setup wizard**
 ([ADR-012](docs/adr/ADR-012-first-run-setup-wizard.md)). It lists automatically detected supported
 harnesses (Codex in v0.1), asks which one to connect to Yoetz, separately asks which installation
-to use when several Codex CLI binaries are on your PATH, then previews and — only after an explicit
-`Y` confirmation — registers `yoetz mcp serve` with the chosen Codex
+to use when several Codex CLI binaries are found on your PATH or in the standard macOS Codex
+Desktop location (or the Windows Store Codex App package), then previews and — only after an
+explicit `Y` confirmation — registers `yoetz mcp serve` with the chosen Codex
 (`codex mcp get` first; an existing foreign entry is always preserved, never replaced), checks
 whether the local service is reachable, optionally collects the nonsecret Official OpenAI vs
 custom HTTPS origin+model binding (writes service `config.toml`; never secrets), and prints the
 exact next commands for the parts that stay deliberately human-driven:
+
+The official Codex App currently exists on macOS and Windows; Linux setup uses the same wizard for
+the standalone Codex CLI and does not fabricate an app installation that OpenAI does not publish.
 
 1. `yoetz service run` — start the persistent local service under a supervisor you choose;
 2. `yoetz privacy setup` — review recipes, provider binding, and egress policy (zero-egress

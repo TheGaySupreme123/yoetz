@@ -27,6 +27,7 @@ from yoetz.protocol.canonical import (
 from yoetz.protocol.ids import IdKind, new_id, validate_id
 
 __all__ = [
+    "IDLE_STOP_SECONDS",
     "LOCK_DRAIN_SECONDS",
     "STOP_DRAIN_SECONDS",
     "Admission",
@@ -39,6 +40,7 @@ __all__ = [
 
 LOCK_DRAIN_SECONDS: Final = 5
 STOP_DRAIN_SECONDS: Final = 30
+IDLE_STOP_SECONDS: Final = 1_800
 _DEFAULT_IDLE_SECONDS: Final = 900
 _IDLE_POLICY_DOMAIN: Final = "yoetz/idle-relock-policy-change/v1\x00"
 _LIFECYCLE_REASONS: Final = frozenset(
@@ -203,11 +205,12 @@ class ServiceLifecycle:
         terminate_on_deadline: Callable[[], Awaitable[None]] | None = None,
         lock_drain_seconds: float = float(LOCK_DRAIN_SECONDS),
         stop_drain_seconds: float = float(STOP_DRAIN_SECONDS),
+        idle_stop_seconds: float = float(IDLE_STOP_SECONDS),
     ) -> None:
         validate_sha256_digest(process_start_identity_commitment)
         if instance_id is not None:
             validate_id(IdKind.SERVICE_INSTANCE, instance_id)
-        for value in (lock_drain_seconds, stop_drain_seconds):
+        for value in (lock_drain_seconds, stop_drain_seconds, idle_stop_seconds):
             if type(value) is not float or not math.isfinite(value) or value <= 0.0:
                 raise ValueError("drain_timeout_invalid")
         self._clock = clock
@@ -223,10 +226,13 @@ class ServiceLifecycle:
         self._terminate_on_deadline = terminate_on_deadline or _noop
         self._lock_drain_seconds = lock_drain_seconds
         self._stop_drain_seconds = stop_drain_seconds
+        self._idle_stop_seconds = idle_stop_seconds
         self._instance: ServiceInstance | None = None
         self._vault_generation: int | None = None
         self._policy = IdleRelockPolicy()
         self._last_quiescent_activity: float | None = None
+        self._last_process_activity: float | None = None
+        self._connected_clients = 0
         self._admissions: dict[int, Admission] = {}
         self._owner_token = object()
         self._mutex = asyncio.Lock()
@@ -293,6 +299,7 @@ class ServiceLifecycle:
                 self._process_commitment,
                 ServiceState.STARTING,
             )
+            self._last_process_activity = self._sample_monotonic()
             return self._instance
 
     async def publish_endpoint(self) -> None:
@@ -328,7 +335,9 @@ class ServiceLifecycle:
                     raise LifecycleError("vault_locked")
                 self._vault_generation = vault_generation
                 now = self._sample_monotonic()
-                self._last_quiescent_activity = now if not self._admissions else None
+                self._last_quiescent_activity = (
+                    now if not self._admissions and not self._connected_clients else None
+                )
             else:
                 if vault_generation is not None:
                     raise LifecycleError("invalid_transition")
@@ -341,6 +350,27 @@ class ServiceLifecycle:
                     self._last_quiescent_activity = None
             self._instance = replace(self.instance, state=target)
             return self._instance
+
+    async def client_connected(self) -> None:
+        """Hold process-idle shutdown while one authenticated local connection is active."""
+
+        async with self._mutex:
+            if self._closed or self.state in {ServiceState.DRAINING, ServiceState.FAILED}:
+                raise LifecycleError("service_draining")
+            self._connected_clients += 1
+            self._last_process_activity = None
+            self._last_quiescent_activity = None
+
+    async def client_disconnected(self) -> None:
+        async with self._mutex:
+            if self._connected_clients <= 0:
+                raise LifecycleError("invalid_transition")
+            self._connected_clients -= 1
+            if not self._connected_clients and not self._admissions:
+                now = self._sample_monotonic()
+                self._last_process_activity = now
+                if self.state is ServiceState.READY:
+                    self._last_quiescent_activity = now
 
     async def admit(
         self,
@@ -368,6 +398,7 @@ class ServiceLifecycle:
             )
             self._admissions[id(admission)] = admission
             self._last_quiescent_activity = None
+            self._last_process_activity = None
             return admission
 
     async def release(self, admission: Admission) -> None:
@@ -378,16 +409,21 @@ class ServiceLifecycle:
             ):
                 raise LifecycleError("invalid_transition")
             admission.mark_released()
-            if not self._admissions and self.state is ServiceState.READY:
-                self._last_quiescent_activity = self._sample_monotonic()
+            if not self._admissions and not self._connected_clients:
+                now = self._sample_monotonic()
+                self._last_process_activity = now
+                if self.state is ServiceState.READY:
+                    self._last_quiescent_activity = now
             self._condition.notify_all()
 
     async def note_activity(self) -> None:
         async with self._mutex:
             if self.state is not ServiceState.READY:
                 return
-            if not self._admissions:
-                self._last_quiescent_activity = self._sample_monotonic()
+            if not self._admissions and not self._connected_clients:
+                now = self._sample_monotonic()
+                self._last_quiescent_activity = now
+                self._last_process_activity = now
 
     async def request_lock(self, reason: str = "explicit") -> None:
         del reason  # state publication owns bounded reasons outside this internal coordinator
@@ -418,14 +454,28 @@ class ServiceLifecycle:
         while not self._idle_stop.is_set():
             await asyncio.sleep(poll_seconds)
             should_lock = False
+            should_stop = False
             async with self._mutex:
-                if self.state is not ServiceState.READY or self._admissions:
+                if self._admissions or self._connected_clients:
                     continue
-                seconds = self._policy.seconds
-                started = self._last_quiescent_activity
-                if seconds is None or started is None:
+                process_started = self._last_process_activity
+                if process_started is not None:
+                    should_stop = (
+                        self._sample_monotonic() - process_started >= self._idle_stop_seconds
+                    )
+                if should_stop:
+                    pass
+                elif self.state is not ServiceState.READY:
                     continue
-                should_lock = self._sample_monotonic() - started >= seconds
+                else:
+                    seconds = self._policy.seconds
+                    started = self._last_quiescent_activity
+                    if seconds is None or started is None:
+                        continue
+                    should_lock = self._sample_monotonic() - started >= seconds
+            if should_stop:
+                await self.request_stop("idle_shutdown")
+                return
             if should_lock:
                 await self.request_lock("idle_expired")
 
@@ -456,7 +506,9 @@ class ServiceLifecycle:
             except SecretMemoryError as exc:
                 raise LifecycleError("human_authorization_stale") from exc
             self._policy = proposed
-            self._last_quiescent_activity = now if not self._admissions else None
+            self._last_quiescent_activity = (
+                now if not self._admissions and not self._connected_clients else None
+            )
             return self._policy
 
     def idle_relock_target_digest(

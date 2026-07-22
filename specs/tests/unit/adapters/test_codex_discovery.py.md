@@ -18,8 +18,12 @@ Covers: empty/missing PATH entries yield an empty tuple; a single candidate repo
 PATH-visible path, parsed `x.y.z` version, and always-`untested` compatibility; failed or
 unparsable version probes yield `reported_version=None`; a symlinked duplicate is deduplicated
 by resolved target while keeping the PATH-visible name; two distinct installs are both reported
-in sorted order; a non-executable candidate is skipped; discovery leaves candidate bytes and
-mode untouched.
+in sorted order; the exact `codex-testing` wrapper is included while prefix neighbors such as
+`codex-testing-update` are ignored; the default macOS probe adds the standard Codex Desktop
+resource directory even when a normal terminal PATH omits it; Windows combines the Store-installed
+Codex App resource directory with PATH CLIs and collapses `.exe`/`.cmd` forms for one logical
+installation; Linux discovers the CLI and testing wrapper through the same candidate contract; a
+non-executable candidate is skipped; discovery leaves candidate bytes and mode untouched.
 
 ## Errors and edge cases
 

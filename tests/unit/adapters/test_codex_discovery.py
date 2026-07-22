@@ -6,6 +6,9 @@ import os
 import stat
 from pathlib import Path
 
+import pytest
+
+import yoetz.adapters.integrations.codex_discovery as discovery_module
 from yoetz.adapters.integrations.codex_discovery import discover_codex_binaries
 from yoetz.ports.integrations import HarnessId
 
@@ -24,9 +27,14 @@ class _Probe:
         return self.versions.get(executable)
 
 
-def _make_codex(directory: Path, *, executable: bool = True) -> Path:
+def _make_codex(
+    directory: Path,
+    *,
+    executable: bool = True,
+    executable_name: str = "codex",
+) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
-    binary = directory / "codex"
+    binary = directory / executable_name
     binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     mode = 0o755 if executable else 0o644
     os.chmod(binary, mode)
@@ -77,6 +85,83 @@ def test_two_distinct_installs_are_both_reported_sorted(tmp_path: Path) -> None:
     probe = _Probe((str(second.parent), str(first.parent)), {})
     result = discover_codex_binaries(_probe=probe)
     assert [entry.executable_path for entry in result] == sorted([str(first), str(second)])
+
+
+def test_exact_testing_wrapper_is_discovered_but_prefix_neighbors_are_not(tmp_path: Path) -> None:
+    directory = tmp_path / "bin"
+    testing = _make_codex(directory, executable_name="codex-testing")
+    _make_codex(directory, executable_name="codex-testing-update")
+    probe = _Probe((str(directory),), {str(testing): "codex-cli 0.146.0-alpha.2"})
+
+    result = discover_codex_binaries(_probe=probe)
+
+    assert [entry.executable_path for entry in result] == [str(testing)]
+    assert result[0].reported_version == "0.146.0"
+    assert probe.probed == [str(testing)]
+
+
+def test_default_probe_adds_standard_macos_desktop_location(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path_directory = tmp_path / "path-bin"
+    desktop_directory = tmp_path / "desktop"
+    npm_codex = _make_codex(path_directory)
+    testing_codex = _make_codex(path_directory, executable_name="codex-testing")
+    desktop_codex = _make_codex(desktop_directory)
+    monkeypatch.setenv("PATH", str(path_directory))
+    monkeypatch.setattr(discovery_module.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        discovery_module,
+        "_MACOS_CODEX_DIRECTORIES",
+        (str(desktop_directory),),
+    )
+
+    result = discover_codex_binaries()
+
+    assert [entry.executable_path for entry in result] == sorted(
+        [str(npm_codex), str(testing_codex), str(desktop_codex)]
+    )
+
+
+def test_windows_discovers_store_app_cli_and_one_form_per_path_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path_directory = tmp_path / "windows-path"
+    app_resources = tmp_path / "windows-app" / "resources"
+    cli_exe = _make_codex(path_directory, executable_name="codex.exe")
+    _make_codex(path_directory, executable_name="codex.cmd")
+    testing_cmd = _make_codex(path_directory, executable_name="codex-testing.cmd")
+    app_cli = _make_codex(app_resources, executable_name="codex.exe")
+    monkeypatch.setenv("PATH", str(path_directory))
+    monkeypatch.setattr(discovery_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        discovery_module,
+        "_windows_codex_app_directories",
+        lambda: (str(app_resources),),
+    )
+
+    result = discover_codex_binaries()
+
+    assert [entry.executable_path for entry in result] == sorted(
+        [str(cli_exe), str(testing_cmd), str(app_cli)]
+    )
+
+
+def test_linux_discovers_cli_and_testing_wrapper_with_same_selection_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path_directory = tmp_path / "linux-path"
+    cli = _make_codex(path_directory)
+    testing = _make_codex(path_directory, executable_name="codex-testing")
+    monkeypatch.setenv("PATH", str(path_directory))
+    monkeypatch.setattr(discovery_module.sys, "platform", "linux")
+
+    result = discover_codex_binaries()
+
+    assert [entry.executable_path for entry in result] == sorted([str(cli), str(testing)])
 
 
 def test_non_executable_candidate_is_skipped(tmp_path: Path) -> None:

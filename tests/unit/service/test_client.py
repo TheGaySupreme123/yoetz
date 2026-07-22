@@ -28,6 +28,7 @@ from yoetz.service.client import (
     PrivacyReceiptFound,
     PrivacyReceiptNotFound,
     ServiceClient,
+    connect_service_on_demand,
 )
 from yoetz.service.control_protocol import (
     ControlSession,
@@ -232,6 +233,52 @@ async def test_mcp_rejects_every_support_method_before_transport() -> None:
         await client.privacy_get_effective(JsonObject({}))
     assert stream.sent == []
     await client.close()
+
+
+@pytest.mark.anyio
+async def test_on_demand_connect_spawns_only_after_absent_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.service.client as client_module
+
+    expected = object()
+    calls = 0
+    spawned = 0
+
+    async def scripted_connect(kind: ControlClientKind) -> object:
+        nonlocal calls
+        assert kind is ControlClientKind.MCP_BRIDGE
+        calls += 1
+        if calls == 1:
+            raise ControlError("service_unavailable", retryable=True)
+        return expected
+
+    def spawn() -> None:
+        nonlocal spawned
+        spawned += 1
+
+    monkeypatch.setattr(client_module, "connect_service", scripted_connect)
+    monkeypatch.setattr(client_module, "_spawn_service_process", spawn)
+    connected = await connect_service_on_demand(
+        ControlClientKind.MCP_BRIDGE, timeout_seconds=0.2
+    )
+    assert connected is expected
+    assert spawned == 1
+
+
+def test_on_demand_service_environment_strips_secret_shaped_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.service.client as client_module
+
+    monkeypatch.setenv("FIREWORKS_API_KEY", "must-not-cross")
+    monkeypatch.setenv("UNRELATED_TOKEN", "must-not-cross")
+    monkeypatch.setenv("PATH", "/safe/bin")
+    environment = client_module._service_environment()  # pyright: ignore[reportPrivateUsage]
+    assert environment["PATH"] == "/safe/bin"
+    assert "FIREWORKS_API_KEY" not in environment
+    assert "UNRELATED_TOKEN" not in environment
+    assert "must-not-cross" not in environment.values()
 
 
 @pytest.mark.anyio

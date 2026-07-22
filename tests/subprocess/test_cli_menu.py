@@ -66,7 +66,7 @@ def test_menu_home_renders_overview_and_quits(menu_env: Path) -> None:
 def test_menu_sections_navigate_back_to_home(menu_env: Path) -> None:
     result = _RUNNER.invoke(cli.app, ["menu"], input="4\nb\n5\nb\n6\nb\nq\n")
     assert result.exit_code == 0
-    assert "Rotate a provider credential" in result.output
+    assert "Replace API key for the configured provider" in result.output
     assert "Show effective policy" in result.output
     assert "Unlock vault" in result.output
     # Returning from each section re-renders the home screen before quitting.
