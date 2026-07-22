@@ -48,11 +48,11 @@ that frozen order. Each description states what the operation records or reads, 
 prove, and — where the operation has a drill-down — where the agent goes next for detail. It never
 restates the input schema in prose, which the host already has.
 
-`status` and `receipt` carry `readOnlyHint=true`; both provably create no task-ledger event.
-`start`, `publish_work`, `check`, and `respond` carry `readOnlyHint=false` and
-`idempotentHint=true`, because each is safe to retry with its original request ID and that is
-exactly the behavior the retry contract needs an agent to choose. No descriptor carries
-`destructiveHint`: no Yoetz operation deletes recorded evidence.
+`status` carries `readOnlyHint=true` because it creates no task-ledger event. `receipt` carries
+`readOnlyHint=false` because it stages a receipt object and appends a `receipt_recorded` event.
+Every tool carries an explicit `idempotentHint=true`: each is safe to retry with its original
+request ID, including `status` (a pure read) and `receipt` (idempotent record-or-replay). No
+descriptor carries `destructiveHint`: no Yoetz operation deletes recorded evidence.
 
 Descriptions are written to answer the follow-up an agent will actually have. `check` states that it
 returns at most `max_findings` findings plus a suppressed count, and that `status` with
@@ -109,7 +109,9 @@ verdict means the work is correct.
 2. `instructions` bytes equal the packaged resource bytes exactly; there is no fallback.
 3. Descriptor text is static and cannot vary with user, task, provider, or environment state.
 4. The wording lint applies here exactly as it applies to guidance.
-5. Annotations are honest: `readOnlyHint` is true only where no ledger event can result.
+5. Annotations are honest: `readOnlyHint` is true only where no ledger event can result
+   (`status`); `receipt` is not read-only because it appends `receipt_recorded`. Every tool states
+   `idempotentHint` explicitly.
 6. No descriptor claims observation, enforcement, or verification.
 7. The `status` description carries the re-grounding cue: it states the uncertainty condition under
    which an agent should call `status` — uncertainty about what it has already done or committed to

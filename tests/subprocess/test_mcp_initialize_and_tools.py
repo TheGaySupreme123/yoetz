@@ -123,17 +123,46 @@ def test_raw_initialize_lists_exact_capabilities_tools_and_resources() -> None:
     ]
 
 
-def test_unsupported_protocol_is_rejected_before_sdk_negotiation() -> None:
+def test_unknown_protocol_falls_back_to_latest_supported() -> None:
     frames, _stderr = _run_raw(_initialize("1900-01-01"))
 
-    assert frames == [
+    assert len(frames) == 1
+    result = cast(dict[str, object], frames[0]["result"])
+    assert frames[0]["id"] == 1
+    assert "error" not in frames[0]
+    assert result["protocolVersion"] == types.LATEST_PROTOCOL_VERSION
+
+
+def test_malicious_unknown_tool_name_is_sanitized_over_stdio() -> None:
+    """Unregistered tools/call names become JSON-RPC errors without echoing the raw name."""
+
+    injected = "evil\n\x1b[31m" + ("A" * 4000) + "\nTOOL_NAME_INJECTION_MARKER"
+    frames, stderr = _run_raw(
+        _initialize(types.LATEST_PROTOCOL_VERSION),
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {
             "jsonrpc": "2.0",
-            "id": 1,
-            "error": {
-                "code": -32602,
-                "message": "Unsupported protocol version",
-                "data": {"reason": "unsupported_protocol_version"},
-            },
-        }
-    ]
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": injected, "arguments": {}},
+        },
+    )
+    by_id = {frame.get("id"): frame for frame in frames}
+    initialize = cast(dict[str, object], by_id[1]["result"])
+    assert initialize["protocolVersion"] == types.LATEST_PROTOCOL_VERSION
+
+    error_frame = by_id[2]
+    assert "result" not in error_frame
+    error = cast(dict[str, object], error_frame["error"])
+    assert error["code"] == -32602
+    message = cast(str, error["message"])
+    assert message == "The requested tool is not registered."
+    assert injected not in message
+    assert "TOOL_NAME_INJECTION_MARKER" not in message
+    assert "\n" not in message
+
+    # Stderr must not contain the raw injected name or newline-split payload fragments.
+    assert b"TOOL_NAME_INJECTION_MARKER" not in stderr
+    assert b"\x1b[31m" not in stderr
+    # Protocol stdout stays one JSON-RPC object per response line (already parsed above).
+    assert all(isinstance(frame.get("jsonrpc"), str) for frame in frames)

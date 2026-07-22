@@ -1837,7 +1837,9 @@ facade and are never MCP tools.
   packaged `guidance/` resources and verified against the resource manifest before use; none is
   composed at runtime from user, task, provider, or environment values. Shared values are
   `ToolDescriptor`, `TOOL_DESCRIPTORS` (frozen, in the same order `tools/list` returns), and
-  `server_instructions()`. `status` and `receipt` carry `readOnlyHint=true`; no descriptor carries a
+  `server_instructions()`. `status` carries `readOnlyHint=true`; `receipt` carries
+  `readOnlyHint=false` because it stages an object and appends a `receipt_recorded` event. Every
+  tool carries an explicit `idempotentHint=true`. No descriptor carries a
   `destructiveHint`, because no Yoetz operation deletes recorded evidence. Descriptor and
   instruction text is bound by the same honesty lint as the guidance references: it may not say
   "verified", "proved", "authenticated", or "complete" except where the surrounding sentence states

@@ -84,6 +84,7 @@ def _descriptor(
     description: str,
     *,
     read_only: bool,
+    idempotent: bool,
 ) -> ToolDescriptor:
     schema_name = name.replace("_", "-")
     return ToolDescriptor(
@@ -96,7 +97,7 @@ def _descriptor(
         output_schema_ref=(
             f"{SCHEMA_NAMESPACE}operations/{schema_name}-result-{_SCHEMA_VERSION}.schema.json"
         ),
-        annotations=ToolAnnotations(read_only=read_only, idempotent=not read_only),
+        annotations=ToolAnnotations(read_only=read_only, idempotent=idempotent),
     )
 
 
@@ -107,6 +108,7 @@ TOOL_DESCRIPTORS: Final = (
         "Records or resumes a cooperative work session and returns its compact record. "
         "It does not show that work outside the published record occurred.",
         read_only=False,
+        idempotent=True,
     ),
     _descriptor(
         "publish_work",
@@ -114,6 +116,7 @@ TOOL_DESCRIPTORS: Final = (
         "Records a bounded batch of agent-published work events and returns the accepted event "
         "range and coverage. It has no information about work outside that batch.",
         read_only=False,
+        idempotent=True,
     ),
     _descriptor(
         "check",
@@ -122,6 +125,7 @@ TOOL_DESCRIPTORS: Final = (
         "max_findings findings plus a suppressed count, and status with view=findings reads the "
         "rest. A no_issue_detected verdict does not mean the work is correct.",
         read_only=False,
+        idempotent=True,
     ),
     _descriptor(
         "respond",
@@ -129,6 +133,7 @@ TOOL_DESCRIPTORS: Final = (
         "Records an acknowledgement, rejection, or bounded waiver for one finding at its recorded "
         "frontier. It does not resolve other findings or establish that underlying work changed.",
         read_only=False,
+        idempotent=True,
     ),
     _descriptor(
         "status",
@@ -139,13 +144,15 @@ TOOL_DESCRIPTORS: Final = (
         "findings; view=candidate_findings returns unrecorded deterministic candidates without "
         "verdicts or IDs.",
         read_only=True,
+        idempotent=True,
     ),
     _descriptor(
         "receipt",
-        "Read a recorded receipt",
-        "Reads a receipt of the recorded conclusion and coverage limitations at one frontier. "
-        "It does not establish correctness beyond that recorded coverage.",
-        read_only=True,
+        "Record and read a receipt",
+        "Records and returns a receipt of the recorded conclusion and coverage limitations at one "
+        "frontier. It does not establish correctness beyond that recorded coverage.",
+        read_only=False,
+        idempotent=True,
     ),
 )
 
@@ -177,12 +184,12 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[str, str]] = MappingProxyType(
         "publish_work": "sha256:8203bfce3611794f1164f1416c3e5602c286746d69c0f3385cd0e904b1bd7e19",
         "check": "sha256:bd78bde8d0586896318534abcc248aa8d87f30ff4952046593549dc57f394500",
         "respond": "sha256:740e576f822636bdcdf4f246a86192a336e7d0284aae611bbc6421ee62ed469a",
-        "status": "sha256:a153a20df60166bfd16d916a5c6d92118c28e0a3a4079d5568fa93b47b6fa244",
-        "receipt": "sha256:d212254849f3681ba63d71c8f51d6ec18870f9298e4c26edec6f2b2e8952543b",
+        "status": "sha256:298be02f811b28b0d588ee4cff81cf97a1a47d1f1e2bd7ed7a40d619ad7e4d60",
+        "receipt": "sha256:75a8a26a45689c4d0fec54ee20784eda43096b8726fd59f924d599f4bd27d095",
     }
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final = (
-    "sha256:d7cd0ca02b4ab68957a5444d3f02aa5f23b95a0d1b3ab0b78982dc94c39d8976"
+    "sha256:f693c0eaedcefe93fcbeed79466be8771153e3ca9e2eb556ab63299fb0d1530a"
 )
 
 

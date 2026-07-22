@@ -11,6 +11,7 @@ from yoetz.version import read_verified_resource
 __all__ = [
     "GUIDANCE_RESOURCES",
     "GuidanceResource",
+    "GuidanceResourceAnnotations",
     "GuidanceResourceError",
     "list_resources",
     "read_resource",
@@ -22,12 +23,21 @@ class GuidanceResourceError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class GuidanceResourceAnnotations:
+    """Honest MCP resource annotations: intended audience and relative priority."""
+
+    audience: tuple[str, ...]
+    priority: float
+
+
+@dataclass(frozen=True, slots=True)
 class GuidanceResource:
     uri: str
     logical_name: str
     name: str
     title: str
     description: str
+    annotations: GuidanceResourceAnnotations
     media_type: str = "text/markdown"
 
     @property
@@ -49,28 +59,43 @@ GUIDANCE_RESOURCES: Final = (
         logical_name="guidance/agent-instructions.md",
         name="agent-instructions.md",
         title="Yoetz agent instructions",
-        description="Always-delivered instructions for cooperative use of the recorded work surface.",
+        description=(
+            "Read at session start when cooperative recorded-work guidance is needed. "
+            "Always-delivered floor instructions for using the recorded work surface."
+        ),
+        annotations=GuidanceResourceAnnotations(audience=("assistant",), priority=1.0),
     ),
     GuidanceResource(
         uri="yoetz://guidance/workflow.md",
         logical_name="guidance/workflow.md",
         name="workflow.md",
         title="Yoetz cooperative workflow",
-        description="The bounded cooperative workflow for recording, checking, and resuming work.",
+        description=(
+            "Read at task intake before substantive work. The bounded cooperative workflow for "
+            "recording, checking, and resuming work."
+        ),
+        annotations=GuidanceResourceAnnotations(audience=("assistant",), priority=0.9),
     ),
     GuidanceResource(
         uri="yoetz://guidance/publication-policy.md",
         logical_name="guidance/publication-policy.md",
         name="publication-policy.md",
         title="Yoetz publication policy",
-        description="Rules for publishing material work events into the local record.",
+        description=(
+            "Read before publishing material work events. Rules for publishing into the local "
+            "record."
+        ),
+        annotations=GuidanceResourceAnnotations(audience=("assistant",), priority=0.6),
     ),
     GuidanceResource(
         uri="yoetz://guidance/coverage-and-receipts.md",
         logical_name="guidance/coverage-and-receipts.md",
         name="coverage-and-receipts.md",
         title="Yoetz coverage and receipts",
-        description="How to interpret coverage, findings, conclusions, and receipt limitations.",
+        description=(
+            "Read before interpreting coverage, findings, conclusions, or receipt limitations."
+        ),
+        annotations=GuidanceResourceAnnotations(audience=("assistant",), priority=0.6),
     ),
 )
 

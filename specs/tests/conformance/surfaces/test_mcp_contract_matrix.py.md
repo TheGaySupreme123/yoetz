@@ -18,8 +18,9 @@ and fallback errors match the public contract.
 - `test_fallback_error_object_is_admitted` — the last-resort error object is accepted.
 - `test_public_error_and_validation_summaries_are_sanitized` — public error envelopes expose only
   allowlisted paths/reason codes and their text never exceeds structured content.
-- `test_unknown_tool_is_a_tool_level_invalid_request` — unknown tools are distinct from malformed
-  JSON-RPC and never enter application dispatch.
+- `test_unknown_tool_message_is_sanitized` — unknown-tool public messages never echo the raw name;
+  over stdio, unregistered tools/call names are JSON-RPC errors (see subprocess malicious-name
+  coverage).
 - `test_descriptor_text_is_frozen_and_honest` — the six descriptors, their order, and their
   annotations are exact, and every description plus the instructions text passes the wording lint.
 - `test_guidance_resources_are_exact_and_static` — the four registered URIs are exact, bytes equal
@@ -34,8 +35,8 @@ The test asserts:
 - tools/list reports exactly the six operation tools, in frozen order, and resources add none;
 - declared capabilities are exactly tools plus resources with the `instructions` string, and no
   prompts, sampling, roots, completions, or resource subscribe/listChanged;
-- `readOnlyHint` is true for exactly `status` and `receipt`, and no descriptor claims
-  `destructiveHint`;
+- `readOnlyHint` is true for exactly `status` (not `receipt`, which records a ledger event), every
+  descriptor carries `idempotentHint=true`, and no descriptor claims `destructiveHint`;
 - the negotiated `instructions` bytes equal the packaged `guidance/agent-instructions.md` bytes;
 - no descriptor or instruction string says "verified", "proved", "authenticated", or "complete"
   without stating the exact sufficient coverage in the same sentence;

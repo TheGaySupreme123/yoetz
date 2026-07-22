@@ -77,8 +77,10 @@ The through-line is that "Codex is first" had been encoded as "Codex is the only
    annotations, plus `instructions` — loaded from verified packaged resources, never composed at
    runtime, and bound by the same honesty lint as the guidance ("verified", "proved",
    "authenticated", "complete" rejected unless the sentence states the exact sufficient coverage).
-   `status` and `receipt` carry `readOnlyHint=true`; nothing carries `destructiveHint`, because no
-   Yoetz operation deletes recorded evidence.
+   `status` carries `readOnlyHint=true`; `receipt` carries `readOnlyHint=false` because it stages a
+   receipt object and appends a `receipt_recorded` event. Every tool carries an explicit
+   `idempotentHint=true`. Nothing carries `destructiveHint`, because no Yoetz operation deletes
+   recorded evidence.
 
 7. **`ClientInfoModel.kind` gains `cooperative_agent`**, the transport-neutral honest identity for
    any harness without a first-party integration, valid with `cooperative_mcp` or `local_cli`.

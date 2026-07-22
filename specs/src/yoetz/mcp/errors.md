@@ -34,8 +34,8 @@ structured validation errors. It must never echo the raw input value, the origin
 or documentation URLs.
 
 `sanitize_unknown_tool_name(name)` maps a tool name that reached the valid `tools/call` method but
-did not match a registered tool into a safe invalid-request description. It must not reveal the
-full raw argument payload.
+did not match a registered tool into a safe invalid-params description. It must not reveal the
+full raw argument payload or echo the caller-controlled name.
 
 `tool_error_envelope(...)` is a convenience wrapper for the common public error shape. It keeps the
 tool result format consistent between success and failure cases.
@@ -49,10 +49,11 @@ allowlisted public field paths and bounded reason tokens, and never stringifies 
 
 ## Errors and edge cases
 
-- JSON-RPC error objects are not used for ordinary public operation failures.
+- JSON-RPC error objects are not used for ordinary public operation failures on registered tools.
 - The last-resort fallback must still validate even when helper code is broken.
-- Unknown tool names are a tool-level failure, not an MCP protocol failure, when they arrive via a
-  valid MCP method.
+- Unknown tool names are a sanitized JSON-RPC/protocol failure (`INVALID_PARAMS`), not a structured
+  tool execution result, when they arrive via `tools/call`. The public message never echoes the
+  caller-controlled name; stderr must not interpolate that name either.
 - Validation summaries may name fields, not payloads.
 
 ## Invariants

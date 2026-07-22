@@ -64,9 +64,21 @@ The existing bounded stdio transport, nested fallback, cancellation, output-sche
 and stdout-only-protocol rules remain binding. Client cancellation is forwarded structurally, but
 EOF/disconnect never asserts remote commit cancellation; request-ID replay resolves ambiguity.
 
+Protocol-version negotiation is owned by the pinned MCP SDK session: a mutually supported requested
+version is echoed; an unknown requested version is answered with the server's latest supported
+version; the client decides whether to disconnect. Structurally malformed initialize requests still
+fail through ordinary protocol errors. Yoetz does not pre-reject unknown versions before SDK
+negotiation.
+
+An unregistered `tools/call` name is answered as a sanitized JSON-RPC `INVALID_PARAMS` error whose
+message never echoes the caller-controlled name. The bridge owns this path so the SDK's tool-cache
+warning cannot interpolate that name onto stderr. Input and business validation failures for
+registered tools remain structured tool results.
+
 ## Errors and edge cases
 
-- Invalid request/unknown tool remains structured and sanitized.
+- Invalid request on a registered tool remains a structured sanitized tool result. An unknown tool
+  name is a sanitized JSON-RPC error and never a tool execution result.
 - Missing service triggers only the reviewed fixed on-demand launcher; locked does not offer an MCP
   unlock argument.
 - Missing service never prevents MCP initialization or static guidance list/read; only a tool call
