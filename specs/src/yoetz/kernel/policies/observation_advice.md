@@ -32,6 +32,10 @@ Rules (rule_code → FindingKind):
 
 Advice is nonblocking and never prevents Codex actions.
 
+## Errors and edge cases
+
+Fail closed on consent, mapping, and validation errors; never leak secrets.
+
 ## Invariants
 
 1. Works offline from structural envelopes alone.
@@ -41,3 +45,7 @@ Advice is nonblocking and never prevents Codex actions.
 ## Tests
 
 `tests/unit/kernel/test_observation_advice_policies.py`
+
+## Open questions
+
+None.

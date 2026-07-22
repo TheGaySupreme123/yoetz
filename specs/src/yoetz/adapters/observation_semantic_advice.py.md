@@ -21,6 +21,10 @@ Reject packets containing transcript/stdout/stderr/path/cwd/command/reasoning ke
 return additive finding identities that project into `AdviceSnapshot` without replacing
 deterministic results.
 
+## Errors and edge cases
+
+Fail closed on consent, mapping, and validation errors; never leak secrets.
+
 ## Invariants
 
 1. No repo access or ambient logs.
@@ -30,3 +34,7 @@ deterministic results.
 ## Tests
 
 Covered by `tests/unit/application/test_observation_advice.py` deterministic-vs-semantic path.
+
+## Open questions
+
+None.

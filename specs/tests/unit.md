@@ -16,14 +16,18 @@ Required test modules and shared support files:
 ```text
 tests/unit/
   adapters/
+    test_approved_checks.py
     test_codex_capability_harness.py
     test_codex_jsonl.py
     test_codex_discovery.py
     test_codex_lifecycle.py
     test_codex_mcp_registration.py
     test_codex_plugin.py
+    test_codex_session_stream.py
     test_codex_skill_integration.py
     test_git_subject_state.py
+    test_sqlite_observation.py
+    test_workspace_inspect.py
   protocol/
     test_ids.py
     test_strict_json.py
@@ -42,6 +46,7 @@ tests/unit/
     test_reducers_each_family.py
     test_replay_and_projections.py
     test_deterministic_checks.py
+    test_observation_advice_policies.py
     test_policy_work_integrity.py
     test_policy_research_evidence.py
     test_ranking.py
@@ -50,6 +55,7 @@ tests/unit/
     test_error_mapping.py
     test_harness_mcp_service.py
     test_integrations.py
+    test_observation_advice.py
     test_service_facade.py
     test_unit_of_work.py
     test_verdict_rules.py
@@ -63,6 +69,8 @@ tests/unit/
   cli/
     test_elevated.py
     test_hooks.py
+    test_observe_cli.py
+    test_observe_hooks.py
   observability/
     test_logging_allowlist.py
     test_privacy.py
@@ -101,23 +109,30 @@ fixtures into the suite without adding hidden state.
 This index covers exactly these separately owned future files:
 
 ```text
+tests/unit/adapters/test_approved_checks.py
 tests/unit/adapters/test_codex_capability_harness.py
 tests/unit/adapters/test_codex_discovery.py
 tests/unit/adapters/test_codex_jsonl.py
 tests/unit/adapters/test_codex_lifecycle.py
 tests/unit/adapters/test_codex_mcp_registration.py
 tests/unit/adapters/test_codex_plugin.py
+tests/unit/adapters/test_codex_session_stream.py
 tests/unit/adapters/test_codex_skill_integration.py
 tests/unit/adapters/test_git_subject_state.py
+tests/unit/adapters/test_sqlite_observation.py
+tests/unit/adapters/test_workspace_inspect.py
 tests/unit/application/test_error_mapping.py
 tests/unit/application/test_harness_mcp_service.py
 tests/unit/application/test_integrations.py
+tests/unit/application/test_observation_advice.py
 tests/unit/application/test_semantic_post_validation.py
 tests/unit/application/test_service_facade.py
 tests/unit/application/test_unit_of_work.py
 tests/unit/application/test_verdict_rules.py
 tests/unit/cli/test_elevated.py
 tests/unit/cli/test_hooks.py
+tests/unit/cli/test_observe_cli.py
+tests/unit/cli/test_observe_hooks.py
 tests/unit/config/test_load_precedence.py
 tests/unit/config/test_models.py
 tests/unit/config/test_owner_declared_endpoint.py
@@ -128,6 +143,7 @@ tests/unit/domain/test_findings.py
 tests/unit/domain/test_receipts.py
 tests/unit/domain/test_values.py
 tests/unit/kernel/test_deterministic_checks.py
+tests/unit/kernel/test_observation_advice_policies.py
 tests/unit/kernel/test_policy_research_evidence.py
 tests/unit/kernel/test_policy_work_integrity.py
 tests/unit/kernel/test_ranking.py

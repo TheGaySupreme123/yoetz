@@ -24,6 +24,10 @@ revoke. No transcript prose is stored. `refresh_advice` rebuilds `AdviceSnapshot
 envelopes via deterministic observation-advice policies (optional semantic add-on). 
 `peek_advice_for_delivery` suppresses duplicates by suppression identity.
 
+## Errors and edge cases
+
+Fail closed on consent, mapping, and validation errors; never leak secrets.
+
 ## Invariants
 
 1. Owner-only directory and files (`0700` / `0600`).
@@ -33,3 +37,7 @@ envelopes via deterministic observation-advice policies (optional semantic add-o
 ## Tests
 
 `tests/unit/cli/test_observe_cli.py`, `tests/unit/cli/test_observe_hooks.py`.
+
+## Open questions
+
+None.

@@ -20,6 +20,20 @@ Reuses `parse_codex_jsonl_from_offset` / mapping vocabulary from the batch impor
 fields become opaque gaps. Dedup against hook copies is by source identity + cursor via the
 observation store.
 
+## Errors and edge cases
+
+Fail closed on consent, mapping, and validation errors; never leak secrets.
+
+## Invariants
+
+1. No plaintext transcript spool.
+2. No seventh MCP tool.
+3. Coverage-qualified advice only.
+
 ## Tests
 
 `tests/unit/adapters/test_codex_session_stream.py`.
+
+## Open questions
+
+None.

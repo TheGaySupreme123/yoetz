@@ -32,6 +32,7 @@ tests/capability/
   test_service_keyring_unlock.py
   test_user_presence.py
   test_session_event_monitor.py
+  test_observation_dogfood_matrix.py
   evidence.py
 ```
 
@@ -70,6 +71,7 @@ tests/capability/test_codex_timeout_cancellation.py
 tests/capability/test_local_control_channel.py
 tests/capability/test_mcp_gate1_protocol_conformance.py
 tests/capability/test_mcp_protocol_and_sdk.py
+tests/capability/test_observation_dogfood_matrix.py
 tests/capability/test_platform_filesystem_keyring.py
 tests/capability/test_privacy_provider_and_local_model_profiles.py
 tests/capability/test_provider_profile_live.py

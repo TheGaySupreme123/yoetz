@@ -22,6 +22,10 @@ separate authorization path exists (v0.1 runner rejects `allow_network=True`). S
 digested then wiped; secret-like command output never appears in advice/status. Subject-state
 mismatch yields `stale`.
 
+## Errors and edge cases
+
+Fail closed on consent, mapping, and validation errors; never leak secrets.
+
 ## Invariants
 
 1. No freeform shell.
@@ -32,3 +36,7 @@ mismatch yields `stale`.
 ## Tests
 
 `tests/unit/adapters/test_approved_checks.py`
+
+## Open questions
+
+None.

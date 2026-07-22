@@ -18,6 +18,20 @@ session-stream reconcile. Not MCP tools.
 Grant stores a private workspace commitment only and never logs the raw path. Revoke retains
 evidence. Reconcile advances the stream cursor for a consented workspace.
 
+## Errors and edge cases
+
+Fail closed on consent, mapping, and validation errors; never leak secrets.
+
+## Invariants
+
+1. No plaintext transcript spool.
+2. No seventh MCP tool.
+3. Coverage-qualified advice only.
+
 ## Tests
 
 `tests/unit/cli/test_observe_cli.py`.
+
+## Open questions
+
+None.

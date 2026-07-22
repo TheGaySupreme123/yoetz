@@ -26,6 +26,10 @@ hook evidence may raise `hook_observed`; otherwise engine-derived + known gaps. 
 are optional and never required for basic correctness guidance. Recommended next actions are
 closed tokens safe for hook `additionalContext`.
 
+## Errors and edge cases
+
+Fail closed on consent, mapping, and validation errors; never leak secrets.
+
 ## Invariants
 
 1. No seventh MCP tool.
@@ -35,3 +39,7 @@ closed tokens safe for hook `additionalContext`.
 ## Tests
 
 `tests/unit/application/test_observation_advice.py`
+
+## Open questions
+
+None.

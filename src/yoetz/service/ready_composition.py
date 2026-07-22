@@ -14,6 +14,7 @@ import apsw
 
 import yoetz.adapters.sqlite.connection as connection_module
 import yoetz.adapters.sqlite.recovery as recovery_module
+from yoetz.adapters.memory.observation import MemoryObservationStore
 from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
 from yoetz.adapters.privacy.catalog import CatalogPrivacyAudit, CatalogPrivacyPolicyStore
 from yoetz.adapters.privacy.gateway import PolicyEnforcingOutboundGateway
@@ -30,6 +31,7 @@ from yoetz.adapters.sqlite.migrations import initialize_bundle, initialize_catal
 from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.adapters.sqlite.start_catalog import SqliteStartCatalog
 from yoetz.application.check import FinalSemanticEvaluation
+from yoetz.application.observation_control import build_observation_support_handlers
 from yoetz.application.service import (
     ControlProjectionBinding,
     ReadyApplicationFactory,
@@ -1150,6 +1152,9 @@ async def provide_service_ready_context(
         )
 
     versions = _receipt_versions(manifest)
+    # Durable hook path uses LocalObservationStore; ready service handlers use an in-process
+    # ObservationPort so observation_* control methods are not empty stubs.
+    observation_handlers = build_observation_support_handlers(MemoryObservationStore())
     return ServiceReadyContext(
         service_generation=service_generation,
         vault_generation=vault_generation,
@@ -1173,6 +1178,7 @@ async def provide_service_ready_context(
         profile=_profile(config),
         policy_packs=_policy_packs(manifest),
         version_manifest=manifest,
+        support_handlers=observation_handlers,
     )
 
 

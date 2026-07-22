@@ -22,6 +22,10 @@ Commands require a validated `LocalWorkspaceHandle` and one or more relative pat
 absolute roots). Results are `inspected|partial|rejected` with sorted closed limitations. Public
 status and advice must never embed absolute filesystem paths from this port.
 
+## Errors and edge cases
+
+Fail closed on consent, mapping, and validation errors; never leak secrets.
+
 ## Invariants
 
 1. Relative paths only in public results.
@@ -32,3 +36,7 @@ status and advice must never embed absolute filesystem paths from this port.
 
 Unit coverage for relative success, path escape rejection, symlink escape, and absolute-path
 absence in results.
+
+## Open questions
+
+None.

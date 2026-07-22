@@ -20,6 +20,10 @@ Open the root with no-follow directory checks. Reject symlink escapes, out-of-sc
 oversized files, and non-files. Return relative-path digests plus capped excerpts. Selection
 digest is canonical over relative path + content digest + length metadata.
 
+## Errors and edge cases
+
+Fail closed on consent, mapping, and validation errors; never leak secrets.
+
 ## Invariants
 
 1. No absolute paths in results.
@@ -29,3 +33,7 @@ digest is canonical over relative path + content digest + length metadata.
 ## Tests
 
 `tests/unit/adapters/test_workspace_inspect.py`
+
+## Open questions
+
+None.

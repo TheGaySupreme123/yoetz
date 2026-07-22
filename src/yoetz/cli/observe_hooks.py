@@ -87,6 +87,12 @@ _STRUCTURAL_ALLOW: Final = frozenset(
         "decision_reason_code",
         "event_ordinal",
         "attempt",
+        "claim_kind",
+        "action",
+        "changed_paths_digest",
+        "mapping_hint",
+        "capability_profile_id",
+        "codex_version",
     }
 )
 _TOKEN_CHARS: Final = frozenset(
@@ -140,6 +146,12 @@ def _extract_structural(payload: Mapping[str, JsonValue], event_name: str) -> Js
         "decision_reason_code",
         "result_status",
         "subagent_id",
+        "claim_kind",
+        "action",
+        "changed_paths_digest",
+        "mapping_hint",
+        "capability_profile_id",
+        "codex_version",
     ):
         token = _token_or_none(payload.get(key))
         if token is not None and key in _STRUCTURAL_ALLOW:
@@ -148,10 +160,13 @@ def _extract_structural(payload: Mapping[str, JsonValue], event_name: str) -> Js
     tool_input = payload.get("tool_input")
     if isinstance(tool_input, Mapping):
         nested = cast(Mapping[str, JsonValue], tool_input)
-        for key in ("tool_name", "permission_kind"):
+        for key in ("tool_name", "permission_kind", "claim_kind", "action", "mapping_hint"):
             token = _token_or_none(nested.get(key))
             if token is not None and key not in fields:
                 fields[key] = token
+        digest = _token_or_none(nested.get("changed_paths_digest"))
+        if digest is not None and "changed_paths_digest" not in fields:
+            fields["changed_paths_digest"] = digest
     for key in ("exit_status", "duration_ms", "event_ordinal", "attempt"):
         number = _int_or_none(payload.get(key))
         if number is not None:

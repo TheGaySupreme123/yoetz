@@ -132,8 +132,8 @@ implicit composition detail:
 
 ## Status board
 
-The manifest is the canonical inventory. At this draft checkpoint it classifies 585 spec files:
-571 unique future-file owners, 10 directory indexes, and 4 coordination files. Every future owner
+The manifest is the canonical inventory. At this draft checkpoint it classifies 608 spec files:
+594 unique future-file owners, 10 directory indexes, and 4 coordination files. Every future owner
 has all seven required sections; all local Open questions are closed or routed to the central
 decision ledger.
 
@@ -148,11 +148,11 @@ decision ledger.
 | `guidance/` harness-neutral agent guidance | 4 | 1 directory index; owned once and shipped byte-identically to every harness and to MCP (ADR-010) |
 | `skills/` | 2 | Per-harness header and manifest only; v0.1 ships exactly one harness, `codex` |
 | `support/` | 4 | Includes the ADR-012 npm launcher (`support/npm-launcher/`), publish-ready but deliberately unpublished. |
-| `src/yoetz/` Python/code files | 148 | — |
+| `src/yoetz/` Python/code files | 160 | — |
 | `src/yoetz/resources/` | 73 | The resource manifest plus exactly 72 installed entries. |
 | `scripts/` | 6 | — |
-| `tests/` | 194 | 7 suite indexes |
-| **Total future files** | **571** | **10 indexes + 4 coordination files = 585 spec files** |
+| `tests/` | 205 | 7 suite indexes |
+| **Total future files** | **594** | **10 indexes + 4 coordination files = 608 spec files** |
 
 All rows remain `draft` until the founder freeze; “present” is not the same as “reviewed” or
 “locked.” Empirical release cells and independent threat review remain later evidence gates even
