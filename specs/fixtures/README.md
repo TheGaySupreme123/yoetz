@@ -49,6 +49,7 @@ fixtures/
     ADV-008-stale-redacted-ledger.case.json
     ADV-009-wrong-semantic-finding-rejected.case.json
     ADV-010-import-detects-missing-publication.case.json
+    ADV-011-config-evidence-does-not-satisfy-transport.case.json
   imports/codex/
     supported-version.case.json
     unknown-events.case.json
@@ -84,7 +85,7 @@ use lowercase hexadecimal. The file's owning spec freezes its exact story, requi
 assertions. This keeps the repository file set finite and reviewable without hidden generators or
 an unbounded directory convention.
 
-`manifest.json` ASCII-sorts all 48 case paths and records size/SHA-256/media type. No fixture
+`manifest.json` ASCII-sorts all 49 case paths and records size/SHA-256/media type. No fixture
 depends on host paths, current time, random generation, network, provider availability, or Git.
 
 ### Exact future-file inventory
@@ -102,6 +103,7 @@ fixtures/adversarial/ADV-007-crash-retry-duplicate.case.json
 fixtures/adversarial/ADV-008-stale-redacted-ledger.case.json
 fixtures/adversarial/ADV-009-wrong-semantic-finding-rejected.case.json
 fixtures/adversarial/ADV-010-import-detects-missing-publication.case.json
+fixtures/adversarial/ADV-011-config-evidence-does-not-satisfy-transport.case.json
 fixtures/backward-read/v0.1.0-empty-bundle.case.json
 fixtures/backward-read/v0.1.0-full-event-bundle.case.json
 fixtures/canonical/accepted-entry-identity.case.json
@@ -249,12 +251,20 @@ bounded command/result; importer retains source bytes/digest and maps it at
 relevant finding. Import never rewrites the original live writer history or claims universal
 transcript completeness.
 
+#### ADV-011 — config evidence does not satisfy transport
+
+Sequence: obligation requires `integration_transport` and `live_smoke`, is marked resolved, and
+links only `unit_config` evidence. Expected `verification_class_unsatisfied` naming the obligation
+and the missing exact classes. Closest non-trigger declares both required classes on linked
+evidence. Classes remain orthogonal: config never satisfies transport or live smoke. Bounded
+evidence producers that auto-stamp classes remain future work.
+
 Each adversarial case embeds `trigger`, `remediation`, and `non_trigger` variants to measure both
 recall and harmful-nudge behavior without multiplying undeclared fixture files.
 
 ### Policy-rule vectors without a hidden fixture directory
 
-No separate policy-fixture directory exists. The closed 48-file corpus keeps the rule-level public
+No separate policy-fixture directory exists. The closed 49-file corpus keeps the rule-level public
 vectors inside the existing adversarial cases, while the two exact unit modules hold the smallest
 inline trigger/closest-nontrigger values. The exhaustive public mapping is:
 
@@ -267,7 +277,8 @@ inline trigger/closest-nontrigger values. The exhaustive public mapping is:
   `diff_does_not_match_account`;
 - `ADV-006`: `contradictory_claims_unresolved`;
 - `ADV-008`: `ledger_stale_or_incomplete`;
-- `ADV-009`: `weak_or_stale_response` and `questionable_finding_rejection`.
+- `ADV-009`: `weak_or_stale_response` and `questionable_finding_rejection`;
+- `ADV-011`: `verification_class_unsatisfied`.
 
 Every mapped kind has an exact trigger, remediation, and closest non-trigger assertion, including
 its `FindingBasis` fact/ref tuple and origin. A semantic output may independently use an applicable
@@ -275,7 +286,7 @@ kind only with explicit `origin=semantic_model_derived`; the deterministic vecto
 `tests/unit/kernel/test_policy_work_integrity.py` and
 `tests/unit/kernel/test_policy_research_evidence.py` own the minimal per-rule values and consume the
 same policy contracts. This mapping covers every v0.1 `FindingKind` without adding undeclared
-future files or changing the fixture-manifest count.
+future files or changing the fixture-manifest count beyond the reviewed inventory.
 
 ### Codex import corpus
 

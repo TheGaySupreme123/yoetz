@@ -55,7 +55,10 @@ ReceiptVersionSlice(package_name: Literal["yoetz"], package_version: str,
                     resource_manifest_digest: str)
 ReceiptObligation(obligation_id: ObligationId, status: ReceiptObligationStatus,
                   source_refs: tuple[EventId | ObligationId | ClaimId, ...],
-                  summary: str | None = None)
+                  summary: str | None = None,
+                  required_verification_classes: tuple[str, ...] = (),
+                  satisfied_verification_classes: tuple[str, ...] = (),
+                  unsatisfied_verification_classes: tuple[str, ...] = ())
 ReceiptResponse(finding_id: FindingId, finding_frontier: Frontier,
                 disposition: ResponseDisposition,
                 evidence_refs: tuple[EvidenceId | ResultId, ...],

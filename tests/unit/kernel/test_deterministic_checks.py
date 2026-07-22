@@ -173,7 +173,7 @@ def test_captured_object_unavailability_requires_current_exact_association() -> 
 
 def test_templates_are_complete_exact_and_id_only() -> None:
     assert frozenset(DETERMINISTIC_FINDING_TEMPLATES) == frozenset(FindingKind)
-    assert len(DETERMINISTIC_FINDING_TEMPLATES) == 14
+    assert len(DETERMINISTIC_FINDING_TEMPLATES) == 15
     refs = (
         claim_id("clm_00000000-0000-4000-8000-000000000001"),
         obligation_id("obl_00000000-0000-4000-8000-000000000001"),

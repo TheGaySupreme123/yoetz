@@ -13,6 +13,7 @@ from yoetz.domain.events import (
     PlanRevisedPayload,
     ResponseDisposition,
     ResultOutcome,
+    VerificationClass,
 )
 from yoetz.domain.findings import FindingKind
 from yoetz.domain.values import (
@@ -76,6 +77,13 @@ WORK_INTEGRITY_FACT_CODES: Final = frozenset(
         "finding_response_present",
         "response_basis_insufficient",
         "response_state_stale",
+        "class_requirement_present",
+        "unsatisfied_class_capability",
+        "unsatisfied_class_integration_transport",
+        "unsatisfied_class_live_smoke",
+        "unsatisfied_class_production_composition",
+        "unsatisfied_class_source_review",
+        "unsatisfied_class_unit_config",
     }
 )
 
@@ -90,6 +98,7 @@ _RULE_ORDER: Final = (
     FindingKind.CONTRADICTORY_CLAIMS_UNRESOLVED,
     FindingKind.LEDGER_STALE_OR_INCOMPLETE,
     FindingKind.WEAK_OR_STALE_RESPONSE,
+    FindingKind.VERIFICATION_CLASS_UNSATISFIED,
 )
 
 
@@ -613,6 +622,86 @@ def _response_findings(case: DeterministicCase) -> list[DeterministicAssessment]
     return output
 
 
+_UNSATISFIED_CLASS_FACT: Final = {
+    VerificationClass.UNIT_CONFIG: "unsatisfied_class_unit_config",
+    VerificationClass.INTEGRATION_TRANSPORT: "unsatisfied_class_integration_transport",
+    VerificationClass.PRODUCTION_COMPOSITION: "unsatisfied_class_production_composition",
+    VerificationClass.CAPABILITY: "unsatisfied_class_capability",
+    VerificationClass.LIVE_SMOKE: "unsatisfied_class_live_smoke",
+    VerificationClass.SOURCE_REVIEW: "unsatisfied_class_source_review",
+}
+
+
+def _linked_resolution_evidence_ids(
+    case: DeterministicCase,
+    refs: tuple[EvidenceId | ResultId, ...],
+) -> frozenset[EvidenceId]:
+    linked: set[EvidenceId] = set()
+    for ref in refs:
+        if ref.startswith("evd_"):
+            linked.add(EvidenceId(ref))
+            continue
+        if not ref.startswith("res_"):
+            continue
+        result_record = case.projection.results.get(ResultId(ref))
+        if result_record is None or result_record.payload is None:
+            continue
+        linked.update(result_record.payload.evidence_refs)
+    return frozenset(linked)
+
+
+def _satisfied_verification_classes(
+    case: DeterministicCase,
+    refs: tuple[EvidenceId | ResultId, ...],
+) -> frozenset[VerificationClass]:
+    satisfied: set[VerificationClass] = set()
+    for evidence_ref in _linked_resolution_evidence_ids(case, refs):
+        if evidence_ref not in case.allowed_ids or not _coverage_admissible(case, evidence_ref):
+            continue
+        record = case.projection.evidence.get(evidence_ref)
+        if record is None or record.payload is None:
+            continue
+        satisfied.update(record.payload.verification_classes)
+    return frozenset(satisfied)
+
+
+def _verification_class_findings(case: DeterministicCase) -> list[DeterministicAssessment]:
+    output: list[DeterministicAssessment] = []
+    for obligation_ref, record in sorted(
+        case.projection.obligations.items(), key=lambda item: _ascii(item[0])
+    ):
+        payload = record.payload
+        if (
+            payload is None
+            or payload.status is not ObligationStatus.RESOLVED
+            or not payload.required_verification_classes
+            or record.plan_change in {ObligationChangeKind.SUPERSEDED, ObligationChangeKind.WAIVED}
+        ):
+            continue
+        satisfied = _satisfied_verification_classes(case, payload.resolution_evidence_refs)
+        missing = tuple(
+            required
+            for required in payload.required_verification_classes
+            if required not in satisfied
+        )
+        if not missing:
+            continue
+        missing_facts = tuple(
+            _fact(_UNSATISFIED_CLASS_FACT[required], obligation_ref) for required in missing
+        )
+        output.append(
+            build_policy_assessment(
+                case,
+                WORK_INTEGRITY_POLICY_PACK,
+                FindingKind.VERIFICATION_CLASS_UNSATISFIED,
+                (obligation_ref,),
+                (_fact("class_requirement_present", obligation_ref),),
+                missing_facts,
+            )
+        )
+    return output
+
+
 def work_integrity_findings(
     case: DeterministicCase,
 ) -> tuple[DeterministicAssessment, ...]:
@@ -631,6 +720,7 @@ def work_integrity_findings(
         _contradiction_findings(case),
         _ledger_finding(case),
         _response_findings(case),
+        _verification_class_findings(case),
     )
     if len(by_rule) != len(_RULE_ORDER):
         raise ValueError("policy_wiring_invalid")

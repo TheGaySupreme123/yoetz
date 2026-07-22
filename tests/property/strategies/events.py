@@ -133,6 +133,7 @@ _FINDING_KIND_FACTS: Final[Mapping[FindingKind, tuple[int, str]]] = {
     FindingKind.CONTRADICTORY_CLAIMS_UNRESOLVED: (1, "work-integrity"),
     FindingKind.LEDGER_STALE_OR_INCOMPLETE: (3, "work-integrity"),
     FindingKind.WEAK_OR_STALE_RESPONSE: (2, "work-integrity"),
+    FindingKind.VERIFICATION_CLASS_UNSATISFIED: (1, "work-integrity"),
     FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM: (1, "research-evidence"),
     FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT: (1, "research-evidence"),
     FindingKind.MATERIAL_LIMITATION_OMITTED: (1, "research-evidence"),

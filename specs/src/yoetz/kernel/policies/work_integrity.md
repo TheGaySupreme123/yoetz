@@ -62,6 +62,12 @@ The rule inventory is stable and intentionally narrow:
   events, or is otherwise not current enough for a strong conclusion.
 - `weak_or_stale_response` — a rejection or waiver is present but the supporting basis is hollow,
   stale, or too weak to be considered resolved.
+- `verification_class_unsatisfied` — a resolved obligation declares nonempty
+  `required_verification_classes`, and at least one required class is absent from the exact class
+  set declared by linked admissible resolution evidence (including evidence reachable through
+  result→evidence refs). Classes are orthogonal exact-match tokens; `unit_config` never satisfies
+  `integration_transport` or `live_smoke`. Absent/empty required classes keep legacy class-free
+  gating. Waived/superseded obligations are skipped.
 
 `WORK_INTEGRITY_FACT_CODES` is exactly: `completion_claim_present`,
 `open_obligation_present`, `valid_waiver_absent`, `requested_item_present`,
@@ -71,9 +77,10 @@ The rule inventory is stable and intentionally narrow:
 `state_comparison_available`, `state_changed`, `evidence_state_mismatch`,
 `contradictory_claims_present`, `resolution_absent`, `unknown_event_present`,
 `redaction_gap_present`, `freshness_gap_present`, `finding_response_present`,
-`response_basis_insufficient`, and `response_state_stale`. A rule may use only these codes in its
-observed/missing tuples; adding or renaming one changes the policy-pack version and its golden basis
-fixtures.
+`response_basis_insufficient`, `response_state_stale`, `class_requirement_present`, and
+`unsatisfied_class_<classname>` for each registered `VerificationClass` value. A rule may use only
+these codes in its observed/missing tuples; adding or renaming one changes the policy-pack version
+and its golden basis fixtures.
 
 The rule-to-fact/root crosswalk is exact. In the table, `C/O/A/R/V/F/Q/D` mean a current
 claim/obligation/action/result/evidence/finding/response-event/disputed claim-or-event ID; `X` is the
@@ -97,6 +104,7 @@ For every row, `FindingBasis.supporting_refs` is exactly the union of the observ
 | `contradictory_claims_unresolved` | one explicit edge `(C,D)` -> `(C,D)` | `contradictory_claims_present:(C,D)` | `resolution_absent:(C,D)` |
 | `ledger_stale_or_incomplete` | `G = union(G(unknown),G(redaction),G(freshness))`; nonempty `G` -> `G` | each present code uses only its own `G(code)` tuple | none; rootless-only gaps emit no candidate |
 | `weak_or_stale_response` | primary `(F,Q)` -> `S(F)` | `finding_response_present:(F,Q,<sorted response evidence refs>)`; optional `response_state_stale:(F,Q)` | `response_basis_insufficient:(F,Q)` only when support is absent/inadmissible |
+| `verification_class_unsatisfied` | primary `(O)` with nonempty required classes -> `(O)` | `class_requirement_present:(O)` | one `unsatisfied_class_<classname>:(O)` per missing exact required class, ASCII-sorted by class name |
 
 `public_root(X)` follows the shared mapper: a claim stays `C`; an action/result becomes its source
 event. The stale-evidence comparison never chooses a state digest as a subject. For the ledger row,

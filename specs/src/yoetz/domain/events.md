@@ -197,7 +197,9 @@ ObligationPublishedPayload(obligation_id: ObligationId, description: str,
                            requested_items: tuple[RequestedItem, ...] = (),
                            source_refs: tuple[EventId, ...] = (),
                            resolution_evidence_refs:
-                               tuple[EvidenceId | ResultId, ...] = ())
+                               tuple[EvidenceId | ResultId, ...] = (),
+                           required_verification_classes:
+                               tuple[VerificationClass, ...] = ())
 AssignmentRecordedPayload(assignee_actor_id: ActorId,
                           obligation_ids: tuple[ObligationId, ...],
                           scope_description: str,
@@ -222,7 +224,8 @@ EvidenceRecordedPayload(evidence_id: EvidenceId, evidence_kind: EvidenceKind,
                         captured_object_id: ObjectId | None = None,
                         content_digest: str | None = None,
                         description: str | None = None,
-                        subject_state: SubjectStateRef | None = None)
+                        subject_state: SubjectStateRef | None = None,
+                        verification_classes: tuple[VerificationClass, ...] = ())
 ClaimRecordedPayload(claim_id: ClaimId, claim_kind: ClaimKind, statement: str,
                      supporting_refs:
                          tuple[EvidenceId | ResultId | ObligationId, ...],
@@ -316,6 +319,13 @@ is connected by a `plan_revised` event so history and check identity remain expl
 | `source_refs` | tuple[EventId] ≤ `MAX_REF_LIST` | no | Events that motivated the obligation |
 | `status` | `ObligationStatus` | yes | `open` or `resolved` |
 | `resolution_evidence_refs` | tuple[EvidenceId \| ResultId] ≤ `MAX_REF_LIST` | required iff `status == resolved`, else forbidden | The evidence claimed to resolve it |
+| `required_verification_classes` | tuple[`VerificationClass`] ≤ 6, ASCII-sorted unique | no | Exact orthogonal classes this obligation requires when resolved; absent/empty keeps legacy class-free gating |
+
+`VerificationClass ∈ {unit_config, integration_transport, production_composition, capability,
+live_smoke, source_review}`. Classes are orthogonal (not a strength ladder): one class never
+satisfies another, and membership is never inferred from filenames, commands, or prose.
+`unit_config` evidence never satisfies `integration_transport` or `live_smoke`. Schema version
+remains `1.0.0` for this optional additive field.
 
 `RequestedItem = (item_kind: RequestedItemKind, value: str ≤ 1_024 code points)` with
 `RequestedItemKind ∈ {url, file, command, change, source}` (`source` exists for the
@@ -387,6 +397,12 @@ constraint.
 | `description` | str ≤ `MAX_TEXT_BYTES` | no | |
 | `observed_at` | Timestamp | yes | When observed (metadata, not order) |
 | `subject_state` | SubjectStateRef | no | State the evidence describes; captured structural state does not upgrade the event's actual provenance/coverage. |
+| `verification_classes` | tuple[`VerificationClass`] ≤ 6, ASCII-sorted unique | no | Exact classes this producer can honestly declare; absent/empty satisfies only class-free obligations' existing admissibility rules |
+
+Bounded evidence producers that automatically stamp producer-backed classes (command executions with
+argv/exit/digest, production-composition producers, live-smoke harnesses) are future work and out of
+scope for this field's first introduction: publishers may declare only classes their producer
+actually supports.
 
 Presence validation ties strength to substance: `mutable_reference` requires `reference`;
 `metadata_only` requires `description` or `reference`; `content_digest` requires

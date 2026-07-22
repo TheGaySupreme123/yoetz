@@ -1096,6 +1096,7 @@ CREATE TABLE p1_query_findings (
         'requested_item_never_attempted',
         'result_without_action',
         'stale_evidence_for_changed_state',
+        'verification_class_unsatisfied',
         'weak_or_stale_response'
     )),
     origin TEXT CHECK (origin IN ('deterministic', 'semantic_model_derived')),

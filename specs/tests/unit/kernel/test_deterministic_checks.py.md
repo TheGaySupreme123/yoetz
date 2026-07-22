@@ -22,7 +22,7 @@ more, with one exact machine-readable basis for every candidate finding.
   projection's integer sequence and separate head digest.
 - `test_rule_subject_cardinality_and_order_are_exact` — one assessment exists per exact
   `(policy, rule, complete subject-ref tuple)` and pack/rule/ref ordering is byte-stable.
-- `test_deterministic_templates_are_complete_and_exact` — all fourteen kinds use the single
+- `test_deterministic_templates_are_complete_and_exact` — all fifteen kinds use the single
   registry and exact ID-only renderer.
 - `test_candidate_and_finding_basis_are_one_to_one` — every candidate has one stable rule/fact/ref
   explanation and no orphan basis exists.
@@ -30,7 +30,7 @@ more, with one exact machine-readable basis for every candidate finding.
   equal state or no change, and later privacy facts never enter the pure basis.
 - `test_basis_uses_nominal_subject_state_and_typed_refs` — the domain enum and exact seven-kind
   `FindingBasisRef` union are reused without raw-string/parallel-enum substitutes.
-- `test_rule_root_and_fact_ref_tables_are_exact` — all fourteen rules use their frozen primary,
+- `test_rule_root_and_fact_ref_tables_are_exact` — all fifteen rules use their frozen primary,
   public-root, observed/missing, and supporting-ref mappings.
 - `test_status_basis_projection_is_controlled_and_exact` — namespaced rule IDs, fact/ref flattening,
   availability spelling, and evidence/result ref selection map exactly to the frozen status shape.
@@ -68,7 +68,7 @@ The suite exercises:
   an emitted duplicate key is rejected, while a different rule on the same tuple remains distinct;
 - work-integrity precedes research-evidence, rule ordinals are frozen, and subject tuples break
   rule-local ties by unsigned ASCII bytes;
-- all fourteen exact summary/next-action literals plus the exact `Subjects: ... Main agent: ...`
+- all fifteen exact summary/next-action literals plus the exact `Subjects: ... Main agent: ...`
   detail spelling;
 - status projection emits the bare kind as `rule_id`, unique observed code/ref unions, missing
   codes, the exact availability translation, gaps, and only `evd_`/`res_` supporting refs; it never

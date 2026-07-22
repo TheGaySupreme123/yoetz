@@ -14,6 +14,7 @@ from yoetz.domain.events import (
     ObligationStatus,
     PlanPublishedPayload,
     PlanRevisedPayload,
+    VerificationClass,
 )
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
@@ -343,6 +344,54 @@ def _receipt_obligation_status(record: ObligationProjectionRecord) -> ReceiptObl
     return ReceiptObligationStatus.OPEN
 
 
+def _linked_evidence_ids_for_obligation(
+    projection: ProjectionState,
+    refs: tuple[EvidenceId | ResultId, ...],
+) -> frozenset[EvidenceId]:
+    linked: set[EvidenceId] = set()
+    for ref in refs:
+        if ref.startswith("evd_"):
+            linked.add(EvidenceId(ref))
+            continue
+        if not ref.startswith("res_"):
+            continue
+        result_record = projection.results.get(ResultId(ref))
+        if result_record is None or result_record.payload is None:
+            continue
+        linked.update(result_record.payload.evidence_refs)
+    return frozenset(linked)
+
+
+def _obligation_class_coverage(
+    projection: ProjectionState,
+    record: ObligationProjectionRecord,
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    payload = record.payload
+    if payload is None or not payload.required_verification_classes:
+        return (), (), ()
+    required = tuple(item.value for item in payload.required_verification_classes)
+    if payload.status is not ObligationStatus.RESOLVED or record.plan_change in {
+        ObligationChangeKind.SUPERSEDED,
+        ObligationChangeKind.WAIVED,
+    }:
+        return required, (), required
+    declared: set[VerificationClass] = set()
+    for evidence_id_value in _linked_evidence_ids_for_obligation(
+        projection, payload.resolution_evidence_refs
+    ):
+        evidence_record = projection.evidence.get(evidence_id_value)
+        if evidence_record is None or evidence_record.payload is None:
+            continue
+        declared.update(evidence_record.payload.verification_classes)
+    satisfied = tuple(
+        item.value for item in payload.required_verification_classes if item in declared
+    )
+    unsatisfied = tuple(
+        item.value for item in payload.required_verification_classes if item not in declared
+    )
+    return required, satisfied, unsatisfied
+
+
 def _select_obligations(
     context: ReceiptBuildContext,
     findings: tuple[Finding, ...],
@@ -352,6 +401,10 @@ def _select_obligations(
         selected.update(
             cast(ObligationId, ref) for ref in finding.subject_refs if ref.startswith("obl_")
         )
+    for obligation_id_value, record in context.projection.obligations.items():
+        payload = record.payload
+        if payload is not None and payload.required_verification_classes:
+            selected.add(obligation_id_value)
     if len(selected) > 100:
         raise ValueError(_CONTEXT_INVALID)
 
@@ -373,12 +426,16 @@ def _select_obligations(
                     cast(ClaimId, ref) for ref in finding.subject_refs if ref.startswith("clm_")
                 )
         source_refs = _sorted_unique((*record.payload.source_refs, *claim_roots))
+        required, satisfied, unsatisfied = _obligation_class_coverage(context.projection, record)
         obligations.append(
             ReceiptObligation(
                 obligation_id=obligation_id_value,
                 status=_receipt_obligation_status(record),
                 source_refs=source_refs,
                 summary=record.payload.description,
+                required_verification_classes=required,
+                satisfied_verification_classes=satisfied,
+                unsatisfied_verification_classes=unsatisfied,
             )
         )
     return tuple(obligations)
@@ -775,11 +832,42 @@ def _sections(
     )
     items[ReceiptSectionKey.EVIDENCE_AND_CLAIM_BASIS] = (*claim_refs, *evidence_refs)
 
-    if gap_codes:
-        bodies[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] = (
-            f"Coverage is limited by: {', '.join(gap_codes)}."
+    satisfied_classes = _sorted_unique(
+        class_name
+        for obligation in obligations
+        for class_name in obligation.satisfied_verification_classes
+    )
+    unsatisfied_classes = _sorted_unique(
+        class_name
+        for obligation in obligations
+        for class_name in obligation.unsatisfied_verification_classes
+    )
+    class_disclosure = any(obligation.required_verification_classes for obligation in obligations)
+    class_items = (
+        *tuple(f"satisfied:{name}" for name in satisfied_classes),
+        *tuple(f"unsatisfied:{name}" for name in unsatisfied_classes),
+    )
+    class_body = ""
+    if class_disclosure:
+        satisfied_text = ", ".join(satisfied_classes) if satisfied_classes else "none"
+        unsatisfied_text = ", ".join(unsatisfied_classes) if unsatisfied_classes else "none"
+        class_body = (
+            f"Satisfied verification classes: {satisfied_text}. "
+            f"Unsatisfied verification classes: {unsatisfied_text}."
         )
-        items[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] = gap_codes
+
+    if gap_codes:
+        gap_body = f"Coverage is limited by: {', '.join(gap_codes)}."
+        bodies[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] = (
+            f"{gap_body} {class_body}" if class_body else gap_body
+        )
+        items[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] = (*gap_codes, *class_items)
+    elif class_disclosure:
+        bodies[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] = (
+            f"{class_body} Coverage is bounded to the recorded evidence and is not proof of "
+            "correctness."
+        )
+        items[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] = class_items
     elif redactions:
         bodies[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] = (
             "Visibility is reduced by recorded redactions; coverage is not proof of correctness."

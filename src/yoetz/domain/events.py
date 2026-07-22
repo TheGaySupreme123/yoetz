@@ -96,6 +96,7 @@ __all__ = [
     "MAX_REF_LIST",
     "MAX_REQUESTED_ITEMS",
     "MAX_TEXT_BYTES",
+    "MAX_VERIFICATION_CLASSES",
     "PAYLOAD_TYPES",
     "SCHEMA_VERSION",
     "AcceptedEvent",
@@ -127,6 +128,7 @@ __all__ = [
     "PolicyVersion",
     "ProjectionLocator",
     "ReceiptRecordedPayload",
+    "VerificationClass",
     "RedactionMethod",
     "RedactionReasonCategory",
     "RedactionRecordedPayload",
@@ -158,6 +160,7 @@ MAX_REF_LIST: Final = 64
 MAX_CAUSAL_PARENTS: Final = 32
 MAX_REQUESTED_ITEMS: Final = 64
 MAX_ALTERNATIVES: Final = 16
+MAX_VERIFICATION_CLASSES: Final = 6
 
 _MAX_SAFE_INTEGER: Final = 9_007_199_254_740_991
 _MAX_SQLITE_INTEGER: Final = 9_223_372_036_854_775_807
@@ -240,6 +243,21 @@ class EvidenceKind(str, Enum):  # noqa: UP042 - exact wire enum base
     RESEARCH_SOURCE = "research_source"
     IMPORT_REPORT = "import_report"
     OTHER = "other"
+
+
+class VerificationClass(str, Enum):  # noqa: UP042 - exact wire enum base
+    """Orthogonal exact-match verification classes.
+
+    Classes are not a strength ladder. Broader coverage is never inferred from filenames,
+    commands, or prose. Config evidence cannot satisfy transport or live-smoke requirements.
+    """
+
+    UNIT_CONFIG = "unit_config"
+    INTEGRATION_TRANSPORT = "integration_transport"
+    PRODUCTION_COMPOSITION = "production_composition"
+    CAPABILITY = "capability"
+    LIVE_SMOKE = "live_smoke"
+    SOURCE_REVIEW = "source_review"
 
 
 class ClaimKind(str, Enum):  # noqa: UP042 - exact wire enum base
@@ -377,6 +395,22 @@ def _evidence_result_tuple(
     raw = _tuple(value, minimum, maximum)
     result = tuple(_evidence_result_ref(item) for item in raw)
     _validate_ascii_sorted_unique(cast(tuple[str, ...], result))
+    return result
+
+
+def _verification_class_tuple(value: object) -> tuple[VerificationClass, ...]:
+    raw = _tuple(value, 0, MAX_VERIFICATION_CLASSES)
+    classes: list[VerificationClass] = []
+    for item in raw:
+        if type(item) is VerificationClass:
+            classes.append(item)
+        else:
+            classes.append(_enum_from_json(item, VerificationClass))
+    result = tuple(classes)
+    values = tuple(item.value for item in result)
+    if len(values) != len(set(values)):
+        raise ProtocolValueError("duplicate_set_member")
+    _validate_ascii_sorted_unique(values)
     return result
 
 
@@ -723,6 +757,7 @@ class ObligationPublishedPayload:
     requested_items: tuple[RequestedItem, ...] = ()
     source_refs: tuple[EventId, ...] = ()
     resolution_evidence_refs: tuple[EvidenceId | ResultId, ...] = ()
+    required_verification_classes: tuple[VerificationClass, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "obligation_id", obligation_id(self.obligation_id))
@@ -757,6 +792,11 @@ class ObligationPublishedPayload:
         object.__setattr__(self, "resolution_evidence_refs", resolution_refs)
         if status is ObligationStatus.OPEN and resolution_refs:
             raise ProtocolValueError("obligation_resolution_invalid")
+        object.__setattr__(
+            self,
+            "required_verification_classes",
+            _verification_class_tuple(self.required_verification_classes),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -908,6 +948,7 @@ class EvidenceRecordedPayload:
     content_digest: str | None = None
     description: str | None = None
     subject_state: SubjectStateRef | None = None
+    verification_classes: tuple[VerificationClass, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "evidence_id", evidence_id(self.evidence_id))
@@ -934,6 +975,11 @@ class EvidenceRecordedPayload:
             )
         if self.subject_state is not None:
             object.__setattr__(self, "subject_state", _subject_state(self.subject_state))
+        object.__setattr__(
+            self,
+            "verification_classes",
+            _verification_class_tuple(self.verification_classes),
+        )
 
         supported = True
         if strength is EvidenceImmutability.MUTABLE_REFERENCE:
@@ -1470,6 +1516,7 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
                     "requested_items",
                     "source_refs",
                     "resolution_evidence_refs",
+                    "required_verification_classes",
                 }
             ),
         ),
@@ -1498,6 +1545,7 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
                     "content_digest",
                     "description",
                     "subject_state",
+                    "verification_classes",
                 }
             ),
         ),
@@ -1607,6 +1655,7 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
             raise ProtocolValueError("obligation_resolution_invalid")
         requested = _optional(source, "requested_items")
         source_refs = _optional(source, "source_refs")
+        required_classes = _optional(source, "required_verification_classes")
         return ObligationPublishedPayload(
             obligation_id=obligation_id(_field(source, "obligation_id")),
             description=cast(str, _field(source, "description")),
@@ -1628,6 +1677,11 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
                     tuple[EvidenceId | ResultId, ...],
                     tuple(_array(resolution_refs)),
                 )
+            ),
+            required_verification_classes=(
+                ()
+                if required_classes is None
+                else cast(tuple[VerificationClass, ...], tuple(_array(required_classes)))
             ),
         )
     if schema.name == "assignment_recorded":
@@ -1697,6 +1751,7 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
         )
     if schema.name == "evidence_recorded":
         state = _optional(source, "subject_state")
+        verification_classes = _optional(source, "verification_classes")
         return EvidenceRecordedPayload(
             evidence_id=evidence_id(_field(source, "evidence_id")),
             evidence_kind=_enum_from_json(_field(source, "evidence_kind"), EvidenceKind),
@@ -1711,6 +1766,11 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
             content_digest=cast(str | None, _optional(source, "content_digest")),
             description=cast(str | None, _optional(source, "description")),
             subject_state=None if state is None else _decode_subject_state(state),
+            verification_classes=(
+                ()
+                if verification_classes is None
+                else cast(tuple[VerificationClass, ...], tuple(_array(verification_classes)))
+            ),
         )
     if schema.name == "claim_recorded":
         state = _optional(source, "subject_state")
@@ -1904,6 +1964,10 @@ def encode_payload(payload: EventPayload) -> JsonValue:
         _optional_tuple(result, "source_refs", cast(tuple[object, ...], value.source_refs))
         if value.status is ObligationStatus.RESOLVED:
             result["resolution_evidence_refs"] = value.resolution_evidence_refs
+        if value.required_verification_classes:
+            result["required_verification_classes"] = tuple(
+                item.value for item in value.required_verification_classes
+            )
         return _json_object(result)
     if payload_type is AssignmentRecordedPayload:
         value = cast(AssignmentRecordedPayload, payload)
@@ -1983,6 +2047,10 @@ def encode_payload(payload: EventPayload) -> JsonValue:
             "subject_state",
             None if value.subject_state is None else _encode_subject_state(value.subject_state),
         )
+        if value.verification_classes:
+            result["verification_classes"] = tuple(
+                item.value for item in value.verification_classes
+            )
         return _json_object(result)
     if payload_type is ClaimRecordedPayload:
         value = cast(ClaimRecordedPayload, payload)
