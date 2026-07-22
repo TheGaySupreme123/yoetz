@@ -22,8 +22,9 @@ implicit cwd exists.
 - `enum ControlMethod` — exactly `start`, `publish_work`, `check`, `respond`, `status`, `receipt`,
   `import_codex_jsonl`, `review`, `backup_preview`, `backup_execute`, `restore_preview`,
   `restore_execute`, `migrate_preview`, `migrate_execute`, `integration_preview`,
-  `integration_execute`, `service_status`, `service_lock`, `service_stop`, `privacy_get_setup`,
-  `privacy_get_effective`, `privacy_propose_policy`, `privacy_tighten_policy`,
+  `integration_execute`, `observation_ingest`, `observation_status`, `observation_pause`,
+  `observation_resume`, `observation_revoke`, `service_status`, `service_lock`, `service_stop`,
+  `privacy_get_setup`, `privacy_get_effective`, `privacy_propose_policy`, `privacy_tighten_policy`,
   `privacy_receipts_list`, `privacy_receipts_get`. The decision methods
   `privacy_decide_policy` and `privacy_decide_disclosure` are deliberately absent.
 - `@dataclass(frozen=True, slots=True) class ControlCallRequest` — exact call branch fields
@@ -69,19 +70,20 @@ validates the matching closed result branch after receipt. The
 control envelope adds transport correlation and service generation; it never wraps or changes the
 operation's own request ID/idempotency meaning.
 
-The generic `call` surface accepts exactly all 25 registered `ControlMethod` tokens: six workflow
-methods and the nineteen support/lifecycle methods listed above. In particular,
+The generic `call` surface accepts exactly all 30 registered `ControlMethod` tokens: six workflow
+methods and the twenty-four support/lifecycle/observation methods listed above. In particular,
 `privacy_receipts_list` and `privacy_receipts_get` are first-class generic-call branches rather than
-out-of-band client helpers. Client-kind admission still denies both to `mcp_bridge`.
+out-of-band client helpers. Client-kind admission still denies both to `mcp_bridge`. The five
+observation methods are likewise CLI/UI-only and denied to `mcp_bridge`; they are not MCP tools.
 
 The client may retry a connection failure only by resending the identical `ControlRequest` and
 operation request ID. Cancellation is an explicit structural control frame; disconnect alone is
 not proof that the service cancelled a committing operation. `service_status` is available while
 locked. `lock` and `stop` are allowed for CLI/future trusted local UI clients and denied to the MCP
 bridge. The MCP bridge is advertised and admitted for exactly the six workflow methods; import/
-review (including JSONL bytes), maintenance, integration, lifecycle and privacy support calls are
-denied even when their body is schema-valid. No method can unlock, initialize, migrate vault mode,
-submit credentials, or loosen privacy policy.
+review (including JSONL bytes), maintenance, integration, observation, lifecycle and privacy
+support calls are denied even when their body is schema-valid. No method can unlock, initialize,
+migrate vault mode, submit credentials, or loosen privacy policy.
 
 Ordinary CLI/UI clients may inspect setup/effective policy, submit an inert proposal, or apply a
 mathematically proven tightening. A proposal returns its exact digest/diff and remains uncommitted.

@@ -34,10 +34,13 @@ skill specs, and `specs/tests/capability/`.
    transport error code. If the pinned Codex client is shown by transcript test to mishandle the
    null-ID frame, fallback is orderly transport termination. Never fabricate an ID.
 6. **Actor identity:** actor identity is caller-asserted; the server assigns at most
-   `self_asserted` for MCP callers in v0.1 (`harness_observed` only via a justified observation
-   channel, none of which exist in v0.1; a trigger-only hook observes nothing). No inference from
-   display names or transcript
-   fields.
+   `self_asserted` for ordinary MCP callers in v0.1. `harness_observed` authorship (and the
+   `hook_observed` publication/artifact classes) require a justified observation channel. For
+   first-party Codex that channel is the v0.1 `ObservationPort` path — hooks primary, selective
+   session-stream reconciliation secondary — once the exact capability cell proves observation and
+   project-level observation consent is active (ADR-010). A trigger-only hook still observes
+   nothing and cannot raise authorship or artifact observation. No inference from display names or
+   transcript fields.
 7. **Startup budget:** measured cold-start target < 2 s on reference hardware; the release binds
    the acceptable margin to the default observed in every advertised Codex capability cell rather
    than assuming an invariant timeout.
@@ -48,6 +51,8 @@ User & trusted-project MCP config; same-name config preflight; six tool calls (i
 `codex exec`); optional-server failure disclosure; required-server startup failure per supported
 Codex surface; duplicate skill-name discovery across loaded roots; parent + subagents attribution; resume/
 reattach without duplicates; `--json` JSONL import with unknown-event quarantine; skill discovery
-(explicit `$yoetz` and implicit); E-013 trigger-only compaction recovery for exact passing profiles
-and manual recovery for absent profiles, with equal coverage; cancellation/timeout ambiguous-write retry; stdout purity
+(explicit `$yoetz` and implicit); E-013 trigger and observation arms for exact passing profiles
+(manual recovery / cooperative-only coverage for absent profiles); observation consent,
+ingest/status/pause/resume/revoke, `hook_observed` only from real observation evidence, and
+AdviceSnapshot via hooks plus ordinary `status`; cancellation/timeout ambiguous-write retry; stdout purity
 under all of the above.

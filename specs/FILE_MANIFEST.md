@@ -8,8 +8,8 @@ This is the complete one-to-one ledger between the natural-language specificatio
 files planned for the public v0.1 repository. It is declarative: adding, removing, renaming, or
 splitting a future file requires changing this reviewed table and its owning spec together.
 
-The inventory contains 580 spec files: 566 exact future-file owners,
-10 directory indexes, and 4 coordination files. The 566 future paths are unique. The already-
+The inventory contains 582 spec files: 568 exact future-file owners,
+10 directory indexes, and 4 coordination files. The 568 future paths are unique. The already-
 authored public ADRs are current decision authorities, not future-file candidates, so
 they are intentionally outside the mirrored ownership universe. Ignored local architecture/
 strategy inputs are neither inventoried nor authoritative.
@@ -274,6 +274,7 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/src/yoetz/domain/__init__.md` | `future_file` | `src/yoetz/domain/__init__.py` | `python_shorthand` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/domain/events.md` | `future_file` | `src/yoetz/domain/events.py` | `python_shorthand` | — | `B` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/domain/findings.md` | `future_file` | `src/yoetz/domain/findings.py` | `python_shorthand` | — | `B` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/domain/observation.py.md` | `future_file` | `src/yoetz/domain/observation.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/domain/privacy.md` | `future_file` | `src/yoetz/domain/privacy.py` | `python_shorthand` | — | `C–E` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/domain/receipts.md` | `future_file` | `src/yoetz/domain/receipts.py` | `python_shorthand` | — | `B` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/domain/values.md` | `future_file` | `src/yoetz/domain/values.py` | `python_shorthand` | — | `B` | `draft` | Owns exactly this future public repository file. |
@@ -307,6 +308,7 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/src/yoetz/ports/ledger.md` | `future_file` | `src/yoetz/ports/ledger.py` | `python_shorthand` | — | `B` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/ports/maintenance.py.md` | `future_file` | `src/yoetz/ports/maintenance.py` | `exact_suffix` | — | `C/D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/ports/objects.md` | `future_file` | `src/yoetz/ports/objects.py` | `python_shorthand` | — | `B` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/ports/observation.py.md` | `future_file` | `src/yoetz/ports/observation.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/ports/privacy.md` | `future_file` | `src/yoetz/ports/privacy.py` | `python_shorthand` | — | `C–E` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/ports/runtime.md` | `future_file` | `src/yoetz/ports/runtime.py` | `python_shorthand` | — | `B/C` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/ports/secret_memory.md` | `future_file` | `src/yoetz/ports/secret_memory.py` | `python_shorthand` | — | `B` | `draft` | Owns exactly this future public repository file. |

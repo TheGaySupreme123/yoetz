@@ -21,18 +21,19 @@ local control hello.
 
 Protocol is const `1.0`; service version is bounded SemVer; instance ID is canonical `svc_` UUIDv4;
 generation is a canonical positive-decimal string. `allowed_methods` is sorted unique
-and drawn only from the exact twenty-five-value ASCII-sorted registry `backup_execute`,
+and drawn only from the exact thirty-value ASCII-sorted registry `backup_execute`,
 `backup_preview`, `check`,
 `import_codex_jsonl`, `integration_execute`, `integration_preview`, `migrate_execute`,
-`migrate_preview`, `privacy_get_effective`, `privacy_get_setup`, `privacy_propose_policy`,
-`privacy_receipts_get`, `privacy_receipts_list`, `privacy_tighten_policy`, `publish_work`, `receipt`,
-`respond`, `restore_execute`,
+`migrate_preview`, `observation_ingest`, `observation_pause`, `observation_resume`,
+`observation_revoke`, `observation_status`, `privacy_get_effective`, `privacy_get_setup`,
+`privacy_propose_policy`, `privacy_receipts_get`, `privacy_receipts_list`,
+`privacy_tighten_policy`, `publish_work`, `receipt`, `respond`, `restore_execute`,
 `restore_preview`, `review`, `service_lock`, `service_status`, `service_stop`, `start`, `status`.
 For an authenticated `mcp_bridge` hello, `allowed_methods` is exactly the six workflow methods
 `check`, `publish_work`, `receipt`, `respond`, `start`, and `status`; import/review, maintenance,
-integration, lifecycle and privacy support methods are neither advertised nor accepted. The six
-privacy methods are ordinary least-authority CLI/UI methods only. There is no ordinary
-decide/confirm method. Manifest digest is
+integration, observation, lifecycle and privacy support methods are neither advertised nor accepted.
+The six privacy methods and five observation methods are ordinary least-authority CLI/UI methods
+only. There is no ordinary decide/confirm method. Manifest digest is
 `sha256:` plus 64 lowercase hex. Duplicate service identity/version/generation inside `status` must
 equal the envelope.
 

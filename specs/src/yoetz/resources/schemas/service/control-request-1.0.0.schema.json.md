@@ -15,7 +15,7 @@ path; `$id` and media type equal the root artifact.
 ## Behavior
 
 Build copies root bytes unchanged, manifests exact path/size/SHA-256, and validates the root
-artifact's complete twenty-five-call-plus-cancel union offline. The six workflow body `$ref`s
+artifact's complete thirty-call-plus-cancel union offline. The six workflow body `$ref`s
 resolve through the installed registry; every support body definition is already closed inside the
 root artifact. Each integration preview, status, and execute body requires the explicit v0.1
 `harness:"codex"` discriminator; omission or any inferred/unknown harness is schema-invalid.

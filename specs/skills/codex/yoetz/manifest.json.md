@@ -24,8 +24,9 @@ The future file is canonical JSON with an exact reviewed shape. Its top-level co
   versions;
 - `capability_profile_ids` — the exact supported Codex capability-profile IDs frozen by the skill
   contract;
-- `hooks_by_capability_profile` — exact same-key map whose values are tagged absent or the
-  E-013-proven trigger-only descriptor; every v0.1 observation arm is absent;
+- `hooks_by_capability_profile` — exact same-key map whose values are tagged absent or an
+  E-013-proven descriptor that may declare a trigger arm and/or a nonempty closed
+  `observation_events` set; unproven cells keep the observation arm empty;
 - `managed_members` — the exact managed files with logical member name, role, and `origin`
   (`harness_owned` or `shared_guidance`). Every non-manifest member also has byte size and SHA-256.
   The manifest's own entry is tagged `identity_status: "self_excluded"` and carries neither, so it

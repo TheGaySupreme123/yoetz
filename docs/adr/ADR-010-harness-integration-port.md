@@ -1,16 +1,18 @@
 # ADR-010 — Harness integration is a port; Codex is the first adapter
 
-**Status:** Working decision for spec drafting (2026-07-16; trigger-profile amendment 2026-07-17).
-Ratification requires the packaging
+**Status:** Working decision for spec drafting (2026-07-16; trigger-profile amendment 2026-07-17;
+first-party Codex observation amendment 2026-07-22). Ratification requires the packaging
 byte-parity run plus a capability run proving an unprofiled MCP host completes the workflow from an
-installed artifact.
+installed artifact, and — for first-party Codex cells that advertise observation — installed-artifact
+evidence that observation ingest earns `hook_observed` only from real observation evidence.
 **Owning public specs:** `specs/guidance/`, `specs/src/yoetz/ports/integrations.py.md`,
+`specs/src/yoetz/ports/observation.py.md`, `specs/src/yoetz/domain/observation.py.md`,
 `specs/src/yoetz/application/integrations.py.md`,
 `specs/src/yoetz/adapters/integrations/codex_skill.py.md`, `specs/src/yoetz/mcp/descriptors.md`,
 `specs/src/yoetz/mcp/resources.md`, `specs/src/yoetz/mcp/server.md`,
 `specs/schemas/common/client-info-1.0.0.schema.json.md`.
 **Relates to:** ADR-002 (canonical protocol), ADR-005 (Codex capability identity), ADR-007
-(packaging/release).
+(packaging/release), ADR-009 (egress/privacy).
 
 ## Context
 
@@ -54,11 +56,13 @@ The through-line is that "Codex is first" had been encoded as "Codex is the only
 
 3. **Hook support is exact-profile capability data, not a release-wide boolean.**
    `HarnessProfile.hooks_by_capability_profile` maps each advertised capability-profile ID to
-   `HarnessHookProfile | None`. A v0.1 cell may declare a trigger-only profile after E-013's
-   installed-artifact evidence passes; an unproven cell remains `None`. Observation hooks are the
-   only integration capability that would earn `hook_observed` coverage, and every v0.1 cell keeps
-   that arm absent. This lets a safe ergonomic ship without implying observation or inferring
-   support across neighboring host versions.
+   `HarnessHookProfile | None`. A v0.1 cell may declare a trigger arm, an observation arm, both, or
+   neither after the corresponding installed-artifact evidence passes; an unproven cell remains
+   `None`. Observation is a **required v0.1 capability for first-party Codex** once the exact cell
+   is capability-proven: it is the only integration arm that earns `hook_observed`, and only when
+   real observation evidence exists. Trigger-only cells remain valid ergonomics and still earn no
+   coverage. Unprofiled or unsupported cells keep both arms absent. Support is never inferred
+   across neighboring host versions.
 
 4. **Three delivery tiers, with tier 0 self-sufficient.** Tier 0 is
    `guidance/agent-instructions.md`, served verbatim as the MCP initialize `instructions` string, and
@@ -80,7 +84,10 @@ The through-line is that "Codex is first" had been encoded as "Codex is the only
    `status` carries `readOnlyHint=true`; `receipt` carries `readOnlyHint=false` because it stages a
    receipt object and appends a `receipt_recorded` event. Every tool carries an explicit
    `idempotentHint=true`. Nothing carries `destructiveHint`, because no Yoetz operation deletes
-   recorded evidence.
+   recorded evidence. Observation does **not** add a seventh MCP tool: live observation is local
+   CLI/service control through `ObservationPort` (ingest/status/pause/resume/revoke), and advice
+   surfaces through existing nonblocking hooks plus ordinary `status` / findings / coverage
+   machinery.
 
 7. **`ClientInfoModel.kind` gains `cooperative_agent`**, the transport-neutral honest identity for
    any harness without a first-party integration, valid with `cooperative_mcp` or `local_cli`.
@@ -94,16 +101,27 @@ The through-line is that "Codex is first" had been encoded as "Codex is the only
    earns no coverage: it observes nothing, and the `status` result it causes discloses only what
    `status` would already have returned under the ordinary provenance rules and the `agent_context`
    ceiling. It therefore touches no coverage lattice value, strengthens no claim, and changes no
-   honesty wording. An observation hook reports what the harness saw and is the only arm that would
-   earn `hook_observed`; it stays deferred to v0.2. Whether a specific harness exposes a usable
-   compaction or lifecycle trigger point is capability evidence rather than a spec choice, so E-013
-   must freeze the exact trigger points from an installed-artifact capability run before any trigger
-   hook ships. v0.1 may declare the trigger arm in an exact passing cell; the observation arm is
-   always absent.
+   honesty wording. An observation hook reports what the harness saw and is the only arm that earns
+   `hook_observed`, and only when real observation evidence exists (never from a trigger alone, a
+   consent marker, or an empty/degraded observation status).
+
+   For first-party Codex in protocol `0.1`, observation is a required integration capability once
+   the exact support cell is proven. Dual sources feed `ObservationPort`: **hooks are primary**
+   (low-latency structural envelopes) and **selective session-stream reconciliation** fills gaps
+   without replacing the hook path. Future unrecognized Codex events are accepted only as a stable
+   envelope plus allowlisted structural facts; unknown semantics become opaque gaps and never infer
+   success. Batch `ImporterPort` JSONL import remains a separate support surface that may reuse
+   mapping vocabulary but is not live observation. App-server integration and additional harnesses
+   remain deferred.
+
+   Whether a specific harness exposes usable trigger or observation points is capability evidence
+   rather than a spec choice. E-013 freezes exact trigger and observation event, payload/privacy,
+   coalescing/loop, gap, and failure behavior from an installed-artifact run before a cell advertises
+   either arm. Unproven cells remain `None`.
 
    The current Codex `0.144.5` capability candidate exposes `PreToolUse`, `PermissionRequest`,
    `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, `SubagentStart`,
-   `SubagentStop`, and `Stop`. This inventory explains the deferral but does not freeze support:
+   `SubagentStop`, and `Stop`. This inventory nominates candidates but does not freeze support:
    E-013 still requires installed-artifact payload, privacy, and behavior evidence before use.
 
 ## Consequences
@@ -115,6 +133,13 @@ registration is global, file-free, and marker-free, so reusing the skill-install
 misuse fields designed for on-disk trusted-project content. The guarantee below is unchanged —
 adding a harness is still one `HarnessId` value plus adapters, with no shared-type edits.
 
+**Amendment (2026-07-22):** First-party Codex observation is required for v0.1 completion of the
+Codex integration, still on protocol version `0.1`. Observation is a sibling local-control
+capability (`ObservationPort`), not a seventh MCP tool and not an `IntegrationsPort` overload.
+Existing v0.1 ledger/object data remains readable; migrations may add only observation consent,
+cursor, dedup, and advice state. Observation consent is project-level, separate from egress
+consent, and records a private workspace commitment (never a raw path in logs).
+
 A fork can make Yoetz first-party on another harness by writing one adapter and one profile. It
 edits no port, no registry, no guidance, and no schema. That is the property this ADR exists to
 guarantee, and it follows from the ports/adapters pattern the rest of the tree already uses.
@@ -125,15 +150,17 @@ tier-0 instructions, and four fetchable guidance documents. It earns `cooperativ
 which the coverage vector already expresses precisely. That is not a degraded mode needing a warning
 label; it is an accurate one.
 
-First-party integration therefore buys ergonomics, and — once observation hooks exist — stronger
-coverage. It never buys a different public contract. "Codex first" now means "the first harness where
-we can deliver the guidance natively, and the first where we will be able to earn `hook_observed`",
-not "the only harness that works."
+First-party Codex integration therefore buys ergonomics and, when the observation arm is
+capability-proven and consented, stronger coverage via `hook_observed`. It never buys a different
+public contract. "Codex first" means "the first harness where we deliver guidance natively and the
+first where observation can earn `hook_observed`", not "the only harness that works."
 
-A trigger-only v0.1 profile is one such ergonomic: it improves recovery reliability but leaves the
-coverage vector unchanged. Profile declaration is not installation authority; no adapter silently
-edits host configuration. The exact support cell must prove the trigger is already available through
-the reviewed host mechanism, or select `None` and retain manual re-grounding.
+A trigger-only v0.1 profile remains a valid ergonomic: it improves recovery reliability but leaves
+the coverage vector unchanged. An observation-capable cell must still prove real observation
+evidence before any `hook_observed` claim. Profile declaration is not installation authority; no
+adapter silently edits host configuration. The exact support cell must prove each advertised arm
+through the reviewed host mechanism, or select `None` / empty `observation_events` and retain the
+honest weaker coverage.
 
 The cost is one extra indirection for the single harness that exists today, and four guidance files
 whose ownership must be respected: a harness restating a shared rule instead of linking to it is a

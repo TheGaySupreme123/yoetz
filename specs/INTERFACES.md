@@ -958,13 +958,16 @@ encoding, length prefix, hash prepass, normalization, or delimiter.
 CLI/UI-only `lock`/`stop`, and `close`. Shared closed types are `ControlClientKind`
 (`cli|mcp_bridge|ui`), `ControlMethod`, `ControlRequest`, `ControlResult`, `ServiceState`
 (`starting|locked|unlocking|ready|draining|failed`), and `ServiceStatus`. The method registry has
-exactly twenty-five calls: the six workflow operations plus nineteen support/preview/execute,
-lifecycle, and CLI/UI-only methods. The privacy subset is exactly
+exactly thirty calls: the six workflow operations plus twenty-four support/preview/execute,
+lifecycle, observation-control, and CLI/UI-only methods. The privacy subset is exactly
 `privacy_get_setup|privacy_get_effective|privacy_propose_policy|privacy_tighten_policy|
-privacy_receipts_list|privacy_receipts_get`.
+privacy_receipts_list|privacy_receipts_get`. The observation subset is exactly
+`observation_ingest|observation_status|observation_pause|observation_resume|observation_revoke`
+(local CLI/UI only; never MCP tools — the public MCP surface remains six tools).
 It has no privacy decision, unlock, secret, credential, key-handle, decrypted-object,
 arbitrary-path, or policy-loosening field or method. `service_status` is available while locked;
-task operations are not. MCP cannot invoke lifecycle or privacy-control methods.
+task operations are not. MCP cannot invoke lifecycle, privacy-control, or observation-control
+methods.
 
 `ports/privacy.py` owns the shared receipt-inspection values `PrivacyReceiptAudience`,
 `PrivacyReceiptQuery`, `PrivacyReceiptPage` (positive snapshot generation, bounded unique
@@ -1565,6 +1568,55 @@ port exists in v0.1. Review compares only recorded/captured evidence at a
 frozen frontier. Live Git/shell/filesystem inspection requires a later consent/root/symlink/
 submodule/redaction ADR and a separate port.
 
+`ImporterPort` is **batch JSONL import only**. Live Codex observation is owned by
+`ObservationPort` below. The two surfaces may reuse mapping-version and gap-code vocabulary; they
+do not share allocation, cursor, consent, or advice state, and import never earns `hook_observed`.
+
+### Live Codex observation and advice
+
+`ObservationPort` is the local-control boundary for first-party Codex live observation. It is not
+an MCP tool and does not extend the six-tool public workflow. Methods are:
+
+- `ingest(envelope: ObservationEnvelope) -> ObservationIngestResult`;
+- `status(query: ObservationStatusQuery) -> ObservationStatus`;
+- `pause(command: ObservationControlCommand) -> ObservationStatus`;
+- `resume(command: ObservationControlCommand) -> ObservationStatus`;
+- `revoke(command: ObservationRevokeCommand) -> ObservationStatus`.
+
+Shared closed types:
+
+- `ObservationSource` — exactly `codex_hook | codex_session_stream`. Hooks are the primary
+  low-latency source; session-stream reconciliation is selective and secondary.
+- `ObservationEnvelope` — Codex session identity (commitment, never raw path), event kind (exact
+  closed identifier from the capability cell, or an opaque unsupported token), stable source
+  identity, `ObservationCursor`, receipt time, bounded allowlisted structural payload, content-
+  object references (encrypted object IDs/commitments only), and gap codes.
+- `ObservationCursor` — source generation, byte/event position, last source commitment, and
+  mapping version. Cursors are crash-stable and generation-fenced.
+- `ObservationStatus` — lifecycle `active|degraded|stale|stopped`, source coverage, last
+  observation, lag, gaps, unsupported events, and the current `AdviceSnapshot` frontier identity.
+- `AdviceSnapshot` — ranked findings, exact evidence basis, confidence/coverage, recommended next
+  action, freshness, and suppression identity. It surfaces through nonblocking observation/
+  integration hooks and through ordinary public `status` (and existing finding/coverage machinery);
+  it is never a seventh MCP tool.
+
+Observation consent is one project-level confirmation recorded as a private workspace commitment
+(never a raw filesystem path in logs, status, or receipts). Consent is separate from egress
+consent. Revocation stops new ingestion and retains already-kept evidence. Sensitive bounded
+evidence lives only in encrypted objects; plaintext observation state is allowlisted structural
+fields plus commitments. Yoetz never retains hidden reasoning or complete transcript prose, never
+creates an unencrypted transcript spool on vault/service outage, and never places secret-like
+command output in status, logs, hook advice, or semantic packets. Semantic review receives only
+minimized approved packets. Unrecognized future Codex events accept the stable envelope plus
+structural facts, record opaque gaps for unknown semantics, and never infer success.
+
+`hook_observed` (publication channel and artifact-observation class) and `harness_observed`
+authorship require real observation evidence under an active consented observation arm — never a
+trigger-only hook, consent marker, empty status, or degraded/stopped source alone.
+
+Existing v0.1 ledger/object/import data remains readable without rewrite. Migrations may add only
+observation consent, cursor, dedup, and advice state.
+
 ### Maintenance
 
 `MaintenancePort` has paired preview/execute methods:
@@ -1641,34 +1693,36 @@ frozen per-harness descriptor: `harness_id`, `skill_root` (the exact relative in
 All three support collections may be jointly empty only for the explicit unprofiled/unadvertised
 state. Otherwise capability profiles and supported versions are nonempty and the map has exactly
 the same keys as `capability_profile_ids`; missing, extra, wildcard, inherited,
-or range-derived entries are invalid. A v0.1 exact cell may select a trigger-only profile after
-E-013 passes, while an unsupported cell selects `None`. Every v0.1 observation arm is absent, so no
-v0.1 integration can emit the `hook_observed` publication channel or artifact-observation class
-(ADR-005).
+or range-derived entries are invalid. A v0.1 exact cell may select a trigger arm, an observation
+arm, both, or `None` after E-013 passes. For first-party Codex, observation is a required v0.1
+capability once the exact cell is capability-proven; unproven or unprofiled cells keep
+`observation_events=()` and cannot emit `hook_observed` (ADR-005, ADR-010).
 
 `HarnessHookProfile` is the closed descriptor
 `(trigger_event, trigger_payload_profile_id, evidence_case_ids,
 trigger_action="reground_status", duplicate_policy="coalesce", loop_policy="single_flight",
-failure_policy="best_effort", observation_events=())`. `trigger_event`, payload profile, and evidence case IDs
-are exact nonempty bounded identifiers from the selected capability cell; no wildcard or version
-range is allowed. It distinguishes two arms. An **observation hook** reports what the harness saw
-the agent do and is the only arm that would earn `hook_observed`; it is deferred to v0.2. A
-**trigger hook** fires on a harness lifecycle event — context compaction is the motivating case —
-and prompts the agent to re-ground by calling `status`. A trigger hook earns no coverage: it
-observes nothing, and the `status` result it causes discloses only what that call would already
-have returned under the ordinary provenance rules and the `agent_context` ceiling ("Privacy policy,
-disclosure, and outbound gateway" above), so it touches no coverage lattice value and changes no
-honesty wording. E-013 must freeze the exact event, payload/privacy boundary, coalescing/loop guard,
-and failure behavior before one exact v0.1 capability cell declares the trigger arm. Cells without
-that evidence remain `None`; every v0.1 observation arm remains absent.
+failure_policy="best_effort", observation_events)`. `trigger_event`, payload profile, evidence case
+IDs, and each `observation_events` member are exact nonempty bounded identifiers from the selected
+capability cell when that arm is declared; no wildcard or version range is allowed.
+`observation_events` may be nonempty for first-party Codex when capability-proven; otherwise it is
+exactly `()`. It distinguishes two arms. An **observation hook** reports what the harness saw the
+agent do and is the only arm that earns `hook_observed`, and only when real observation evidence
+exists. A **trigger hook** fires on a harness lifecycle event — context compaction is the
+motivating case — and prompts the agent to re-ground by calling `status`. A trigger hook earns no
+coverage: it observes nothing, and the `status` result it causes discloses only what that call
+would already have returned under the ordinary provenance rules and the `agent_context` ceiling
+("Privacy policy, disclosure, and outbound gateway" above), so it touches no coverage lattice value
+and changes no honesty wording. E-013 must freeze the exact event, payload/privacy boundary,
+coalescing/loop guard, gap codes, and failure behavior before one exact v0.1 capability cell
+declares either arm. Cells without that evidence remain `None` or keep `observation_events=()`.
 
 Adding a first-party harness is exactly one `HarnessId` value plus one adapter under
 `adapters/integrations/`; it requires no change to this port, to `IntegrationService`, or to any
 guidance content. The guidance a harness installs is owned once, harness-neutrally, under
 `guidance/` and is not duplicated per harness. A harness Yoetz has not profiled is still fully
 supported through the MCP baseline and identifies itself as `cooperative_agent` (§6); first-party
-integration buys harness-native ergonomics and, once observation hooks exist, stronger coverage —
-never a different public contract.
+integration buys harness-native ergonomics and, when observation is capability-proven and
+consented, stronger coverage — never a different public contract.
 
 `IntegrationService` owns request validation and confirmation. Install/replace/remove are bound to
 a freshly recomputed preview digest and explicit acceptance. Its shared values are

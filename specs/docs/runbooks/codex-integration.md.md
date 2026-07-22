@@ -102,11 +102,14 @@ Codex discovery (ADR-012). Automation changes no rule above: identical commands,
 explicit digest-bound confirmation; a foreign entry is preserved and refused; success is verified
 by re-reading the entry; "registered" never implies Codex will successfully connect.
 
-The exact capability profile also reports the compaction-recovery trigger as present or absent. A
-present v0.1 trigger only prompts the agent to re-ground through `status`; it records no observation,
-changes no coverage, and remains optional. Skill installation does not configure the hook. If the
-profile is absent, the host mechanism is missing, or the trigger fails, use the ordinary manual
-resume/compaction procedure and do not infer support from another Codex version.
+The exact capability profile also reports the compaction-recovery trigger and/or observation arm as
+present or absent. A present v0.1 trigger only prompts the agent to re-ground through `status`; it
+records no observation, changes no coverage, and remains optional. When observation is advertised,
+enablement requires project-level observation consent; live ingest uses local control methods, not
+a seventh MCP tool; `hook_observed` requires real observation evidence; and `AdviceSnapshot`
+surfaces via hooks and ordinary `status`. Skill installation does not configure hooks. If the
+profile is absent, the host mechanism is missing, or a trigger/observation path fails, use the
+ordinary manual resume/compaction procedure and do not infer support from another Codex version.
 
 ### Remove
 
