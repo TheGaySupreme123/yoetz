@@ -100,6 +100,10 @@ elevated_app = typer.Typer(
     ),
     no_args_is_help=True,
 )
+hooks_app = typer.Typer(
+    help="Codex lifecycle hook commands (activation, correlation, re-ground).",
+    no_args_is_help=True,
+)
 
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(state_app, name="state")
@@ -117,6 +121,7 @@ app.add_typer(restore_app, name="restore")
 app.add_typer(migrate_app, name="migrate")
 app.add_typer(elevated_app, name="elevated-bootstrap")
 app.add_typer(elevated_app, name="consent")
+app.add_typer(hooks_app, name="hooks")
 
 
 def run_async(operation: Callable[[], Awaitable[int]]) -> int:
@@ -286,6 +291,32 @@ async def _call_workflow(
 def _finish(code: int) -> None:
     if code:
         raise typer.Exit(code)
+
+
+def _hooks_operation(name: str) -> Callable[..., int]:
+    module = importlib.import_module("yoetz.cli.hooks")
+    return cast(Callable[..., int], getattr(module, name))
+
+
+@hooks_app.command("user-prompt-submit")
+def hooks_user_prompt_submit() -> None:
+    """Inject the materiality/activation cue for UserPromptSubmit."""
+
+    _finish(_hooks_operation("handle_user_prompt_submit")())
+
+
+@hooks_app.command("post-tool-use")
+def hooks_post_tool_use() -> None:
+    """Correlate a successful Yoetz start tool call for PostToolUse."""
+
+    _finish(_hooks_operation("handle_post_tool_use")())
+
+
+@hooks_app.command("session-start")
+def hooks_session_start() -> None:
+    """Re-ground after SessionStart resume/compact; clear removes mapping."""
+
+    _finish(_hooks_operation("handle_session_start")())
 
 
 def _workflow_command(method: str, request_type: type[BaseModel]) -> Callable[..., None]:
@@ -732,7 +763,13 @@ def provider_endpoint(
     from yoetz.config.models import ConfigError
 
     try:
-        if interactive and not official and not fireworks and https_origin is None and model is None:
+        if (
+            interactive
+            and not official
+            and not fireworks
+            and https_origin is None
+            and model is None
+        ):
             if not (sys.stdin.isatty() and sys.stdout.isatty()):
                 _finish(_usage_failure())
                 return
@@ -1015,11 +1052,7 @@ def root(
         if context.invoked_subcommand is not None:
             raise typer.BadParameter("--set cannot be combined with a subcommand")
         operation = _setup_operation("run_provider_setup")
-        _finish(
-            run_async(
-                lambda: operation(fireworks=fireworks, model=model, api_key=api_key)
-            )
-        )
+        _finish(run_async(lambda: operation(fireworks=fireworks, model=model, api_key=api_key)))
         return
     if fireworks or model is not None or api_key is not None:
         raise typer.BadParameter("--fireworks, --model, and --api-key require --set")

@@ -199,7 +199,12 @@ retained semantic-finding provenance, and version identities. The generic fallba
   when there is no gap/redaction;
   `Visibility is reduced by recorded redactions; coverage is not proof of correctness.` when there
   are redactions but no gap; otherwise `Coverage is limited by: {codes}.`, where `codes` is the
-  comma-space join of the exact sorted material gap-code tuple; and
+  comma-space join of the exact sorted material gap-code tuple; when the gap set includes
+  `semantic_review_not_configured` or `semantic_relevance_review_not_run`, the limitations body
+  begins with `Semantic relevance review was not run.` before that coverage-limited sentence; and
+  compact rendering preserves the structural conclusion: unresolved deterministic findings remain
+  explicit, insufficient coverage remains explicit, and only a genuinely clear deterministic
+  conclusion may say that no unresolved deterministic issue was found; and
 - versions: `Engine {engine_version}; protocol {protocol_version}; {policy rows}.`, where each
   policy row is `{policy_id} {policy_version}` in `ReceiptVersionSlice.policy_versions` order and
   rows are separated by semicolon-space.

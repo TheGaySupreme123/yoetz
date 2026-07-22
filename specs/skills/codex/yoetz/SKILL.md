@@ -33,10 +33,12 @@ installation into a trusted project.
 ### Required frontmatter
 
 - `name: yoetz`.
-- A concise description that triggers on material, multi-step agent work where the user benefits
-  from a durable obligation/evidence/completion record; it explicitly avoids trivial edits and
-  ordinary questions.
-- Optional `metadata.short-description` contains only a concise UI description.
+- A concise description that front-loads activation triggers: material multi-step, delegated,
+  resumable, or verification-heavy work with an explicit call-`start`-before-substantive-work cue,
+  then the trivial-question/edit exclusion.
+- Optional `metadata.short-description` carries the same trigger salience in a short catalog line
+  (current hosts may show only this text in the skill catalog). It must not be a generic product
+  tagline that hides when to activate.
 - No other frontmatter fields. Codex ignores Yoetz-private compatibility fields; skill schema
   version, Yoetz protocol range, minimum/maximum-tested Codex versions, and required MCP server
   name `yoetz` live in the adjacent compatibility manifest.
@@ -73,10 +75,9 @@ layout convention owned here; the bytes inside are not.
 
 ### Activation and disclosure
 
-Codex applies the skill to non-trivial work with multiple requested outcomes, delegated work,
-meaningful verification, long duration/resume risk, or a material completion claim. It skips
-translation, explanation, one-line edits, and other work where the ledger ceremony would exceed
-the integrity benefit.
+Codex applies the skill to material multi-step, delegated, resumable, or verification-heavy work
+and calls `start` before substantive work. It skips trivial questions or edits where the ledger
+ceremony would exceed the integrity benefit.
 
 At activation, Codex tells the user in one short sentence that it is using Yoetz as a local work
 ledger/verifier. It does not imply enforcement, complete observation, authenticated authorship, or

@@ -20,6 +20,10 @@ and private-source digest without leaking transcripts, prompts, payloads, secret
 - `EvidenceRecorder.begin(case, context)`, `.observe(...)`, `.finish(outcome, reasons)`.
 - `validate_evidence(record)`, `canonical_evidence_bytes(record)`,
   `write_evidence_atomic(record, output_root)`.
+- `capability_evidence_output_root(tmp_path)` — durable root when `YOETZ_CAPABILITY_EVIDENCE_DIR`
+  is set; otherwise an isolated temp directory.
+- `runtime_capability_context(...)` — binds digests from the version manifest, or from
+  `YOETZ_CANDIDATE_ARTIFACT_DIGEST` when the capability workflow supplies the prepared candidate.
 
 ## Behavior
 

@@ -88,7 +88,7 @@ def test_public_error_and_validation_summaries_are_sanitized() -> None:
     assert "never-echo-this" not in repr(locations)
 
 
-def test_unknown_tool_is_a_tool_level_invalid_request() -> None:
+def test_unknown_tool_message_is_sanitized() -> None:
     raw_name = "../../private/secret-tool"
     message = sanitize_unknown_tool_name(raw_name)
 
@@ -100,16 +100,14 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(item.name for item in TOOL_DESCRIPTORS) == _EXPECTED_TOOL_NAMES
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == _EXPECTED_TOOL_NAMES
     assert TOOL_DESCRIPTOR_SET_DIGEST == (
-        "sha256:d7cd0ca02b4ab68957a5444d3f02aa5f23b95a0d1b3ab0b78982dc94c39d8976"
+        "sha256:fed4821789eb054b73919233b785c2750696f65af7ebe2ea3d98dbc407bbae6f"
     )
-    assert {item.name for item in TOOL_DESCRIPTORS if item.annotations.read_only} == {
-        "status",
-        "receipt",
-    }
+    assert descriptor_for("start").description.startswith(
+        "Call for material multi-step, delegated, resumable, or verification-heavy work"
+    )
+    assert {item.name for item in TOOL_DESCRIPTORS if item.annotations.read_only} == {"status"}
     assert all(not item.annotations.destructive for item in TOOL_DESCRIPTORS)
-    assert all(
-        item.annotations.idempotent is (not item.annotations.read_only) for item in TOOL_DESCRIPTORS
-    )
+    assert all(item.annotations.idempotent for item in TOOL_DESCRIPTORS)
     assert all(
         _FORBIDDEN_DESCRIPTOR_CLAIMS.search(item.description) is None for item in TOOL_DESCRIPTORS
     )
@@ -131,6 +129,13 @@ def test_guidance_resources_are_exact_and_static() -> None:
         assert item.text.encode("utf-8") == item.bytes
         assert item.size == len(item.bytes)
         assert item.media_type == "text/markdown"
+        assert item.annotations.audience == ("assistant",)
+        assert 0.0 <= item.annotations.priority <= 1.0
+        assert "Read " in item.description or item.description.startswith("Read")
+    assert GUIDANCE_RESOURCES[0].annotations.priority == 1.0
+    assert GUIDANCE_RESOURCES[1].annotations.priority == 0.9
+    assert all(item.annotations.priority <= 0.9 for item in GUIDANCE_RESOURCES[1:])
+    assert GUIDANCE_RESOURCES[2].annotations.priority == GUIDANCE_RESOURCES[3].annotations.priority
 
 
 def test_resource_uri_is_a_key_not_a_path(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -499,6 +499,15 @@ post-append result frontier.
 finding coverage using `coverage.weakest`; every explicit receipt-gap code must also occur in the
 top-level known-gap set, and the fold must equal that top-level coverage.
 
+Shared structural gap codes for optional semantic relevance review (distinct families):
+
+- `optional_semantic_review_blocked_by_policy` — blocked before dispatch by network-egress policy;
+- `semantic_review_not_configured` — evaluator/provider not configured;
+- `semantic_relevance_review_not_run` — evaluation failed/timed out/unavailable without a clean pass.
+
+The not-configured and not-run codes share the honest compact limitation that semantic relevance
+review was not run; they must not reuse blocked-by-policy wording.
+
 ## 9. Kernel (`kernel/`)
 
 - `ProjectionState` (frozen): `frontier`, `head_digest`, `plans`, `obligations`, `decisions`,
@@ -1837,7 +1846,9 @@ facade and are never MCP tools.
   packaged `guidance/` resources and verified against the resource manifest before use; none is
   composed at runtime from user, task, provider, or environment values. Shared values are
   `ToolDescriptor`, `TOOL_DESCRIPTORS` (frozen, in the same order `tools/list` returns), and
-  `server_instructions()`. `status` and `receipt` carry `readOnlyHint=true`; no descriptor carries a
+  `server_instructions()`. `status` carries `readOnlyHint=true`; `receipt` carries
+  `readOnlyHint=false` because it stages an object and appends a `receipt_recorded` event. Every
+  tool carries an explicit `idempotentHint=true`. No descriptor carries a
   `destructiveHint`, because no Yoetz operation deletes recorded evidence. Descriptor and
   instruction text is bound by the same honesty lint as the guidance references: it may not say
   "verified", "proved", "authenticated", or "complete" except where the surrounding sentence states

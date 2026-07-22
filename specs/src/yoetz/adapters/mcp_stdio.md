@@ -20,7 +20,8 @@ bytes into request parsing, or interleave non-protocol noise into stdout.
 
 - `MAX_JSON_FRAME_BYTES: int = 1_048_576` — the inbound and outbound payload cap in bytes, counting
   JSON payload bytes only and excluding the single terminating LF (`specs/INTERFACES.md`).
-- `bounded_stdio_server(max_json_bytes: int = MAX_JSON_FRAME_BYTES)` — async context manager that
+- `bounded_stdio_server(max_json_bytes: int = MAX_JSON_FRAME_BYTES, *,
+  drain_pending_responses: bool = False)` — async context manager that
   yields the pair `(read_stream, write_stream)` consumed by `Server.run` in `mcp/server.py`
   (`specs/INTERFACES.md`). `read_stream` delivers validated SDK `SessionMessage` values to the server;
   `write_stream` accepts SDK `SessionMessage` values from the server and serializes them to stdout.
@@ -96,8 +97,10 @@ The reader owns a single `bytearray` buffer and loops:
 6. **Forward.** Only a fully validated `SessionMessage` is sent into the zero-capacity inbound
    stream. Raw parser, decoder, I/O, or transport exceptions never enter the SDK receive stream —
    the SDK sees validated messages or clean stream closure, nothing else.
-7. **EOF.** `os.read` returning `b""` with an **empty** buffer is clean EOF: the reader closes the
-   inbound stream, which triggers orderly SDK shutdown. `os.read` returning `b""` with a
+7. **EOF.** `os.read` returning `b""` with an **empty** buffer is clean EOF. The production MCP
+   server enables `drain_pending_responses`, keeping SDK input open for a bounded window until
+   accepted requests have written responses; direct transport users default to immediate closure.
+   `os.read` returning `b""` with a
    **non-empty** partial frame is a transport failure (partial-EOF): the incomplete frame is
    discarded, never forwarded, and the transport terminates through the failure path.
 
@@ -188,6 +191,7 @@ The implementation never fabricates an ID and never silently replaces bytes.
 | Partial `os.write` | Loop with readiness waits until fully written |
 | Cancellation (task group cancelled) | Cancellation is re-raised, not converted; streams and fds are closed in `finally` |
 | Client stops reading (stall) | Writer blocks on readiness; zero-capacity streams backpressure the whole pipeline; no queue growth |
+| Clean EOF after accepted requests | When production drain tracking is enabled, keep the SDK input stream open for a bounded window until each accepted request response has been written; then close. Notifications do not enter the pending count. |
 
 Nothing user-controlled — payload bytes, tool names, JSON fragments, exception strings — ever
 appears in an emitted error frame or a log record from this file.
@@ -204,6 +208,8 @@ appears in an emitted error frame or a log record from this file.
 7. Parse-error frames use `"id": null`; no ID is ever fabricated.
 8. Memory streams have capacity zero; backpressure replaces queuing.
 9. No private SDK API is used; otherwise ADR-005 blocks release.
+10. Clean EOF cannot cancel already accepted request responses merely because the reader observed
+    EOF; the bounded drain tracker counts requests and written responses without retaining payloads.
 
 ## Tests
 

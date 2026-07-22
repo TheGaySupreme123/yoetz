@@ -23,7 +23,8 @@ through it.
 ## Public surface
 
 - `GUIDANCE_RESOURCES` — frozen tuple of the four registered resources, in stable order.
-- `list_resources()` — MCP `resources/list`; returns URI, name, title, description, and MIME type.
+- `list_resources()` — MCP `resources/list`; returns URI, name, title, description, MIME type,
+  size, and honest MCP annotations (`audience`, `priority`).
 - `read_resource(uri)` — MCP `resources/read`; returns verified bytes for exactly one registered URI.
 
 Registered URIs are exactly:
@@ -41,8 +42,11 @@ The registry is closed and built at startup from the packaged `guidance/` resour
 size and SHA-256 are verified against the resource manifest before registration; a failure is fatal
 to startup rather than degraded, for the same reason it is fatal in `mcp/descriptors.md`.
 
-Each entry exposes frozen URI, logical name, display metadata, and media type. Its bytes, strict
-UTF-8 text, and byte size are projections of `yoetz.version.read_verified_resource(logical_name)`;
+Each entry exposes frozen URI, logical name, display metadata, media type, and MCP annotations
+identifying the assistant audience plus a relative priority in `[0, 1]` (agent-instructions highest,
+workflow high, publication-policy and coverage-and-receipts moderate). Each description states when
+the resource should be read; descriptions do not promise activation or enforcement. Its bytes,
+strict UTF-8 text, and byte size are projections of `yoetz.version.read_verified_resource(logical_name)`;
 there is no second manifest parser or package-reader seam in the MCP layer. `list_resources()`
 forces all four reads before returning the tuple so a partial guidance set is startup-fatal.
 
@@ -97,8 +101,9 @@ documents only.
   shape; unknown/templated/traversing URIs are bounded structural errors with no filesystem access.
 - `tests/subprocess/test_mcp_service_bridge.py` — resources list and read succeed while the service
   is absent, locked, and draining.
-- `tests/capability/test_mcp_protocol_and_sdk.py` — an unprofiled host discovers and reads the
-  guidance over the pinned SDK and completes the workflow with no installed skill.
+- `tests/capability/test_mcp_gate1_protocol_conformance.py` — Gate-1 lists and reads every bundled
+  guidance resource with digest agreement against packaged bytes (protocol/conduit only).
+- `tests/capability/test_mcp_protocol_and_sdk.py` — pinned SDK/protocol identity probes.
 - `tests/conformance/privacy/test_never_send_scope_and_channels.py` — no resource read produces a
   disclosure receipt or admits any task/user content.
 - `tests/packaging/test_resource_byte_parity.py` — served bytes equal packaged and installed bytes.

@@ -27,6 +27,8 @@ re-ranks, re-fetches, or strengthens the result.
   `ReceiptVersionSlice` (including `resource_manifest_digest`), not `VersionManifest` or a
   mapping.
 - `test_builder_never_adds_new_findings_or_evidence` — the builder is a packaging step only.
+- `test_semantic_review_not_configured_limitations_state_not_run` — not-configured gap produces
+  limitations and compact wording that semantic relevance review was not run.
 
 ## Behavior
 

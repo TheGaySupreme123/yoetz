@@ -19,6 +19,7 @@ from pydantic import ValidationError
 
 MAX_JSON_FRAME_BYTES: Final = 1_048_576
 _MAX_READ_CHUNK: Final = 65_536
+_EOF_DRAIN_SECONDS: Final = 5.0
 _PARSE_REASONS: Final = frozenset(
     {
         "bom_rejected",
@@ -64,6 +65,37 @@ class TransportFailure(Exception):
 class _WriterItem:
     payload: bytes
     done: anyio.Event | None = None
+
+
+@dataclass(slots=True)
+class _DrainTracker:
+    enabled: bool = False
+    pending_requests: int = 0
+    drained: anyio.Event | None = None
+
+    def request_started(self) -> None:
+        if not self.enabled:
+            return
+        if self.pending_requests == 0:
+            self.drained = anyio.Event()
+        self.pending_requests += 1
+
+    def response_finished(self) -> None:
+        if not self.enabled:
+            return
+        if self.pending_requests <= 0:
+            return
+        self.pending_requests -= 1
+        if self.pending_requests == 0 and self.drained is not None:
+            self.drained.set()
+
+    async def wait_for_drain(self) -> None:
+        if not self.enabled:
+            return
+        if self.pending_requests == 0 or self.drained is None:
+            return
+        with anyio.move_on_after(_EOF_DRAIN_SECONDS):
+            await self.drained.wait()
 
 
 def _parse_frame(frame: bytes) -> SessionMessage:
@@ -197,6 +229,7 @@ async def _writer(
 async def _outbound_forwarder(
     outbound: MemoryObjectReceiveStream[SessionMessage],
     items: MemoryObjectSendStream[_WriterItem],
+    tracker: _DrainTracker,
 ) -> None:
     try:
         async with outbound, items:
@@ -204,6 +237,9 @@ async def _outbound_forwarder(
                 done = anyio.Event()
                 await items.send(_WriterItem(_serialize_session_message(message), done))
                 await done.wait()
+                root = message.message.root
+                if isinstance(root, types.JSONRPCResponse | types.JSONRPCError):
+                    tracker.response_finished()
     except anyio.BrokenResourceError, anyio.ClosedResourceError:
         await anyio.sleep(0)
 
@@ -219,7 +255,9 @@ async def _reader(
     maximum: int,
     inbound: MemoryObjectSendStream[SessionMessage],
     items: MemoryObjectSendStream[_WriterItem],
+    tracker: _DrainTracker | None = None,
 ) -> None:
+    tracker = _DrainTracker() if tracker is None else tracker
     buffer = bytearray()
     try:
         async with inbound, items:
@@ -238,6 +276,7 @@ async def _reader(
                 if not chunk:
                     if buffer:
                         raise TransportFailure("partial_eof")
+                    await tracker.wait_for_drain()
                     return
                 buffer.extend(chunk)
                 while True:
@@ -254,6 +293,8 @@ async def _reader(
                     except TransportFailure as exc:
                         await _emit_transport_error(items, exc.reason)
                         continue
+                    if isinstance(message.message.root, types.JSONRPCRequest):
+                        tracker.request_started()
                     await inbound.send(message)
     except anyio.BrokenResourceError, anyio.ClosedResourceError:
         await anyio.sleep(0)
@@ -262,6 +303,8 @@ async def _reader(
 @asynccontextmanager
 async def bounded_stdio_server(
     max_json_bytes: int = MAX_JSON_FRAME_BYTES,
+    *,
+    drain_pending_responses: bool = False,
 ) -> AsyncGenerator[
     tuple[
         MemoryObjectReceiveStream[SessionMessage],
@@ -288,12 +331,20 @@ async def bounded_stdio_server(
     outbound_send, outbound_receive = anyio.create_memory_object_stream[SessionMessage](0)
     item_send, item_receive = anyio.create_memory_object_stream[_WriterItem](0)
     reader_items = item_send.clone()
+    tracker = _DrainTracker(enabled=drain_pending_responses)
     try:
         try:
             async with anyio.create_task_group() as tasks:
                 tasks.start_soon(_writer, stdout_fd, max_json_bytes, item_receive)
-                tasks.start_soon(_outbound_forwarder, outbound_receive, item_send)
-                tasks.start_soon(_reader, stdin_fd, max_json_bytes, inbound_send, reader_items)
+                tasks.start_soon(_outbound_forwarder, outbound_receive, item_send, tracker)
+                tasks.start_soon(
+                    _reader,
+                    stdin_fd,
+                    max_json_bytes,
+                    inbound_send,
+                    reader_items,
+                    tracker,
+                )
                 try:
                     yield inbound_receive, outbound_send
                 except BaseException:

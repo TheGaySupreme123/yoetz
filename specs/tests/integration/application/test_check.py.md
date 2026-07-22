@@ -31,6 +31,9 @@ admits semantic results only after post-validation.
 - `test_final_semantic_provenance_matches_selected_attempt` — top-level status/reason and optional
   final provenance describe the same selected attempt; earlier late/nonselected attempts remain
   audit-only.
+- `test_semantic_evaluator_crash_degrades_to_not_run_without_false_clean` — evaluator crash or
+  non-success terminal preserves deterministic findings, records
+  `semantic_relevance_review_not_run`, and never yields a false clean `no_issue_detected` verdict.
 - `test_freeze_reservation_race_and_resume` — a final-reservation race installs no stale case and
   a reclaimed check resumes from the exact stored case object without rebuilding it.
 - `test_direct_scope_and_durable_policy_accounting` — selected claim/obligation roots constrain

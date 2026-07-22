@@ -22,28 +22,33 @@ text that prevents harm and points to the rest.
 
 ## Public surface
 
-The future file is reviewed Markdown with stable headings, no frontmatter, and a hard bound of
-2 KiB. It is addressed by the logical resource name `guidance/agent-instructions.md` and is also
+The future file is reviewed Markdown with stable headings, no frontmatter, and a compactness target
+of 2 KiB (the consent floor may push slightly above that target; packaging still fails on unbounded
+growth). It is addressed by the logical resource name `guidance/agent-instructions.md` and is also
 served as the `instructions` string; both are the same bytes.
 
 Required sections, in this order:
 
-1. **What Yoetz is** — a local work ledger and deterministic checker. One or two sentences.
-2. **What Yoetz is not** — not enforcement, not observation, not proof of authorship, not a
+1. **When to use Yoetz** — the complete material-task intake rule. The full cue (material
+   trigger, call-`start`-before-substantive-work, trivial-task exclusion, and never-claim-active-
+   until-`start`-succeeds) MUST appear within the first 512 UTF-8 bytes so hosts that inject only
+   the leading instructions window still receive the decisive intake action.
+2. **What Yoetz is** — a local work ledger and deterministic checker. One or two sentences.
+3. **What Yoetz is not** — not enforcement, not observation, not proof of authorship, not a
    transcript recorder, not an orchestrator.
-3. **Never publish** — the shortlist, stated as absolutes.
-4. **Before you claim done** — publish the completion claim and current evidence, then `check`.
-5. **Word conclusions honestly** — never stronger than the receipt's weakest coverage; one
+4. **Never publish** — the shortlist, stated as absolutes.
+5. **Before you claim done** — publish the completion claim and current evidence, then `check`.
+6. **Word conclusions honestly** — never stronger than the receipt's weakest coverage; one
    permitted and one forbidden example.
-6. **Never invent Yoetz state** — no fabricated session IDs, findings, or receipts; if a call fails,
+7. **Never invent Yoetz state** — no fabricated session IDs, findings, or receipts; if a call fails,
    say Yoetz was unavailable.
-7. **Non-default actions need consent** — ordinary MCP tools and privacy tighten are default-safe;
+8. **Non-default actions need consent** — ordinary MCP tools and privacy tighten are default-safe;
    otherwise use `yoetz consent catalog` / `status`, prepare only when catalog `implemented=true`,
    show `danger_text`, wait for the repeated `confirmation_phrase`, substitute the human-typed
    phrase into `approve_command` (never auto-fill), and never take secrets via chat/MCP/argv/env/
    config (inherited FDs only when the catalog lists them; no `--yolo`; elevated consent does not
    unlock an already-locked vault) (ADR-015/016).
-8. **Read more** — the three `yoetz://guidance/<name>` resource URIs and one line each on when to
+9. **Read more** — the three `yoetz://guidance/<name>` resource URIs and one line each on when to
    read them.
 
 ## Behavior
@@ -72,8 +77,10 @@ enumerate the six tools, whose schemas the host already has; it does not teach t
 
 ## Errors and edge cases
 
-- Exceeding 2 KiB fails packaging. Hosts inject this text every session, and a document long enough
-  to be truncated or skipped is worse than a shorter one that is read.
+- Truncating away the intake cue from the first 512 UTF-8 bytes fails packaging: hosts that inject
+  only a leading instructions window must still receive the decisive material-task rule.
+- Exceeding a reviewed compactness bound fails packaging. Hosts inject this text every session, and a
+  document long enough to be truncated or skipped is worse than a shorter one that is read.
 - A rule that appears only here and not in the owning tier-1 document is a drift failure; tier 0
   restates, and never originates, a rule.
 - A rule that appears only in tier 1 while its absence would cause harm is also a failure: it
@@ -86,7 +93,8 @@ enumerate the six tools, whose schemas the host already has; it does not teach t
 ## Invariants
 
 1. Every rule whose absence would cause harm is stated here, not deferred.
-2. The text is ≤2 KiB and self-sufficient.
+2. The complete material-task intake cue appears within the first 512 UTF-8 bytes; the text remains
+   compact enough for unconditional host injection.
 3. It is byte-identical wherever it is served: `instructions`, resource, and every installed copy.
 4. It never originates a rule that its owning document does not already state.
 5. It never claims Yoetz observes, enforces, or verifies.
@@ -96,6 +104,8 @@ enumerate the six tools, whose schemas the host already has; it does not teach t
 
 - `specs/tests/packaging.md`: size bound, exact section inventory, byte parity across the
   `instructions` string, the resource, and every harness install.
+- `tests/conformance/surfaces/test_agent_instructions_intake_cue.py`: the complete intake cue
+  appears within the first 512 UTF-8 bytes of the canonical file and the packaged mirror.
 - `specs/tests/conformance.md`: wording-lint; every rule here is traceable to an owning tier-1
   document; every harm-class rule in the never-publish and honesty sets appears here.
 - `specs/tests/capability.md`: a host that reads only `instructions` and never fetches a resource

@@ -58,9 +58,12 @@ reword conclusions.
    derive `ReceiptFindingState.resolved` with the shared scope/policy-execution/suppression/
    freshness rules. Load the exact readable applicable `CheckRecordedPayload`, if one exists. Map
    its skipped/failed policy and semantic terminal outcomes to registered root-bound or global
-   `CaseGap` codes and fold their coverage. A response disposition alone never resolves a row.
-   Construct the exact `ReceiptBuildContext`; the pure builder does not perform these reads or
-   applicability decisions.
+   `CaseGap` codes (including `semantic_review_not_configured`,
+   `semantic_relevance_review_not_run`, and `optional_semantic_review_blocked_by_policy` via
+   `semantic_coverage_gap_code`) and fold their coverage so `ReceiptBuildContext` keeps
+   `coverage.known_gaps` equal to the CaseGap code set. A response disposition alone never resolves
+   a row. Construct the exact `ReceiptBuildContext`; the pure builder does not perform these reads
+   or applicability decisions.
 
 ### Build and publish immutable objects
 

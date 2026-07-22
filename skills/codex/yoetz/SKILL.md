@@ -1,15 +1,15 @@
 ---
 name: yoetz
-description: Use Yoetz for material multi-step agent work that benefits from a durable obligation, evidence, and completion record; skip trivial edits and ordinary questions.
+description: Use for material multi-step, delegated, resumable, or verification-heavy work; call start before substantive work. Skip trivial questions or edits where the ceremony exceeds the integrity benefit.
 metadata:
-  short-description: Local work ledger and deterministic checker
+  short-description: Durable task ledger and completion checks for material multi-step or delegated work — call start before substantive work
 ---
 
 # Yoetz for Codex
 
 ## When to activate
 
-Activate for non-trivial work with multiple outcomes, delegation, meaningful verification, long duration or resume risk, or a material completion claim. Do not activate for translation, explanation, ordinary questions, or one-line edits where the ledger ceremony exceeds the integrity benefit.
+Activate for material multi-step, delegated, resumable, or verification-heavy work, and call `start` before substantive work. Do not activate for trivial questions or edits where the ledger ceremony exceeds the integrity benefit.
 
 ## Startup and availability
 
@@ -17,7 +17,7 @@ Tell the user briefly that you are using Yoetz as a local work ledger and verifi
 
 ## Compatibility
 
-Use only the six registered Yoetz MCP tools and their current schemas. Compatibility is exact and evidence-bound in the adjacent `manifest.json`; an empty profile set means this development skill advertises no tested Codex version or hook.
+Use only the six registered Yoetz MCP tools and their current schemas. Compatibility is exact and evidence-bound in the adjacent `manifest.json`; an empty profile set means this [REDACTED] skill advertises no tested Codex version or hook.
 
 ## Shared guidance
 

@@ -24,8 +24,12 @@ composed, summarized, truncated, or templated at runtime.
 
 ## Behavior
 
-The installed copy matches the reviewed root guidance byte-for-byte and stays within its 2 KiB
-bound, because every host injects it into model context on every session.
+The installed copy matches the reviewed root guidance byte-for-byte. It begins with the complete
+material-task intake rule (material trigger, call `start` before substantive work, trivial-task
+exclusion, and never claim active until `start` succeeds) within the first 512 UTF-8 bytes, because
+hosts that inject only a leading instructions window still need the decisive intake action. The
+file stays within its reviewed size bound, because every host injects it into model context on
+every session.
 
 Manifest verification checks byte size and SHA-256 before the bytes are used as `instructions` or
 served as a resource. Verification failure is fatal to MCP startup rather than degraded: a server
@@ -40,7 +44,8 @@ reviewed product text, so it is not a `LocalDisclosureSink` and creates no discl
 - If the installed guidance diverges from source, the package or startup check fails.
 - A missing or digest-mismatched file fails MCP startup; the server never falls back to a built-in
   literal, an empty `instructions`, or a summary.
-- Exceeding the 2 KiB bound fails packaging.
+- Truncating the intake cue out of the first 512 UTF-8 bytes fails packaging.
+- Unbounded growth past the reviewed compactness target fails packaging.
 - A harness install whose copy differs from this resource fails byte parity.
 - The file names no harness, install path, provider, model, or version.
 
@@ -49,7 +54,8 @@ reviewed product text, so it is not a `LocalDisclosureSink` and creates no discl
 1. The packaged copy is byte-identical to source, to the served `instructions` string, and to every
    installed copy.
 2. Exactly one packaged copy exists, regardless of how many harnesses ship.
-3. The bytes are ≤2 KiB and verified before use.
+3. The bytes are verified before use, and the complete intake cue appears within the first 512
+   UTF-8 bytes.
 4. There is no runtime composition, summarization, or fallback path for `instructions`.
 5. Serving it creates no disclosure receipt.
 
@@ -57,6 +63,8 @@ reviewed product text, so it is not a `LocalDisclosureSink` and creates no discl
 
 - `specs/tests/packaging.md` — source/wheel parity, size bound, single-copy inventory, and identical
   bytes across every harness install.
+- `tests/conformance/surfaces/test_agent_instructions_intake_cue.py` — the complete intake cue
+  appears within the first 512 UTF-8 bytes of both the canonical and packaged copies.
 - `specs/tests/subprocess.md` — the served `instructions` bytes equal the packaged resource bytes;
   a corrupted resource fails startup rather than serving unverified text.
 - `specs/tests/capability.md` — an unprofiled MCP host receives the instructions at initialize.

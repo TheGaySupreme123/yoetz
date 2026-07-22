@@ -281,6 +281,13 @@ resume revalidates the object/row facts for the recorded phase before moving for
   diversity-replacing a weak finding cannot strengthen it. Semantic
   findings remain `semantic_model_derived`; deterministic post-validation never upgrades their
   origin.
+- When optional or required semantic evaluation ends without `not_requested` or `succeeded`, the
+  check unions one structural coverage gap via `semantic_coverage_gap_code`: `not_configured` maps
+  to `semantic_review_not_configured`; `blocked_by_policy` maps to
+  `optional_semantic_review_blocked_by_policy`; timeout/failed/unavailable/invalid and other
+  non-success terminals map to `semantic_relevance_review_not_run`. An evaluator exception is caught
+  and recorded as `failed/coordinator_failure` with the not-run gap; it never fabricates a clean
+  semantic pass. Deterministic findings and verdict material remain intact under optional mode.
 - Result includes exact `CheckPolicyExecution` records in canonical requested-pack order, semantic
   status/reason, optional selected/final-attempt provenance, subject and result
   frontiers, returned findings, suppressed count, coverage, and relevant versions. It never hides

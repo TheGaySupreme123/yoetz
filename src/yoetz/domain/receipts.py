@@ -53,6 +53,7 @@ from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.models import ReceiptRedactionProfile
 
 __all__ = [
+    "OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP",
     "PolicyVersionEntry",
     "ReceiptConclusion",
     "ReceiptDocument",
@@ -67,12 +68,26 @@ __all__ = [
     "ReceiptSection",
     "ReceiptSectionKey",
     "ReceiptVersionSlice",
+    "SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP",
+    "SEMANTIC_REVIEW_NOT_CONFIGURED_GAP",
     "SchemaVersionEntry",
     "receipt_document_from_json",
     "receipt_document_to_json",
     "receipt_weakest_coverage",
     "render_receipt_compact",
 ]
+
+# Structural receipt/check coverage gap codes for optional semantic relevance review.
+# Distinct from policy-block; not-configured and evaluator failure share honest not-run wording.
+SEMANTIC_REVIEW_NOT_CONFIGURED_GAP: Final = "semantic_review_not_configured"
+SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP: Final = "semantic_relevance_review_not_run"
+OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP: Final = "optional_semantic_review_blocked_by_policy"
+_SEMANTIC_REVIEW_NOT_RUN_GAPS: Final = frozenset(
+    {
+        SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
+        SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
+    }
+)
 
 
 class ReceiptConclusion(str, Enum):  # noqa: UP042 - exact wire enum base
@@ -1008,11 +1023,25 @@ def render_receipt_compact(document: ReceiptDocument) -> str:
             prefix + "coverage is insufficient because a referenced object was redacted. "
             "No payload content is shown."
         )
-    if "optional_semantic_review_blocked_by_policy" in gap_codes:
+    if OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP in gap_codes:
         return (
             prefix + "coverage is insufficient because optional semantic review was blocked before "
             "dispatch by network-egress policy. No provider attempt or semantic finding was "
             "recorded."
+        )
+    if gap_codes & _SEMANTIC_REVIEW_NOT_RUN_GAPS:
+        if document.conclusion is ReceiptConclusion.UNRESOLVED_FINDINGS_REMAIN:
+            count = len(document.findings)
+            noun = "finding" if count == 1 else "findings"
+            verb = "remains" if count == 1 else "remain"
+            return (
+                prefix + f"{count} unresolved {noun} {verb}; semantic relevance review was not run."
+            )
+        if document.conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE:
+            return prefix + "coverage is insufficient; semantic relevance review was not run."
+        return (
+            prefix + "no unresolved deterministic issue was found in the published record; "
+            "semantic relevance review was not run."
         )
     if {
         "import_source_range_not_universal",

@@ -39,9 +39,10 @@ timeout; a nonzero exit, OS/subprocess error, or non-UTF-8 output yields `None`.
 PATH entries in order, forms each absolute candidate, resolves it strictly for a dedupe key (so
 aliased installs count once) while keeping the PATH-visible name as
 `executable_path` (that is what registration must invoke), keeps only regular executable files,
-parses the first output line for the first `\d+.\d+.\d+` token as `reported_version`, caps
-results at 16 candidates, and returns them sorted by `executable_path`. Every candidate reports
-`compatibility="untested"`.
+parses the first output line for the first SemVer 2.0 token — `X.Y.Z` with optional `-prerelease`
+and `+build` suffixes using ASCII alphanumerics, hyphen, and dot — as `reported_version` without
+truncating a prerelease to its release core, caps results at 16 candidates, and returns them sorted
+by `executable_path`. Every candidate reports `compatibility="untested"`.
 
 ## Errors and edge cases
 
@@ -64,8 +65,8 @@ results at 16 candidates, and returns them sorted by `executable_path`. Every ca
 
 - `tests/unit/adapters/test_codex_discovery.py` — empty/single/multiple/dedupe/non-executable
   cases, exact `codex-testing` inclusion with prefix-neighbor exclusion, standard macOS Desktop
-  augmentation, Windows Store app plus `.exe`/`.cmd` handling, Linux CLI behavior, version parsing,
-  and a no-mutation check.
+  augmentation, Windows Store app plus `.exe`/`.cmd` handling, Linux CLI behavior, version parsing
+  including exact prerelease preservation for `0.146.0-alpha.2`, and a no-mutation check.
 
 ## Open questions
 

@@ -39,6 +39,8 @@ Git, stage/commit files, update `.gitignore`, download anything, or manage arbit
 - `load_packaged_skill_source(resource_source=None) -> SkillSource` — verifies installed resource manifest before
   returning the exact inventory, composed of the Codex skill header plus the neutral guidance
   members.
+- `load_packaged_skill_members(resource_source=None) -> Mapping[str, bytes]` — same verification,
+  returning immutable member path→bytes for plugin bundling without duplicating SKILL contents.
 - `inspect_destination(target, source) -> DestinationInspection` — descriptor-safe read-only state.
 - `build_managed_marker(source, scope) -> bytes` — canonical `.yoetz-install.json`.
 - `recover_interrupted_swap(target, expected_preview=None) -> DestinationInspection` — conservative
@@ -53,6 +55,7 @@ Git, stage/commit files, update `.gitignore`, download anything, or manage arbit
 Load only manifest entries for the Codex skill root `skills/codex/yoetz/` plus the neutral guidance
 root `guidance/`. Require the exact Codex `SKILL.md`, the exact guidance members named by
 `guidance/README.md`, the compatibility manifest, and no extra/collision. Verify size/SHA-256,
+the resource-set digest using the generator's runtime-support exclusion rule,
 UTF-8/LF/final newline, the Codex-readable skill frontmatter/name, compatibility-manifest
 version/protocol/Codex tested set, link containment and public boundary. Unknown Yoetz-private
 compatibility fields in `SKILL.md` frontmatter are invalid rather than treated as runtime metadata.

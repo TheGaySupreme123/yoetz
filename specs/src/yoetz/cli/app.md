@@ -2,7 +2,8 @@
 
 **Wave:** D/F | **ADRs:** ADR-001, ADR-002, ADR-005, ADR-007, ADR-008, ADR-013 |
 **Imports (spec-tree):** `cli/render.md`, `cli/exits.md`, `cli/unlock.md`, `cli/menu.md`,
-`service/client.md`, `mcp/server.md`, `ports/subject_state.md`, `adapters/git_subject_state.md` |
+`cli/hooks.py.md`, `service/client.md`, `mcp/server.md`, `ports/subject_state.md`,
+`adapters/git_subject_state.md` |
 **Imported by:** console/module entrypoints and CLI tests
 
 ## Purpose
@@ -38,6 +39,9 @@ objects, or fall back to direct execution.
   `privacy setup|show|propose|tighten` and `privacy receipts list|get` for transparent setup and
   bounded structural local audit inspection, and the trusted-human-only
   `privacy decide-policy|decide-disclosure`.
+  `hooks user-prompt-submit|post-tool-use|session-start` for Codex lifecycle hook commands
+  (thin wiring over `cli/hooks.py`); these read bounded stdin JSON and emit bounded stdout JSON
+  without claiming activation support.
 - No `build_runtime`, `RuntimeFactory`, application constructor, password/key/token option, or
   secret environment reader.
 

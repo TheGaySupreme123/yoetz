@@ -26,7 +26,12 @@ _WINDOWS_APP_QUERY_TIMEOUT_SECONDS: Final = 5.0
 _VERSION_TIMEOUT_SECONDS: Final = 5.0
 _VERSION_OUTPUT_LIMIT: Final = 4_096
 _MAX_CANDIDATES: Final = 16
-_VERSION_RE: Final = re.compile(r"\b(\d+\.\d+\.\d+)\b", re.ASCII)
+# SemVer 2.0 core plus optional prerelease (-…) and build (+…); never truncate a prerelease
+# token to its X.Y.Z release core.
+_VERSION_RE: Final = re.compile(
+    r"\b(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\b",
+    re.ASCII,
+)
 
 
 class CodexProbe(Protocol):

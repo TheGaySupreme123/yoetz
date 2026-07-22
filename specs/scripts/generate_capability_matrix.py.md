@@ -37,9 +37,15 @@ uv run --locked python scripts/generate_capability_matrix.py \
 ### Inputs
 
 The candidate manifest fixes package/artifact/resource/commit/test revision and advertised platform
-identities. Policy names every required capability case, exact external version/platform pairs,
-allowed outcome for claim, evidence freshness window, and whether a bounded live case is required.
-Both are canonical JSON, public-boundary scanned, and supplied explicitly.
+identities. Policy (`release/capability-policy.json`, schema `yoetz.capability-policy/1`) names
+every required capability case as objects with `capability_family`, `external_version`, `platform`,
+and `requirement_id`, plus `evidence_freshness_window_seconds`, `live_provider_required`, and
+`profile`. Optional `planned_cases` documents Gate-2/Gate-3 cells that are not yet required and must
+not fail the release gate. Both policy and candidate manifests are canonical JSON, public-boundary
+scanned, and supplied explicitly. v0.1 required cases are the Gate-1 MCP protocol conformance
+observations under family `mcp_protocol_conformance` / MCP SDK `1.28.1` / `linux_x86_64`. Gate-2
+Codex conduit and Gate-3 real-model activation remain planned-only until an exact Codex artifact and
+driver exist; the policy never claims a supported Codex profile from empty or unavailable evidence.
 
 Evidence files use the `CapabilityEvidence` shape from `tests/capability.md`. Enumerate regular
 non-symlink `.json` files in ASCII path order under the explicit evidence directory with count/size

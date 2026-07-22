@@ -58,7 +58,7 @@ _CASE_NEGOTIATE = CapabilityCase(
             "yoetz_validation_authority",
             "stdout_cap_bound",
             "null_id_parse_error",
-            "unsupported_protocol_rejected",
+            "unsupported_protocol_falls_back",
             "transcript_digest",
         }
     ),
@@ -164,8 +164,10 @@ def test_pinned_sdk_protocol_negotiation_and_validation_authority(tmp_path: Path
     assert [tool["name"] for tool in tools] == [item.name for item in TOOL_DESCRIPTORS]
     assert len(tools) == 6
 
-    rejected, _ = _run_raw(_initialize("1900-01-01"))
-    assert rejected[0]["error"]["data"]["reason"] == "unsupported_protocol_version"  # type: ignore[index]
+    fallback, _ = _run_raw(_initialize("1900-01-01"))
+    fallback_result = cast(dict[str, object], fallback[0]["result"])
+    assert "error" not in fallback[0]
+    assert fallback_result["protocolVersion"] == types.LATEST_PROTOCOL_VERSION
 
     null_rows = _stdio_malformed_null_id()
     assert null_rows[0]["id"] is None
@@ -177,7 +179,7 @@ def test_pinned_sdk_protocol_negotiation_and_validation_authority(tmp_path: Path
             {
                 "frame_count": len(frames),
                 "null_id_rows": len(null_rows),
-                "rejected": 1,
+                "fallback": 1,
                 "stderr_empty": len(stderr) == 0,
             },
             separators=(",", ":"),
@@ -207,7 +209,7 @@ def test_pinned_sdk_protocol_negotiation_and_validation_authority(tmp_path: Path
             Observation("stdout_cap_bound", integer_value=MAX_JSON_FRAME_BYTES),
             Observation("tool_inventory_exact", integer_value=6),
             Observation("transcript_digest", digest_value=transcript_digest),
-            Observation("unsupported_protocol_rejected", boolean_value=True),
+            Observation("unsupported_protocol_falls_back", boolean_value=True),
             Observation("yoetz_validation_authority", boolean_value=True),
         ),
         EvidenceOutcome.PASS,

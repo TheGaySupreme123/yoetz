@@ -13,7 +13,7 @@ import yoetz.cli.app as cli
 from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter, CommandOutput
 from yoetz.ports.control import ControlClientKind, ControlError
 from yoetz.ports.harness_mcp import HarnessBinary
-from yoetz.ports.integrations import HarnessId
+from yoetz.ports.integrations import HarnessId, IntegrationError, IntegrationReason
 from yoetz.service.client import ServiceClient
 
 _RUNNER = CliRunner()
@@ -176,7 +176,12 @@ def test_interactive_wizard_selects_harness_then_installation_and_requires_y_or_
     assert "Codex executable: /b/codex" in result.stdout
     assert "Apply this registration? [Y/N]" in result.stdout
     assert "Please enter Y or N." in result.stdout
-    assert "Harness MCP registration: registered" in result.stdout
+    assert "MCP registration: registered; automatic activation not tested" in result.stdout
+    assert "Skill support: no tested capability profile; automatic activation not tested" in (
+        result.stdout
+    )
+    assert "Plugin installation: absent" in result.stdout
+    assert "Hook installation: absent; trust unknown" in result.stdout
 
 
 def test_interactive_registration_n_declines_without_mutation(
@@ -193,7 +198,10 @@ def test_interactive_registration_n_declines_without_mutation(
 
     assert result.exit_code == 0
     assert "Apply this registration? [Y/N]" in result.stdout
-    assert "Harness MCP registration: declined" in result.stdout
+    assert "MCP registration: declined" in result.stdout
+    assert "Skill support: no tested capability profile; automatic activation not tested" in (
+        result.stdout
+    )
     for calls in cast(list[list[tuple[str, ...]]], wizard_env["calls"]):
         assert all(call[1:3] == ("mcp", "get") for call in calls)
 
@@ -219,7 +227,41 @@ def test_setup_status_is_read_only(wizard_env: dict[str, object]) -> None:
     assert report["discovered"][0]["registration_state"] == "yoetz_owned"
     assert report["marker_present"] is False
     assert report["service"]["reachable"] is False
+    assert report["integration"] == {
+        "hooks": {
+            "presence": "absent",
+            "trust_observable": False,
+            "trust_state": "unknown",
+        },
+        "plugin": {"digest": None, "presence": "absent"},
+        "skill": {
+            "automatic_activation_tested": False,
+            "source_state": "verified",
+            "tested_profiles": [],
+        },
+    }
     assert not cast(Path, wizard_env["marker"]).exists()
+
+
+def test_setup_status_reports_invalid_packaged_skill_source(
+    wizard_env: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yoetz.cli.setup as setup_module
+
+    monkeypatch.setattr(
+        setup_module,
+        "load_packaged_skill_source",
+        lambda: (_ for _ in ()).throw(IntegrationError(IntegrationReason.SOURCE_INVALID, {})),
+    )
+    wizard_env["outputs"] = [_yoetz_entry()]
+    result = _RUNNER.invoke(cli.app, ["setup", "status", "--json"])
+    assert result.exit_code == 0
+    report = json.loads(result.stdout)
+    assert report["integration"]["skill"] == {
+        "automatic_activation_tested": False,
+        "source_state": "source_invalid",
+        "tested_profiles": [],
+    }
 
 
 def test_integrate_mcp_status_preview_install(wizard_env: dict[str, object]) -> None:

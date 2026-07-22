@@ -48,11 +48,11 @@ that frozen order. Each description states what the operation records or reads, 
 prove, and — where the operation has a drill-down — where the agent goes next for detail. It never
 restates the input schema in prose, which the host already has.
 
-`status` and `receipt` carry `readOnlyHint=true`; both provably create no task-ledger event.
-`start`, `publish_work`, `check`, and `respond` carry `readOnlyHint=false` and
-`idempotentHint=true`, because each is safe to retry with its original request ID and that is
-exactly the behavior the retry contract needs an agent to choose. No descriptor carries
-`destructiveHint`: no Yoetz operation deletes recorded evidence.
+`status` carries `readOnlyHint=true` because it creates no task-ledger event. `receipt` carries
+`readOnlyHint=false` because it stages a receipt object and appends a `receipt_recorded` event.
+Every tool carries an explicit `idempotentHint=true`: each is safe to retry with its original
+request ID, including `status` (a pure read) and `receipt` (idempotent record-or-replay). No
+descriptor carries `destructiveHint`: no Yoetz operation deletes recorded evidence.
 
 Descriptions are written to answer the follow-up an agent will actually have. `check` states that it
 returns at most `max_findings` findings plus a suppressed count, and that `status` with
@@ -62,6 +62,12 @@ discover them by trial. It distinguishes the two that are easily confused: `view
 findings a `check` already recorded, while `view=candidate_findings` runs the deterministic packs
 against the current record and returns candidates only — no verdict, no IDs, nothing recorded. An
 agent that does not know the second exists pays a full `check` to ask a question, or asks nothing.
+
+The `start` description also states *when* to call it, not only what it returns: for material
+multi-step, delegated, resumable, or verification-heavy work, before substantive work, skipping
+trivial questions or edits. The cue is front-loaded because tool descriptions are among the most
+context-durable texts Yoetz has, and intake salience failed when the description explained only
+record semantics.
 
 The `status` description also states *when* to call it, not only what it returns: when the agent is
 uncertain about what it has already done or already committed to, rather than reconstructing that
@@ -76,7 +82,9 @@ provider, policy, or environment values, so no descriptor can leak state or vary
 installations.
 
 Each descriptor retains the canonical input/output schema URI and exposes the corresponding
-verified local schema object for `tools/list`. Descriptor identity has one reviewed SHA-256 golden
+verified local schema object for `tools/list`. The served MCP schema recursively inlines every
+checked-in Yoetz `$ref`; an MCP client can validate tool calls and results with network access
+disabled and never resolves `schemas.yoetz.dev` at runtime. Descriptor identity has one reviewed SHA-256 golden
 per tool and one ordered-set SHA-256 golden; drift fails module initialization.
 
 ### Honesty lint
@@ -109,17 +117,24 @@ verdict means the work is correct.
 2. `instructions` bytes equal the packaged resource bytes exactly; there is no fallback.
 3. Descriptor text is static and cannot vary with user, task, provider, or environment state.
 4. The wording lint applies here exactly as it applies to guidance.
-5. Annotations are honest: `readOnlyHint` is true only where no ledger event can result.
+5. Annotations are honest: `readOnlyHint` is true only where no ledger event can result
+   (`status`); `receipt` is not read-only because it appends `receipt_recorded`. Every tool states
+   `idempotentHint` explicitly.
 6. No descriptor claims observation, enforcement, or verification.
-7. The `status` description carries the re-grounding cue: it states the uncertainty condition under
+7. The `start` description carries the intake cue: it begins with the material-task condition under
+   which an agent should call `start` — before substantive work on material multi-step, delegated,
+   resumable, or verification-heavy tasks, skipping trivial work — and then states what `start`
+   records.
+8. The `status` description carries the re-grounding cue: it states the uncertainty condition under
    which an agent should call `status` — uncertainty about what it has already done or committed to
    — and not only what `status` returns.
 
 ## Tests
 
 - `tests/conformance/surfaces/test_mcp_contract_matrix.py` — exact frozen descriptor set, order,
-  and annotation values; wording lint over every description and the instructions text; the `status`
-  description states the re-grounding condition under which to call it, not only its return.
+  and annotation values; wording lint over every description and the instructions text; the `start`
+  description begins with the intake condition; the `status` description states the re-grounding
+  condition under which to call it, not only its return.
 - `tests/subprocess/test_mcp_initialize_and_tools.py` — the negotiated `instructions` bytes equal
   the packaged resource bytes; a corrupted resource fails startup rather than serving unverified
   text.

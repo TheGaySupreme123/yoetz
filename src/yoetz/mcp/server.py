@@ -8,11 +8,10 @@ from dataclasses import dataclass, field
 from typing import Final, cast
 
 import anyio
-from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp import types
 from mcp.server import InitializationOptions, NotificationOptions, Server
 from mcp.server.lowlevel.helper_types import ReadResourceContents
-from mcp.shared.message import SessionMessage
+from mcp.shared.exceptions import McpError
 from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
 from pydantic import AnyUrl, BaseModel, ValidationError
 
@@ -80,7 +79,9 @@ __all__ = [
 ]
 
 _SERVER_NAME: Final = "yoetz"
-_UNSUPPORTED_PROTOCOL_REASON: Final = "unsupported_protocol_version"
+_REGISTERED_TOOL_NAMES: Final = frozenset(
+    {"start", "publish_work", "check", "respond", "status", "receipt"}
+)
 _RECONNECT_REASONS: Final = frozenset(
     {"service_unavailable", "privacy_projection_unavailable", "service_generation_changed"}
 )
@@ -415,7 +416,12 @@ async def list_tools() -> list[types.Tool]:
 
 
 async def call_tool(name: str, arguments: dict[str, object]) -> types.CallToolResult:
-    """Dispatch one registered operation with bridge-owned strict validation."""
+    """Dispatch one registered operation with bridge-owned strict validation.
+
+    Unregistered names raise ``McpError`` so the low-level session answers with a JSON-RPC
+    error rather than a tool execution result. Registered-tool validation failures stay as
+    structured tool results.
+    """
 
     dispatcher = {
         "start": dispatch_start,
@@ -426,12 +432,24 @@ async def call_tool(name: str, arguments: dict[str, object]) -> types.CallToolRe
         "receipt": dispatch_receipt,
     }.get(name)
     if dispatcher is None:
-        return structured_error_result(
-            PublicErrorCode.INVALID_REQUEST,
-            sanitize_unknown_tool_name(name),
-            request_id=safe_request_id_from(arguments),
+        raise McpError(
+            types.ErrorData(code=types.INVALID_PARAMS, message=sanitize_unknown_tool_name(name))
         )
     return await dispatcher(arguments)
+
+
+async def _handle_call_tool_request(req: types.CallToolRequest) -> types.ServerResult:
+    """Own CallToolRequest so unknown names never reach the SDK's name-echoing cache path."""
+
+    name = req.params.name
+    if name not in _REGISTERED_TOOL_NAMES:
+        # Raise before any logging that would interpolate the caller-controlled name.
+        raise McpError(
+            types.ErrorData(code=types.INVALID_PARAMS, message=sanitize_unknown_tool_name(name))
+        )
+    arguments = dict(req.params.arguments or {})
+    result = await call_tool(name, arguments)
+    return types.ServerResult(result)
 
 
 async def list_resources() -> list[types.Resource]:
@@ -445,6 +463,10 @@ async def list_resources() -> list[types.Resource]:
             description=resource.description,
             mimeType=resource.media_type,
             size=resource.size,
+            annotations=types.Annotations(
+                audience=cast(list[types.Role], list(resource.annotations.audience)),
+                priority=resource.annotations.priority,
+            ),
         )
         for resource in BRIDGE_RUNTIME.resources
     ]
@@ -462,7 +484,9 @@ async def read_resource(uri: object) -> list[ReadResourceContents]:
 
 server: Final = Server(_SERVER_NAME, version=__version__, instructions=BRIDGE_RUNTIME.instructions)
 server.list_tools()(list_tools)
-server.call_tool(validate_input=False)(call_tool)
+# Register a Yoetz-owned CallToolRequest handler instead of Server.call_tool so an unregistered
+# name becomes a sanitized JSON-RPC error and never reaches the SDK path that logs the raw name.
+server.request_handlers[types.CallToolRequest] = _handle_call_tool_request
 server.list_resources()(list_resources)
 server.read_resource()(read_resource)
 
@@ -479,72 +503,17 @@ def _initialization_options(runtime: BridgeRuntime) -> InitializationOptions:
     )
 
 
-def _unsupported_initialize(message: SessionMessage) -> tuple[str | int, object] | None:
-    root = message.message.root
-    if not isinstance(root, types.JSONRPCRequest) or root.method != "initialize":
-        return None
-    try:
-        request = types.InitializeRequest.model_validate(root.model_dump(by_alias=True))
-        requested = request.params.protocolVersion
-    except ValidationError:
-        return None
-    if type(requested) is str and requested in SUPPORTED_PROTOCOL_VERSIONS:
-        return None
-    return root.id, requested
-
-
-def _unsupported_protocol_error(request_id: str | int) -> SessionMessage:
-    return SessionMessage(
-        types.JSONRPCMessage(
-            types.JSONRPCError(
-                jsonrpc="2.0",
-                id=request_id,
-                error=types.ErrorData(
-                    code=-32602,
-                    message="Unsupported protocol version",
-                    data={"reason": _UNSUPPORTED_PROTOCOL_REASON},
-                ),
-            )
-        )
-    )
-
-
-async def _forward_messages(
-    first: SessionMessage,
-    source: MemoryObjectReceiveStream[SessionMessage],
-    target: MemoryObjectSendStream[SessionMessage | Exception],
-) -> None:
-    async with target:
-        await target.send(first)
-        async for message in source:
-            await target.send(message)
-
-
 async def run_stdio(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> None:
-    """Run bounded stdio, rejecting unknown protocol versions before SDK negotiation."""
+    """Run bounded stdio and let the SDK negotiate protocol versions conformantly."""
 
-    async with bounded_stdio_server() as (read_stream, write_stream):
+    async with bounded_stdio_server(drain_pending_responses=True) as (read_stream, write_stream):
         try:
-            first = await read_stream.receive()
-        except anyio.EndOfStream:
-            return
-        unsupported = _unsupported_initialize(first)
-        if unsupported is not None:
-            await write_stream.send(_unsupported_protocol_error(unsupported[0]))
-            return
-        bridge_send, bridge_receive = anyio.create_memory_object_stream[SessionMessage | Exception](
-            0
-        )
-        try:
-            async with anyio.create_task_group() as tasks:
-                tasks.start_soon(_forward_messages, first, read_stream, bridge_send)
-                await server.run(
-                    bridge_receive,
-                    write_stream,
-                    _initialization_options(runtime),
-                    raise_exceptions=False,
-                )
-                tasks.cancel_scope.cancel()
+            await server.run(
+                read_stream,
+                write_stream,
+                _initialization_options(runtime),
+                raise_exceptions=False,
+            )
         finally:
             await close_bridge_runtime(runtime)
 

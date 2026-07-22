@@ -59,11 +59,19 @@ invokes those trusted ceremonies directly and records only structural outcomes;
 canonical JSON, mode 0600, at `setup_marker_path()`; a dry run (`--non-interactive` without
 `--accept`) writes nothing; (9) emits the report (schema `yoetz.setup-wizard-report/1`) as
 canonical JSON in JSON/non-TTY mode or a bounded human summary interactively, and returns 0 for
-every completed run — partial outcomes are reported honestly, not encoded as failures.
+every completed run — partial outcomes are reported honestly, not encoded as failures. The human
+summary reports MCP registration, skill support, trusted-project plugin presence, lifecycle-hook
+presence/trust observability, and local service state as separate structural lines. The JSON report
+retains the same layers under `integration.skill`, `integration.plugin`, and `integration.hooks`.
+Skill reporting includes whether the packaged source verified; resource or target inspection
+failures degrade to bounded invalid/unknown states instead of aborting setup status.
+Successful MCP registration is phrased as recorded registration with automatic activation
+not tested; skill support states when no tested capability profile exists. The summary never claims
+or implies that Yoetz is set up or ready on a harness merely because an MCP entry exists.
 
 `setup_status` reports discovered binaries with per-binary registration state (adapter errors
-become `registration_state: null` plus the reason token), marker presence, and service
-reachability; it mutates nothing.
+become `registration_state: null` plus the reason token), the same separate skill/plugin/hook/trust
+layers, marker presence, and service reachability; it mutates nothing.
 
 Human-facing setup copy capitalizes the product names `Yoetz` and `Codex`. Lowercase `yoetz` and
 `codex` remain unchanged in executable names, subcommands, MCP server identifiers, wire values, and

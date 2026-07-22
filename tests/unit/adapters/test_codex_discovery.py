@@ -96,8 +96,18 @@ def test_exact_testing_wrapper_is_discovered_but_prefix_neighbors_are_not(tmp_pa
     result = discover_codex_binaries(_probe=probe)
 
     assert [entry.executable_path for entry in result] == [str(testing)]
-    assert result[0].reported_version == "0.146.0"
+    assert result[0].reported_version == "0.146.0-alpha.2"
     assert probe.probed == [str(testing)]
+
+
+def test_prerelease_and_build_suffix_are_preserved_exactly(tmp_path: Path) -> None:
+    binary = _make_codex(tmp_path / "bin")
+    probe = _Probe(
+        (str(binary.parent),),
+        {str(binary): "codex-cli 1.2.3-beta.1+exp.sha.5114f85"},
+    )
+    result = discover_codex_binaries(_probe=probe)
+    assert result[0].reported_version == "1.2.3-beta.1+exp.sha.5114f85"
 
 
 def test_default_probe_adds_standard_macos_desktop_location(

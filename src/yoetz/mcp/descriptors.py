@@ -7,12 +7,13 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import cache
 from types import MappingProxyType
-from typing import Final
+from typing import Final, cast
 
 from yoetz.mcp.resources import read_resource
 from yoetz.protocol.canonical import JsonValue
-from yoetz.protocol.schemas import SCHEMA_NAMESPACE, schema_document_for
+from yoetz.protocol.schemas import SCHEMA_NAMESPACE, load_schema_catalog, schema_document_for
 
 __all__ = [
     "TOOL_DESCRIPTOR_DIGESTS",
@@ -34,6 +35,99 @@ _BOUNDARY_TERMS: Final = re.compile(
     r"(?:/|\\|\b(?:claude|codex|cursor|gemini|host|model|openai|provider|version)\b)",
     re.IGNORECASE | re.ASCII,
 )
+
+
+def _external_schema_documents(value: JsonValue) -> dict[str, Mapping[str, JsonValue]]:
+    catalog = load_schema_catalog()
+    documents: dict[str, Mapping[str, JsonValue]] = {}
+
+    def visit(candidate: JsonValue) -> None:
+        if isinstance(candidate, Mapping):
+            source = cast(Mapping[str, JsonValue], candidate)
+            ref = source.get("$ref")
+            if isinstance(ref, str) and ref.startswith(SCHEMA_NAMESPACE):
+                uri = ref.partition("#")[0]
+                if uri not in documents:
+                    document = catalog.by_id.get(uri)
+                    if document is None:
+                        raise RuntimeError("mcp_schema_reference_unknown")
+                    nested = document.json_schema
+                    documents[uri] = nested
+                    visit(nested)
+            for item in source.values():
+                visit(item)
+        elif isinstance(candidate, tuple | list):
+            sequence = cast(tuple[JsonValue, ...] | list[JsonValue], candidate)
+            for item in sequence:
+                visit(item)
+
+    visit(value)
+    return documents
+
+
+def _bundle_key(uri: str) -> str:
+    return "__yoetz_" + hashlib.sha256(uri.encode("ascii")).hexdigest()[:16]
+
+
+def _rewrite_schema_refs(value: JsonValue, *, current_uri: str, root_uri: str) -> JsonValue:
+    if isinstance(value, Mapping):
+        source = cast(Mapping[str, JsonValue], value)
+        rewritten_ref = source.get("$ref")
+        if isinstance(rewritten_ref, str):
+            if rewritten_ref.startswith(SCHEMA_NAMESPACE):
+                uri, separator, fragment = rewritten_ref.partition("#")
+                rewritten_ref = f"#/$defs/{_bundle_key(uri)}"
+                if separator and fragment:
+                    rewritten_ref += fragment
+            elif rewritten_ref.startswith("#") and current_uri != root_uri:
+                rewritten_ref = f"#/$defs/{_bundle_key(current_uri)}{rewritten_ref[1:]}"
+        return {
+            key: (
+                rewritten_ref
+                if key == "$ref" and isinstance(rewritten_ref, str)
+                else _rewrite_schema_refs(item, current_uri=current_uri, root_uri=root_uri)
+            )
+            for key, item in source.items()
+            if key not in {"$id", "$schema"}
+        }
+    if isinstance(value, tuple | list):
+        sequence = cast(tuple[JsonValue, ...] | list[JsonValue], value)
+        return [
+            _rewrite_schema_refs(item, current_uri=current_uri, root_uri=root_uri)
+            for item in sequence
+        ]
+    return value
+
+
+@cache
+def _mcp_schema(name: str, version: str) -> Mapping[str, JsonValue]:
+    document = schema_document_for(name, version)
+    root = document.json_schema
+    documents = _external_schema_documents(root)
+    bundled = _rewrite_schema_refs(
+        root,
+        current_uri=document.schema_id,
+        root_uri=document.schema_id,
+    )
+    if not isinstance(bundled, dict):
+        raise RuntimeError("mcp_schema_invalid")
+    bundled_dict = bundled
+    existing_definitions = bundled_dict.get("$defs")
+    if existing_definitions is None:
+        definitions: dict[str, JsonValue] = {}
+        bundled_dict["$defs"] = definitions
+    elif isinstance(existing_definitions, Mapping):
+        definitions = dict(cast(Mapping[str, JsonValue], existing_definitions))
+        bundled_dict["$defs"] = definitions
+    else:
+        raise RuntimeError("mcp_schema_invalid")
+    for uri, external in sorted(documents.items(), key=lambda item: item[0].encode("ascii")):
+        definitions[_bundle_key(uri)] = _rewrite_schema_refs(
+            external,
+            current_uri=uri,
+            root_uri=document.schema_id,
+        )
+    return MappingProxyType(bundled_dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,15 +161,11 @@ class ToolDescriptor:
 
     @property
     def input_schema(self) -> Mapping[str, JsonValue]:
-        return schema_document_for(
-            f"{self.name.replace('_', '-')}-request", _SCHEMA_VERSION
-        ).json_schema
+        return _mcp_schema(f"{self.name.replace('_', '-')}-request", _SCHEMA_VERSION)
 
     @property
     def output_schema(self) -> Mapping[str, JsonValue]:
-        return schema_document_for(
-            f"{self.name.replace('_', '-')}-result", _SCHEMA_VERSION
-        ).json_schema
+        return _mcp_schema(f"{self.name.replace('_', '-')}-result", _SCHEMA_VERSION)
 
 
 def _descriptor(
@@ -84,6 +174,7 @@ def _descriptor(
     description: str,
     *,
     read_only: bool,
+    idempotent: bool,
 ) -> ToolDescriptor:
     schema_name = name.replace("_", "-")
     return ToolDescriptor(
@@ -96,7 +187,7 @@ def _descriptor(
         output_schema_ref=(
             f"{SCHEMA_NAMESPACE}operations/{schema_name}-result-{_SCHEMA_VERSION}.schema.json"
         ),
-        annotations=ToolAnnotations(read_only=read_only, idempotent=not read_only),
+        annotations=ToolAnnotations(read_only=read_only, idempotent=idempotent),
     )
 
 
@@ -104,9 +195,12 @@ TOOL_DESCRIPTORS: Final = (
     _descriptor(
         "start",
         "Start or resume a work session",
-        "Records or resumes a cooperative work session and returns its compact record. "
-        "It does not show that work outside the published record occurred.",
+        "Call for material multi-step, delegated, resumable, or verification-heavy work before "
+        "substantive work; skip trivial questions or edits. Records or resumes a cooperative work "
+        "session and returns its compact record. It does not show that work outside the published "
+        "record occurred.",
         read_only=False,
+        idempotent=True,
     ),
     _descriptor(
         "publish_work",
@@ -114,6 +208,7 @@ TOOL_DESCRIPTORS: Final = (
         "Records a bounded batch of agent-published work events and returns the accepted event "
         "range and coverage. It has no information about work outside that batch.",
         read_only=False,
+        idempotent=True,
     ),
     _descriptor(
         "check",
@@ -122,6 +217,7 @@ TOOL_DESCRIPTORS: Final = (
         "max_findings findings plus a suppressed count, and status with view=findings reads the "
         "rest. A no_issue_detected verdict does not mean the work is correct.",
         read_only=False,
+        idempotent=True,
     ),
     _descriptor(
         "respond",
@@ -129,6 +225,7 @@ TOOL_DESCRIPTORS: Final = (
         "Records an acknowledgement, rejection, or bounded waiver for one finding at its recorded "
         "frontier. It does not resolve other findings or establish that underlying work changed.",
         read_only=False,
+        idempotent=True,
     ),
     _descriptor(
         "status",
@@ -139,13 +236,15 @@ TOOL_DESCRIPTORS: Final = (
         "findings; view=candidate_findings returns unrecorded deterministic candidates without "
         "verdicts or IDs.",
         read_only=True,
+        idempotent=True,
     ),
     _descriptor(
         "receipt",
-        "Read a recorded receipt",
-        "Reads a receipt of the recorded conclusion and coverage limitations at one frontier. "
-        "It does not establish correctness beyond that recorded coverage.",
-        read_only=True,
+        "Record and read a receipt",
+        "Records and returns a receipt of the recorded conclusion and coverage limitations at one "
+        "frontier. It does not establish correctness beyond that recorded coverage.",
+        read_only=False,
+        idempotent=True,
     ),
 )
 
@@ -173,16 +272,16 @@ def _digest_descriptor(descriptor: ToolDescriptor) -> str:
 # These are reviewed golden identities, not values supplied by a host or environment.
 TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[str, str]] = MappingProxyType(
     {
-        "start": "sha256:df4c6259b5020c41e8f9c327951f3b613b7282b148f40cf1224a095999ec6987",
+        "start": "sha256:42509100525d5c866aa21c02cfa33942163967f79968ef1c7c7e00e15fb0e696",
         "publish_work": "sha256:8203bfce3611794f1164f1416c3e5602c286746d69c0f3385cd0e904b1bd7e19",
         "check": "sha256:bd78bde8d0586896318534abcc248aa8d87f30ff4952046593549dc57f394500",
         "respond": "sha256:740e576f822636bdcdf4f246a86192a336e7d0284aae611bbc6421ee62ed469a",
-        "status": "sha256:a153a20df60166bfd16d916a5c6d92118c28e0a3a4079d5568fa93b47b6fa244",
-        "receipt": "sha256:d212254849f3681ba63d71c8f51d6ec18870f9298e4c26edec6f2b2e8952543b",
+        "status": "sha256:298be02f811b28b0d588ee4cff81cf97a1a47d1f1e2bd7ed7a40d619ad7e4d60",
+        "receipt": "sha256:75a8a26a45689c4d0fec54ee20784eda43096b8726fd59f924d599f4bd27d095",
     }
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final = (
-    "sha256:d7cd0ca02b4ab68957a5444d3f02aa5f23b95a0d1b3ab0b78982dc94c39d8976"
+    "sha256:fed4821789eb054b73919233b785c2750696f65af7ebe2ea3d98dbc407bbae6f"
 )
 
 
