@@ -190,7 +190,7 @@ def _sanitized_env(*, allow_network: bool) -> dict[str, str]:
 
 def _root_from_handle(workspace: LocalWorkspaceHandle) -> Path | None:
     try:
-        descriptor = workspace._validated_descriptor()
+        descriptor = workspace._validated_descriptor()  # pyright: ignore[reportPrivateUsage]
     except ValueError:
         return None
     root = getattr(descriptor, "root", None)

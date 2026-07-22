@@ -450,15 +450,11 @@ class AdviceSnapshot:
     suppression_identity: str
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "ranked_finding_ids", _ranked_finding_ids(self.ranked_finding_ids)
-        )
+        object.__setattr__(self, "ranked_finding_ids", _ranked_finding_ids(self.ranked_finding_ids))
         validate_sha256_digest(self.evidence_basis_digest)
         if type(self.confidence_coverage) is not Coverage:
             raise _invalid("invalid_coverage_value")
-        object.__setattr__(
-            self, "recommended_next_action", _token(self.recommended_next_action)
-        )
+        object.__setattr__(self, "recommended_next_action", _token(self.recommended_next_action))
         object.__setattr__(self, "freshness_frontier", _token(self.freshness_frontier))
         object.__setattr__(self, "suppression_identity", _token(self.suppression_identity))
 
@@ -512,13 +508,19 @@ class ObservationIngestResult:
         elif self.disposition is ObservationIngestDisposition.DUPLICATE:
             if self.reason is not None:
                 object.__setattr__(self, "reason", _token(self.reason))
-            if self.advanced_cursor is not None and type(self.advanced_cursor) is not ObservationCursor:
+            if (
+                self.advanced_cursor is not None
+                and type(self.advanced_cursor) is not ObservationCursor
+            ):
                 raise _invalid()
         else:
             if self.reason is None:
                 raise _invalid()
             object.__setattr__(self, "reason", _token(self.reason))
-            if self.advanced_cursor is not None and type(self.advanced_cursor) is not ObservationCursor:
+            if (
+                self.advanced_cursor is not None
+                and type(self.advanced_cursor) is not ObservationCursor
+            ):
                 raise _invalid()
 
 
@@ -733,9 +735,7 @@ def observation_status_from_json(value: JsonValue) -> ObservationStatus:
         lifecycle=lifecycle,
         workspace_commitment=cast(str, source["workspace_commitment"]),
         source_coverage=coverage,
-        last_observation_receipt_time=(
-            None if receipt is None else timestamp_from_string(receipt)
-        ),
+        last_observation_receipt_time=(None if receipt is None else timestamp_from_string(receipt)),
         lag_events=cast(int, source["lag_events"]),
         gaps=_sorted_unique_gap_codes(source["gaps"]),
         unsupported_events=_sorted_unique_tokens(

@@ -21,14 +21,7 @@ from yoetz.adapters.integrations.observation_local import (
     YOETZ_TOOL_NAMES,
     LocalObservationStore,
 )
-from yoetz.cli.hooks import (
-    _active_context,
-    _context_output,
-    _read_status,
-    _stderr_line,
-    _stdout_json,
-    read_hook_payload,
-)
+from yoetz.cli import hooks as hooks_cli
 from yoetz.domain.observation import (
     AdviceSnapshot,
     ObservationCursor,
@@ -37,9 +30,9 @@ from yoetz.domain.observation import (
     ObservationSource,
     observation_envelope_to_json,
 )
-from yoetz.domain.values import JsonObject, JsonValue, Timestamp, timestamp_from_datetime
+from yoetz.domain.values import JsonObject, Timestamp, timestamp_from_datetime
 from yoetz.ports.control import ControlClientKind, ControlError
-from yoetz.protocol.canonical import canonical_digest
+from yoetz.protocol.canonical import JsonValue, canonical_digest
 from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import StartRequest
@@ -101,7 +94,7 @@ _TOKEN_CHARS: Final = frozenset(
 
 
 type AsyncRunner = Callable[[Callable[[], Awaitable[object]]], object]
-type ServiceConnector = Callable[[ControlClientKind], Awaitable[object]]
+type ServiceConnector = hooks_cli.ServiceConnector
 
 
 def _now() -> Timestamp:
@@ -384,8 +377,14 @@ def handle_observe(
 
     runner: AsyncRunner = cast(AsyncRunner, anyio.run if run_async is None else run_async)
     store = LocalObservationStore(_state=_state)
+    # Shared hook IO/status helpers live in cli.hooks; intentional private seam reuse.
+    _stderr_line = hooks_cli._stderr_line  # pyright: ignore[reportPrivateUsage]
+    _stdout_json = hooks_cli._stdout_json  # pyright: ignore[reportPrivateUsage]
+    _context_output = hooks_cli._context_output  # pyright: ignore[reportPrivateUsage]
+    _active_context = hooks_cli._active_context  # pyright: ignore[reportPrivateUsage]
+    _read_status = hooks_cli._read_status  # pyright: ignore[reportPrivateUsage]
     try:
-        payload = read_hook_payload(stdin_bytes)
+        payload = hooks_cli.read_hook_payload(stdin_bytes)
         raw_event = event_name or payload.get("hook_event_name")
         if type(raw_event) is not str or not raw_event:
             _stdout_json({}, stdout)
@@ -505,9 +504,10 @@ def handle_observe(
                         elif mapping is not None:
 
                             async def _status() -> object:
-                                return await _read_status(
-                                    mapping, connect=connect or connect_service
+                                connector: hooks_cli.ServiceConnector = (
+                                    connect if connect is not None else connect_service
                                 )
+                                return await _read_status(mapping, connect=connector)
 
                             kind, updated = cast(
                                 tuple[str, LifecycleMapping | None], runner(_status)

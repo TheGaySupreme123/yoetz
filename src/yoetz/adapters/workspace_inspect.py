@@ -67,7 +67,9 @@ def open_inspect_workspace(path: Path) -> LocalWorkspaceHandle:
         if not stat.S_ISDIR(facts.st_mode):
             raise ValueError("unsafe_root")
         payload = _InspectRoot(root=root, device=facts.st_dev, inode=facts.st_ino)
-        return LocalWorkspaceHandle._from_validated_descriptor(payload)
+        return LocalWorkspaceHandle._from_validated_descriptor(  # pyright: ignore[reportPrivateUsage]
+            payload
+        )
     finally:
         os.close(descriptor)
 
@@ -84,7 +86,7 @@ class LocalWorkspaceInspectAdapter:
                 None,
             )
         try:
-            descriptor = command.workspace._validated_descriptor()
+            descriptor = command.workspace._validated_descriptor()  # pyright: ignore[reportPrivateUsage]
         except ValueError:
             return WorkspaceInspectResult(
                 WorkspaceInspectStatus.REJECTED,

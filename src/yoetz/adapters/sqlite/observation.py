@@ -147,7 +147,10 @@ class SqliteObservationStore:
                     ObservationGapCode.CURSOR_STALE.value,
                     existing,
                 )
-            if existing is not None and envelope.cursor.source_generation < existing.source_generation:
+            if (
+                existing is not None
+                and envelope.cursor.source_generation < existing.source_generation
+            ):
                 self._note_gap_event(workspace, envelope, ObservationGapCode.CURSOR_STALE.value)
                 return ObservationIngestResult(
                     ObservationIngestDisposition.REJECTED,
@@ -243,7 +246,9 @@ class SqliteObservationStore:
                 )
             return self._status_unlocked(command.workspace_commitment)
 
-    def set_advice_snapshot(self, workspace: str, snapshot: AdviceSnapshot, updated_at: Timestamp) -> None:
+    def set_advice_snapshot(
+        self, workspace: str, snapshot: AdviceSnapshot, updated_at: Timestamp
+    ) -> None:
         payload = canonical_encode(advice_snapshot_to_json(snapshot))
         with self._db:
             self._db.execute(
@@ -386,9 +391,7 @@ class SqliteObservationStore:
             ),
         )
 
-    def _note_gap_event(
-        self, workspace: str, envelope: ObservationEnvelope, gap_code: str
-    ) -> None:
+    def _note_gap_event(self, workspace: str, envelope: ObservationEnvelope, gap_code: str) -> None:
         """Persist a gap without advancing the primary source cursor."""
 
         gap_envelope = ObservationEnvelope(
@@ -493,16 +496,16 @@ class SqliteObservationStore:
             (workspace_commitment,),
         ).fetchone()
         advice_frontier = (
-            cast(str, advice_row[0]) if advice_row is not None and type(advice_row[0]) is str else None
+            cast(str, advice_row[0])
+            if advice_row is not None and type(advice_row[0]) is str
+            else None
         )
         last = self._last_receipt(workspace_commitment)
         return ObservationStatus(
             lifecycle=lifecycle,
             workspace_commitment=workspace_commitment,
             source_coverage=coverage,
-            last_observation_receipt_time=(
-                None if last is None else Timestamp(last)
-            ),
+            last_observation_receipt_time=(None if last is None else Timestamp(last)),
             lag_events=0,
             gaps=tuple(sorted(gaps, key=str.encode)),
             unsupported_events=tuple(sorted(unsupported, key=str.encode)),
