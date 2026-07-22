@@ -11,6 +11,8 @@ import pytest
 
 from yoetz.adapters.integrations.codex_capability_harness import (
     CODEX_ARTIFACT_UNAVAILABLE,
+    CODEX_CONDUIT_DRIVER_UNAVAILABLE,
+    CodexArtifactIdentity,
     capture_codex_artifact_identity,
     evaluate_codex_conduit_availability,
 )
@@ -52,3 +54,16 @@ def test_evaluate_codex_conduit_availability_fail_closed_without_path(
     availability, identity = evaluate_codex_conduit_availability()
     assert availability == CODEX_ARTIFACT_UNAVAILABLE
     assert identity is None
+
+
+def test_evaluate_codex_conduit_availability_never_calls_discovery_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = CodexArtifactIdentity("/safe/codex", "0.146.0", "sha256:" + "a" * 64)
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.codex_capability_harness.discover_codex_capability_artifact",
+        lambda: expected,
+    )
+    availability, identity = evaluate_codex_conduit_availability()
+    assert availability == CODEX_CONDUIT_DRIVER_UNAVAILABLE
+    assert identity is expected

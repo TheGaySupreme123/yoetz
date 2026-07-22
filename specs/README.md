@@ -132,8 +132,8 @@ implicit composition detail:
 
 ## Status board
 
-The manifest is the canonical inventory. At this draft checkpoint it classifies 582 spec files:
-568 unique future-file owners, 10 directory indexes, and 4 coordination files. Every future owner
+The manifest is the canonical inventory. At this draft checkpoint it classifies 580 spec files:
+566 unique future-file owners, 10 directory indexes, and 4 coordination files. Every future owner
 has all seven required sections; all local Open questions are closed or routed to the central
 decision ledger.
 
@@ -143,7 +143,7 @@ decision ledger.
 | `.github/` workflows | 9 | — |
 | `docs/` public protocol and runbooks | 11 | Already-authored ADRs remain current authorities outside the future-file universe. |
 | `schemas/` | 53 | 1 directory index |
-| `fixtures/` | 50 | 1 directory index |
+| `fixtures/` | 49 | 1 directory index |
 | `migrations/` | 2 | — |
 | `guidance/` harness-neutral agent guidance | 4 | 1 directory index; owned once and shipped byte-identically to every harness and to MCP (ADR-010) |
 | `skills/` | 2 | Per-harness header and manifest only; v0.1 ships exactly one harness, `codex` |
@@ -151,8 +151,8 @@ decision ledger.
 | `src/yoetz/` Python/code files | 145 | — |
 | `src/yoetz/resources/` | 72 | The resource manifest plus exactly 71 installed entries. |
 | `scripts/` | 6 | — |
-| `tests/` | 195 | 7 suite indexes |
-| **Total future files** | **568** | **10 indexes + 4 coordination files = 582 spec files** |
+| `tests/` | 194 | 7 suite indexes |
+| **Total future files** | **566** | **10 indexes + 4 coordination files = 580 spec files** |
 
 All rows remain `draft` until the founder freeze; “present” is not the same as “reviewed” or
 “locked.” Empirical release cells and independent threat review remain later evidence gates even

@@ -16,7 +16,8 @@ Temp fake binaries, prerelease version retention, digest equality, and empty-dis
 
 Write a temporary executable payload, call `capture_codex_artifact_identity` with a full prerelease
 version string, and assert path/version/digest. Monkeypatch discovery to empty and assert
-`codex_artifact_unavailable`.
+`codex_artifact_unavailable`. An available artifact still reports
+`codex_conduit_driver_unavailable`, never `ready`, until a real app-server driver exists.
 
 ## Errors and edge cases
 

@@ -506,7 +506,7 @@ def _initialization_options(runtime: BridgeRuntime) -> InitializationOptions:
 async def run_stdio(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> None:
     """Run bounded stdio and let the SDK negotiate protocol versions conformantly."""
 
-    async with bounded_stdio_server() as (read_stream, write_stream):
+    async with bounded_stdio_server(drain_pending_responses=True) as (read_stream, write_stream):
         try:
             await server.run(
                 read_stream,

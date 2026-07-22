@@ -28,7 +28,9 @@ Rendered tree includes `.codex-plugin/plugin.json` (name `yoetz`, version = pack
 
 Installer follows skill conventions: refuse when `harness_tested_set` is empty
 (`version_incompatible`), refuse modified managed files unless `replace_modified`, write a
-nonsecret marker, stage/swap atomically. Inspection never infers Codex trust from file presence; the
+nonsecret marker, reject symlinked or unsafe `.agents/plugins` ancestors, and stage/swap atomically.
+If the staged-tree swap fails after moving an existing managed installation aside, restore that
+installation before returning `write_failed`. Inspection never infers Codex trust from file presence; the
 note `codex_hook_trust_not_observable_from_installation_state` is always attached.
 
 ## Errors and edge cases
@@ -36,6 +38,7 @@ note `codex_hook_trust_not_observable_from_installation_state` is always attache
 - Empty tested set → install refused; machinery exists but support is not claimed.
 - Modified local files → `modified_copy`.
 - Unsafe/untrusted project roots → `target_untrusted` / `target_unsafe`.
+- Symlinked or unsafe managed-path ancestors → `target_unsafe` without writing through them.
 
 ## Invariants
 

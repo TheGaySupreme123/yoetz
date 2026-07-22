@@ -320,7 +320,8 @@ def test_semantic_review_not_configured_receipt_states_not_run() -> None:
     rendered = render_receipt_compact(document)
     assert "semantic relevance review was not run" in rendered
     assert "optional semantic review was blocked" not in rendered
-    assert "no unresolved deterministic issue was found in the published record" in rendered
+    assert "coverage is insufficient" in rendered
+    assert "no unresolved deterministic issue was found in the published record" not in rendered
 
 
 def test_semantic_relevance_review_not_run_gap_shares_not_run_wording() -> None:
@@ -345,4 +346,24 @@ def test_semantic_relevance_review_not_run_gap_shares_not_run_wording() -> None:
             section["body"] = "Coverage is insufficient at frontier 7."
     rendered = render_receipt_compact(receipt_document_from_json(wire))
     assert "semantic relevance review was not run" in rendered
+
+
+def test_semantic_review_not_run_never_hides_unresolved_findings() -> None:
+    """A semantic gap must not turn an unresolved deterministic receipt into a clean claim."""
+
+    from yoetz.domain.receipts import SEMANTIC_REVIEW_NOT_CONFIGURED_GAP
+
+    wire = _variant("deterministic-current.case.json", "current_complete")
+    wire["conclusion"] = "unresolved_findings_remain"
+    coverage = cast(dict[str, Any], wire["coverage"])
+    coverage["known_gaps"] = [SEMANTIC_REVIEW_NOT_CONFIGURED_GAP]
+    coverage["ledger_freshness"] = "partial"
+    wire["gaps"] = [{"code": SEMANTIC_REVIEW_NOT_CONFIGURED_GAP, "subject_refs": []}]
+    document = receipt_document_from_json(wire)
+
+    rendered = render_receipt_compact(document)
+
+    assert "unresolved finding" in rendered
+    assert "semantic relevance review was not run" in rendered
+    assert "no unresolved deterministic issue" not in rendered
     assert "blocked before dispatch" not in rendered

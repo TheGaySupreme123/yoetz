@@ -16,6 +16,7 @@ from yoetz.adapters.integrations.codex_discovery import discover_codex_binaries
 
 __all__ = [
     "CODEX_ARTIFACT_UNAVAILABLE",
+    "CODEX_CONDUIT_DRIVER_UNAVAILABLE",
     "CodexArtifactIdentity",
     "CodexConduitAvailability",
     "capture_codex_artifact_identity",
@@ -24,8 +25,11 @@ __all__ = [
 ]
 
 CODEX_ARTIFACT_UNAVAILABLE: Final = "codex_artifact_unavailable"
+CODEX_CONDUIT_DRIVER_UNAVAILABLE: Final = "codex_conduit_driver_unavailable"
 
-type CodexConduitAvailability = Literal["ready", "codex_artifact_unavailable"]
+type CodexConduitAvailability = Literal[
+    "codex_artifact_unavailable", "codex_conduit_driver_unavailable"
+]
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -110,10 +114,11 @@ def evaluate_codex_conduit_availability() -> tuple[
 
     When no exact artifact is available this returns
     ``("codex_artifact_unavailable", None)`` and never pretends the conduit checks passed.
-    Real app-server protocol driving is intentionally out of scope for this skeleton.
+    Discovery alone never means ready. When an exact artifact exists but the app-server driver
+    is not implemented, return its identity with ``codex_conduit_driver_unavailable``.
     """
 
     identity = discover_codex_capability_artifact()
     if identity is None:
         return (CODEX_ARTIFACT_UNAVAILABLE, None)
-    return ("ready", identity)
+    return (CODEX_CONDUIT_DRIVER_UNAVAILABLE, identity)

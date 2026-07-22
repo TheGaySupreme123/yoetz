@@ -14,7 +14,7 @@ Each member has `path`, `fixture_id`, `media_type`, `byte_length`, and lowercase
 
 ## Behavior
 
-List exactly the 49 `*.case.json` resources owned by this directory tree, ASCII-sorted by relative POSIX path. The manifest never lists itself. `media_type` is `application/vnd.yoetz.fixture-case+json`. Generation verifies each case against the common fixture shape, rejects duplicate IDs or paths, computes bytes from the checked-in file without newline rewriting, and emits canonical JSON. The eight `fixtures/privacy/PRIV-*.case.json` members are public test/sdist evidence and are not installed package resources.
+List exactly the 48 `*.case.json` resources owned by this directory tree, ASCII-sorted by relative POSIX path. The manifest never lists itself. `media_type` is `application/vnd.yoetz.fixture-case+json`. Generation verifies each case against the common fixture shape, rejects duplicate IDs or paths, computes bytes from the checked-in file without newline rewriting, and emits canonical JSON. The eight `fixtures/privacy/PRIV-*.case.json` members are public test/sdist evidence and are not installed package resources.
 
 ## Errors and edge cases
 

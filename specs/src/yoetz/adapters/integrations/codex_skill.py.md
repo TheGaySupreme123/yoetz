@@ -55,6 +55,7 @@ Git, stage/commit files, update `.gitignore`, download anything, or manage arbit
 Load only manifest entries for the Codex skill root `skills/codex/yoetz/` plus the neutral guidance
 root `guidance/`. Require the exact Codex `SKILL.md`, the exact guidance members named by
 `guidance/README.md`, the compatibility manifest, and no extra/collision. Verify size/SHA-256,
+the resource-set digest using the generator's runtime-support exclusion rule,
 UTF-8/LF/final newline, the Codex-readable skill frontmatter/name, compatibility-manifest
 version/protocol/Codex tested set, link containment and public boundary. Unknown Yoetz-private
 compatibility fields in `SKILL.md` frontmatter are invalid rather than treated as runtime metadata.

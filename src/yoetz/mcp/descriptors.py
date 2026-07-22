@@ -7,12 +7,13 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import cache
 from types import MappingProxyType
-from typing import Final
+from typing import Final, cast
 
 from yoetz.mcp.resources import read_resource
 from yoetz.protocol.canonical import JsonValue
-from yoetz.protocol.schemas import SCHEMA_NAMESPACE, schema_document_for
+from yoetz.protocol.schemas import SCHEMA_NAMESPACE, load_schema_catalog, schema_document_for
 
 __all__ = [
     "TOOL_DESCRIPTOR_DIGESTS",
@@ -34,6 +35,99 @@ _BOUNDARY_TERMS: Final = re.compile(
     r"(?:/|\\|\b(?:claude|codex|cursor|gemini|host|model|openai|provider|version)\b)",
     re.IGNORECASE | re.ASCII,
 )
+
+
+def _external_schema_documents(value: JsonValue) -> dict[str, Mapping[str, JsonValue]]:
+    catalog = load_schema_catalog()
+    documents: dict[str, Mapping[str, JsonValue]] = {}
+
+    def visit(candidate: JsonValue) -> None:
+        if isinstance(candidate, Mapping):
+            source = cast(Mapping[str, JsonValue], candidate)
+            ref = source.get("$ref")
+            if isinstance(ref, str) and ref.startswith(SCHEMA_NAMESPACE):
+                uri = ref.partition("#")[0]
+                if uri not in documents:
+                    document = catalog.by_id.get(uri)
+                    if document is None:
+                        raise RuntimeError("mcp_schema_reference_unknown")
+                    nested = document.json_schema
+                    documents[uri] = nested
+                    visit(nested)
+            for item in source.values():
+                visit(item)
+        elif isinstance(candidate, tuple | list):
+            sequence = cast(tuple[JsonValue, ...] | list[JsonValue], candidate)
+            for item in sequence:
+                visit(item)
+
+    visit(value)
+    return documents
+
+
+def _bundle_key(uri: str) -> str:
+    return "__yoetz_" + hashlib.sha256(uri.encode("ascii")).hexdigest()[:16]
+
+
+def _rewrite_schema_refs(value: JsonValue, *, current_uri: str, root_uri: str) -> JsonValue:
+    if isinstance(value, Mapping):
+        source = cast(Mapping[str, JsonValue], value)
+        rewritten_ref = source.get("$ref")
+        if isinstance(rewritten_ref, str):
+            if rewritten_ref.startswith(SCHEMA_NAMESPACE):
+                uri, separator, fragment = rewritten_ref.partition("#")
+                rewritten_ref = f"#/$defs/{_bundle_key(uri)}"
+                if separator and fragment:
+                    rewritten_ref += fragment
+            elif rewritten_ref.startswith("#") and current_uri != root_uri:
+                rewritten_ref = f"#/$defs/{_bundle_key(current_uri)}{rewritten_ref[1:]}"
+        return {
+            key: (
+                rewritten_ref
+                if key == "$ref" and isinstance(rewritten_ref, str)
+                else _rewrite_schema_refs(item, current_uri=current_uri, root_uri=root_uri)
+            )
+            for key, item in source.items()
+            if key not in {"$id", "$schema"}
+        }
+    if isinstance(value, tuple | list):
+        sequence = cast(tuple[JsonValue, ...] | list[JsonValue], value)
+        return [
+            _rewrite_schema_refs(item, current_uri=current_uri, root_uri=root_uri)
+            for item in sequence
+        ]
+    return value
+
+
+@cache
+def _mcp_schema(name: str, version: str) -> Mapping[str, JsonValue]:
+    document = schema_document_for(name, version)
+    root = document.json_schema
+    documents = _external_schema_documents(root)
+    bundled = _rewrite_schema_refs(
+        root,
+        current_uri=document.schema_id,
+        root_uri=document.schema_id,
+    )
+    if not isinstance(bundled, dict):
+        raise RuntimeError("mcp_schema_invalid")
+    bundled_dict = bundled
+    existing_definitions = bundled_dict.get("$defs")
+    if existing_definitions is None:
+        definitions: dict[str, JsonValue] = {}
+        bundled_dict["$defs"] = definitions
+    elif isinstance(existing_definitions, Mapping):
+        definitions = dict(cast(Mapping[str, JsonValue], existing_definitions))
+        bundled_dict["$defs"] = definitions
+    else:
+        raise RuntimeError("mcp_schema_invalid")
+    for uri, external in sorted(documents.items(), key=lambda item: item[0].encode("ascii")):
+        definitions[_bundle_key(uri)] = _rewrite_schema_refs(
+            external,
+            current_uri=uri,
+            root_uri=document.schema_id,
+        )
+    return MappingProxyType(bundled_dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,15 +161,11 @@ class ToolDescriptor:
 
     @property
     def input_schema(self) -> Mapping[str, JsonValue]:
-        return schema_document_for(
-            f"{self.name.replace('_', '-')}-request", _SCHEMA_VERSION
-        ).json_schema
+        return _mcp_schema(f"{self.name.replace('_', '-')}-request", _SCHEMA_VERSION)
 
     @property
     def output_schema(self) -> Mapping[str, JsonValue]:
-        return schema_document_for(
-            f"{self.name.replace('_', '-')}-result", _SCHEMA_VERSION
-        ).json_schema
+        return _mcp_schema(f"{self.name.replace('_', '-')}-result", _SCHEMA_VERSION)
 
 
 def _descriptor(

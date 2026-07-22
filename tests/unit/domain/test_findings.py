@@ -75,7 +75,6 @@ _WORK_INTEGRITY_KINDS = frozenset(
         FindingKind.CONTRADICTORY_CLAIMS_UNRESOLVED,
         FindingKind.LEDGER_STALE_OR_INCOMPLETE,
         FindingKind.WEAK_OR_STALE_RESPONSE,
-        FindingKind.VERIFICATION_CLASS_UNSATISFIED,
     }
 )
 
@@ -197,7 +196,6 @@ def test_finding_kind_traits_are_exhaustive_and_exact() -> None:
         FindingKind.CONTRADICTORY_CLAIMS_UNRESOLVED: (1, True),
         FindingKind.LEDGER_STALE_OR_INCOMPLETE: (3, False),
         FindingKind.WEAK_OR_STALE_RESPONSE: (2, True),
-        FindingKind.VERIFICATION_CLASS_UNSATISFIED: (1, True),
         FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM: (1, True),
         FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT: (1, True),
         FindingKind.MATERIAL_LIMITATION_OMITTED: (1, True),

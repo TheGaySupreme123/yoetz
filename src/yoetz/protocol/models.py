@@ -750,7 +750,6 @@ type FindingKindWire = Literal[
     "requested_item_never_attempted",
     "result_without_action",
     "stale_evidence_for_changed_state",
-    "verification_class_unsatisfied",
     "weak_or_stale_response",
 ]
 
@@ -1414,7 +1413,6 @@ class CheckProjectedFindingModel(_ClosedModel):
         "requested_item_never_attempted",
         "result_without_action",
         "stale_evidence_for_changed_state",
-        "verification_class_unsatisfied",
         "weak_or_stale_response",
     ]
     origin: Literal["deterministic", "semantic_model_derived"]
@@ -2783,14 +2781,7 @@ _RECEIPT_STRUCTURAL_POINTERS: Final = (
     )
     + _prefix_leaf_patterns(
         "/document/obligations/*",
-        (
-            "obligation_id",
-            "required_verification_classes/*",
-            "satisfied_verification_classes/*",
-            "source_refs/*",
-            "status",
-            "unsatisfied_verification_classes/*",
-        ),
+        ("obligation_id", "source_refs/*", "status"),
     )
     + _prefix_leaf_patterns(
         "/document/responses/*",
@@ -2997,7 +2988,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 683:
+    if len(result) != 680:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

@@ -165,7 +165,24 @@ def _initialize_frame(protocol_version: object, request_id: int = 1) -> dict[str
 
 
 def _serve_command() -> list[str]:
+    candidate_python = os.environ.get("YOETZ_CANDIDATE_PYTHON", "").strip()
+    if candidate_python:
+        return [candidate_python, "-m", "yoetz", "mcp", "serve"]
     return ["uv", "run", "yoetz", "mcp", "serve"]
+
+
+def test_candidate_python_is_the_server_entrypoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Candidate CI must execute installed candidate bytes, not checkout ``uv run`` bytes."""
+
+    monkeypatch.setenv("YOETZ_CANDIDATE_PYTHON", "/candidate/bin/python")
+
+    assert _serve_command() == [
+        "/candidate/bin/python",
+        "-m",
+        "yoetz",
+        "mcp",
+        "serve",
+    ]
 
 
 def _run_raw(*frames: Mapping[str, object]) -> tuple[list[dict[str, object]], bytes, bytes]:
@@ -200,8 +217,24 @@ def _run_raw(*frames: Mapping[str, object]) -> tuple[list[dict[str, object]], by
 
 
 @asynccontextmanager
-async def _sdk_session() -> AsyncGenerator[tuple[ClientSession, types.InitializeResult]]:
-    params = StdioServerParameters(command="uv", args=["run", "yoetz", "mcp", "serve"])
+async def _sdk_session(
+    tmp_path: Path,
+) -> AsyncGenerator[tuple[ClientSession, types.InitializeResult]]:
+    command = _serve_command()
+    home = tmp_path / "mcp-home"
+    home.mkdir(mode=0o700, exist_ok=True)
+    for directory in ("cache", "config", "data", "runtime", "state"):
+        (home / directory).mkdir(mode=0o700, exist_ok=True)
+    environment = {
+        **os.environ,
+        "HOME": str(home),
+        "XDG_CACHE_HOME": str(home / "cache"),
+        "XDG_CONFIG_HOME": str(home / "config"),
+        "XDG_DATA_HOME": str(home / "data"),
+        "XDG_RUNTIME_DIR": str(home / "runtime"),
+        "XDG_STATE_HOME": str(home / "state"),
+    }
+    params = StdioServerParameters(command=command[0], args=command[1:], env=environment)
     async with stdio_client(params) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
             initialize = await session.initialize()
@@ -333,7 +366,7 @@ def test_mcp_unknown_version_fallback(tmp_path: Path) -> None:
 async def test_mcp_capability_declaration_exact(tmp_path: Path) -> None:
     """This gate proves protocol conformance and conduit behavior only; it says nothing about model activation."""
 
-    async with _sdk_session() as (_session, initialize):
+    async with _sdk_session(tmp_path) as (_session, initialize):
         capabilities = initialize.capabilities
         assert capabilities.tools is not None
         assert capabilities.resources is not None
@@ -356,7 +389,7 @@ async def test_mcp_capability_declaration_exact(tmp_path: Path) -> None:
 async def test_mcp_tools_list_exact_six(tmp_path: Path) -> None:
     """This gate proves protocol conformance and conduit behavior only; it says nothing about model activation."""
 
-    async with _sdk_session() as (session, _initialize):
+    async with _sdk_session(tmp_path) as (session, _initialize):
         listed = await session.list_tools()
         assert [tool.name for tool in listed.tools] == list(_TOOL_NAMES)
         assert len(listed.tools) == 6
@@ -384,7 +417,7 @@ async def test_mcp_tools_list_exact_six(tmp_path: Path) -> None:
 async def test_mcp_resources_list_read_all(tmp_path: Path) -> None:
     """This gate proves protocol conformance and conduit behavior only; it says nothing about model activation."""
 
-    async with _sdk_session() as (session, _initialize):
+    async with _sdk_session(tmp_path) as (session, _initialize):
         listed = await session.list_resources()
         assert [str(resource.uri) for resource in listed.resources] == [
             item.uri for item in GUIDANCE_RESOURCES
@@ -410,27 +443,27 @@ async def test_mcp_resources_list_read_all(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-async def test_mcp_tools_call_all_six_conduit(tmp_path: Path) -> None:
-    """This gate proves protocol conformance and conduit behavior only; it says nothing about model activation.
-
-    With no unlocked local service the truthful degraded shape (SERVICE_UNAVAILABLE / VAULT_LOCKED)
-    is accepted; a reachable service returning ok=true also passes.
-    """
+async def test_mcp_tools_call_all_six_dispatch(tmp_path: Path) -> None:
+    """All six names reach their handlers and return the common structured validation boundary."""
 
     arguments = _schema_valid_tool_arguments()
-    async with _sdk_session() as (session, _initialize):
+    async with _sdk_session(tmp_path) as (session, _initialize):
         shapes: list[str] = []
         for name in _TOOL_NAMES:
-            result = await session.call_tool(name, cast(dict[str, object], arguments[name]))
+            request_id = arguments[name]["request_id"]
+            result = await session.call_tool(name, {"request_id": request_id})
             structured = _assert_tool_result_shape(result)
-            shapes.append("ok" if structured.get("ok") is True else "degraded")
+            assert cast(dict[str, object], structured["error"])["code"] == (
+                PublicErrorCode.INVALID_REQUEST.value
+            )
+            shapes.append("invalid_request")
         assert len(shapes) == 6
     _record_pass(
         tmp_path,
         case_id="MCP-G1-TOOLS-CALL",
-        requirement_id="mcp_tools_call_all_six_conduit",
-        observation="tools_call_all_six_conduit",
-        fixture=b"gate1-tools-call-all-six",
+        requirement_id="mcp_tools_call_all_six_dispatch",
+        observation="tools_call_all_six_dispatch",
+        fixture=b"gate1-tools-dispatch-all-six",
         value=True,
     )
 
@@ -518,9 +551,10 @@ async def test_mcp_idempotent_retry_stable(tmp_path: Path) -> None:
     """This gate proves protocol conformance and conduit behavior only; it says nothing about model activation."""
 
     arguments = _schema_valid_tool_arguments()["status"]
-    async with _sdk_session() as (session, _initialize):
-        first = await session.call_tool("status", cast(dict[str, object], arguments))
-        second = await session.call_tool("status", cast(dict[str, object], arguments))
+    async with _sdk_session(tmp_path) as (session, _initialize):
+        invalid = {"request_id": arguments["request_id"]}
+        first = await session.call_tool("status", invalid)
+        second = await session.call_tool("status", invalid)
         first_wire = _assert_tool_result_shape(first)
         second_wire = _assert_tool_result_shape(second)
         # Structural identity for degraded/success results: same request_id and error/ok shape.
@@ -572,7 +606,13 @@ def test_mcp_cancellation_eof_clean(tmp_path: Path) -> None:
     process.stdin.write(payload + b"\n")
     process.stdin.flush()
     assert process.stdout.readline()
-    # Close stdin mid-session (EOF) without a clean shutdown notification.
+    process.stdin.write(b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
+    process.stdin.write(
+        b'{"jsonrpc":"2.0","method":"notifications/cancelled",'
+        b'"params":{"requestId":42,"reason":"capability cancellation probe"}}\n'
+    )
+    process.stdin.flush()
+    # Close stdin after a real cancellation notification, without a clean shutdown notification.
     process.stdin.close()
     assert process.wait(timeout=15) == 0
     stderr = process.stderr.read()
@@ -584,6 +624,51 @@ def test_mcp_cancellation_eof_clean(tmp_path: Path) -> None:
         requirement_id="mcp_cancellation_eof_clean",
         observation="cancellation_eof_clean",
         fixture=b"gate1-cancellation-eof",
+        value=True,
+    )
+
+
+def test_mcp_pending_responses_flush_on_eof(tmp_path: Path) -> None:
+    """Requests accepted before EOF receive their responses before the server exits."""
+
+    process = subprocess.Popen(
+        _serve_command(),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ},
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    initialize = json.dumps(
+        _initialize_frame(types.LATEST_PROTOCOL_VERSION),
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    process.stdin.write(initialize + b"\n")
+    process.stdin.flush()
+    assert process.stdout.readline()
+    pending = (
+        b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n'
+        b'{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\n'
+        b'{"jsonrpc":"2.0","id":3,"method":"resources/list","params":{}}\n'
+    )
+    process.stdin.write(pending)
+    process.stdin.flush()
+    process.stdin.close()
+    responses = [json.loads(line) for line in process.stdout.read().splitlines()]
+    assert process.wait(timeout=15) == 0
+    assert [response["id"] for response in responses] == [2, 3]
+    stderr = process.stderr.read()
+    assert b"Traceback" not in stderr
+    assert b"Exception" not in stderr
+    _record_pass(
+        tmp_path,
+        case_id="MCP-G1-PENDING-FLUSH",
+        requirement_id="mcp_pending_responses_flush_on_eof",
+        observation="pending_responses_flush_on_eof",
+        fixture=b"gate1-pending-responses-flush",
         value=True,
     )
 
@@ -614,10 +699,10 @@ def test_mcp_stdout_purity(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-async def test_mcp_sdk_unknown_tool_raises_sanitized_error() -> None:
+async def test_mcp_sdk_unknown_tool_raises_sanitized_error(tmp_path: Path) -> None:
     """SDK client path: unknown tool becomes a protocol error, not a tool result."""
 
-    async with _sdk_session() as (session, _initialize):
+    async with _sdk_session(tmp_path) as (session, _initialize):
         with pytest.raises(McpError) as raised:
             await session.call_tool("not_a_registered_tool", {})
         message = str(raised.value)

@@ -46,7 +46,6 @@ tests/unit/
     test_policy_research_evidence.py
     test_ranking.py
     test_receipt_builder.py
-    test_verification_classes.py
   application/
     test_error_mapping.py
     test_harness_mcp_service.py
@@ -135,7 +134,6 @@ tests/unit/kernel/test_ranking.py
 tests/unit/kernel/test_receipt_builder.py
 tests/unit/kernel/test_reducers_each_family.py
 tests/unit/kernel/test_replay_and_projections.py
-tests/unit/kernel/test_verification_classes.py
 tests/unit/observability/test_logging_allowlist.py
 tests/unit/observability/test_privacy.py
 tests/unit/privacy/test_catalog_audit.py

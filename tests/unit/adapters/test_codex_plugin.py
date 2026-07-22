@@ -94,6 +94,32 @@ def _resources() -> _Resources:
     return _Resources(files)
 
 
+def _enable_supported_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    resources: _Resources,
+) -> None:
+    fake_source = SkillSource(
+        HarnessId.CODEX,
+        "0.1.0",
+        "0.1",
+        ("0.146.0",),
+        "sha256:" + "a" * 64,
+        (
+            IntegrationFile(
+                "SKILL.md",
+                len(resources.files["skills/codex/yoetz/SKILL.md"]),
+                "sha256:" + "b" * 64,
+                "text/markdown",
+            ),
+        ),
+    )
+
+    def _fake_load(_resource_source: SkillResourceSource | None = None) -> SkillSource:
+        return fake_source
+
+    monkeypatch.setattr(plugin_mod, "load_packaged_skill_source", _fake_load)
+
+
 def test_render_plugin_tree_wires_three_hooks() -> None:
     tree = render_plugin_tree(resource_source=_resources())
     assert ".codex-plugin/plugin.json" in tree
@@ -126,26 +152,7 @@ def test_install_refuses_locally_modified_file(
 ) -> None:
     tmp_path.chmod(0o700)
     resources = _resources()
-    fake_source = SkillSource(
-        HarnessId.CODEX,
-        "0.1.0",
-        "0.1",
-        ("0.146.0",),
-        "sha256:" + "a" * 64,
-        (
-            IntegrationFile(
-                "SKILL.md",
-                len(resources.files["skills/codex/yoetz/SKILL.md"]),
-                "sha256:" + "b" * 64,
-                "text/markdown",
-            ),
-        ),
-    )
-
-    def _fake_load(_resource_source: SkillResourceSource | None = None) -> SkillSource:
-        return fake_source
-
-    monkeypatch.setattr(plugin_mod, "load_packaged_skill_source", _fake_load)
+    _enable_supported_profile(monkeypatch, resources)
     target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
     first = install_plugin(target, resource_source=resources)
     assert first.presence is PluginHookPresence.INSTALLED
@@ -156,6 +163,53 @@ def test_install_refuses_locally_modified_file(
     with pytest.raises(IntegrationError) as caught:
         install_plugin(target, resource_source=resources)
     assert caught.value.reason is IntegrationReason.MODIFIED_COPY
+
+
+def test_install_refuses_symlinked_plugin_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tmp_path.chmod(0o700)
+    resources = _resources()
+    _enable_supported_profile(monkeypatch, resources)
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    (tmp_path / ".agents").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(IntegrationError) as caught:
+        install_plugin(
+            IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path)),
+            resource_source=resources,
+        )
+
+    assert caught.value.reason is IntegrationReason.TARGET_UNSAFE
+    assert not (outside / "plugins").exists()
+
+
+def test_install_restores_previous_plugin_when_swap_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tmp_path.chmod(0o700)
+    resources = _resources()
+    _enable_supported_profile(monkeypatch, resources)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    install_plugin(target, resource_source=resources)
+    destination = tmp_path / ".agents/plugins/yoetz"
+    marker_path = destination / ".yoetz-plugin-install.json"
+    original_marker = marker_path.read_bytes()
+    real_replace = plugin_mod.os.replace
+
+    def _fail_stage_swap(source: Path, target_path: Path) -> None:
+        if source.name.startswith(".yoetz.plugin-stage-") and target_path == destination:
+            raise OSError("injected stage swap failure")
+        real_replace(source, target_path)
+
+    monkeypatch.setattr(plugin_mod.os, "replace", _fail_stage_swap)
+    with pytest.raises(IntegrationError) as caught:
+        install_plugin(target, replace_modified=True, resource_source=resources)
+
+    assert caught.value.reason is IntegrationReason.WRITE_FAILED
+    assert destination.is_dir()
+    assert marker_path.read_bytes() == original_marker
 
 
 def test_inspect_absent_and_trust_not_observable(tmp_path: Path) -> None:

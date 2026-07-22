@@ -193,8 +193,13 @@ jobs:
           uv sync --locked --group dev
           uv venv "${{ runner.temp }}/candidate-venv"
           uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" \
-            --no-deps --find-links "${{ runner.temp }}/dist" "yoetz==0.1.0"
-          uv pip install --python "${{ runner.temp }}/candidate-venv/bin/python" "yoetz==0.1.0"
+            "${{ runner.temp }}/dist/yoetz-0.1.0-py3-none-any.whl"
+          candidate_origin=$("${{ runner.temp }}/candidate-venv/bin/python" -I -c \
+            'import pathlib, yoetz; print(pathlib.Path(yoetz.__file__).resolve())')
+          case "$candidate_origin" in
+            "${{ runner.temp }}/candidate-venv/"*) ;;
+            *) echo "::error::candidate import escaped isolated environment: $candidate_origin"; exit 1 ;;
+          esac
           echo "YOETZ_CANDIDATE_PYTHON=${{ runner.temp }}/candidate-venv/bin/python" >> "$GITHUB_ENV"
           candidate_digest=$(python3 -c "import json; print(json.load(open('${{ runner.temp }}/dist/candidate.json'))['artifact_digest'])")
           echo "YOETZ_CANDIDATE_ARTIFACT_DIGEST=${candidate_digest}" >> "$GITHUB_ENV"

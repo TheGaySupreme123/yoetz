@@ -5,7 +5,7 @@ server/descriptors/resources, pinned MCP SDK | **Imported by:** release capabili
 
 ## Purpose
 
-Prove installed `yoetz mcp serve` protocol conformance and MCP conduit behavior through the pinned
+Prove installed `yoetz mcp serve` protocol conformance and MCP dispatch behavior through the pinned
 Python MCP SDK client and raw JSON-RPC framing. This gate says nothing about model activation.
 
 ## Public surface
@@ -18,21 +18,24 @@ Required observation cases enrolled in `release/capability-policy.json` under fa
 - `mcp_capability_declaration_exact`
 - `mcp_tools_list_exact_six`
 - `mcp_resources_list_read_all`
-- `mcp_tools_call_all_six_conduit`
+- `mcp_tools_call_all_six_dispatch`
 - `mcp_unknown_tool_sanitized`
 - `mcp_malformed_framing`
 - `mcp_idempotent_retry_stable`
 - `mcp_cancellation_eof_clean`
+- `mcp_pending_responses_flush_on_eof`
 - `mcp_stdout_purity`
 
 ## Behavior
 
 Drive `uv run yoetz mcp serve` via `mcp.client.stdio` / `ClientSession` for capability declaration,
 tools/list (exact six descriptors), resources/list+read (digest agreement with packaged bytes), and
-tools/call for all six tools. Accept either successful structured results or bounded
-`SERVICE_UNAVAILABLE` / `VAULT_LOCKED` degraded results when the local service is unreachable.
+tools/call for all six names using a request-ID-only input that each real handler rejects at its
+common structured `INVALID_REQUEST` boundary. Service conduit behavior remains owned by the
+dedicated integration suite and is not inferred from Gate 1.
 Use raw frames for every `SUPPORTED_PROTOCOL_VERSIONS` negotiation, unknown-version fallback,
-unknown/malicious tool names, malformed framing, EOF cancellation, and stdout purity. Idempotent
+unknown/malicious tool names, malformed framing, an actual cancellation notification followed by
+EOF, pending-response flush before EOF shutdown, and stdout purity. Idempotent
 retry compares structural identity for the same `request_id`.
 
 Each case emits `CapabilityEvidence` into `YOETZ_CAPABILITY_EVIDENCE_DIR` when set.
@@ -45,7 +48,7 @@ Each case emits `CapabilityEvidence` into `YOETZ_CAPABILITY_EVIDENCE_DIR` when s
 ## Invariants
 
 1. Protocol conformance ≠ model activation.
-2. Degraded service shapes remain schema-valid conduit evidence.
+2. Structured dispatch validation is not service-conduit evidence.
 3. Required case IDs match `release/capability-policy.json` exactly.
 
 ## Tests

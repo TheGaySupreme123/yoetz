@@ -397,9 +397,6 @@ class ReceiptObligation:
     status: ReceiptObligationStatus
     source_refs: tuple[EventId | ObligationId | ClaimId, ...]
     summary: str | None = None
-    required_verification_classes: tuple[str, ...] = ()
-    satisfied_verification_classes: tuple[str, ...] = ()
-    unsatisfied_verification_classes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         reason = "invalid_receipt_obligation"
@@ -412,25 +409,6 @@ class ReceiptObligation:
         object.__setattr__(self, "source_refs", refs)
         if self.summary is not None:
             object.__setattr__(self, "summary", _bounded_text(self.summary, 1, 8192, reason))
-        for field_name in (
-            "required_verification_classes",
-            "satisfied_verification_classes",
-            "unsatisfied_verification_classes",
-        ):
-            raw = getattr(self, field_name)
-            values = _validate_tuple(raw, 0, 6, reason)
-            classes = tuple(_bounded_text(item, 1, 64, reason) for item in values)
-            _validate_sorted_unique_strings(classes)
-            object.__setattr__(self, field_name, classes)
-        required = frozenset(self.required_verification_classes)
-        if not frozenset(self.satisfied_verification_classes) <= required:
-            raise ProtocolValueError(reason)
-        if not frozenset(self.unsatisfied_verification_classes) <= required:
-            raise ProtocolValueError(reason)
-        if frozenset(self.satisfied_verification_classes) & frozenset(
-            self.unsatisfied_verification_classes
-        ):
-            raise ProtocolValueError(reason)
 
 
 @dataclass(frozen=True, slots=True)
@@ -691,14 +669,7 @@ def _obligation_from_json(value: object) -> ReceiptObligation:
     source = _closed_object(
         value,
         frozenset({"obligation_id", "status", "source_refs"}),
-        frozenset(
-            {
-                "summary",
-                "required_verification_classes",
-                "satisfied_verification_classes",
-                "unsatisfied_verification_classes",
-            }
-        ),
+        frozenset({"summary"}),
         invalid,
     )
     refs = tuple(
@@ -706,14 +677,6 @@ def _obligation_from_json(value: object) -> ReceiptObligation:
         for item in _array(_field(source, "source_refs", invalid), invalid)
     )
     keys = frozenset(cast(tuple[str, ...], tuple(source)))
-
-    def _optional_classes(field_name: str) -> tuple[str, ...]:
-        if field_name not in keys:
-            return ()
-        return tuple(
-            cast(str, item) for item in _array(_field(source, field_name, invalid), invalid)
-        )
-
     return ReceiptObligation(
         obligation_id=obligation_id(_field(source, "obligation_id", invalid)),
         status=_enum_value(
@@ -723,9 +686,6 @@ def _obligation_from_json(value: object) -> ReceiptObligation:
         ),
         source_refs=refs,
         summary=(cast(str, _field(source, "summary", invalid)) if "summary" in keys else None),
-        required_verification_classes=_optional_classes("required_verification_classes"),
-        satisfied_verification_classes=_optional_classes("satisfied_verification_classes"),
-        unsatisfied_verification_classes=_optional_classes("unsatisfied_verification_classes"),
     )
 
 
@@ -952,12 +912,6 @@ def _obligation_to_json(value: ReceiptObligation) -> dict[str, object]:
     }
     if value.summary is not None:
         result["summary"] = value.summary
-    if value.required_verification_classes:
-        result["required_verification_classes"] = list(value.required_verification_classes)
-    if value.satisfied_verification_classes:
-        result["satisfied_verification_classes"] = list(value.satisfied_verification_classes)
-    if value.unsatisfied_verification_classes:
-        result["unsatisfied_verification_classes"] = list(value.unsatisfied_verification_classes)
     return result
 
 
@@ -1076,6 +1030,15 @@ def render_receipt_compact(document: ReceiptDocument) -> str:
             "recorded."
         )
     if gap_codes & _SEMANTIC_REVIEW_NOT_RUN_GAPS:
+        if document.conclusion is ReceiptConclusion.UNRESOLVED_FINDINGS_REMAIN:
+            count = len(document.findings)
+            noun = "finding" if count == 1 else "findings"
+            verb = "remains" if count == 1 else "remain"
+            return (
+                prefix + f"{count} unresolved {noun} {verb}; semantic relevance review was not run."
+            )
+        if document.conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE:
+            return prefix + "coverage is insufficient; semantic relevance review was not run."
         return (
             prefix + "no unresolved deterministic issue was found in the published record; "
             "semantic relevance review was not run."

@@ -382,10 +382,6 @@ DETERMINISTIC_FINDING_TEMPLATES: Final[
             "A finding response lacks current admissible support.",
             "Provide current admissible response evidence.",
         ),
-        FindingKind.VERIFICATION_CLASS_UNSATISFIED: DeterministicFindingTemplate(
-            "A resolved obligation lacks linked admissible evidence for required verification classes.",
-            "Publish linked admissible evidence declaring each missing verification class or revise the obligation.",
-        ),
         FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM: DeterministicFindingTemplate(
             "The cited evidence does not support the recorded claim.",
             "Provide relevant evidence or revise the claim.",
@@ -1381,7 +1377,6 @@ def run_deterministic_policies(
             FindingKind.CONTRADICTORY_CLAIMS_UNRESOLVED,
             FindingKind.LEDGER_STALE_OR_INCOMPLETE,
             FindingKind.WEAK_OR_STALE_RESPONSE,
-            FindingKind.VERIFICATION_CLASS_UNSATISFIED,
         )
         assessments = work_integrity_findings(case)
     elif (policy.policy_id, policy.policy_version) == ("research-evidence", "0.1.0"):

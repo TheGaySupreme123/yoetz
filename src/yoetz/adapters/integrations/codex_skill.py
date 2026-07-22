@@ -160,19 +160,31 @@ def _resource_entries(
     if manifest.get("package") != "yoetz":
         raise _error(IntegrationReason.SOURCE_INVALID)
     digest = manifest.get("resource_set_digest")
-    without_digest = {key: value for key, value in manifest.items() if key != "resource_set_digest"}
-    if type(digest) is not str or digest != canonical_digest(without_digest):
-        raise _error(IntegrationReason.SOURCE_INVALID)
     raw_entries = manifest.get("entries")
     if type(raw_entries) is not list:
         raise _error(IntegrationReason.SOURCE_INVALID)
     by_path: dict[str, Mapping[str, JsonValue]] = {}
+    digest_entries: list[JsonValue] = []
     for raw_entry in raw_entries:
         entry = _mapping(raw_entry, IntegrationReason.SOURCE_INVALID)
         package_path = entry.get("package_path")
         if type(package_path) is not str or package_path in by_path:
             raise _error(IntegrationReason.SOURCE_INVALID)
         by_path[package_path] = entry
+        if entry.get("kind") == "runtime_support":
+            digest_entries.append(
+                {key: value for key, value in entry.items() if key not in {"sha256", "size"}}
+            )
+        else:
+            digest_entries.append(dict(entry))
+    digest_material: dict[str, JsonValue] = {
+        "entries": digest_entries,
+        "package": manifest["package"],
+        "resource_set_version": manifest["resource_set_version"],
+        "schema": manifest["schema"],
+    }
+    if type(digest) is not str or digest != canonical_digest(digest_material):
+        raise _error(IntegrationReason.SOURCE_INVALID)
     return manifest, by_path
 
 

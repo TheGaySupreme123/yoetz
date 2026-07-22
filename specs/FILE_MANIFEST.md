@@ -8,8 +8,8 @@ This is the complete one-to-one ledger between the natural-language specificatio
 files planned for the public v0.1 repository. It is declarative: adding, removing, renaming, or
 splitting a future file requires changing this reviewed table and its owning spec together.
 
-The inventory contains 582 spec files: 568 exact future-file owners,
-10 directory indexes, and 4 coordination files. The 568 future paths are unique. The already-
+The inventory contains 580 spec files: 566 exact future-file owners,
+10 directory indexes, and 4 coordination files. The 566 future paths are unique. The already-
 authored public ADRs are current decision authorities, not future-file candidates, so
 they are intentionally outside the mirrored ownership universe. Ignored local architecture/
 strategy inputs are neither inventoried nor authoritative.
@@ -66,7 +66,6 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/fixtures/adversarial/ADV-008-stale-redacted-ledger.case.json.md` | `future_file` | `fixtures/adversarial/ADV-008-stale-redacted-ledger.case.json` | `exact_suffix` | — | `A-D` | `draft` | Owns exactly this future public repository file. |
 | `specs/fixtures/adversarial/ADV-009-wrong-semantic-finding-rejected.case.json.md` | `future_file` | `fixtures/adversarial/ADV-009-wrong-semantic-finding-rejected.case.json` | `exact_suffix` | — | `A-E` | `draft` | Owns exactly this future public repository file. |
 | `specs/fixtures/adversarial/ADV-010-import-detects-missing-publication.case.json.md` | `future_file` | `fixtures/adversarial/ADV-010-import-detects-missing-publication.case.json` | `exact_suffix` | — | `A-D` | `draft` | Owns exactly this future public repository file. |
-| `specs/fixtures/adversarial/ADV-011-config-evidence-does-not-satisfy-transport.case.json.md` | `future_file` | `fixtures/adversarial/ADV-011-config-evidence-does-not-satisfy-transport.case.json` | `exact_suffix` | — | `A-D` | `draft` | Owns exactly this future public repository file. |
 | `specs/fixtures/backward-read/v0.1.0-empty-bundle.case.json.md` | `future_file` | `fixtures/backward-read/v0.1.0-empty-bundle.case.json` | `exact_suffix` | — | `A-F` | `draft` | Owns exactly this future public repository file. |
 | `specs/fixtures/backward-read/v0.1.0-full-event-bundle.case.json.md` | `future_file` | `fixtures/backward-read/v0.1.0-full-event-bundle.case.json` | `exact_suffix` | — | `A-F` | `draft` | Owns exactly this future public repository file. |
 | `specs/fixtures/canonical/accepted-entry-identity.case.json.md` | `future_file` | `fixtures/canonical/accepted-entry-identity.case.json` | `exact_suffix` | — | `A` | `draft` | Owns exactly this future public repository file. |
@@ -588,7 +587,6 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/tests/unit/kernel/test_receipt_builder.py.md` | `future_file` | `tests/unit/kernel/test_receipt_builder.py` | `exact_suffix` | — | `B` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/kernel/test_reducers_each_family.py.md` | `future_file` | `tests/unit/kernel/test_reducers_each_family.py` | `exact_suffix` | — | `B` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/kernel/test_replay_and_projections.py.md` | `future_file` | `tests/unit/kernel/test_replay_and_projections.py` | `exact_suffix` | — | `B` | `draft` | Owns exactly this future public repository file. |
-| `specs/tests/unit/kernel/test_verification_classes.py.md` | `future_file` | `tests/unit/kernel/test_verification_classes.py` | `exact_suffix` | — | `B` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/observability/test_logging_allowlist.py.md` | `future_file` | `tests/unit/observability/test_logging_allowlist.py` | `exact_suffix` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/observability/test_privacy.py.md` | `future_file` | `tests/unit/observability/test_privacy.py` | `exact_suffix` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/privacy/test_catalog_audit.py.md` | `future_file` | `tests/unit/privacy/test_catalog_audit.py` | `exact_suffix` | — | `C/E` | `draft` | Owns exactly this future public repository file. |

@@ -16,8 +16,8 @@ alone never becomes a supported Codex profile claim.
 - `CodexArtifactIdentity` — path, `reported_version`, `executable_digest`.
 - `capture_codex_artifact_identity(path, *, reported_version)` — pure file digest capture.
 - `discover_codex_capability_artifact()` — discovery + identity, or `None`.
-- `evaluate_codex_conduit_availability()` — `("ready", identity)` or
-  `("codex_artifact_unavailable", None)`.
+- `evaluate_codex_conduit_availability()` — `("codex_conduit_driver_unavailable", identity)` or
+  `("codex_artifact_unavailable", None)`; discovery alone is never reported as ready.
 
 ## Behavior
 

@@ -1,7 +1,8 @@
 """Six-operation MCP/Codex capability evidence.
 
-Local cells drive all six tools through the real MCP stdio transport (``yoetz mcp serve`` via the
-pinned SDK client). They prove conduit and descriptor behavior only — not Codex model activation.
+Local cells drive all six names through the real MCP stdio transport (``yoetz mcp serve`` via the
+pinned SDK client). They prove dispatch and descriptor behavior only — not service conduit or Codex
+model activation.
 
 Driving the same slice through interactive/exec Codex requires ``YOETZ_LIVE_CODEX=1`` and a Gate
 2/3 live driver. When live authorization is present but no driver exists, the cell fails closed
@@ -10,6 +11,7 @@ with ``live_driver_unavailable`` rather than claiming a pass.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
@@ -37,10 +39,39 @@ _VERSION = "0.139.0"
 _EXPECTED = ("start", "publish_work", "check", "respond", "status", "receipt")
 _DEGRADED_CODES = frozenset(
     {
+        PublicErrorCode.INVALID_REQUEST.value,
         PublicErrorCode.SERVICE_UNAVAILABLE.value,
         PublicErrorCode.VAULT_LOCKED.value,
     }
 )
+
+
+def _serve_parameters(tmp_path: Path) -> StdioServerParameters:
+    candidate_python = os.environ.get("YOETZ_CANDIDATE_PYTHON", "").strip()
+    home = tmp_path / "mcp-home"
+    home.mkdir(mode=0o700, exist_ok=True)
+    for directory in ("cache", "config", "data", "runtime", "state"):
+        (home / directory).mkdir(mode=0o700, exist_ok=True)
+    environment = {
+        **os.environ,
+        "HOME": str(home),
+        "XDG_CACHE_HOME": str(home / "cache"),
+        "XDG_CONFIG_HOME": str(home / "config"),
+        "XDG_DATA_HOME": str(home / "data"),
+        "XDG_RUNTIME_DIR": str(home / "runtime"),
+        "XDG_STATE_HOME": str(home / "state"),
+    }
+    if candidate_python:
+        return StdioServerParameters(
+            command=candidate_python,
+            args=["-m", "yoetz", "mcp", "serve"],
+            env=environment,
+        )
+    return StdioServerParameters(
+        command="uv",
+        args=["run", "yoetz", "mcp", "serve"],
+        env=environment,
+    )
 
 
 def _id(kind: str, seed: int) -> str:
@@ -135,7 +166,7 @@ def _plain_json(value: object) -> object:
     return value
 
 
-def _assert_conduit_result(result: types.CallToolResult) -> None:
+def _assert_dispatch_result(result: types.CallToolResult) -> None:
     assert result.structuredContent is not None
     structured = cast(dict[str, object], result.structuredContent)
     assert "request_id" in structured
@@ -157,7 +188,7 @@ async def test_installed_server_advertises_exactly_six_frozen_tools(tmp_path: Pa
     """List tools through the real MCP stdio server; compare against frozen descriptors."""
 
     evidence_root = capability_evidence_output_root(tmp_path)
-    params = StdioServerParameters(command="uv", args=["run", "yoetz", "mcp", "serve"])
+    params = _serve_parameters(tmp_path)
     async with stdio_client(params) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
@@ -203,31 +234,34 @@ async def test_installed_server_advertises_exactly_six_frozen_tools(tmp_path: Pa
 
 
 @pytest.mark.anyio
-async def test_mcp_stdio_six_tool_conduit_without_claiming_codex_activation(
+async def test_mcp_stdio_six_tool_dispatch_without_claiming_codex_activation(
     tmp_path: Path,
 ) -> None:
-    """Drive all six tools through real MCP stdio; accept success or structured unavailable/locked.
+    """Drive all six names through real MCP stdio and their structured validation boundary.
 
-    This observation is MCP conduit coverage only. It does not call Application methods directly
-    and does not claim Codex model activation.
+    This observation is MCP dispatch coverage only. It does not call Application methods directly,
+    prove service conduit behavior, or claim Codex model activation.
     """
 
     evidence_root = capability_evidence_output_root(tmp_path)
     arguments = _schema_valid_tool_arguments()
-    params = StdioServerParameters(command="uv", args=["run", "yoetz", "mcp", "serve"])
+    params = _serve_parameters(tmp_path)
     async with stdio_client(params) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
             listed = await session.list_tools()
             assert tuple(tool.name for tool in listed.tools) == _EXPECTED
             for name in _EXPECTED:
-                result = await session.call_tool(name, cast(dict[str, object], arguments[name]))
-                _assert_conduit_result(result)
+                result = await session.call_tool(
+                    name,
+                    {"request_id": arguments[name]["request_id"]},
+                )
+                _assert_dispatch_result(result)
 
     context = runtime_capability_context(
-        fixture_digest=bytes_digest(b"mcp-stdio-six-tools-conduit"),
+        fixture_digest=bytes_digest(b"mcp-stdio-six-tools-dispatch"),
         test_revision=_TEST_REVISION,
-        config_profile_digest=canonical_digest({"profile": "mcp_stdio_conduit"}),
+        config_profile_digest=canonical_digest({"profile": "mcp_stdio_dispatch"}),
         external_tool="mcp",
         external_version="1.28.1",
         integration_channel="mcp_stdio",
@@ -238,18 +272,18 @@ async def test_mcp_stdio_six_tool_conduit_without_claiming_codex_activation(
         CapabilityCase(
             case_id="SIX-002",
             requirement_id="ADR-005.six-tools",
-            claim_id="E-002.six-tools-mcp-stdio-conduit",
+            claim_id="E-002.six-tools-mcp-stdio-dispatch",
             capability_family="codex_six_tools",
             required_observation_codes=frozenset(
-                {"mcp_stdio_conduit", "six_tools_called", "structured_result_shape"}
+                {"mcp_stdio_dispatch", "six_tools_called", "structured_result_shape"}
             ),
             allowed_observation_codes=frozenset(
-                {"mcp_stdio_conduit", "six_tools_called", "structured_result_shape"}
+                {"mcp_stdio_dispatch", "six_tools_called", "structured_result_shape"}
             ),
         ),
         context,
         (
-            Observation("mcp_stdio_conduit", boolean_value=True),
+            Observation("mcp_stdio_dispatch", boolean_value=True),
             Observation("six_tools_called", integer_value=6),
             Observation("structured_result_shape", boolean_value=True),
         ),

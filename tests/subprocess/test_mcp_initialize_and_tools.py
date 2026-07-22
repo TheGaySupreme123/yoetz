@@ -59,6 +59,25 @@ def _plain_json(value: object) -> object:
     return value
 
 
+def _external_schema_refs(value: object) -> tuple[str, ...]:
+    if isinstance(value, Mapping):
+        source = cast(Mapping[object, object], value)
+        found: list[str] = []
+        ref = source.get("$ref")
+        if isinstance(ref, str) and ref.startswith(("http://", "https://")):
+            found.append(ref)
+        for item in source.values():
+            found.extend(_external_schema_refs(item))
+        return tuple(found)
+    if isinstance(value, tuple | list):
+        found: list[str] = []
+        sequence = cast(tuple[object, ...] | list[object], value)
+        for item in sequence:
+            found.extend(_external_schema_refs(item))
+        return tuple(found)
+    return ()
+
+
 def _initialize(protocol_version: object, request_id: int = 1) -> dict[str, object]:
     return {
         "jsonrpc": "2.0",
@@ -82,6 +101,8 @@ async def test_static_inventory_is_exact_and_verified() -> None:
     for tool, descriptor in zip(tools, TOOL_DESCRIPTORS, strict=True):
         assert tool.inputSchema == _plain_json(descriptor.input_schema)
         assert tool.outputSchema == _plain_json(descriptor.output_schema)
+        assert _external_schema_refs(tool.inputSchema) == ()
+        assert _external_schema_refs(tool.outputSchema) == ()
         assert tool.annotations == types.ToolAnnotations(
             title=descriptor.title,
             readOnlyHint=descriptor.annotations.read_only,

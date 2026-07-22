@@ -17,6 +17,7 @@ from tests.capability.evidence import (
 
 from yoetz.adapters.integrations.codex_capability_harness import (
     CODEX_ARTIFACT_UNAVAILABLE,
+    CODEX_CONDUIT_DRIVER_UNAVAILABLE,
     evaluate_codex_conduit_availability,
 )
 from yoetz.protocol.canonical import canonical_digest
@@ -67,13 +68,11 @@ def test_codex_conduit_harness_fails_closed_without_artifact(tmp_path: Path) -> 
         context,
         (
             Observation("artifact_digest_present", digest_value=identity.executable_digest),
-            Observation("conduit_availability", enum_value="ready"),
+            Observation("conduit_availability", enum_value=CODEX_CONDUIT_DRIVER_UNAVAILABLE),
         ),
         EvidenceOutcome.UNSUPPORTED,
-        ("codex_conduit_driver_not_implemented",),
+        (CODEX_CONDUIT_DRIVER_UNAVAILABLE,),
         output_root=evidence_root,
     )
     assert evidence.outcome is EvidenceOutcome.UNSUPPORTED
-    pytest.skip(
-        "codex_conduit_driver_not_implemented: Gate 2 app-server driving not in this change"
-    )
+    pytest.skip("codex_conduit_driver_unavailable: Gate 2 app-server driving not implemented")

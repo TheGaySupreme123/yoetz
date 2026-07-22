@@ -17,7 +17,7 @@ One capability case `CODEX-G2-CONDUIT` / `codex_conduit_app_server`. Listed unde
 
 Call `evaluate_codex_conduit_availability()`. On unavailable, record unsupported evidence with
 reason `codex_artifact_unavailable` and `pytest.skip` with that structural reason. If an artifact
-is present, record unsupported with `codex_conduit_driver_not_implemented` and skip — still no
+is present, record unsupported with `codex_conduit_driver_unavailable` and skip — still no
 support claim.
 
 ## Errors and edge cases

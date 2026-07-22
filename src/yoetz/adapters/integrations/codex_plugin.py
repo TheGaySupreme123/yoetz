@@ -194,6 +194,33 @@ def _validated_project(target: IntegrationTarget) -> Path:
     return root
 
 
+def _validated_plugin_parent(root: Path, *, create: bool) -> Path:
+    """Resolve the managed parent without following project-local symlink ancestors."""
+
+    current = root
+    for component in (".agents", "plugins"):
+        candidate = current / component
+        if not candidate.exists() and not candidate.is_symlink():
+            if not create:
+                return root / ".agents" / "plugins"
+            try:
+                candidate.mkdir(mode=0o700)
+            except OSError as exc:
+                raise _error(IntegrationReason.WRITE_FAILED) from exc
+        if candidate.is_symlink() or not candidate.is_dir():
+            raise _error(IntegrationReason.TARGET_UNSAFE)
+        try:
+            stat = candidate.stat()
+        except OSError as exc:
+            raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+        if hasattr(os, "geteuid") and stat.st_uid != os.geteuid():
+            raise _error(IntegrationReason.TARGET_UNSAFE)
+        if stat.st_mode & 0o022:
+            raise _error(IntegrationReason.TARGET_UNSAFE)
+        current = candidate
+    return current
+
+
 def _build_marker(members: Mapping[str, bytes]) -> bytes:
     managed = [
         {
@@ -252,7 +279,8 @@ def install_plugin(
     if not source.harness_tested_set:
         raise _error(IntegrationReason.VERSION_INCOMPATIBLE)
     root = _validated_project(target)
-    destination = root / _PLUGIN_ROOT
+    parent = _validated_plugin_parent(root, create=True)
+    destination = parent / "yoetz"
     members = render_plugin_tree(resource_source=resource_source)
     marker = _build_marker(members)
     if destination.exists():
@@ -274,20 +302,27 @@ def install_plugin(
             and not replace_modified
         ):
             raise _error(IntegrationReason.MODIFIED_COPY)
-    parent = destination.parent
-    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     stage = parent / f".yoetz.plugin-stage-{os.urandom(6).hex()}"
     rollback = parent / f".yoetz.plugin-rollback-{os.urandom(6).hex()}"
+    destination_moved = False
     try:
         _write_tree(stage, members, marker)
         if destination.exists():
             os.replace(destination, rollback)
+            destination_moved = True
         os.replace(stage, destination)
         if rollback.exists():
             shutil.rmtree(rollback)
     except IntegrationError:
         raise
     except OSError as exc:
+        if destination_moved and rollback.exists():
+            try:
+                if destination.exists():
+                    shutil.rmtree(destination)
+                os.replace(rollback, destination)
+            except OSError:
+                pass
         raise _error(IntegrationReason.WRITE_FAILED) from exc
     finally:
         if stage.exists():
@@ -312,7 +347,16 @@ def inspect_plugin(
             None,
             (trust_note,),
         )
-    destination = root / _PLUGIN_ROOT
+    try:
+        parent = _validated_plugin_parent(root, create=False)
+    except IntegrationError:
+        return PluginInspection(
+            PluginHookPresence.INSTALLED_UNTRUSTED_UNKNOWN,
+            False,
+            None,
+            (trust_note, "destination_unsafe"),
+        )
+    destination = parent / "yoetz"
     if not destination.exists():
         return PluginInspection(PluginHookPresence.ABSENT, False, None, (trust_note,))
     if destination.is_symlink() or not destination.is_dir():

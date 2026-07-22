@@ -172,9 +172,8 @@ research-evidence pack and semantic reviewer may both produce an evidence-assess
 surface type is used for both because the CLI, MCP, and receipt layers need one common
 representation, but origin/provenance and policy fields record which path produced it.
 
-`FindingKind` is the closed fifteen-value inventory registered in `specs/INTERFACES.md`, including
-`action_without_result` and `verification_class_unsatisfied`. `FINDING_KIND_TRAITS` implements that
-registry table verbatim. A
+`FindingKind` is the closed fourteen-value inventory registered in `specs/INTERFACES.md`, including
+`action_without_result`. `FINDING_KIND_TRAITS` implements that registry table verbatim. A
 candidate's explicit `priority` MUST equal its kind's registered priority; a mismatch is invalid
 rather than a caller-selected reranking. The registered `actionable` boolean is derived from kind
 and is never another serialized finding field. This keeps both deterministic packs and

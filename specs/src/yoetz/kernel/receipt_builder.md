@@ -202,18 +202,12 @@ retained semantic-finding provenance, and version identities. The generic fallba
   comma-space join of the exact sorted material gap-code tuple; when the gap set includes
   `semantic_review_not_configured` or `semantic_relevance_review_not_run`, the limitations body
   begins with `Semantic relevance review was not run.` before that coverage-limited sentence; and
-  when any selected obligation
-  declares required verification classes, the limitations body also includes the structural lines
-  `Satisfied verification classes: {ascii-sorted satisfied}.` and/or
-  `Unsatisfied verification classes: {ascii-sorted unsatisfied}.` with matching `satisfied:` /
-  `unsatisfied:` item tokens (class names only; no prose synthesis about what was “proven”); and
+  compact rendering preserves the structural conclusion: unresolved deterministic findings remain
+  explicit, insufficient coverage remains explicit, and only a genuinely clear deterministic
+  conclusion may say that no unresolved deterministic issue was found; and
 - versions: `Engine {engine_version}; protocol {protocol_version}; {policy rows}.`, where each
   policy row is `{policy_id} {policy_version}` in `ReceiptVersionSlice.policy_versions` order and
   rows are separated by semicolon-space.
-
-Obligations that declare nonempty `required_verification_classes` are always selected for the
-receipt even when they are outside the current plan, so class coverage disclosure cannot be omitted
-by plan-selection alone.
 
 Fallback items are respectively empty, open-obligation IDs, unresolved actionable finding IDs,
 claim refs followed by evidence refs, exact gap codes, and empty; fallback `coverage_note` is

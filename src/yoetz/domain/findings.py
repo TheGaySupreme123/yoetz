@@ -106,7 +106,6 @@ class FindingKind(str, Enum):  # noqa: UP042 - exact wire enum base
     REQUESTED_ITEM_NEVER_ATTEMPTED = "requested_item_never_attempted"
     RESULT_WITHOUT_ACTION = "result_without_action"
     STALE_EVIDENCE_FOR_CHANGED_STATE = "stale_evidence_for_changed_state"
-    VERIFICATION_CLASS_UNSATISFIED = "verification_class_unsatisfied"
     WEAK_OR_STALE_RESPONSE = "weak_or_stale_response"
 
 
@@ -161,7 +160,6 @@ FINDING_KIND_TRAITS: Final[MappingProxyType[FindingKind, tuple[int, bool]]] = Ma
         FindingKind.CONTRADICTORY_CLAIMS_UNRESOLVED: (1, True),
         FindingKind.LEDGER_STALE_OR_INCOMPLETE: (3, False),
         FindingKind.WEAK_OR_STALE_RESPONSE: (2, True),
-        FindingKind.VERIFICATION_CLASS_UNSATISFIED: (1, True),
         FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM: (1, True),
         FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT: (1, True),
         FindingKind.MATERIAL_LIMITATION_OMITTED: (1, True),
@@ -181,7 +179,6 @@ _WORK_INTEGRITY_KINDS: Final = frozenset(
         FindingKind.CONTRADICTORY_CLAIMS_UNRESOLVED,
         FindingKind.LEDGER_STALE_OR_INCOMPLETE,
         FindingKind.WEAK_OR_STALE_RESPONSE,
-        FindingKind.VERIFICATION_CLASS_UNSATISFIED,
     }
 )
 _POLICY_IDENTITY_BY_KIND: Final[MappingProxyType[FindingKind, tuple[str, str]]] = MappingProxyType(

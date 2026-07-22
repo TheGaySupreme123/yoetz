@@ -282,16 +282,13 @@ handles and unknown-only adjacent metadata appear in neither JSON view.
 Key payload fields (minimum; full shapes in `specs/src/yoetz/domain/events.md`):
 
 - `obligation_published`: `obligation_id`, `description`, `evidence_expectation`, optional
-  `acceptance_criteria`, `source_refs`, optional `required_verification_classes` (exact orthogonal
-  class tokens; absent/empty means legacy class-free gating).
+  `acceptance_criteria`, `source_refs`.
 - `action_recorded`: `action_id`, `action_kind` (`command`|`edit`|`research`|`review`|`other`),
   `description`, optional `command`, `subject_state` (see SubjectStateRef below).
 - `result_recorded`: `result_id`, `action_id`, `outcome` (`success`|`failure`|`partial`|
   `unknown`), optional `exit_status`, `subject_state`, `evidence_refs`.
 - `evidence_recorded`: `evidence_id`, `strength` (mirrors `EvidenceImmutability`), `reference`
-  (mutable ref) and/or `captured_object_id` + `content_digest`, `observed_at`, `evidence_kind`,
-  optional `verification_classes` (exact producer-backed class tokens only; never inferred from
-  filenames, commands, or prose).
+  (mutable ref) and/or `captured_object_id` + `content_digest`, `observed_at`, `evidence_kind`.
 - `claim_recorded`: `claim_id`, `claim_kind` (`completion`|`material`), `statement`,
   `supporting_refs` (evidence/result/obligation IDs), optional `subject_state`.
 - `response_recorded`: `finding_id`, `finding_frontier`, `disposition`
@@ -299,10 +296,6 @@ Key payload fields (minimum; full shapes in `specs/src/yoetz/domain/events.md`):
   `evidence_refs`.
 - `SubjectStateRef`: optional `tree_digest`, `diff_digest`, `described_state` — binds evidence
   and claims to repository/artifact state for freshness checks.
-- `VerificationClass` (owned by `domain/events.py`): closed orthogonal vocabulary
-  `unit_config`, `integration_transport`, `production_composition`, `capability`, `live_smoke`,
-  `source_review`. Classes are not a strength ladder; one class never satisfies another; class
-  membership is never inferred. Schema version stays `1.0.0` for these optional additive fields.
 
 `reason` MAY be omitted for `acknowledged` and MUST be non-empty for `rejected` or `waived`.
 Waiver-only fields are forbidden on other dispositions. `finding_frontier` is always the full
@@ -406,13 +399,11 @@ Work-integrity finding kinds (`FindingKind`):
 `failed_work_omitted`, `claim_without_admissible_evidence`, `result_without_action`,
 `action_without_result`,
 `stale_evidence_for_changed_state`, `contradictory_claims_unresolved`,
-`ledger_stale_or_incomplete`, `weak_or_stale_response` (flags a hollow rejection/waiver),
-`verification_class_unsatisfied` (resolved obligation lacks linked admissible evidence declaring
-each required verification class).
+`ledger_stale_or_incomplete`, `weak_or_stale_response` (flags a hollow rejection/waiver).
 Research/evidence-assessment kinds: `evidence_does_not_support_claim`, `diff_does_not_match_account`,
 `material_limitation_omitted`, `questionable_finding_rejection`.
 
-The ownership partition is exhaustive and disjoint: the first eleven kinds belong to the built-in
+The ownership partition is exhaustive and disjoint: the first ten kinds belong to the built-in
 `work-integrity/0.1.0` pack, and the latter four belong to the built-in
 `research-evidence/0.1.0` pack. `semantic-review` is only a review-context / recipe label; it is
 not a `PolicyPack` value and it never appears as `Finding.policy_id`.
@@ -440,7 +431,6 @@ inferable from the frozen case.
 | `contradictory_claims_unresolved` | 1 | true |
 | `ledger_stale_or_incomplete` | 3 | false |
 | `weak_or_stale_response` | 2 | true |
-| `verification_class_unsatisfied` | 1 | true |
 | `evidence_does_not_support_claim` | 1 | true |
 | `diff_does_not_match_account` | 1 | true |
 | `material_limitation_omitted` | 1 | true |

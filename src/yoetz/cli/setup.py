@@ -13,12 +13,14 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 import typer
 
 from yoetz.adapters.integrations.codex_discovery import discover_codex_binaries
 from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter
+from yoetz.adapters.integrations.codex_plugin import inspect_plugin
+from yoetz.adapters.integrations.codex_skill import load_packaged_skill_source
 from yoetz.application.harness_mcp import HarnessMcpService, McpRegistrationConfirmation
 from yoetz.config.paths import PathSafetyError, setup_marker_path
 from yoetz.ports.harness_mcp import (
@@ -27,7 +29,12 @@ from yoetz.ports.harness_mcp import (
     McpRegistrationError,
     McpRegistrationState,
 )
-from yoetz.ports.integrations import HarnessId
+from yoetz.ports.integrations import (
+    HarnessId,
+    IntegrationError,
+    IntegrationScope,
+    IntegrationTarget,
+)
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 
 __all__ = [
@@ -101,6 +108,57 @@ def should_offer_first_run() -> bool:
     except OSError, ValueError:
         return False
     return interactive and not setup_marker_present()
+
+
+def _integration_layers() -> dict[str, JsonValue]:
+    """Inspect skill, plugin, hook, and trust state without inferring activation."""
+
+    try:
+        source = load_packaged_skill_source()
+    except IntegrationError as error:
+        tested_profiles: list[JsonValue] = []
+        skill_state = error.reason.value
+    else:
+        tested_profiles = list(source.harness_tested_set)
+        skill_state = "verified"
+    try:
+        inspection = inspect_plugin(
+            IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(Path.cwd()))
+        )
+    except IntegrationError as error:
+        return {
+            "hooks": {
+                "presence": "unknown",
+                "trust_observable": False,
+                "trust_state": "unknown",
+            },
+            "plugin": {
+                "digest": None,
+                "presence": "unknown",
+                "reason": error.reason.value,
+            },
+            "skill": {
+                "automatic_activation_tested": False,
+                "source_state": skill_state,
+                "tested_profiles": tested_profiles,
+            },
+        }
+    return {
+        "hooks": {
+            "presence": inspection.presence.value,
+            "trust_observable": inspection.trust_observable,
+            "trust_state": "observable" if inspection.trust_observable else "unknown",
+        },
+        "plugin": {
+            "digest": inspection.installed_digest,
+            "presence": inspection.presence.value,
+        },
+        "skill": {
+            "automatic_activation_tested": bool(tested_profiles),
+            "source_state": skill_state,
+            "tested_profiles": tested_profiles,
+        },
+    }
 
 
 def _is_interactive_terminal() -> bool:
@@ -543,6 +601,7 @@ async def run_setup_wizard(
 
     report: dict[str, JsonValue] = {
         "discovered": [_binary_row(binary) for binary in binaries],
+        "integration": _integration_layers(),
         "marker_written": marker_written,
         "next_steps": next_steps,
         "provider": provider,
@@ -562,6 +621,7 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
     registration = report["registration"]
     service = report["service"]
     provider = report["provider"]
+    integration = report["integration"]
     typer.echo("Setup summary:")
     if isinstance(registration, dict):
         outcome = registration.get("outcome")
@@ -574,7 +634,32 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
         if reason:
             line += f" ({reason})"
         typer.echo(line)
-    typer.echo("  Skill support: no tested capability profile; automatic activation not tested")
+    if isinstance(integration, dict):
+        skill = integration.get("skill")
+        plugin = integration.get("plugin")
+        hooks = integration.get("hooks")
+        if isinstance(skill, dict) and skill.get("source_state") != "verified":
+            typer.echo("  Skill support: packaged source invalid; automatic activation not tested")
+        elif (
+            isinstance(skill, dict)
+            and isinstance(skill.get("tested_profiles"), list)
+            and bool(skill.get("tested_profiles"))
+        ):
+            tested_profiles = cast(list[JsonValue], skill["tested_profiles"])
+            profiles = ", ".join(str(item) for item in tested_profiles)
+            typer.echo(f"  Skill support: tested profiles: {profiles}")
+        else:
+            typer.echo(
+                "  Skill support: no tested capability profile; automatic activation not tested"
+            )
+        if isinstance(plugin, dict):
+            typer.echo(f"  Plugin installation: {plugin.get('presence') or 'absent'}")
+        if isinstance(hooks, dict):
+            typer.echo(
+                "  Hook installation: "
+                f"{hooks.get('presence') or 'absent'}; "
+                f"trust {hooks.get('trust_state') or 'unknown'}"
+            )
     if isinstance(service, dict):
         reachable = service.get("reachable")
         typer.echo(f"  Local service reachable: {'yes' if reachable else 'no'}")
@@ -606,6 +691,7 @@ async def setup_status(*, json_output: bool) -> int:
         rows.append(row)
     report: dict[str, JsonValue] = {
         "discovered": rows,
+        "integration": _integration_layers(),
         "marker_present": setup_marker_present(),
         "schema": _STATUS_SCHEMA,
         "service": await _service_reachability(),

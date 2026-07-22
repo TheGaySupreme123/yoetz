@@ -82,7 +82,9 @@ provider, policy, or environment values, so no descriptor can leak state or vary
 installations.
 
 Each descriptor retains the canonical input/output schema URI and exposes the corresponding
-verified local schema object for `tools/list`. Descriptor identity has one reviewed SHA-256 golden
+verified local schema object for `tools/list`. The served MCP schema recursively inlines every
+checked-in Yoetz `$ref`; an MCP client can validate tool calls and results with network access
+disabled and never resolves `schemas.yoetz.dev` at runtime. Descriptor identity has one reviewed SHA-256 golden
 per tool and one ordered-set SHA-256 golden; drift fails module initialization.
 
 ### Honesty lint

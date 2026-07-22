@@ -17,8 +17,8 @@ from yoetz.domain.findings import Finding, FindingKind, finding_from_json
 from yoetz.domain.values import freeze_json
 
 # The exhaustive public policy-rule mapping frozen in specs/fixtures/README.md /
-# fixtures/README.md. Every one of the 15 registered FindingKind values is owned by exactly
-# one of these eight adversarial cases; ADV-005/007/010 exist but are deliberately excluded from
+# fixtures/README.md. Every one of the 14 registered FindingKind values is owned by exactly
+# one of these seven adversarial cases; ADV-005/007/010 exist but are deliberately excluded from
 # this mapping (they exercise plan-revision honesty, crash/retry idempotency, and cross-channel
 # import comparison -- not a new FindingKind of their own).
 _ADV_KIND_MAP: dict[str, frozenset[FindingKind]] = {
@@ -51,12 +51,9 @@ _ADV_KIND_MAP: dict[str, frozenset[FindingKind]] = {
     "ADV-009-wrong-semantic-finding-rejected": frozenset(
         {FindingKind.WEAK_OR_STALE_RESPONSE, FindingKind.QUESTIONABLE_FINDING_REJECTION}
     ),
-    "ADV-011-config-evidence-does-not-satisfy-transport": frozenset(
-        {FindingKind.VERIFICATION_CLASS_UNSATISFIED}
-    ),
 }
 
-# All eleven adversarial cases, including the three excluded from the kind-ownership mapping above.
+# All ten adversarial cases, including the three excluded from the kind-ownership mapping above.
 _ALL_ADV_IDS = (
     "ADV-001-abandoned-obligation",
     "ADV-002-omitted-failed-test",
@@ -68,7 +65,6 @@ _ALL_ADV_IDS = (
     "ADV-008-stale-redacted-ledger",
     "ADV-009-wrong-semantic-finding-rejected",
     "ADV-010-import-detects-missing-publication",
-    "ADV-011-config-evidence-does-not-satisfy-transport",
 )
 
 

@@ -55,7 +55,7 @@
       "capability_family": "mcp_protocol_conformance",
       "external_version": "1.28.1",
       "platform": "linux_x86_64",
-      "requirement_id": "mcp_tools_call_all_six_conduit"
+      "requirement_id": "mcp_tools_call_all_six_dispatch"
     },
     {
       "capability_family": "mcp_protocol_conformance",
@@ -80,6 +80,12 @@
       "external_version": "1.28.1",
       "platform": "linux_x86_64",
       "requirement_id": "mcp_cancellation_eof_clean"
+    },
+    {
+      "capability_family": "mcp_protocol_conformance",
+      "external_version": "1.28.1",
+      "platform": "linux_x86_64",
+      "requirement_id": "mcp_pending_responses_flush_on_eof"
     },
     {
       "capability_family": "mcp_protocol_conformance",

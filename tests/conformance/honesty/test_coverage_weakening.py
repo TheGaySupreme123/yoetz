@@ -60,7 +60,6 @@ _WORK_INTEGRITY_KINDS = frozenset(
         FindingKind.CONTRADICTORY_CLAIMS_UNRESOLVED,
         FindingKind.LEDGER_STALE_OR_INCOMPLETE,
         FindingKind.WEAK_OR_STALE_RESPONSE,
-        FindingKind.VERIFICATION_CLASS_UNSATISFIED,
     }
 )
 
