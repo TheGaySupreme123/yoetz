@@ -25,6 +25,8 @@ from yoetz.domain.findings import (
     rank_key,
 )
 from yoetz.domain.receipts import (
+    SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
+    SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     ReceiptConclusion,
     ReceiptDocument,
     ReceiptGap,
@@ -857,7 +859,17 @@ def _sections(
         )
 
     if gap_codes:
-        gap_body = f"Coverage is limited by: {', '.join(gap_codes)}."
+        not_run = (
+            SEMANTIC_REVIEW_NOT_CONFIGURED_GAP in gap_codes
+            or SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP in gap_codes
+        )
+        if not_run:
+            gap_body = (
+                "Semantic relevance review was not run. "
+                f"Coverage is limited by: {', '.join(gap_codes)}."
+            )
+        else:
+            gap_body = f"Coverage is limited by: {', '.join(gap_codes)}."
         bodies[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] = (
             f"{gap_body} {class_body}" if class_body else gap_body
         )

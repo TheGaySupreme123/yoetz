@@ -27,6 +27,10 @@ Lock the receipt document’s canonical structure and the compact render’s hon
   sorted-unique `EvidenceId | ResultId` union and preserves each ID kind through the codec.
 - `test_receipt_section_items_are_required_and_exact` — missing `items` is invalid, while explicit
   `items=[]` decodes to the required empty tuple and re-encodes as `items=[]`.
+- `test_semantic_review_not_configured_receipt_states_not_run` — not-configured gap carries the
+  explicit “semantic relevance review was not run” compact disclosure, distinct from blocked-by-policy.
+- `test_semantic_relevance_review_not_run_gap_shares_not_run_wording` — failure/timeout gap family
+  shares the same truthful not-run wording.
 
 ## Behavior
 

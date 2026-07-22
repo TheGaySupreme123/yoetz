@@ -17,6 +17,11 @@ from yoetz.domain.findings import (
     finding_to_json,
     semantic_provenance_to_json,
 )
+from yoetz.domain.receipts import (
+    OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
+    SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
+    SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
+)
 from yoetz.domain.values import (
     Frontier,
     claim_id,
@@ -85,6 +90,7 @@ __all__ = [
     "execute_check_commit",
     "normalize_check_scope",
     "run_deterministic_policies",
+    "semantic_coverage_gap_code",
     "validate_semantic_judgment",
 ]
 
@@ -221,6 +227,19 @@ class FinalSemanticEvaluation:
                 raise _invalid("semantic_judgment_invalid")
         elif self.judgment is not None:
             raise _invalid("semantic_judgment_invalid")
+
+
+def semantic_coverage_gap_code(status: SemanticStatus, reason: SemanticReason) -> str | None:
+    """Map a terminal semantic outcome to the receipt/check structural gap code, or None."""
+
+    validate_semantic_outcome(status, reason)
+    if status in {SemanticStatus.NOT_REQUESTED, SemanticStatus.SUCCEEDED}:
+        return None
+    if status is SemanticStatus.BLOCKED_BY_POLICY:
+        return OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP
+    if status is SemanticStatus.NOT_CONFIGURED:
+        return SEMANTIC_REVIEW_NOT_CONFIGURED_GAP
+    return SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP
 
 
 class _VerificationPolicy(Protocol):
@@ -809,7 +828,14 @@ async def _semantic_evaluation(
             SemanticStatus.NOT_CONFIGURED,
             SemanticReason.PROVIDER_NOT_CONFIGURED,
         )
-    return await app.evaluate_semantic_check(frozen, deterministic)
+    try:
+        return await app.evaluate_semantic_check(frozen, deterministic)
+    except Exception:
+        # Optional/required semantic evaluator crash must never fabricate a clean semantic pass.
+        return FinalSemanticEvaluation(
+            SemanticStatus.FAILED,
+            SemanticReason.COORDINATOR_FAILURE,
+        )
 
 
 async def execute_check_commit(app: Application, request: CheckRequest) -> CheckCommitResult:
@@ -901,10 +927,17 @@ async def execute_check_commit(app: Application, request: CheckRequest) -> Check
             SemanticStatus.NOT_REQUESTED,
             SemanticStatus.SUCCEEDED,
         }
-        if semantic_failed and not coverage.known_gaps:
+        semantic_gap = semantic_coverage_gap_code(semantic_result.status, semantic_result.reason)
+        if semantic_gap is not None and semantic_gap not in coverage.known_gaps:
+            gaps = set(coverage.known_gaps)
+            gaps.add(semantic_gap)
+            freshness = coverage.ledger_freshness
+            if freshness is LedgerFreshness.CURRENT:
+                freshness = LedgerFreshness.PARTIAL
             coverage = replace(
                 coverage,
-                known_gaps=(f"semantic_{semantic_result.reason.value}",),
+                ledger_freshness=freshness,
+                known_gaps=tuple(sorted(gaps, key=str.encode)),
             )
         if policy_failed or (request.mode == "semantic_required" and semantic_failed):
             completeness = CheckCompleteness.REQUIRED_INCOMPLETE

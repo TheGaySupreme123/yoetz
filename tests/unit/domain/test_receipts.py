@@ -289,3 +289,60 @@ def test_every_explicit_gap_occurs_in_coverage_summary() -> None:
     with pytest.raises(ProtocolValueError) as exc_info:
         receipt_document_from_json(wire)
     _assert_reason(exc_info, "receipt_gap_not_in_coverage")
+
+
+def test_semantic_review_not_configured_receipt_states_not_run() -> None:
+    """Requirement: receipt with semantic evaluator not configured discloses not-run."""
+
+    from yoetz.domain.receipts import (
+        OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
+        SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
+    )
+
+    wire = _variant("deterministic-current.case.json", "current_complete")
+    wire["conclusion"] = "insufficient_coverage"
+    coverage = cast(dict[str, Any], wire["coverage"])
+    coverage["known_gaps"] = [SEMANTIC_REVIEW_NOT_CONFIGURED_GAP]
+    coverage["ledger_freshness"] = "partial"
+    wire["gaps"] = [{"code": SEMANTIC_REVIEW_NOT_CONFIGURED_GAP, "subject_refs": []}]
+    for section in cast(list[dict[str, Any]], wire["sections"]):
+        if section["key"] == "limitations_and_coverage":
+            section["body"] = (
+                "Semantic relevance review was not run. "
+                f"Coverage is limited by: {SEMANTIC_REVIEW_NOT_CONFIGURED_GAP}."
+            )
+            section["items"] = [SEMANTIC_REVIEW_NOT_CONFIGURED_GAP]
+        if section["key"] == "summary":
+            section["body"] = "Coverage is insufficient at frontier 7."
+    document = receipt_document_from_json(wire)
+    assert SEMANTIC_REVIEW_NOT_CONFIGURED_GAP in {gap.code for gap in document.gaps}
+    assert OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP not in {gap.code for gap in document.gaps}
+    rendered = render_receipt_compact(document)
+    assert "semantic relevance review was not run" in rendered
+    assert "optional semantic review was blocked" not in rendered
+    assert "no unresolved deterministic issue was found in the published record" in rendered
+
+
+def test_semantic_relevance_review_not_run_gap_shares_not_run_wording() -> None:
+    """Evaluator failure/timeout uses the same truthful not-run disclosure family."""
+
+    from yoetz.domain.receipts import SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP
+
+    wire = _variant("deterministic-current.case.json", "current_complete")
+    wire["conclusion"] = "insufficient_coverage"
+    coverage = cast(dict[str, Any], wire["coverage"])
+    coverage["known_gaps"] = [SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP]
+    coverage["ledger_freshness"] = "partial"
+    wire["gaps"] = [{"code": SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP, "subject_refs": []}]
+    for section in cast(list[dict[str, Any]], wire["sections"]):
+        if section["key"] == "limitations_and_coverage":
+            section["body"] = (
+                "Semantic relevance review was not run. "
+                f"Coverage is limited by: {SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP}."
+            )
+            section["items"] = [SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP]
+        if section["key"] == "summary":
+            section["body"] = "Coverage is insufficient at frontier 7."
+    rendered = render_receipt_compact(receipt_document_from_json(wire))
+    assert "semantic relevance review was not run" in rendered
+    assert "blocked before dispatch" not in rendered

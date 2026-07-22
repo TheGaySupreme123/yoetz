@@ -210,12 +210,13 @@ class _Runtime:
 
 
 class _App:
-    def __init__(self, *, semantic: bool = False) -> None:
+    def __init__(self, *, semantic: bool = False, crash_semantic: bool = False) -> None:
         self.id_source = _Ids()
         self.ids: IdPort = self.id_source
         self.clock = FixedClock()
         self.verification_policy = VerificationPolicy()
         self.ledger = _Ledger(_case())
+        self.crash_semantic = crash_semantic
         capabilities = {
             RuntimeCapability.WRITE,
             RuntimeCapability.PAYLOAD_READ,
@@ -253,6 +254,8 @@ class _App:
         deterministic_findings: tuple[Finding, ...],
     ) -> FinalSemanticEvaluation:
         _ = (frozen, deterministic_findings)
+        if self.crash_semantic:
+            raise RuntimeError("semantic_evaluator_crashed")
         return self.semantic_result
 
 
@@ -309,7 +312,42 @@ async def test_semantic_required_unavailable_preserves_deterministic_truth() -> 
     assert result.findings
     assert result.semantic_status is SemanticStatus.NOT_CONFIGURED
     assert result.semantic_provenance is None
-    assert result.coverage.known_gaps == ("semantic_provider_not_configured",)
+    assert result.coverage.known_gaps == ("semantic_review_not_configured",)
+
+
+@pytest.mark.anyio
+async def test_semantic_evaluator_crash_degrades_to_not_run_without_false_clean() -> None:
+    """Requirement: evaluator crash/timeout degrades to not-run disclosure, never false clean."""
+
+    from yoetz.domain.receipts import (
+        SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
+        SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
+    )
+
+    crashed = _App(semantic=True, crash_semantic=True)
+    crash_result = await execute_check_commit(crashed, _request("semantic_if_configured"))
+    assert crash_result.findings
+    assert crash_result.semantic_status is SemanticStatus.FAILED
+    assert crash_result.semantic_reason is SemanticReason.COORDINATOR_FAILURE
+    assert crash_result.verdict.value != "no_issue_detected"
+    assert SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP in crash_result.coverage.known_gaps
+    assert SEMANTIC_REVIEW_NOT_CONFIGURED_GAP not in crash_result.coverage.known_gaps
+
+    timed_out = _App(semantic=True)
+    timed_out.semantic_result = FinalSemanticEvaluation(
+        SemanticStatus.UNAVAILABLE,
+        SemanticReason.CREDENTIAL_UNAVAILABLE,
+    )
+    timeout_result = await execute_check_commit(timed_out, _request("semantic_if_configured"))
+    assert timeout_result.findings
+    assert timeout_result.semantic_status is SemanticStatus.UNAVAILABLE
+    assert timeout_result.verdict.value != "no_issue_detected"
+    assert SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP in timeout_result.coverage.known_gaps
+
+    # Deterministic findings remain intact (same unsupported-claim material from the frozen case).
+    assert {finding.kind.value for finding in crash_result.findings} == {
+        finding.kind.value for finding in timeout_result.findings
+    }
 
 
 @pytest.mark.anyio

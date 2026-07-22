@@ -405,3 +405,53 @@ def test_receipt_obligation_class_fields_validate_bounds() -> None:
             required_verification_classes=("unit_config",),
             satisfied_verification_classes=("live_smoke",),
         )
+
+
+def test_semantic_origin_cannot_satisfy_required_verification_classes() -> None:
+    """Requirement: semantic-origin findings/data never satisfy required_verification_classes.
+
+    Class satisfaction is derived only from published EvidenceRecordedPayload.verification_classes
+    on admissible resolution evidence. Semantic findings are advisory and never enter that set.
+    """
+
+    from yoetz.domain.findings import FindingOrigin
+
+    case = make_case(
+        obligations={
+            obl(1): obligation_record(
+                _resolved(1, VerificationClass.LIVE_SMOKE, VerificationClass.UNIT_CONFIG),
+                1,
+            )
+        },
+        evidence={evd(1): evidence_record(_evidence(1), 2)},
+    )
+    assert FindingKind.VERIFICATION_CLASS_UNSATISFIED in _kinds(case)
+
+    # Evidence payloads carry producer-declared classes only; they have no semantic origin field
+    # and empty class tuples never upgrade a required class to satisfied.
+    for record in case.projection.evidence.values():
+        assert record.payload is not None
+        assert not hasattr(record.payload, "origin")
+        assert record.payload.verification_classes == ()
+    assert FindingOrigin.SEMANTIC_MODEL_DERIVED.value == "semantic_model_derived"
+
+    # Adding classed evidence is the only path that clears the finding — findings origin never
+    # participates.
+    cleared = make_case(
+        obligations={
+            obl(1): obligation_record(
+                _resolved(
+                    1,
+                    VerificationClass.LIVE_SMOKE,
+                    VerificationClass.UNIT_CONFIG,
+                    resolution=(evd(1), evd(2)),
+                ),
+                1,
+            )
+        },
+        evidence={
+            evd(1): evidence_record(_evidence(1, VerificationClass.LIVE_SMOKE), 2),
+            evd(2): evidence_record(_evidence(2, VerificationClass.UNIT_CONFIG), 3),
+        },
+    )
+    assert FindingKind.VERIFICATION_CLASS_UNSATISFIED not in _kinds(cleared)

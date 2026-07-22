@@ -18,6 +18,8 @@ the `verification_class_unsatisfied` deterministic rule, and receipt class-cover
 - `test_verification_class_unsatisfied_missing_one_all_and_legacy` — rule triggers and non-triggers.
 - `test_receipt_discloses_satisfied_and_unsatisfied_verification_classes` — limitations disclosure.
 - `test_receipt_obligation_class_fields_validate_bounds` — receipt obligation class consistency.
+- `test_semantic_origin_cannot_satisfy_required_verification_classes` — semantic-origin material
+  never satisfies `required_verification_classes`; only published evidence class declarations count.
 
 ## Behavior
 

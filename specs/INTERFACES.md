@@ -509,6 +509,15 @@ post-append result frontier.
 finding coverage using `coverage.weakest`; every explicit receipt-gap code must also occur in the
 top-level known-gap set, and the fold must equal that top-level coverage.
 
+Shared structural gap codes for optional semantic relevance review (distinct families):
+
+- `optional_semantic_review_blocked_by_policy` — blocked before dispatch by network-egress policy;
+- `semantic_review_not_configured` — evaluator/provider not configured;
+- `semantic_relevance_review_not_run` — evaluation failed/timed out/unavailable without a clean pass.
+
+The not-configured and not-run codes share the honest compact limitation that semantic relevance
+review was not run; they must not reuse blocked-by-policy wording.
+
 ## 9. Kernel (`kernel/`)
 
 - `ProjectionState` (frozen): `frontier`, `head_digest`, `plans`, `obligations`, `decisions`,

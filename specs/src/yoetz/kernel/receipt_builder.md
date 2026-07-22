@@ -199,7 +199,10 @@ retained semantic-finding provenance, and version identities. The generic fallba
   when there is no gap/redaction;
   `Visibility is reduced by recorded redactions; coverage is not proof of correctness.` when there
   are redactions but no gap; otherwise `Coverage is limited by: {codes}.`, where `codes` is the
-  comma-space join of the exact sorted material gap-code tuple; and when any selected obligation
+  comma-space join of the exact sorted material gap-code tuple; when the gap set includes
+  `semantic_review_not_configured` or `semantic_relevance_review_not_run`, the limitations body
+  begins with `Semantic relevance review was not run.` before that coverage-limited sentence; and
+  when any selected obligation
   declares required verification classes, the limitations body also includes the structural lines
   `Satisfied verification classes: {ascii-sorted satisfied}.` and/or
   `Unsatisfied verification classes: {ascii-sorted unsatisfied}.` with matching `satisfied:` /

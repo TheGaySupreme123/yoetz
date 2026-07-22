@@ -412,3 +412,39 @@ def test_builder_never_adds_new_findings_or_evidence() -> None:
     receipt = _build(_context(finding=finding, check=check))
     assert receipt.findings == (finding,)
     assert receipt.evidence_refs == ()
+
+
+def test_semantic_review_not_configured_limitations_state_not_run() -> None:
+    """Requirement: receipt limitations disclose that semantic relevance review was not run."""
+
+    from yoetz.domain.receipts import SEMANTIC_REVIEW_NOT_CONFIGURED_GAP, render_receipt_compact
+
+    gap = CaseGap(
+        f"semantic_outcome:{SEMANTIC_REVIEW_NOT_CONFIGURED_GAP}",
+        SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
+        (),
+    )
+    coverage = _coverage(gaps=(SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,))
+    check = _check(
+        CheckVerdict.INSUFFICIENT_COVERAGE,
+        coverage,
+    )
+    # Override semantic outcome on the applicable check for documentation; gaps drive disclosure.
+    check = replace(
+        check,
+        semantic_status=SemanticStatus.NOT_CONFIGURED,
+        semantic_reason=SemanticReason.PROVIDER_NOT_CONFIGURED,
+    )
+    receipt = _build(_context(coverage=coverage, gaps=(gap,), check=check))
+    assert receipt.conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE
+    assert SEMANTIC_REVIEW_NOT_CONFIGURED_GAP in {item.code for item in receipt.gaps}
+    limitations = next(
+        section
+        for section in receipt.sections
+        if section.key is ReceiptSectionKey.LIMITATIONS_AND_COVERAGE
+    )
+    assert limitations.body.startswith("Semantic relevance review was not run.")
+    assert SEMANTIC_REVIEW_NOT_CONFIGURED_GAP in limitations.items
+    rendered = render_receipt_compact(receipt)
+    assert "semantic relevance review was not run" in rendered
+    assert "optional semantic review was blocked" not in rendered

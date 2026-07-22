@@ -199,6 +199,19 @@ mention:
 - coverage gaps and redactions;
 - whether semantic evaluation was unavailable or not requested.
 
+Structural semantic-relevance gap codes are distinct:
+
+- `optional_semantic_review_blocked_by_policy` — optional review was blocked before dispatch by
+  network-egress policy (no provider attempt);
+- `semantic_review_not_configured` — the semantic evaluator/provider was not configured;
+- `semantic_relevance_review_not_run` — optional semantic evaluation failed, timed out, or otherwise
+  did not complete.
+
+When either not-configured or not-run gap is present, compact wording states that no unresolved
+deterministic issue was found in the published record and that **semantic relevance review was not
+run**, and must not reuse the blocked-by-policy sentence. Limitations section bodies for those gaps
+begin with `Semantic relevance review was not run.` before listing coverage-limited codes.
+
 The compact render is intentionally weaker than the underlying document when the document carries
 more detail than the chosen surface needs. It is presentation only and is never hashed as the
 receipt document.

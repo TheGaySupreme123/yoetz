@@ -6,7 +6,7 @@ import hashlib
 from dataclasses import dataclass, replace
 from typing import Literal, Protocol, cast
 
-from yoetz.application.check import case_coverage
+from yoetz.application.check import case_coverage, semantic_coverage_gap_code
 from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
 from yoetz.domain.events import (
     CheckRecordedPayload,
@@ -324,6 +324,15 @@ def _context(
         for gap in gaps
     ):
         gaps.append(CaseGap("check_not_recorded", "check_not_recorded", ()))
+    if applicable is not None:
+        semantic_gap = semantic_coverage_gap_code(
+            applicable.semantic_status, applicable.semantic_reason
+        )
+        if semantic_gap is not None and not any(gap.code == semantic_gap for gap in gaps):
+            gaps.append(CaseGap(f"semantic_outcome:{semantic_gap}", semantic_gap, ()))
+        for code in applicable.coverage.known_gaps:
+            if not any(gap.code == code for gap in gaps):
+                gaps.append(CaseGap(f"check_coverage:{code}", code, ()))
     ordered_gaps = tuple(
         sorted(
             gaps,
@@ -344,6 +353,27 @@ def _context(
         from yoetz.protocol.coverage import weakest
 
         coverage = weakest(coverage, applicable.coverage)
+        # ReceiptBuildContext requires exact equality between coverage.known_gaps and CaseGap codes.
+        extra_codes = set(coverage.known_gaps) - {gap.code for gap in ordered_gaps}
+        if extra_codes:
+            extended = list(ordered_gaps)
+            for code in sorted(extra_codes, key=str.encode):
+                extended.append(CaseGap(f"check_coverage:{code}", code, ()))
+            ordered_gaps = tuple(
+                sorted(
+                    extended,
+                    key=lambda gap: (
+                        gap.marker.encode("ascii"),
+                        tuple(ref.encode("ascii") for ref in gap.subject_refs),
+                    ),
+                )
+            )
+        codes = tuple(sorted({gap.code for gap in ordered_gaps}, key=str.encode))
+        if codes != coverage.known_gaps:
+            freshness = coverage.ledger_freshness
+            if codes and freshness is LedgerFreshness.CURRENT:
+                freshness = LedgerFreshness.PARTIAL
+            coverage = replace(coverage, ledger_freshness=freshness, known_gaps=codes)
     return ReceiptBuildContext(
         projection,
         frontier,

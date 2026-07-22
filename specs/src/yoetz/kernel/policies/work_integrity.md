@@ -179,6 +179,10 @@ Rule-level behavior is deterministic and conservative:
   structurally admissible typed `evidence_refs` basis, or when its exact finding frontier is stale
   relative to the responded finding. It never grades the free-text reason and does not trigger for
   a response with current admissible support.
+- `verification_class_unsatisfied` derives class satisfaction only from linked admissible
+  `EvidenceRecordedPayload.verification_classes`. Semantic-origin findings and other non-evidence
+  advisory material never count as class-satisfying admissible evidence and cannot clear a required
+  verification class.
 
 Policy cardinality follows the engine contract exactly. For each rule, the logical subject key is
 the candidate's complete canonical `subject_refs` tuple. The pack groups every raw structural
