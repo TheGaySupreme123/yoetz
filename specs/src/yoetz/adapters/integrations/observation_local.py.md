@@ -20,7 +20,9 @@ suppression. Used by hooks and `yoetz observe` when service observation handlers
 
 Consent is recorded as a workspace commitment only (never a raw path). Ingest fails closed without
 active consent. Pause/resume/revoke match `ObservationPort` semantics. Evidence is retained on
-revoke. No transcript prose is stored.
+revoke. No transcript prose is stored. `refresh_advice` rebuilds `AdviceSnapshot` from retained
+envelopes via deterministic observation-advice policies (optional semantic add-on). 
+`peek_advice_for_delivery` suppresses duplicates by suppression identity.
 
 ## Invariants
 

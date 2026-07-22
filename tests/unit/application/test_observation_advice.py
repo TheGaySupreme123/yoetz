@@ -1,0 +1,235 @@
+"""Integration-style tests for observation advice construction and wiring."""
+
+from __future__ import annotations
+
+import io
+import json
+from pathlib import Path
+
+from yoetz.adapters.integrations.observation_local import LocalObservationStore
+from yoetz.adapters.observation_semantic_advice import NullSemanticAdvice, OptionalSemanticAdvice
+from yoetz.application.observation_advice import (
+    ObservationAdviceBuildInput,
+    build_observation_advice_snapshot,
+    minimized_semantic_evidence_packet,
+    should_reissue_advice,
+)
+from yoetz.cli.observe_hooks import handle_observe
+from yoetz.domain.observation import (
+    ObservationCursor,
+    ObservationEnvelope,
+    ObservationLifecycle,
+    ObservationSource,
+    ObservationStatusQuery,
+)
+from yoetz.domain.values import JsonObject, Timestamp
+from yoetz.kernel.policies.observation_advice import (
+    ObservationAdviceContext,
+    ObservationCompositionFact,
+    observation_advice_findings,
+)
+
+_COMMITMENT = "hmac-sha256:" + "a" * 64
+_TIME = Timestamp("2026-07-22T21:00:00.000Z")
+
+
+def _envelope(identity: str, payload: dict[str, object], *, pos: int = 1) -> ObservationEnvelope:
+    return ObservationEnvelope(
+        session_commitment=_COMMITMENT,
+        event_kind="PostToolUse",
+        source_identity=identity,
+        source=ObservationSource.CODEX_HOOK,
+        cursor=ObservationCursor(
+            source_generation=1,
+            byte_position=pos * 8,
+            event_position=pos,
+            last_source_commitment=_COMMITMENT,
+            mapping_version="codex-obs-hook/1.0.0",
+        ),
+        receipt_time=_TIME,
+        structural_payload=JsonObject(payload),
+        content_object_refs=(),
+        gap_codes=(),
+    )
+
+
+def test_zero_cooperative_publications_still_yields_advice() -> None:
+    envelopes = (
+        _envelope(
+            "hook:fail",
+            {"tool_name": "shell", "exit_status": 2, "correlation_id": "x1"},
+        ),
+    )
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=envelopes,
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            has_real_observation=True,
+        )
+    )
+    assert snapshot is not None
+    assert snapshot.ranked_finding_ids
+    assert snapshot.recommended_next_action == "resolve_failed_command"
+    assert "SECRET" not in snapshot.recommended_next_action
+
+
+def test_suppression_skips_duplicate_until_evidence_changes() -> None:
+    envelopes = (
+        _envelope(
+            "hook:fail",
+            {"tool_name": "shell", "exit_status": 1, "correlation_id": "x1"},
+        ),
+    )
+    first = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=envelopes,
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            has_real_observation=True,
+        )
+    )
+    assert first is not None
+    second = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=envelopes,
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            prior_snapshot=first,
+            has_real_observation=True,
+        )
+    )
+    assert second is first
+    assert should_reissue_advice(first, first) is False
+    changed = (
+        envelopes[0],
+        _envelope(
+            "hook:fail2",
+            {"tool_name": "shell", "exit_status": 1, "correlation_id": "x2"},
+            pos=2,
+        ),
+    )
+    third = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=changed,
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            prior_snapshot=first,
+            has_real_observation=True,
+        )
+    )
+    assert third is not None
+    assert third.suppression_identity != first.suppression_identity
+
+
+def test_deterministic_only_vs_configured_semantic() -> None:
+    envelopes = (
+        _envelope(
+            "hook:fail",
+            {"tool_name": "shell", "exit_status": 1, "correlation_id": "x1"},
+        ),
+    )
+    candidates = observation_advice_findings(
+        ObservationAdviceContext(
+            envelopes=envelopes,
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+        )
+    )
+    packet = minimized_semantic_evidence_packet(candidates, "sha256:" + "e" * 64)
+    assert "transcript" not in packet
+    assert "stdout" not in packet
+    null = NullSemanticAdvice().review(evidence_packet=packet)
+    assert null is None
+
+    def _eval(payload: dict[str, object]) -> dict[str, object]:
+        assert "transcript" not in payload
+        return {"detail_token": "sem-1", "next_action": "reground_status"}
+
+    addon = OptionalSemanticAdvice(configured=True, ready=True, evaluator=_eval).review(
+        evidence_packet=packet
+    )
+    assert addon is not None
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=envelopes,
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            semantic_addon=addon,
+            has_real_observation=True,
+        )
+    )
+    assert snapshot is not None
+    assert len(snapshot.ranked_finding_ids) >= 2
+
+
+def test_observe_hook_refresh_advice_without_mcp_tools(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    out = io.BytesIO()
+    code = handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps(
+            {
+                "session_id": "advice-1",
+                "tool_name": "shell",
+                "correlation_id": "c-fail",
+                "exit_status": 1,
+            }
+        ).encode(),
+        stdout=out,
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    assert code == 0
+    status = store.status(ObservationStatusQuery(workspace))
+    assert status.advice_frontier is not None
+    payload = json.loads(out.getvalue().decode() or "{}")
+    # Safe-event delivery consumes the snapshot once into additionalContext.
+    context = payload.get("hookSpecificOutput") or payload
+    serialized = json.dumps(payload)
+    assert "resolve_failed_command" in serialized or status.advice_frontier != "none"
+    # Second peek is suppressed (same evidence frontier).
+    assert store.peek_advice_for_delivery(workspace) is None
+    _ = context
+    text = serialized
+    assert "AKIA" not in text
+    assert "password" not in text.lower()
+
+
+def test_secret_like_command_output_absent_from_advice_surfaces(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps(
+            {
+                "session_id": "advice-2",
+                "tool_name": "shell",
+                "exit_status": 1,
+                "stdout": "AWS_SECRET=should-never-appear",
+                "transcript": "hidden reasoning with password=hunter2",
+            }
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    snapshot = store.refresh_advice(
+        workspace,
+        composition=ObservationCompositionFact(
+            semantic_configured=False,
+            semantic_ready=False,
+            provider_factory_ids=(),
+            connected_provider_ids=(),
+        ),
+    )
+    assert snapshot is not None
+    encoded = repr(snapshot)
+    assert "AWS_SECRET" not in encoded
+    assert "hunter2" not in encoded
+    assert "password" not in encoded

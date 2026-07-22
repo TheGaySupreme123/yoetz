@@ -432,6 +432,10 @@ def handle_observe(
         local_result = store.ingest(envelope)
         _ = local_result
 
+        # Deterministic advice from retained envelopes (works with zero MCP publications).
+        with contextlib.suppress(Exception):
+            store.refresh_advice(workspace_commitment)
+
         if not skip_service:
 
             async def _ingest() -> str | None:

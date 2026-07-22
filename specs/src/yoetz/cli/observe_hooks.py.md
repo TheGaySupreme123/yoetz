@@ -19,8 +19,9 @@ auto-attaches on consented SessionStart when feasible.
 ## Behavior
 
 Always exit 0. On outage emit structural gap codes (`service_unavailable` / `vault_locked`) without
-plaintext spool. Advice `additionalContext` only at safe events when a new `AdviceSnapshot`
-suppression identity is available.
+plaintext spool. After local ingest, refresh deterministic `AdviceSnapshot` from retained envelopes
+(works with zero cooperative MCP publications). Advice `additionalContext` only at safe events when
+a new `AdviceSnapshot` suppression identity is available.
 
 ## Tests
 

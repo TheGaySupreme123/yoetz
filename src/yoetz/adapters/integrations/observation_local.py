@@ -366,6 +366,74 @@ class LocalObservationStore:
             self._save(workspace, state)
             return snapshot
 
+    def list_envelopes(self, workspace: str) -> tuple[ObservationEnvelope, ...]:
+        with self._lock:
+            state = self._load(workspace)
+            assert state.envelopes is not None
+            return tuple(state.envelopes)
+
+    def refresh_advice(
+        self,
+        workspace: str,
+        *,
+        composition: object | None = None,
+        check_facts: object = (),
+        inspect_fact: object | None = None,
+        plan_path_digests: object = (),
+        semantic_addon: object | None = None,
+    ) -> AdviceSnapshot | None:
+        """Recompute deterministic (and optional semantic) advice from retained envelopes."""
+
+        from yoetz.application.observation_advice import (
+            ObservationAdviceBuildInput,
+            ObservationAdviceSemanticAddon,
+            build_observation_advice_snapshot,
+        )
+        from yoetz.kernel.policies.observation_advice import (
+            ObservationCheckFact,
+            ObservationCompositionFact,
+            ObservationInspectFact,
+        )
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.envelopes is not None
+            assert state.gaps is not None
+            status = self._status_unlocked(workspace)
+            typed_checks: tuple[ObservationCheckFact, ...] = ()
+            if type(check_facts) is tuple:
+                typed_checks = tuple(
+                    item for item in check_facts if type(item) is ObservationCheckFact
+                )
+            typed_inspect = inspect_fact if type(inspect_fact) is ObservationInspectFact else None
+            typed_composition = (
+                composition if type(composition) is ObservationCompositionFact else None
+            )
+            typed_plans: tuple[str, ...] = ()
+            if type(plan_path_digests) is tuple:
+                typed_plans = tuple(item for item in plan_path_digests if type(item) is str)
+            typed_semantic = (
+                semantic_addon if type(semantic_addon) is ObservationAdviceSemanticAddon else None
+            )
+            snapshot = build_observation_advice_snapshot(
+                ObservationAdviceBuildInput(
+                    envelopes=tuple(state.envelopes),
+                    lifecycle=status.lifecycle,
+                    gaps=tuple(sorted(state.gaps, key=str.encode)),
+                    check_facts=typed_checks,
+                    inspect_fact=typed_inspect,
+                    composition=typed_composition,
+                    plan_path_digests=typed_plans,
+                    prior_snapshot=state.advice_snapshot,
+                    semantic_addon=typed_semantic,
+                    has_real_observation=bool(state.envelopes),
+                )
+            )
+            state.advice_snapshot = snapshot
+            state.advice_frontier = None if snapshot is None else snapshot.freshness_frontier
+            self._save(workspace, state)
+            return snapshot
+
     def get_stream_cursor(
         self, workspace: str, session_commitment: str
     ) -> ObservationCursor | None:

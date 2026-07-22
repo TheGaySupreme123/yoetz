@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 from typing import Final
 
@@ -61,6 +62,8 @@ def observe_status(
     root = _resolve_workspace(workspace)
     commitment = store.workspace_commitment(str(root))
     consent = store.consent_for(commitment)
+    with contextlib.suppress(Exception):
+        store.refresh_advice(commitment)
     status = store.status(ObservationStatusQuery(commitment))
     consent_label = (
         "absent"

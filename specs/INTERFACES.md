@@ -1598,7 +1598,19 @@ Shared closed types:
 - `AdviceSnapshot` — ranked findings, exact evidence basis, confidence/coverage, recommended next
   action, freshness, and suppression identity. It surfaces through nonblocking observation/
   integration hooks and through ordinary public `status` (and existing finding/coverage machinery);
-  it is never a seventh MCP tool.
+  it is never a seventh MCP tool. Deterministic observation-advice policies derive the snapshot
+  from retained envelopes (and optional inspect/approved-check/composition facts) even with zero
+  cooperative Yoetz MCP publications. Optional semantic advice is additive only, through the
+  privacy gateway, over minimized approved packets.
+
+Independent verification support (local control, not MCP):
+
+- `WorkspaceInspectPort` — descriptor-safe bounded relative-path artifact inspection under a
+  consented workspace root; returns digests + capped excerpts; never absolute paths in public
+  status.
+- Approved-check runner — executes only commitment-approved argv (`shell=False`, bounded
+  time/output, sanitized env, no network unless separately authorized); binds results to the
+  observed subject-state digest so later edits stale prior success.
 
 Observation consent is one project-level confirmation recorded as a private workspace commitment
 (never a raw filesystem path in logs, status, or receipts). Consent is separate from egress
