@@ -35,6 +35,7 @@ _HARNESS: Final = "codex"
 _BACK: Final = "b"
 _QUIT: Final = "q"
 
+
 def menu_available() -> bool:
     """True only when stdin and stdout are both real TTYs."""
 

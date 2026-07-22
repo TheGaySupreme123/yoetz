@@ -164,9 +164,7 @@ def test_fireworks_binding_uses_reviewed_responses_base_path(tmp_path: Path) -> 
         path=tmp_path / "fireworks.toml",
     )
     assert path.is_file()
-    assert provider == fireworks_provider(
-        model="accounts/fireworks/models/qwen3-235b-a22b"
-    )
+    assert provider == fireworks_provider(model="accounts/fireworks/models/qwen3-235b-a22b")
     profile = OpenAIProfile(
         provider_id="fireworks",
         model=provider.model,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import cast
 
@@ -17,6 +18,13 @@ from yoetz.ports.integrations import HarnessId, IntegrationError, IntegrationRea
 from yoetz.service.client import ServiceClient
 
 _RUNNER = CliRunner()
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _plain(text: str) -> str:
+    """Strip ANSI SGR sequences so Rich usage panels stay assertable."""
+
+    return _ANSI_ESCAPE.sub("", text)
 
 
 def _binary(path: str = "/opt/harness/bin/codex") -> HarnessBinary:
@@ -366,6 +374,8 @@ def test_root_set_fireworks_dispatches_simple_provider_setup(
 
 
 def test_provider_flags_require_set() -> None:
-    result = _RUNNER.invoke(cli.app, ["--fireworks"])
+    # Rich may colorize option tokens inside the Error panel (e.g. FORCE_COLOR CI),
+    # splitting "--set" across ANSI codes; assert on the stripped combined output.
+    result = _RUNNER.invoke(cli.app, ["--fireworks"], env={"NO_COLOR": "1"})
     assert result.exit_code == 2
-    assert "require --set" in result.stderr
+    assert "require --set" in _plain(result.output)

@@ -331,7 +331,7 @@ Several frictions were independent of Yoetz activation but materially affected t
   practical audit source.
 - GitHub issue creation required a user approval; the driver allowed it for the session.
 - The first pytest attempt failed before pytest because uv could not initialize its cache under
-  `/Users/shayb/.cache/uv` and could not open `sdists-v9/.git` due to `Operation not permitted`.
+  `$HOME/.cache/uv` and could not open `sdists-v9/.git` due to `Operation not permitted`.
   A persistent `uv run pytest` approval was then required. Ruff required a separate persistent
   approval.
 - User-visible update gaps reached 2 minutes 44.819 seconds, 3 minutes 44.202 seconds including
@@ -617,16 +617,16 @@ TOML round-trip and CLI forwarding alone are insufficient.
 ### Primary run artifacts
 
 - Canonical complete rollout, 1,972,069 bytes at review time:
-  `/Users/shayb/.codex-testing/sessions/2026/07/22/rollout-2026-07-22T16-21-22-019f89fc-ef51-7300-8adb-c02d60c63a45.jsonl`.
+  `$CODEX_TESTING_HOME/sessions/2026/07/22/rollout-2026-07-22T16-21-22-019f89fc-ef51-7300-8adb-c02d60c63a45.jsonl`.
   It is the authority for complete chronology, tool calls, progress, compaction, and final wording.
-- Codex host logs: `/Users/shayb/.codex-testing/logs_2.sqlite`, keyed by the session/thread ID.
+- Codex host logs: `$CODEX_TESTING_HOME/logs_2.sqlite`, keyed by the session/thread ID.
   Retention covered only 1,000 rows for this thread, from approximately `13:29:17Z` through
   `13:44:31Z`; it is useful for catalog and selection details, not the complete chronology.
-- Registration config: `/Users/shayb/.codex-testing/config.toml`, whose `mcp_servers.yoetz` entry
+- Registration config: `$CODEX_TESTING_HOME/config.toml`, whose `mcp_servers.yoetz` entry
   uses command `yoetz` and arguments `mcp`, `serve`.
 - Shell snapshot:
-  `/Users/shayb/.codex-testing/shell_snapshots/019f89fc-ef51-7300-8adb-c02d60c63a45.1784726482940965000.sh`.
-- Setup marker: `/Users/shayb/Library/Application Support/yoetz/setup-wizard.json`, with a pre-run
+  `$CODEX_TESTING_HOME/shell_snapshots/019f89fc-ef51-7300-8adb-c02d60c63a45.1784726482940965000.sh`.
+- Setup marker: `$YOETZ_DATA/setup-wizard.json`, with a pre-run
   modification time.
 
 These local artifacts can contain environment-specific data. They are evidence locations, not
@@ -634,15 +634,15 @@ files intended for repository publication or copying.
 
 ### Yoetz durable-state artifacts
 
-- Catalog: `/Users/shayb/Library/Application Support/yoetz/catalog.sqlite3`.
+- Catalog: `$YOETZ_DATA/catalog.sqlite3`.
 - Only pre-run ledger:
-  `/Users/shayb/Library/Application Support/yoetz/tasks/tsk_bf3294b7-cbc8-435d-8cfa-a2d919d715a3/ledger.sqlite3`.
+  `$YOETZ_DATA/tasks/tsk_bf3294b7-cbc8-435d-8cfa-a2d919d715a3/ledger.sqlite3`.
 - Runtime directory checked after the run:
-  `/Users/shayb/Library/Caches/TemporaryItems/yoetz`.
+  `$HOME/Library/Caches/TemporaryItems/yoetz`.
 - Skill paths checked and absent:
-  `/Users/shayb/.codex-testing/skills/yoetz`,
-  `/Users/shayb/yoetz-core/.agents/skills/yoetz`, and
-  `/Users/shayb/.agents/skills/yoetz`.
+  `$CODEX_TESTING_HOME/skills/yoetz`,
+  `$HOME/yoetz-core/.agents/skills/yoetz`, and
+  `$HOME/.agents/skills/yoetz`.
 
 ### Repository implementation and contract references
 

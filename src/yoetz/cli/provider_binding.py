@@ -93,9 +93,7 @@ def prompt_provider_endpoint_binding(*, path: Path | None = None) -> Path | None
                 "official_openai", model=model, path=path
             )
         elif raw == "2":
-            written, provider = apply_provider_endpoint_choice(
-                "fireworks", model=model, path=path
-            )
+            written, provider = apply_provider_endpoint_choice("fireworks", model=model, path=path)
         else:
             origin = typer.prompt(
                 "  HTTPS origin (https://host[:port] only; no path, userinfo, or secrets)"

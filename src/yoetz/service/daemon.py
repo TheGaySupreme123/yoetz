@@ -665,8 +665,7 @@ class ServiceDaemon:
             task.add_done_callback(self._connection_tasks.discard)
 
     async def _run_handler(
-        self,
-        handler: Callable[[ControlStream], Awaitable[None]], stream: ControlStream
+        self, handler: Callable[[ControlStream], Awaitable[None]], stream: ControlStream
     ) -> None:
         lifecycle = self._composition.lifecycle
         connected = False

@@ -614,7 +614,9 @@ class VaultService:
             if binding.service_generation != self._service_generation:
                 raise VaultError("record_binding_mismatch")
             try:
-                record = store.load_record(VaultRecordKind.PROVIDER_CREDENTIAL, stored.record_binding())
+                record = store.load_record(
+                    VaultRecordKind.PROVIDER_CREDENTIAL, stored.record_binding()
+                )
             except EncryptedVaultError:
                 # Backward-read support for pre-profile-binding development vaults.
                 legacy = ProviderCredentialBinding(
