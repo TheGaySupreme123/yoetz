@@ -266,7 +266,7 @@ async def test_drain_quarantines_permanent_and_keeps_retryable(
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
     store.grant_consent(workspace)
-    session = store.bind_codex_session(workspace, "sess-drain")
+    store.bind_codex_session(workspace, "sess-drain")
     perm = _drain_envelope(store, "sess-drain", "hook:perm", 1)
     retry = _drain_envelope(store, "sess-drain", "hook:retry", 2)
     store.enqueue_outbox(workspace, "sess-drain", perm)
@@ -282,7 +282,7 @@ async def test_drain_quarantines_permanent_and_keeps_retryable(
 
     monkeypatch.setattr(observe_hooks_module, "_try_service_ingest", _fake_ingest)
 
-    await observe_hooks_module._drain_outbox(  # noqa: SLF001
+    await observe_hooks_module._drain_outbox(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
         store, workspace_commitment=workspace, codex_session_id="sess-drain"
     )
 

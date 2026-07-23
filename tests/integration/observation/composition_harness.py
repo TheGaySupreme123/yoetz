@@ -150,7 +150,7 @@ def setup_returns_early_when_mcp_registered() -> bool:
     # Legacy early-return pattern: return already_registered before any plugin install.
     early_return = (
         'outcome="already_registered"' in source.replace(" ", "")
-        or "return _registration_report(preview.state_before, outcome=\"already_registered\")"
+        or 'return _registration_report(preview.state_before, outcome="already_registered")'
         in source
     )
     if installs_plugin and "Plugin is already registered; setup will still install" in source:
@@ -394,7 +394,9 @@ class ContractObservationPipeline:
         for envelope in self.local.list_envelopes(self.workspace):
             if envelope.source_identity in self.acknowledged:
                 continue
-            if any(item.source_identity == envelope.source_identity for item in self.pending_outbox):
+            if any(
+                item.source_identity == envelope.source_identity for item in self.pending_outbox
+            ):
                 continue
             if len(self.pending_outbox) >= self.max_outbox:
                 self.outbox_overflow = True

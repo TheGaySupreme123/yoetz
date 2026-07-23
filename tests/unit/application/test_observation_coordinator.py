@@ -288,7 +288,7 @@ async def test_coordinator_rejects_without_mapping(tmp_path: Path) -> None:
         clock=_Clock(),  # type: ignore[arg-type]
         ids=_Ids(),  # type: ignore[arg-type]
         state_root=tmp_path,
-        mapping_loader=lambda *_args, **_kwargs: None,
+        mapping_loader=lambda *_args, **_kwargs: None,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
     )
     result = await coordinator.ingest_request(
         ObservationIngestRequest(
@@ -524,7 +524,7 @@ async def test_duplicate_ingest_reconciles_ledger_instead_of_early_return(tmp_pa
         clock=_Clock(),  # type: ignore[arg-type]
         ids=_Ids(),  # type: ignore[arg-type]
         state_root=tmp_path,
-        mapping_loader=lambda *_args, **_kwargs: mapping,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
     )
 
     result = await coordinator.ingest_request(

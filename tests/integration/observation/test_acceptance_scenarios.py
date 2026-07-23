@@ -177,7 +177,6 @@ def test_vault_outage_nonblocking_degraded_no_plaintext_spool(
     # Lifecycle mapping required for the service-ingest soft-fail path.
     from yoetz.adapters.integrations.codex_lifecycle import mapping_from_start_ids, store_mapping
     from yoetz.cli import observe_hooks as observe_hooks_module
-    from yoetz.domain.observation import ObservationEnvelope
     from yoetz.protocol.ids import IdKind, new_id
 
     store_mapping(
@@ -192,7 +191,7 @@ def test_vault_outage_nonblocking_degraded_no_plaintext_spool(
     )
 
     async def _vault_locked_ingest(
-        _session_id: str, _envelope: ObservationEnvelope
+        _session_id: str, _envelope: object
     ) -> tuple[str | None, str | None]:
         # Simulate a vault-locked service so the outbox drain records the gap
         # while keeping the entry pending (retryable).

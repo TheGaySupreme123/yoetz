@@ -342,9 +342,7 @@ def _readiness_layers(
 ) -> dict[str, JsonValue]:
     consent_active = consent_outcome == "granted"
     service_routing = bool(service.get("reachable"))
-    observation_ready = (
-        _plugin_verified(plugin_presence) and consent_active and service_routing
-    )
+    observation_ready = _plugin_verified(plugin_presence) and consent_active and service_routing
     return {
         "codex": None
         if binary is None

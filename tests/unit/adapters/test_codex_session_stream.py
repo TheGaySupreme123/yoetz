@@ -122,10 +122,11 @@ def test_reconcile_enqueues_recovered_envelopes_into_outbox(tmp_path: Path) -> N
         locator=locator,
     )
     assert result["resolved"] is True
-    assert result["accepted"] >= 1
+    accepted = result["accepted"]
+    assert isinstance(accepted, int) and accepted >= 1
     # Recovered stream envelopes are queued in the same durable outbox as hooks,
     # so a later mapped drain materializes them into the task ledger.
-    assert store.pending_outbox_count(workspace) == result["accepted"]
+    assert store.pending_outbox_count(workspace) == accepted
 
 
 def test_hook_stream_dedup_via_local_store(tmp_path: Path) -> None:
@@ -229,8 +230,6 @@ def test_should_trigger_stream_reconcile_events() -> None:
     )
     assert should_trigger_stream_reconcile("UserPromptSubmit", last_reconcile_mono=None) is False
     assert (
-        should_trigger_stream_reconcile(
-            "UserPromptSubmit", last_reconcile_mono=0.0, now_mono=40.0
-        )
+        should_trigger_stream_reconcile("UserPromptSubmit", last_reconcile_mono=0.0, now_mono=40.0)
         is True
     )
