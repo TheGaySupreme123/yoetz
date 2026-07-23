@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
@@ -142,7 +143,7 @@ def test_deterministic_only_vs_configured_semantic() -> None:
     null = NullSemanticAdvice().review(evidence_packet=packet)
     assert null is None
 
-    def _eval(payload: dict[str, object]) -> dict[str, object]:
+    def _eval(payload: Mapping[str, object]) -> Mapping[str, object]:
         assert "transcript" not in payload
         return {"detail_token": "sem-1", "next_action": "reground_status"}
 

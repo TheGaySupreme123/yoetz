@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, cast
 
 from yoetz.application.observation_advice import (
     ObservationAdviceSemanticAddon,
@@ -13,7 +13,7 @@ from yoetz.application.observation_advice import (
     stable_advice_finding_id,
 )
 from yoetz.kernel.policies.observation_advice import ObservationAdviceCandidate
-from yoetz.protocol.canonical import canonical_digest
+from yoetz.protocol.canonical import JsonValue, canonical_digest
 
 __all__ = [
     "NullSemanticAdvice",
@@ -71,7 +71,9 @@ class OptionalSemanticAdvice:
         if raw is None:
             return None
         detail = str(raw.get("detail_token") or "semantic-addon")
-        digest = canonical_digest({"packet": dict(evidence_packet), "detail": detail})
+        digest = canonical_digest(
+            cast(JsonValue, {"packet": dict(evidence_packet), "detail": detail})
+        )
         finding = stable_advice_finding_id(_SEMANTIC_RULE, detail, digest)
         next_action = raw.get("next_action")
         return ObservationAdviceSemanticAddon(

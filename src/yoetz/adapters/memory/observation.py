@@ -176,7 +176,10 @@ class MemoryObservationStore:
                     ObservationGapCode.CURSOR_STALE.value,
                     existing,
                 )
-            if existing is not None and envelope.cursor.source_generation < existing.source_generation:
+            if (
+                existing is not None
+                and envelope.cursor.source_generation < existing.source_generation
+            ):
                 self._note_gap(workspace, ObservationGapCode.CURSOR_STALE.value)
                 return ObservationIngestResult(
                     ObservationIngestDisposition.REJECTED,

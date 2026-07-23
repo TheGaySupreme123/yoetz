@@ -93,7 +93,7 @@ def test_envelope_rejects_transcript_and_path_keys() -> None:
     with pytest.raises(ProtocolValueError):
         _envelope(session_commitment="/tmp/codex/session.jsonl")
     with pytest.raises(ProtocolValueError):
-        _envelope(structural_payload=JsonObject({"cwd": "/home/user/project"}))
+        _envelope(structural_payload=JsonObject({"cwd": "/workspace/project"}))
 
 
 def test_envelope_accepts_allowlisted_structural_facts() -> None:

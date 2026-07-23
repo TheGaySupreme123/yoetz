@@ -403,7 +403,9 @@ class LocalObservationStore:
             typed_checks: tuple[ObservationCheckFact, ...] = ()
             if type(check_facts) is tuple:
                 typed_checks = tuple(
-                    item for item in check_facts if type(item) is ObservationCheckFact
+                    item
+                    for item in cast(tuple[object, ...], check_facts)
+                    if type(item) is ObservationCheckFact
                 )
             typed_inspect = inspect_fact if type(inspect_fact) is ObservationInspectFact else None
             typed_composition = (
@@ -411,7 +413,11 @@ class LocalObservationStore:
             )
             typed_plans: tuple[str, ...] = ()
             if type(plan_path_digests) is tuple:
-                typed_plans = tuple(item for item in plan_path_digests if type(item) is str)
+                typed_plans = tuple(
+                    item
+                    for item in cast(tuple[object, ...], plan_path_digests)
+                    if type(item) is str
+                )
             typed_semantic = (
                 semantic_addon if type(semantic_addon) is ObservationAdviceSemanticAddon else None
             )

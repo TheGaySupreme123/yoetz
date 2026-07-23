@@ -90,7 +90,7 @@ def test_consent_pause_resume_revoke_and_dedup() -> None:
 
         status = await store.status(ObservationStatusQuery(_WORKSPACE))
         assert status.source_coverage[ObservationSource.CODEX_HOOK] is True
-        assert len(store._state.envelopes) == 2  # noqa: SLF001 - retained evidence
+        assert len(store._state.envelopes) == 2  # pyright: ignore[reportPrivateUsage]
 
     asyncio.run(run())
 

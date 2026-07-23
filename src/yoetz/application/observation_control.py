@@ -31,12 +31,17 @@ def _as_json_object(request: object) -> JsonObject:
     if type(request) is JsonObject:
         return request
     if isinstance(request, Mapping):
-        raw = dict(cast(Mapping[str, JsonValue], request))
+        source = cast(Mapping[str, object], request)
+        raw: dict[str, JsonValue] = {}
+        for key, value in source.items():
+            if type(key) is not str:
+                raise ControlError("invalid_request")
+            raw[key] = cast(JsonValue, value)
         # Wire JSON arrays arrive as lists; domain parsers require tuples.
         for key in ("content_object_refs", "gap_codes"):
-            value = raw.get(key)
+            value = source.get(key)
             if type(value) is list:
-                raw[key] = tuple(cast(list[object], value))
+                raw[key] = tuple(cast(list[JsonValue], value))
         cursor = raw.get("cursor")
         if isinstance(cursor, Mapping):
             raw["cursor"] = JsonObject(cast(Mapping[str, JsonValue], cursor))
@@ -54,7 +59,9 @@ def _map_public_error(error: PublicOperationError) -> ControlError:
     return ControlError("invalid_request", retryable=False)
 
 
-def build_observation_support_handlers(port: ObservationPort) -> Mapping[ControlMethod, _SupportHandler]:
+def build_observation_support_handlers(
+    port: ObservationPort,
+) -> Mapping[ControlMethod, _SupportHandler]:
     """Bind the five observation_* control methods to one ObservationPort."""
 
     async def ingest(request: object) -> JsonObject:

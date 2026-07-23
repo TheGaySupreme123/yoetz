@@ -4,7 +4,7 @@
   "claims": [
     {
       "claim_id": "integration.codex_exact_version_support",
-      "statement": "Yoetz records Codex integration and JSONL import support as an exact tested executable set (target/maximum-tested 0.144.5); a version newer than maximum-tested is reported untested, never supported, and the exact release cell separately records whether a trigger compaction-recovery hook and/or an observation arm is present. A trigger is a recovery ergonomic carrying no observation or coverage claim; an observation arm, when capability-proven and consented, is the only path that may earn hook_observed from real observation evidence.",
+      "statement": "Yoetz records Codex integration and JSONL import support as an exact tested executable set (target/maximum-tested 0.144.5); a version newer than maximum-tested is reported untested, never supported, and the exact release cell separately records whether a trigger compaction-recovery hook and/or an observation arm is present. A trigger is a recovery ergonomic carrying no observation or coverage claim; an observation arm, when supported by capability evidence and consented, is the only path that may earn hook_observed from real observation evidence.",
       "scope": {
         "operations": [
           "import_codex_jsonl",

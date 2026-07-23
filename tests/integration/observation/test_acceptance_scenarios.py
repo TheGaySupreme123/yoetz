@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -59,6 +61,7 @@ _TIME = Timestamp("2026-07-22T21:00:00.000Z")
 _EMPTY = "hmac-sha256:" + ("0" * 64)
 _SECRET = "AWS_SECRET=should-never-appear"
 _PASSWORD = "password=hunter2"
+_TRUE = shutil.which("true") or "/usr/bin/true"
 
 
 def _cursor(pos: int = 1) -> ObservationCursor:
@@ -105,9 +108,7 @@ def test_session_start_creates_binding_without_mcp_start(tmp_path: Path) -> None
     out = io.BytesIO()
     code = handle_observe(
         event_name="SessionStart",
-        stdin_bytes=json.dumps(
-            {"session_id": "auto-attach-1", "source": "startup"}
-        ).encode(),
+        stdin_bytes=json.dumps({"session_id": "auto-attach-1", "source": "startup"}).encode(),
         stdout=out,
         workspace=str(tmp_path),
         _state=tmp_path,
@@ -282,7 +283,7 @@ def test_structural_lifecycle_envelopes_and_unpaired_gap(tmp_path: Path) -> None
 
 def test_approved_check_stale_when_digest_changes(tmp_path: Path) -> None:
     handle = open_inspect_workspace(tmp_path)
-    argv = ("/bin/true",)
+    argv = (_TRUE,)
     commitment = approval_commitment("pytest-accept", argv, allow_network=False)
     approval = ApprovedCheckApproval(
         approval_id="pytest-accept",
@@ -368,7 +369,7 @@ def test_deterministic_only_and_configured_semantic_additive() -> None:
     assert deterministic is not None
     assert len(deterministic.ranked_finding_ids) >= 1
 
-    def _eval(payload: dict[str, object]) -> dict[str, object]:
+    def _eval(payload: Mapping[str, object]) -> Mapping[str, object]:
         assert "transcript" not in payload
         assert _SECRET not in json.dumps(payload)
         return {"detail_token": "sem-1", "next_action": "reground_status"}
@@ -705,7 +706,13 @@ def test_secrets_absent_from_status_advice_logs_and_semantic(tmp_path: Path) -> 
     )
     packet = minimized_semantic_evidence_packet(candidates, _DIGEST_A)
     packet_text = json.dumps(packet)
-    for surface in (status_text, hook_out, advice_text, packet_text, repr(store.list_envelopes(workspace))):
+    for surface in (
+        status_text,
+        hook_out,
+        advice_text,
+        packet_text,
+        repr(store.list_envelopes(workspace)),
+    ):
         assert "AWS_SECRET" not in surface
         assert "hunter2" not in surface
         assert "password=" not in surface.lower()
@@ -730,9 +737,7 @@ async def test_observation_support_handlers_call_memory_port() -> None:
         observation_envelope_to_json(envelope)
     )
     assert result["disposition"] == "accepted"
-    status = await handlers[ControlMethod.OBSERVATION_STATUS](
-        {"workspace_commitment": _COMMITMENT}
-    )
+    status = await handlers[ControlMethod.OBSERVATION_STATUS]({"workspace_commitment": _COMMITMENT})
     assert status["lifecycle"] == "active"
 
 

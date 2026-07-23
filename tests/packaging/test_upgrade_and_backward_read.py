@@ -118,7 +118,13 @@ def test_root_and_installed_migration_trees_are_byte_identical() -> None:
         for version in versions:
             root_file = _REPO_ROOT / "migrations" / family / f"{version}.sql"
             installed_file = (
-                _REPO_ROOT / "src" / "yoetz" / "resources" / "migrations" / family / f"{version}.sql"
+                _REPO_ROOT
+                / "src"
+                / "yoetz"
+                / "resources"
+                / "migrations"
+                / family
+                / f"{version}.sql"
             )
             assert root_file.read_bytes() == installed_file.read_bytes()
 
@@ -146,7 +152,13 @@ def test_migration_ddl_contains_no_destructive_statement(installed: _Installed) 
     for family, versions in (("catalog", ("0001",)), ("bundle", ("0001", "0002"))):
         for version in versions:
             text = (
-                _REPO_ROOT / "src" / "yoetz" / "resources" / "migrations" / family / f"{version}.sql"
+                _REPO_ROOT
+                / "src"
+                / "yoetz"
+                / "resources"
+                / "migrations"
+                / family
+                / f"{version}.sql"
             ).read_text(encoding="utf-8")
             upper = text.upper()
             for forbidden in (r"DROP\s+TABLE", r"DELETE\s+FROM", r"\bUPDATE\b", r"\bTRUNCATE\b"):

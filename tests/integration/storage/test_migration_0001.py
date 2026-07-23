@@ -19,7 +19,9 @@ def test_root_and_installed_migration_resources_are_byte_identical() -> None:
     for family, versions in (("catalog", ("0001",)), ("bundle", ("0001", "0002"))):
         for version in versions:
             root = ROOT / "migrations" / family / f"{version}.sql"
-            resource = ROOT / "src" / "yoetz" / "resources" / "migrations" / family / f"{version}.sql"
+            resource = (
+                ROOT / "src" / "yoetz" / "resources" / "migrations" / family / f"{version}.sql"
+            )
             assert root.read_bytes() == resource.read_bytes()
 
 
@@ -71,9 +73,7 @@ def test_bundle_run_migrations_applies_0002_from_schema_version_one() -> None:
         bundle.execute("INSERT INTO counters(name, next_value) VALUES ('ingestion_sequence', 1)")
     assert bundle.execute("PRAGMA user_version").fetchone() == (1,)
     assert (
-        bundle.execute(
-            "SELECT 1 FROM sqlite_schema WHERE name = 'observation_consent'"
-        ).fetchone()
+        bundle.execute("SELECT 1 FROM sqlite_schema WHERE name = 'observation_consent'").fetchone()
         is None
     )
 

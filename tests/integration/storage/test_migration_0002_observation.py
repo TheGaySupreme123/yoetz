@@ -43,9 +43,7 @@ def test_forward_migrate_0001_to_0002_then_observation_ingest() -> None:
         bundle.execute("SELECT 1 FROM sqlite_schema WHERE name = 'events'").fetchone() is not None
     )
     assert (
-        bundle.execute(
-            "SELECT 1 FROM sqlite_schema WHERE name = 'observation_consent'"
-        ).fetchone()
+        bundle.execute("SELECT 1 FROM sqlite_schema WHERE name = 'observation_consent'").fetchone()
         is None
     )
 

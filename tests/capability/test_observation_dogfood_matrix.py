@@ -23,6 +23,7 @@ from tests.capability.evidence import (
 
 from yoetz.adapters.importers.codex_jsonl import (
     SUPPORTED_CODEX_PROFILES,
+    CodexCapabilityProfile,
     parse_codex_jsonl,
     profile_for_codex_version,
 )
@@ -151,7 +152,7 @@ def test_fixture_profiles_older_or_current_when_present(tmp_path: Path) -> None:
     evidence_root = capability_evidence_output_root(tmp_path)
     profiles = tuple(sorted(SUPPORTED_CODEX_PROFILES))
     assert profiles, "expected at least one registered Codex profile"
-    selected = []
+    selected: list[CodexCapabilityProfile] = []
     for version in profiles:
         try:
             selected.append(profile_for_codex_version(version))

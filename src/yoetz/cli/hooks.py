@@ -46,7 +46,7 @@ class _StatusClient(Protocol):
 
 type ServiceConnector = Callable[[ControlClientKind], Awaitable[_StatusClient]]
 type StatusOutcome = tuple[str, LifecycleMapping | None]
-type AsyncRunner = Callable[[Callable[[], Awaitable[StatusOutcome]]], StatusOutcome]
+type AsyncRunner = Callable[[Callable[[], Awaitable[object]]], object]
 
 _MAX_STDIN_BYTES: Final = 262_144
 _MAX_CONTEXT_CHARS: Final = 2_000
@@ -437,7 +437,7 @@ def handle_session_start(
             async def _run() -> StatusOutcome:
                 return await _read_status(mapping, connect=connect)
 
-            kind, updated = runner(_run)
+            kind, updated = cast(StatusOutcome, runner(_run))
             from yoetz.cli.observe_hooks import handle_observe
 
             handle_observe(

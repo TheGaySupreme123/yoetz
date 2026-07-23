@@ -75,12 +75,24 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
     async def unreachable_on_demand(_kind: ControlClientKind) -> ServiceClient:
         raise ControlError("service_unavailable")
 
+    def fake_grant_observation_consent(workspace: Path | None = None) -> dict[str, str]:
+        del workspace
+        return {
+            "outcome": "granted",
+            "workspace_commitment": "hmac-sha256:" + "a" * 64,
+        }
+
     import yoetz.cli.setup as setup_module
     import yoetz.service.client as service_client_module
 
     monkeypatch.setattr(setup_module, "discover_codex_binaries", fake_discover)
     monkeypatch.setattr(setup_module, "CodexMcpAdapter", fake_adapter)
     monkeypatch.setattr(setup_module, "setup_marker_path", lambda: marker)
+    monkeypatch.setattr(
+        setup_module,
+        "_grant_observation_consent",
+        fake_grant_observation_consent,
+    )
     monkeypatch.setattr(cli, "build_service_client", unreachable_client)
     monkeypatch.setattr(
         service_client_module,
@@ -119,6 +131,10 @@ def test_non_interactive_accept_registers_and_writes_marker(
     assert result.exit_code == 0
     report = json.loads(result.stdout)
     assert report["registration"] == {
+        "observation_consent": {
+            "outcome": "granted",
+            "workspace_commitment": "hmac-sha256:" + "a" * 64,
+        },
         "outcome": "registered",
         "reason": None,
         "state": "yoetz_owned",
@@ -182,7 +198,8 @@ def test_interactive_wizard_selects_harness_then_installation_and_requires_y_or_
     assert "MCP server name: yoetz" in result.stdout
     assert "Command: yoetz mcp serve" in result.stdout
     assert "Codex executable: /b/codex" in result.stdout
-    assert "Apply this registration? [Y/N]" in result.stdout
+    assert "Confirm Codex project setup? [Y/N]" in result.stdout
+    assert "Observation consent for this workspace" in result.stdout
     assert "Please enter Y or N." in result.stdout
     assert "MCP registration: registered; automatic activation not tested" in result.stdout
     assert "Skill support: no tested capability profile; automatic activation not tested" in (
@@ -205,7 +222,7 @@ def test_interactive_registration_n_declines_without_mutation(
     result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\nN\n")
 
     assert result.exit_code == 0
-    assert "Apply this registration? [Y/N]" in result.stdout
+    assert "Confirm Codex project setup? [Y/N]" in result.stdout
     assert "MCP registration: declined" in result.stdout
     assert "Skill support: no tested capability profile; automatic activation not tested" in (
         result.stdout

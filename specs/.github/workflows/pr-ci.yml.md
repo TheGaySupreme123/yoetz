@@ -77,7 +77,9 @@ On a small Linux runner:
 5. validate every public schema, canonical vector, migration, skill link, and manifest; prove each
    schema `$id` is the direct `/0.1/<relative-path>` static-host URL, resolve every `$ref` from the
    local manifest with DNS/sockets denied, and verify root/package mirrors byte-for-byte;
-6. verify released event/migration/vector files are append-only against the protected-base export;
+6. verify migration/vector files are append-only against the protected-base export and, once a
+   release tag exists, verify versioned `*.schema.json` artifacts against the most recent reachable
+   release tag; the atomic `schemas/manifest.json` inventory may advance as specified by ADR-007;
 7. run the public-boundary scanner on the checkout's public candidate inventory;
 8. run focused canonical/schema/protocol unit vectors under at least two hash seeds.
 

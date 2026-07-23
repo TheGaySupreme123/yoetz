@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from yoetz.adapters.approved_checks import (
@@ -13,6 +14,8 @@ from yoetz.adapters.approved_checks import (
     approval_commitment,
 )
 from yoetz.adapters.workspace_inspect import open_inspect_workspace
+
+_TRUE = shutil.which("true") or "/usr/bin/true"
 
 
 def _approval(argv: tuple[str, ...]) -> ApprovedCheckApproval:
@@ -28,7 +31,7 @@ def _approval(argv: tuple[str, ...]) -> ApprovedCheckApproval:
 
 def test_approved_check_binds_to_subject_state_digest(tmp_path: Path) -> None:
     handle = open_inspect_workspace(tmp_path)
-    argv = ("/bin/true",)
+    argv = (_TRUE,)
     approval = _approval(argv)
     runner = ApprovedCheckRunner({approval.approval_commitment: approval})
     digest_a = "sha256:" + "a" * 64
@@ -57,7 +60,7 @@ def test_approved_check_binds_to_subject_state_digest(tmp_path: Path) -> None:
 
 def test_unapproved_argv_rejected(tmp_path: Path) -> None:
     handle = open_inspect_workspace(tmp_path)
-    approval = _approval(("/bin/true",))
+    approval = _approval((_TRUE,))
     runner = ApprovedCheckRunner()  # nothing registered
     result = runner.run(
         ApprovedCheckCommand(
