@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
-
-import apsw
 
 from yoetz.adapters.integrations.codex_lifecycle import (
     LifecycleMapping,
@@ -19,7 +17,6 @@ from yoetz.adapters.integrations.observation_local import (
     LocalObservationStore,
     session_commitment_from_codex_id,
 )
-from yoetz.adapters.sqlite.observation import SqliteObservationStore
 from yoetz.application.observation_advice import (
     ObservationAdviceBuildInput,
     build_observation_advice_snapshot,
@@ -43,11 +40,12 @@ from yoetz.domain.observation import (
     ObservationStatus,
     ObservationStatusQuery,
 )
-from yoetz.domain.values import Timestamp
+from yoetz.domain.values import timestamp_from_datetime
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import AppendCommand, AppendEntry, OperationKind
-from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectSource
+from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
+from yoetz.ports.observation import TaskObservationPort
 from yoetz.ports.runtime import (
     BundleRuntimePort,
     RouteAccess,
@@ -79,7 +77,7 @@ class ObservationAdviceHook(Protocol):
         *,
         workspace_commitment: str,
         task_id: str,
-        store: SqliteObservationStore,
+        store: TaskObservationPort,
         envelopes: tuple[ObservationEnvelope, ...],
         frontier: str | None,
     ) -> Awaitable[None] | None: ...
@@ -118,9 +116,7 @@ class ObservationCoordinator:
         except ProtocolValueError:
             return _reject(ObservationGapCode.CONSENT_MISSING.value)
 
-        expected = session_commitment_from_codex_id(
-            self.local.key_material(), codex_session_id
-        )
+        expected = session_commitment_from_codex_id(self.local.key_material(), codex_session_id)
         if request.envelope.session_commitment != expected:
             return _reject(ObservationGapCode.CONSENT_MISSING.value)
 
@@ -161,7 +157,7 @@ class ObservationCoordinator:
                         ),
                     )
                 )
-                store = self._sqlite_store(runtime)
+                store = self._observation_store(runtime)
                 store.grant_consent(workspace, consent.granted_at)
                 store.bind_session(workspace, request.envelope.session_commitment)
                 result = await store.ingest(request.envelope)
@@ -171,13 +167,9 @@ class ObservationCoordinator:
                     # Still treat as durable success for outbox ack (idempotent replay).
                     return result
 
-                batch = materialize_observation_envelope(
-                    request.envelope, task_id=runtime.task_id
-                )
+                batch = materialize_observation_envelope(request.envelope, task_id=runtime.task_id)
                 if batch.skip_reason is None and batch.drafts:
-                    await self._append_materialized(
-                        runtime, request.envelope, batch
-                    )
+                    await self._append_materialized(runtime, request.envelope, batch)
 
                 await self._run_advice(workspace, runtime.task_id, store)
                 return result
@@ -199,7 +191,7 @@ class ObservationCoordinator:
                 if runtime is not None:
                     with_context = getattr(self.runtime, "release", None)
                     if with_context is not None:
-                        await cast(Any, with_context)(runtime)
+                        await with_context(runtime)
 
     async def ingest(self, envelope: ObservationEnvelope) -> ObservationIngestResult:
         """ObservationPort-shaped ingest without Codex session id → reject closed."""
@@ -219,15 +211,15 @@ class ObservationCoordinator:
     async def revoke(self, command: ObservationRevokeCommand) -> ObservationStatus:
         return self.local.revoke(command)
 
-    def _sqlite_store(self, runtime: TaskRuntime) -> SqliteObservationStore:
-        db = getattr(runtime.ledger, "_db", None)
-        if type(db) is not apsw.Connection:
+    def _observation_store(self, runtime: TaskRuntime) -> TaskObservationPort:
+        store = runtime.observation
+        if store is None:
             raise PublicOperationError(
                 PublicErrorCode.STORAGE_UNSAFE,
                 "Observation store connection is unavailable.",
                 retryable=True,
             )
-        return SqliteObservationStore(db)
+        return store
 
     async def _append_materialized(
         self,
@@ -239,7 +231,7 @@ class ObservationCoordinator:
         if writer_id is None:
             return
         author = observation_author()
-        refs = []
+        refs: list[ObjectRef] = []
         entries: list[AppendEntry] = []
         for item in batch.drafts:
             commitment = await runtime.objects.commitment_for(
@@ -323,12 +315,10 @@ class ObservationCoordinator:
             from yoetz.protocol.ids import PREFIX_BY_KIND
 
             return PREFIX_BY_KIND[IdKind.REQUEST] + str(_uuid.UUID(bytes=bytes(arr)))
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return self.ids.new(IdKind.REQUEST)
 
-    async def _run_advice(
-        self, workspace: str, task_id: str, store: SqliteObservationStore
-    ) -> None:
+    async def _run_advice(self, workspace: str, task_id: str, store: TaskObservationPort) -> None:
         envelopes = store.list_envelopes(workspace)
         status = await store.status(ObservationStatusQuery(workspace))
         snapshot = build_observation_advice_snapshot(
@@ -340,7 +330,9 @@ class ObservationCoordinator:
             )
         )
         if snapshot is not None:
-            store.set_advice_snapshot(workspace, snapshot, self.clock.now_utc())
+            store.set_advice_snapshot(
+                workspace, snapshot, timestamp_from_datetime(self.clock.now_utc())
+            )
             # Mirror into local store for hook advice delivery.
             self.local.set_advice_snapshot(workspace, snapshot)
         if self.advice_hook is not None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 
 import pytest
@@ -24,9 +25,7 @@ from yoetz.domain.observation import (
     observation_ingest_request_to_json,
 )
 from yoetz.domain.values import JsonObject, Timestamp
-from yoetz.protocol.ids import IdKind, PREFIX_BY_KIND
-
-import uuid
+from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 
 
 def _task_id() -> str:
@@ -56,9 +55,7 @@ def _envelope(
         event_kind=kind,
         source_identity=identity,
         source=ObservationSource.CODEX_HOOK,
-        cursor=ObservationCursor(
-            1, 0, ordinal, f"hmac-sha256:{'ab' * 32}", "codex-obs-hook/1.0.0"
-        ),
+        cursor=ObservationCursor(1, 0, ordinal, f"hmac-sha256:{'ab' * 32}", "codex-obs-hook/1.0.0"),
         receipt_time=Timestamp("2026-01-01T00:00:00.000Z"),
         structural_payload=JsonObject(structural),
         content_object_refs=(),
@@ -210,6 +207,71 @@ async def test_coordinator_rejects_without_mapping(tmp_path: Path) -> None:
     )
     assert result.disposition is ObservationIngestDisposition.REJECTED
     assert result.reason == ObservationGapCode.MAPPING_MISSING.value
+
+
+@pytest.mark.anyio
+async def test_run_advice_persists_snapshot_with_real_datetime_clock(tmp_path: Path) -> None:
+    """Regression: production clocks return ``datetime``, not ``Timestamp``.
+
+    ``_run_advice`` must persist the advice snapshot through the durable
+    observation store, which requires a ``Timestamp``. A raw ``datetime`` would
+    ``AttributeError`` on ``updated_at.wire`` and get swallowed by the ingest
+    guard, silently dropping advice. This exercises the real datetime path.
+    """
+
+    from datetime import UTC, datetime
+
+    import apsw
+
+    from yoetz.adapters.sqlite.migrations import initialize_bundle
+
+    class _DatetimeClock:
+        def now_utc(self) -> datetime:
+            # Mirror the production ``_SystemClock``: a real ``datetime`` truncated
+            # to millisecond precision (never a ``Timestamp``).
+            now = datetime.now(UTC)
+            return now.replace(microsecond=(now.microsecond // 1_000) * 1_000)
+
+    class _UnusedRuntime:
+        async def route(self, command: object) -> object:
+            raise AssertionError("route must not be called in this unit path")
+
+        async def release(self, runtime: object) -> None:
+            return None
+
+    class _Ids:
+        def new(self, kind: IdKind) -> str:
+            return PREFIX_BY_KIND[kind] + str(uuid.uuid4())
+
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": "task_advice", "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    workspace = f"hmac-sha256:{'44' * 32}"
+    session = f"hmac-sha256:{'55' * 32}"
+    store.grant_consent(workspace, Timestamp("2026-01-01T00:00:00.000Z"))
+    store.bind_session(workspace, session)
+    ingested = await store.ingest(
+        _envelope(session=session, kind="PostToolUse", identity="hook:fail", exit_status=2)
+    )
+    assert ingested.disposition is ObservationIngestDisposition.ACCEPTED
+    assert store.load_advice_snapshot(workspace) is None
+
+    local = LocalObservationStore(_state=tmp_path)
+    coordinator = ObservationCoordinator(
+        runtime=_UnusedRuntime(),  # type: ignore[arg-type]
+        local=local,
+        clock=_DatetimeClock(),  # type: ignore[arg-type]
+        ids=_Ids(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+    )
+
+    await coordinator._run_advice(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        workspace, "task_advice", store
+    )
+
+    persisted = store.load_advice_snapshot(workspace)
+    assert persisted is not None
+    assert persisted.ranked_finding_ids
 
 
 @pytest.mark.anyio

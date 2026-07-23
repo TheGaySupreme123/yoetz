@@ -26,6 +26,7 @@ from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort
 from yoetz.ports.ledger import LedgerPort
 from yoetz.ports.objects import ObjectStorePort
+from yoetz.ports.observation import TaskObservationPort
 from yoetz.protocol.ids import IdKind, validate_id
 
 __all__ = [
@@ -359,6 +360,7 @@ class TaskRuntime:
     protocol_version: str
     bundle_schema_version: str
     fence: OwnershipFence
+    observation: TaskObservationPort | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "task_id", _validated_id(task_id, self.task_id))
@@ -368,6 +370,9 @@ class TaskRuntime:
         capabilities = _validated_capabilities(self.capabilities)
         object.__setattr__(self, "capabilities", capabilities)
         if RuntimeCapability.WRITE in capabilities and self.writer_id is None:
+            raise _invalid()
+        if self.observation is not None and RuntimeCapability.WRITE not in capabilities:
+            # A durable observation seam is only ever handed to WRITE-capable routes.
             raise _invalid()
         task_ports = (
             cast(object, self.ledger),
