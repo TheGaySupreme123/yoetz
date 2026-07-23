@@ -20,6 +20,7 @@ tests/integration/
   storage/
     test_build_and_pragma_gate.py
     test_migration_0001.py
+    test_migration_0002_observation.py
     test_append_and_replay.py
     test_projection_rebuild.py
     test_start_catalog_state_machine.py
@@ -46,6 +47,8 @@ tests/integration/
     test_plaintext_canary_sweep.py
   providers/
     test_fake_provider_coordinator.py
+  observation/
+    test_acceptance_scenarios.py
   service/
     test_daemon_clients.py
     test_encrypted_vault.py
@@ -75,6 +78,7 @@ tests/integration/objects/test_envelope_and_encrypted_files.py
 tests/integration/objects/test_key_backends.py
 tests/integration/objects/test_portable_recovery.py
 tests/integration/objects/test_redaction_and_gc.py
+tests/integration/observation/test_acceptance_scenarios.py
 tests/integration/privacy/test_egress_gateway.py
 tests/integration/privacy/test_plaintext_canary_sweep.py
 tests/integration/providers/test_fake_provider_coordinator.py
@@ -90,6 +94,7 @@ tests/integration/storage/test_backup_restore.py
 tests/integration/storage/test_build_and_pragma_gate.py
 tests/integration/storage/test_checkpoint_and_wal_bounds.py
 tests/integration/storage/test_migration_0001.py
+tests/integration/storage/test_migration_0002_observation.py
 tests/integration/storage/test_migration_rollback.py
 tests/integration/storage/test_owner_generation.py
 tests/integration/storage/test_projection_rebuild.py

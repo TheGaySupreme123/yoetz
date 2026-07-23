@@ -302,6 +302,11 @@ _STRUCTURAL_SUPPORT_METHODS = frozenset(
         ControlMethod.PRIVACY_TIGHTEN_POLICY,
         ControlMethod.BACKUP_PREVIEW,
         ControlMethod.BACKUP_EXECUTE,
+        ControlMethod.OBSERVATION_INGEST,
+        ControlMethod.OBSERVATION_STATUS,
+        ControlMethod.OBSERVATION_PAUSE,
+        ControlMethod.OBSERVATION_RESUME,
+        ControlMethod.OBSERVATION_REVOKE,
     }
 )
 _PATH_BEARING_SUPPORT_METHODS = frozenset(
@@ -559,6 +564,21 @@ class Application:
 
     async def integration_execute(self, request: object) -> JsonObject:
         return await self._support(ControlMethod.INTEGRATION_EXECUTE, request)
+
+    async def observation_ingest(self, request: object) -> JsonObject:
+        return await self._support(ControlMethod.OBSERVATION_INGEST, request)
+
+    async def observation_status(self, request: object) -> JsonObject:
+        return await self._support(ControlMethod.OBSERVATION_STATUS, request)
+
+    async def observation_pause(self, request: object) -> JsonObject:
+        return await self._support(ControlMethod.OBSERVATION_PAUSE, request)
+
+    async def observation_resume(self, request: object) -> JsonObject:
+        return await self._support(ControlMethod.OBSERVATION_RESUME, request)
+
+    async def observation_revoke(self, request: object) -> JsonObject:
+        return await self._support(ControlMethod.OBSERVATION_REVOKE, request)
 
     async def _support(self, method: ControlMethod, request: object) -> JsonObject:
         handler = self.support_handlers.get(method)

@@ -85,9 +85,60 @@ def _sha(data: bytes) -> str:
 
 
 def _hooks_json() -> bytes:
+    def _command(event: str, *, command: str, timeout: int, status: str) -> dict[str, JsonValue]:
+        return {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": command,
+                    "timeout": timeout,
+                    "statusMessage": status,
+                }
+            ]
+        }
+
+    observe = "yoetz hooks observe --event"
     body: dict[str, JsonValue] = {
-        "description": "Yoetz Codex lifecycle hooks (activation cue, start correlation, re-ground).",
+        "description": (
+            "Yoetz Codex lifecycle hooks: observation ingress, activation cue, "
+            "start correlation, and re-ground."
+        ),
         "hooks": {
+            "SessionStart": [
+                {
+                    "matcher": "resume|compact",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "yoetz hooks session-start",
+                            "timeout": 15,
+                            "statusMessage": "Yoetz re-ground",
+                        }
+                    ],
+                },
+                _command(
+                    "SessionStart",
+                    command=f"{observe} SessionStart",
+                    timeout=10,
+                    status="Yoetz observe SessionStart",
+                ),
+            ],
+            "SessionEnd": [
+                _command(
+                    "SessionEnd",
+                    command=f"{observe} SessionEnd",
+                    timeout=10,
+                    status="Yoetz observe SessionEnd",
+                )
+            ],
+            "Stop": [
+                _command(
+                    "Stop",
+                    command=f"{observe} Stop",
+                    timeout=10,
+                    status="Yoetz observe Stop",
+                )
+            ],
             "UserPromptSubmit": [
                 {
                     "hooks": [
@@ -100,6 +151,14 @@ def _hooks_json() -> bytes:
                     ]
                 }
             ],
+            "PreToolUse": [
+                _command(
+                    "PreToolUse",
+                    command=f"{observe} PreToolUse",
+                    timeout=10,
+                    status="Yoetz observe PreToolUse",
+                )
+            ],
             "PostToolUse": [
                 {
                     "matcher": "^mcp__yoetz__start$",
@@ -111,20 +170,53 @@ def _hooks_json() -> bytes:
                             "statusMessage": "Yoetz start correlation",
                         }
                     ],
-                }
+                },
+                _command(
+                    "PostToolUse",
+                    command=f"{observe} PostToolUse",
+                    timeout=10,
+                    status="Yoetz observe PostToolUse",
+                ),
             ],
-            "SessionStart": [
-                {
-                    "matcher": "resume|compact",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": "yoetz hooks session-start",
-                            "timeout": 15,
-                            "statusMessage": "Yoetz re-ground",
-                        }
-                    ],
-                }
+            "PermissionRequest": [
+                _command(
+                    "PermissionRequest",
+                    command=f"{observe} PermissionRequest",
+                    timeout=10,
+                    status="Yoetz observe PermissionRequest",
+                )
+            ],
+            "PreCompact": [
+                _command(
+                    "PreCompact",
+                    command=f"{observe} PreCompact",
+                    timeout=10,
+                    status="Yoetz observe PreCompact",
+                )
+            ],
+            "PostCompact": [
+                _command(
+                    "PostCompact",
+                    command=f"{observe} PostCompact",
+                    timeout=10,
+                    status="Yoetz observe PostCompact",
+                )
+            ],
+            "SubagentStart": [
+                _command(
+                    "SubagentStart",
+                    command=f"{observe} SubagentStart",
+                    timeout=10,
+                    status="Yoetz observe SubagentStart",
+                )
+            ],
+            "SubagentStop": [
+                _command(
+                    "SubagentStop",
+                    command=f"{observe} SubagentStop",
+                    timeout=10,
+                    status="Yoetz observe SubagentStop",
+                )
             ],
         },
     }

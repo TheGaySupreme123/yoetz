@@ -15,7 +15,7 @@ workflow results reuse their operation schemas; this artifact owns every support
 
 - Draft 2020-12, `$id` `https://schemas.yoetz.dev/0.1/service/control-result-1.0.0.schema.json`.
 - Owning model: `ControlResult`.
-- A disjoint closed `oneOf` with one `ok` and one `error` branch for each of the exact twenty-five
+- A disjoint closed `oneOf` with one `ok` and one `error` branch for each of the exact thirty
   method constants. Every branch requires only `protocol_version`, `rpc_id`,
   `service_instance_id`, `service_generation`, `method`, `outcome`, and `body`.
 - `outcome` is branch-constant `ok|error`; `method` is branch-constant and selects the exact body.
@@ -45,7 +45,7 @@ These operation result schemas retain their own success/public-error union. Cont
 method dispatch completed and returned its reviewed public result; it does not rewrite a workflow
 error into a transport failure.
 
-### Nineteen support success branches
+### Twenty-four support success branches
 
 This artifact owns the following exact closed success `$defs`; `v` means required
 `schema_version: "1.0.0"`. Bracketed fields are optional; all other fields are required. Every
@@ -65,6 +65,11 @@ explicit structural/audit-recursion exemptions `service_status`, `service_lock`,
 | `migrate_execute` | `{v, request_id:req_, task_id:tsk_, from_version:positive-canonical-decimal, to_version:positive-canonical-decimal, backup_manifest_digest:digest, frontier_before:Frontier, frontier_after:Frontier, replay_digest:digest, completed_at:timestamp}`. |
 | `integration_preview` | Closed union: preview `{v, operation:preview, action:install\|replace\|remove\|noop, state_before:IntegrationState, source_digest:digest, [installed_digest:digest], compatibility:supported\|unsupported\|untested, file_changes:FileChange[0..64], warnings:sorted-unique-token[0..64], preview_digest:digest}`; status `{v, operation:status, state:IntegrationState, source_digest:digest, [installed_digest:digest], compatibility:supported\|unsupported\|untested, file_states:FileState[0..64], managed_marker_valid:bool}`. |
 | `integration_execute` | `{v, action:install\|replace\|remove\|noop, state_before:IntegrationState, state_after:IntegrationState, source_digest:digest, [installed_digest:digest], changed_files:sorted-unique-relative-path[0..64], preview_digest:digest}`. |
+| `observation_ingest` | `{v, request_id:req_, result:ObservationIngestResult, status:ObservationStatus}`; path-free; may include advice frontier identity; never secret-like command output. |
+| `observation_status` | `{v, request_id:req_, status:ObservationStatus}` including optional `AdviceSnapshot` projection fields already safe for status. |
+| `observation_pause` | `{v, request_id:req_, status:ObservationStatus}` with lifecycle reflecting paused/stopped ingest. |
+| `observation_resume` | `{v, request_id:req_, status:ObservationStatus}` with lifecycle `active` only when consent remains. |
+| `observation_revoke` | `{v, request_id:req_, status:ObservationStatus}` with ingest stopped and retained-evidence acknowledgment only (no deletion claim). |
 | `service_status` | Offline `$ref` to `service/service-status-1.0.0`. |
 | `service_lock` | Offline `$ref` to `service/service-status-1.0.0`; returned state must be `locked` for a successful result. |
 | `service_stop` | `{v, state:draining, accepted:true}`; it never claims process exit before the connection closes. |
@@ -100,7 +105,7 @@ content.
 
 ### Control error branches
 
-For each of the twenty-five method constants there is a distinct `outcome=error` branch with the
+For each of the thirty method constants there is a distinct `outcome=error` branch with the
 same exact body `$def`: `{code, retryable}` and no message/details. `code` is
 `protocol_mismatch|frame_invalid|frame_too_large|request_cancelled|request_timeout|vault_locked|
 service_draining|method_forbidden|service_generation_changed|privacy_projection_unavailable|
@@ -138,7 +143,7 @@ uses only the fixed code. A control result for a cancel-frame RPC ID is invalid.
 
 1. Every result binds exact request, method, service instance and generation.
 2. Errors contain only fixed code and retryability.
-3. Every one of the twenty-five success bodies is closed here or by the exact named offline
+3. Every one of the thirty success bodies is closed here or by the exact named offline
    operation/schema `$ref`; no open-dict support result exists.
 4. Secret/confidential-ingress material has no result field.
 5. Backup preview/execute cannot omit or hide the privacy-audit sidecar/object subset inside the
@@ -146,7 +151,7 @@ uses only the fixed code. A control result for a cancel-frame RPC ID is invalid.
 
 ## Tests
 
-`tests/unit/protocol/test_service_control_schemas.py` enumerates all fifty result branches,
+`tests/unit/protocol/test_service_control_schemas.py` enumerates all sixty result branches,
 cross-pairs every method/body, validates every nested support field gate (including required backup
 privacy-audit counts/digests), and rejects a cancel result. Subprocess frame tests and CLI/MCP
 conformance matrices cover transport mapping.

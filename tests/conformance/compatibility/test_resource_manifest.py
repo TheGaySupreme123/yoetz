@@ -35,11 +35,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _EXPECTED_RESOURCE_COUNTS = {
     "canonical_vectors": "9",
     "guidance_resources": "4",
-    "migrations": "2",
+    "migrations": "3",
     "runtime_support_resources": "1",
     "schema_resources": "53",
     "skill_resources": "2",
-    "total": "71",
+    "total": "72",
 }
 
 
@@ -56,7 +56,7 @@ def test_root_resource_bytes_match_manifest() -> None:
 
     manifest = build_version_manifest()
     assert dict(manifest.resource_counts) == _EXPECTED_RESOURCE_COUNTS
-    assert len(manifest.resources) == 71
+    assert len(manifest.resources) == 72
 
     for resource in manifest.resources:
         installed = read_verified_resource(resource.name)
@@ -113,9 +113,9 @@ def test_missing_extra_duplicate_and_traversal_cases_fail(
 
     load_resource_manifest = _load_resource_manifest_fn()
     entries, doc = _baseline_entries()
-    assert len(entries) == 71
+    assert len(entries) == 72
 
-    # missing -- dropping the last entry breaks the exact 71-member inventory count.
+    # missing -- dropping the last entry breaks the exact 72-member inventory count.
     _install_synthetic_manifest(monkeypatch, doc, entries[:-1])
     with pytest.raises(ResourceIntegrityError):
         load_resource_manifest()
@@ -132,7 +132,7 @@ def test_missing_extra_duplicate_and_traversal_cases_fail(
     with pytest.raises(ResourceIntegrityError):
         load_resource_manifest()
 
-    # duplicate -- exactly 71 entries, but one logical_name repeats and one real entry is displaced.
+    # duplicate -- exactly 72 entries, but one logical_name repeats and one real entry is displaced.
     duplicate_entries = [*entries[:-1], dict(cast(dict[str, JsonValue], entries[0]))]
     _install_synthetic_manifest(monkeypatch, doc, cast(list[JsonValue], duplicate_entries))
     with pytest.raises(ResourceIntegrityError):
@@ -160,7 +160,7 @@ def test_public_resource_list_matches_release_artifact() -> None:
     kinds = [cast(str, entry.kind) for entry in entries]
     assert kinds.count("json_schema") == 53
     assert kinds.count("canonical_vector") == 9
-    assert kinds.count("migration") == 2
+    assert kinds.count("migration") == 3
     assert kinds.count("guidance") == 4
     assert kinds.count("runtime_support") == 1
     assert kinds.count("skill") == 1
@@ -174,7 +174,7 @@ def test_public_resource_list_matches_release_artifact() -> None:
     assert len(schema_paths) - 1 == 52
 
     names = [cast(str, entry.logical_name) for entry in entries]
-    assert len(names) == 71
+    assert len(names) == 72
     assert names == sorted(set(names), key=lambda item: item.encode("ascii"))
 
     version_manifest = build_version_manifest()

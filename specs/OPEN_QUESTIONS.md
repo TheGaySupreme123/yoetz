@@ -104,7 +104,7 @@ that evidence.
 | E-010 | Local service endpoint, peer-credential, permission, lifecycle, keyring, memory-protection, and relock matrix | No platform support claim until a clean-profile service proves authenticated local attachment, locked/ready transitions, crash recovery, suspend/session-lock relock, and secret-canary absence. | Service/control capability evidence and platform matrix. |
 | E-011 | Privacy classifier, never-send scanner, minimizer/redactor, consent, endpoint binding, and receipt matrix | No “policy enforced” claim from configuration alone; every profile, channel, scope intersection, denial, and dispatch path must produce exact evidence. Imported Codex command/model text is intentionally verbatim only in encrypted local objects and receives no import-time content scan; every later disclosure crosses the one authoritative classifier/secret scan, tested across shell assignments, inline auth/header flags, bearer/API-key forms, credential URLs, and JSON/UTF-8/chunk splits. | ADR-009 privacy conformance, property, integration, and live-profile evidence. |
 | E-012 | Public security, conduct, and support routes | Before public release, prove that private vulnerability reporting is enabled, `security@yoetz.dev` and `conduct@yoetz.dev` are monitored by maintainers, and the repository issue route is available for ordinary support. | Repository policy-link check plus dated maintainer delivery/response drill. |
-| E-013 | Exact harness lifecycle trigger points a trigger hook may bind to, context compaction among them | Codex `0.144.5` currently exposes `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, and `Stop`, but names alone are not support evidence. A v0.1 exact capability cell may declare a trigger-only hook only after an installed-artifact run freezes event, payload/privacy boundary, permitted action, coalescing/loop guard, and failure behavior. Unproven cells remain `None`; every v0.1 observation arm is absent. | ADR-010 installed-artifact capability evidence and exact harness support-matrix cell. |
+| E-013 | Exact harness lifecycle trigger points and observation events a hook profile may bind to; context compaction among triggers | Codex `0.144.5` currently exposes `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, and `Stop`, but names alone are not support evidence. A v0.1 exact capability cell may declare a trigger arm and/or a nonempty `observation_events` set only after an installed-artifact run freezes event, payload/privacy boundary, permitted action, coalescing/loop guard, gap codes, and failure behavior for each arm. Observation evidence must prove dual-source ingest (hooks primary; selective session-stream reconciliation), consent/revoke behavior, and that `hook_observed` is earned only from real observation evidence. Unproven cells remain `None` / empty observation arms; unprofiled harnesses stay cooperative-only. | ADR-010 installed-artifact capability evidence and exact harness support-matrix cell. |
 | E-014 | Publication-ceremony budget and work-package grouping examples | Dogfood must measure publications per work package, model-authored event bytes, token/latency overhead, abandoned or stale-ledger rate, skipped checks, and user-visible chatter. Large inventories must compare grouped work packages with per-file publication amplification; no threshold is inferred from file count alone. | Harness-neutral capability/conformance fixtures plus bounded dogfood evidence used to freeze guidance examples and budgets. |
 | E-015 | Exact structural subject-state capture matrix | No support claim until installed-artifact tests freeze Git/object-format and OS cells, symlink/submodule/racy-worktree behavior, file/byte caps, exclusions, sanitized environment, path/content-free output, and no network or trusted-service reachability. | ADR-011 CLI/subprocess, packaging-boundary, privacy, and capability evidence. |
 | E-016 | TOML as alternate nonsecret settings surface, including official OpenAI vs owner-declared OpenAI-compatible HTTPS origin+model | **Working (ADR-014).** Config validates constrained `https_origin`, rejects secrets/free `base_url`, mutual-excludes official vs owner-declared, and writes the same fields from wizard/menu/`yoetz provider endpoint`. Owner-declared data-use defaults to `unknown` (never `assisted`). Privacy desired-state export/apply classifies widen vs tighten and never silently widens. Remaining: optional live owner-declared host probe before advertising verified interoperability beyond the protocol cell. | ADR-014, ADR-006/009 amendments, config/privacy/openai_responses specs, unit fixtures; live probe optional. |
@@ -125,18 +125,20 @@ that evidence.
 - Live Git/filesystem artifact inspection during import review; v0.1 compares recorded evidence
   only.
 - Chunked import/object formats above the exact 4 MiB source/object cap.
-- Codex observation hooks or app-server integration, additional first-party harnesses, and remote
-  service exposure. Additional harnesses are additive by construction under ADR-010: an adapter plus a
+- Codex app-server integration, additional first-party harnesses, and remote service exposure.
+  Additional harnesses are additive by construction under ADR-010: an adapter plus a
   `HarnessId` value, with no port, guidance, or registry change. Hooks land on
   `HarnessProfile.hooks_by_capability_profile`, whose exact values distinguish two arms.
-  Observation hooks report what the harness
-  saw and are the only deferred capability that would make `hook_observed` earnable. Trigger hooks
-  fire on a harness lifecycle event — context compaction is the motivating case — and prompt the
-  agent to re-ground by calling `status`; they earn no coverage, because the `status` result they
-  cause discloses only what that call would already have returned under the ordinary provenance
-  rules and the `agent_context` ceiling. An exact v0.1 capability cell may declare that trigger arm
-  after E-013 passes; unsupported cells remain `None`. Every v0.1 observation arm remains absent,
-  and no v0.1 adapter silently installs or configures hooks.
+  Observation hooks report what the harness saw and are the only arm that makes `hook_observed`
+  earnable; for first-party Codex they are a **required v0.1 capability** once the exact cell is
+  proven (ADR-010 amendment 2026-07-22), via local `ObservationPort` control methods rather than a
+  seventh MCP tool. Trigger hooks fire on a harness lifecycle event — context compaction is the
+  motivating case — and prompt the agent to re-ground by calling `status`; they earn no coverage,
+  because the `status` result they cause discloses only what that call would already have returned
+  under the ordinary provenance rules and the `agent_context` ceiling. An exact v0.1 capability
+  cell may declare either or both arms after E-013 passes; unsupported cells remain `None`.
+  App-server integration, non-Codex first-party harnesses, and remote service exposure remain
+  deferred. No v0.1 adapter silently installs or configures hooks.
 - MCP prompts. v0.1 ships tools, resources, and the `instructions` string only.
 - Launchd/systemd convenience installers, multi-user service hosting, remote control, and
   independent concurrent service writers; the single-user persistent local service and
@@ -242,9 +244,20 @@ that evidence.
   reviewed `HarnessProfile`. Adding a first-party harness is one `HarnessId` value plus one adapter
   and requires no port, registry, guidance, or schema change, so a fork can do it without touching
   the core. `HarnessProfile.hooks_by_capability_profile` binds every exact profile ID to either
-  `None` or, after E-013 passes, a trigger-only descriptor. Every v0.1 observation arm is absent,
-  keeping `hook_observed` unearnable while allowing capability-proven recovery ergonomics without a
-  second port or inferred version support.
+  `None` or, after E-013 passes, a descriptor that may declare a trigger arm and/or a nonempty
+  closed `observation_events` set. For first-party Codex, observation is a required v0.1
+  capability once capability-proven: it earns `hook_observed` only from real observation evidence,
+  through local `ObservationPort` control (not a seventh MCP tool). Trigger-only cells remain valid
+  recovery ergonomics without raising coverage. Unproven cells stay `None` / empty observation
+  arms and keep cooperative coverage honest.
+- **F-021 (2026-07-22):** First-party Codex observation is in protocol `0.1` (not deferred to
+  v0.2). Dual sources are hooks (primary, low-latency) and selective session-stream reconciliation.
+  Shared types are `ObservationSource`, `ObservationEnvelope`, `ObservationCursor`,
+  `ObservationStatus`, and `AdviceSnapshot`. Observation consent is one project-level confirmation
+  via a private workspace commitment, separate from egress consent; revocation stops new ingestion
+  and retains already-kept evidence. `AdviceSnapshot` surfaces via nonblocking hooks and ordinary
+  `status`. Batch `ImporterPort` JSONL import stays a separate support surface. Existing v0.1 data
+  remains readable; migrations may add only observation consent/cursor/dedup/advice state.
 - **F-016:** Any MCP host is supported with no integration. `guidance/agent-instructions.md` is
   served verbatim as the initialize `instructions` string to every host and must carry every rule
   whose absence would cause harm, because it is the only tier guaranteed to arrive; the four

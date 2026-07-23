@@ -73,7 +73,8 @@ redacted material as a real limitation.
 - Missing or corrupt reference bytes must fail MCP resource registration and installed-skill
   validation.
 - Text implying that installing a first-party integration or firing a v0.1 trigger-only hook
-  strengthens coverage is invalid; every v0.1 observation arm is absent.
+  strengthens coverage is invalid. Only a capability-proven, consented observation arm with real
+  observation evidence may earn `hook_observed`.
 - Naming a harness, install path, provider, or model fails the public-boundary scan.
 
 ## Invariants

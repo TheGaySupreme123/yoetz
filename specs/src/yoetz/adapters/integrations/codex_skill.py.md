@@ -29,8 +29,9 @@ Git, stage/commit files, update `.gitignore`, download anything, or manage arbit
 - `CODEX_HARNESS_PROFILE: HarnessProfile` — the reviewed profile: `skill_root=.agents/skills/
   yoetz/`, the Codex frontmatter profile, the exact Codex capability-profile IDs, tested Codex
   version bounds, and an exact `hooks_by_capability_profile` map. Each value is `None` unless that
-  exact installed-artifact cell passes E-013; a passing v0.1 value is trigger-only and its
-  observation arm remains absent, so no v0.1 harness earns `hook_observed`.
+  exact installed-artifact cell passes E-013; a passing value may declare a trigger arm and/or a
+  nonempty closed `observation_events` set. Observation earns `hook_observed` only from real
+  observation evidence via `ObservationPort`; trigger-only cells change no coverage.
 - Until E-002 capability evidence exists, this constant has empty capability-profile IDs,
   supported versions, and hook map: an explicit unprofiled/unadvertised state, not inferred
   compatibility for either locally observed Codex version.
@@ -174,7 +175,9 @@ completed; ambiguity preserves it. Never force-delete modified/unmanaged content
 5. Crash leaves old/new complete or preserved ambiguity, never a falsely exact state.
 6. Adapter performs no network, Git, Codex config, MCP registration, or package mutation.
 7. A trigger-only profile is selected only from exact E-013 evidence, performs re-grounding only,
-   and cannot change coverage; every v0.1 observation arm is absent.
+   and cannot change coverage. An observation-capable profile requires E-013 observation evidence
+   and nonempty closed `observation_events`; live ingest remains `ObservationPort`, not this
+   filesystem adapter.
 
 ## Tests
 

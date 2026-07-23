@@ -169,6 +169,19 @@ not remove these objects. Verified backups include their encrypted bytes plus a 
 sidecar; restore never revives pending approval or dispatch authority. LLM inference consent is
 independent of telemetry, crash diagnostics, update checks, and capability testing.
 
+## Live harness observation (first-party Codex)
+
+Observation consent is separate from egress consent. Enabling first-party Codex observation requires
+one project-level confirmation recorded as a private workspace commitment (never a raw path in
+logs, status, or receipts). Revocation stops new ingestion and retains already-kept evidence.
+
+Observation never retains hidden reasoning or complete transcript prose. Sensitive bounded evidence
+lives only in encrypted objects; plaintext observation state is allowlisted structural fields plus
+commitments. On vault or service outage Yoetz never creates an unencrypted transcript spool.
+Semantic review receives only minimized approved packets. Secret-like command output never appears
+in status, logs, hook advice, or semantic packets. Live observation uses local control methods, not
+a seventh MCP tool; advice surfaces through nonblocking hooks and ordinary `status`.
+
 The enforceable technical contract, setup behavior, schemas, fixtures, and remaining empirical or
 independent-review release gates are specified in:
 

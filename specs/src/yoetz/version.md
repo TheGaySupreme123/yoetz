@@ -37,7 +37,7 @@ startup diagnostics compare it with the reviewed packaged `runtime-support.json`
   - `WORK_INTEGRITY_POLICY_VERSION = "work-integrity/0.1.0"`
   - `RESEARCH_EVIDENCE_POLICY_VERSION = "research-evidence/0.1.0"`
   - `OBJECT_FORMAT_VERSION = "yoetz-object/1"`
-  - `CATALOG_SCHEMA_VERSION = "1"`, `BUNDLE_SCHEMA_VERSION = "1"`
+  - `CATALOG_SCHEMA_VERSION = "1"`, `BUNDLE_SCHEMA_VERSION = "2"`
   - `SQLITE_APPLICATION_ID = "0x594F4554"`.
 
 `VersionManifest` contains exactly:
@@ -106,7 +106,7 @@ names are absent.
 
 ### Resource parity
 
-The packaged resource manifest enumerates exactly the 71 reviewed resources frozen by its owning
+The packaged resource manifest enumerates exactly the 72 reviewed resources frozen by its owning
 spec: 52 JSON Schema artifacts, the schema inventory manifest, 9 canonical compatibility fixtures,
 2 migrations, the Codex skill plus compatibility manifest, 4 harness-neutral guidance files, and
 the runtime-support allowlist. For every entry:

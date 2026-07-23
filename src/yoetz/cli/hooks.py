@@ -29,6 +29,7 @@ from yoetz.service.client import connect_service
 __all__ = [
     "INACTIVE_CONTEXT",
     "YOETZ_START_TOOL_NAMES",
+    "handle_observe",
     "handle_post_tool_use",
     "handle_session_start",
     "handle_user_prompt_submit",
@@ -45,7 +46,7 @@ class _StatusClient(Protocol):
 
 type ServiceConnector = Callable[[ControlClientKind], Awaitable[_StatusClient]]
 type StatusOutcome = tuple[str, LifecycleMapping | None]
-type AsyncRunner = Callable[[Callable[[], Awaitable[StatusOutcome]]], StatusOutcome]
+type AsyncRunner = Callable[[Callable[[], Awaitable[object]]], object]
 
 _MAX_STDIN_BYTES: Final = 262_144
 _MAX_CONTEXT_CHARS: Final = 2_000
@@ -130,12 +131,29 @@ def handle_user_prompt_submit(
     stdin_bytes: bytes | None = None,
     stdout: BinaryIO | None = None,
     resource_root: Path | None = None,
+    _state: Path | None = None,
+    workspace: str | None = None,
 ) -> int:
-    """Inject the materiality/activation cue; never touches the service."""
+    """Inject the materiality/activation cue; route structural facts through observe."""
 
     try:
-        _ = read_hook_payload(stdin_bytes)
+        raw = (
+            stdin_bytes if stdin_bytes is not None else sys.stdin.buffer.read(_MAX_STDIN_BYTES + 1)
+        )
+        _ = read_hook_payload(raw)
         cue = intake_cue_text(resource_root=resource_root)
+        # Compatibility: keep trigger cue, then best-effort structural observe.
+        from yoetz.cli.observe_hooks import handle_observe
+
+        observe_out = __import__("io").BytesIO()
+        handle_observe(
+            event_name="UserPromptSubmit",
+            stdin_bytes=raw,
+            stdout=observe_out,
+            workspace=workspace,
+            _state=_state,
+            skip_service=False,
+        )
         _stdout_json(_context_output("UserPromptSubmit", cue), stdout)
         return 0
     except Exception:
@@ -189,36 +207,43 @@ def handle_post_tool_use(
     stdin_bytes: bytes | None = None,
     stdout: BinaryIO | None = None,
     _state: Path | None = None,
+    workspace: str | None = None,
 ) -> int:
-    """Correlate a successful Yoetz start MCP tool call to the Codex session."""
+    """Correlate a successful Yoetz start MCP tool call; route structural observe."""
 
     try:
-        payload = read_hook_payload(stdin_bytes)
-        tool_name = payload.get("tool_name")
-        if type(tool_name) is not str or tool_name not in YOETZ_START_TOOL_NAMES:
-            _stdout_json({}, stdout)
-            return 0
-        session_raw = payload.get("session_id")
-        try:
-            codex_session_id = validate_codex_session_id(session_raw)
-        except ProtocolValueError:
-            _stdout_json({}, stdout)
-            return 0
-        success = _extract_start_success(payload.get("tool_response"))
-        if success is None:
-            _stdout_json({}, stdout)
-            return 0
-        frontier = _frontier_from_start(success)
-        mapping = mapping_from_start_ids(
-            codex_session_id=codex_session_id,
-            yoetz_task_id=cast(str, success.get("task_id")),
-            yoetz_session_id=cast(str, success.get("session_id")),
-            yoetz_writer_id=cast(str, success.get("writer_id")),
-            last_frontier=frontier,
+        raw = (
+            stdin_bytes if stdin_bytes is not None else sys.stdin.buffer.read(_MAX_STDIN_BYTES + 1)
         )
-        store_mapping(mapping, _state=_state)
-        _stdout_json({}, stdout)
-        return 0
+        payload = read_hook_payload(raw)
+        tool_name = payload.get("tool_name")
+        if type(tool_name) is str and tool_name in YOETZ_START_TOOL_NAMES:
+            session_raw = payload.get("session_id")
+            try:
+                codex_session_id = validate_codex_session_id(session_raw)
+            except ProtocolValueError:
+                codex_session_id = None
+            if codex_session_id is not None:
+                success = _extract_start_success(payload.get("tool_response"))
+                if success is not None:
+                    frontier = _frontier_from_start(success)
+                    mapping = mapping_from_start_ids(
+                        codex_session_id=codex_session_id,
+                        yoetz_task_id=cast(str, success.get("task_id")),
+                        yoetz_session_id=cast(str, success.get("session_id")),
+                        yoetz_writer_id=cast(str, success.get("writer_id")),
+                        last_frontier=frontier,
+                    )
+                    store_mapping(mapping, _state=_state)
+        from yoetz.cli.observe_hooks import handle_observe
+
+        return handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=raw,
+            stdout=stdout,
+            workspace=workspace,
+            _state=_state,
+        )
     except Exception:
         _stderr_line("hook_degraded: post-tool-use")
         _stdout_json({}, stdout)
@@ -320,18 +345,31 @@ def handle_session_start(
     _state: Path | None = None,
     connect: ServiceConnector = connect_service,
     run_async: AsyncRunner | None = None,
+    workspace: str | None = None,
 ) -> int:
-    """Re-ground after resume/compact via read-only status; clear removes mapping."""
+    """Re-ground after resume/compact; also route structural observe when consented."""
 
     import anyio
 
     runner: AsyncRunner = cast(AsyncRunner, anyio.run if run_async is None else run_async)
     try:
-        payload = read_hook_payload(stdin_bytes)
+        raw = (
+            stdin_bytes if stdin_bytes is not None else sys.stdin.buffer.read(_MAX_STDIN_BYTES + 1)
+        )
+        payload = read_hook_payload(raw)
         source = payload.get("source")
         if source == "startup":
-            _stdout_json({}, stdout)
-            return 0
+            from yoetz.cli.observe_hooks import handle_observe
+
+            return handle_observe(
+                event_name="SessionStart",
+                stdin_bytes=raw,
+                stdout=stdout,
+                workspace=workspace,
+                _state=_state,
+                connect=connect,
+                run_async=run_async,
+            )
         session_raw = payload.get("session_id")
         try:
             codex_session_id = validate_codex_session_id(session_raw)
@@ -340,11 +378,31 @@ def handle_session_start(
             return 0
         if source == "clear":
             clear_mapping(codex_session_id, _state=_state)
+            from yoetz.cli.observe_hooks import handle_observe
+
+            handle_observe(
+                event_name="SessionStart",
+                stdin_bytes=raw,
+                stdout=__import__("io").BytesIO(),
+                workspace=workspace,
+                _state=_state,
+                connect=connect,
+                run_async=run_async,
+            )
             _stdout_json({}, stdout)
             return 0
         if source not in {"resume", "compact"}:
-            _stdout_json({}, stdout)
-            return 0
+            from yoetz.cli.observe_hooks import handle_observe
+
+            return handle_observe(
+                event_name="SessionStart",
+                stdin_bytes=raw,
+                stdout=stdout,
+                workspace=workspace,
+                _state=_state,
+                connect=connect,
+                run_async=run_async,
+            )
         with acquire_session_lock(codex_session_id, _state=_state) as owned:
             if not owned:
                 # Another concurrent handler is already re-grounding this session.
@@ -352,13 +410,45 @@ def handle_session_start(
                 return 0
             mapping = load_mapping(codex_session_id, _state=_state)
             if mapping is None:
+                from yoetz.cli.observe_hooks import handle_observe
+
+                observe_out = __import__("io").BytesIO()
+                handle_observe(
+                    event_name="SessionStart",
+                    stdin_bytes=raw,
+                    stdout=observe_out,
+                    workspace=workspace,
+                    _state=_state,
+                    connect=connect,
+                    run_async=run_async,
+                )
+                observed = observe_out.getvalue()
+                if observed and observed not in {b"{}\n", b"{}\r\n"}:
+                    if stdout is not None:
+                        stdout.write(observed)
+                        stdout.flush()
+                    else:
+                        sys.stdout.buffer.write(observed)
+                        sys.stdout.buffer.flush()
+                    return 0
                 _stdout_json(_context_output("SessionStart", INACTIVE_CONTEXT), stdout)
                 return 0
 
             async def _run() -> StatusOutcome:
                 return await _read_status(mapping, connect=connect)
 
-            kind, updated = runner(_run)
+            kind, updated = cast(StatusOutcome, runner(_run))
+            from yoetz.cli.observe_hooks import handle_observe
+
+            handle_observe(
+                event_name="SessionStart",
+                stdin_bytes=raw,
+                stdout=__import__("io").BytesIO(),
+                workspace=workspace,
+                _state=_state,
+                connect=connect,
+                run_async=run_async,
+            )
             if kind == "active" and updated is not None:
                 store_mapping(updated, _state=_state)
                 _stdout_json(
@@ -378,3 +468,24 @@ def handle_session_start(
         _stderr_line("hook_degraded: session-start")
         _stdout_json(_context_output("SessionStart", INACTIVE_CONTEXT), stdout)
         return 0
+
+
+def handle_observe(
+    *,
+    event_name: str,
+    stdin_bytes: bytes | None = None,
+    stdout: BinaryIO | None = None,
+    workspace: str | None = None,
+    _state: Path | None = None,
+) -> int:
+    """Compatibility export for the unified observe ingress."""
+
+    from yoetz.cli.observe_hooks import handle_observe as _handle
+
+    return _handle(
+        event_name=event_name,
+        stdin_bytes=stdin_bytes,
+        stdout=stdout,
+        workspace=workspace,
+        _state=_state,
+    )

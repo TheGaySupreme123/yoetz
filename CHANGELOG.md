@@ -8,6 +8,16 @@ released versions.
 
 ### Added
 
+- First-party Codex **live observation and advice** as a required v0.1 capability (ADR-010
+  amendment): dual-source ingest (hooks primary + selective session-stream reconciliation), local
+  `ObservationPort` control (`yoetz observe status|grant|pause|resume|revoke|reconcile`), unified
+  `yoetz hooks observe`, project-level observation consent via private workspace commitment,
+  automatic session↔task attachment without depending on MCP `start`, descriptor-safe workspace
+  inspection, approved-check runner, and deterministic `AdviceSnapshot` guidance (optional semantic
+  review remains additive). Still exactly six MCP tools; observation is CLI/service control only.
+  Sensitive evidence stays encrypted; no unencrypted transcript spool; `hook_observed` requires real
+  observation evidence under active consent.
+
 - TOML alternate settings surface and owner-declared OpenAI-compatible endpoints (ADR-014 /
   issue #2): `config.toml` may bind Official OpenAI (`openai-responses`) or
   `owner-declared-openai-responses` with constrained `[provider.owner_declared_endpoint].https_origin`

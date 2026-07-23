@@ -12,9 +12,14 @@ failing truthfully and narrowly without blocking ordinary work.
 
 ## Public surface
 
-- `handle_user_prompt_submit` — stdin hook payload → stdout additionalContext with intake cue.
-- `handle_post_tool_use` — successful `start` / `mcp__yoetz__start` → write mapping; else no-op.
-- `handle_session_start` — `startup` no-op; `clear` removes mapping; `resume`/`compact` re-ground.
+- `handle_user_prompt_submit` — stdin hook payload → stdout additionalContext with intake cue;
+  also routes structural facts through `handle_observe` when consent is active.
+- `handle_post_tool_use` — successful `start` / `mcp__yoetz__start` → write mapping; routes
+  structural observe for all PostToolUse payloads.
+- `handle_session_start` — `startup`/other sources may observe; `clear` removes mapping;
+  `resume`/`compact` re-ground; absent mapping falls back to inactive context unless observation
+  auto-attach produced context.
+- `handle_observe` — compatibility export to the unified observe ingress.
 - Helpers: `read_hook_payload`, `intake_cue_text`, `INACTIVE_CONTEXT`, `YOETZ_START_TOOL_NAMES`.
 
 ## Behavior

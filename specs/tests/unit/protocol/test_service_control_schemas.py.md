@@ -10,7 +10,7 @@ mirrored by installed resources; confidential ingress remains impossible to enco
 
 ## Public surface
 
-Table-driven positive/boundary/negative cases cover control hello/result, twenty-five exact call
+Table-driven positive/boundary/negative cases cover control hello/result, thirty exact call
 branches plus cancel, fifty method-specific ok/error result branches, every service status
 enum/capability, and all ten fixed control error codes.
 

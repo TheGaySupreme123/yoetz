@@ -5,17 +5,24 @@ from pathlib import Path
 import apsw
 import pytest
 
-from yoetz.adapters.sqlite.migrations import initialize_bundle, initialize_catalog
+from yoetz.adapters.sqlite.migrations import (
+    BUNDLE_MIGRATIONS,
+    initialize_bundle,
+    initialize_catalog,
+    run_migrations,
+)
 
 ROOT = Path(__file__).parents[3]
 
 
-@pytest.mark.parametrize("family", ["catalog", "bundle"])
-def test_root_and_installed_migration_resources_are_byte_identical(family: str) -> None:
-    root = ROOT / "migrations" / family / "0001.sql"
-    resource = ROOT / "src" / "yoetz" / "resources" / "migrations" / family / "0001.sql"
-
-    assert root.read_bytes() == resource.read_bytes()
+def test_root_and_installed_migration_resources_are_byte_identical() -> None:
+    for family, versions in (("catalog", ("0001",)), ("bundle", ("0001", "0002"))):
+        for version in versions:
+            root = ROOT / "migrations" / family / f"{version}.sql"
+            resource = (
+                ROOT / "src" / "yoetz" / "resources" / "migrations" / family / f"{version}.sql"
+            )
+            assert root.read_bytes() == resource.read_bytes()
 
 
 def test_fresh_migrations_install_identified_foreign_key_clean_schemas() -> None:
@@ -25,16 +32,62 @@ def test_fresh_migrations_install_identified_foreign_key_clean_schemas() -> None
     bundle = apsw.Connection(":memory:")
     initialize_bundle(bundle, {"task_id": "task_test", "owner_generation": "generation_test"})
 
-    for database in (catalog, bundle):
-        assert database.execute("PRAGMA application_id").fetchone() == (0x594F4554,)
-        assert database.execute("PRAGMA user_version").fetchone() == (1,)
-        assert database.execute("PRAGMA foreign_keys").fetchone() == (1,)
-        assert database.execute("PRAGMA trusted_schema").fetchone() == (0,)
-        assert database.execute("PRAGMA foreign_key_check").fetchone() is None
+    assert catalog.execute("PRAGMA application_id").fetchone() == (0x594F4554,)
+    assert catalog.execute("PRAGMA user_version").fetchone() == (1,)
+    assert catalog.execute("PRAGMA foreign_keys").fetchone() == (1,)
+    assert catalog.execute("PRAGMA trusted_schema").fetchone() == (0,)
+    assert catalog.execute("PRAGMA foreign_key_check").fetchone() is None
+
+    assert bundle.execute("PRAGMA application_id").fetchone() == (0x594F4554,)
+    assert bundle.execute("PRAGMA user_version").fetchone() == (2,)
+    assert bundle.execute("PRAGMA foreign_keys").fetchone() == (1,)
+    assert bundle.execute("PRAGMA trusted_schema").fetchone() == (0,)
+    assert bundle.execute("PRAGMA foreign_key_check").fetchone() is None
 
     assert bundle.execute(
         "SELECT value FROM bundle_meta WHERE key = 'import_schema_version'"
     ).fetchone() == ("1",)
+    assert bundle.execute(
+        "SELECT value FROM bundle_meta WHERE key = 'storage_schema_version'"
+    ).fetchone() == ("2",)
+    assert bundle.execute(
+        "SELECT 1 FROM sqlite_schema WHERE name = 'observation_consent'"
+    ).fetchone() == (1,)
+
+
+def test_bundle_run_migrations_applies_0002_from_schema_version_one() -> None:
+    bundle = apsw.Connection(":memory:")
+    bundle.execute("PRAGMA foreign_keys = ON")
+    bundle.execute("PRAGMA trusted_schema = OFF")
+    ddl = BUNDLE_MIGRATIONS[0].ddl.decode("utf-8")
+    with bundle:
+        bundle.execute(ddl)
+        bundle.execute(
+            "INSERT INTO bundle_meta(key, value) VALUES "
+            "('task_id', 'task_test'), "
+            "('owner_generation', '1'), "
+            "('storage_schema_version', '1'), "
+            "('protocol_version', '0.1'), "
+            "('import_schema_version', '1')"
+        )
+        bundle.execute("INSERT INTO counters(name, next_value) VALUES ('ingestion_sequence', 1)")
+    assert bundle.execute("PRAGMA user_version").fetchone() == (1,)
+    assert (
+        bundle.execute("SELECT 1 FROM sqlite_schema WHERE name = 'observation_consent'").fetchone()
+        is None
+    )
+
+    report = run_migrations(bundle, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
+    assert report.from_version == 1
+    assert report.to_version == 2
+    assert report.applied_versions == ("0002",)
+    assert bundle.execute("PRAGMA user_version").fetchone() == (2,)
+    assert bundle.execute(
+        "SELECT value FROM bundle_meta WHERE key = 'storage_schema_version'"
+    ).fetchone() == ("2",)
+    assert bundle.execute(
+        "SELECT 1 FROM sqlite_schema WHERE name = 'observation_consent'"
+    ).fetchone() == (1,)
 
 
 def test_importer_tables_have_frozen_columns_indexes_and_no_triggers() -> None:

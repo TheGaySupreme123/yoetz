@@ -48,4 +48,4 @@ Permitted: “Yoetz found no deterministic issue in the cooperatively published 
 
 Forbidden: “Yoetz proved the implementation is complete and correct.”
 
-Installing a harness integration or firing a trigger-only hook does not strengthen coverage. In v0.1 every observation arm is absent. A proven trigger may prompt a bounded status re-grounding; it observes nothing and changes no coverage.
+Installing a harness integration or firing a trigger-only hook does not strengthen coverage. A proven trigger may prompt a bounded status re-grounding; it observes nothing and changes no coverage. Only a capability-proven, consented observation arm with real observation evidence may earn `hook_observed`; an absent, empty, paused, or degraded observation status does not.

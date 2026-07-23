@@ -106,11 +106,16 @@ continues and the skill discloses no live ledger/check/receipt data. If configur
 server failure blocks only the Codex surfaces that the tested capability profile proves are
 affected. Installing the skill never itself changes MCP configuration or produces a receipt.
 
-The exact capability profile also reports whether a compaction-recovery trigger hook is present. A
-present v0.1 trigger only prompts the agent to re-ground by calling `status` — it records no
-observation, changes no coverage, and remains optional. Skill installation never configures this
-hook. If the profile is absent or the trigger fails, use the ordinary manual resume/compaction
-procedure; do not infer support from a different Codex version.
+The exact capability profile also reports whether a compaction-recovery trigger hook and/or a
+first-party observation arm is present. A present v0.1 trigger only prompts the agent to re-ground
+by calling `status` — it records no observation, changes no coverage, and remains optional. When
+the cell advertises observation, enablement requires one project-level observation consent
+(workspace commitment, never a raw path in logs); live ingest uses local control methods
+(`observation_ingest|status|pause|resume|revoke`), not a seventh MCP tool. `hook_observed` is earned
+only from real observation evidence. `AdviceSnapshot` surfaces via nonblocking hooks and ordinary
+`status`. Skill installation never configures hooks. If the profile is absent or a trigger/observation
+path fails, use the ordinary manual resume/compaction procedure and cooperative publication; do not
+infer support from a different Codex version.
 
 ## 8. Remove
 

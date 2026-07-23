@@ -86,11 +86,21 @@ def _open_readonly(path: Path) -> apsw.Connection:
 def _classify_bundle_schema(value: str) -> str:
     """Bounded, always-total classification grounded in the compatibility.md version vocabulary.
 
-    A bundle_schema value equal to the exact installed cell is ``supported``; anything else is
-    reported ``unsupported`` -- there is no silent third option and no collapse into a bare pass.
+    The exact installed cell is ``supported``. Older contiguous released cells in
+    ``1..current-1`` stay ``readable`` (safe inspect/read; writes still require migration).
+    Anything else is ``unsupported`` -- there is no silent third option and no collapse into a
+    bare pass.
     """
 
-    return "supported" if value == BUNDLE_SCHEMA_VERSION else "unsupported"
+    if type(value) is not str or not value.isdigit():
+        return "unsupported"
+    version = int(value)
+    current = int(BUNDLE_SCHEMA_VERSION)
+    if version == current:
+        return "supported"
+    if 1 <= version < current:
+        return "readable"
+    return "unsupported"
 
 
 def test_released_corpus_still_reads(fixture_loader: FixtureLoader, tmp_path: Path) -> None:
@@ -127,11 +137,17 @@ def test_released_corpus_still_reads(fixture_loader: FixtureLoader, tmp_path: Pa
         release_identity = cast(dict[str, JsonValue], input_block["release_manifest_identity"])
         assert release_identity["package"] == "yoetz", name
         assert release_identity["protocol"] == PROTOCOL_VERSION, name
-        assert release_identity["bundle_schema"] == BUNDLE_SCHEMA_VERSION, name
+        assert _classify_bundle_schema(cast(str, release_identity["bundle_schema"])) in {
+            "supported",
+            "readable",
+        }, name
 
         minimum_versions = cast(dict[str, JsonValue], document["minimum_versions"])
         assert minimum_versions["protocol"] == PROTOCOL_VERSION, name
-        assert minimum_versions["bundle_schema"] == BUNDLE_SCHEMA_VERSION, name
+        assert _classify_bundle_schema(cast(str, minimum_versions["bundle_schema"])) in {
+            "supported",
+            "readable",
+        }, name
         assert minimum_versions["engine"] == ENGINE_VERSION, name
 
         bundle_path = tmp_path / name / "bundle.sqlite3"
@@ -291,7 +307,10 @@ def test_compatibility_window_is_honestly_reported(fixture_loader: FixtureLoader
         expected = cast(dict[str, JsonValue], document["expected"])
 
         release_identity = cast(dict[str, JsonValue], input_block["release_manifest_identity"])
-        assert _classify_bundle_schema(cast(str, release_identity["bundle_schema"])) == "supported"
+        assert _classify_bundle_schema(cast(str, release_identity["bundle_schema"])) in {
+            "supported",
+            "readable",
+        }
 
         classification = cast(dict[str, JsonValue], expected["compatibility_classification"])
         schema_state = cast(str, classification["schema"]).split("_", 1)[0]

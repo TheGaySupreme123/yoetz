@@ -253,6 +253,15 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     before rendering. This narrow content-withholding fingerprint is not a local disclosure sink,
     does not authorize semantic/live artifact inspection, and does not weaken never-send. An
     unsupported, partial, unsafe, changing, or over-limit capture returns no comparable state.
+16. **Live harness observation retention (first-party Codex, ADR-010 amendment 2026-07-22):**
+    Observation consent is independent of egress consent. One project-level confirmation records a
+    private workspace commitment (never a raw path). Revocation stops new ingestion and keeps
+    retained evidence. Never retain hidden reasoning or complete transcript prose. Sensitive
+    bounded observation evidence lives only in encrypted objects; plaintext state is allowlisted
+    structural fields plus commitments. Never create an unencrypted transcript spool on
+    vault/service outage. Semantic review receives only minimized approved packets. Secret-like
+    command output never appears in status, logs, hook advice, or semantic packets. Observation is
+    local control (`ObservationPort`), not a network egress channel and not a seventh MCP tool.
 
 ### Human involvement under the recommended recipe
 

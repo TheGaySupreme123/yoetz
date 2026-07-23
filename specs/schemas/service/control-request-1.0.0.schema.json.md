@@ -14,7 +14,7 @@ definition. Vault secrets intentionally have no JSON method/body.
 
 - Draft 2020-12, `$id` `https://schemas.yoetz.dev/0.1/service/control-request-1.0.0.schema.json`.
 - Owning model: `ControlRequest`.
-- A disjoint closed `oneOf` containing twenty-five method-specific call branches plus one cancel
+- A disjoint closed `oneOf` containing thirty method-specific call branches plus one cancel
   branch. Every call branch requires only `kind`, `protocol_version`, `rpc_id`,
   `service_instance_id`, `service_generation`, `method`, `body`, and optional `deadline_ms`;
   `method` is a branch-specific constant and `body` is branch-specific and closed.
@@ -47,7 +47,7 @@ The exact method/body mappings are offline `$ref`s to the six reviewed request a
 Each row is a separate call `oneOf` branch. A body valid for one operation but paired with another
 method is invalid.
 
-### Nineteen support call branches
+### Twenty-four support call branches
 
 This schema owns the following `$defs`; `v` below means required `schema_version: "1.0.0"`.
 `location` is a required 1..4096-character explicitly selected local locator with no NUL/control
@@ -67,6 +67,11 @@ optional; every other listed field is required.
 | `migrate_execute` | The exact `migrate_preview` body plus required `confirmed_plan_digest:digest`. |
 | `integration_preview` | A closed union of `{v, operation:preview, request_id:req_, harness:codex, project_root:location, action:install\|replace\|remove, replace_modified:bool}` and `{v, operation:status, harness:codex, project_root:location}`. |
 | `integration_execute` | `{v, request_id:req_, harness:codex, project_root:location, action:install\|replace\|remove, preview_digest:digest, explicitly_accepted:true, replace_modified:bool}`. |
+| `observation_ingest` | `{v, request_id:req_, envelope:ObservationEnvelope}`; envelope is the closed INTERFACES value (source, session commitment, event kind, cursor, receipt time, allowlisted structural payload, content-object refs, gap codes); no raw path, transcript prose, or secret-like command output. CLI/UI only. |
+| `observation_status` | `{v, request_id:req_, query:ObservationStatusQuery}` — closed path-free status query. CLI/UI only. |
+| `observation_pause` | `{v, request_id:req_, command:ObservationControlCommand}`. CLI/UI only. |
+| `observation_resume` | `{v, request_id:req_, command:ObservationControlCommand}`; requires active observation consent. CLI/UI only. |
+| `observation_revoke` | `{v, request_id:req_, command:ObservationRevokeCommand}`; stops new ingest and retains evidence. CLI/UI only. |
 | `service_status` | `{}`. |
 | `service_lock` | `{}`. |
 | `service_stop` | `{}`. |
@@ -112,7 +117,7 @@ the cancel frame itself never receives a success result that could falsely prove
 ## Invariants
 
 1. Call and cancel branches are disjoint and envelope-closed.
-2. Every one of the twenty-five method bodies has one exact closed branch in this artifact; no
+2. Every one of the thirty method bodies has one exact closed branch in this artifact; no
    registry entry can resolve to `dict[str, JsonValue]` or an unvalidated body.
 3. Generation/instance fence stale clients.
 4. No JSON request can carry vault unlock material.

@@ -102,7 +102,7 @@ jobs:
             -k "schema or manifest or resource" \
             -m "not fault and not soak and not live" -q --timeout=120
 
-      - name: Verify released event/migration/vector files are append-only against base
+      - name: Verify released migration/vector files and versioned schemas are append-only
         env:
           BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
@@ -111,7 +111,7 @@ jobs:
             echo "No comparable base commit (initial push); skipping append-only diff."
             exit 0
           fi
-          for root in migrations fixtures/canonical schemas; do
+          for root in migrations fixtures/canonical; do
             if git cat-file -e "${BASE_REF}:${root}" 2>/dev/null; then
               removed=$(git diff --diff-filter=DMR --name-only "${BASE_REF}" -- "$root" || true)
               if [ -n "$removed" ]; then
@@ -121,6 +121,19 @@ jobs:
               fi
             fi
           done
+          release_tag=$(git describe --tags --abbrev=0 \
+            --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || true)
+          if [ -z "${release_tag}" ]; then
+            echo "No release tag; versioned schemas are not yet frozen."
+            exit 0
+          fi
+          changed_schemas=$(git diff --diff-filter=DMR --name-only \
+            "refs/tags/${release_tag}" -- ':(glob)schemas/**/*.schema.json' || true)
+          if [ -n "${changed_schemas}" ]; then
+            echo "::error::released versioned schema changed against ${release_tag}:"
+            echo "${changed_schemas}"
+            exit 1
+          fi
 
       - name: Run public-boundary scanner over the checkout
         run: uv run --locked python scripts/scan_public_boundary.py --source-tree .

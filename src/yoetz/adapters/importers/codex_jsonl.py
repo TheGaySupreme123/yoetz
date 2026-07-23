@@ -65,9 +65,11 @@ __all__ = [
     "SanitizedCodexArgv",
     "materialize_codex_mapping",
     "parse_codex_jsonl",
+    "parse_codex_jsonl_from_offset",
     "plan_codex_mapping",
     "profile_for_codex_version",
     "sanitize_codex_argv",
+    "split_codex_jsonl_chunk",
 ]
 
 CODEX_JSONL_MAPPING_VERSION: Final = "codex-jsonl/1.0.0"
@@ -377,6 +379,34 @@ def profile_for_codex_version(version: str) -> CodexCapabilityProfile:
 
 
 def _split_lines(source: bytes, profile: CodexCapabilityProfile) -> tuple[CodexSourceLine, ...]:
+    return _split_lines_from(source, profile, start_ordinal=1)
+
+
+def split_codex_jsonl_chunk(
+    source: bytes,
+    profile: CodexCapabilityProfile,
+    *,
+    start_ordinal: int = 1,
+) -> tuple[CodexSourceLine, ...]:
+    """Split a byte chunk into source lines with chunk-relative byte offsets.
+
+    Partial (unterminated) final lines are returned so callers can hold them across reads.
+    Absolute file positions are owned by the session-stream cursor, not these lines.
+    """
+
+    if type(start_ordinal) is not int or start_ordinal < 1:
+        raise ValueError("codex_source_invalid")
+    if (
+        type(profile) is not CodexCapabilityProfile
+        or SUPPORTED_CODEX_PROFILES.get(profile.cli_version) != profile
+    ):
+        raise ValueError("unsupported_codex_profile")
+    return _split_lines_from(source, profile, start_ordinal=start_ordinal)
+
+
+def _split_lines_from(
+    source: bytes, profile: CodexCapabilityProfile, *, start_ordinal: int
+) -> tuple[CodexSourceLine, ...]:
     if type(source) is not bytes:
         raise ValueError("codex_source_invalid")
     if len(source) > profile.max_source_bytes:
@@ -385,7 +415,7 @@ def _split_lines(source: bytes, profile: CodexCapabilityProfile) -> tuple[CodexS
         return ()
     lines: list[CodexSourceLine] = []
     start = 0
-    ordinal = 1
+    ordinal = start_ordinal
     while start < len(source):
         newline = source.find(b"\n", start)
         terminated = newline >= 0
@@ -400,6 +430,80 @@ def _split_lines(source: bytes, profile: CodexCapabilityProfile) -> tuple[CodexS
         ordinal += 1
         start = end
     return tuple(lines)
+
+
+def parse_codex_jsonl_from_offset(
+    source: bytes,
+    profile: CodexCapabilityProfile,
+    *,
+    start_ordinal: int = 1,
+) -> CodexParseResult:
+    """Parse a JSONL chunk using the same mapping rules as ``parse_codex_jsonl``.
+
+    Unterminated trailing lines are marked so incremental readers can retain them
+    without inventing events. Byte positions are chunk-relative.
+    """
+
+    if (
+        type(profile) is not CodexCapabilityProfile
+        or SUPPORTED_CODEX_PROFILES.get(profile.cli_version) != profile
+    ):
+        raise ValueError("unsupported_codex_profile")
+    lines = split_codex_jsonl_chunk(source, profile, start_ordinal=start_ordinal)
+    records: list[CodexParsedRecord] = []
+    statuses: list[ImportLineStatus] = []
+    reasons: list[str | None] = []
+    stream_gaps: set[str] = set()
+    for line in lines:
+        if len(line.content) > profile.max_line_bytes:
+            statuses.append(ImportLineStatus.OVERSIZED)
+            reasons.append("line_oversized")
+            continue
+        try:
+            value = _parse_json_line(line.content)
+        except TypeError, ValueError, UnicodeError:
+            statuses.append(ImportLineStatus.MALFORMED)
+            reason = "malformed_line"
+            if line.ordinal == lines[-1].ordinal and not line.terminated:
+                reason = "truncated_final_line"
+                stream_gaps.add(reason)
+            reasons.append(reason)
+            continue
+        status, item_type, reason = _validate_wrapper(value)
+        statuses.append(status)
+        reasons.append(reason)
+        wrapper_type = value.get("type")
+        if status is ImportLineStatus.MAPPED and type(wrapper_type) is str:
+            try:
+                frozen = freeze_json(cast(JsonValue, value))
+            except ProtocolValueError:
+                statuses[-1] = ImportLineStatus.UNSUPPORTED
+                reasons[-1] = "json_profile_unsupported"
+                continue
+            if type(frozen) is not JsonObject:
+                statuses[-1] = ImportLineStatus.UNSUPPORTED
+                reasons[-1] = "json_profile_unsupported"
+                continue
+            records.append(
+                CodexParsedRecord(
+                    line.ordinal,
+                    line.byte_start,
+                    line.byte_end,
+                    wrapper_type,
+                    item_type,
+                    frozen,
+                )
+            )
+    if lines and not lines[-1].terminated:
+        stream_gaps.add("final_newline_absent")
+    return CodexParseResult(
+        profile,
+        lines,
+        tuple(records),
+        tuple(statuses),
+        tuple(reasons),
+        tuple(sorted(stream_gaps, key=str.encode)),
+    )
 
 
 def _reject_constant(_: str) -> NoReturn:

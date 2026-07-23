@@ -24,6 +24,7 @@ The future document publishes:
 - preview/authorization contract;
 - outbound-case and provider-adapter contract;
 - egress-receipt semantics;
+- live harness observation retention (local control; not a network channel);
 - failure, cancellation, retry, and crash behavior;
 - extension/versioning requirements.
 
@@ -56,6 +57,17 @@ Ambiguous classification takes the stricter class. A detector miss cannot author
 category, scope, and never-send scanning are independent gates. The never-send registry is versioned
 and includes the complete public list in `PRIVACY.md`; policy may add prohibitions but cannot remove
 them.
+
+### Live harness observation retention
+
+First-party Codex live observation is local control (`ObservationPort`), not a network egress
+channel and not a seventh MCP tool. Observation consent is independent of egress consent: one
+project-level confirmation records a private workspace commitment (never a raw path). Revocation
+stops new ingestion and retains already-kept evidence. Never retain hidden reasoning or complete
+transcript prose. Sensitive bounded observation evidence lives only in encrypted objects; plaintext
+state is allowlisted structural fields plus commitments. Never create an unencrypted transcript
+spool on vault/service outage. Semantic review receives only minimized approved packets.
+Secret-like command output never appears in status, logs, hook advice, or semantic packets.
 
 ### Policy resolution
 

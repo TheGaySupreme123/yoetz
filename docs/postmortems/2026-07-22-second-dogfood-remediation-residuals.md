@@ -26,11 +26,14 @@ Installed-artifact lag (source-tree tests green while `$HOME/.local/bin/yoetz` o
 candidate stays behind) is a dogfood-process residual. Before any future dogfood runtime claim,
 reinstall or invoke the exact candidate under test. Remediation does not change that process gate.
 
-### No observation channel (deferred v0.2 / ADR-010)
+### No observation channel yet implemented (now in-scope for v0.1)
 
-Yoetz still records only what participants publish. There is no independent workspace or harness
-observation channel. ADR-010 keeps observation hooks deferred (v0.2); cooperative MCP remains the
-only tracking path. After a failed or empty publication sequence, Yoetz stays informationally empty.
+At the second dogfood, Yoetz still recorded only what participants published — there was no
+independent workspace or harness observation channel, so cooperative MCP remained the only tracking
+path. **Contract amendment (2026-07-22):** first-party Codex observation is now a required v0.1
+capability (protocol stays `0.1`) via local `ObservationPort` control, not a seventh MCP tool
+(ADR-010). Implementation and capability evidence remain outstanding; until they land, runtime
+behavior stays cooperative-only.
 
 ### Auto-activation unproven without Yoetz-specific wording
 

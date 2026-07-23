@@ -5,7 +5,8 @@
 
 ## Purpose
 
-Mark `yoetz.domain` as the package boundary for values, events, findings, and receipts.
+Mark `yoetz.domain` as the package boundary for values, events, findings, receipts, and
+observation domain types.
 
 ## Public surface
 

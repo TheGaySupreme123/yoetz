@@ -170,6 +170,14 @@ an evidence-backed dispute, or an explicit unresolved limitation. Human involvem
 policy widening, credential mutation, `confirm_every_request`, and finding waiver; never-send and
 out-of-scope content are unapprovable.
 
+Live first-party Codex observation consent is separate from egress consent. One project-level
+confirmation records a private workspace commitment (never a raw path). Revocation stops new
+ingestion and retains already-kept evidence. Observation never retains hidden reasoning or complete
+transcript prose; sensitive bounded evidence lives only in encrypted objects; plaintext state is
+allowlisted structural fields plus commitments; and vault/service outage never creates an
+unencrypted transcript spool. Secret-like command output never appears in status, logs, hook advice,
+or semantic packets. Semantic review still receives only minimized approved packets.
+
 v0.1 crash diagnostics are bounded structural identities/counts only. Yoetz does not capture or
 upload exception messages, locals, source/path excerpts, or raw tracebacks, even to an owner-only
 file. A future encrypted diagnostic-content feature would require its own reviewed schema,

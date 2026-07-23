@@ -113,6 +113,17 @@ ever admits `sensitive_confidential` content or anything in the never-send set. 
 `guidance/` documents over MCP resources is not a disclosure sink at all — those bytes carry no
 ledger, task, or user content and are identical for every installation.
 
+## Live harness observation retention
+
+First-party Codex live observation (ADR-010) is local control, not a network egress channel and not
+a seventh MCP tool. Observation consent is independent of egress consent: one project-level
+confirmation records a private workspace commitment (never a raw path). Revocation stops new
+ingestion and retains already-kept evidence. Never retain hidden reasoning or complete transcript
+prose. Sensitive bounded observation evidence lives only in encrypted objects; plaintext state is
+allowlisted structural fields plus commitments. Never create an unencrypted transcript spool on
+vault/service outage. Semantic review receives only minimized approved packets. Secret-like command
+output never appears in status, logs, hook advice, or semantic packets.
+
 ## Outbound pipeline and state machine
 
 One candidate request moves through exact states: `candidate` → `classified` →
