@@ -69,8 +69,7 @@ def test_rapid_changes_coalesce_and_identical_state_is_cached() -> None:
     assert len(first) == len(second) == 1
     assert duplicate == ()
     assert db.execute(
-        "SELECT subject_state_digest,status FROM observation_verification_jobs "
-        "ORDER BY state_token"
+        "SELECT subject_state_digest,status FROM observation_verification_jobs ORDER BY state_token"
     ).fetchall() == [(_STATE_A, "stale"), (_STATE_B, "pending")]
 
 
@@ -114,9 +113,12 @@ def test_new_service_generation_recovers_abandoned_lease_and_result_is_immutable
     assert db.execute(
         "SELECT status,is_current,result_commitment FROM observation_verification_results"
     ).fetchone() == ("passed", 1, _result().result_digest)
-    assert repository.claim_next(
-        service_generation=2,
-        lease_owner="service-two",
-        lease_expires_at="2026-07-23T10:15:00.000Z",
-        now=_LATER,
-    ) is None
+    assert (
+        repository.claim_next(
+            service_generation=2,
+            lease_owner="service-two",
+            lease_expires_at="2026-07-23T10:15:00.000Z",
+            now=_LATER,
+        )
+        is None
+    )

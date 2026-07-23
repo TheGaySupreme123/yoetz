@@ -154,9 +154,7 @@ def test_service_unavailable_never_spools_visible_plaintext(tmp_path: Path) -> N
         skip_service=True,
     )
     assert code == 0
-    persisted = b"".join(
-        path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
-    )
+    persisted = b"".join(path.read_bytes() for path in tmp_path.rglob("*") if path.is_file())
     assert canary.encode() not in persisted
     status = store.status(ObservationStatusQuery(workspace))
     assert ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value in status.gaps

@@ -274,9 +274,7 @@ def test_quarantine_eviction_retains_aggregate_loss_evidence(
     assert store.quarantined_count(workspace) == 2
     status = store.status(ObservationStatusQuery(workspace))
     assert ObservationGapCode.QUARANTINE_DETAIL_EVICTED.value in status.gaps
-    state_bytes = b"".join(
-        path.read_bytes() for path in tmp_path.rglob("*.json") if path.is_file()
-    )
+    state_bytes = b"".join(path.read_bytes() for path in tmp_path.rglob("*.json") if path.is_file())
     assert b'"quarantine_evicted_count":1' in state_bytes
     assert b'"quarantine_evicted_commitment":"sha256:' in state_bytes
     assert b'"quarantine_evicted_first":' in state_bytes

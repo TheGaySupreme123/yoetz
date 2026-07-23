@@ -926,11 +926,7 @@ async def run_setup_wizard(
             raw_presence = plugin.get("presence")
             plugin_presence = raw_presence if type(raw_presence) is str else None
     hooks_raw = integration.get("hooks")
-    hooks = (
-        hooks_raw
-        if isinstance(hooks_raw, dict)
-        else {}
-    )
+    hooks = hooks_raw if isinstance(hooks_raw, dict) else {}
     readiness = _readiness_layers(
         binary=chosen,
         mcp_state=cast(str | None, registration.get("state")),
@@ -1020,10 +1016,7 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
                 typer.echo(f"  Observation consent: {outcome}")
         check_policy = registration.get("check_policy")
         if isinstance(check_policy, dict):
-            typer.echo(
-                "  Approved-check policy: "
-                f"{check_policy.get('outcome') or 'absent'}"
-            )
+            typer.echo(f"  Approved-check policy: {check_policy.get('outcome') or 'absent'}")
             digest = check_policy.get("policy_digest")
             if type(digest) is str:
                 typer.echo(f"  Approved-check policy digest: {digest}")

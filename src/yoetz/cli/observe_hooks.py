@@ -693,9 +693,7 @@ def handle_observe(
             envelope=envelope,
             workspace_locator=workspace_locator,
         )
-        content_map = (
-            {envelope.source_identity: content_chunks} if content_chunks else None
-        )
+        content_map = {envelope.source_identity: content_chunks} if content_chunks else None
 
         # Local durable ingest first (never plaintext transcript spool).
         local_result = store.ingest(envelope)

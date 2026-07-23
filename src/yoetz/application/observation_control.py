@@ -34,7 +34,9 @@ type _SupportHandler = Callable[[object], Awaitable[JsonObject]]
 class ObservationIngestPort(Protocol):
     """Port or coordinator that accepts redacted ObservationIngestRequest bodies."""
 
-    async def ingest_request(self, request: ObservationIngestRequest) -> ObservationIngestResult: ...
+    async def ingest_request(
+        self, request: ObservationIngestRequest
+    ) -> ObservationIngestResult: ...
 
     async def status(self, query: ObservationStatusQuery) -> ObservationStatus: ...
 

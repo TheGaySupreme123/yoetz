@@ -1443,9 +1443,7 @@ class LocalObservationStore:
                 continue
         raw_quarantine_evicted_count = raw.get("quarantine_evicted_count", 0)
         quarantine_evicted_count = (
-            raw_quarantine_evicted_count
-            if type(raw_quarantine_evicted_count) is int
-            else 0
+            raw_quarantine_evicted_count if type(raw_quarantine_evicted_count) is int else 0
         )
         return _WorkspaceState(
             consent=consent,

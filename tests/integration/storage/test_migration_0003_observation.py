@@ -82,6 +82,4 @@ def test_failed_followup_migration_rolls_back_atomically(tmp_path: Path) -> None
     with pytest.raises(apsw.SQLError):
         run_migrations(db, (*BUNDLE_MIGRATIONS, failing), maintenance=None)  # type: ignore[arg-type]
     assert db.execute("PRAGMA user_version").fetchone() == (3,)
-    assert db.execute(
-        "SELECT 1 FROM sqlite_schema WHERE name='must_rollback'"
-    ).fetchone() is None
+    assert db.execute("SELECT 1 FROM sqlite_schema WHERE name='must_rollback'").fetchone() is None

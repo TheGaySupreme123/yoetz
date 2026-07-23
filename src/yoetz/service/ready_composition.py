@@ -1164,12 +1164,8 @@ async def provide_service_ready_context(
     # Production path: LocalObservationStore (consent/outbox) + ObservationCoordinator
     # routes into the mapped task-bundle SqliteObservationStore. MemoryObservationStore
     # remains test/reference-only and must not be used here.
-    provider_factory_ids = tuple(
-        getattr(gateway, "configured_provider_ids", lambda: ())()
-    )
-    connected_provider_ids = tuple(
-        getattr(gateway, "connected_provider_ids", lambda: ())()
-    )
+    provider_factory_ids = tuple(getattr(gateway, "configured_provider_ids", lambda: ())())
+    connected_provider_ids = tuple(getattr(gateway, "connected_provider_ids", lambda: ())())
     semantic_configured = config.verification.semantic != "disabled"
     semantic_ready = semantic_configured and bool(connected_provider_ids)
     observation_coordinator = ObservationCoordinator(
