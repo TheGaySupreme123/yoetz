@@ -626,47 +626,22 @@ def handle_observe(
                                 runner(_drain)
 
         if not skip_service and resolved_event != "SessionStart":
-            # Non-SessionStart: enqueue already done; try immediate service drain when mapped.
+            # Every later mapped hook drains the complete session outbox, so the
+            # current envelope plus any stream-recovered or previously-pending
+            # entries all reconcile. Retryable rejections stay pending and
+            # permanently-invalid ones are quarantined (never dropped) by the
+            # shared drain routing. Unmapped events remain pending until mapped.
             if mapping is not None:
 
-                async def _ingest_one() -> tuple[str | None, str | None]:
-                    return await _try_service_ingest(codex_session_id, envelope)
+                async def _drain_all() -> None:
+                    await _drain_outbox(
+                        store,
+                        workspace_commitment=workspace_commitment,
+                        codex_session_id=codex_session_id,
+                    )
 
-                soft_fail, rejected = cast(tuple[str | None, str | None], runner(_ingest_one))
-                if soft_fail is not None:
-                    _stderr_line(f"hook_observe_degraded: {soft_fail}")
-                    store.note_coverage_gap(workspace_commitment, soft_fail)
-                    gap_envelope = ObservationEnvelope(
-                        session_commitment=session_commitment,
-                        event_kind="observation_gap",
-                        source_identity=f"hook:gap:{soft_fail}:{envelope.source_identity[-24:]}",
-                        source=ObservationSource.CODEX_HOOK,
-                        cursor=ObservationCursor(
-                            source_generation=envelope.cursor.source_generation,
-                            byte_position=envelope.cursor.byte_position,
-                            event_position=envelope.cursor.event_position + 1,
-                            last_source_commitment=envelope.cursor.last_source_commitment,
-                            mapping_version=HOOK_MAPPING_VERSION,
-                        ),
-                        receipt_time=_now(),
-                        structural_payload=JsonObject({"hook_name": resolved_event}),
-                        content_object_refs=(),
-                        gap_codes=(soft_fail,),
-                    )
-                    with contextlib.suppress(Exception):
-                        store.ingest(gap_envelope)
-                elif rejected is not None:
-                    _stderr_line(f"hook_observe_degraded: {rejected}")
-                    store.note_coverage_gap(workspace_commitment, rejected)
-                    if rejected != ObservationGapCode.MAPPING_MISSING.value:
-                        store.acknowledge_outbox(
-                            workspace_commitment, codex_session_id, envelope.source_identity
-                        )
-                else:
-                    store.acknowledge_outbox(
-                        workspace_commitment, codex_session_id, envelope.source_identity
-                    )
-            # Unmapped non-SessionStart events remain pending in the outbox.
+                with contextlib.suppress(Exception):
+                    runner(_drain_all)
 
         # Nonblocking advice delivery at safe points (suppress Yoetz self-tool loops).
         if not additional and resolved_event in ADVICE_SAFE_EVENTS and not skip_advice_loop:

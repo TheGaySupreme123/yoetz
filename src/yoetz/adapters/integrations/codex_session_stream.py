@@ -167,11 +167,7 @@ class CodexSessionStreamLocator:
                 if walked > _MAX_SESSION_WALK:
                     return None
                 # Never descend through symlinked directories.
-                dirnames[:] = [
-                    name
-                    for name in dirnames
-                    if not (Path(dirpath) / name).is_symlink()
-                ]
+                dirnames[:] = [name for name in dirnames if not (Path(dirpath) / name).is_symlink()]
                 for name in filenames:
                     if session_id not in name:
                         continue
@@ -189,9 +185,7 @@ class CodexSessionStreamLocator:
             return None
         return matches[0]
 
-    def _validate_candidate(
-        self, candidate: Path, *, home: Path, session_id: str
-    ) -> Path | None:
+    def _validate_candidate(self, candidate: Path, *, home: Path, session_id: str) -> Path | None:
         try:
             if candidate.is_symlink() or not candidate.is_file():
                 return None
@@ -222,7 +216,7 @@ class CodexSessionStreamLocator:
     def _is_beneath(path: Path, root: Path) -> bool:
         try:
             path.relative_to(root.resolve(strict=False))
-        except (OSError, ValueError):
+        except OSError, ValueError:
             return False
         return True
 
@@ -586,19 +580,32 @@ def reconcile_session_stream(
     advance = reader.advance(path)
     accepted = 0
     duplicates = 0
+    overflow = False
     for envelope in advance.envelopes:
         result = store.ingest(envelope)
         if result.disposition.value == "accepted":
             accepted += 1
+            # Recovered stream envelopes flow through the same durable outbox as
+            # hooks so the coordinator materializes them into the task ledger.
+            # Enqueue only after the row is retained; the cursor is persisted
+            # after the whole batch, so it never advances past an unqueued event.
+            if (
+                store.enqueue_outbox(workspace_commitment, codex_session_id, envelope)
+                == ObservationGapCode.OUTBOX_OVERFLOW.value
+            ):
+                overflow = True
         elif result.disposition.value == "duplicate":
             duplicates += 1
     store.set_stream_cursor(workspace_commitment, session_commitment, advance.cursor)
     store.set_stream_partial(workspace_commitment, session_commitment, advance.partial_line)
     store.note_stream_reconcile(workspace_commitment)
+    gaps = advance.gaps
+    if overflow and ObservationGapCode.OUTBOX_OVERFLOW.value not in gaps:
+        gaps = (*gaps, ObservationGapCode.OUTBOX_OVERFLOW.value)
     return {
         "accepted": accepted,
         "duplicates": duplicates,
-        "gaps": advance.gaps,
+        "gaps": gaps,
         "byte_position": advance.cursor.byte_position,
         "event_position": advance.cursor.event_position,
         "generation": advance.cursor.source_generation,

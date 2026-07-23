@@ -168,12 +168,16 @@ def test_zero_cooperative_publications_deterministic_advice(tmp_path: Path) -> N
 # ---------------------------------------------------------------------------
 
 
-def test_vault_outage_nonblocking_degraded_no_plaintext_spool(tmp_path: Path) -> None:
+def test_vault_outage_nonblocking_degraded_no_plaintext_spool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
     store.grant_consent(workspace)
     # Lifecycle mapping required for the service-ingest soft-fail path.
     from yoetz.adapters.integrations.codex_lifecycle import mapping_from_start_ids, store_mapping
+    from yoetz.cli import observe_hooks as observe_hooks_module
+    from yoetz.domain.observation import ObservationEnvelope
     from yoetz.protocol.ids import IdKind, new_id
 
     store_mapping(
@@ -187,8 +191,14 @@ def test_vault_outage_nonblocking_degraded_no_plaintext_spool(tmp_path: Path) ->
         _state=tmp_path,
     )
 
-    def fake_runner(_factory: object) -> tuple[str | None, str | None]:
+    async def _vault_locked_ingest(
+        _session_id: str, _envelope: ObservationEnvelope
+    ) -> tuple[str | None, str | None]:
+        # Simulate a vault-locked service so the outbox drain records the gap
+        # while keeping the entry pending (retryable).
         return ObservationGapCode.VAULT_LOCKED.value, None
+
+    monkeypatch.setattr(observe_hooks_module, "_try_service_ingest", _vault_locked_ingest)
 
     code = handle_observe(
         event_name="PostToolUse",
@@ -205,7 +215,6 @@ def test_vault_outage_nonblocking_degraded_no_plaintext_spool(tmp_path: Path) ->
         workspace=str(tmp_path),
         _state=tmp_path,
         skip_service=False,
-        run_async=fake_runner,
     )
     assert code == 0
     status = store.status(ObservationStatusQuery(workspace))

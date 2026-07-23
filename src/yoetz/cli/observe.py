@@ -24,6 +24,7 @@ from yoetz.adapters.integrations.observation_local import (
 from yoetz.domain.observation import (
     ObservationControlCommand,
     ObservationCursor,
+    ObservationGapCode,
     ObservationRevokeCommand,
     ObservationSource,
     ObservationStatusQuery,
@@ -91,9 +92,7 @@ def observe_status(
             "freshness_frontier": snapshot.freshness_frontier,
             "top_summary": None if top is None else top.summary,
             "top_detail": None if top is None else top.detail,
-            "top_evidence": None
-            if top is None or not top.evidence_refs
-            else top.evidence_refs[0],
+            "top_evidence": None if top is None or not top.evidence_refs else top.evidence_refs[0],
             "finding_ids": tuple(str(item) for item in snapshot.ranked_finding_ids[:8]),
         }
     if json_output:
@@ -118,11 +117,7 @@ def observe_status(
         "stream_coverage": str(
             status.source_coverage.get(ObservationSource.CODEX_SESSION_STREAM, False)
         ),
-        "recommendation": (
-            "none"
-            if snapshot is None
-            else snapshot.recommended_next_action
-        ),
+        "recommendation": ("none" if snapshot is None else snapshot.recommended_next_action),
         "advice_summary": (
             "none"
             if snapshot is None or not snapshot.ranked_items
@@ -239,18 +234,29 @@ def reconcile_session_stream(
     advance = reader.advance(path)
     accepted = 0
     duplicates = 0
+    overflow = False
     for envelope in advance.envelopes:
         result = store.ingest(envelope)
         if result.disposition.value == "accepted":
             accepted += 1
+            # Recovered envelopes join the durable outbox so a later mapped hook
+            # drains them into the task ledger, just like the locator path.
+            if (
+                store.enqueue_outbox(workspace_commitment, session_token[:128], envelope)
+                == ObservationGapCode.OUTBOX_OVERFLOW.value
+            ):
+                overflow = True
         elif result.disposition.value == "duplicate":
             duplicates += 1
     store.set_stream_cursor(workspace_commitment, session_commitment, advance.cursor)
     store.set_stream_partial(workspace_commitment, session_commitment, advance.partial_line)
+    gaps = advance.gaps
+    if overflow and ObservationGapCode.OUTBOX_OVERFLOW.value not in gaps:
+        gaps = (*gaps, ObservationGapCode.OUTBOX_OVERFLOW.value)
     payload = {
         "accepted": accepted,
         "duplicates": duplicates,
-        "gaps": advance.gaps,
+        "gaps": gaps,
         "byte_position": advance.cursor.byte_position,
         "event_position": advance.cursor.event_position,
         "generation": advance.cursor.source_generation,
