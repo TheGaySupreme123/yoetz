@@ -534,6 +534,12 @@ def handle_observe(
             if overflow is not None:
                 _stderr_line(f"hook_observe_degraded: {overflow}")
 
+        # Persist session end so lifecycle can report STOPPED once every bound
+        # session has ended.
+        if resolved_event == "SessionEnd":
+            with contextlib.suppress(Exception):
+                store.note_session_end(workspace_commitment, session_commitment)
+
         # Selective secondary stream reconciliation (path never persisted/disclosed).
         with contextlib.suppress(Exception):
             from yoetz.adapters.integrations.codex_session_stream import (

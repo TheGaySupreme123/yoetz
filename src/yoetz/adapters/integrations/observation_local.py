@@ -197,6 +197,7 @@ class _WorkspaceState:
     pending_outbox: list[tuple[str, ObservationEnvelope]] | None = None
     quarantine: list[tuple[str, ObservationEnvelope, str]] | None = None
     codex_session_bindings: dict[str, str] | None = None
+    ended_sessions: set[str] | None = None
 
     def __post_init__(self) -> None:
         if self.session_workspaces is None:
@@ -225,6 +226,8 @@ class _WorkspaceState:
             self.quarantine = []
         if self.codex_session_bindings is None:
             self.codex_session_bindings = {}
+        if self.ended_sessions is None:
+            self.ended_sessions = set()
 
 
 def _cursor_key(source: ObservationSource, session_commitment: str) -> str:
@@ -328,6 +331,22 @@ class LocalObservationStore:
                     retryable=False,
                 )
             state.session_workspaces[session_commitment] = workspace_commitment
+            self._save(workspace_commitment, state)
+
+    def note_session_end(self, workspace_commitment: str, session_commitment: str) -> None:
+        """Persist that a bound Codex session ended.
+
+        When every bound session for a workspace has ended (or consent stops),
+        the lifecycle reports STOPPED rather than lingering as DEGRADED.
+        """
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.ended_sessions is not None
+            assert state.session_workspaces is not None
+            # Retain the binding so "all bound sessions ended" is computable.
+            state.session_workspaces.setdefault(session_commitment, workspace_commitment)
+            state.ended_sessions.add(session_commitment)
             self._save(workspace_commitment, state)
 
     def bind_codex_session(self, workspace_commitment: str, codex_session_id: str) -> str:
@@ -961,6 +980,11 @@ class LocalObservationStore:
             last_drain = None
         consent_active = consent is not None and consent.revoked_at is None and not consent.paused
         mapping_available = bool(state.session_workspaces) or bool(state.codex_session_bindings)
+        bound_sessions = set(state.session_workspaces)
+        ended_sessions = state.ended_sessions or set()
+        # STOPPED once every bound session has ended (consent-stop is handled in
+        # compute_observation_lifecycle via consent_active).
+        session_ended = bool(bound_sessions) and bound_sessions <= ended_sessions
         signals = ObservationHealthSignals(
             consent_active=consent_active,
             mapping_available=mapping_available,
@@ -973,7 +997,7 @@ class LocalObservationStore:
             last_hook_receipt_monotonic=last_hook,
             last_stream_advancement_monotonic=last_stream,
             last_successful_drain_monotonic=last_drain if pending == 0 else last_drain,
-            session_ended=False,
+            session_ended=session_ended,
         )
         lifecycle = compute_observation_lifecycle(
             signals,
@@ -1026,6 +1050,7 @@ class LocalObservationStore:
                 }
             ),
             "dedup": tuple(sorted(state.dedup, key=str.encode)),
+            "ended_sessions": tuple(sorted(state.ended_sessions or set(), key=str.encode)),
             "envelopes": tuple(observation_envelope_to_json(item) for item in state.envelopes),
             "gaps": tuple(sorted(state.gaps, key=str.encode)),
             "unsupported_events": tuple(sorted(state.unsupported_events, key=str.encode)),
@@ -1114,6 +1139,7 @@ class LocalObservationStore:
             for key, value in cast(Mapping[str, JsonValue], raw.get("cursors") or {}).items()
         }
         dedup_raw = raw.get("dedup") or ()
+        ended_sessions_raw = raw.get("ended_sessions") or ()
         envelopes_raw = raw.get("envelopes") or ()
         gaps_raw = raw.get("gaps") or ()
         unsupported_raw = raw.get("unsupported_events") or ()
@@ -1244,6 +1270,7 @@ class LocalObservationStore:
             session_workspaces=session_workspaces,
             cursors=cursors,
             dedup=set(cast(tuple[str, ...], dedup_raw)),
+            ended_sessions=set(cast(tuple[str, ...], ended_sessions_raw)),
             envelopes=envelopes,
             gaps=set(cast(tuple[str, ...], gaps_raw)),
             unsupported_events=set(cast(tuple[str, ...], unsupported_raw)),

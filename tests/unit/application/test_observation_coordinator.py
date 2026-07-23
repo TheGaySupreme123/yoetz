@@ -170,6 +170,28 @@ def test_monotonic_samples_fenced_across_simulated_reboot(tmp_path: Path) -> Non
     )
 
 
+def test_session_end_reports_stopped_and_persists(tmp_path: Path) -> None:
+    from yoetz.domain.observation import ObservationLifecycle
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment("sess-end")
+    store.bind_session(workspace, session)
+    store.ingest(_envelope(session=session))
+    assert store.status(ObservationStatusQuery(workspace)).lifecycle is not (
+        ObservationLifecycle.STOPPED
+    )
+
+    store.note_session_end(workspace, session)
+    assert store.status(ObservationStatusQuery(workspace)).lifecycle is ObservationLifecycle.STOPPED
+    # Durable across a fresh store instance.
+    reopened = LocalObservationStore(_state=tmp_path)
+    assert (
+        reopened.status(ObservationStatusQuery(workspace)).lifecycle is ObservationLifecycle.STOPPED
+    )
+
+
 def test_local_outbox_quarantine_is_visible_and_durable(tmp_path: Path) -> None:
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
