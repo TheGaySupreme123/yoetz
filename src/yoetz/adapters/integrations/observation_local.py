@@ -198,6 +198,14 @@ class _WorkspaceState:
     quarantine: list[tuple[str, ObservationEnvelope, str]] | None = None
     codex_session_bindings: dict[str, str] | None = None
     ended_sessions: set[str] | None = None
+    session_generations: dict[str, int] | None = None
+    ended_session_generations: dict[str, int] | None = None
+    quarantine_evicted_count: int = 0
+    quarantine_evicted_commitment: str | None = None
+    quarantine_evicted_first: Timestamp | None = None
+    quarantine_evicted_last: Timestamp | None = None
+    trusted_policy_digest: str | None = None
+    trusted_policy_mac: str | None = None
 
     def __post_init__(self) -> None:
         if self.session_workspaces is None:
@@ -228,6 +236,10 @@ class _WorkspaceState:
             self.codex_session_bindings = {}
         if self.ended_sessions is None:
             self.ended_sessions = set()
+        if self.session_generations is None:
+            self.session_generations = {}
+        if self.ended_session_generations is None:
+            self.ended_session_generations = {}
 
 
 def _cursor_key(source: ObservationSource, session_commitment: str) -> str:
@@ -333,7 +345,34 @@ class LocalObservationStore:
             state.session_workspaces[session_commitment] = workspace_commitment
             self._save(workspace_commitment, state)
 
-    def note_session_end(self, workspace_commitment: str, session_commitment: str) -> None:
+    def begin_session_generation(self, workspace_commitment: str, session_commitment: str) -> int:
+        """Advance the durable generation and clear only the prior stopped fence."""
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.session_generations is not None
+            assert state.ended_session_generations is not None
+            assert state.ended_sessions is not None
+            generation = state.session_generations.get(session_commitment, 0) + 1
+            state.session_generations[session_commitment] = generation
+            state.ended_session_generations.pop(session_commitment, None)
+            state.ended_sessions.discard(session_commitment)
+            self._save(workspace_commitment, state)
+            return generation
+
+    def current_session_generation(self, workspace_commitment: str, session_commitment: str) -> int:
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.session_generations is not None
+            return state.session_generations.get(session_commitment, 1)
+
+    def note_session_end(
+        self,
+        workspace_commitment: str,
+        session_commitment: str,
+        *,
+        generation: int | None = None,
+    ) -> None:
         """Persist that a bound Codex session ended.
 
         When every bound session for a workspace has ended (or consent stops),
@@ -343,10 +382,17 @@ class LocalObservationStore:
         with self._lock:
             state = self._load(workspace_commitment)
             assert state.ended_sessions is not None
+            assert state.session_generations is not None
+            assert state.ended_session_generations is not None
             assert state.session_workspaces is not None
+            current = state.session_generations.get(session_commitment, 1)
+            observed = current if generation is None else generation
+            if observed != current:
+                return
             # Retain the binding so "all bound sessions ended" is computable.
             state.session_workspaces.setdefault(session_commitment, workspace_commitment)
             state.ended_sessions.add(session_commitment)
+            state.ended_session_generations[session_commitment] = observed
             self._save(workspace_commitment, state)
 
     def bind_codex_session(self, workspace_commitment: str, codex_session_id: str) -> str:
@@ -378,6 +424,14 @@ class LocalObservationStore:
             if len(active) == 1:
                 return active[0]
             return None
+
+    def codex_sessions_for_workspace(self, workspace_commitment: str) -> tuple[str, ...]:
+        """Return the bounded structural session IDs already bound to one workspace."""
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.codex_session_bindings is not None
+            return tuple(sorted(state.codex_session_bindings, key=str.encode))
 
     def consent_for(self, workspace_commitment: str) -> LocalObservationConsent | None:
         with self._lock:
@@ -673,9 +727,28 @@ class LocalObservationStore:
             )
             if not already:
                 state.quarantine.append((codex_session_id, moved, reason))
-                # Bounded: drop the oldest quarantined entry if we exceed the cap.
+                # Bounded detail with permanent aggregate evidence for evictions.
                 while len(state.quarantine) > _MAX_QUARANTINE:
-                    state.quarantine.pop(0)
+                    evicted_session, evicted_envelope, evicted_reason = state.quarantine.pop(0)
+                    material = JsonObject(
+                        {
+                            "prior": state.quarantine_evicted_commitment,
+                            "session_commitment": evicted_envelope.session_commitment,
+                            "source_identity": evicted_envelope.source_identity,
+                            "source_commitment": evicted_envelope.cursor.last_source_commitment,
+                            "reason": evicted_reason,
+                            "codex_session_commitment": session_commitment_from_codex_id(
+                                self.key_material(), evicted_session
+                            ),
+                        }
+                    )
+                    state.quarantine_evicted_commitment = canonical_digest(material)
+                    state.quarantine_evicted_count += 1
+                    receipt = evicted_envelope.receipt_time
+                    if state.quarantine_evicted_first is None:
+                        state.quarantine_evicted_first = receipt
+                    state.quarantine_evicted_last = receipt
+                    state.gaps.add(ObservationGapCode.QUARANTINE_DETAIL_EVICTED.value)
             state.gaps.add(ObservationGapCode.OUTBOX_QUARANTINED.value)
             self._save(workspace, state)
             return True
@@ -700,6 +773,63 @@ class LocalObservationStore:
             assert state.gaps is not None
             if type(gap_code) is str and gap_code:
                 state.gaps.add(gap_code)
+            self._save(workspace, state)
+
+    def trust_policy_digest(self, workspace: str, policy_digest: str) -> None:
+        """Persist a tamper-evident local activation cache for one exact digest.
+
+        The task-bundle repository remains the authoritative encrypted trust
+        record. This cache contains no argv or content and cannot activate a
+        different byte digest.
+        """
+
+        import hashlib
+        import hmac
+
+        if (
+            type(policy_digest) is not str
+            or not policy_digest.startswith("sha256:")
+            or len(policy_digest) != 71
+        ):
+            raise ProtocolValueError("invalid_approved_check_policy")
+        with self._lock:
+            state = self._load(workspace)
+            state.trusted_policy_digest = policy_digest
+            state.trusted_policy_mac = hmac.new(
+                self.key_material(),
+                b"yoetz/check-policy-trust/v1\0"
+                + workspace.encode("ascii")
+                + b"\0"
+                + policy_digest.encode("ascii"),
+                hashlib.sha256,
+            ).hexdigest()
+            self._save(workspace, state)
+
+    def policy_digest_is_trusted(self, workspace: str, policy_digest: str) -> bool:
+        import hashlib
+        import hmac
+
+        with self._lock:
+            state = self._load(workspace)
+            expected = hmac.new(
+                self.key_material(),
+                b"yoetz/check-policy-trust/v1\0"
+                + workspace.encode("ascii")
+                + b"\0"
+                + policy_digest.encode("ascii"),
+                hashlib.sha256,
+            ).hexdigest()
+            return (
+                state.trusted_policy_digest == policy_digest
+                and state.trusted_policy_mac is not None
+                and hmac.compare_digest(state.trusted_policy_mac, expected)
+            )
+
+    def revoke_policy_trust(self, workspace: str) -> None:
+        with self._lock:
+            state = self._load(workspace)
+            state.trusted_policy_digest = None
+            state.trusted_policy_mac = None
             self._save(workspace, state)
 
     def ingest(self, envelope: ObservationEnvelope) -> ObservationIngestResult:
@@ -1051,6 +1181,24 @@ class LocalObservationStore:
             ),
             "dedup": tuple(sorted(state.dedup, key=str.encode)),
             "ended_sessions": tuple(sorted(state.ended_sessions or set(), key=str.encode)),
+            "session_generations": JsonObject(
+                {
+                    key: value
+                    for key, value in sorted(
+                        (state.session_generations or {}).items(),
+                        key=lambda item: item[0].encode(),
+                    )
+                }
+            ),
+            "ended_session_generations": JsonObject(
+                {
+                    key: value
+                    for key, value in sorted(
+                        (state.ended_session_generations or {}).items(),
+                        key=lambda item: item[0].encode(),
+                    )
+                }
+            ),
             "envelopes": tuple(observation_envelope_to_json(item) for item in state.envelopes),
             "gaps": tuple(sorted(state.gaps, key=str.encode)),
             "unsupported_events": tuple(sorted(state.unsupported_events, key=str.encode)),
@@ -1111,6 +1259,20 @@ class LocalObservationStore:
                 )
                 for session, envelope, reason in (state.quarantine or ())
             ),
+            "quarantine_evicted_count": state.quarantine_evicted_count,
+            "quarantine_evicted_commitment": state.quarantine_evicted_commitment,
+            "quarantine_evicted_first": (
+                None
+                if state.quarantine_evicted_first is None
+                else state.quarantine_evicted_first.wire
+            ),
+            "quarantine_evicted_last": (
+                None
+                if state.quarantine_evicted_last is None
+                else state.quarantine_evicted_last.wire
+            ),
+            "trusted_policy_digest": state.trusted_policy_digest,
+            "trusted_policy_mac": state.trusted_policy_mac,
             "codex_session_bindings": JsonObject(
                 {key: value for key, value in sorted(state.codex_session_bindings.items())}
             ),
@@ -1140,6 +1302,20 @@ class LocalObservationStore:
         }
         dedup_raw = raw.get("dedup") or ()
         ended_sessions_raw = raw.get("ended_sessions") or ()
+        session_generations = {
+            str(key): int(value)
+            for key, value in cast(
+                Mapping[str, JsonValue], raw.get("session_generations") or {}
+            ).items()
+            if type(value) is int and not isinstance(value, bool) and value >= 1
+        }
+        ended_session_generations = {
+            str(key): int(value)
+            for key, value in cast(
+                Mapping[str, JsonValue], raw.get("ended_session_generations") or {}
+            ).items()
+            if type(value) is int and not isinstance(value, bool) and value >= 1
+        }
         envelopes_raw = raw.get("envelopes") or ()
         gaps_raw = raw.get("gaps") or ()
         unsupported_raw = raw.get("unsupported_events") or ()
@@ -1265,12 +1441,20 @@ class LocalObservationStore:
                 )
             except ProtocolValueError, TypeError, ValueError:
                 continue
+        raw_quarantine_evicted_count = raw.get("quarantine_evicted_count", 0)
+        quarantine_evicted_count = (
+            raw_quarantine_evicted_count
+            if type(raw_quarantine_evicted_count) is int
+            else 0
+        )
         return _WorkspaceState(
             consent=consent,
             session_workspaces=session_workspaces,
             cursors=cursors,
             dedup=set(cast(tuple[str, ...], dedup_raw)),
             ended_sessions=set(cast(tuple[str, ...], ended_sessions_raw)),
+            session_generations=session_generations,
+            ended_session_generations=ended_session_generations,
             envelopes=envelopes,
             gaps=set(cast(tuple[str, ...], gaps_raw)),
             unsupported_events=set(cast(tuple[str, ...], unsupported_raw)),
@@ -1288,6 +1472,22 @@ class LocalObservationStore:
             monotonic_epoch=monotonic_epoch,
             pending_outbox=pending_outbox,
             quarantine=quarantine,
+            quarantine_evicted_count=quarantine_evicted_count,
+            quarantine_evicted_commitment=cast(
+                str | None, raw.get("quarantine_evicted_commitment")
+            ),
+            quarantine_evicted_first=(
+                None
+                if raw.get("quarantine_evicted_first") is None
+                else Timestamp(str(raw.get("quarantine_evicted_first")))
+            ),
+            quarantine_evicted_last=(
+                None
+                if raw.get("quarantine_evicted_last") is None
+                else Timestamp(str(raw.get("quarantine_evicted_last")))
+            ),
+            trusted_policy_digest=cast(str | None, raw.get("trusted_policy_digest")),
+            trusted_policy_mac=cast(str | None, raw.get("trusted_policy_mac")),
             codex_session_bindings=bindings,
         )
 

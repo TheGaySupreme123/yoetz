@@ -21,6 +21,7 @@ tests/integration/
     test_build_and_pragma_gate.py
     test_migration_0001.py
     test_migration_0002_observation.py
+    test_migration_0003_observation.py
     test_append_and_replay.py
     test_projection_rebuild.py
     test_start_catalog_state_machine.py
@@ -99,6 +100,7 @@ tests/integration/storage/test_build_and_pragma_gate.py
 tests/integration/storage/test_checkpoint_and_wal_bounds.py
 tests/integration/storage/test_migration_0001.py
 tests/integration/storage/test_migration_0002_observation.py
+tests/integration/storage/test_migration_0003_observation.py
 tests/integration/storage/test_migration_rollback.py
 tests/integration/storage/test_owner_generation.py
 tests/integration/storage/test_projection_rebuild.py

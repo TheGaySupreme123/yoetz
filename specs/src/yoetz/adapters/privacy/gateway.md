@@ -19,6 +19,9 @@ on policy tightening, and exposes neither clients nor credentials to application
   `reconcile_policy` atomically swaps the current snapshot after policy/vault/human-authority
   validation. Every snapshot binds `HumanAuthorityCapability` generation/digest.
 - `async close() -> None` — idempotent terminal closure of all bound transports.
+- `configured_provider_ids()` / `connected_provider_ids()` — bounded structural snapshots used by
+  observation advice composition; they expose provider IDs only, never bindings, endpoints,
+  credentials, or clients.
 
 ## Behavior
 

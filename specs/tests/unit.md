@@ -17,6 +17,7 @@ Required test modules and shared support files:
 tests/unit/
   adapters/
     test_approved_checks.py
+    test_check_sandbox.py
     test_codex_capability_harness.py
     test_codex_jsonl.py
     test_codex_discovery.py
@@ -56,6 +57,10 @@ tests/unit/
     test_harness_mcp_service.py
     test_integrations.py
     test_observation_advice.py
+    test_observation_check_policy.py
+    test_observation_coordinator.py
+    test_observation_health.py
+    test_observation_verification_worker.py
     test_service_facade.py
     test_unit_of_work.py
     test_verdict_rules.py
@@ -110,6 +115,7 @@ This index covers exactly these separately owned future files:
 
 ```text
 tests/unit/adapters/test_approved_checks.py
+tests/unit/adapters/test_check_sandbox.py
 tests/unit/adapters/test_codex_capability_harness.py
 tests/unit/adapters/test_codex_discovery.py
 tests/unit/adapters/test_codex_jsonl.py
@@ -125,6 +131,10 @@ tests/unit/application/test_error_mapping.py
 tests/unit/application/test_harness_mcp_service.py
 tests/unit/application/test_integrations.py
 tests/unit/application/test_observation_advice.py
+tests/unit/application/test_observation_check_policy.py
+tests/unit/application/test_observation_coordinator.py
+tests/unit/application/test_observation_health.py
+tests/unit/application/test_observation_verification_worker.py
 tests/unit/application/test_semantic_post_validation.py
 tests/unit/application/test_service_facade.py
 tests/unit/application/test_unit_of_work.py

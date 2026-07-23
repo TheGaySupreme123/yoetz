@@ -15,7 +15,12 @@ from yoetz.cli.observe_hooks import (
     handle_observe,
     map_hook_payload_to_envelope,
 )
-from yoetz.domain.observation import ObservationEnvelope, ObservationGapCode, ObservationSource
+from yoetz.domain.observation import (
+    ObservationEnvelope,
+    ObservationGapCode,
+    ObservationSource,
+    ObservationStatusQuery,
+)
 
 _KEY = b"k" * 32
 
@@ -59,7 +64,36 @@ def test_unknown_future_hook_becomes_opaque_gap(tmp_path: Path) -> None:
         key_material=_KEY,
         gap_codes=(ObservationGapCode.UNSUPPORTED_EVENT.value,),
     )
+    assert envelope.event_kind == "FutureHostEvent"
     assert ObservationGapCode.UNSUPPORTED_EVENT.value in envelope.gap_codes
+
+
+def test_visible_unknown_content_is_redacted_and_hidden_fields_are_ignored(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    session = store.session_commitment("sess-visible")
+    envelope = map_hook_payload_to_envelope(
+        "FutureHostEvent",
+        {"session_id": "sess-visible"},
+        session_commitment=session,
+        event_ordinal=1,
+        key_material=_KEY,
+    )
+    chunks = observe_hooks_module._visible_content_chunks(  # pyright: ignore[reportPrivateUsage]
+        "FutureHostEvent",
+        {
+            "visibility": "task",
+            "visible_content": "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz123456",
+            "reasoning": "HIDDEN_REASONING_CANARY",
+            "system": "SYSTEM_PROMPT_CANARY",
+        },
+        envelope=envelope,
+        workspace_locator=None,
+    )
+    assert len(chunks) == 1
+    assert chunks[0].redacted is True
+    assert b"sk-abcdefghijklmnopqrstuvwxyz123456" not in chunks[0].content
+    assert b"HIDDEN_REASONING_CANARY" not in chunks[0].content
+    assert b"SYSTEM_PROMPT_CANARY" not in chunks[0].content
 
 
 def test_identical_tool_calls_remain_distinct(tmp_path: Path) -> None:
@@ -102,6 +136,30 @@ def test_observe_without_consent_exits_zero_no_spool(tmp_path: Path) -> None:
     )
     assert code == 0
     assert json.loads(stdout.getvalue().decode()) == {}
+
+
+def test_service_unavailable_never_spools_visible_plaintext(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    canary = "VISIBLE_TASK_CANARY_6f4b2f"
+    code = handle_observe(
+        event_name="UserPromptSubmit",
+        stdin_bytes=json.dumps(
+            {"session_id": "no-spool", "prompt": canary, "event_ordinal": 1}
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    assert code == 0
+    persisted = b"".join(
+        path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
+    )
+    assert canary.encode() not in persisted
+    status = store.status(ObservationStatusQuery(workspace))
+    assert ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value in status.gaps
 
 
 def test_observe_ingests_when_consented_and_pairs_pre_post(tmp_path: Path) -> None:
@@ -292,3 +350,35 @@ async def test_drain_quarantines_permanent_and_keeps_retryable(
     pending = store.list_pending_outbox(workspace)
     assert len(pending) == 1
     assert pending[0][1].source_identity == retry.source_identity
+
+
+@pytest.mark.anyio
+async def test_drain_is_round_robin_across_all_workspace_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    for session in ("current", "recovered"):
+        store.bind_codex_session(workspace, session)
+        for ordinal in (1, 2):
+            store.enqueue_outbox(
+                workspace,
+                session,
+                _drain_envelope(store, session, f"hook:{session}:{ordinal}", ordinal),
+            )
+    calls: list[str] = []
+
+    async def _accept(session_id: str, envelope: ObservationEnvelope):
+        del envelope
+        calls.append(session_id)
+        return None, None
+
+    monkeypatch.setattr(observe_hooks_module, "_try_service_ingest", _accept)
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="current",
+    )
+    assert calls == ["current", "recovered", "current", "recovered"]
+    assert store.pending_outbox_count(workspace) == 0

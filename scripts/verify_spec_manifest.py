@@ -148,6 +148,7 @@ _MAX_SPEC_BYTES: Final = 2_000_000
 _SCOPE_BUCKETS: Final = (
     "Repository root",
     ".github/ workflows",
+    ".yoetz/ project policy",
     "docs/ public protocol and runbooks",
     "schemas/",
     "fixtures/",
@@ -167,6 +168,8 @@ def _classify_scope(future_path: str, mapping: PathMapping) -> str:
         return "Repository root"
     if future_path.startswith(".github/"):
         return ".github/ workflows"
+    if future_path.startswith(".yoetz/"):
+        return ".yoetz/ project policy"
     if future_path.startswith("docs/"):
         return "docs/ public protocol and runbooks"
     if future_path.startswith("schemas/"):

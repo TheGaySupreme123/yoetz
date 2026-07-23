@@ -1147,6 +1147,7 @@ class StatusRequestModel(PublicRequestModel):
     session_id: SessionIdWire
     writer_id: WriterIdWire
     view: Literal[
+        "advice",
         "assignment",
         "candidate_findings",
         "compact",
@@ -2018,6 +2019,35 @@ class StatusObligationsPageModel(_ClosedModel):
         return self
 
 
+class StatusAdviceItemModel(_ClosedModel):
+    finding_id: FindingIdWire
+    rule_code: CodeWire
+    priority: Annotated[int, Field(ge=1, le=100)]
+    evidence_commitments: tuple[AsciiString1To160, ...]
+    coverage: CoverageModel
+    freshness_frontier: AsciiString1To160
+    verification_state: Literal["current", "stale", "unavailable", "not_required"]
+    semantic_state: Literal["ready", "disabled", "unavailable", "failed"]
+    recommended_next_action: CodeWire
+
+    @model_validator(mode="after")
+    def _validate_advice_item(self) -> StatusAdviceItemModel:
+        _require_unique(self.evidence_commitments, limit=16)
+        return self
+
+
+class StatusAdvicePageModel(_ClosedModel):
+    projection_format: Literal["yoetz.advice-snapshot/1"]
+    items: tuple[StatusAdviceItemModel, ...]
+    next_cursor: None
+
+    @model_validator(mode="after")
+    def _validate_advice_page(self) -> StatusAdvicePageModel:
+        if len(self.items) > 64:
+            raise ValueError("status_page_limit")
+        return self
+
+
 class StatusVersionSliceModel(_ClosedModel):
     protocol_version: Literal["0.1"]
     engine_version: VersionWire
@@ -2050,7 +2080,8 @@ class StatusVersionsPageModel(_ClosedModel):
 
 
 type StatusPage = (
-    StatusAssignmentPageModel
+    StatusAdvicePageModel
+    | StatusAssignmentPageModel
     | StatusCandidateFindingsPageModel
     | StatusCompactPageModel
     | StatusEvidencePageModel
@@ -2062,6 +2093,7 @@ type StatusPage = (
 
 _STATUS_PAGE_BY_VIEW: Final[Mapping[str, type[_ClosedModel]]] = MappingProxyType(
     {
+        "advice": StatusAdvicePageModel,
         "assignment": StatusAssignmentPageModel,
         "candidate_findings": StatusCandidateFindingsPageModel,
         "compact": StatusCompactPageModel,
@@ -2083,6 +2115,7 @@ class StatusSuccessModel(_ClosedModel):
     session_id: SessionIdWire
     writer_id: WriterIdWire
     view: Literal[
+        "advice",
         "assignment",
         "candidate_findings",
         "compact",
@@ -2552,6 +2585,27 @@ _STATUS_COMMON_STRUCTURAL_POINTERS: Final = (
     )
 )
 
+_STATUS_ADVICE_STRUCTURAL_POINTERS: Final = (
+    (
+        "/page/next_cursor",
+        "/page/projection_format",
+    )
+    + _prefix_leaf_patterns(
+        "/page/items/*",
+        (
+            "evidence_commitments/*",
+            "finding_id",
+            "freshness_frontier",
+            "priority",
+            "recommended_next_action",
+            "rule_code",
+            "semantic_state",
+            "verification_state",
+        ),
+    )
+    + _prefix_leaf_patterns("/page/items/*/coverage", _COVERAGE_LEAVES)
+)
+
 _STATUS_ASSIGNMENT_STRUCTURAL_POINTERS: Final = ("/page/next_cursor",) + _prefix_leaf_patterns(
     "/page/items/*",
     ("actor_id", "assignment_event_id", "obligation_ids/*", "resolved", "scope_refs/*"),
@@ -2889,6 +2943,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
     add_structural("check", _CHECK_STRUCTURAL_POINTERS)
     add_structural("respond", _RESPOND_STRUCTURAL_POINTERS)
     add_structural("status", _STATUS_COMMON_STRUCTURAL_POINTERS)
+    add_structural("status", _STATUS_ADVICE_STRUCTURAL_POINTERS, status_view="advice")
     add_structural(
         "status",
         _STATUS_ASSIGNMENT_STRUCTURAL_POINTERS,
@@ -2988,7 +3043,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 680:
+    if len(result) != 697:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

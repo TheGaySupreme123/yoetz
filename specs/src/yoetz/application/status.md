@@ -54,7 +54,7 @@ record is not the public `StatusResult = StatusResultModel` alias and has no ser
    runtime. Status never enumerates bundles, guesses from paths, or treats possession of an ID as
    authorization.
 2. Require `view` to be exactly `compact`, `assignment`, `obligations`, `findings`,
-   `candidate_findings`, `evidence`, `history`, or `versions`. Strictly reject unknown filter keys,
+   `candidate_findings`, `evidence`, `history`, `versions`, or `advice`. Strictly reject unknown filter keys,
    duplicate set members, filter
    values not meaningful for the chosen view, negative/noncanonical frontiers, oversized cursors,
    and limits outside the registered bounds before any query.
@@ -84,6 +84,14 @@ bounded set at the frozen frontier:
 | `evidence` | evidence identity, strength, subject-state freshness, availability and references; no large content | `strength`, `freshness`, `include_unavailable` |
 | `history` | structural accepted-event summaries, not payload bodies or the entire ledger | `schema_name`, `actor_id`, `after_sequence` |
 | `versions` | protocol/engine/policy/projection/object/storage/Python/SQLite/provider-profile identities relevant to this task/runtime | none |
+| `advice` | latest versioned bounded observation-advice projection: finding/rule identities, evidence commitments, coverage/freshness, verification and semantic state, and next action | none |
+
+`advice` reads the latest durable snapshot through the task observation repository at the routed
+task frontier. Its page format is `yoetz.advice-snapshot/1`; it exposes no raw encrypted content,
+plaintext path, transcript, tool output, or semantic packet. Finding IDs match ordinary materialized
+`finding_recorded` events, so `findings` and `compact` naturally include unresolved advice instead
+of creating a parallel namespace. Missing observation/advice state returns an empty bounded page
+with explicit freshness/coverage limitations.
 
 Set-valued filters are sorted/unique and enum-valued filters use exact registered tokens. Adding a
 filter changes the schema version; adapters may not accept arbitrary predicates, column names, SQL,

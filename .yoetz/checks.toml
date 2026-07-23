@@ -1,0 +1,19 @@
+format = "yoetz.approved-check-policy/1"
+
+[[checks]]
+id = "observation-targeted"
+argv = [".venv/bin/pytest", "tests/unit/application/test_observation_coordinator.py", "tests/unit/application/test_observation_advice.py", "tests/integration/observation/test_acceptance_scenarios.py", "-q"]
+timeout_seconds = 300
+network = false
+
+[[checks]]
+id = "ruff"
+argv = [".venv/bin/ruff", "check", "src", "tests"]
+timeout_seconds = 300
+network = false
+
+[[checks]]
+id = "typecheck"
+argv = ["npx", "--no-install", "pyright"]
+timeout_seconds = 300
+network = false

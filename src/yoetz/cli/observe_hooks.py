@@ -24,6 +24,8 @@ from yoetz.adapters.integrations.observation_local import (
 from yoetz.cli import hooks as hooks_cli
 from yoetz.domain.observation import (
     AdviceSnapshot,
+    ObservationContentChunk,
+    ObservationContentKind,
     ObservationCursor,
     ObservationEnvelope,
     ObservationGapCode,
@@ -35,8 +37,9 @@ from yoetz.domain.observation import (
     observation_ingest_result_from_json,
 )
 from yoetz.domain.values import JsonObject, Timestamp, timestamp_from_datetime
+from yoetz.observability.privacy import redact_sensitive_content
 from yoetz.ports.control import ControlClientKind, ControlError
-from yoetz.protocol.canonical import JsonValue, canonical_digest
+from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import StartRequest
@@ -66,6 +69,7 @@ SUPPORTED_HOOK_EVENTS: Final = frozenset(
 )
 ADVICE_SAFE_EVENTS: Final = frozenset({"PostToolUse", "SessionStart", "Stop", "SessionEnd"})
 _MAX_ADVICE_CONTEXT: Final = 1_200
+_MAX_CONTENT_CHUNK: Final = 256 * 1024
 # Ingest rejections that are recoverable: keep the outbox entry pending for a
 # later drain. Anything else is permanently invalid and gets quarantined so it
 # is never silently dropped as if committed.
@@ -243,6 +247,7 @@ def map_hook_payload_to_envelope(
     session_commitment: str,
     event_ordinal: int,
     key_material: bytes,
+    source_generation: int = 1,
     gap_codes: tuple[str, ...] = (),
 ) -> ObservationEnvelope:
     """Map a bounded hook payload to a structural ObservationEnvelope."""
@@ -259,7 +264,7 @@ def map_hook_payload_to_envelope(
             source_identity=identity,
             source=ObservationSource.CODEX_HOOK,
             cursor=ObservationCursor(
-                source_generation=1,
+                source_generation=source_generation,
                 byte_position=0,
                 event_position=event_ordinal,
                 last_source_commitment=f"hmac-sha256:{'0' * 64}",
@@ -281,7 +286,7 @@ def map_hook_payload_to_envelope(
         source_identity=identity,
         source=ObservationSource.CODEX_HOOK,
         cursor=ObservationCursor(
-            source_generation=1,
+            source_generation=source_generation,
             byte_position=0,
             event_position=event_ordinal,
             last_source_commitment=commitment,
@@ -294,6 +299,103 @@ def map_hook_payload_to_envelope(
     )
 
 
+def _visible_content_chunks(
+    event_name: str,
+    payload: Mapping[str, JsonValue],
+    *,
+    envelope: ObservationEnvelope,
+    workspace_locator: str | None,
+) -> tuple[ObservationContentChunk, ...]:
+    """Extract only explicitly visible task content and redact it before transport."""
+
+    selected: list[tuple[ObservationContentKind, str, bytes]] = []
+
+    def add(kind: ObservationContentKind, label: str, value: JsonValue) -> None:
+        if type(value) is str and value:
+            selected.append((kind, label, value.encode("utf-8")))
+        elif isinstance(value, Mapping) or type(value) in {tuple, list}:
+            try:
+                selected.append((kind, label, canonical_encode(value)))
+            except ProtocolValueError, TypeError, ValueError:
+                return
+
+    if event_name == "UserPromptSubmit":
+        add(
+            ObservationContentKind.VISIBLE_USER_MESSAGE,
+            "user",
+            payload.get("prompt") or payload.get("message"),
+        )
+    elif event_name in {"Stop", "AgentMessage"}:
+        add(
+            ObservationContentKind.VISIBLE_ASSISTANT_MESSAGE,
+            "assistant",
+            payload.get("message") or payload.get("output") or payload.get("content"),
+        )
+    elif event_name in {"SubagentStart", "SubagentStop"}:
+        add(
+            ObservationContentKind.VISIBLE_SUBAGENT_MESSAGE,
+            "subagent",
+            payload.get("message") or payload.get("output") or payload.get("content"),
+        )
+    elif event_name == "PreToolUse":
+        add(ObservationContentKind.TOOL_INPUT, "tool-input", payload.get("tool_input"))
+    elif event_name == "PostToolUse":
+        add(
+            ObservationContentKind.TOOL_OUTPUT,
+            "tool-output",
+            payload.get("tool_response") or payload.get("tool_output") or payload.get("output"),
+        )
+    elif event_name not in SUPPORTED_HOOK_EVENTS:
+        # Unknown host events are retained only when the host marks their
+        # payload visible. Hidden/system/developer/reasoning fields are never read.
+        if payload.get("visibility") in {"user", "assistant", "tool", "task"}:
+            add(
+                ObservationContentKind.UNSUPPORTED_VISIBLE_PAYLOAD,
+                "unsupported",
+                payload.get("visible_content") or payload.get("message"),
+            )
+
+    for key, kind, label in (
+        ("diff", ObservationContentKind.WORKSPACE_DIFF, "diff"),
+        ("patch", ObservationContentKind.WORKSPACE_DIFF, "patch"),
+        ("file_content", ObservationContentKind.CHANGED_FILE, "changed-file"),
+    ):
+        add(kind, label, payload.get(key))
+    if event_name == "SessionStart" and workspace_locator is not None:
+        add(ObservationContentKind.WORKSPACE_LOCATOR, "workspace", workspace_locator)
+
+    chunks: list[ObservationContentChunk] = []
+    remaining = 680_000
+    for kind, label, raw in selected:
+        redacted, detected = redact_sensitive_content(raw)
+        if not redacted:
+            continue
+        redacted = redacted[:remaining]
+        if not redacted:
+            break
+        parts = [
+            redacted[offset : offset + _MAX_CONTENT_CHUNK]
+            for offset in range(0, len(redacted), _MAX_CONTENT_CHUNK)
+        ][:16]
+        for index, part in enumerate(parts):
+            chunks.append(
+                ObservationContentChunk(
+                    content_kind=kind,
+                    correlation_identity=f"{envelope.source_identity}:{label}",
+                    source_commitment=envelope.cursor.last_source_commitment,
+                    media_type="text/plain",
+                    part_index=index,
+                    part_count=len(parts),
+                    content=part,
+                    redacted=detected,
+                )
+            )
+            if len(chunks) >= 16:
+                return tuple(chunks)
+        remaining -= len(redacted)
+    return tuple(chunks)
+
+
 def _advice_context(snapshot: AdviceSnapshot) -> str:
     from yoetz.application.observation_advice import hook_advice_context
 
@@ -301,7 +403,10 @@ def _advice_context(snapshot: AdviceSnapshot) -> str:
 
 
 async def _try_service_ingest(
-    codex_session_id: str, envelope: ObservationEnvelope
+    codex_session_id: str,
+    envelope: ObservationEnvelope,
+    *,
+    content_chunks: tuple[ObservationContentChunk, ...] = (),
 ) -> tuple[str | None, str | None]:
     """Attempt service ingest.
 
@@ -314,7 +419,11 @@ async def _try_service_ingest(
     try:
         client = await connect_service(ControlClientKind.CLI)
         body = observation_ingest_request_to_json(
-            ObservationIngestRequest(codex_session_id=codex_session_id, envelope=envelope)
+            ObservationIngestRequest(
+                codex_session_id=codex_session_id,
+                envelope=envelope,
+                content_chunks=content_chunks,
+            )
         )
         raw = await client.observation_ingest(body, deadline_ms=3_000)
         try:
@@ -342,15 +451,58 @@ async def _drain_outbox(
     *,
     workspace_commitment: str,
     codex_session_id: str,
+    content_by_source_identity: Mapping[str, tuple[ObservationContentChunk, ...]] | None = None,
 ) -> None:
-    """Drain pending local outbox after mapping exists; ack only after service commit."""
+    """Drain all mapped-session work fairly; ack only after service commit.
 
-    pending = store.list_pending_outbox(workspace_commitment, codex_session_id=codex_session_id)
+    The current session receives the first slot for low-latency hook feedback,
+    then sessions are interleaved round-robin. A busy current session therefore
+    cannot indefinitely filter or starve recovered work from another mapped
+    session in the same workspace.
+    """
+
+    all_pending = store.list_pending_outbox(workspace_commitment)
+    grouped: dict[str, list[ObservationEnvelope]] = {}
+    for session_id, envelope in all_pending:
+        grouped.setdefault(session_id, []).append(envelope)
+    session_order = sorted(grouped, key=str.encode)
+    if codex_session_id in grouped:
+        session_order.remove(codex_session_id)
+        session_order.insert(0, codex_session_id)
+    pending: list[tuple[str, ObservationEnvelope]] = []
+    while grouped and len(pending) < 64:
+        for session_id in tuple(session_order):
+            queue = grouped.get(session_id)
+            if not queue:
+                grouped.pop(session_id, None)
+                continue
+            pending.append((session_id, queue.pop(0)))
+            if not queue:
+                grouped.pop(session_id, None)
+            if len(pending) >= 64:
+                break
     for session_id, envelope in pending:
-        soft_fail, rejected = await _try_service_ingest(session_id, envelope)
+        chunks = (
+            ()
+            if content_by_source_identity is None
+            else content_by_source_identity.get(envelope.source_identity, ())
+        )
+        if chunks:
+            soft_fail, rejected = await _try_service_ingest(
+                session_id, envelope, content_chunks=chunks
+            )
+        else:
+            soft_fail, rejected = await _try_service_ingest(session_id, envelope)
         if soft_fail is not None:
             # Transport/vault problem: retryable, keep the entry pending.
             store.note_coverage_gap(workspace_commitment, soft_fail)
+            if chunks:
+                # Plaintext chunks are intentionally not spooled. Structural
+                # replay remains pending and the omission is explicit.
+                store.note_coverage_gap(
+                    workspace_commitment,
+                    ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                )
             continue
         if rejected is not None:
             store.note_coverage_gap(workspace_commitment, rejected)
@@ -476,11 +628,14 @@ def handle_observe(
             return 0
 
         workspace_commitment: str | None = None
+        workspace_locator: str | None = None
         if workspace is not None:
             try:
-                workspace_commitment = store.workspace_commitment(str(Path(workspace).resolve()))
+                workspace_locator = str(Path(workspace).resolve())
+                workspace_commitment = store.workspace_commitment(workspace_locator)
             except Exception:
                 workspace_commitment = None
+                workspace_locator = None
         if workspace_commitment is None:
             workspace_commitment = store.find_workspace_for_codex_session(codex_session_id)
         consent = None if workspace_commitment is None else store.consent_for(workspace_commitment)
@@ -491,6 +646,11 @@ def handle_observe(
 
         assert workspace_commitment is not None
         session_commitment = store.bind_codex_session(workspace_commitment, codex_session_id)
+        source_generation = (
+            store.begin_session_generation(workspace_commitment, session_commitment)
+            if resolved_event == "SessionStart"
+            else store.current_session_generation(workspace_commitment, session_commitment)
+        )
         gap_codes: list[str] = []
 
         # Pair pre/post via correlation_id when present.
@@ -519,12 +679,22 @@ def handle_observe(
         )
 
         envelope = map_hook_payload_to_envelope(
-            resolved_event if resolved_event in SUPPORTED_HOOK_EVENTS else "unsupported_event",
+            resolved_event,
             payload,
             session_commitment=session_commitment,
             event_ordinal=event_ordinal,
             key_material=store.key_material(),
+            source_generation=source_generation,
             gap_codes=tuple(sorted(set(gap_codes), key=str.encode)),
+        )
+        content_chunks = _visible_content_chunks(
+            resolved_event,
+            payload,
+            envelope=envelope,
+            workspace_locator=workspace_locator,
+        )
+        content_map = (
+            {envelope.source_identity: content_chunks} if content_chunks else None
         )
 
         # Local durable ingest first (never plaintext transcript spool).
@@ -532,13 +702,22 @@ def handle_observe(
         if local_result.disposition.value == "accepted":
             overflow = store.enqueue_outbox(workspace_commitment, codex_session_id, envelope)
             if overflow is not None:
+                if content_chunks:
+                    store.note_coverage_gap(
+                        workspace_commitment,
+                        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                    )
                 _stderr_line(f"hook_observe_degraded: {overflow}")
 
         # Persist session end so lifecycle can report STOPPED once every bound
         # session has ended.
         if resolved_event == "SessionEnd":
             with contextlib.suppress(Exception):
-                store.note_session_end(workspace_commitment, session_commitment)
+                store.note_session_end(
+                    workspace_commitment,
+                    session_commitment,
+                    generation=source_generation,
+                )
 
         # Selective secondary stream reconciliation (path never persisted/disclosed).
         with contextlib.suppress(Exception):
@@ -595,12 +774,13 @@ def handle_observe(
                             else:
                                 additional = _active_context(mapping, mapping.last_frontier)
                         elif mapping is not None:
+                            active_mapping = mapping
 
                             async def _status() -> object:
                                 connector: hooks_cli.ServiceConnector = (
                                     connect if connect is not None else connect_service
                                 )
-                                return await _read_status(mapping, connect=connector)
+                                return await _read_status(active_mapping, connect=connector)
 
                             kind, updated = cast(
                                 tuple[str, LifecycleMapping | None], runner(_status)
@@ -626,6 +806,7 @@ def handle_observe(
                                     store,
                                     workspace_commitment=workspace_commitment,
                                     codex_session_id=codex_session_id,
+                                    content_by_source_identity=content_map,
                                 )
 
                             with contextlib.suppress(Exception):
@@ -644,10 +825,20 @@ def handle_observe(
                         store,
                         workspace_commitment=workspace_commitment,
                         codex_session_id=codex_session_id,
+                        content_by_source_identity=content_map,
                     )
 
                 with contextlib.suppress(Exception):
                     runner(_drain_all)
+
+        if content_chunks and (skip_service or mapping is None):
+            # Content is intentionally ephemeral. Without a ready mapped
+            # service there is no encrypted destination, so retain only the
+            # structural envelope plus an explicit omission gap.
+            store.note_coverage_gap(
+                workspace_commitment,
+                ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+            )
 
         # Nonblocking advice delivery at safe points (suppress Yoetz self-tool loops).
         if not additional and resolved_event in ADVICE_SAFE_EVENTS and not skip_advice_loop:

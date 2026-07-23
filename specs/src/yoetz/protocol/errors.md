@@ -126,6 +126,8 @@ input_not_bytes
 integer_out_of_safe_range
 integer_out_of_sqlite_range
 invalid_actor_type
+invalid_approved_check
+invalid_approved_check_policy
 invalid_chain
 invalid_check_types
 invalid_commitment

@@ -136,9 +136,31 @@ adding a harness is still one `HarnessId` value plus adapters, with no shared-ty
 **Amendment (2026-07-22):** First-party Codex observation is required for v0.1 completion of the
 Codex integration, still on protocol version `0.1`. Observation is a sibling local-control
 capability (`ObservationPort`), not a seventh MCP tool and not an `IntegrationsPort` overload.
-Existing v0.1 ledger/object data remains readable; migrations may add only observation consent,
-cursor, dedup, and advice state. Observation consent is project-level, separate from egress
-consent, and records a private workspace commitment (never a raw path in logs).
+Existing v0.1 ledger/object data remains readable. Bundle migration `0002` owns consent, cursor,
+dedup, structural envelopes, and the current advice snapshot. Unreleased migration `0003` is the
+single owner for authenticated encrypted workspace-locator/content references, canonical logical
+identity claims, exact-digest check-policy trust, generation-fenced verification jobs/results, and
+advice history/delivery state. Repositories own those tables; coordinators do not issue private SQL.
+Observation consent is project-level and separate from egress consent. The plaintext local boundary
+records a private workspace commitment, structural outbox/quarantine evidence, and encrypted object
+identities—never raw task content or a raw path in logs/status/SQLite.
+
+Hook `PostToolUse` and stream `item.completed` for one host call normalize before materialization to
+the same semantic kind, correlation identity, roles, operation digest, and ledger IDs. A durable
+logical-identity claim merges source coverage and prevents duplicate action/result appends while
+allowing later encrypted content references. Cursor advancement is coupled to durable outbox
+insertion; overflow leaves later stream input replayable. Unsupported visible future events retain
+an opaque envelope, encrypted visible payload when available, and an explicit gap. Session stop is
+source-generation fenced, pending work drains fairly across mapped sessions, and bounded quarantine
+eviction retains aggregate commitment/count/time range plus a loss gap.
+
+After every completed tool action, ready-service composition captures a descriptor-safe structural
+workspace digest. Real state change enqueues exact-policy verification; unchanged state does not.
+One job runs per workspace, newer pending state coalesces older pending work, abandoned generation
+leases recover after restart, and a result becomes current only if post-run state still matches.
+Deterministic advice consumes this evidence offline and materializes through existing
+`finding_recorded`; ordinary `status(view="advice")` and safe hook context surface the same bounded
+finding/evidence identities. The MCP registry remains exactly six tools.
 
 A fork can make Yoetz first-party on another harness by writing one adapter and one profile. It
 edits no port, no registry, no guidance, and no schema. That is the property this ADR exists to

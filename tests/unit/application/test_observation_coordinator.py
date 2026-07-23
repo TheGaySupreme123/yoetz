@@ -192,6 +192,29 @@ def test_session_end_reports_stopped_and_persists(tmp_path: Path) -> None:
     )
 
 
+def test_new_session_generation_resumes_and_stale_end_remains_fenced(tmp_path: Path) -> None:
+    from yoetz.domain.observation import ObservationLifecycle
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment("sess-generation")
+    store.bind_session(workspace, session)
+    first = store.begin_session_generation(workspace, session)
+    store.note_session_end(workspace, session, generation=first)
+    assert store.status(ObservationStatusQuery(workspace)).lifecycle is ObservationLifecycle.STOPPED
+
+    second = store.begin_session_generation(workspace, session)
+    assert second == first + 1
+    assert store.status(ObservationStatusQuery(workspace)).lifecycle is not (
+        ObservationLifecycle.STOPPED
+    )
+    store.note_session_end(workspace, session, generation=first)
+    assert store.status(ObservationStatusQuery(workspace)).lifecycle is not (
+        ObservationLifecycle.STOPPED
+    )
+
+
 def test_local_outbox_quarantine_is_visible_and_durable(tmp_path: Path) -> None:
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
@@ -222,6 +245,42 @@ def test_local_outbox_quarantine_is_visible_and_durable(tmp_path: Path) -> None:
         ObservationGapCode.OUTBOX_QUARANTINED.value
         in reopened.status(ObservationStatusQuery(workspace)).gaps
     )
+
+
+def test_quarantine_eviction_retains_aggregate_loss_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yoetz.adapters.integrations.observation_local as local_mod
+
+    monkeypatch.setattr(local_mod, "_MAX_QUARANTINE", 2)
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "sess-quarantine-eviction")
+    for index in range(3):
+        envelope = _envelope(
+            session=session,
+            identity=f"hook:quarantine:{index}",
+            ordinal=index + 1,
+        )
+        store.ingest(envelope)
+        store.enqueue_outbox(workspace, "sess-quarantine-eviction", envelope)
+        assert store.quarantine_outbox(
+            workspace,
+            "sess-quarantine-eviction",
+            envelope.source_identity,
+            ObservationGapCode.CONSENT_REVOKED.value,
+        )
+    assert store.quarantined_count(workspace) == 2
+    status = store.status(ObservationStatusQuery(workspace))
+    assert ObservationGapCode.QUARANTINE_DETAIL_EVICTED.value in status.gaps
+    state_bytes = b"".join(
+        path.read_bytes() for path in tmp_path.rglob("*.json") if path.is_file()
+    )
+    assert b'"quarantine_evicted_count":1' in state_bytes
+    assert b'"quarantine_evicted_commitment":"sha256:' in state_bytes
+    assert b'"quarantine_evicted_first":' in state_bytes
+    assert b'"quarantine_evicted_last":' in state_bytes
 
 
 def test_local_outbox_overflow_records_gap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

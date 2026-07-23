@@ -74,6 +74,14 @@ lines. Successful MCP registration is phrased as recorded registration with auto
 not tested; skill support states when no tested capability profile exists. The summary never claims
 or implies that Yoetz is set up or ready on a harness merely because an MCP entry exists.
 
+When `.yoetz/checks.toml` exists, interactive setup parses fixed schema
+`yoetz.approved-check-policy/1` and shows the exact raw-byte SHA-256 digest plus check IDs before
+project confirmation. That trusted-local confirmation binds only the shown digest; repository bytes
+grant no authority. Noninteractive `--accept` may install integration and consent but leaves checks
+`untrusted_confirmation_required`. Any byte change suspends all commands until
+`yoetz observe checks trust --policy-digest ...` confirms the new preview. Reports expose only the
+digest, check IDs, and trust outcome—never workspace path, check output, or secret content.
+
 `setup_status` reports discovered binaries with per-binary registration state (adapter errors
 become `registration_state: null` plus the reason token), the same separate skill/plugin/hook/trust
 layers, marker presence, and service reachability; it mutates nothing.

@@ -8,7 +8,7 @@ This is the complete one-to-one ledger between the natural-language specificatio
 files planned for the public v0.1 repository. It is declarative: adding, removing, renaming, or
 splitting a future file requires changing this reviewed table and its owning spec together.
 
-The inventory contains 617 spec files: 603 exact future-file owners,
+The inventory contains 628 spec files: 614 exact future-file owners,
 10 directory indexes, and 4 coordination files. The 603 future paths are unique. The already-
 authored public ADRs are current decision authorities, not future-file candidates, so
 they are intentionally outside the mirrored ownership universe. Ignored local architecture/
@@ -40,6 +40,7 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/.github/workflows/pr-ci.yml.md` | `future_file` | `.github/workflows/pr-ci.yml` | `exact_suffix` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/.github/workflows/release.yml.md` | `future_file` | `.github/workflows/release.yml` | `exact_suffix` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/.github/workflows/security-privacy.yml.md` | `future_file` | `.github/workflows/security-privacy.yml` | `exact_suffix` | — | `F` | `draft` | Owns exactly this future public repository file. |
+| `specs/.yoetz/checks.toml.md` | `future_file` | `.yoetz/checks.toml` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/FILE_MANIFEST.md` | `coordination` | — | `none` | — | `A–F` | `draft` | Classifies the complete specification inventory. |
 | `specs/INTERFACES.md` | `coordination` | — | `none` | — | `A–F` | `draft` | Owns the shared cross-file vocabulary and semantics. |
 | `specs/OPEN_QUESTIONS.md` | `coordination` | — | `none` | — | `A–F` | `draft` | Records resolved founder decisions plus empirical, review, and deferred gates. |
@@ -112,6 +113,7 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/guidance/workflow.md` | `future_file` | `guidance/workflow.md` | `markdown_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/migrations/bundle/0001.sql.md` | `future_file` | `migrations/bundle/0001.sql` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/migrations/bundle/0002.sql.md` | `future_file` | `migrations/bundle/0002.sql` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/migrations/bundle/0003.sql.md` | `future_file` | `migrations/bundle/0003.sql` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/migrations/catalog/0001.sql.md` | `future_file` | `migrations/catalog/0001.sql` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/repository/.gitignore.md` | `future_file` | `.gitignore` | `repository_projection` | — | `A/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/repository/.python-version.md` | `future_file` | `.python-version` | `repository_projection` | — | `F` | `draft` | Owns exactly this future public repository file. |
@@ -243,19 +245,21 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/src/yoetz/adapters/sqlite/maintenance.py.md` | `future_file` | `src/yoetz/adapters/sqlite/maintenance.py` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/sqlite/migrations.md` | `future_file` | `src/yoetz/adapters/sqlite/migrations.py` | `python_shorthand` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/sqlite/observation.md` | `future_file` | `src/yoetz/adapters/sqlite/observation.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/adapters/sqlite/observation_verification.md` | `future_file` | `src/yoetz/adapters/sqlite/observation_verification.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/sqlite/recovery.md` | `future_file` | `src/yoetz/adapters/sqlite/recovery.py` | `python_shorthand` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/sqlite/repository.md` | `future_file` | `src/yoetz/adapters/sqlite/repository.py` | `python_shorthand` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/sqlite/start_catalog.md` | `future_file` | `src/yoetz/adapters/sqlite/start_catalog.py` | `python_shorthand` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/adapters/workspace_inspect.py.md` | `future_file` | `src/yoetz/adapters/workspace_inspect.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/application/__init__.md` | `future_file` | `src/yoetz/application/__init__.py` | `python_shorthand` | — | `F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/application/check.md` | `future_file` | `src/yoetz/application/check.py` | `python_shorthand` | — | `D–E` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/application/codex_plugin.py.md` | `future_file` | `src/yoetz/application/codex_plugin.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/application/egress.md` | `future_file` | `src/yoetz/application/egress.py` | `python_shorthand` | — | `D–E` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/application/harness_mcp.py.md` | `future_file` | `src/yoetz/application/harness_mcp.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/application/import_review.md` | `future_file` | `src/yoetz/application/import_review.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/application/integrations.py.md` | `future_file` | `src/yoetz/application/integrations.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
-| `specs/src/yoetz/application/codex_plugin.py.md` | `future_file` | `src/yoetz/application/codex_plugin.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/application/maintenance.py.md` | `future_file` | `src/yoetz/application/maintenance.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/application/observation_advice.md` | `future_file` | `src/yoetz/application/observation_advice.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/application/observation_check_policy.md` | `future_file` | `src/yoetz/application/observation_check_policy.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/application/observation_control.md` | `future_file` | `src/yoetz/application/observation_control.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/application/observation_coordinator.md` | `future_file` | `src/yoetz/application/observation_coordinator.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/application/observation_health.md` | `future_file` | `src/yoetz/application/observation_health.py` | `python_shorthand` | — | `D` | `draft` | Owns exactly this future public repository file. |
@@ -360,6 +364,7 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/src/yoetz/resources/manifest.json.md` | `future_file` | `src/yoetz/resources/manifest.json` | `exact_suffix` | — | `A/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/resources/migrations/bundle/0001.sql.md` | `future_file` | `src/yoetz/resources/migrations/bundle/0001.sql` | `exact_suffix` | — | `C/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/resources/migrations/bundle/0002.sql.md` | `future_file` | `src/yoetz/resources/migrations/bundle/0002.sql` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
+| `specs/src/yoetz/resources/migrations/bundle/0003.sql.md` | `future_file` | `src/yoetz/resources/migrations/bundle/0003.sql` | `exact_suffix` | — | `D/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/resources/migrations/catalog/0001.sql.md` | `future_file` | `src/yoetz/resources/migrations/catalog/0001.sql` | `exact_suffix` | — | `C/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/resources/schemas/common/actor-assertion-1.0.0.schema.json.md` | `future_file` | `src/yoetz/resources/schemas/common/actor-assertion-1.0.0.schema.json` | `exact_suffix` | — | `A/F` | `draft` | Owns exactly this future public repository file. |
 | `specs/src/yoetz/resources/schemas/common/client-info-1.0.0.schema.json.md` | `future_file` | `src/yoetz/resources/schemas/common/client-info-1.0.0.schema.json` | `exact_suffix` | — | `A/F` | `draft` | Owns exactly this future public repository file. |
@@ -521,6 +526,7 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/tests/integration/storage/test_checkpoint_and_wal_bounds.py.md` | `future_file` | `tests/integration/storage/test_checkpoint_and_wal_bounds.py` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/integration/storage/test_migration_0001.py.md` | `future_file` | `tests/integration/storage/test_migration_0001.py` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/integration/storage/test_migration_0002_observation.py.md` | `future_file` | `tests/integration/storage/test_migration_0002_observation.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/tests/integration/storage/test_migration_0003_observation.py.md` | `future_file` | `tests/integration/storage/test_migration_0003_observation.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/integration/storage/test_migration_rollback.py.md` | `future_file` | `tests/integration/storage/test_migration_rollback.py` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/integration/storage/test_owner_generation.py.md` | `future_file` | `tests/integration/storage/test_owner_generation.py` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/integration/storage/test_projection_rebuild.py.md` | `future_file` | `tests/integration/storage/test_projection_rebuild.py` | `exact_suffix` | — | `C` | `draft` | Owns exactly this future public repository file. |
@@ -600,8 +606,10 @@ strategy inputs are neither inventoried nor authoritative.
 | `specs/tests/unit/application/test_harness_mcp_service.py.md` | `future_file` | `tests/unit/application/test_harness_mcp_service.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/application/test_integrations.py.md` | `future_file` | `tests/unit/application/test_integrations.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/application/test_observation_advice.py.md` | `future_file` | `tests/unit/application/test_observation_advice.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/tests/unit/application/test_observation_check_policy.py.md` | `future_file` | `tests/unit/application/test_observation_check_policy.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/application/test_observation_coordinator.py.md` | `future_file` | `tests/unit/application/test_observation_coordinator.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/application/test_observation_health.py.md` | `future_file` | `tests/unit/application/test_observation_health.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
+| `specs/tests/unit/application/test_observation_verification_worker.py.md` | `future_file` | `tests/unit/application/test_observation_verification_worker.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/application/test_semantic_post_validation.py.md` | `future_file` | `tests/unit/application/test_semantic_post_validation.py` | `exact_suffix` | — | `D/E` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/application/test_service_facade.py.md` | `future_file` | `tests/unit/application/test_service_facade.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |
 | `specs/tests/unit/application/test_unit_of_work.py.md` | `future_file` | `tests/unit/application/test_unit_of_work.py` | `exact_suffix` | — | `D` | `draft` | Owns exactly this future public repository file. |

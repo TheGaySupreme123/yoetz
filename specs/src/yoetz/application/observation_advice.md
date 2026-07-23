@@ -20,6 +20,7 @@ remains unresolved after material work.
 - `hook_advice_context(...)`
 - `advice_items_for_ledger(...)`
 - `SemanticAdvicePort` protocol
+- `ObservationAdviceContextBuilder.build(...)`
 
 ## Behavior
 
@@ -27,6 +28,14 @@ Deterministic advice always works offline. Coverage is honest and observation-qu
 hook evidence may raise `hook_observed`; otherwise engine-derived + known gaps. Semantic add-ons
 are optional and never required for basic correctness guidance. Recommended next actions are
 closed tokens safe for hook `additionalContext`.
+
+The context builder reads normalized envelopes/gaps, current durable verification/check facts,
+changed-path inspection facts, production composition readiness, prior suppression history, and—
+through the ordinary ledger/runtime path—claims, obligations, actions, results, findings, and
+evidence. Missing sources remain explicit limitations. Production semantic readiness derives from
+the generation-fenced provider registry. Optional semantic work is additive, privacy-gated, and
+receives only a minimized redacted evidence packet; failure cannot erase deterministic advice.
+Deterministic items materialize through existing `FindingKind`/`finding_recorded` identities.
 
 ## Errors and edge cases
 

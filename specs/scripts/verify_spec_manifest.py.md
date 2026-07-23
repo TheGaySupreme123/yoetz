@@ -112,6 +112,8 @@ subtotal, each classification count, the future-owner total, and the final spec-
 the registry-derived values. The table total is recomputed from its rows rather than trusted as a
 second input. A missing, duplicate, malformed, or mismatched summary emits
 `SUMMARY_COUNT_DRIFT` with only the coordination-file path and count category, never copied prose.
+The closed buckets include `.yoetz/ project policy` separately from repository-root files so the
+fixed approved-check proposal is inventoried without treating it as installed runtime state.
 
 This is validation, not generation: the script does not rewrite either Markdown file. A manifest
 change and its reviewed summary update land together, and CI prevents an arithmetic or stale-copy

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import re
@@ -33,6 +34,8 @@ __all__ = [
     "OBSERVATION_STREAM_LINE_DOMAIN",
     "OBSERVATION_WORKSPACE_DOMAIN",
     "ObservationControlCommand",
+    "ObservationContentChunk",
+    "ObservationContentKind",
     "ObservationCursor",
     "ObservationEnvelope",
     "ObservationGapCode",
@@ -51,6 +54,8 @@ __all__ = [
     "hook_source_commitment",
     "observation_control_command_from_json",
     "observation_control_command_to_json",
+    "observation_content_chunk_from_json",
+    "observation_content_chunk_to_json",
     "observation_cursor_from_json",
     "observation_cursor_to_json",
     "observation_earns_hook_observed",
@@ -80,6 +85,12 @@ _MAX_SOURCE_COVERAGE: Final = 8
 _MAX_ADVICE_SUMMARY: Final = 160
 _MAX_ADVICE_DETAIL: Final = 240
 _MAX_EVIDENCE_REFS: Final = 16
+_MAX_CONTENT_CHUNKS: Final = 16
+_MAX_CONTENT_CHUNK_BYTES: Final = 524_288
+# Base64 plus structural framing must stay below the existing 1 MiB ordinary
+# control-frame ceiling. Larger logical content is sent over multiple requests
+# and assembled from independently encrypted chunk objects.
+_MAX_CONTENT_TOTAL_BYTES: Final = 700_000
 
 _TOKEN_RE: Final = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:/+-]{0,127}$", re.ASCII)
 _GAP_RE: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
@@ -88,6 +99,10 @@ _ADVICE_TEXT_RE: Final = re.compile(
     re.ASCII,
 )
 _ADVICE_ORIGINS: Final = frozenset({"deterministic", "semantic_model_derived"})
+_MEDIA_TYPE_RE: Final = re.compile(
+    r"^[a-z][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$",
+    re.ASCII,
+)
 
 OBSERVATION_WORKSPACE_DOMAIN: Final = b"yoetz/observation-workspace/v1\x00"
 OBSERVATION_STREAM_LINE_DOMAIN: Final = b"yoetz/observation-stream-line/v1\x00"
@@ -180,6 +195,25 @@ class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum
     MAPPING_MISSING = "mapping_missing"
     OUTBOX_OVERFLOW = "outbox_overflow"
     OUTBOX_QUARANTINED = "outbox_quarantined"
+    QUARANTINE_DETAIL_EVICTED = "quarantine_detail_evicted"
+    CONTENT_CAPTURE_UNAVAILABLE = "content_capture_unavailable"
+    CONTENT_REDACTED = "content_redacted"
+    POLICY_UNTRUSTED = "policy_untrusted"
+    VERIFICATION_STALE = "verification_stale"
+    NETWORK_CHECK_UNSUPPORTED = "network_check_unsupported"
+
+
+class ObservationContentKind(str, Enum):  # noqa: UP042 - exact durable wire enum
+    VISIBLE_USER_MESSAGE = "visible_user_message"
+    VISIBLE_ASSISTANT_MESSAGE = "visible_assistant_message"
+    VISIBLE_SUBAGENT_MESSAGE = "visible_subagent_message"
+    TOOL_INPUT = "tool_input"
+    TOOL_OUTPUT = "tool_output"
+    CHANGED_FILE = "changed_file"
+    WORKSPACE_DIFF = "workspace_diff"
+    APPROVED_CHECK_OUTPUT = "approved_check_output"
+    UNSUPPORTED_VISIBLE_PAYLOAD = "unsupported_visible_payload"
+    WORKSPACE_LOCATOR = "workspace_locator"
 
 
 class ObservationIngestDisposition(str, Enum):  # noqa: UP042 - exact durable wire enum
@@ -445,6 +479,84 @@ def hook_source_commitment(key_material: bytes, source_identity: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class ObservationContentChunk:
+    """Bounded ephemeral plaintext accepted only by ready-service ingest.
+
+    Chunks are never written to the local structural outbox. They exist long
+    enough for the ready service to assemble and encrypt a captured-content
+    object, then the mutable byte buffer is discarded by the caller.
+    """
+
+    content_kind: ObservationContentKind
+    correlation_identity: str
+    source_commitment: str
+    media_type: str
+    part_index: int
+    part_count: int
+    content: bytes
+    redacted: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.content_kind) is not ObservationContentKind:
+            raise _invalid("invalid_event_enum")
+        object.__setattr__(self, "correlation_identity", _token(self.correlation_identity))
+        validate_commitment(self.source_commitment)
+        if (
+            type(self.media_type) is not str
+            or len(self.media_type) > 128
+            or _MEDIA_TYPE_RE.fullmatch(self.media_type) is None
+        ):
+            raise _invalid()
+        object.__setattr__(self, "part_index", _nonnegative(self.part_index, maximum=15))
+        object.__setattr__(self, "part_count", _positive(self.part_count, maximum=16))
+        if self.part_index >= self.part_count:
+            raise _invalid()
+        if (
+            type(self.content) is not bytes
+            or not self.content
+            or len(self.content) > _MAX_CONTENT_CHUNK_BYTES
+            or type(self.redacted) is not bool
+        ):
+            raise _invalid()
+
+    def __repr__(self) -> str:
+        return (
+            "ObservationContentChunk("
+            f"kind={self.content_kind.value!r}, "
+            f"correlation_identity={self.correlation_identity!r}, "
+            f"part={self.part_index + 1}/{self.part_count}, "
+            f"bytes={len(self.content)}, redacted={self.redacted})"
+        )
+
+    __str__ = __repr__
+
+
+def _content_chunks(value: object) -> tuple[ObservationContentChunk, ...]:
+    raw = _exact_tuple(value, maximum=_MAX_CONTENT_CHUNKS)
+    chunks: list[ObservationContentChunk] = []
+    total = 0
+    groups: dict[tuple[str, str, str, str], tuple[int, set[int]]] = {}
+    for item in raw:
+        if type(item) is not ObservationContentChunk:
+            raise _invalid()
+        chunks.append(item)
+        total += len(item.content)
+        key = (
+            item.content_kind.value,
+            item.correlation_identity,
+            item.source_commitment,
+            item.media_type,
+        )
+        expected, indexes = groups.setdefault(key, (item.part_count, set()))
+        if expected != item.part_count or item.part_index in indexes:
+            raise _invalid()
+        indexes.add(item.part_index)
+    if total > _MAX_CONTENT_TOTAL_BYTES:
+        raise _invalid()
+    return tuple(chunks)
+
+
+@dataclass(frozen=True, slots=True)
 class ObservationCursor:
     source_generation: int
     byte_position: int
@@ -674,6 +786,7 @@ class ObservationIngestRequest:
 
     codex_session_id: str
     envelope: ObservationEnvelope
+    content_chunks: tuple[ObservationContentChunk, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.codex_session_id) is not str or not self.codex_session_id:
@@ -688,6 +801,7 @@ class ObservationIngestRequest:
             raise _invalid()
         if type(self.envelope) is not ObservationEnvelope:
             raise _invalid()
+        object.__setattr__(self, "content_chunks", _content_chunks(self.content_chunks))
 
 
 @dataclass(frozen=True, slots=True)
@@ -847,8 +961,6 @@ def advice_item_from_json(value: JsonValue) -> AdviceItem:
     if set(source) != set(required):
         raise _invalid()
     refs = source["evidence_refs"]
-    if type(refs) is list:
-        refs = tuple(cast(list[JsonValue], refs))
     return AdviceItem(
         finding_id=finding_id(source["finding_id"]),
         rule_code=cast(str, source["rule_code"]),
@@ -893,13 +1005,9 @@ def advice_snapshot_from_json(value: JsonValue) -> AdviceSnapshot:
     if not required.issubset(set(source)) or set(source) - required - optional:
         raise _invalid()
     items_raw = source.get("ranked_items", ())
-    if type(items_raw) is list:
-        items_raw = tuple(cast(list[JsonValue], items_raw))
     if type(items_raw) is not tuple:
         raise _invalid()
     ids_raw = source["ranked_finding_ids"]
-    if type(ids_raw) is list:
-        ids_raw = tuple(cast(list[JsonValue], ids_raw))
     items = tuple(advice_item_from_json(item) for item in cast(tuple[JsonValue, ...], items_raw))
     return AdviceSnapshot(
         ranked_finding_ids=_ranked_finding_ids(ids_raw),
@@ -976,19 +1084,26 @@ def observation_status_from_json(value: JsonValue) -> ObservationStatus:
 
 
 def observation_ingest_request_to_json(value: ObservationIngestRequest) -> JsonObject:
-    return JsonObject(
-        {
-            "codex_session_id": value.codex_session_id,
-            "envelope": observation_envelope_to_json(value.envelope),
-        }
-    )
+    payload: dict[str, JsonValue] = {
+        "codex_session_id": value.codex_session_id,
+        "envelope": observation_envelope_to_json(value.envelope),
+    }
+    if value.content_chunks:
+        payload["content_chunks"] = tuple(
+            observation_content_chunk_to_json(item) for item in value.content_chunks
+        )
+    return JsonObject(payload)
 
 
 def observation_ingest_request_from_json(value: JsonValue) -> ObservationIngestRequest:
     if type(value) is not JsonObject:
         raise _invalid()
     source = value
-    if set(source) != {"codex_session_id", "envelope"}:
+    if not {"codex_session_id", "envelope"}.issubset(source) or set(source) - {
+        "codex_session_id",
+        "envelope",
+        "content_chunks",
+    }:
         raise _invalid()
     envelope_raw = source["envelope"]
     if type(envelope_raw) is not JsonObject:
@@ -996,9 +1111,71 @@ def observation_ingest_request_from_json(value: JsonValue) -> ObservationIngestR
             envelope_raw = JsonObject(cast(Mapping[str, JsonValue], envelope_raw))
         else:
             raise _invalid()
+    chunks_raw = source.get("content_chunks", ())
+    if type(chunks_raw) is not tuple:
+        raise _invalid()
     return ObservationIngestRequest(
         codex_session_id=cast(str, source["codex_session_id"]),
         envelope=observation_envelope_from_json(envelope_raw),
+        content_chunks=tuple(
+            observation_content_chunk_from_json(item)
+            for item in cast(tuple[JsonValue, ...], chunks_raw)
+        ),
+    )
+
+
+def observation_content_chunk_to_json(value: ObservationContentChunk) -> JsonObject:
+    if type(value) is not ObservationContentChunk:
+        raise _invalid()
+    return JsonObject(
+        {
+            "content_kind": value.content_kind.value,
+            "correlation_identity": value.correlation_identity,
+            "source_commitment": value.source_commitment,
+            "media_type": value.media_type,
+            "part_index": value.part_index,
+            "part_count": value.part_count,
+            "content_b64": base64.b64encode(value.content).decode("ascii"),
+            "redacted": value.redacted,
+        }
+    )
+
+
+def observation_content_chunk_from_json(value: JsonValue) -> ObservationContentChunk:
+    if type(value) is not JsonObject:
+        if isinstance(value, Mapping):
+            value = JsonObject(cast(Mapping[str, JsonValue], value))
+        else:
+            raise _invalid()
+    required = {
+        "content_kind",
+        "correlation_identity",
+        "source_commitment",
+        "media_type",
+        "part_index",
+        "part_count",
+        "content_b64",
+        "redacted",
+    }
+    if set(value) != required:
+        raise _invalid()
+    encoded = value["content_b64"]
+    if type(encoded) is not str or len(encoded) > ((_MAX_CONTENT_CHUNK_BYTES + 2) // 3) * 4:
+        raise _invalid()
+    try:
+        content = base64.b64decode(encoded, validate=True)
+        kind = ObservationContentKind(cast(str, value["content_kind"]))
+    except ValueError as exc:
+        raise _invalid() from exc
+    return ObservationContentChunk(
+        content_kind=kind,
+        correlation_identity=cast(str, value["correlation_identity"]),
+        source_commitment=cast(str, value["source_commitment"]),
+        media_type=cast(str, value["media_type"]),
+        part_index=cast(int, value["part_index"]),
+        part_count=cast(int, value["part_count"]),
+        content=content,
+        redacted=cast(bool, value["redacted"]),
     )
 
 

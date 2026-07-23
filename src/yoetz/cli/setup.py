@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, cast
 
@@ -24,6 +25,7 @@ from yoetz.adapters.integrations.codex_plugin import PluginHookPresence, inspect
 from yoetz.adapters.integrations.codex_skill import load_packaged_skill_source
 from yoetz.application.codex_plugin import CodexPluginService
 from yoetz.application.harness_mcp import HarnessMcpService, McpRegistrationConfirmation
+from yoetz.application.observation_check_policy import load_observation_check_policy
 from yoetz.config.paths import PathSafetyError, setup_marker_path
 from yoetz.ports.harness_mcp import (
     HarnessBinary,
@@ -275,7 +277,7 @@ def _confirm_registration() -> bool:
         typer.echo("Please enter Y or N.")
 
 
-def _confirm_project_setup(*, include_observation: bool) -> bool:
+def _confirm_project_setup(*, include_observation: bool, policy_digest: str | None) -> bool:
     """One confirmed operation covering MCP/plugin/guidance/hooks/observation consent."""
 
     typer.echo("This confirmation covers:")
@@ -287,6 +289,8 @@ def _confirm_project_setup(*, include_observation: bool) -> bool:
             "(structural Codex events only; never raw path logged)"
         )
         typer.echo("  - Advice readiness once observation evidence exists")
+    if policy_digest is not None:
+        typer.echo(f"  - Trust exact approved-check policy digest {policy_digest}")
     while True:
         raw = typer.prompt("Confirm Codex project setup? [Y/N]", show_default=False)
         answer = raw.strip().upper()
@@ -316,7 +320,52 @@ def _grant_observation_consent(workspace: Path | None = None) -> dict[str, JsonV
         }
 
 
-def _emit_registration_preview(binary: HarnessBinary) -> None:
+def _check_policy_preview(workspace: Path | None = None) -> dict[str, JsonValue]:
+    """Return a path-free exact-byte policy preview; repository bytes grant no authority."""
+
+    root = (workspace if workspace is not None else Path.cwd()).resolve()
+    try:
+        policy, _raw = load_observation_check_policy(root)
+    except Exception:
+        return {"outcome": "absent", "policy_digest": None, "check_ids": ()}
+    return {
+        "outcome": "proposed",
+        "policy_digest": policy.raw_digest,
+        "check_ids": tuple(item.approval_id for item in policy.checks),
+    }
+
+
+def _activate_check_policy_trust(
+    workspace: Path | None,
+    preview: dict[str, JsonValue],
+    *,
+    exact_digest_confirmed: bool,
+) -> dict[str, JsonValue]:
+    """Activate only the exact bytes shown to a trusted local human."""
+
+    digest = preview.get("policy_digest")
+    if type(digest) is not str:
+        return preview
+    if not exact_digest_confirmed:
+        return {**preview, "outcome": "untrusted_confirmation_required"}
+    try:
+        from yoetz.adapters.integrations.observation_local import LocalObservationStore
+
+        root = (workspace if workspace is not None else Path.cwd()).resolve()
+        policy, _raw = load_observation_check_policy(root)
+        if policy.raw_digest != digest:
+            return {**preview, "outcome": "untrusted_digest_changed"}
+        store = LocalObservationStore()
+        commitment = store.workspace_commitment(str(root))
+        store.trust_policy_digest(commitment, digest)
+        return {**preview, "outcome": "trusted"}
+    except Exception:
+        return {**preview, "outcome": "untrusted_activation_failed"}
+
+
+def _emit_registration_preview(
+    binary: HarnessBinary, policy_preview: dict[str, JsonValue] | None = None
+) -> None:
     typer.echo("Proposed change: complete Yoetz Codex project integration:")
     typer.echo("  1. Install plugin / guidance / hooks under .agents/plugins/yoetz")
     typer.echo("  2. Register the Yoetz MCP server with Codex")
@@ -325,6 +374,14 @@ def _emit_registration_preview(binary: HarnessBinary) -> None:
     typer.echo(f"  Codex executable: {binary.executable_path}")
     if binary.reported_version is not None:
         typer.echo(f"  Codex version: {binary.reported_version}")
+    digest = None if policy_preview is None else policy_preview.get("policy_digest")
+    if type(digest) is str:
+        typer.echo(f"  Approved-check policy digest: {digest}")
+        check_ids = policy_preview.get("check_ids") if policy_preview is not None else None
+        if isinstance(check_ids, tuple):
+            typer.echo(f"  Proposed checks: {', '.join(str(item) for item in check_ids)}")
+        typer.echo("  Repository policy bytes propose commands; this confirmation activates only")
+        typer.echo("  the exact digest above. Any byte change suspends execution.")
 
 
 def _plugin_verified(presence: str | None) -> bool:
@@ -391,6 +448,7 @@ async def _codex_integration_step(
         }
 
     plugin_preview = plugin_service.preview(project)
+    check_policy = _check_policy_preview(workspace)
     already_registered = mcp_preview.state_before is McpRegistrationState.YOETZ_OWNED
     foreign = mcp_preview.state_before is McpRegistrationState.FOREIGN_PRESENT
 
@@ -409,15 +467,20 @@ async def _codex_integration_step(
         }
 
     accepted = accept
+    policy_digest_confirmed = False
     if interactive and not accepted:
-        _emit_registration_preview(binary)
+        _emit_registration_preview(binary, check_policy)
         typer.echo(
             f"  Plugin presence before apply: {plugin_preview.presence_before.value} "
             f"({plugin_preview.planned_file_count} managed files)"
         )
         if already_registered:
             typer.echo("  MCP is already registered; setup will still install/verify the plugin.")
-        accepted = _confirm_project_setup(include_observation=True)
+        accepted = _confirm_project_setup(
+            include_observation=True,
+            policy_digest=cast(str | None, check_policy.get("policy_digest")),
+        )
+        policy_digest_confirmed = accepted and type(check_policy.get("policy_digest")) is str
     if not accepted:
         return {
             "outcome": "declined",
@@ -505,19 +568,25 @@ async def _codex_integration_step(
         return {
             "outcome": "failed",
             "reason": "mcp_verification_failed",
-            "state": None if mcp_state is None else mcp_state.value,
+            "state": mcp_state.value,
             "plugin": plugin_report,
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
 
     # 3) Consent only after both plugin and MCP verified.
     observation = _grant_observation_consent(workspace)
+    check_policy = _activate_check_policy_trust(
+        workspace,
+        check_policy,
+        exact_digest_confirmed=policy_digest_confirmed,
+    )
     return {
         "outcome": mcp_outcome,
         "reason": None,
         "state": mcp_state.value,
         "plugin": plugin_report,
         "observation_consent": observation,
+        "check_policy": check_policy,
     }
 
 
@@ -841,36 +910,33 @@ async def run_setup_wizard(
     mutating_run = interactive or accept
     marker_written = _write_setup_marker(str(registration["outcome"])) if mutating_run else False
     integration = _integration_layers()
-    consent = None
-    if isinstance(registration, dict):
-        observation = registration.get("observation_consent")
-        if isinstance(observation, dict):
-            consent = observation.get("outcome")
-        plugin_block = registration.get("plugin")
-    else:
-        plugin_block = None
+    consent: str | None = None
+    observation = registration.get("observation_consent")
+    if isinstance(observation, Mapping):
+        raw_consent = observation.get("outcome")
+        consent = raw_consent if type(raw_consent) is str else None
+    plugin_block = registration.get("plugin")
     plugin_presence = None
-    if isinstance(plugin_block, dict):
+    if isinstance(plugin_block, Mapping):
         raw_presence = plugin_block.get("presence")
         plugin_presence = raw_presence if type(raw_presence) is str else None
-    elif isinstance(integration, dict):
+    else:
         plugin = integration.get("plugin")
-        if isinstance(plugin, dict):
+        if isinstance(plugin, Mapping):
             raw_presence = plugin.get("presence")
             plugin_presence = raw_presence if type(raw_presence) is str else None
+    hooks_raw = integration.get("hooks")
     hooks = (
-        cast(dict[str, JsonValue], integration["hooks"])
-        if isinstance(integration, dict) and isinstance(integration.get("hooks"), dict)
+        hooks_raw
+        if isinstance(hooks_raw, dict)
         else {}
     )
     readiness = _readiness_layers(
         binary=chosen,
-        mcp_state=cast(str | None, registration.get("state"))
-        if isinstance(registration, dict)
-        else None,
+        mcp_state=cast(str | None, registration.get("state")),
         plugin_presence=plugin_presence,
         hooks=hooks,
-        consent_outcome=cast(str | None, consent),
+        consent_outcome=consent,
         service=service,
     )
 
@@ -952,6 +1018,15 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
                 )
             elif outcome is not None:
                 typer.echo(f"  Observation consent: {outcome}")
+        check_policy = registration.get("check_policy")
+        if isinstance(check_policy, dict):
+            typer.echo(
+                "  Approved-check policy: "
+                f"{check_policy.get('outcome') or 'absent'}"
+            )
+            digest = check_policy.get("policy_digest")
+            if type(digest) is str:
+                typer.echo(f"  Approved-check policy digest: {digest}")
     if isinstance(service, dict):
         reachable = service.get("reachable")
         typer.echo(f"  Local service reachable: {'yes' if reachable else 'no'}")

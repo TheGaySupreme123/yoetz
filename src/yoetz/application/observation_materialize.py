@@ -250,6 +250,16 @@ def materialize_observation_envelope(
     channel = PublicationChannel.HOOK_OBSERVED
     mapping = envelope.cursor.mapping_version or MATERIALIZATION_MAPPING_VERSION
     kind = envelope.event_kind
+    # Codex hook ``PostToolUse`` and session-stream ``item.completed`` are two
+    # observations of the same completed host call. Normalize the stream form
+    # before choosing ledger roles so both sources produce the same
+    # action/result batch and therefore the same operation digest.
+    if (
+        envelope.source is ObservationSource.CODEX_SESSION_STREAM
+        and kind == "item.completed"
+        and _correlation(structural) is not None
+    ):
+        kind = "PostToolUse"
     tool = _tool_name(structural)
     correlation = _correlation(structural)
     unpaired = ObservationGapCode.UNPAIRED_EVENT.value in gaps

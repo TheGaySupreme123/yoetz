@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from yoetz.adapters.approved_checks import ApprovedCheckRunner
+from yoetz.adapters.git_subject_state import (
+    GitSubjectStateAdapter,
+    open_local_workspace,
+)
 from yoetz.adapters.integrations.codex_lifecycle import (
     LifecycleMapping,
     load_mapping,
@@ -18,9 +25,9 @@ from yoetz.adapters.integrations.observation_local import (
     session_commitment_from_codex_id,
 )
 from yoetz.application.observation_advice import (
-    ObservationAdviceBuildInput,
-    build_observation_advice_snapshot,
+    ObservationAdviceContextBuilder,
 )
+from yoetz.application.observation_check_policy import load_observation_check_policy
 from yoetz.application.observation_materialize import (
     MaterializedObservationBatch,
     canonical_logical_identity,
@@ -28,9 +35,19 @@ from yoetz.application.observation_materialize import (
     media_type_for_schema,
     observation_author,
     observation_operation_digest,
+    stable_observation_id,
+)
+from yoetz.application.observation_verification import (
+    ObservationVerificationJob,
+    ObservationVerificationRepository,
+    ObservationVerificationWorker,
 )
 from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
+from yoetz.domain.events import EventDraft, EventSchema, encode_payload, media_type_for
+from yoetz.domain.findings import Finding, FindingKind, FindingOrigin
 from yoetz.domain.observation import (
+    ObservationContentChunk,
+    ObservationContentKind,
     ObservationControlCommand,
     ObservationEnvelope,
     ObservationGapCode,
@@ -41,10 +58,21 @@ from yoetz.domain.observation import (
     ObservationStatus,
     ObservationStatusQuery,
 )
-from yoetz.domain.values import timestamp_from_datetime
+from yoetz.domain.values import (
+    Frontier,
+    JsonObject,
+    event_id,
+    timestamp_from_datetime,
+)
+from yoetz.observability.privacy import redact_sensitive_content
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
-from yoetz.ports.ledger import AppendCommand, AppendEntry, OperationKind
+from yoetz.ports.ledger import (
+    AppendCommand,
+    AppendEntry,
+    OperationKind,
+    ProjectionView,
+)
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
 from yoetz.ports.observation import TaskObservationPort
 from yoetz.ports.runtime import (
@@ -54,6 +82,9 @@ from yoetz.ports.runtime import (
     RuntimeCapability,
     TaskRuntime,
 )
+from yoetz.ports.subject_state import SubjectStateCaptureCommand, SubjectStateFormat
+from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
+from yoetz.protocol.coverage import PublicationChannel
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
 
@@ -103,6 +134,9 @@ class ObservationCoordinator:
     mapping_loader: ObservationMappingLoader = load_mapping
     state_root: Path | None = None
     advice_hook: ObservationAdviceHook | None = None
+    advice_context_builder: ObservationAdviceContextBuilder = field(
+        default_factory=ObservationAdviceContextBuilder
+    )
 
     def __post_init__(self) -> None:
         self._lock = asyncio.Lock()
@@ -161,7 +195,27 @@ class ObservationCoordinator:
                 store = self._observation_store(runtime)
                 store.grant_consent(workspace, consent.granted_at)
                 store.bind_session(workspace, request.envelope.session_commitment)
-                result = await store.ingest(request.envelope)
+                captured_refs, content_redacted = await self._capture_content(
+                    runtime,
+                    store,
+                    workspace=workspace,
+                    envelope=request.envelope,
+                    chunks=request.content_chunks,
+                )
+                gaps = set(request.envelope.gap_codes)
+                if content_redacted:
+                    gaps.add(ObservationGapCode.CONTENT_REDACTED.value)
+                envelope = replace(
+                    request.envelope,
+                    content_object_refs=tuple(
+                        sorted(
+                            {*request.envelope.content_object_refs, *captured_refs},
+                            key=str.encode,
+                        )
+                    ),
+                    gap_codes=tuple(sorted(gaps, key=str.encode)),
+                )
+                result = await store.ingest(envelope)
                 if result.disposition is ObservationIngestDisposition.REJECTED:
                     return result
 
@@ -171,11 +225,23 @@ class ObservationCoordinator:
                 # failed, so re-run the idempotent materialize/append to repair it.
                 # If any step raises, the broad guard below turns it into a
                 # retryable rejection so the outbox keeps the entry pending.
-                batch = materialize_observation_envelope(request.envelope, task_id=runtime.task_id)
+                batch = materialize_observation_envelope(envelope, task_id=runtime.task_id)
                 if batch.skip_reason is None and batch.drafts:
-                    await self._append_materialized(runtime, request.envelope, batch)
+                    claim = await self._append_materialized(runtime, envelope, batch)
+                    if claim is not None:
+                        operation_id, materialization_digest = claim
+                        store.record_logical_identity_claim(
+                            workspace=workspace,
+                            logical_identity=canonical_logical_identity(envelope),
+                            materialization_digest=materialization_digest,
+                            operation_id=operation_id,
+                            source_mask=1 if envelope.source.value == "codex_hook" else 2,
+                            mapping_version=envelope.cursor.mapping_version,
+                            materialized_at=timestamp_from_datetime(self.clock.now_utc()),
+                        )
 
-                await self._run_advice(workspace, runtime.task_id, store)
+                await self._run_verification(runtime, workspace, store, envelope)
+                await self._run_advice(workspace, runtime, store)
                 return result
             except PublicOperationError as exc:
                 if exc.code is PublicErrorCode.VAULT_LOCKED:
@@ -213,7 +279,38 @@ class ObservationCoordinator:
         return self.local.resume(command)
 
     async def revoke(self, command: ObservationRevokeCommand) -> ObservationStatus:
-        return self.local.revoke(command)
+        status = self.local.revoke(command)
+        # The local fence is authoritative for immediately stopping new capture.
+        # Best-effort bundle propagation additionally deactivates the encrypted
+        # locator and exact-digest trust rows while retaining encrypted evidence.
+        seen_tasks: set[str] = set()
+        for codex_session_id in self.local.codex_sessions_for_workspace(
+            command.workspace_commitment
+        ):
+            mapping = self.mapping_loader(codex_session_id, _state=self.state_root)
+            if mapping is None or mapping.yoetz_task_id in seen_tasks:
+                continue
+            runtime: TaskRuntime | None = None
+            try:
+                runtime = await self.runtime.route(
+                    RouteCommand(
+                        session_id=mapping.yoetz_session_id,
+                        writer_id=mapping.yoetz_writer_id,
+                        access=RouteAccess.WRITE,
+                        required_capabilities=frozenset({RuntimeCapability.WRITE}),
+                    )
+                )
+                await self._observation_store(runtime).revoke(command)
+                seen_tasks.add(mapping.yoetz_task_id)
+            except Exception:
+                self.local.note_coverage_gap(
+                    command.workspace_commitment,
+                    ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                )
+            finally:
+                if runtime is not None:
+                    await self.runtime.release(runtime)
+        return status
 
     def _observation_store(self, runtime: TaskRuntime) -> TaskObservationPort:
         store = runtime.observation
@@ -230,10 +327,25 @@ class ObservationCoordinator:
         runtime: TaskRuntime,
         envelope: ObservationEnvelope,
         batch: MaterializedObservationBatch,
-    ) -> None:
+    ) -> tuple[str, str] | None:
         writer_id = runtime.writer_id
         if writer_id is None:
-            return
+            return None
+        digest = observation_operation_digest(
+            task_id=runtime.task_id,
+            session_id=runtime.session_id,
+            writer_id=writer_id,
+            logical_identity=canonical_logical_identity(envelope),
+            draft_roles=tuple(item.role for item in batch.drafts),
+        )
+        # Check the stable operation identity before staging payloads. A replay
+        # after "ledger committed, local outbox not acknowledged" must not
+        # create orphan encrypted objects on every retry.
+        operation_id = self._stable_operation_id(digest)
+        existing = await runtime.ledger.lookup_operation(writer_id, operation_id)
+        if existing is not None:
+            return operation_id, digest
+
         author = observation_author()
         refs: list[ObjectRef] = []
         entries: list[AppendEntry] = []
@@ -272,18 +384,6 @@ class ObservationCoordinator:
                     item.projection_status,
                 )
             )
-        digest = observation_operation_digest(
-            task_id=runtime.task_id,
-            session_id=runtime.session_id,
-            writer_id=writer_id,
-            logical_identity=canonical_logical_identity(envelope),
-            draft_roles=tuple(item.role for item in batch.drafts),
-        )
-        # Stable operation id from the same material so retries collide.
-        operation_id = self._stable_operation_id(digest)
-        existing = await runtime.ledger.lookup_operation(writer_id, operation_id)
-        if existing is not None:
-            return
         command = AppendCommand(
             runtime.task_id,
             runtime.session_id,
@@ -303,6 +403,247 @@ class ObservationCoordinator:
             command,
         )
         await run_prepared_append(runtime.ledger, mutation)
+        return operation_id, digest
+
+    async def _capture_content(
+        self,
+        runtime: TaskRuntime,
+        store: TaskObservationPort,
+        *,
+        workspace: str,
+        envelope: ObservationEnvelope,
+        chunks: tuple[ObservationContentChunk, ...],
+    ) -> tuple[tuple[str, ...], bool]:
+        """Assemble encrypted captured-content chunk objects before SQLite references them."""
+
+        if not chunks:
+            return (), False
+        logical_identity = canonical_logical_identity(envelope)
+        object_ids: set[str] = set()
+        any_redacted = False
+        for chunk in chunks:
+            existing = store.content_manifest_object_id(
+                workspace=workspace,
+                logical_identity=logical_identity,
+                chunk=chunk,
+            )
+            if existing is not None:
+                object_ids.add(existing)
+                any_redacted = any_redacted or chunk.redacted
+                continue
+            safe_content, detected = redact_sensitive_content(chunk.content)
+            any_redacted = any_redacted or chunk.redacted or detected
+            stored_chunk = replace(
+                chunk,
+                content=safe_content,
+                redacted=chunk.redacted or detected,
+            )
+            manifest = canonical_encode(
+                JsonObject(
+                    {
+                        "format": "yoetz.observation-content/1",
+                        "content_kind": stored_chunk.content_kind.value,
+                        "correlation_identity": stored_chunk.correlation_identity,
+                        "source_commitment": stored_chunk.source_commitment,
+                        "media_type": stored_chunk.media_type,
+                        "part_index": stored_chunk.part_index,
+                        "part_count": stored_chunk.part_count,
+                        "redacted": stored_chunk.redacted,
+                        "content_b64": base64.b64encode(safe_content).decode("ascii"),
+                    }
+                )
+            )
+            metadata = ObjectMetadata(
+                ObjectKind.CAPTURED_CONTENT,
+                "application/vnd.yoetz.observation-content+json",
+                runtime.task_id,
+                self.clock.now_utc(),
+            )
+            staged = await runtime.objects.stage(
+                ObjectSource(data=manifest, declared_size=len(manifest)),
+                metadata,
+            )
+            ref = await runtime.objects.finalize(staged)
+            store.record_content_manifest(
+                workspace=workspace,
+                logical_identity=logical_identity,
+                chunk=stored_chunk,
+                ref=ref,
+                recorded_at=timestamp_from_datetime(self.clock.now_utc()),
+            )
+            if stored_chunk.content_kind is ObservationContentKind.WORKSPACE_LOCATOR:
+                store.bind_workspace_locator(
+                    workspace=workspace,
+                    locator_ref=ref,
+                    bound_at=timestamp_from_datetime(self.clock.now_utc()),
+                )
+            object_ids.add(ref.object_id)
+        return tuple(sorted(object_ids, key=str.encode)), any_redacted
+
+    async def _run_verification(
+        self,
+        runtime: TaskRuntime,
+        workspace: str,
+        store: TaskObservationPort,
+        envelope: ObservationEnvelope,
+    ) -> None:
+        """Capture each completed-action state and drain its durable latest-work queue."""
+
+        if envelope.event_kind not in {"PostToolUse", "item.completed"}:
+            return
+        required = (
+            "workspace_locator_descriptor",
+            "verification_repository",
+            "latest_verification_subject_digest",
+            "policy_digest_is_trusted",
+            "record_trusted_check_policy",
+        )
+        if any(not callable(getattr(store, name, None)) for name in required):
+            return
+        descriptor = store.workspace_locator_descriptor(workspace)
+        if descriptor is None:
+            self.local.note_coverage_gap(
+                workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+            )
+            return
+        locator_ref = await runtime.objects.resolve_verified(*descriptor)
+        encrypted = b"".join([chunk async for chunk in runtime.objects.open_verified(locator_ref)])
+        parsed = strict_json_parse(encrypted)
+        if not isinstance(parsed, dict) and type(parsed) is not JsonObject:
+            return
+        content_b64 = parsed.get("content_b64")
+        content_kind = parsed.get("content_kind")
+        if (
+            content_kind != ObservationContentKind.WORKSPACE_LOCATOR.value
+            or type(content_b64) is not str
+        ):
+            return
+        try:
+            locator = base64.b64decode(content_b64.encode("ascii"), validate=True).decode("utf-8")
+            handle = open_local_workspace(Path(locator))
+            policy, _raw_policy = load_observation_check_policy(Path(locator))
+        except Exception:
+            self.local.note_coverage_gap(
+                workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+            )
+            return
+        if not self.local.policy_digest_is_trusted(workspace, policy.raw_digest):
+            self.local.note_coverage_gap(workspace, ObservationGapCode.POLICY_UNTRUSTED.value)
+            return
+        now = timestamp_from_datetime(self.clock.now_utc())
+        if not store.policy_digest_is_trusted(workspace, policy.raw_digest):
+            trust_payload = canonical_encode(
+                JsonObject(
+                    {
+                        "format": "yoetz.approved-check-policy-trust/1",
+                        "workspace_commitment": workspace,
+                        "policy_digest": policy.raw_digest,
+                        "trusted_at": now.wire,
+                    }
+                )
+            )
+            trust_ref = await self._encrypt_captured_content(runtime, trust_payload)
+            store.record_trusted_check_policy(
+                workspace=workspace,
+                policy_digest=policy.raw_digest,
+                trust_ref=trust_ref,
+                trusted_at=now,
+            )
+        capture = GitSubjectStateAdapter()
+
+        def subject_digest(_handle: object) -> str:
+            result = capture.capture(
+                SubjectStateCaptureCommand(handle, SubjectStateFormat.GIT_STRUCTURAL_V1)
+            )
+            if result.subject_state is None:
+                raise RuntimeError("subject_state_unavailable")
+            return canonical_digest(
+                JsonObject(
+                    {
+                        "tree_digest": result.subject_state.tree_digest,
+                        "diff_digest": result.subject_state.diff_digest,
+                    }
+                )
+            )
+
+        current_digest = await asyncio.to_thread(subject_digest, handle)
+        repository = cast(ObservationVerificationRepository, store.verification_repository())
+
+        async def persist_output(job: ObservationVerificationJob, content: bytes) -> str | None:
+            chunk = ObservationContentChunk(
+                content_kind=ObservationContentKind.APPROVED_CHECK_OUTPUT,
+                correlation_identity=f"check:{job.job_id}",
+                source_commitment=f"hmac-sha256:{'0' * 64}",
+                media_type="text/plain",
+                part_index=0,
+                part_count=1,
+                content=content,
+                redacted=True,
+            )
+            manifest = canonical_encode(
+                JsonObject(
+                    {
+                        "format": "yoetz.observation-content/1",
+                        "content_kind": chunk.content_kind.value,
+                        "correlation_identity": chunk.correlation_identity,
+                        "source_commitment": chunk.source_commitment,
+                        "media_type": chunk.media_type,
+                        "part_index": 0,
+                        "part_count": 1,
+                        "redacted": True,
+                        "content_b64": base64.b64encode(content).decode("ascii"),
+                    }
+                )
+            )
+            ref = await self._encrypt_captured_content(runtime, manifest)
+            store.record_content_manifest(
+                workspace=workspace,
+                logical_identity=f"verification:{job.job_id}",
+                chunk=chunk,
+                ref=ref,
+                recorded_at=timestamp_from_datetime(self.clock.now_utc()),
+            )
+            return ref.object_id
+
+        def now_wire() -> str:
+            return timestamp_from_datetime(self.clock.now_utc()).wire
+
+        def lease_expiry() -> str:
+            return timestamp_from_datetime(self.clock.now_utc() + timedelta(minutes=2)).wire
+
+        worker = ObservationVerificationWorker(
+            repository=repository,
+            runner=ApprovedCheckRunner({item.approval_commitment: item for item in policy.checks}),
+            workspace_provider=lambda _workspace: handle,
+            policy_provider=lambda _workspace, _digest: policy.checks,
+            capture_subject_state=subject_digest,
+            persist_output=persist_output,
+            service_generation=runtime.fence.service_generation,
+            lease_owner=runtime.fence.service_instance_id,
+            now=now_wire,
+            lease_expires_at=lease_expiry,
+        )
+        worker.enqueue_if_changed(
+            workspace=workspace,
+            policy_digest=policy.raw_digest,
+            approvals=policy.checks,
+            previous_subject_state_digest=store.latest_verification_subject_digest(workspace),
+            subject_state_digest=current_digest,
+        )
+        while await worker.run_once() is not None:
+            pass
+
+    async def _encrypt_captured_content(self, runtime: TaskRuntime, content: bytes) -> ObjectRef:
+        metadata = ObjectMetadata(
+            ObjectKind.CAPTURED_CONTENT,
+            "application/vnd.yoetz.observation-content+json",
+            runtime.task_id,
+            self.clock.now_utc(),
+        )
+        staged = await runtime.objects.stage(
+            ObjectSource(data=content, declared_size=len(content)), metadata
+        )
+        return await runtime.objects.finalize(staged)
 
     def _stable_operation_id(self, digest: str) -> str:
         # Derive a request-shaped id from the digest for idempotent appends.
@@ -322,23 +663,43 @@ class ObservationCoordinator:
         except ValueError, TypeError:
             return self.ids.new(IdKind.REQUEST)
 
-    async def _run_advice(self, workspace: str, task_id: str, store: TaskObservationPort) -> None:
+    async def _run_advice(
+        self, workspace: str, runtime: TaskRuntime | str, store: TaskObservationPort
+    ) -> None:
+        task_id = runtime.task_id if isinstance(runtime, TaskRuntime) else runtime
         envelopes = store.list_envelopes(workspace)
-        status = await store.status(ObservationStatusQuery(workspace))
-        snapshot = build_observation_advice_snapshot(
-            ObservationAdviceBuildInput(
-                envelopes=envelopes,
-                lifecycle=status.lifecycle,
-                gaps=status.gaps,
-                has_real_observation=bool(envelopes),
-            )
-        )
+        snapshot = await self.advice_context_builder.build(workspace, store)
         if snapshot is not None:
-            store.set_advice_snapshot(
-                workspace, snapshot, timestamp_from_datetime(self.clock.now_utc())
-            )
+            now = timestamp_from_datetime(self.clock.now_utc())
+            store.set_advice_snapshot(workspace, snapshot, now)
+            recorder = getattr(store, "record_advice_history", None)
+            if callable(recorder):
+                recorder(
+                    workspace=workspace,
+                    snapshot=snapshot,
+                    verification_state=(
+                        "stale"
+                        if ObservationGapCode.VERIFICATION_STALE.value
+                        in snapshot.confidence_coverage.known_gaps
+                        else "unavailable"
+                    ),
+                    semantic_state=(
+                        "ready"
+                        if any(
+                            item.origin == "semantic_model_derived"
+                            for item in snapshot.ranked_items
+                        )
+                        else "disabled"
+                    ),
+                    freshness=(
+                        "current" if not snapshot.confidence_coverage.known_gaps else "partial"
+                    ),
+                    recorded_at=now,
+                )
             # Mirror into local store for hook advice delivery.
             self.local.set_advice_snapshot(workspace, snapshot)
+            if isinstance(runtime, TaskRuntime):
+                await self._materialize_advice_findings(runtime, envelopes, snapshot)
         if self.advice_hook is not None:
             result = self.advice_hook(
                 workspace_commitment=workspace,
@@ -349,3 +710,150 @@ class ObservationCoordinator:
             )
             if asyncio.iscoroutine(result) or isinstance(result, Awaitable):
                 await cast(Awaitable[None], result)
+
+    async def _materialize_advice_findings(
+        self,
+        runtime: TaskRuntime,
+        envelopes: tuple[ObservationEnvelope, ...],
+        snapshot: object,
+    ) -> None:
+        from yoetz.domain.observation import AdviceSnapshot
+
+        if type(snapshot) is not AdviceSnapshot or runtime.writer_id is None:
+            return
+        refs: set[str] = set()
+        for envelope in envelopes:
+            batch = materialize_observation_envelope(envelope, task_id=runtime.task_id)
+            refs.update(str(item.draft.event_id) for item in batch.drafts)
+        if not refs:
+            return
+        projection = await runtime.ledger.load_projection(
+            runtime.session_id, ProjectionView.COMPACT
+        )
+        frontier = Frontier.genesis() if projection is None else projection.frontier
+        kind_by_rule = {
+            "failed_command_unresolved": FindingKind.FAILED_WORK_OMITTED,
+            "edit_after_successful_check": FindingKind.STALE_EVIDENCE_FOR_CHANGED_STATE,
+            "completion_without_verification": FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
+            "static_test_for_live_claim": FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM,
+            "subagent_finding_unaddressed": FindingKind.MATERIAL_LIMITATION_OMITTED,
+            "change_outside_plan": FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT,
+            "observation_gap_or_stale": FindingKind.LEDGER_STALE_OR_INCOMPLETE,
+            "provider_not_ready": FindingKind.MATERIAL_LIMITATION_OMITTED,
+            "semantic_claim_without_attempt": FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
+        }
+        items = tuple(
+            item
+            for item in snapshot.ranked_items
+            if item.origin == "deterministic" and item.rule_code in kind_by_rule
+        )
+        if not items:
+            return
+        request_digest_value = canonical_digest(
+            JsonObject(
+                {
+                    "format": "yoetz.observation-advice-findings/1",
+                    "task_id": runtime.task_id,
+                    "suppression_identity": snapshot.suppression_identity,
+                    "evidence_basis_digest": snapshot.evidence_basis_digest,
+                }
+            )
+        )
+        operation_id = self._stable_operation_id(request_digest_value)
+        existing = await runtime.ledger.lookup_operation(runtime.writer_id, operation_id)
+        if existing is not None:
+            return
+        entries: list[AppendEntry] = []
+        object_refs: list[ObjectRef] = []
+        subject_refs = tuple(event_id(ref) for ref in sorted(refs, key=str.encode)[-64:])
+        for item in items:
+            kind = kind_by_rule[item.rule_code]
+            policy_id = (
+                "work-integrity"
+                if kind
+                in {
+                    FindingKind.FAILED_WORK_OMITTED,
+                    FindingKind.STALE_EVIDENCE_FOR_CHANGED_STATE,
+                    FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
+                    FindingKind.LEDGER_STALE_OR_INCOMPLETE,
+                }
+                else "research-evidence"
+            )
+            finding = Finding(
+                item.finding_id,
+                kind,
+                FindingOrigin.DETERMINISTIC,
+                item.priority,
+                item.summary,
+                item.detail,
+                subject_refs,
+                policy_id,
+                "0.1.0",
+                frontier,
+                item.coverage,
+                None,
+            )
+            schema = EventSchema("finding-recorded", "1.0.0")
+            draft = EventDraft(
+                event_id(
+                    stable_observation_id(
+                        kind=IdKind.EVENT,
+                        task_id=runtime.task_id,
+                        source_identity=snapshot.suppression_identity,
+                        mapping_version="obs-advice/1.0.0",
+                        role=str(item.finding_id),
+                    )
+                ),
+                schema,
+                timestamp_from_datetime(self.clock.now_utc()),
+                (),
+                finding,
+                (),
+                (),
+            )
+            payload = canonical_encode(encode_payload(finding))
+            metadata = ObjectMetadata(
+                ObjectKind.EVENT_PAYLOAD,
+                media_type_for(schema.name),
+                runtime.task_id,
+                self.clock.now_utc(),
+            )
+            staged = await runtime.objects.stage(
+                ObjectSource(data=payload, declared_size=len(payload)), metadata
+            )
+            ref = await runtime.objects.finalize(staged)
+            object_refs.append(ref)
+            entries.append(
+                AppendEntry(
+                    draft,
+                    observation_author(),
+                    ref,
+                    ref.commitment,
+                    metadata.media_type,
+                    ref.plaintext_size,
+                    PublicationChannel.ENGINE_DERIVED,
+                    item.coverage,
+                    "projected",
+                )
+            )
+        command = AppendCommand(
+            runtime.task_id,
+            runtime.session_id,
+            runtime.writer_id,
+            operation_id,
+            OperationKind.PUBLISH_WORK,
+            request_digest_value,
+            None,
+            tuple(entries),
+        )
+        await run_prepared_append(
+            runtime.ledger,
+            PreparedMutation(
+                command.writer_id,
+                command.operation_id,
+                command.request_digest,
+                command.expected_frontier,
+                tuple(object_refs),
+                command,
+            ),
+        )

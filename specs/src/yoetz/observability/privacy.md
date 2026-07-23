@@ -29,6 +29,8 @@ that separation, not permission to put payloads there first.
   `end_offset: int` (exclusive), and `severity: Sensitivity`; `kind` is exactly
   `canary|credential_pattern|private_key_marker`, and it never retains the matched bytes.
 - `scan_for_sensitive_content(data: bytes, *, canaries: tuple[bytes, ...] = ()) -> tuple[ScanFinding, ...]`.
+- `redact_sensitive_content(data: bytes) -> tuple[bytes, bool]` — replaces detected secret spans
+  with fixed ASCII redaction bytes before encrypted observation persistence.
 - `assert_plaintext_safe(data: bytes, surface: str, *, canaries=()) -> None` — raises the typed
   internal `PrivacyFenceError` when a forbidden match is found.
 - `redact_diagnostic_value(name: str, value: object) -> JsonValue` — allowlist conversion for a
@@ -176,6 +178,14 @@ encoding, catalog/bundle structural-row construction in test/release-probe modes
 backup manifests, import metadata, diagnostic manifests, and generated error summaries. Event
 payloads and captured artifacts are expected to contain user data and go directly to the encrypted
 object path; scanning them does not make them suitable for plaintext storage.
+
+Observation capture applies a stricter ingress rule: hidden reasoning and system/platform/developer
+fields are never selected; visible task content is scanned and secret spans are redacted in memory
+before object staging. Raw matched bytes may not reach SQLite, local outbox/quarantine, logs,
+diagnostics, crash text, hook context, semantic packets, or backup manifests. If redaction or
+authenticated encryption cannot complete, only structural metadata plus
+`content_capture_unavailable|content_redacted` survives. This protects copied at-rest files without
+vault keys; it does not protect a compromised unlocked same-user process or root/kernel control.
 
 In normal production, structural fences (typed models and allowlists) are mandatory. Expensive
 full-file canary scans are mandatory in conformance/release-probe profiles and before diagnostic

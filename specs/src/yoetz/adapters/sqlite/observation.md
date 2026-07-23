@@ -1,4 +1,4 @@
-# src/yoetz/adapters/sqlite/observation.py — durable ObservationPort over migration 0002
+# src/yoetz/adapters/sqlite/observation.py — durable ObservationPort over migrations 0002/0003
 
 **Wave:** D | **ADRs:** ADR-005, ADR-009, ADR-010 | **Imports (spec-tree):**
 `ports/observation.py.md`, `domain/observation.py.md`, `adapters/sqlite/migrations.md` |
@@ -6,21 +6,24 @@
 
 ## Purpose
 
-Provide a SQLite-backed `ObservationPort` against the observation tables created by bundle
-migration `0002`, so consent, cursors, dedup, structural envelopes, and advice snapshots survive
-process restart without plaintext transcript spool.
+Provide a SQLite-backed `TaskObservationPort` against migrations `0002` and `0003`, so consent,
+cursors, dedup, structural envelopes, encrypted-content metadata, logical identity, exact policy
+trust, verification, and advice state survive restart without plaintext transcript spool.
 
 ## Public surface
 
-- `SqliteObservationStore` — `grant_consent`, `bind_session`, the five async `ObservationPort`
-  methods, `set_advice_snapshot`, `load_advice_snapshot`, `list_envelopes`
+- `SqliteObservationStore` — the five async `ObservationPort` methods plus repository-owned
+  content-manifest, workspace-binding, logical-identity, trust, verification-fact, advice-history,
+  and advice-snapshot operations.
 
 ## Behavior
 
-Fail closed without active consent. Pause/resume/revoke match the memory adapter. Identical
-envelopes are idempotent duplicates. Gaps from rejected stale cursors are persisted as bounded
-`observation_gap` events. Envelope wire JSON is stored losslessly in `structural_json`; sensitive
-prose never appears in plaintext columns.
+Fail closed without active consent. Revoke deactivates the locator, revokes trust, and retains
+encrypted evidence. Identical envelopes are idempotent duplicates. A logical-identity claim binds
+workspace, normalized identity, canonical materialization digest, stable operation ID, source mask,
+and mapping version; a second source ORs coverage only when the other fields match exactly.
+Content rows store encrypted object inventory/commitments/classification/relations only. The
+verification repository owns all job/result SQL, lease recovery, coalescing, and fact projection.
 
 ## Errors and edge cases
 
@@ -31,7 +34,8 @@ Oversized retention trims oldest events/dedup rows.
 
 1. No transcript/stdout/stderr/path columns.
 2. Revoke retains evidence rows.
-3. Tables are exactly those owned by `migrations/bundle/0002.sql`.
+3. Tables are exactly those owned by `migrations/bundle/0002.sql` and `0003.sql`.
+4. Coordinators never access `_db` or issue observation-table SQL.
 
 ## Tests
 

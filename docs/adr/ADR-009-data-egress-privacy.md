@@ -255,13 +255,36 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     unsupported, partial, unsafe, changing, or over-limit capture returns no comparable state.
 16. **Live harness observation retention (first-party Codex, ADR-010 amendment 2026-07-22):**
     Observation consent is independent of egress consent. One project-level confirmation records a
-    private workspace commitment (never a raw path). Revocation stops new ingestion and keeps
-    retained evidence. Never retain hidden reasoning or complete transcript prose. Sensitive
-    bounded observation evidence lives only in encrypted objects; plaintext state is allowlisted
-    structural fields plus commitments. Never create an unencrypted transcript spool on
-    vault/service outage. Semantic review receives only minimized approved packets. Secret-like
-    command output never appears in status, logs, hook advice, or semantic packets. Observation is
-    local control (`ObservationPort`), not a network egress channel and not a seventh MCP tool.
+    private workspace commitment (never a raw path). The normalized workspace locator is an
+    authenticated encrypted task object; plaintext state retains only its commitment and object
+    identity. Revocation stops new ingestion, deactivates the locator and check-policy trust
+    bindings, and retains already encrypted task evidence.
+
+    Retain bounded task-relevant visible user/assistant/subagent messages, tool inputs/results,
+    task-linked terminal results, selected changed-file/diff material, approved-check output,
+    lifecycle structure, and composition readiness. Reject hidden reasoning, system/developer/
+    platform prompts, credentials, detected secret spans, unrelated files, and ambient logs before
+    persistence. Secret-bearing spans are redacted in memory before authenticated encryption.
+    SQLite, observation envelopes, cursors, local outboxes, status, hook context, and logs contain
+    only allowlisted structure, encrypted object identities/commitments, sizes, classifications,
+    and relations. A locked vault, absent service, or failed encryption keeps the structural
+    envelope with `content_capture_unavailable`; it never creates a plaintext fallback spool.
+
+    This boundary protects stolen object files, SQLite files, backups, and copied local state when
+    vault keys are unavailable, and tampering must fail authenticated decryption. It does **not**
+    claim protection from root, kernel compromise, or a compromised same-user Yoetz/Codex process
+    while the vault is unlocked; immutable Python buffers are not promised zeroized. Public copy
+    must describe authenticated encryption at rest and secret exclusion, never “cannot be hacked”
+    or absolute host immunity.
+
+    Exact project check policy bytes propose no authority. One trusted-local confirmation binds the
+    raw `.yoetz/checks.toml` digest; any byte change suspends all listed commands. Approved checks
+    use exact argv, `shell=False`, sanitized environment, bounded output/time, and an enforcing
+    sandbox. Network-requiring checks fail closed unless a separately reviewed authorization and
+    sandbox prove the permission. Redacted output is encrypted before durable retention. Optional
+    semantic observation advice remains additive and passes only minimized approved packets through
+    the existing privacy gateway. Observation, trust, verification management, and local advice
+    diagnostics are local control, not network-egress channels and not additional MCP tools.
 
 ### Human involvement under the recommended recipe
 

@@ -50,6 +50,7 @@ from yoetz.protocol.coverage import (
 )
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import (
+    StatusAdvicePageModel,
     StatusAssignmentFilterModel,
     StatusAssignmentPageModel,
     StatusCandidateFindingItemModel,
@@ -513,7 +514,81 @@ async def execute_status(app: Application, request: StatusRequest) -> StatusInte
                 raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")
 
         import_status = await _import_status(runtime)
-        if request.view == "candidate_findings":
+        if request.view == "advice":
+            if position is not None:
+                raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")
+            raw_page = await runtime.ledger.query_projection(
+                ProjectionQuery(
+                    runtime.session_id,
+                    ProjectionView.COMPACT.value,
+                    None,
+                    frontier,
+                    1,
+                    None,
+                    expected_version,
+                )
+            )
+            snapshot = (
+                None
+                if runtime.observation is None
+                else runtime.observation.load_latest_advice_snapshot()
+            )
+            items: tuple[dict[str, JsonValue], ...] = ()
+            if snapshot is not None:
+                verification_state = (
+                    "stale"
+                    if "verification_stale" in snapshot.confidence_coverage.known_gaps
+                    else (
+                        "unavailable"
+                        if "policy_untrusted" in snapshot.confidence_coverage.known_gaps
+                        else "current"
+                    )
+                )
+                items = tuple(
+                    {
+                        "finding_id": str(item.finding_id),
+                        "rule_code": item.rule_code,
+                        "priority": item.priority,
+                        "evidence_commitments": tuple(
+                            sorted(
+                                {
+                                    snapshot.evidence_basis_digest,
+                                    *(
+                                        ref
+                                        for ref in item.evidence_refs
+                                        if ref.startswith(("sha256:", "hmac-sha256:"))
+                                    ),
+                                },
+                                key=str.encode,
+                            )
+                        ),
+                        "coverage": coverage_to_json(item.coverage),
+                        "freshness_frontier": item.freshness_frontier,
+                        "verification_state": verification_state,
+                        "semantic_state": (
+                            "ready" if item.origin == "semantic_model_derived" else "disabled"
+                        ),
+                        "recommended_next_action": item.recommended_next_action,
+                    }
+                    for item in snapshot.ranked_items[: int(request.limit)]
+                )
+            page = StatusAdvicePageModel.model_validate(
+                {
+                    "projection_format": "yoetz.advice-snapshot/1",
+                    "items": items,
+                    "next_cursor": None,
+                }
+            )
+            coverage = snapshot.confidence_coverage if snapshot is not None else raw_page.coverage
+            gaps = (
+                snapshot.confidence_coverage.known_gaps if snapshot is not None else raw_page.gaps
+            )
+            head = raw_page.head_frontier
+            effective = raw_page.effective_frontier
+            lag = raw_page.lag
+            projection_version = raw_page.projection_version
+            rebuild_state = raw_page.rebuild_state
+        elif request.view == "candidate_findings":
             if position is not None and type(position) is not int:
                 raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")
             page, coverage, gaps, _ = await _candidate_page(

@@ -26,7 +26,7 @@ and gap-code vocabulary; it does not share consent, cursor, dedup, or advice sta
   - `resume(command: ObservationControlCommand) -> ObservationStatus`
   - `revoke(command: ObservationRevokeCommand) -> ObservationStatus`
 - Shared closed types owned with `domain/observation.py`: `ObservationSource`,
-  `ObservationEnvelope`, `ObservationCursor`, `ObservationStatus`, `AdviceSnapshot`,
+  `ObservationEnvelope`, `ObservationContentChunk`, `ObservationCursor`, `ObservationStatus`, `AdviceSnapshot`,
   `ObservationIngestResult`, `ObservationStatusQuery`, `ObservationControlCommand`,
   `ObservationRevokeCommand`, and closed gap/reason enums as registered in `INTERFACES.md`.
 
@@ -55,12 +55,12 @@ the cursor without replacing hook ingest or inventing events the stream does not
 
 ### Ingest
 
-`ingest` validates the envelope against the exact capability cell and mapping version, advances the
-generation-fenced cursor, deduplicates by source identity + cursor + event identity, persists
-allowlisted structural fields and commitments in plaintext state, and stores sensitive bounded
-evidence only as encrypted object references. It never retains hidden reasoning or complete
-transcript prose. Unrecognized future Codex events accept the stable envelope plus structural facts,
-record opaque gap codes for unknown semantics, and never infer success.
+`ingest` validates the envelope and bounded ephemeral content chunks, normalizes logical identity
+before materialization, advances the generation-fenced cursor only after durable outbox insertion,
+and stores sensitive bounded evidence only as authenticated encrypted objects. Plaintext state holds
+allowlisted structure and object commitments/relations. Equivalent dual-source calls share one
+operation; the second source may strengthen coverage/content references without duplicate ledger
+events. Unknown visible events retain opaque structure, encrypted content, and an explicit gap.
 
 `hook_observed` (and `harness_observed` authorship where justified) requires real observation
 evidence under an active consented observation arm. Trigger-only hooks, consent markers, empty
@@ -76,9 +76,10 @@ suppression identity. The same snapshot surfaces through nonblocking hooks and o
 
 ### Durability and migration
 
-Existing v0.1 ledger/object/import data remains readable without rewrite. Migrations may add only
-observation consent, cursor, dedup, and advice state. Vault or service outage never creates an
-unencrypted transcript spool; ingest fails closed until the vault/service is ready again.
+Existing v0.1 ledger/object/import data remains readable without rewrite. Migration `0003` adds
+encrypted content/workspace-binding references, logical identity, exact-digest trust, verification
+jobs/results, and advice history/delivery state. Vault or service outage never creates plaintext
+content retry state; structural replay retains `content_capture_unavailable`.
 
 ## Errors and edge cases
 
@@ -97,6 +98,7 @@ unencrypted transcript spool; ingest fails closed until the vault/service is rea
 4. Plaintext state is allowlisted structure + commitments only.
 5. `hook_observed` requires real observation evidence.
 6. `ImporterPort` remains a separate batch-import surface.
+7. Repository bytes propose no check authority; exact digest trust is local and encrypted.
 
 ## Tests
 

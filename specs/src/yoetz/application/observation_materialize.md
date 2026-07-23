@@ -16,7 +16,7 @@ observation-store-only with explicit gaps and never invent success.
   version, and event role
 - `observation_operation_digest(...)`, `observation_author()`
 
-## Behavior (conservative mapping)
+## Behavior
 
 - `PreToolUse` → pending `action_recorded` when a stable tool-call identity exists
 - `PostToolUse` → linked `action_recorded` + `result_recorded`; unpaired post → evidence only +
@@ -28,6 +28,11 @@ observation-store-only with explicit gaps and never invent success.
 - Completion/final → `claim_recorded` with observation provenance (never automatic completion proof)
 - Unknown/unsupported → skip materialization (`unsupported_or_gap`)
 - Hook+stream copies share stable IDs → one materialized action/result
+
+## Errors and edge cases
+
+Missing correlation, unsupported semantics, and invalid success evidence produce evidence/gaps or
+skip; they never fabricate an action/result.
 
 ## Invariants
 

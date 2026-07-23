@@ -22,7 +22,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 
 import apsw
 
@@ -42,6 +42,7 @@ from yoetz.application.observation_advice import (
 )
 from yoetz.cli.observe_hooks import handle_observe, map_hook_payload_to_envelope
 from yoetz.domain.observation import (
+    AdviceSnapshot,
     ObservationEnvelope,
     ObservationGapCode,
     ObservationIngestDisposition,
@@ -200,7 +201,7 @@ class SetupLayers:
     hooks_present: bool
     mcp_registered: bool
     consent_active: bool
-    report: dict[str, object] = field(default_factory=dict)
+    report: dict[str, object] = field(default_factory=lambda: dict[str, object]())
 
 
 def _write_plugin_hooks(project: Path) -> bool:
@@ -240,12 +241,13 @@ def run_unified_setup(
             mcp_already_registered=mcp_already_registered,
         )
         if isinstance(result, Mapping):
+            result_map = cast(Mapping[str, object], result)
             return SetupLayers(
-                plugin_present=bool(result.get("plugin_present")),
-                hooks_present=bool(result.get("hooks_present")),
-                mcp_registered=bool(result.get("mcp_registered")),
-                consent_active=bool(result.get("consent_active")),
-                report=dict(result),
+                plugin_present=bool(result_map.get("plugin_present")),
+                hooks_present=bool(result_map.get("hooks_present")),
+                mcp_registered=bool(result_map.get("mcp_registered")),
+                consent_active=bool(result_map.get("consent_active")),
+                report=dict(result_map),
             )
 
     plugin_ok = False
@@ -296,14 +298,16 @@ class ContractObservationPipeline:
     db: apsw.Connection
     sqlite: SqliteObservationStore
     workspace: str
-    pending_outbox: list[ObservationEnvelope] = field(default_factory=list)
-    acknowledged: list[str] = field(default_factory=list)
+    pending_outbox: list[ObservationEnvelope] = field(
+        default_factory=lambda: list[ObservationEnvelope]()
+    )
+    acknowledged: list[str] = field(default_factory=lambda: list[str]())
     outbox_overflow: bool = False
     max_outbox: int = 64
     task_id: str = ""
     session_id: str = ""
     writer_id: str = ""
-    bound_sessions: list[str] = field(default_factory=list)
+    bound_sessions: list[str] = field(default_factory=lambda: list[str]())
 
     @classmethod
     def open(cls, install: FakeCodexInstall) -> ContractObservationPipeline:
@@ -496,7 +500,7 @@ class ContractObservationPipeline:
             )
         }
 
-    def refresh_advice(self) -> object | None:
+    def refresh_advice(self) -> AdviceSnapshot | None:
         envelopes = tuple(self.sqlite.list_envelopes(self.workspace))
         if not envelopes:
             envelopes = tuple(self.local.list_envelopes(self.workspace))

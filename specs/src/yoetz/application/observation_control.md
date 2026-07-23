@@ -22,7 +22,7 @@ Parse request bodies through domain JSON helpers (normalizing wire lists to tupl
 For `observation_ingest`:
 
 - When the body contains `codex_session_id` and the port exposes `ingest_request`, parse
-  `ObservationIngestRequest` (Codex session id + envelope; no caller-supplied Yoetz
+  `ObservationIngestRequest` (Codex session id + envelope + bounded ephemeral content chunks; no caller-supplied Yoetz
   task/session/writer IDs) and call `ingest_request`.
 - Otherwise parse a bare `ObservationEnvelope` and call `ObservationPort.ingest` (test/reference
   memory/SQLite stores).
