@@ -31,6 +31,7 @@ from yoetz.adapters.integrations.codex_session_stream import (
     SessionStreamReader,
     default_stream_profile,
     envelope_from_stream_record,
+    structural_from_stream_record,
 )
 from yoetz.adapters.integrations.observation_local import (
     STREAM_MAPPING_VERSION,
@@ -67,6 +68,13 @@ def _case(case_id: str, claim: str) -> CapabilityCase:
 
 
 def test_synthetic_unknown_future_codex_version_generic_ingest(tmp_path: Path) -> None:
+    """Prove generic parsing of an unfamiliar host record (stable facts + coverage gap).
+
+    Does not inject a pre-built unsupported envelope into an old profile. Instead builds a
+    future host JSON record, extracts allowlisted structural facts via the stream mapper,
+    and records an unsupported-event gap without inventing success.
+    """
+
     evidence_root = capability_evidence_output_root(tmp_path)
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
@@ -74,6 +82,49 @@ def test_synthetic_unknown_future_codex_version_generic_ingest(tmp_path: Path) -
     session = store.session_commitment("future-codex")
     store.bind_session(workspace, session)
 
+    from yoetz.adapters.importers.codex_jsonl import CodexParsedRecord
+    from yoetz.domain.values import JsonObject
+
+    # Unfamiliar future host wrapper — not a known profile envelope injection.
+    future_record = CodexParsedRecord(
+        1,
+        0,
+        160,
+        "future.host.event.v99",
+        "command_execution",
+        JsonObject(
+            {
+                "type": "future.host.event.v99",
+                "item": {
+                    "id": "fx-future-1",
+                    "type": "command_execution",
+                    "exit_code": 0,
+                    "status": "completed",
+                    "novel_prose": "must-not-become-success-proof",
+                },
+                "codex_version": "99.0.0-future",
+            }
+        ),
+    )
+    structural, gaps = structural_from_stream_record(future_record)
+    assert ObservationGapCode.UNSUPPORTED_EVENT.value in gaps
+    # Validated stable structural facts only (exit status / tool identity), never prose.
+    assert structural.get("exit_status") == 0 or structural.get("tool_name") is not None
+    assert "novel_prose" not in structural
+    envelope = envelope_from_stream_record(
+        future_record,
+        session_commitment=session,
+        cursor=ObservationCursor(
+            source_generation=1,
+            byte_position=160,
+            event_position=1,
+            last_source_commitment=_EMPTY,
+            mapping_version=STREAM_MAPPING_VERSION,
+        ),
+    )
+    assert ObservationGapCode.UNSUPPORTED_EVENT.value in envelope.gap_codes
+    assert store.ingest(envelope).disposition.value == "accepted"
+    # Observation continues: a later known stream line still ingests on a fresh generation.
     path = tmp_path / "future.jsonl"
     path.write_bytes(
         b'{"type":"item.completed","item":{"id":"fx1","type":"command_execution",'
@@ -83,42 +134,18 @@ def test_synthetic_unknown_future_codex_version_generic_ingest(tmp_path: Path) -
         session_commitment=session,
         profile=default_stream_profile(),
         cursor=ObservationCursor(
-            source_generation=1,
+            source_generation=2,
             byte_position=0,
             event_position=0,
             last_source_commitment=_EMPTY,
             mapping_version=STREAM_MAPPING_VERSION,
         ),
+        key_material=store.key_material(),
     )
     advance = reader.advance(path)
     assert advance.envelopes
-    for envelope in advance.envelopes:
-        result = store.ingest(envelope)
-        assert result.disposition.value in {"accepted", "duplicate"}
-    # Opaque future-host gap recorded without inventing success; observation continues.
-    from yoetz.domain.observation import ObservationEnvelope
-    from yoetz.domain.values import JsonObject, Timestamp
-
-    gap_env = ObservationEnvelope(
-        session_commitment=session,
-        event_kind="unsupported_event",
-        source_identity="stream:future-opaque-v99",
-        source=ObservationSource.CODEX_SESSION_STREAM,
-        cursor=ObservationCursor(
-            source_generation=advance.cursor.source_generation,
-            byte_position=advance.cursor.byte_position + 8,
-            event_position=advance.cursor.event_position + 1,
-            last_source_commitment=advance.cursor.last_source_commitment,
-            mapping_version=STREAM_MAPPING_VERSION,
-        ),
-        receipt_time=Timestamp("2026-07-22T22:30:00.000Z"),
-        structural_payload=JsonObject(
-            {"stream_kind": "future_wrapper", "codex_version": "99.0.0-future"}
-        ),
-        content_object_refs=(),
-        gap_codes=(ObservationGapCode.UNSUPPORTED_EVENT.value,),
-    )
-    assert store.ingest(gap_env).disposition.value == "accepted"
+    for item in advance.envelopes:
+        assert store.ingest(item).disposition.value in {"accepted", "duplicate"}
     status = store.status(ObservationStatusQuery(workspace))
     assert status.source_coverage[ObservationSource.CODEX_SESSION_STREAM] is True
     assert ObservationGapCode.UNSUPPORTED_EVENT.value in status.gaps

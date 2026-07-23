@@ -82,11 +82,54 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
             "workspace_commitment": "hmac-sha256:" + "a" * 64,
         }
 
+    class _FakePluginService:
+        def preview(self, target: object) -> object:
+            del target
+            from yoetz.adapters.integrations.codex_plugin import PluginHookPresence
+            from yoetz.application.codex_plugin import CodexPluginPreview
+
+            return CodexPluginPreview(
+                presence_before=PluginHookPresence.ABSENT,
+                planned_file_count=4,
+                trust_observable=False,
+                installed_digest=None,
+                notes=("codex_hook_trust_not_observable_from_installation_state",),
+            )
+
+        def inspect(self, target: object) -> object:
+            del target
+            from yoetz.adapters.integrations.codex_plugin import (
+                PluginHookPresence,
+                PluginInspection,
+            )
+
+            return PluginInspection(
+                PluginHookPresence.ABSENT,
+                False,
+                None,
+                ("codex_hook_trust_not_observable_from_installation_state",),
+            )
+
+        def install(self, target: object, **kwargs: object) -> object:
+            del target, kwargs
+            from yoetz.adapters.integrations.codex_plugin import (
+                PluginHookPresence,
+                PluginInspection,
+            )
+
+            return PluginInspection(
+                PluginHookPresence.INSTALLED,
+                False,
+                "sha256:" + "b" * 64,
+                ("codex_hook_trust_not_observable_from_installation_state",),
+            )
+
     import yoetz.cli.setup as setup_module
     import yoetz.service.client as service_client_module
 
     monkeypatch.setattr(setup_module, "discover_codex_binaries", fake_discover)
     monkeypatch.setattr(setup_module, "CodexMcpAdapter", fake_adapter)
+    monkeypatch.setattr(setup_module, "CodexPluginService", _FakePluginService)
     monkeypatch.setattr(setup_module, "setup_marker_path", lambda: marker)
     monkeypatch.setattr(
         setup_module,
@@ -130,20 +173,37 @@ def test_non_interactive_accept_registers_and_writes_marker(
     result = _RUNNER.invoke(cli.app, ["setup", "run", "--non-interactive", "--accept", "--json"])
     assert result.exit_code == 0
     report = json.loads(result.stdout)
-    assert report["registration"] == {
-        "observation_consent": {
-            "outcome": "granted",
-            "workspace_commitment": "hmac-sha256:" + "a" * 64,
-        },
-        "outcome": "registered",
-        "reason": None,
-        "state": "yoetz_owned",
+    assert report["registration"]["outcome"] == "registered"
+    assert report["registration"]["state"] == "yoetz_owned"
+    assert report["registration"]["observation_consent"] == {
+        "outcome": "granted",
+        "workspace_commitment": "hmac-sha256:" + "a" * 64,
     }
+    assert report["registration"]["plugin"]["outcome"] == "installed"
+    assert report["registration"]["plugin"]["presence"] == "installed"
+    assert report["readiness"]["observation_ready"] is False  # service unreachable
+    assert report["readiness"]["consent"] == "granted"
     assert report["service"]["reachable"] is False
     assert report["marker_written"] is True
     marker = json.loads(cast(Path, wizard_env["marker"]).read_text())
     assert marker["schema"] == "yoetz.setup-wizard-marker/1"
     assert marker["outcome"] == "registered"
+
+
+def test_already_registered_mcp_still_installs_plugin_and_grants_consent(
+    wizard_env: dict[str, object],
+) -> None:
+    wizard_env["outputs"] = [
+        _yoetz_entry(),  # preview get: already yoetz-owned
+        _yoetz_entry(),  # status verify after plugin install
+    ]
+    result = _RUNNER.invoke(cli.app, ["setup", "run", "--non-interactive", "--accept", "--json"])
+    assert result.exit_code == 0
+    report = json.loads(result.stdout)
+    assert report["registration"]["outcome"] == "already_registered"
+    assert report["registration"]["plugin"]["outcome"] == "installed"
+    assert report["registration"]["observation_consent"]["outcome"] == "granted"
+    assert report["marker_written"] is True
 
 
 def test_foreign_entry_is_preserved_and_reported(wizard_env: dict[str, object]) -> None:
@@ -154,6 +214,8 @@ def test_foreign_entry_is_preserved_and_reported(wizard_env: dict[str, object]) 
     report = json.loads(result.stdout)
     assert report["registration"]["outcome"] == "skipped"
     assert report["registration"]["reason"] == "foreign_entry_present"
+    assert report["registration"]["observation_consent"]["outcome"] == "absent"
+    assert report["registration"]["plugin"]["outcome"] == "skipped"
     # No mutating `mcp add` ever ran.
     for calls in cast(list[list[tuple[str, ...]]], wizard_env["calls"]):
         assert all(call[1:3] == ("mcp", "get") for call in calls)
@@ -194,7 +256,7 @@ def test_interactive_wizard_selects_harness_then_installation_and_requires_y_or_
     assert "Select a harness to connect to Yoetz" in result.stdout
     assert "Detected Codex installations:" in result.stdout
     assert "Select the Codex installation to configure" in result.stdout
-    assert "register the Yoetz MCP server with Codex" in result.stdout
+    assert "complete Yoetz Codex project integration" in result.stdout
     assert "MCP server name: yoetz" in result.stdout
     assert "Command: yoetz mcp serve" in result.stdout
     assert "Codex executable: /b/codex" in result.stdout
@@ -205,8 +267,9 @@ def test_interactive_wizard_selects_harness_then_installation_and_requires_y_or_
     assert "Skill support: no tested capability profile; automatic activation not tested" in (
         result.stdout
     )
-    assert "Plugin installation: absent" in result.stdout
-    assert "Hook installation: absent; trust unknown" in result.stdout
+    assert "Plugin installation:" in result.stdout
+    assert "Hook installation:" in result.stdout
+    assert "Observation readiness:" in result.stdout
 
 
 def test_interactive_registration_n_declines_without_mutation(

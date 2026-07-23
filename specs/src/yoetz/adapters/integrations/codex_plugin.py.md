@@ -26,8 +26,10 @@ Rendered tree includes `.codex-plugin/plugin.json` (name `yoetz`, version = pack
 `SessionStart` matcher `resume|compact` to `yoetz hooks ...`, `.mcp.json` for `yoetz mcp serve`, and
 `skills/yoetz/**` members from `load_packaged_skill_members` (no duplicated SKILL bytes).
 
-Installer follows skill conventions: refuse when `harness_tested_set` is empty
-(`version_incompatible`), refuse modified managed files unless `replace_modified`, write a
+Installer follows skill conventions: by default refuse when `harness_tested_set` is empty
+(`version_incompatible`); observation setup may pass `allow_untested=True` to install hooks while
+still reporting that automatic activation is untested. Refuses modified managed files unless
+`replace_modified`, write a
 nonsecret marker, reject symlinked or unsafe `.agents/plugins` ancestors, and stage/swap atomically.
 If the staged-tree swap fails after moving an existing managed installation aside, restore that
 installation before returning `write_failed`. Inspection never infers Codex trust from file presence; the

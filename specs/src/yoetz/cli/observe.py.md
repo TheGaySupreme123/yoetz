@@ -16,7 +16,8 @@ session-stream reconcile. Not MCP tools.
 ## Behavior
 
 Grant stores a private workspace commitment only and never logs the raw path. Revoke retains
-evidence. Reconcile advances the stream cursor for a consented workspace.
+evidence. Reconcile is a recovery/diagnostic command that advances the stream cursor for a
+consented workspace (automatic reconcile is hook-driven via `CodexSessionStreamLocator`).
 
 ## Errors and edge cases
 

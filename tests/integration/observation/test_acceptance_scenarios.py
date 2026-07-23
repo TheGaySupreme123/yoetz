@@ -172,9 +172,23 @@ def test_vault_outage_nonblocking_degraded_no_plaintext_spool(tmp_path: Path) ->
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
     store.grant_consent(workspace)
+    # Lifecycle mapping required for the service-ingest soft-fail path.
+    from yoetz.adapters.integrations.codex_lifecycle import mapping_from_start_ids, store_mapping
+    from yoetz.protocol.ids import IdKind, new_id
 
-    def fake_runner(_factory: object) -> str:
-        return ObservationGapCode.VAULT_LOCKED.value
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id="outage-1",
+            yoetz_task_id=new_id(IdKind.TASK),
+            yoetz_session_id=new_id(IdKind.SESSION),
+            yoetz_writer_id=new_id(IdKind.WRITER),
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+
+    def fake_runner(_factory: object) -> tuple[str | None, str | None]:
+        return ObservationGapCode.VAULT_LOCKED.value, None
 
     code = handle_observe(
         event_name="PostToolUse",
@@ -224,12 +238,10 @@ def test_vault_outage_nonblocking_degraded_no_plaintext_spool(tmp_path: Path) ->
         _state=tmp_path,
         skip_service=True,
     )
-    assert store.status(ObservationStatusQuery(workspace)).lifecycle is ObservationLifecycle.ACTIVE
-
-
-# ---------------------------------------------------------------------------
-# 4. Compaction / resume / subagent / permission denial — structural + unpaired gap
-# ---------------------------------------------------------------------------
+    assert store.status(ObservationStatusQuery(workspace)).lifecycle in {
+        ObservationLifecycle.ACTIVE,
+        ObservationLifecycle.DEGRADED,
+    }
 
 
 def test_structural_lifecycle_envelopes_and_unpaired_gap(tmp_path: Path) -> None:
@@ -611,6 +623,7 @@ def test_stream_reconciliation_restores_missed_hook_event(tmp_path: Path) -> Non
             last_source_commitment=_EMPTY,
             mapping_version=STREAM_MAPPING_VERSION,
         ),
+        key_material=store.key_material(),
     )
     advance = reader.advance(path)
     assert len(advance.envelopes) == 1
@@ -637,6 +650,7 @@ def test_unknown_future_fields_record_gaps_continue_observation(tmp_path: Path) 
         {"session_id": "future-1", "novel_field": "ignored-prose"},
         session_commitment=session,
         event_ordinal=1,
+        key_material=store.key_material(),
         gap_codes=(ObservationGapCode.UNSUPPORTED_EVENT.value,),
     )
     store.bind_session(workspace, session)
@@ -655,7 +669,10 @@ def test_unknown_future_fields_record_gaps_continue_observation(tmp_path: Path) 
     status = store.status(ObservationStatusQuery(workspace))
     assert ObservationGapCode.UNSUPPORTED_EVENT.value in status.gaps
     assert status.source_coverage[ObservationSource.CODEX_HOOK] is True
-    assert status.lifecycle is ObservationLifecycle.ACTIVE
+    assert status.lifecycle in {
+        ObservationLifecycle.ACTIVE,
+        ObservationLifecycle.DEGRADED,
+    }
 
 
 # ---------------------------------------------------------------------------

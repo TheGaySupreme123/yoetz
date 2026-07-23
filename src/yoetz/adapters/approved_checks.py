@@ -1,11 +1,13 @@
-"""Approved-check runner: fixed argv, commitment-bound, no freeform shell."""
+"""Approved-check runner: fixed argv, commitment-bound, enforcing sandbox when available."""
 
 from __future__ import annotations
 
 import hashlib
 import os
 import selectors
+import stat
 import subprocess
+import tempfile
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -13,6 +15,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Final
 
+from yoetz.adapters.check_sandbox import default_check_sandbox
+from yoetz.ports.check_sandbox import CheckSandboxPort, CheckSandboxStatus
 from yoetz.ports.subject_state import LocalWorkspaceHandle
 from yoetz.protocol.canonical import JsonValue, canonical_digest
 from yoetz.protocol.errors import ProtocolValueError
@@ -52,6 +56,7 @@ class ApprovedCheckOutcome(str, Enum):  # noqa: UP042 - exact wire enum
     NOT_APPROVED = "not_approved"
     UNSAFE_ARGV = "unsafe_argv"
     NETWORK_DENIED = "network_denied"
+    SANDBOX_UNAVAILABLE = "sandbox_unavailable"
     OUTPUT_TRUNCATED = "output_truncated"
     TIMEOUT = "timeout"
     EXEC_FAILED = "exec_failed"
@@ -171,21 +176,30 @@ def approval_commitment(approval_id: str, argv: Sequence[str], *, allow_network:
     )
 
 
-def _sanitized_env(*, allow_network: bool) -> dict[str, str]:
-    env = {
+def _owner_private_temp_dirs() -> tuple[Path, Path, tempfile.TemporaryDirectory[str]]:
+    """Create owner-private HOME and TMPDIR replacements (never /dev/null)."""
+
+    root = tempfile.TemporaryDirectory(prefix="yoetz-check-")
+    base = Path(root.name)
+    home = base / "home"
+    tmp = base / "tmp"
+    home.mkdir(mode=0o700)
+    tmp.mkdir(mode=0o700)
+    os.chmod(home, stat.S_IRWXU)
+    os.chmod(tmp, stat.S_IRWXU)
+    return home, tmp, root
+
+
+def _sanitized_env(*, home: Path, tmpdir: Path) -> dict[str, str]:
+    return {
         "LANG": "C",
         "LC_ALL": "C",
         "PATH": os.defpath,
-        "HOME": os.devnull,
-        "TMPDIR": os.devnull,
+        "HOME": str(home),
+        "TMPDIR": str(tmpdir),
         "PAGER": "cat",
         "TERM": "dumb",
     }
-    if not allow_network:
-        # Best-effort isolation markers; runner still rejects network-allowing approvals
-        # unless the approval explicitly grants network.
-        env["YOETZ_APPROVED_CHECK_NETWORK"] = "denied"
-    return env
 
 
 def _root_from_handle(workspace: LocalWorkspaceHandle) -> Path | None:
@@ -246,8 +260,14 @@ def _bounded_communicate(
 class ApprovedCheckRunner:
     """Execute only commitment-approved argv under a consented workspace root."""
 
-    def __init__(self, approvals: Mapping[str, ApprovedCheckApproval] | None = None) -> None:
+    def __init__(
+        self,
+        approvals: Mapping[str, ApprovedCheckApproval] | None = None,
+        *,
+        sandbox: CheckSandboxPort | None = None,
+    ) -> None:
         self._approvals = dict(approvals or {})
+        self._sandbox = sandbox if sandbox is not None else default_check_sandbox()
 
     def register(self, approval: ApprovedCheckApproval) -> None:
         self._approvals[approval.approval_commitment] = approval
@@ -306,13 +326,33 @@ class ApprovedCheckRunner:
                 approval.approval_commitment,
                 0,
             )
+        home, tmpdir, temp_root = _owner_private_temp_dirs()
         started = time.monotonic()
         process: subprocess.Popen[bytes] | None = None
         try:
-            process = subprocess.Popen(
-                list(approval.argv),
+            env = _sanitized_env(home=home, tmpdir=tmpdir)
+            launch = self._sandbox.prepare(
+                argv=approval.argv,
                 cwd=root,
-                env=_sanitized_env(allow_network=False),
+                env=env,
+                deny_network=True,
+            )
+            if launch.status is CheckSandboxStatus.UNAVAILABLE or not launch.network_isolated:
+                # Never claim network denial from an environment variable alone.
+                return self._result(
+                    ApprovedCheckStatus.REJECTED,
+                    ApprovedCheckOutcome.SANDBOX_UNAVAILABLE,
+                    None,
+                    None,
+                    0,
+                    command.subject_state_digest,
+                    approval.approval_commitment,
+                    int((time.monotonic() - started) * 1000),
+                )
+            process = subprocess.Popen(
+                list(launch.argv),
+                cwd=launch.cwd,
+                env=dict(launch.env),
                 shell=False,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
@@ -381,6 +421,7 @@ class ApprovedCheckRunner:
                     process.stdout.close()
                 if process.stderr is not None:
                     process.stderr.close()
+            temp_root.cleanup()
 
     def _result(
         self,

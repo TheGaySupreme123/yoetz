@@ -360,15 +360,18 @@ def install_plugin(
     *,
     replace_modified: bool = False,
     resource_source: SkillResourceSource | None = None,
+    allow_untested: bool = False,
 ) -> PluginInspection:
     """Install the rendered plugin tree under the trusted-project plugin root.
 
-    Fail-closed when the packaged Codex tested set is empty (no supported profile yet).
-    Refuses to overwrite user-modified managed files unless ``replace_modified`` is true.
+    By default refuse when the packaged Codex tested set is empty (no supported profile
+    yet). Observation setup may pass ``allow_untested=True`` to install hooks while still
+    reporting that automatic activation is untested. Refuses to overwrite user-modified
+    managed files unless ``replace_modified`` is true.
     """
 
     source = load_packaged_skill_source(resource_source)
-    if not source.harness_tested_set:
+    if not source.harness_tested_set and not allow_untested:
         raise _error(IntegrationReason.VERSION_INCOMPATIBLE)
     root = _validated_project(target)
     parent = _validated_plugin_parent(root, create=True)

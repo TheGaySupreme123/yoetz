@@ -20,8 +20,9 @@ import typer
 
 from yoetz.adapters.integrations.codex_discovery import discover_codex_binaries
 from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter
-from yoetz.adapters.integrations.codex_plugin import inspect_plugin
+from yoetz.adapters.integrations.codex_plugin import PluginHookPresence, inspect_plugin
 from yoetz.adapters.integrations.codex_skill import load_packaged_skill_source
+from yoetz.application.codex_plugin import CodexPluginService
 from yoetz.application.harness_mcp import HarnessMcpService, McpRegistrationConfirmation
 from yoetz.config.paths import PathSafetyError, setup_marker_path
 from yoetz.ports.harness_mcp import (
@@ -278,8 +279,8 @@ def _confirm_project_setup(*, include_observation: bool) -> bool:
     """One confirmed operation covering MCP/plugin/guidance/hooks/observation consent."""
 
     typer.echo("This confirmation covers:")
+    typer.echo("  - Plugin / guidance / hooks installation in this trusted project")
     typer.echo("  - MCP registration")
-    typer.echo("  - Plugin / guidance / hooks installation (when applied separately)")
     if include_observation:
         typer.echo(
             "  - Observation consent for this workspace "
@@ -316,10 +317,221 @@ def _grant_observation_consent(workspace: Path | None = None) -> dict[str, JsonV
 
 
 def _emit_registration_preview(binary: HarnessBinary) -> None:
-    typer.echo("Proposed change: register the Yoetz MCP server with Codex:")
+    typer.echo("Proposed change: complete Yoetz Codex project integration:")
+    typer.echo("  1. Install plugin / guidance / hooks under .agents/plugins/yoetz")
+    typer.echo("  2. Register the Yoetz MCP server with Codex")
     typer.echo("  MCP server name: yoetz")
     typer.echo("  Command: yoetz mcp serve")
     typer.echo(f"  Codex executable: {binary.executable_path}")
+    if binary.reported_version is not None:
+        typer.echo(f"  Codex version: {binary.reported_version}")
+
+
+def _plugin_verified(presence: str | None) -> bool:
+    return presence == PluginHookPresence.INSTALLED.value
+
+
+def _readiness_layers(
+    *,
+    binary: HarnessBinary | None,
+    mcp_state: str | None,
+    plugin_presence: str | None,
+    hooks: dict[str, JsonValue],
+    consent_outcome: str | None,
+    service: dict[str, JsonValue],
+) -> dict[str, JsonValue]:
+    consent_active = consent_outcome == "granted"
+    service_routing = bool(service.get("reachable"))
+    observation_ready = (
+        _plugin_verified(plugin_presence) and consent_active and service_routing
+    )
+    return {
+        "codex": None
+        if binary is None
+        else {
+            "executable_path": binary.executable_path,
+            "reported_version": binary.reported_version,
+        },
+        "mcp_registration": mcp_state,
+        "plugin_installation": plugin_presence,
+        "hooks": hooks,
+        "consent": consent_outcome or "absent",
+        "service_routing": {
+            "reachable": service_routing,
+            "state": service.get("state"),
+        },
+        "observation_ready": observation_ready,
+        "semantic_advice_ready": False,
+        "semantic_advice_note": "deterministic_only_until_provider_ready",
+    }
+
+
+async def _codex_integration_step(
+    binary: HarnessBinary,
+    *,
+    interactive: bool,
+    accept: bool,
+    workspace: Path | None = None,
+) -> dict[str, JsonValue]:
+    """Preview and apply one Codex integration: plugin + MCP + consent."""
+
+    mcp_service = HarnessMcpService(CodexMcpAdapter())
+    plugin_service = CodexPluginService()
+    project = IntegrationTarget(
+        IntegrationScope.TRUSTED_PROJECT,
+        str((workspace if workspace is not None else Path.cwd()).resolve()),
+    )
+    try:
+        mcp_preview = await mcp_service.preview(binary)
+    except McpRegistrationError as error:
+        return {
+            "outcome": "failed",
+            "reason": error.reason.value,
+            "state": None,
+            "plugin": {"outcome": "skipped", "presence": None},
+            "observation_consent": {"outcome": "absent", "workspace_commitment": None},
+        }
+
+    plugin_preview = plugin_service.preview(project)
+    already_registered = mcp_preview.state_before is McpRegistrationState.YOETZ_OWNED
+    foreign = mcp_preview.state_before is McpRegistrationState.FOREIGN_PRESENT
+
+    if foreign:
+        inspection = plugin_service.inspect(project)
+        return {
+            "outcome": "skipped",
+            "reason": "foreign_entry_present",
+            "state": mcp_preview.state_before.value,
+            "plugin": {
+                "outcome": "skipped",
+                "presence": inspection.presence.value,
+                "reason": "mcp_foreign_entry",
+            },
+            "observation_consent": {"outcome": "absent", "workspace_commitment": None},
+        }
+
+    accepted = accept
+    if interactive and not accepted:
+        _emit_registration_preview(binary)
+        typer.echo(
+            f"  Plugin presence before apply: {plugin_preview.presence_before.value} "
+            f"({plugin_preview.planned_file_count} managed files)"
+        )
+        if already_registered:
+            typer.echo("  MCP is already registered; setup will still install/verify the plugin.")
+        accepted = _confirm_project_setup(include_observation=True)
+    if not accepted:
+        return {
+            "outcome": "declined",
+            "reason": None,
+            "state": mcp_preview.state_before.value,
+            "plugin": {
+                "outcome": "declined",
+                "presence": plugin_preview.presence_before.value,
+            },
+            "observation_consent": {"outcome": "absent", "workspace_commitment": None},
+        }
+
+    # 1) Install and verify plugin/hooks (even when MCP is already registered).
+    plugin_report: dict[str, JsonValue]
+    try:
+        inspection = plugin_service.install(project, allow_untested=True)
+        plugin_report = {
+            "outcome": "installed",
+            "presence": inspection.presence.value,
+            "trust_observable": inspection.trust_observable,
+            "digest": inspection.installed_digest,
+        }
+    except IntegrationError as error:
+        plugin_report = {
+            "outcome": "failed",
+            "presence": plugin_preview.presence_before.value,
+            "reason": error.reason.value,
+        }
+        return {
+            "outcome": "failed",
+            "reason": "plugin_install_failed",
+            "state": mcp_preview.state_before.value,
+            "plugin": plugin_report,
+            "observation_consent": {"outcome": "absent", "workspace_commitment": None},
+        }
+
+    plugin_ok = inspection.presence is PluginHookPresence.INSTALLED
+    if not plugin_ok:
+        plugin_report["outcome"] = "unverified"
+        return {
+            "outcome": "failed",
+            "reason": "plugin_verification_failed",
+            "state": mcp_preview.state_before.value,
+            "plugin": plugin_report,
+            "observation_consent": {"outcome": "absent", "workspace_commitment": None},
+        }
+
+    # 2) Register and verify MCP (noop when already yoetz-owned).
+    mcp_outcome = "already_registered" if already_registered else "registered"
+    mcp_state = mcp_preview.state_before
+    if not already_registered:
+        try:
+            result = await mcp_service.register(
+                binary,
+                McpRegistrationConfirmation(
+                    mcp_preview.preview_digest,
+                    True,
+                    "interactive" if interactive else "noninteractive_flag",
+                ),
+            )
+        except McpRegistrationError as error:
+            return {
+                "outcome": "failed",
+                "reason": error.reason.value,
+                "state": mcp_preview.state_before.value,
+                "plugin": plugin_report,
+                "observation_consent": {"outcome": "absent", "workspace_commitment": None},
+            }
+        mcp_state = result.state_after
+        mcp_outcome = "registered"
+    else:
+        try:
+            mcp_state = await mcp_service.status(binary)
+        except McpRegistrationError as error:
+            return {
+                "outcome": "failed",
+                "reason": error.reason.value,
+                "state": mcp_preview.state_before.value,
+                "plugin": plugin_report,
+                "observation_consent": {"outcome": "absent", "workspace_commitment": None},
+            }
+
+    mcp_ok = mcp_state is McpRegistrationState.YOETZ_OWNED
+    if not mcp_ok:
+        return {
+            "outcome": "failed",
+            "reason": "mcp_verification_failed",
+            "state": None if mcp_state is None else mcp_state.value,
+            "plugin": plugin_report,
+            "observation_consent": {"outcome": "absent", "workspace_commitment": None},
+        }
+
+    # 3) Consent only after both plugin and MCP verified.
+    observation = _grant_observation_consent(workspace)
+    return {
+        "outcome": mcp_outcome,
+        "reason": None,
+        "state": mcp_state.value,
+        "plugin": plugin_report,
+        "observation_consent": observation,
+    }
+
+
+async def _register_step(
+    binary: HarnessBinary,
+    *,
+    interactive: bool,
+    accept: bool,
+) -> dict[str, JsonValue]:
+    """Backward-compatible name for the complete Codex integration step."""
+
+    return await _codex_integration_step(binary, interactive=interactive, accept=accept)
 
 
 async def _service_reachability(*, start_if_absent: bool = False) -> dict[str, JsonValue]:
@@ -579,50 +791,6 @@ def _registration_report(
     }
 
 
-async def _register_step(
-    binary: HarnessBinary,
-    *,
-    interactive: bool,
-    accept: bool,
-) -> dict[str, JsonValue]:
-    service = HarnessMcpService(CodexMcpAdapter())
-    try:
-        preview = await service.preview(binary)
-    except McpRegistrationError as error:
-        return _registration_report(None, outcome="failed", reason=error.reason.value)
-    if preview.state_before is McpRegistrationState.YOETZ_OWNED:
-        return _registration_report(preview.state_before, outcome="already_registered")
-    if preview.state_before is McpRegistrationState.FOREIGN_PRESENT:
-        # The runbook rule: preserve a foreign same-name entry, never replace it.
-        return _registration_report(
-            preview.state_before, outcome="skipped", reason="foreign_entry_present"
-        )
-    accepted = accept
-    if interactive and not accepted:
-        _emit_registration_preview(binary)
-        accepted = _confirm_project_setup(include_observation=True)
-    if not accepted:
-        return _registration_report(preview.state_before, outcome="declined")
-    try:
-        result = await service.register(
-            binary,
-            McpRegistrationConfirmation(
-                preview.preview_digest,
-                True,
-                "interactive" if interactive else "noninteractive_flag",
-            ),
-        )
-    except McpRegistrationError as error:
-        return _registration_report(
-            preview.state_before, outcome="failed", reason=error.reason.value
-        )
-    report = _registration_report(result.state_after, outcome="registered")
-    if interactive or accept:
-        observation = _grant_observation_consent()
-        report["observation_consent"] = observation
-    return report
-
-
 async def run_setup_wizard(
     *,
     non_interactive: bool,
@@ -674,13 +842,47 @@ async def run_setup_wizard(
 
     mutating_run = interactive or accept
     marker_written = _write_setup_marker(str(registration["outcome"])) if mutating_run else False
+    integration = _integration_layers()
+    consent = None
+    if isinstance(registration, dict):
+        observation = registration.get("observation_consent")
+        if isinstance(observation, dict):
+            consent = observation.get("outcome")
+        plugin_block = registration.get("plugin")
+    else:
+        plugin_block = None
+    plugin_presence = None
+    if isinstance(plugin_block, dict):
+        raw_presence = plugin_block.get("presence")
+        plugin_presence = raw_presence if type(raw_presence) is str else None
+    elif isinstance(integration, dict):
+        plugin = integration.get("plugin")
+        if isinstance(plugin, dict):
+            raw_presence = plugin.get("presence")
+            plugin_presence = raw_presence if type(raw_presence) is str else None
+    hooks = (
+        cast(dict[str, JsonValue], integration["hooks"])
+        if isinstance(integration, dict) and isinstance(integration.get("hooks"), dict)
+        else {}
+    )
+    readiness = _readiness_layers(
+        binary=chosen,
+        mcp_state=cast(str | None, registration.get("state"))
+        if isinstance(registration, dict)
+        else None,
+        plugin_presence=plugin_presence,
+        hooks=hooks,
+        consent_outcome=cast(str | None, consent),
+        service=service,
+    )
 
     report: dict[str, JsonValue] = {
         "discovered": [_binary_row(binary) for binary in binaries],
-        "integration": _integration_layers(),
+        "integration": integration,
         "marker_written": marker_written,
         "next_steps": next_steps,
         "provider": provider,
+        "readiness": readiness,
         "registration": registration,
         "schema": _REPORT_SCHEMA,
         "selected": None if chosen is None else _binary_row(chosen),
@@ -698,6 +900,7 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
     service = report["service"]
     provider = report["provider"]
     integration = report["integration"]
+    readiness = report.get("readiness")
     typer.echo("Setup summary:")
     if isinstance(registration, dict):
         outcome = registration.get("outcome")
@@ -710,9 +913,15 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
         if reason:
             line += f" ({reason})"
         typer.echo(line)
+        plugin = registration.get("plugin")
+        if isinstance(plugin, dict):
+            typer.echo(
+                "  Plugin installation: "
+                f"{plugin.get('outcome') or 'unknown'} "
+                f"(presence={plugin.get('presence') or 'absent'})"
+            )
     if isinstance(integration, dict):
         skill = integration.get("skill")
-        plugin = integration.get("plugin")
         hooks = integration.get("hooks")
         if isinstance(skill, dict) and skill.get("source_state") != "verified":
             typer.echo("  Skill support: packaged source invalid; automatic activation not tested")
@@ -728,8 +937,6 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
             typer.echo(
                 "  Skill support: no tested capability profile; automatic activation not tested"
             )
-        if isinstance(plugin, dict):
-            typer.echo(f"  Plugin installation: {plugin.get('presence') or 'absent'}")
         if isinstance(hooks, dict):
             typer.echo(
                 "  Hook installation: "
@@ -751,6 +958,19 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
         reachable = service.get("reachable")
         typer.echo(f"  Local service reachable: {'yes' if reachable else 'no'}")
         typer.echo(f"  Local service state: {service.get('state') or 'unavailable'}")
+    if isinstance(readiness, dict):
+        typer.echo(
+            "  Observation readiness: "
+            + ("ready to observe" if readiness.get("observation_ready") else "not ready")
+        )
+        typer.echo(
+            "  Semantic-advice readiness: "
+            + (
+                "ready"
+                if readiness.get("semantic_advice_ready")
+                else str(readiness.get("semantic_advice_note") or "not demonstrated")
+            )
+        )
     if isinstance(provider, dict):
         typer.echo(f"  Provider binding: {provider.get('binding')}")
         typer.echo(f"  Provider credential: {provider.get('credential')}")

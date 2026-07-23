@@ -17,10 +17,11 @@ subject-state digest so a later edit makes prior success stale.
 
 ## Behavior
 
-Fixed argv, `shell=False`, sanitized environment, bounded time/output. Network denied unless a
-separate authorization path exists (v0.1 runner rejects `allow_network=True`). Stdout/stderr are
-digested then wiped; secret-like command output never appears in advice/status. Subject-state
-mismatch yields `stale`.
+Fixed argv, `shell=False`, sanitized environment with owner-private `HOME`/`TMPDIR` (never
+`/dev/null`), bounded time/output. Network denial requires an enforcing `CheckSandboxPort`
+(`sandbox_unavailable` when absent). Never claim network denial from an environment variable
+alone. Stdout/stderr are digested then wiped; secret-like command output never appears in
+advice/status. Subject-state mismatch yields `stale`.
 
 ## Errors and edge cases
 

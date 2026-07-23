@@ -151,6 +151,15 @@ def test_install_refuses_when_tested_set_empty(tmp_path: Path) -> None:
     assert not (tmp_path / ".agents").exists()
 
 
+def test_install_allow_untested_installs_hooks(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    inspection = install_plugin(target, resource_source=_resources(), allow_untested=True)
+    assert inspection.presence is PluginHookPresence.INSTALLED
+    assert inspection.trust_observable is False
+    assert (tmp_path / ".agents/plugins/yoetz/hooks/hooks.json").is_file()
+
+
 def test_install_refuses_locally_modified_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

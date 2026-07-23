@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,26 +17,50 @@ from yoetz.adapters.importers.codex_jsonl import (
     parse_codex_jsonl_from_offset,
     profile_for_codex_version,
 )
-from yoetz.adapters.integrations.observation_local import STREAM_MAPPING_VERSION
+from yoetz.adapters.integrations.observation_local import (
+    STREAM_MAPPING_VERSION,
+    LocalObservationStore,
+)
 from yoetz.domain.observation import (
     ObservationCursor,
     ObservationEnvelope,
     ObservationGapCode,
     ObservationSource,
+    stream_line_commitment,
 )
 from yoetz.domain.values import JsonObject, JsonValue, Timestamp, timestamp_from_datetime
 from yoetz.protocol.canonical import canonical_digest
 
 __all__ = [
+    "CodexSessionStreamLocator",
+    "PERIODIC_RECONCILE_SECONDS",
     "SessionStreamAdvance",
     "SessionStreamReader",
     "default_stream_profile",
     "envelope_from_stream_record",
+    "reconcile_session_stream",
+    "resolve_codex_home",
+    "should_trigger_stream_reconcile",
     "structural_from_stream_record",
 ]
 
 _MAX_READ_CHUNK: Final = 262_144
 _EMPTY_COMMITMENT: Final = "hmac-sha256:" + ("0" * 64)
+_MAX_SESSION_WALK: Final = 4_096
+PERIODIC_RECONCILE_SECONDS: Final = 30.0
+_MATERIAL_HOOK_EVENTS: Final = frozenset(
+    {
+        "PreToolUse",
+        "PostToolUse",
+        "PermissionRequest",
+        "PreCompact",
+        "PostCompact",
+        "Stop",
+        "SessionEnd",
+        "SessionStart",
+        "SubagentStop",
+    }
+)
 
 
 def default_stream_profile() -> CodexCapabilityProfile:
@@ -57,6 +84,158 @@ def _token(value: object) -> str | None:
     if any(ch not in allowed for ch in value) or value[0] in "._:/+-":
         return None
     return value
+
+
+def resolve_codex_home(
+    explicit: Path | str | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> Path:
+    """Resolve the selected owner-private Codex home (never disclosed by callers)."""
+
+    if explicit is not None:
+        return Path(explicit).expanduser()
+    environ = os.environ if env is None else env
+    for key in ("CODEX_HOME", "CODEX_TESTING_HOME"):
+        raw = environ.get(key)
+        if type(raw) is str and raw.strip():
+            return Path(raw).expanduser()
+    return Path.home() / ".codex"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class CodexSessionStreamLocator:
+    """Locate a Codex session JSONL path under one selected Codex home.
+
+    Resolved paths are for local use only: never persist or emit them.
+    """
+
+    codex_home: Path
+
+    def __repr__(self) -> str:
+        return "CodexSessionStreamLocator(codex_home=<redacted>)"
+
+    @property
+    def session_root(self) -> Path:
+        return self.codex_home / "sessions"
+
+    def resolve(
+        self,
+        *,
+        session_id: str,
+        hook_provided_path: str | None = None,
+    ) -> Path | None:
+        """Return a validated session file or ``None`` when unsafe/ambiguous/absent."""
+
+        token = _token(session_id)
+        if token is None:
+            return None
+        home = self._validated_home()
+        if home is None:
+            return None
+        if hook_provided_path is not None:
+            return self._validate_candidate(Path(hook_provided_path), home=home, session_id=token)
+        return self._exact_session_match(home=home, session_id=token)
+
+    def _validated_home(self) -> Path | None:
+        try:
+            home = self.codex_home.expanduser()
+            if home.is_symlink() or not home.is_dir():
+                return None
+            resolved = home.resolve(strict=True)
+        except OSError:
+            return None
+        if not self._owner_safe(resolved):
+            return None
+        return resolved
+
+    def _exact_session_match(self, *, home: Path, session_id: str) -> Path | None:
+        root = home / "sessions"
+        try:
+            if root.is_symlink() or not root.is_dir():
+                return None
+            root_resolved = root.resolve(strict=True)
+        except OSError:
+            return None
+        if not self._is_beneath(root_resolved, home):
+            return None
+        matches: list[Path] = []
+        walked = 0
+        try:
+            for dirpath, dirnames, filenames in os.walk(root_resolved, followlinks=False):
+                walked += 1
+                if walked > _MAX_SESSION_WALK:
+                    return None
+                # Never descend through symlinked directories.
+                dirnames[:] = [
+                    name
+                    for name in dirnames
+                    if not (Path(dirpath) / name).is_symlink()
+                ]
+                for name in filenames:
+                    if session_id not in name:
+                        continue
+                    candidate = Path(dirpath) / name
+                    validated = self._validate_candidate(
+                        candidate, home=home, session_id=session_id
+                    )
+                    if validated is not None:
+                        matches.append(validated)
+                    if len(matches) > 1:
+                        return None
+        except OSError:
+            return None
+        if len(matches) != 1:
+            return None
+        return matches[0]
+
+    def _validate_candidate(
+        self, candidate: Path, *, home: Path, session_id: str
+    ) -> Path | None:
+        try:
+            if candidate.is_symlink() or not candidate.is_file():
+                return None
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            return None
+        if not self._is_beneath(resolved, home / "sessions"):
+            return None
+        if not self._is_beneath(resolved, home):
+            return None
+        if resolved.suffix.lower() != ".jsonl":
+            return None
+        if session_id not in resolved.name:
+            return None
+        if not self._owner_safe(resolved):
+            return None
+        # Unsupported / non-JSONL formats: require an opening JSON object byte.
+        try:
+            with resolved.open("rb") as handle:
+                head = handle.read(1)
+        except OSError:
+            return None
+        if head not in {b"{", b"", b"\n"}:
+            return None
+        return resolved
+
+    @staticmethod
+    def _is_beneath(path: Path, root: Path) -> bool:
+        try:
+            path.relative_to(root.resolve(strict=False))
+        except (OSError, ValueError):
+            return False
+        return True
+
+    @staticmethod
+    def _owner_safe(path: Path) -> bool:
+        try:
+            stat = path.stat()
+        except OSError:
+            return False
+        uid = getattr(os, "getuid", None)
+        if callable(uid):
+            return int(stat.st_uid) == int(uid())
+        return True
 
 
 def structural_from_stream_record(record: CodexParsedRecord) -> tuple[JsonObject, tuple[str, ...]]:
@@ -108,12 +287,23 @@ def envelope_from_stream_record(
     cursor: ObservationCursor,
 ) -> ObservationEnvelope:
     structural, gaps = structural_from_stream_record(record)
+    host_ids: dict[str, JsonValue] = {}
+    item = record.value.get("item")
+    if isinstance(item, JsonObject):
+        for key in ("id", "call_id", "tool_call_id", "event_id"):
+            token = _token(item.get(key))
+            if token is not None:
+                host_ids[key] = token
+    event_id = _token(record.value.get("event_id")) or _token(record.value.get("id"))
+    if event_id is not None:
+        host_ids.setdefault("event_id", event_id)
     identity = (
         "stream:"
         + canonical_digest(
             JsonObject(
                 {
                     "byte_end": record.byte_end,
+                    "host_ids": JsonObject(host_ids),
                     "ordinal": record.line_ordinal,
                     "structural": structural,
                     "wrapper": record.wrapper_type,
@@ -153,6 +343,7 @@ class SessionStreamReader:
     session_commitment: str
     profile: CodexCapabilityProfile
     cursor: ObservationCursor
+    key_material: bytes
     partial_line: bytes = b""
     _inode: int | None = None
     _size_at_generation: int = 0
@@ -160,6 +351,8 @@ class SessionStreamReader:
     def __post_init__(self) -> None:
         if type(self.partial_line) is not bytes:
             raise ValueError("session_stream_partial_invalid")
+        if type(self.key_material) is not bytes or not 16 <= len(self.key_material) <= 64:
+            raise ValueError("session_stream_key_invalid")
 
     def advance(self, path: Path) -> SessionStreamAdvance:
         gaps: set[str] = set()
@@ -276,9 +469,7 @@ class SessionStreamReader:
                 break
             consumed = line.byte_end
             event_position += 1
-            last_commitment = (
-                "hmac-sha256:" + __import__("hashlib").sha256(line.content).hexdigest()
-            )
+            last_commitment = stream_line_commitment(self.key_material, line.content)
             abs_cursor = ObservationCursor(
                 source_generation=generation,
                 byte_position=byte_position + consumed,
@@ -333,3 +524,85 @@ class SessionStreamReader:
             truncated,
             rotated,
         )
+
+
+def should_trigger_stream_reconcile(
+    event_name: str,
+    *,
+    last_reconcile_mono: float | None,
+    now_mono: float | None = None,
+    session_source: str | None = None,
+) -> bool:
+    """Decide whether an observe hook should run incremental stream reconciliation."""
+
+    if event_name in {"Stop", "SessionEnd", "PostCompact", "PreCompact"}:
+        return True
+    if event_name == "SessionStart" and session_source in {"resume", "compact"}:
+        return True
+    if event_name in _MATERIAL_HOOK_EVENTS:
+        return True
+    current = time.monotonic() if now_mono is None else now_mono
+    if last_reconcile_mono is None:
+        return False
+    return (current - last_reconcile_mono) >= PERIODIC_RECONCILE_SECONDS
+
+
+def reconcile_session_stream(
+    store: LocalObservationStore,
+    *,
+    workspace_commitment: str,
+    session_commitment: str,
+    codex_session_id: str,
+    locator: CodexSessionStreamLocator,
+    hook_provided_path: str | None = None,
+) -> dict[str, JsonValue]:
+    """Advance the session stream cursor and ingest envelopes. Path stays local-only."""
+
+    path = locator.resolve(session_id=codex_session_id, hook_provided_path=hook_provided_path)
+    if path is None:
+        return {
+            "accepted": 0,
+            "duplicates": 0,
+            "gaps": (ObservationGapCode.SOURCE_LAG.value,),
+            "resolved": False,
+        }
+    existing = store.get_stream_cursor(workspace_commitment, session_commitment)
+    if existing is None:
+        existing = ObservationCursor(
+            source_generation=1,
+            byte_position=0,
+            event_position=0,
+            last_source_commitment=_EMPTY_COMMITMENT,
+            mapping_version=STREAM_MAPPING_VERSION,
+        )
+    partial = store.get_stream_partial(workspace_commitment, session_commitment)
+    reader = SessionStreamReader(
+        session_commitment=session_commitment,
+        profile=default_stream_profile(),
+        cursor=existing,
+        key_material=store.key_material(),
+        partial_line=partial,
+    )
+    advance = reader.advance(path)
+    accepted = 0
+    duplicates = 0
+    for envelope in advance.envelopes:
+        result = store.ingest(envelope)
+        if result.disposition.value == "accepted":
+            accepted += 1
+        elif result.disposition.value == "duplicate":
+            duplicates += 1
+    store.set_stream_cursor(workspace_commitment, session_commitment, advance.cursor)
+    store.set_stream_partial(workspace_commitment, session_commitment, advance.partial_line)
+    store.note_stream_reconcile(workspace_commitment)
+    return {
+        "accepted": accepted,
+        "duplicates": duplicates,
+        "gaps": advance.gaps,
+        "byte_position": advance.cursor.byte_position,
+        "event_position": advance.cursor.event_position,
+        "generation": advance.cursor.source_generation,
+        "rotated": advance.rotated,
+        "truncated": advance.truncated,
+        "resolved": True,
+    }

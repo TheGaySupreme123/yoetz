@@ -6,10 +6,10 @@
 
 ## Purpose
 
-Build `AdviceSnapshot` from deterministic observation-advice candidates plus optional additive
-semantic advice. Suppress duplicate delivery by finding identity + evidence frontier; reissue when
-evidence changes, severity increases, or prior recommendation remains unresolved after material
-work.
+Build `AdviceSnapshot` with ranked `AdviceItem` values from deterministic observation-advice
+candidates plus optional additive semantic advice. Suppress duplicate delivery by finding identity
++ evidence frontier; reissue when evidence changes, severity increases, or prior recommendation
+remains unresolved after material work.
 
 ## Public surface
 
@@ -17,6 +17,8 @@ work.
 - `should_reissue_advice(...)`
 - `stable_advice_finding_id(...)`
 - `minimized_semantic_evidence_packet(...)`
+- `hook_advice_context(...)`
+- `advice_items_for_ledger(...)`
 - `SemanticAdvicePort` protocol
 
 ## Behavior

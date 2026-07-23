@@ -106,6 +106,21 @@ class ObservationCheckFact:
     subject_state_digest: str
     status: str
     cursor_event_position: int
+    is_current: bool = True
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.approval_commitment) is not str
+            or not self.approval_commitment.startswith("sha256:")
+            or type(self.subject_state_digest) is not str
+            or not self.subject_state_digest.startswith("sha256:")
+            or type(self.status) is not str
+            or not self.status
+            or type(self.cursor_event_position) is not int
+            or self.cursor_event_position < 0
+            or type(self.is_current) is not bool
+        ):
+            raise ValueError("observation_advice_invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,7 +287,7 @@ def _edits_after_check(
         ):
             last_success_pos = envelope.cursor.event_position
     for check in checks:
-        if check.status == "passed":
+        if check.status == "passed" and check.is_current:
             last_success_pos = max(last_success_pos or 0, check.cursor_event_position)
     if last_success_pos is None:
         return []
@@ -312,7 +327,7 @@ def _completion_without_verification(
             completion_refs.append(_envelope_ref(envelope))
     if not completion_refs:
         return []
-    has_pass = any(check.status == "passed" for check in checks)
+    has_pass = any(check.status == "passed" and check.is_current for check in checks)
     has_obs_pass = any(
         (_exit_status(envelope) == 0 or _success(envelope) is True)
         and (_tool(envelope) in _CHECK_TOOLS | {"shell", "Bash", "bash"})
