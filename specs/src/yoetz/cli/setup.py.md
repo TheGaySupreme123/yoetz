@@ -47,31 +47,30 @@ presents the automatically detected supported harnesses as a numbered human-faci
 explicit `--codex-path` (must be an existing executable file), the single candidate, a separate
 interactive numbered choice for several, or a fail-closed usage error (`exit 2`, message naming
 `--codex-path`) when several exist non-interactively; zero candidates skip registration with reason
-`codex_not_found`; (4) runs the
-registration step through `HarnessMcpService`+`CodexMcpAdapter` — `yoetz_owned` reports
-`already_registered`, `foreign_present` reports `skipped`/`foreign_entry_present` (preserved,
-never replaced), otherwise a branded `Yoetz`/`Codex` preview followed by an explicit `Y` or `N`
-prompt with no default (or the `--accept` flag) gates one
-digest-bound `register`; adapter failures become `failed` with the reason token; (5) on an
-interactive run, uses the fixed on-demand connector and reports exact service state; a
-noninteractive status probe never starts it; (6) on an interactive TTY, offers Official OpenAI,
-the fixed Fireworks Responses profile, or an owner-declared HTTPS origin+model (writes
-`config.toml` via `cli/provider_binding`), then enters the existing hidden-TTY vault/provider
-ceremonies when needed; (7) assembles `next_steps` naming the
-exact follow-up commands — `yoetz service run`, `yoetz service unlock`, `yoetz privacy setup`,
+`codex_not_found`; (4) runs **one** Codex integration step through `CodexPluginService` +
+`HarnessMcpService`+`CodexMcpAdapter`: preview plugin/guidance/hooks and MCP, one explicit `Y`/`N`
+(or `--accept`), install/verify plugin (via the owning plugin service; `allow_untested=True` for
+observation hooks), register/verify MCP, then grant observation consent **only** after both verify.
+Already-registered MCP (`yoetz_owned`) must **not** return early — plugin install/verify and consent
+activation still run. Foreign same-name MCP entries are preserved and skip consent. Modified-plugin
+refusals leave consent inactive. (5) on an interactive run, uses the fixed on-demand connector and
+reports exact service state; a noninteractive status probe never starts it; (6) on an interactive
+TTY, offers Official OpenAI, the fixed Fireworks Responses profile, or an owner-declared HTTPS
+origin+model (writes `config.toml` via `cli/provider_binding`), then enters the existing hidden-TTY
+vault/provider ceremonies when needed; (7) assembles `next_steps` naming the exact follow-up
+commands — `yoetz service run`, `yoetz service unlock`, `yoetz privacy setup`,
 `yoetz provider endpoint` / TOML edit, and `yoetz provider credential set`; on a real TTY it
 invokes those trusted ceremonies directly and records only structural outcomes;
 (8) on a mutating run (interactive, or `--accept`) writes the marker `{outcome, schema}` as
 canonical JSON, mode 0600, at `setup_marker_path()`; a dry run (`--non-interactive` without
 `--accept`) writes nothing; (9) emits the report (schema `yoetz.setup-wizard-report/1`) as
 canonical JSON in JSON/non-TTY mode or a bounded human summary interactively, and returns 0 for
-every completed run — partial outcomes are reported honestly, not encoded as failures. The human
-summary reports MCP registration, skill support, trusted-project plugin presence, lifecycle-hook
-presence/trust observability, and local service state as separate structural lines. The JSON report
-retains the same layers under `integration.skill`, `integration.plugin`, and `integration.hooks`.
-Skill reporting includes whether the packaged source verified; resource or target inspection
-failures degrade to bounded invalid/unknown states instead of aborting setup status.
-Successful MCP registration is phrased as recorded registration with automatic activation
+every completed run — partial outcomes are reported honestly, not encoded as failures. The report
+includes a `readiness` object with Codex exe/version, MCP registration, plugin installation, hook
+presence/trust, consent, service routing, `observation_ready`, and semantic-advice readiness.
+“Ready to observe” requires verified plugin/hooks + active consent + service routing; stored
+consent alone is insufficient. The human summary reports the same layers as separate structural
+lines. Successful MCP registration is phrased as recorded registration with automatic activation
 not tested; skill support states when no tested capability profile exists. The summary never claims
 or implies that Yoetz is set up or ready on a harness merely because an MCP entry exists.
 

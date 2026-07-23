@@ -23,10 +23,16 @@ output.
   version. Crash-stable and generation-fenced.
 - `ObservationStatus` — lifecycle `active|degraded|stale|stopped`, source coverage, last
   observation, lag, gaps, unsupported events, and current `AdviceSnapshot` frontier identity.
-- `AdviceSnapshot` — ranked findings, exact evidence basis, confidence/coverage, recommended next
-  action, freshness, and suppression identity.
+- `AdviceSnapshot` — ranked `AdviceItem` values (finding id, rule code, priority, summary, detail,
+  next action, evidence refs, coverage, freshness) plus exact evidence basis, confidence/coverage,
+  recommended next action, freshness, and suppression identity.
+- `AdviceItem` — bounded durable advice safe for ordinary `status`, `yoetz observe status`, and
+  nonblocking hook delivery; never embeds raw command output, transcript, paths, or secrets.
 - Supporting closed values as needed by the port: ingest results, status queries, control/revoke
   commands, and gap/reason enums — all exact, bounded, and path-free.
+- `ObservationIngestRequest` — redacted local-control ingest body with raw Codex session id +
+  `ObservationEnvelope` only (never caller-supplied Yoetz task/session/writer IDs).
+- Gap codes include `mapping_missing` and `outbox_overflow` for coordinator/outbox honesty.
 
 ## Behavior
 

@@ -9,8 +9,13 @@ from typing import Final
 import typer
 
 from yoetz.adapters.integrations.codex_session_stream import (
+    CodexSessionStreamLocator,
     SessionStreamReader,
     default_stream_profile,
+    resolve_codex_home,
+)
+from yoetz.adapters.integrations.codex_session_stream import (
+    reconcile_session_stream as advance_session_stream,
 )
 from yoetz.adapters.integrations.observation_local import (
     STREAM_MAPPING_VERSION,
@@ -65,6 +70,7 @@ def observe_status(
     with contextlib.suppress(Exception):
         store.refresh_advice(commitment)
     status = store.status(ObservationStatusQuery(commitment))
+    snapshot = store.advice_snapshot_for(commitment)
     consent_label = (
         "absent"
         if consent is None
@@ -74,30 +80,56 @@ def observe_status(
             else ("paused" if consent.paused else "active")
         )
     )
+    advice_payload: dict[str, JsonValue]
+    if snapshot is None:
+        advice_payload = {"present": False}
+    else:
+        top = snapshot.ranked_items[0] if snapshot.ranked_items else None
+        advice_payload = {
+            "present": True,
+            "recommended_next_action": snapshot.recommended_next_action,
+            "freshness_frontier": snapshot.freshness_frontier,
+            "top_summary": None if top is None else top.summary,
+            "top_detail": None if top is None else top.detail,
+            "top_evidence": None
+            if top is None or not top.evidence_refs
+            else top.evidence_refs[0],
+            "finding_ids": tuple(str(item) for item in snapshot.ranked_finding_ids[:8]),
+        }
     if json_output:
         _emit(
             {
                 "workspace_commitment": commitment,
                 "consent": consent_label,
                 "status": observation_status_to_json(status),
+                "advice": advice_payload,
             },
             json_output=True,
         )
         return 0
-    _emit(
-        {
-            "workspace_commitment": commitment,
-            "consent": consent_label,
-            "lifecycle": status.lifecycle.value,
-            "advice_frontier": status.advice_frontier or "none",
-            "gaps": ",".join(status.gaps) if status.gaps else "none",
-            "hook_coverage": str(status.source_coverage.get(ObservationSource.CODEX_HOOK, False)),
-            "stream_coverage": str(
-                status.source_coverage.get(ObservationSource.CODEX_SESSION_STREAM, False)
-            ),
-        },
-        json_output=False,
-    )
+    payload: dict[str, JsonValue] = {
+        "workspace_commitment": commitment,
+        "consent": consent_label,
+        "lifecycle": status.lifecycle.value,
+        "lag_events": status.lag_events,
+        "advice_frontier": status.advice_frontier or "none",
+        "gaps": ",".join(status.gaps) if status.gaps else "none",
+        "hook_coverage": str(status.source_coverage.get(ObservationSource.CODEX_HOOK, False)),
+        "stream_coverage": str(
+            status.source_coverage.get(ObservationSource.CODEX_SESSION_STREAM, False)
+        ),
+        "recommendation": (
+            "none"
+            if snapshot is None
+            else snapshot.recommended_next_action
+        ),
+        "advice_summary": (
+            "none"
+            if snapshot is None or not snapshot.ranked_items
+            else snapshot.ranked_items[0].summary
+        ),
+    }
+    _emit(payload, json_output=False)
     return 0
 
 
@@ -154,6 +186,8 @@ def reconcile_session_stream(
     json_output: bool,
     _state: Path | None = None,
 ) -> int:
+    """Manual recovery/diagnostic reconcile; automatic reconcile is hook-driven."""
+
     store = LocalObservationStore(_state=_state)
     root = _resolve_workspace(workspace)
     workspace_commitment = store.workspace_commitment(str(root))
@@ -167,8 +201,25 @@ def reconcile_session_stream(
         return 20
     # Session commitment is derived from the file's stem (opaque token), never the full path.
     session_token = path.stem if path.stem else "session"
+    if "-" in session_token:
+        session_token = session_token.rsplit("-", 1)[-1] or session_token
     session_commitment = store.session_commitment(session_token[:128])
     store.bind_session(workspace_commitment, session_commitment)
+    locator = CodexSessionStreamLocator(resolve_codex_home())
+    validated = locator.resolve(session_id=session_token[:128], hook_provided_path=str(path))
+    if validated is not None:
+        payload = advance_session_stream(
+            store,
+            workspace_commitment=workspace_commitment,
+            session_commitment=session_commitment,
+            codex_session_id=session_token[:128],
+            locator=locator,
+            hook_provided_path=str(validated),
+        )
+        payload = {**payload, "mode": "locator"}
+        _emit(payload, json_output=json_output)
+        return 0
+    # Recovery mode for explicit paths outside the selected Codex home.
     existing = store.get_stream_cursor(workspace_commitment, session_commitment)
     if existing is None:
         existing = ObservationCursor(
@@ -182,6 +233,8 @@ def reconcile_session_stream(
         session_commitment=session_commitment,
         profile=default_stream_profile(),
         cursor=existing,
+        key_material=store.key_material(),
+        partial_line=store.get_stream_partial(workspace_commitment, session_commitment),
     )
     advance = reader.advance(path)
     accepted = 0
@@ -193,7 +246,8 @@ def reconcile_session_stream(
         elif result.disposition.value == "duplicate":
             duplicates += 1
     store.set_stream_cursor(workspace_commitment, session_commitment, advance.cursor)
-    payload: dict[str, JsonValue] = {
+    store.set_stream_partial(workspace_commitment, session_commitment, advance.partial_line)
+    payload = {
         "accepted": accepted,
         "duplicates": duplicates,
         "gaps": advance.gaps,
@@ -202,6 +256,8 @@ def reconcile_session_stream(
         "generation": advance.cursor.source_generation,
         "rotated": advance.rotated,
         "truncated": advance.truncated,
+        "resolved": True,
+        "mode": "recovery_explicit_path",
     }
     _emit(payload, json_output=json_output)
     return 0

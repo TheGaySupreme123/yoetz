@@ -1595,8 +1595,10 @@ Shared closed types:
   mapping version. Cursors are crash-stable and generation-fenced.
 - `ObservationStatus` — lifecycle `active|degraded|stale|stopped`, source coverage, last
   observation, lag, gaps, unsupported events, and the current `AdviceSnapshot` frontier identity.
-- `AdviceSnapshot` — ranked findings, exact evidence basis, confidence/coverage, recommended next
-  action, freshness, and suppression identity. It surfaces through nonblocking observation/
+- `AdviceSnapshot` — ranked `AdviceItem` values (finding id, deterministic rule code, priority,
+  summary, evidence-linked detail, next action, evidence refs, coverage, freshness) plus exact
+  evidence basis, confidence/coverage, recommended next action, freshness, and suppression
+  identity. It surfaces through nonblocking observation/
   integration hooks and through ordinary public `status` (and existing finding/coverage machinery);
   it is never a seventh MCP tool. Deterministic observation-advice policies derive the snapshot
   from retained envelopes (and optional inspect/approved-check/composition facts) even with zero

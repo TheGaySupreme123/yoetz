@@ -14,6 +14,8 @@ from yoetz.cli.observe_hooks import (
 )
 from yoetz.domain.observation import ObservationGapCode, ObservationSource
 
+_KEY = b"k" * 32
+
 
 def test_map_supported_hook_payloads_structural_only(tmp_path: Path) -> None:
     store = LocalObservationStore(_state=tmp_path)
@@ -29,13 +31,18 @@ def test_map_supported_hook_payloads_structural_only(tmp_path: Path) -> None:
             "prompt": "MUST_NOT_APPEAR",
         }
         envelope = map_hook_payload_to_envelope(
-            event, payload, session_commitment=session, event_ordinal=1
+            event,
+            payload,
+            session_commitment=session,
+            event_ordinal=1,
+            key_material=store.key_material(),
         )
         assert envelope.source is ObservationSource.CODEX_HOOK
         assert envelope.event_kind == event
         assert "transcript" not in envelope.structural_payload
         assert "prompt" not in envelope.structural_payload
         assert envelope.structural_payload.get("tool_name") == "shell"
+        assert envelope.cursor.last_source_commitment.startswith("hmac-sha256:")
 
 
 def test_unknown_future_hook_becomes_opaque_gap(tmp_path: Path) -> None:
@@ -46,9 +53,36 @@ def test_unknown_future_hook_becomes_opaque_gap(tmp_path: Path) -> None:
         {"session_id": "sess-2"},
         session_commitment=session,
         event_ordinal=1,
+        key_material=_KEY,
         gap_codes=(ObservationGapCode.UNSUPPORTED_EVENT.value,),
     )
     assert ObservationGapCode.UNSUPPORTED_EVENT.value in envelope.gap_codes
+
+
+def test_identical_tool_calls_remain_distinct(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    session = store.session_commitment("sess-dup")
+    payload = {
+        "session_id": "sess-dup",
+        "tool_name": "shell",
+        "tool_call_id": "same-call",
+        "exit_status": 0,
+    }
+    first = map_hook_payload_to_envelope(
+        "PostToolUse",
+        payload,
+        session_commitment=session,
+        event_ordinal=1,
+        key_material=_KEY,
+    )
+    second = map_hook_payload_to_envelope(
+        "PostToolUse",
+        payload,
+        session_commitment=session,
+        event_ordinal=2,
+        key_material=_KEY,
+    )
+    assert first.source_identity != second.source_identity
 
 
 def test_observe_without_consent_exits_zero_no_spool(tmp_path: Path) -> None:

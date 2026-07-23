@@ -14,7 +14,7 @@ import apsw
 
 import yoetz.adapters.sqlite.connection as connection_module
 import yoetz.adapters.sqlite.recovery as recovery_module
-from yoetz.adapters.memory.observation import MemoryObservationStore
+from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
 from yoetz.adapters.privacy.catalog import CatalogPrivacyAudit, CatalogPrivacyPolicyStore
 from yoetz.adapters.privacy.gateway import PolicyEnforcingOutboundGateway
@@ -32,6 +32,7 @@ from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.adapters.sqlite.start_catalog import SqliteStartCatalog
 from yoetz.application.check import FinalSemanticEvaluation
 from yoetz.application.observation_control import build_observation_support_handlers
+from yoetz.application.observation_coordinator import ObservationCoordinator
 from yoetz.application.service import (
     ControlProjectionBinding,
     ReadyApplicationFactory,
@@ -1035,6 +1036,12 @@ def _receipt_versions(manifest: Mapping[str, CanonicalJsonValue]) -> ReceiptVers
 async def _semantic_not_configured(
     frozen: FrozenCase, findings: tuple[object, ...]
 ) -> FinalSemanticEvaluation:
+    """Explicit deterministic-only check path when no privacy-ready provider binding exists.
+
+    Observation advice uses ``compose_observation_semantic_advisor`` separately: privacy-gated
+    when a provider binding is configured and ready, otherwise NullSemanticAdvice.
+    """
+
     del frozen, findings
     return FinalSemanticEvaluation(
         SemanticStatus.NOT_CONFIGURED, SemanticReason.PROVIDER_NOT_CONFIGURED
@@ -1152,9 +1159,16 @@ async def provide_service_ready_context(
         )
 
     versions = _receipt_versions(manifest)
-    # Durable hook path uses LocalObservationStore; ready service handlers use an in-process
-    # ObservationPort so observation_* control methods are not empty stubs.
-    observation_handlers = build_observation_support_handlers(MemoryObservationStore())
+    # Production path: LocalObservationStore (consent/outbox) + ObservationCoordinator
+    # routes into the mapped task-bundle SqliteObservationStore. MemoryObservationStore
+    # remains test/reference-only and must not be used here.
+    observation_coordinator = ObservationCoordinator(
+        runtime=runtime,
+        local=LocalObservationStore(),
+        clock=clock,
+        ids=ids,
+    )
+    observation_handlers = build_observation_support_handlers(observation_coordinator)
     return ServiceReadyContext(
         service_generation=service_generation,
         vault_generation=vault_generation,

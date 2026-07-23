@@ -71,8 +71,64 @@ def test_zero_cooperative_publications_still_yields_advice() -> None:
     )
     assert snapshot is not None
     assert snapshot.ranked_finding_ids
+    assert snapshot.ranked_items
+    assert snapshot.ranked_items[0].rule_code == "failed_command_unresolved"
+    assert snapshot.ranked_items[0].summary
     assert snapshot.recommended_next_action == "resolve_failed_command"
     assert "SECRET" not in snapshot.recommended_next_action
+
+
+def test_completion_without_verification_is_clear() -> None:
+    envelopes = (
+        _envelope(
+            "hook:done",
+            {"claim_kind": "completion", "result_status": "completed"},
+            pos=1,
+        ),
+    )
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=envelopes,
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            has_real_observation=True,
+        )
+    )
+    assert snapshot is not None
+    assert any(
+        item.rule_code == "completion_without_verification"
+        and item.summary == "Completion not supported by current evidence"
+        for item in snapshot.ranked_items
+    )
+
+
+def test_semantic_packet_minimization() -> None:
+    envelopes = (
+        _envelope(
+            "hook:fail",
+            {"tool_name": "shell", "exit_status": 1, "correlation_id": "x1"},
+        ),
+    )
+    candidates = observation_advice_findings(
+        ObservationAdviceContext(
+            envelopes=envelopes,
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=("source_lag",),
+        )
+    )
+    packet = minimized_semantic_evidence_packet(
+        candidates,
+        "sha256:" + "e" * 64,
+        coverage_gaps=("source_lag",),
+        finding_summaries=("Unresolved failed command observed",),
+    )
+    assert "transcript" not in packet
+    assert "stdout" not in packet
+    assert "path" not in packet
+    assert packet["coverage_gaps"] == ("source_lag",)
+    serialized = str(packet)
+    assert "/Users" not in serialized
+    assert "SECRET" not in serialized
 
 
 def test_suppression_skips_duplicate_until_evidence_changes() -> None:

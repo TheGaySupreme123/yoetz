@@ -19,19 +19,35 @@ auto-attaches on consented SessionStart when feasible.
 ## Behavior
 
 Always exit 0. On outage emit structural gap codes (`service_unavailable` / `vault_locked`) without
-plaintext spool. After local ingest, refresh deterministic `AdviceSnapshot` from retained envelopes
-(works with zero cooperative MCP publications). Advice `additionalContext` only at safe events when
-a new `AdviceSnapshot` suppression identity is available.
+plaintext spool. Allocate a durable per-session hook sequence when Codex supplies no
+`event_ordinal`. Source identity includes host tool/event ids and the ordinal so repeated identical
+tool calls remain distinct. Cursor `last_source_commitment` uses keyed `hook_source_commitment`.
+
+Pipeline order:
+
+1. Local durable ingest into `LocalObservationStore`.
+2. Enqueue pending outbox entry on local accept.
+3. Selective session-stream reconciliation (sibling-owned locator).
+4. Refresh deterministic advice from retained envelopes.
+5. **SessionStart:** auto-start/attach first, persist lifecycle mapping, then drain the local
+   outbox through service `ObservationIngestRequest`.
+6. Non-SessionStart: when already mapped, call service ingest immediately; validate disposition —
+   `accepted`/`duplicate` ack outbox; `rejected` records a safe local coverage gap.
+7. Advice `additionalContext` only at safe events when a new suppression identity is available.
+
+Service ingest sends redacted `ObservationIngestRequest` (Codex session id + envelope only).
 
 ## Errors and edge cases
 
-Fail closed on consent, mapping, and validation errors; never leak secrets.
+Fail closed on consent, mapping, and validation errors; never leak secrets. Rejected service
+dispositions become visible local gaps.
 
 ## Invariants
 
 1. No plaintext transcript spool.
 2. No seventh MCP tool.
 3. Coverage-qualified advice only.
+4. Outbox ack only after service accepted/duplicate (task-bundle commit).
 
 ## Tests
 

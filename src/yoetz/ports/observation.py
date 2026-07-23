@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from yoetz.domain.observation import (
+    AdviceItem,
     AdviceSnapshot,
     ObservationControlCommand,
     ObservationCursor,
@@ -22,6 +23,7 @@ from yoetz.domain.observation import (
 )
 
 __all__ = [
+    "AdviceItem",
     "AdviceSnapshot",
     "ObservationControlCommand",
     "ObservationCursor",

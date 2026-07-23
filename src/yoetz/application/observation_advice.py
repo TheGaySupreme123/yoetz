@@ -10,6 +10,7 @@ from typing import Final, Protocol
 
 from yoetz.domain.findings import FindingId, finding_id
 from yoetz.domain.observation import (
+    AdviceItem,
     AdviceSnapshot,
     ObservationEnvelope,
     ObservationLifecycle,
@@ -40,13 +41,40 @@ __all__ = [
     "ObservationAdviceBuildInput",
     "ObservationAdviceSemanticAddon",
     "SemanticAdvicePort",
+    "advice_items_for_ledger",
     "build_observation_advice_snapshot",
+    "hook_advice_context",
+    "minimized_semantic_evidence_packet",
     "should_reissue_advice",
     "stable_advice_finding_id",
 ]
 
 _SUPPRESSION_DOMAIN: Final = b"yoetz/observation-advice-suppress/v1\x00"
 _FINDING_DOMAIN: Final = b"yoetz/observation-advice-finding/v1\x00"
+
+_RULE_SUMMARIES: Final[Mapping[str, str]] = {
+    "failed_command_unresolved": "Unresolved failed command observed",
+    "edit_after_successful_check": "Verification stale after later edit",
+    "completion_without_verification": "Completion not supported by current evidence",
+    "static_test_for_live_claim": "Static check does not support live claim",
+    "subagent_finding_unaddressed": "Subagent finding remains unaddressed",
+    "change_outside_plan": "Observed change outside declared plan scope",
+    "observation_gap_or_stale": "Observation coverage is incomplete or stale",
+    "provider_not_ready": "Configured provider is not ready",
+    "semantic_claim_without_attempt": "Semantic claim lacks a recorded attempt",
+}
+
+_RULE_DETAILS: Final[Mapping[str, str]] = {
+    "failed_command_unresolved": "A tool result failed and was not followed by a successful retry",
+    "edit_after_successful_check": "A check that predates a later edit is no longer current verification",
+    "completion_without_verification": "A completion claim lacks current admissible verification evidence",
+    "static_test_for_live_claim": "Only static verification was observed for a live or wire claim",
+    "subagent_finding_unaddressed": "A subagent reported a finding that parent work has not addressed",
+    "change_outside_plan": "Changed-path evidence falls outside the declared plan digests",
+    "observation_gap_or_stale": "Source lag, mapping, or drain gaps prevent complete observation",
+    "provider_not_ready": "Semantic or provider binding is configured but not ready",
+    "semantic_claim_without_attempt": "A semantic claim was observed without a matching attempt receipt",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +84,11 @@ class ObservationAdviceSemanticAddon:
     finding_ids: tuple[FindingId, ...]
     evidence_digest: str | None
     next_action: str | None = None
+    summaries: tuple[str, ...] = ()
+    details: tuple[str, ...] = ()
+    provider_identity: str | None = None
+    attempt_receipt: str | None = None
+    failure_reason: str | None = None
 
 
 class SemanticAdvicePort(Protocol):
@@ -179,6 +212,29 @@ def _freshness_frontier(envelopes: Sequence[ObservationEnvelope], evidence_diges
     )
 
 
+def _item_from_candidate(
+    candidate: ObservationAdviceCandidate,
+    finding: FindingId,
+    *,
+    coverage: Coverage,
+    freshness_frontier: str,
+) -> AdviceItem:
+    summary = _RULE_SUMMARIES.get(candidate.rule_code, "Observation advice finding")
+    detail = _RULE_DETAILS.get(candidate.rule_code, "Evidence-linked observation finding")
+    return AdviceItem(
+        finding_id=finding,
+        rule_code=candidate.rule_code,
+        priority=candidate.priority,
+        summary=summary,
+        detail=detail,
+        recommended_next_action=candidate.next_action,
+        evidence_refs=candidate.evidence_refs,
+        coverage=coverage,
+        freshness_frontier=freshness_frontier,
+        origin="deterministic",
+    )
+
+
 def build_observation_advice_snapshot(
     input_value: ObservationAdviceBuildInput,
 ) -> AdviceSnapshot | None:
@@ -255,23 +311,85 @@ def build_observation_advice_snapshot(
             check_types=coverage.check_types,
             known_gaps=tuple(sorted(gap_set, key=str.encode)),
         )
+    frontier = _freshness_frontier(input_value.envelopes, basis)
+    items: list[AdviceItem] = [
+        _item_from_candidate(candidate, finding, coverage=coverage, freshness_frontier=frontier)
+        for candidate, finding in zip(candidates, finding_ids, strict=True)
+    ]
+    if semantic is not None and semantic_ids:
+        for index, finding in enumerate(semantic_ids):
+            if finding in finding_ids:
+                continue
+            summary = (
+                semantic.summaries[index]
+                if index < len(semantic.summaries)
+                else "Model-derived observation note"
+            )
+            detail = (
+                semantic.details[index]
+                if index < len(semantic.details)
+                else "Additive semantic advice over minimized evidence"
+            )
+            items.append(
+                AdviceItem(
+                    finding_id=finding,
+                    rule_code="semantic-additive-review",
+                    priority=90,
+                    summary=summary[:160],
+                    detail=detail[:240],
+                    recommended_next_action=next_action,
+                    evidence_refs=("semantic:minimized",),
+                    coverage=coverage,
+                    freshness_frontier=frontier,
+                    origin="semantic_model_derived",
+                )
+            )
     suppression = _suppression_identity(ranked, basis, next_action)
     snapshot = AdviceSnapshot(
         ranked_finding_ids=ranked,
         evidence_basis_digest=basis,
         confidence_coverage=coverage,
         recommended_next_action=next_action,
-        freshness_frontier=_freshness_frontier(input_value.envelopes, basis),
+        freshness_frontier=frontier,
         suppression_identity=suppression,
+        ranked_items=tuple(items),
     )
     if not should_reissue_advice(input_value.prior_snapshot, snapshot):
         return input_value.prior_snapshot
     return snapshot
 
 
+def hook_advice_context(snapshot: AdviceSnapshot) -> str:
+    """Highest-priority summary, reason, next action, and one evidence reference."""
+
+    if snapshot.ranked_items:
+        top = snapshot.ranked_items[0]
+        ref = top.evidence_refs[0] if top.evidence_refs else "evidence:none"
+        text = (
+            f"Yoetz: {top.summary}. Reason: {top.detail}. "
+            f"Next: {top.recommended_next_action}. Evidence: {ref}."
+        )
+    else:
+        findings = ",".join(str(item) for item in snapshot.ranked_finding_ids[:8])
+        text = (
+            f"Yoetz advice frontier {snapshot.freshness_frontier}: "
+            f"next={snapshot.recommended_next_action}; findings={findings}."
+        )
+    return text[:512]
+
+
+def advice_items_for_ledger(snapshot: AdviceSnapshot) -> tuple[AdviceItem, ...]:
+    """Deterministic items for task-ledger materialization (Agent A coordinator hook)."""
+
+    return tuple(item for item in snapshot.ranked_items if item.origin == "deterministic")
+
+
 def minimized_semantic_evidence_packet(
     candidates: Sequence[ObservationAdviceCandidate],
     basis_digest: str,
+    *,
+    coverage_gaps: Sequence[str] = (),
+    finding_summaries: Sequence[str] = (),
 ) -> dict[str, object]:
     """Build a minimized packet for optional semantic review (no repo/transcript/logs)."""
 
@@ -279,12 +397,15 @@ def minimized_semantic_evidence_packet(
         "format": "yoetz.observation-advice-semantic/1",
         "policy": f"{OBSERVATION_ADVICE_POLICY_ID}/{OBSERVATION_ADVICE_POLICY_VERSION}",
         "evidence_basis_digest": basis_digest,
+        "coverage_gaps": tuple(sorted({gap for gap in coverage_gaps if gap}, key=str.encode)),
+        "finding_summaries": tuple(finding_summaries[:16]),
         "deterministic_rules": tuple(
             {
                 "kind": item.kind.value,
                 "rule_code": item.rule_code,
                 "next_action": item.next_action,
                 "evidence_ref_count": len(item.evidence_refs),
+                "summary": _RULE_SUMMARIES.get(item.rule_code, "Observation advice finding"),
             }
             for item in candidates
         ),

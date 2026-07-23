@@ -48,7 +48,9 @@ tests/integration/
   providers/
     test_fake_provider_coordinator.py
   observation/
+    composition_harness.py
     test_acceptance_scenarios.py
+    test_production_composition.py
   service/
     test_daemon_clients.py
     test_encrypted_vault.py
@@ -78,7 +80,9 @@ tests/integration/objects/test_envelope_and_encrypted_files.py
 tests/integration/objects/test_key_backends.py
 tests/integration/objects/test_portable_recovery.py
 tests/integration/objects/test_redaction_and_gc.py
+tests/integration/observation/composition_harness.py
 tests/integration/observation/test_acceptance_scenarios.py
+tests/integration/observation/test_production_composition.py
 tests/integration/privacy/test_egress_gateway.py
 tests/integration/privacy/test_plaintext_canary_sweep.py
 tests/integration/providers/test_fake_provider_coordinator.py

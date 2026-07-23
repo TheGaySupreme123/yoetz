@@ -12,7 +12,6 @@ from yoetz.domain.observation import (
     ObservationGapCode,
     ObservationIngestDisposition,
     ObservationIngestResult,
-    ObservationLifecycle,
     ObservationRevokeCommand,
     ObservationSource,
     ObservationStatus,
@@ -320,6 +319,14 @@ class MemoryObservationStore:
         self._state.gaps.setdefault(workspace, set()).add(code)
 
     def _status_unlocked(self, workspace_commitment: str) -> ObservationStatus:
+        import time
+
+        from yoetz.application.observation_health import (
+            DEFAULT_OBSERVATION_HEALTH_THRESHOLDS,
+            ObservationHealthSignals,
+            compute_observation_lifecycle,
+        )
+
         consent = self._state.consent.get(workspace_commitment)
         coverage = {
             ObservationSource.CODEX_HOOK: False,
@@ -328,25 +335,40 @@ class MemoryObservationStore:
         for workspace, envelope in self._state.envelopes:
             if workspace == workspace_commitment:
                 coverage[envelope.source] = True
-        if consent is None:
-            lifecycle = ObservationLifecycle.STOPPED
-        elif consent.revoked_at is not None:
-            lifecycle = ObservationLifecycle.STOPPED
-        elif consent.paused:
-            lifecycle = ObservationLifecycle.STOPPED
-        elif not any(coverage.values()):
-            lifecycle = ObservationLifecycle.DEGRADED
-        else:
-            lifecycle = ObservationLifecycle.ACTIVE
         gaps = tuple(sorted(self._state.gaps.get(workspace_commitment, set()), key=str.encode))
         unsupported = tuple(
             sorted(self._state.unsupported_events.get(workspace_commitment, set()), key=str.encode)
+        )
+        consent_active = (
+            consent is not None and consent.revoked_at is None and not consent.paused
+        )
+        last_receipt = self._state.last_receipt.get(workspace_commitment)
+        progress = time.monotonic() if last_receipt is not None and any(coverage.values()) else None
+        signals = ObservationHealthSignals(
+            consent_active=consent_active,
+            mapping_available=workspace_commitment in self._state.session_workspaces.values()
+            or workspace_commitment in self._state.consent,
+            source_coverage=coverage,
+            pending_outbox_count=0,
+            lag_events=0,
+            gaps=gaps,
+            unsupported_events=unsupported,
+            advice_frontier=self._state.advice_frontier.get(workspace_commitment),
+            last_hook_receipt_monotonic=progress,
+            last_stream_advancement_monotonic=None,
+            last_successful_drain_monotonic=progress,
+            session_ended=False,
+        )
+        lifecycle = compute_observation_lifecycle(
+            signals,
+            now_monotonic=time.monotonic(),
+            thresholds=DEFAULT_OBSERVATION_HEALTH_THRESHOLDS,
         )
         return ObservationStatus(
             lifecycle=lifecycle,
             workspace_commitment=workspace_commitment,
             source_coverage=coverage,
-            last_observation_receipt_time=self._state.last_receipt.get(workspace_commitment),
+            last_observation_receipt_time=last_receipt,
             lag_events=0,
             gaps=gaps,
             unsupported_events=unsupported,

@@ -7,10 +7,11 @@ never transcript prose or raw workspace paths.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import os
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,7 +26,6 @@ from yoetz.domain.observation import (
     ObservationGapCode,
     ObservationIngestDisposition,
     ObservationIngestResult,
-    ObservationLifecycle,
     ObservationRevokeCommand,
     ObservationSource,
     ObservationStatus,
@@ -60,6 +60,8 @@ _MAX_STATE_BYTES: Final = 1_048_576
 _MAX_ENVELOPES: Final = 256
 _MAX_DEDUP: Final = 4_096
 _MAX_OPEN_PRE: Final = 256
+_MAX_OUTBOX: Final = 512
+_MAX_HOOK_SEQUENCES: Final = 256
 
 YOETZ_TOOL_NAMES: Final = frozenset(
     {
@@ -179,6 +181,12 @@ class _WorkspaceState:
     last_advice_suppression: str | None = None
     open_pre: dict[str, str] | None = None
     stream_cursors: dict[str, ObservationCursor] | None = None
+    stream_partials: dict[str, bytes] | None = None
+    hook_sequences: dict[str, int] | None = None
+    last_stream_reconcile_mono_ms: int | None = None
+    last_hook_receipt_mono_ms: int | None = None
+    last_successful_drain_mono_ms: int | None = None
+    pending_outbox: list[tuple[str, ObservationEnvelope]] | None = None
     codex_session_bindings: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
@@ -198,6 +206,12 @@ class _WorkspaceState:
             self.open_pre = {}
         if self.stream_cursors is None:
             self.stream_cursors = {}
+        if self.stream_partials is None:
+            self.stream_partials = {}
+        if self.hook_sequences is None:
+            self.hook_sequences = {}
+        if self.pending_outbox is None:
+            self.pending_outbox = []
         if self.codex_session_bindings is None:
             self.codex_session_bindings = {}
 
@@ -224,9 +238,20 @@ def _dedup_key(workspace: str, envelope: ObservationEnvelope) -> str:
 class LocalObservationStore:
     """Durable ObservationPort-shaped local store for consent and structural envelopes."""
 
-    def __init__(self, *, _state: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        _state: Path | None = None,
+        _monotonic: Callable[[], float] | None = None,
+    ) -> None:
         self._root = observation_dir(_state=_state)
         self._lock = threading.RLock()
+        self._monotonic = _monotonic
+
+    def _now_mono(self) -> float:
+        import time
+
+        return time.monotonic() if self._monotonic is None else self._monotonic()
 
     def key_material(self) -> bytes:
         path = self._root / "key-material.bin"
@@ -366,6 +391,12 @@ class LocalObservationStore:
             self._save(workspace, state)
             return snapshot
 
+    def advice_snapshot_for(self, workspace: str) -> AdviceSnapshot | None:
+        """Non-consuming read of the current advice snapshot for status views."""
+
+        with self._lock:
+            return self._load(workspace).advice_snapshot
+
     def list_envelopes(self, workspace: str) -> tuple[ObservationEnvelope, ...]:
         with self._lock:
             state = self._load(workspace)
@@ -457,6 +488,125 @@ class LocalObservationStore:
             state.stream_cursors[session_commitment] = cursor
             self._save(workspace, state)
 
+    def get_stream_partial(self, workspace: str, session_commitment: str) -> bytes:
+        with self._lock:
+            state = self._load(workspace)
+            assert state.stream_partials is not None
+            return state.stream_partials.get(session_commitment, b"")
+
+    def set_stream_partial(
+        self, workspace: str, session_commitment: str, partial: bytes
+    ) -> None:
+        if type(partial) is not bytes or len(partial) > 262_144:
+            raise ProtocolValueError("invalid_event_value_type")
+        with self._lock:
+            state = self._load(workspace)
+            assert state.stream_partials is not None
+            if partial:
+                state.stream_partials[session_commitment] = partial
+            else:
+                state.stream_partials.pop(session_commitment, None)
+            self._save(workspace, state)
+
+    def note_stream_reconcile(self, workspace: str, *, mono: float | None = None) -> None:
+        import time
+
+        with self._lock:
+            state = self._load(workspace)
+            current = time.monotonic() if mono is None else mono
+            state.last_stream_reconcile_mono_ms = int(current * 1000)
+            self._save(workspace, state)
+
+    def last_stream_reconcile_mono(self, workspace: str) -> float | None:
+        with self._lock:
+            value = self._load(workspace).last_stream_reconcile_mono_ms
+            return None if value is None else value / 1000.0
+
+    def allocate_hook_ordinal(self, workspace: str, session_commitment: str) -> int:
+        """Allocate a durable per-session hook sequence when the host supplies no ordinal."""
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.hook_sequences is not None
+            next_value = state.hook_sequences.get(session_commitment, 0) + 1
+            state.hook_sequences[session_commitment] = next_value
+            # Bound retained sequence keys.
+            if len(state.hook_sequences) > _MAX_HOOK_SEQUENCES:
+                oldest = next(iter(state.hook_sequences))
+                del state.hook_sequences[oldest]
+            self._save(workspace, state)
+            return next_value
+
+    def enqueue_outbox(
+        self, workspace: str, codex_session_id: str, envelope: ObservationEnvelope
+    ) -> str | None:
+        """Queue a structural envelope for service drain. Returns overflow gap or None."""
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.pending_outbox is not None
+            assert state.gaps is not None
+            if len(state.pending_outbox) >= _MAX_OUTBOX:
+                state.gaps.add(ObservationGapCode.OUTBOX_OVERFLOW.value)
+                self._save(workspace, state)
+                return ObservationGapCode.OUTBOX_OVERFLOW.value
+            # Dedup identical source identities already pending for this session.
+            for pending_session, pending_envelope in state.pending_outbox:
+                if (
+                    pending_session == codex_session_id
+                    and pending_envelope.source_identity == envelope.source_identity
+                    and pending_envelope.event_kind == envelope.event_kind
+                    and pending_envelope.cursor.event_position == envelope.cursor.event_position
+                ):
+                    return None
+            state.pending_outbox.append((codex_session_id, envelope))
+            self._save(workspace, state)
+            return None
+
+    def list_pending_outbox(
+        self, workspace: str, *, codex_session_id: str | None = None
+    ) -> tuple[tuple[str, ObservationEnvelope], ...]:
+        with self._lock:
+            state = self._load(workspace)
+            assert state.pending_outbox is not None
+            if codex_session_id is None:
+                return tuple(state.pending_outbox)
+            return tuple(
+                item for item in state.pending_outbox if item[0] == codex_session_id
+            )
+
+    def pending_outbox_count(self, workspace: str) -> int:
+        with self._lock:
+            state = self._load(workspace)
+            assert state.pending_outbox is not None
+            return len(state.pending_outbox)
+
+    def acknowledge_outbox(
+        self, workspace: str, codex_session_id: str, source_identity: str
+    ) -> bool:
+        """Remove one outbox entry after the task-bundle transaction has committed."""
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.pending_outbox is not None
+            for index, (session, envelope) in enumerate(state.pending_outbox):
+                if session == codex_session_id and envelope.source_identity == source_identity:
+                    del state.pending_outbox[index]
+                    state.last_successful_drain_mono_ms = int(self._now_mono() * 1000)
+                    self._save(workspace, state)
+                    return True
+            return False
+
+    def note_coverage_gap(self, workspace: str, gap_code: str) -> None:
+        """Record a safe local coverage gap without retaining payload prose."""
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.gaps is not None
+            if type(gap_code) is str and gap_code:
+                state.gaps.add(gap_code)
+            self._save(workspace, state)
+
     def ingest(self, envelope: ObservationEnvelope) -> ObservationIngestResult:
         if type(envelope) is not ObservationEnvelope:
             raise _error(
@@ -527,6 +677,11 @@ class LocalObservationStore:
             if len(state.envelopes) > _MAX_ENVELOPES:
                 del state.envelopes[: len(state.envelopes) - _MAX_ENVELOPES]
             state.last_receipt = envelope.receipt_time
+            mono_ms = int(self._now_mono() * 1000)
+            if envelope.source is ObservationSource.CODEX_HOOK:
+                state.last_hook_receipt_mono_ms = mono_ms
+            else:
+                state.last_stream_reconcile_mono_ms = mono_ms
             for gap in envelope.gap_codes:
                 state.gaps.add(gap)
             if ObservationGapCode.UNSUPPORTED_EVENT.value in envelope.gap_codes:
@@ -684,6 +839,12 @@ class LocalObservationStore:
         )
 
     def _status_unlocked(self, workspace_commitment: str) -> ObservationStatus:
+        from yoetz.application.observation_health import (
+            DEFAULT_OBSERVATION_HEALTH_THRESHOLDS,
+            ObservationHealthSignals,
+            compute_observation_lifecycle,
+        )
+
         state = self._load(workspace_commitment)
         consent = state.consent
         coverage = {
@@ -693,20 +854,55 @@ class LocalObservationStore:
         assert state.envelopes is not None
         assert state.gaps is not None
         assert state.unsupported_events is not None
+        assert state.pending_outbox is not None
+        assert state.session_workspaces is not None
         for envelope in state.envelopes:
             coverage[envelope.source] = True
-        if consent is None or consent.revoked_at is not None or consent.paused:
-            lifecycle = ObservationLifecycle.STOPPED
-        elif not any(coverage.values()):
-            lifecycle = ObservationLifecycle.DEGRADED
-        else:
-            lifecycle = ObservationLifecycle.ACTIVE
+        pending = len(state.pending_outbox)
+        last_hook = (
+            None
+            if state.last_hook_receipt_mono_ms is None
+            else state.last_hook_receipt_mono_ms / 1000.0
+        )
+        last_stream = (
+            None
+            if state.last_stream_reconcile_mono_ms is None
+            else state.last_stream_reconcile_mono_ms / 1000.0
+        )
+        last_drain = (
+            None
+            if state.last_successful_drain_mono_ms is None
+            else state.last_successful_drain_mono_ms / 1000.0
+        )
+        consent_active = (
+            consent is not None and consent.revoked_at is None and not consent.paused
+        )
+        mapping_available = bool(state.session_workspaces) or bool(state.codex_session_bindings)
+        signals = ObservationHealthSignals(
+            consent_active=consent_active,
+            mapping_available=mapping_available,
+            source_coverage=coverage,
+            pending_outbox_count=pending,
+            lag_events=pending,
+            gaps=tuple(sorted(state.gaps, key=str.encode)),
+            unsupported_events=tuple(sorted(state.unsupported_events, key=str.encode)),
+            advice_frontier=state.advice_frontier,
+            last_hook_receipt_monotonic=last_hook,
+            last_stream_advancement_monotonic=last_stream,
+            last_successful_drain_monotonic=last_drain if pending == 0 else last_drain,
+            session_ended=False,
+        )
+        lifecycle = compute_observation_lifecycle(
+            signals,
+            now_monotonic=self._now_mono(),
+            thresholds=DEFAULT_OBSERVATION_HEALTH_THRESHOLDS,
+        )
         return ObservationStatus(
             lifecycle=lifecycle,
             workspace_commitment=workspace_commitment,
             source_coverage=coverage,
             last_observation_receipt_time=state.last_receipt,
-            lag_events=0,
+            lag_events=pending,
             gaps=tuple(sorted(state.gaps, key=str.encode)),
             unsupported_events=tuple(sorted(state.unsupported_events, key=str.encode)),
             advice_frontier=state.advice_frontier,
@@ -765,6 +961,34 @@ class LocalObservationStore:
                     for key, cursor in sorted(state.stream_cursors.items())
                 }
             ),
+            "stream_partials": JsonObject(
+                {
+                    key: "b64:" + base64.b64encode(value).decode("ascii")
+                    for key, value in sorted(
+                        (state.stream_partials or {}).items(), key=lambda item: item[0].encode()
+                    )
+                }
+            ),
+            "hook_sequences": JsonObject(
+                {
+                    key: value
+                    for key, value in sorted(
+                        (state.hook_sequences or {}).items(), key=lambda item: item[0].encode()
+                    )
+                }
+            ),
+            "last_stream_reconcile_mono_ms": state.last_stream_reconcile_mono_ms,
+            "last_hook_receipt_mono_ms": state.last_hook_receipt_mono_ms,
+            "last_successful_drain_mono_ms": state.last_successful_drain_mono_ms,
+            "pending_outbox": tuple(
+                JsonObject(
+                    {
+                        "codex_session_id": session,
+                        "envelope": observation_envelope_to_json(envelope),
+                    }
+                )
+                for session, envelope in (state.pending_outbox or ())
+            ),
             "codex_session_bindings": JsonObject(
                 {key: value for key, value in sorted(state.codex_session_bindings.items())}
             ),
@@ -801,6 +1025,42 @@ class LocalObservationStore:
             str(key): observation_cursor_from_json(JsonObject(cast(Mapping[str, JsonValue], value)))
             for key, value in cast(Mapping[str, JsonValue], raw.get("stream_cursors") or {}).items()
         }
+        stream_partials: dict[str, bytes] = {}
+        for key, value in cast(Mapping[str, JsonValue], raw.get("stream_partials") or {}).items():
+            if type(value) is not str or not value.startswith("b64:"):
+                continue
+            try:
+                stream_partials[str(key)] = base64.b64decode(
+                    value[4:].encode("ascii"), validate=True
+                )
+            except (ValueError, OSError):
+                continue
+        hook_sequences: dict[str, int] = {}
+        for key, value in cast(Mapping[str, JsonValue], raw.get("hook_sequences") or {}).items():
+            if type(value) is int and not isinstance(value, bool) and value >= 0:
+                hook_sequences[str(key)] = value
+        reconcile_mono = raw.get("last_stream_reconcile_mono_ms")
+        last_reconcile = (
+            int(reconcile_mono)
+            if type(reconcile_mono) is int and not isinstance(reconcile_mono, bool) and reconcile_mono >= 0
+            else None
+        )
+        hook_mono_raw = raw.get("last_hook_receipt_mono_ms")
+        last_hook_mono = (
+            int(hook_mono_raw)
+            if type(hook_mono_raw) is int
+            and not isinstance(hook_mono_raw, bool)
+            and hook_mono_raw >= 0
+            else None
+        )
+        drain_mono_raw = raw.get("last_successful_drain_mono_ms")
+        last_drain_mono = (
+            int(drain_mono_raw)
+            if type(drain_mono_raw) is int
+            and not isinstance(drain_mono_raw, bool)
+            and drain_mono_raw >= 0
+            else None
+        )
         bindings = {
             str(key): str(value)
             for key, value in cast(
@@ -828,6 +1088,26 @@ class LocalObservationStore:
                 )
             else:
                 advice_snapshot = advice_snapshot_from_json(advice_raw)
+        pending_outbox: list[tuple[str, ObservationEnvelope]] = []
+        for item in cast(tuple[JsonValue, ...] | list[JsonValue], raw.get("pending_outbox") or ()):
+            if not isinstance(item, Mapping):
+                continue
+            row = cast(Mapping[str, JsonValue], item)
+            session = row.get("codex_session_id")
+            envelope_raw = row.get("envelope")
+            if type(session) is not str or not isinstance(envelope_raw, Mapping):
+                continue
+            try:
+                pending_outbox.append(
+                    (
+                        session,
+                        observation_envelope_from_json(
+                            JsonObject(cast(Mapping[str, JsonValue], envelope_raw))
+                        ),
+                    )
+                )
+            except (ProtocolValueError, TypeError, ValueError):
+                continue
         return _WorkspaceState(
             consent=consent,
             session_workspaces=session_workspaces,
@@ -842,6 +1122,12 @@ class LocalObservationStore:
             last_advice_suppression=cast(str | None, raw.get("last_advice_suppression")),
             open_pre=open_pre,
             stream_cursors=stream_cursors,
+            stream_partials=stream_partials,
+            hook_sequences=hook_sequences,
+            last_stream_reconcile_mono_ms=last_reconcile,
+            last_hook_receipt_mono_ms=last_hook_mono,
+            last_successful_drain_mono_ms=last_drain_mono,
+            pending_outbox=pending_outbox,
             codex_session_bindings=bindings,
         )
 

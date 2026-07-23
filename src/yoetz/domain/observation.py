@@ -27,21 +27,28 @@ from yoetz.protocol.coverage import Coverage, coverage_from_json, coverage_to_js
 from yoetz.protocol.errors import PROTOCOL_REASON_CODES, ProtocolValueError
 
 __all__ = [
+    "AdviceItem",
     "AdviceSnapshot",
+    "OBSERVATION_HOOK_COMMITMENT_DOMAIN",
+    "OBSERVATION_STREAM_LINE_DOMAIN",
     "OBSERVATION_WORKSPACE_DOMAIN",
     "ObservationControlCommand",
     "ObservationCursor",
     "ObservationEnvelope",
     "ObservationGapCode",
     "ObservationIngestDisposition",
+    "ObservationIngestRequest",
     "ObservationIngestResult",
     "ObservationLifecycle",
     "ObservationRevokeCommand",
     "ObservationSource",
     "ObservationStatus",
     "ObservationStatusQuery",
+    "advice_item_from_json",
+    "advice_item_to_json",
     "advice_snapshot_from_json",
     "advice_snapshot_to_json",
+    "hook_source_commitment",
     "observation_control_command_from_json",
     "observation_control_command_to_json",
     "observation_cursor_from_json",
@@ -49,6 +56,8 @@ __all__ = [
     "observation_earns_hook_observed",
     "observation_envelope_from_json",
     "observation_envelope_to_json",
+    "observation_ingest_request_from_json",
+    "observation_ingest_request_to_json",
     "observation_ingest_result_from_json",
     "observation_ingest_result_to_json",
     "observation_revoke_command_from_json",
@@ -57,6 +66,7 @@ __all__ = [
     "observation_status_query_from_json",
     "observation_status_query_to_json",
     "observation_status_to_json",
+    "stream_line_commitment",
     "workspace_commitment_from_path",
 ]
 
@@ -67,11 +77,21 @@ _MAX_GAP_CODES: Final = 64
 _MAX_UNSUPPORTED_EVENTS: Final = 64
 _MAX_RANKED_FINDINGS: Final = 64
 _MAX_SOURCE_COVERAGE: Final = 8
+_MAX_ADVICE_SUMMARY: Final = 160
+_MAX_ADVICE_DETAIL: Final = 240
+_MAX_EVIDENCE_REFS: Final = 16
 
 _TOKEN_RE: Final = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:/+-]{0,127}$", re.ASCII)
 _GAP_RE: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
+_ADVICE_TEXT_RE: Final = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9 .,:;'_+/-]{0,239}$",
+    re.ASCII,
+)
+_ADVICE_ORIGINS: Final = frozenset({"deterministic", "semantic_model_derived"})
 
 OBSERVATION_WORKSPACE_DOMAIN: Final = b"yoetz/observation-workspace/v1\x00"
+OBSERVATION_STREAM_LINE_DOMAIN: Final = b"yoetz/observation-stream-line/v1\x00"
+OBSERVATION_HOOK_COMMITMENT_DOMAIN: Final = b"yoetz/observation-hook-commitment/v1\x00"
 
 _STRUCTURAL_KEYS: Final = frozenset(
     {
@@ -157,6 +177,8 @@ class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum
     CONSENT_MISSING = "consent_missing"
     CONSENT_REVOKED = "consent_revoked"
     SOURCE_LAG = "source_lag"
+    MAPPING_MISSING = "mapping_missing"
+    OUTBOX_OVERFLOW = "outbox_overflow"
 
 
 class ObservationIngestDisposition(str, Enum):  # noqa: UP042 - exact durable wire enum
@@ -314,6 +336,37 @@ def _ranked_finding_ids(value: object) -> tuple[FindingId, ...]:
     return tuple(result)
 
 
+def _advice_text(value: object, *, maximum: int) -> str:
+    if type(value) is not str or not value or len(value) > maximum:
+        raise _invalid()
+    if _ADVICE_TEXT_RE.fullmatch(value) is None or _looks_like_path(value):
+        raise _invalid()
+    lowered = value.lower()
+    for banned in ("secret", "password", "token=", "api_key", "bearer ", "/users/", "c:\\"):
+        if banned in lowered:
+            raise _invalid()
+    return value
+
+
+def _evidence_refs(value: object) -> tuple[str, ...]:
+    raw = _exact_tuple(value, maximum=_MAX_EVIDENCE_REFS)
+    result: list[str] = []
+    previous: str | None = None
+    for item in raw:
+        member = _token(item)
+        if previous is not None and member.encode("ascii") <= previous.encode("ascii"):
+            raise _invalid("duplicate_set_member" if member == previous else "unsorted_set_field")
+        result.append(member)
+        previous = member
+    return tuple(result)
+
+
+def _advice_origin(value: object) -> Literal["deterministic", "semantic_model_derived"]:
+    if type(value) is not str or value not in _ADVICE_ORIGINS:
+        raise _invalid("invalid_event_enum")
+    return cast(Literal["deterministic", "semantic_model_derived"], value)
+
+
 def _source_coverage(value: object) -> Mapping[ObservationSource, bool]:
     if not isinstance(value, Mapping):
         raise _invalid()
@@ -355,6 +408,36 @@ def workspace_commitment_from_path(key_material: bytes, path: str) -> str:
     digest = hmac.new(
         key_material,
         OBSERVATION_WORKSPACE_DOMAIN + normalized.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"hmac-sha256:{digest}"
+
+
+def stream_line_commitment(key_material: bytes, content: bytes) -> str:
+    """Keyed HMAC over one session-stream line body (never labeled as plain sha256)."""
+
+    if type(key_material) is not bytes or not 16 <= len(key_material) <= 64:
+        raise _invalid("invalid_commitment")
+    if type(content) is not bytes:
+        raise _invalid()
+    digest = hmac.new(
+        key_material,
+        OBSERVATION_STREAM_LINE_DOMAIN + content,
+        hashlib.sha256,
+    ).hexdigest()
+    return f"hmac-sha256:{digest}"
+
+
+def hook_source_commitment(key_material: bytes, source_identity: str) -> str:
+    """Keyed HMAC over a hook source-identity token for cursor last-commitment."""
+
+    if type(key_material) is not bytes or not 16 <= len(key_material) <= 64:
+        raise _invalid("invalid_commitment")
+    if type(source_identity) is not str or not source_identity or "\x00" in source_identity:
+        raise _invalid()
+    digest = hmac.new(
+        key_material,
+        OBSERVATION_HOOK_COMMITMENT_DOMAIN + source_identity.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
     return f"hmac-sha256:{digest}"
@@ -441,6 +524,52 @@ class ObservationEnvelope:
 
 
 @dataclass(frozen=True, slots=True)
+class AdviceItem:
+    """Bounded durable advice value safe for status, observe status, and hooks."""
+
+    finding_id: FindingId
+    rule_code: str
+    priority: int
+    summary: str
+    detail: str
+    recommended_next_action: str
+    evidence_refs: tuple[str, ...]
+    coverage: Coverage
+    freshness_frontier: str
+    origin: Literal["deterministic", "semantic_model_derived"] = "deterministic"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "finding_id", finding_id(self.finding_id))
+        object.__setattr__(self, "rule_code", _token(self.rule_code))
+        object.__setattr__(self, "priority", _nonnegative(self.priority, maximum=1_000))
+        object.__setattr__(
+            self, "summary", _advice_text(self.summary, maximum=_MAX_ADVICE_SUMMARY)
+        )
+        object.__setattr__(self, "detail", _advice_text(self.detail, maximum=_MAX_ADVICE_DETAIL))
+        object.__setattr__(self, "recommended_next_action", _token(self.recommended_next_action))
+        object.__setattr__(self, "evidence_refs", _evidence_refs(self.evidence_refs))
+        if type(self.coverage) is not Coverage:
+            raise _invalid("invalid_coverage_value")
+        object.__setattr__(self, "freshness_frontier", _token(self.freshness_frontier))
+        object.__setattr__(self, "origin", _advice_origin(self.origin))
+
+
+def _ranked_advice_items(value: object) -> tuple[AdviceItem, ...]:
+    raw = _exact_tuple(value, maximum=_MAX_RANKED_FINDINGS)
+    result: list[AdviceItem] = []
+    seen: set[str] = set()
+    for item in raw:
+        if type(item) is not AdviceItem:
+            raise _invalid()
+        key = str(item.finding_id)
+        if key in seen:
+            raise _invalid("duplicate_set_member")
+        seen.add(key)
+        result.append(item)
+    return tuple(result)
+
+
+@dataclass(frozen=True, slots=True)
 class AdviceSnapshot:
     ranked_finding_ids: tuple[FindingId, ...]
     evidence_basis_digest: str
@@ -448,9 +577,21 @@ class AdviceSnapshot:
     recommended_next_action: str
     freshness_frontier: str
     suppression_identity: str
+    ranked_items: tuple[AdviceItem, ...] = ()
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "ranked_finding_ids", _ranked_finding_ids(self.ranked_finding_ids))
+        items = _ranked_advice_items(self.ranked_items)
+        if items:
+            derived = tuple(item.finding_id for item in items)
+            if self.ranked_finding_ids and _ranked_finding_ids(self.ranked_finding_ids) != derived:
+                raise _invalid()
+            object.__setattr__(self, "ranked_items", items)
+            object.__setattr__(self, "ranked_finding_ids", derived)
+        else:
+            object.__setattr__(
+                self, "ranked_finding_ids", _ranked_finding_ids(self.ranked_finding_ids)
+            )
+            object.__setattr__(self, "ranked_items", ())
         validate_sha256_digest(self.evidence_basis_digest)
         if type(self.confidence_coverage) is not Coverage:
             raise _invalid("invalid_coverage_value")
@@ -522,6 +663,28 @@ class ObservationIngestResult:
                 and type(self.advanced_cursor) is not ObservationCursor
             ):
                 raise _invalid()
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationIngestRequest:
+    """Redacted local-control ingest body: Codex session routing + envelope only.
+
+    Callers MUST NOT supply Yoetz task/session/writer IDs. The service coordinator
+    resolves those from the validated lifecycle mapping.
+    """
+
+    codex_session_id: str
+    envelope: ObservationEnvelope
+
+    def __post_init__(self) -> None:
+        if type(self.codex_session_id) is not str or not self.codex_session_id:
+            raise _invalid()
+        if "\x00" in self.codex_session_id or "/" in self.codex_session_id or "\\" in self.codex_session_id:
+            raise _invalid()
+        if len(self.codex_session_id) > 128:
+            raise _invalid()
+        if type(self.envelope) is not ObservationEnvelope:
+            raise _invalid()
 
 
 @dataclass(frozen=True, slots=True)
@@ -645,10 +808,63 @@ def observation_envelope_from_json(value: JsonValue) -> ObservationEnvelope:
     )
 
 
+def advice_item_to_json(value: AdviceItem) -> JsonObject:
+    return JsonObject(
+        {
+            "finding_id": str(value.finding_id),
+            "rule_code": value.rule_code,
+            "priority": value.priority,
+            "summary": value.summary,
+            "detail": value.detail,
+            "recommended_next_action": value.recommended_next_action,
+            "evidence_refs": value.evidence_refs,
+            "coverage": JsonObject(coverage_to_json(value.coverage)),
+            "freshness_frontier": value.freshness_frontier,
+            "origin": value.origin,
+        }
+    )
+
+
+def advice_item_from_json(value: JsonValue) -> AdviceItem:
+    if type(value) is not JsonObject:
+        raise _invalid()
+    source = value
+    required = (
+        "finding_id",
+        "rule_code",
+        "priority",
+        "summary",
+        "detail",
+        "recommended_next_action",
+        "evidence_refs",
+        "coverage",
+        "freshness_frontier",
+        "origin",
+    )
+    if set(source) != set(required):
+        raise _invalid()
+    refs = source["evidence_refs"]
+    if type(refs) is list:
+        refs = tuple(cast(list[JsonValue], refs))
+    return AdviceItem(
+        finding_id=finding_id(source["finding_id"]),
+        rule_code=cast(str, source["rule_code"]),
+        priority=cast(int, source["priority"]),
+        summary=cast(str, source["summary"]),
+        detail=cast(str, source["detail"]),
+        recommended_next_action=cast(str, source["recommended_next_action"]),
+        evidence_refs=_evidence_refs(refs),
+        coverage=coverage_from_json(source["coverage"]),
+        freshness_frontier=cast(str, source["freshness_frontier"]),
+        origin=_advice_origin(source["origin"]),
+    )
+
+
 def advice_snapshot_to_json(value: AdviceSnapshot) -> JsonObject:
     return JsonObject(
         {
             "ranked_finding_ids": tuple(str(item) for item in value.ranked_finding_ids),
+            "ranked_items": tuple(advice_item_to_json(item) for item in value.ranked_items),
             "evidence_basis_digest": value.evidence_basis_digest,
             "confidence_coverage": JsonObject(coverage_to_json(value.confidence_coverage)),
             "recommended_next_action": value.recommended_next_action,
@@ -662,23 +878,34 @@ def advice_snapshot_from_json(value: JsonValue) -> AdviceSnapshot:
     if type(value) is not JsonObject:
         raise _invalid()
     source = value
-    required = (
+    required = {
         "ranked_finding_ids",
         "evidence_basis_digest",
         "confidence_coverage",
         "recommended_next_action",
         "freshness_frontier",
         "suppression_identity",
-    )
-    if set(source) != set(required):
+    }
+    optional = {"ranked_items"}
+    if not required.issubset(set(source)) or set(source) - required - optional:
         raise _invalid()
+    items_raw = source.get("ranked_items", ())
+    if type(items_raw) is list:
+        items_raw = tuple(cast(list[JsonValue], items_raw))
+    if type(items_raw) is not tuple:
+        raise _invalid()
+    ids_raw = source["ranked_finding_ids"]
+    if type(ids_raw) is list:
+        ids_raw = tuple(cast(list[JsonValue], ids_raw))
+    items = tuple(advice_item_from_json(item) for item in cast(tuple[JsonValue, ...], items_raw))
     return AdviceSnapshot(
-        ranked_finding_ids=_ranked_finding_ids(source["ranked_finding_ids"]),
+        ranked_finding_ids=_ranked_finding_ids(ids_raw),
         evidence_basis_digest=cast(str, source["evidence_basis_digest"]),
         confidence_coverage=coverage_from_json(source["confidence_coverage"]),
         recommended_next_action=cast(str, source["recommended_next_action"]),
         freshness_frontier=cast(str, source["freshness_frontier"]),
         suppression_identity=cast(str, source["suppression_identity"]),
+        ranked_items=items,
     )
 
 
@@ -742,6 +969,33 @@ def observation_status_from_json(value: JsonValue) -> ObservationStatus:
             source["unsupported_events"], maximum=_MAX_UNSUPPORTED_EVENTS
         ),
         advice_frontier=cast(str | None, source["advice_frontier"]),
+    )
+
+
+def observation_ingest_request_to_json(value: ObservationIngestRequest) -> JsonObject:
+    return JsonObject(
+        {
+            "codex_session_id": value.codex_session_id,
+            "envelope": observation_envelope_to_json(value.envelope),
+        }
+    )
+
+
+def observation_ingest_request_from_json(value: JsonValue) -> ObservationIngestRequest:
+    if type(value) is not JsonObject:
+        raise _invalid()
+    source = value
+    if set(source) != {"codex_session_id", "envelope"}:
+        raise _invalid()
+    envelope_raw = source["envelope"]
+    if type(envelope_raw) is not JsonObject:
+        if isinstance(envelope_raw, Mapping):
+            envelope_raw = JsonObject(cast(Mapping[str, JsonValue], envelope_raw))
+        else:
+            raise _invalid()
+    return ObservationIngestRequest(
+        codex_session_id=cast(str, source["codex_session_id"]),
+        envelope=observation_envelope_from_json(envelope_raw),
     )
 
 

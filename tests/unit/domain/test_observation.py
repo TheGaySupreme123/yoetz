@@ -127,6 +127,20 @@ def test_workspace_commitment_from_path_is_hmac_and_path_free() -> None:
 
 
 def test_advice_snapshot_and_coverage_helper() -> None:
+    from yoetz.domain.observation import AdviceItem
+
+    item = AdviceItem(
+        finding_id=_FINDING,
+        rule_code="failed_command_unresolved",
+        priority=1,
+        summary="Unresolved failed command observed",
+        detail="A tool result failed and was not followed by a successful retry",
+        recommended_next_action="resolve_failed_command",
+        evidence_refs=("hook:1",),
+        coverage=_coverage(),
+        freshness_frontier="frontier-1",
+        origin="deterministic",
+    )
     advice = AdviceSnapshot(
         ranked_finding_ids=(_FINDING,),
         evidence_basis_digest=_DIGEST,
@@ -134,7 +148,9 @@ def test_advice_snapshot_and_coverage_helper() -> None:
         recommended_next_action="reground_status",
         freshness_frontier="frontier-1",
         suppression_identity="suppress-1",
+        ranked_items=(item,),
     )
+    assert advice.ranked_items[0].summary.startswith("Unresolved")
     assert advice.recommended_next_action == "reground_status"
     status = ObservationStatus(
         lifecycle=ObservationLifecycle.ACTIVE,

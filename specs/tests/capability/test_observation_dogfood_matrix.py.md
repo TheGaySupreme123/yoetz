@@ -15,9 +15,10 @@ Pytest module with optional `@pytest.mark.live` skip path.
 
 ## Behavior
 
-Ingest known stream envelopes, record opaque unsupported-event gaps for future shapes, and walk
-registered `SUPPORTED_CODEX_PROFILES` through structural ingest. Live cells skip unless
-`YOETZ_LIVE_CODEX=1`.
+Prove generic structural parsing of an unfamiliar future host record (validated stable facts plus
+an unsupported-event coverage gap, without inventing success or injecting a pre-built unsupported
+envelope into an old profile). Also walk registered `SUPPORTED_CODEX_PROFILES` through structural
+ingest. Live cells skip unless `YOETZ_LIVE_CODEX=1`.
 
 ## Errors and edge cases
 
