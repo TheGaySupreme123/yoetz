@@ -63,6 +63,9 @@ _MAX_OPEN_PRE: Final = 256
 _MAX_OUTBOX: Final = 512
 _MAX_QUARANTINE: Final = 512
 _MAX_HOOK_SEQUENCES: Final = 256
+# Wall/monotonic drift tolerated before persisted monotonic samples are treated
+# as belonging to a different boot epoch (and therefore fenced off).
+_EPOCH_TOLERANCE_SECONDS: Final = 2.0
 
 YOETZ_TOOL_NAMES: Final = frozenset(
     {
@@ -187,6 +190,10 @@ class _WorkspaceState:
     last_stream_reconcile_mono_ms: int | None = None
     last_hook_receipt_mono_ms: int | None = None
     last_successful_drain_mono_ms: int | None = None
+    # Boot/process epoch (wall - monotonic) the monotonic samples above belong
+    # to. Samples are only comparable to a live clock within the same epoch;
+    # after a restart or reboot they are fenced off (see `_epoch_matches`).
+    monotonic_epoch: float | None = None
     pending_outbox: list[tuple[str, ObservationEnvelope]] | None = None
     quarantine: list[tuple[str, ObservationEnvelope, str]] | None = None
     codex_session_bindings: dict[str, str] | None = None
@@ -247,15 +254,34 @@ class LocalObservationStore:
         *,
         _state: Path | None = None,
         _monotonic: Callable[[], float] | None = None,
+        _wall: Callable[[], float] | None = None,
     ) -> None:
         self._root = observation_dir(_state=_state)
         self._lock = threading.RLock()
         self._monotonic = _monotonic
+        self._wall = _wall
 
     def _now_mono(self) -> float:
         import time
 
         return time.monotonic() if self._monotonic is None else self._monotonic()
+
+    def _wall_now(self) -> float:
+        import time
+
+        return time.time() if self._wall is None else self._wall()
+
+    def _boot_epoch(self) -> float:
+        """Approximate wall time at monotonic zero: stable within a boot session.
+
+        A reboot resets the monotonic clock, so this shifts by the previous
+        uptime and cleanly distinguishes samples from an earlier boot.
+        """
+
+        return self._wall_now() - self._now_mono()
+
+    def _epoch_matches(self, epoch: float | None) -> bool:
+        return epoch is not None and abs(self._boot_epoch() - epoch) <= _EPOCH_TOLERANCE_SECONDS
 
     def key_material(self) -> bytes:
         path = self._root / "key-material.bin"
@@ -517,6 +543,7 @@ class LocalObservationStore:
             state = self._load(workspace)
             current = time.monotonic() if mono is None else mono
             state.last_stream_reconcile_mono_ms = int(current * 1000)
+            state.monotonic_epoch = self._boot_epoch()
             self._save(workspace, state)
 
     def last_stream_reconcile_mono(self, workspace: str) -> float | None:
@@ -593,6 +620,7 @@ class LocalObservationStore:
                 if session == codex_session_id and envelope.source_identity == source_identity:
                     del state.pending_outbox[index]
                     state.last_successful_drain_mono_ms = int(self._now_mono() * 1000)
+                    state.monotonic_epoch = self._boot_epoch()
                     self._save(workspace, state)
                     return True
             return False
@@ -726,6 +754,7 @@ class LocalObservationStore:
                 del state.envelopes[: len(state.envelopes) - _MAX_ENVELOPES]
             state.last_receipt = envelope.receipt_time
             mono_ms = int(self._now_mono() * 1000)
+            state.monotonic_epoch = self._boot_epoch()
             if envelope.source is ObservationSource.CODEX_HOOK:
                 state.last_hook_receipt_mono_ms = mono_ms
             else:
@@ -922,6 +951,14 @@ class LocalObservationStore:
             if state.last_successful_drain_mono_ms is None
             else state.last_successful_drain_mono_ms / 1000.0
         )
+        # Fence persisted monotonic samples to their boot epoch. After a restart
+        # or reboot the monotonic clock is incomparable, so drop the stale
+        # samples; lifecycle then reports DEGRADED until fresh qualifying
+        # progress arrives in the current epoch instead of trusting bad ages.
+        if not self._epoch_matches(state.monotonic_epoch):
+            last_hook = None
+            last_stream = None
+            last_drain = None
         consent_active = consent is not None and consent.revoked_at is None and not consent.paused
         mapping_available = bool(state.session_workspaces) or bool(state.codex_session_bindings)
         signals = ObservationHealthSignals(
@@ -1026,6 +1063,10 @@ class LocalObservationStore:
             "last_stream_reconcile_mono_ms": state.last_stream_reconcile_mono_ms,
             "last_hook_receipt_mono_ms": state.last_hook_receipt_mono_ms,
             "last_successful_drain_mono_ms": state.last_successful_drain_mono_ms,
+            # Canonical JSON forbids floats; persist the epoch as integer millis.
+            "monotonic_epoch_ms": (
+                None if state.monotonic_epoch is None else round(state.monotonic_epoch * 1000)
+            ),
             "pending_outbox": tuple(
                 JsonObject(
                     {
@@ -1117,6 +1158,12 @@ class LocalObservationStore:
             if type(drain_mono_raw) is int
             and not isinstance(drain_mono_raw, bool)
             and drain_mono_raw >= 0
+            else None
+        )
+        epoch_raw = raw.get("monotonic_epoch_ms")
+        monotonic_epoch = (
+            float(epoch_raw) / 1000.0
+            if type(epoch_raw) is int and not isinstance(epoch_raw, bool)
             else None
         )
         bindings = {
@@ -1211,6 +1258,7 @@ class LocalObservationStore:
             last_stream_reconcile_mono_ms=last_reconcile,
             last_hook_receipt_mono_ms=last_hook_mono,
             last_successful_drain_mono_ms=last_drain_mono,
+            monotonic_epoch=monotonic_epoch,
             pending_outbox=pending_outbox,
             quarantine=quarantine,
             codex_session_bindings=bindings,

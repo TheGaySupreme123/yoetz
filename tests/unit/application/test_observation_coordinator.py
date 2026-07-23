@@ -134,6 +134,42 @@ def test_local_outbox_enqueue_ack_and_overflow(tmp_path: Path) -> None:
     assert store.pending_outbox_count(workspace) == 0
 
 
+def test_monotonic_samples_fenced_across_simulated_reboot(tmp_path: Path) -> None:
+    """After a reboot the monotonic clock resets, so persisted samples are fenced.
+
+    Without fencing, ``compute_observation_lifecycle`` sees ``now - progress``
+    go negative and raises, crashing status. Fencing drops the incomparable
+    samples so status reports DEGRADED until fresh progress in the new epoch.
+    """
+
+    from yoetz.domain.observation import ObservationLifecycle
+
+    # Boot 1: monotonic 1000, wall 5000 -> epoch 4000.
+    boot1 = LocalObservationStore(_state=tmp_path, _monotonic=lambda: 1000.0, _wall=lambda: 5000.0)
+    workspace = boot1.workspace_commitment(str(tmp_path.resolve()))
+    boot1.grant_consent(workspace)
+    session = boot1.session_commitment("sess-epoch")
+    boot1.bind_session(workspace, session)
+    boot1.ingest(_envelope(session=session))
+    assert boot1.status(ObservationStatusQuery(workspace)).lifecycle is ObservationLifecycle.ACTIVE
+
+    # Reboot: monotonic reset to 5, same wall -> epoch 4995, far from 4000.
+    rebooted = LocalObservationStore(_state=tmp_path, _monotonic=lambda: 5.0, _wall=lambda: 5000.0)
+    # Must not raise on the now-incomparable persisted sample.
+    assert (
+        rebooted.status(ObservationStatusQuery(workspace)).lifecycle
+        is ObservationLifecycle.DEGRADED
+    )
+
+    # Same-boot tiny drift stays within tolerance and keeps using the samples.
+    same_boot = LocalObservationStore(
+        _state=tmp_path, _monotonic=lambda: 1000.5, _wall=lambda: 5000.5
+    )
+    assert (
+        same_boot.status(ObservationStatusQuery(workspace)).lifecycle is ObservationLifecycle.ACTIVE
+    )
+
+
 def test_local_outbox_quarantine_is_visible_and_durable(tmp_path: Path) -> None:
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
