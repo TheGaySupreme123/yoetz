@@ -209,6 +209,89 @@ async def test_coordinator_rejects_without_mapping(tmp_path: Path) -> None:
     assert result.reason == ObservationGapCode.MAPPING_MISSING.value
 
 
+def _obs(
+    *, source: ObservationSource, identity: str, corr: str | None, session: str, kind: str
+) -> ObservationEnvelope:
+    structural: dict[str, object] = {"tool_name": "shell"}
+    if corr is not None:
+        structural["tool_call_id"] = corr
+        structural["correlation_id"] = corr
+    return ObservationEnvelope(
+        session_commitment=session,
+        event_kind=kind,
+        source_identity=identity,
+        source=source,
+        cursor=ObservationCursor(1, 0, 1, f"hmac-sha256:{'ab' * 32}", "codex-obs-hook/1.1.0"),
+        receipt_time=Timestamp("2026-01-01T00:00:00.000Z"),
+        structural_payload=JsonObject(structural),
+        content_object_refs=(),
+        gap_codes=(),
+    )
+
+
+def test_hook_and_stream_copies_share_one_logical_operation() -> None:
+    from yoetz.application.observation_materialize import (
+        canonical_logical_identity,
+        observation_operation_digest,
+    )
+
+    session = f"hmac-sha256:{'66' * 32}"
+    hook = _obs(
+        source=ObservationSource.CODEX_HOOK,
+        identity="hook:post:call-1",
+        corr="call-1",
+        session=session,
+        kind="PostToolUse",
+    )
+    stream = _obs(
+        source=ObservationSource.CODEX_SESSION_STREAM,
+        identity="stream:item.completed:call-1",
+        corr="call-1",
+        session=session,
+        kind="item.completed",
+    )
+    # Same host call id + tool family -> one logical identity across sources.
+    assert canonical_logical_identity(hook) == canonical_logical_identity(stream)
+
+    def _digest(env: ObservationEnvelope) -> str:
+        return observation_operation_digest(
+            task_id="task_x",
+            session_id="ses_x",
+            writer_id="wtr_x",
+            logical_identity=canonical_logical_identity(env),
+            draft_roles=("action", "result"),
+        )
+
+    assert _digest(hook) == _digest(stream)
+
+    # A different host call id stays distinct.
+    other = _obs(
+        source=ObservationSource.CODEX_HOOK,
+        identity="hook:post:call-2",
+        corr="call-2",
+        session=session,
+        kind="PostToolUse",
+    )
+    assert canonical_logical_identity(other) != canonical_logical_identity(hook)
+
+    # No host call id -> source-specific opaque identity (hook != stream).
+    opaque_hook = _obs(
+        source=ObservationSource.CODEX_HOOK,
+        identity="hook:session-start",
+        corr=None,
+        session=session,
+        kind="SessionStart",
+    )
+    opaque_stream = _obs(
+        source=ObservationSource.CODEX_SESSION_STREAM,
+        identity="stream:session-start",
+        corr=None,
+        session=session,
+        kind="SessionStart",
+    )
+    assert canonical_logical_identity(opaque_hook) != canonical_logical_identity(opaque_stream)
+
+
 @pytest.mark.anyio
 async def test_run_advice_persists_snapshot_with_real_datetime_clock(tmp_path: Path) -> None:
     """Regression: production clocks return ``datetime``, not ``Timestamp``.

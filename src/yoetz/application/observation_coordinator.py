@@ -23,6 +23,7 @@ from yoetz.application.observation_advice import (
 )
 from yoetz.application.observation_materialize import (
     MaterializedObservationBatch,
+    canonical_logical_identity,
     materialize_observation_envelope,
     media_type_for_schema,
     observation_author,
@@ -272,7 +273,7 @@ class ObservationCoordinator:
             task_id=runtime.task_id,
             session_id=runtime.session_id,
             writer_id=writer_id,
-            source_identity=envelope.source_identity,
+            logical_identity=canonical_logical_identity(envelope),
             draft_roles=tuple(item.role for item in batch.drafts),
         )
         # Stable operation id from the same material so retries collide.
