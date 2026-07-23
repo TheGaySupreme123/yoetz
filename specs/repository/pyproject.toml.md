@@ -27,8 +27,8 @@ The file must define, at minimum:
 - runtime dependency declarations;
 - optional dependency groups for non-default capabilities;
 - console-script entry points and module invocation parity;
-- package-data inclusion for `py.typed`, all 71 entries in the reviewed runtime resource manifest,
-  and the manifest itself (72 runtime resource files total): schemas, canonical fixtures,
+- package-data inclusion for `py.typed`, all 73 entries in the reviewed runtime resource manifest,
+  and the manifest itself (74 runtime resource files total): schemas, canonical fixtures,
   migrations, Codex skill files, and the runtime-support allowlist;
 - tool configuration used by the release and test pipeline when that configuration is part of the
   public build contract.

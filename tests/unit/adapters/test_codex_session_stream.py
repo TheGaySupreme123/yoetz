@@ -95,6 +95,40 @@ def test_restart_from_zero_is_stable(tmp_path: Path) -> None:
     assert two.cursor.byte_position == one.cursor.byte_position
 
 
+def test_reconcile_enqueues_recovered_envelopes_into_outbox(tmp_path: Path) -> None:
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions" / "2026" / "07" / "23"
+    sessions.mkdir(parents=True)
+    home.chmod(0o700)
+    sessions.chmod(0o700)
+    session_id = "019f8b27-b98e-7061-bbb5-d0b897594de6"
+    target = sessions / f"rollout-2026-07-23T12-00-00-{session_id}.jsonl"
+    target.write_bytes(_line("item.completed"))
+    os.chmod(target, 0o600)
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment(session_id)
+    store.bind_session(workspace, session)
+    assert store.pending_outbox_count(workspace) == 0
+
+    locator = CodexSessionStreamLocator(home)
+    result = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=locator,
+    )
+    assert result["resolved"] is True
+    accepted = result["accepted"]
+    assert isinstance(accepted, int) and accepted >= 1
+    # Recovered stream envelopes are queued in the same durable outbox as hooks,
+    # so a later mapped drain materializes them into the task ledger.
+    assert store.pending_outbox_count(workspace) == accepted
+
+
 def test_hook_stream_dedup_via_local_store(tmp_path: Path) -> None:
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
@@ -196,8 +230,6 @@ def test_should_trigger_stream_reconcile_events() -> None:
     )
     assert should_trigger_stream_reconcile("UserPromptSubmit", last_reconcile_mono=None) is False
     assert (
-        should_trigger_stream_reconcile(
-            "UserPromptSubmit", last_reconcile_mono=0.0, now_mono=40.0
-        )
+        should_trigger_stream_reconcile("UserPromptSubmit", last_reconcile_mono=0.0, now_mono=40.0)
         is True
     )

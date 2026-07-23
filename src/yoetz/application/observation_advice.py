@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Final, Protocol
+from typing import Final, Protocol, cast
 
 from yoetz.domain.findings import FindingId, finding_id
 from yoetz.domain.observation import (
@@ -14,6 +14,8 @@ from yoetz.domain.observation import (
     AdviceSnapshot,
     ObservationEnvelope,
     ObservationLifecycle,
+    ObservationStatus,
+    ObservationStatusQuery,
 )
 from yoetz.kernel.policies.observation_advice import (
     OBSERVATION_ADVICE_POLICY_ID,
@@ -39,6 +41,7 @@ from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 
 __all__ = [
     "ObservationAdviceBuildInput",
+    "ObservationAdviceContextBuilder",
     "ObservationAdviceSemanticAddon",
     "SemanticAdvicePort",
     "advice_items_for_ledger",
@@ -101,6 +104,20 @@ class SemanticAdvicePort(Protocol):
     ) -> ObservationAdviceSemanticAddon | None: ...
 
 
+class ObservationContextStore(Protocol):
+    def list_envelopes(self, workspace: str) -> tuple[ObservationEnvelope, ...]: ...
+
+    async def status(self, query: ObservationStatusQuery) -> ObservationStatus: ...
+
+    def load_advice_snapshot(self, workspace: str) -> AdviceSnapshot | None: ...
+
+
+type CallableFacts = Callable[[str], tuple[ObservationCheckFact, ...]]
+type CallableInspect = Callable[[str], ObservationInspectFact | None]
+type CallablePlans = Callable[[str], tuple[str, ...]]
+type CallableSemantic = Callable[[str], ObservationAdviceSemanticAddon | None]
+
+
 @dataclass(frozen=True, slots=True)
 class ObservationAdviceBuildInput:
     envelopes: tuple[ObservationEnvelope, ...]
@@ -113,6 +130,54 @@ class ObservationAdviceBuildInput:
     prior_snapshot: AdviceSnapshot | None = None
     semantic_addon: ObservationAdviceSemanticAddon | None = None
     has_real_observation: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationAdviceContextBuilder:
+    """Load one coherent advice context from durable observation repositories.
+
+    Optional verified facts are injected by their owning repositories; missing
+    facts remain explicit coverage limitations rather than being invented from
+    envelope shape.
+    """
+
+    check_facts: CallableFacts | None = None
+    inspect_fact: CallableInspect | None = None
+    composition: ObservationCompositionFact | None = None
+    plan_path_digests: CallablePlans | None = None
+    semantic_addon: CallableSemantic | None = None
+
+    async def build(self, workspace: str, store: ObservationContextStore) -> AdviceSnapshot | None:
+        envelopes = store.list_envelopes(workspace)
+        status = await store.status(ObservationStatusQuery(workspace))
+        store_check_facts = getattr(store, "load_check_facts", None)
+        checks: tuple[ObservationCheckFact, ...] = ()
+        if self.check_facts is not None:
+            checks = self.check_facts(workspace)
+        elif callable(store_check_facts):
+            loaded = store_check_facts(workspace)
+            if type(loaded) is tuple:
+                loaded_items = cast(tuple[object, ...], loaded)
+                if all(type(item) is ObservationCheckFact for item in loaded_items):
+                    checks = cast(tuple[ObservationCheckFact, ...], loaded_items)
+        return build_observation_advice_snapshot(
+            ObservationAdviceBuildInput(
+                envelopes=envelopes,
+                lifecycle=status.lifecycle,
+                gaps=status.gaps,
+                check_facts=checks,
+                inspect_fact=(None if self.inspect_fact is None else self.inspect_fact(workspace)),
+                composition=self.composition,
+                plan_path_digests=(
+                    () if self.plan_path_digests is None else self.plan_path_digests(workspace)
+                ),
+                prior_snapshot=store.load_advice_snapshot(workspace),
+                semantic_addon=(
+                    None if self.semantic_addon is None else self.semantic_addon(workspace)
+                ),
+                has_real_observation=bool(envelopes),
+            )
+        )
 
 
 def stable_advice_finding_id(rule_code: str, detail_token: str, evidence_digest: str) -> FindingId:

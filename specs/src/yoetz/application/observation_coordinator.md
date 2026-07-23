@@ -28,19 +28,27 @@ optionally refreshes deterministic advice at the committed frontier.
 3. Load Codex lifecycle mapping (reject `mapping_missing` when absent).
 4. Resolve mapped task runtime for write.
 5. Validate project consent from `LocalObservationStore`.
-6. Grant/bind consent into the task `SqliteObservationStore` and ingest.
-7. Materialize supported envelopes into the task ledger (`hook_observed` coverage).
-8. Run deterministic advice snapshot refresh (and optional `advice_hook`).
-9. Return accepted/duplicate/rejected.
+6. Encrypt/redact content chunks and persist only repository-owned object metadata/relations.
+7. Grant/bind consent into the task `SqliteObservationStore` and ingest.
+8. Normalize and materialize supported envelopes into the task ledger (`hook_observed` coverage);
+   persist/merge the logical-identity source claim.
+9. Capture the completed-action subject state, enqueue/drain generation-fenced verification only
+   when changed, and encrypt redacted output.
+10. Build advice from the durable context, persist history, materialize deterministic advice as
+    ordinary findings, and call the optional safe hook.
+11. Return accepted/duplicate/rejected.
 
-Idempotency: SQLite observation dedup + stable operation digests for ledger appends so hook retry,
-outbox replay, and hook/stream duplication collapse safely.
+Idempotency covers content manifests, observation rows, stable ledger operations, logical identity,
+verification cache, and advice history. Duplicate ingest retries incomplete downstream work.
+Equivalent hook/stream calls share one normalized operation and only strengthen source coverage.
 
 ## Errors and edge cases
 
 - Missing/revoked/paused consent → rejected with consent gap codes.
 - Unmapped session → rejected `mapping_missing` (local outbox retains pending entries).
 - Vault locked / service unavailable → rejected with matching gap codes.
+- Missing encrypted locator or untrusted/changed policy records explicit gaps and executes nothing.
+- Revocation immediately closes local capture and best-effort deactivates bundle locator/trust rows.
 
 ## Invariants
 
@@ -48,6 +56,7 @@ outbox replay, and hook/stream duplication collapse safely.
 2. `MemoryObservationStore` is never used on this path.
 3. Local outbox ack happens only after callers observe accepted/duplicate from this coordinator.
 4. No seventh MCP tool.
+5. The coordinator uses repositories, never private SQLite connections/SQL.
 
 ## Tests
 

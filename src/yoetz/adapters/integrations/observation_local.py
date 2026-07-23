@@ -61,7 +61,11 @@ _MAX_ENVELOPES: Final = 256
 _MAX_DEDUP: Final = 4_096
 _MAX_OPEN_PRE: Final = 256
 _MAX_OUTBOX: Final = 512
+_MAX_QUARANTINE: Final = 512
 _MAX_HOOK_SEQUENCES: Final = 256
+# Wall/monotonic drift tolerated before persisted monotonic samples are treated
+# as belonging to a different boot epoch (and therefore fenced off).
+_EPOCH_TOLERANCE_SECONDS: Final = 2.0
 
 YOETZ_TOOL_NAMES: Final = frozenset(
     {
@@ -186,8 +190,22 @@ class _WorkspaceState:
     last_stream_reconcile_mono_ms: int | None = None
     last_hook_receipt_mono_ms: int | None = None
     last_successful_drain_mono_ms: int | None = None
+    # Boot/process epoch (wall - monotonic) the monotonic samples above belong
+    # to. Samples are only comparable to a live clock within the same epoch;
+    # after a restart or reboot they are fenced off (see `_epoch_matches`).
+    monotonic_epoch: float | None = None
     pending_outbox: list[tuple[str, ObservationEnvelope]] | None = None
+    quarantine: list[tuple[str, ObservationEnvelope, str]] | None = None
     codex_session_bindings: dict[str, str] | None = None
+    ended_sessions: set[str] | None = None
+    session_generations: dict[str, int] | None = None
+    ended_session_generations: dict[str, int] | None = None
+    quarantine_evicted_count: int = 0
+    quarantine_evicted_commitment: str | None = None
+    quarantine_evicted_first: Timestamp | None = None
+    quarantine_evicted_last: Timestamp | None = None
+    trusted_policy_digest: str | None = None
+    trusted_policy_mac: str | None = None
 
     def __post_init__(self) -> None:
         if self.session_workspaces is None:
@@ -212,8 +230,16 @@ class _WorkspaceState:
             self.hook_sequences = {}
         if self.pending_outbox is None:
             self.pending_outbox = []
+        if self.quarantine is None:
+            self.quarantine = []
         if self.codex_session_bindings is None:
             self.codex_session_bindings = {}
+        if self.ended_sessions is None:
+            self.ended_sessions = set()
+        if self.session_generations is None:
+            self.session_generations = {}
+        if self.ended_session_generations is None:
+            self.ended_session_generations = {}
 
 
 def _cursor_key(source: ObservationSource, session_commitment: str) -> str:
@@ -243,15 +269,34 @@ class LocalObservationStore:
         *,
         _state: Path | None = None,
         _monotonic: Callable[[], float] | None = None,
+        _wall: Callable[[], float] | None = None,
     ) -> None:
         self._root = observation_dir(_state=_state)
         self._lock = threading.RLock()
         self._monotonic = _monotonic
+        self._wall = _wall
 
     def _now_mono(self) -> float:
         import time
 
         return time.monotonic() if self._monotonic is None else self._monotonic()
+
+    def _wall_now(self) -> float:
+        import time
+
+        return time.time() if self._wall is None else self._wall()
+
+    def _boot_epoch(self) -> float:
+        """Approximate wall time at monotonic zero: stable within a boot session.
+
+        A reboot resets the monotonic clock, so this shifts by the previous
+        uptime and cleanly distinguishes samples from an earlier boot.
+        """
+
+        return self._wall_now() - self._now_mono()
+
+    def _epoch_matches(self, epoch: float | None) -> bool:
+        return epoch is not None and abs(self._boot_epoch() - epoch) <= _EPOCH_TOLERANCE_SECONDS
 
     def key_material(self) -> bytes:
         path = self._root / "key-material.bin"
@@ -300,6 +345,56 @@ class LocalObservationStore:
             state.session_workspaces[session_commitment] = workspace_commitment
             self._save(workspace_commitment, state)
 
+    def begin_session_generation(self, workspace_commitment: str, session_commitment: str) -> int:
+        """Advance the durable generation and clear only the prior stopped fence."""
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.session_generations is not None
+            assert state.ended_session_generations is not None
+            assert state.ended_sessions is not None
+            generation = state.session_generations.get(session_commitment, 0) + 1
+            state.session_generations[session_commitment] = generation
+            state.ended_session_generations.pop(session_commitment, None)
+            state.ended_sessions.discard(session_commitment)
+            self._save(workspace_commitment, state)
+            return generation
+
+    def current_session_generation(self, workspace_commitment: str, session_commitment: str) -> int:
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.session_generations is not None
+            return state.session_generations.get(session_commitment, 1)
+
+    def note_session_end(
+        self,
+        workspace_commitment: str,
+        session_commitment: str,
+        *,
+        generation: int | None = None,
+    ) -> None:
+        """Persist that a bound Codex session ended.
+
+        When every bound session for a workspace has ended (or consent stops),
+        the lifecycle reports STOPPED rather than lingering as DEGRADED.
+        """
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.ended_sessions is not None
+            assert state.session_generations is not None
+            assert state.ended_session_generations is not None
+            assert state.session_workspaces is not None
+            current = state.session_generations.get(session_commitment, 1)
+            observed = current if generation is None else generation
+            if observed != current:
+                return
+            # Retain the binding so "all bound sessions ended" is computable.
+            state.session_workspaces.setdefault(session_commitment, workspace_commitment)
+            state.ended_sessions.add(session_commitment)
+            state.ended_session_generations[session_commitment] = observed
+            self._save(workspace_commitment, state)
+
     def bind_codex_session(self, workspace_commitment: str, codex_session_id: str) -> str:
         """Bind a Codex session id to a consented workspace; return session commitment."""
 
@@ -329,6 +424,14 @@ class LocalObservationStore:
             if len(active) == 1:
                 return active[0]
             return None
+
+    def codex_sessions_for_workspace(self, workspace_commitment: str) -> tuple[str, ...]:
+        """Return the bounded structural session IDs already bound to one workspace."""
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.codex_session_bindings is not None
+            return tuple(sorted(state.codex_session_bindings, key=str.encode))
 
     def consent_for(self, workspace_commitment: str) -> LocalObservationConsent | None:
         with self._lock:
@@ -494,9 +597,7 @@ class LocalObservationStore:
             assert state.stream_partials is not None
             return state.stream_partials.get(session_commitment, b"")
 
-    def set_stream_partial(
-        self, workspace: str, session_commitment: str, partial: bytes
-    ) -> None:
+    def set_stream_partial(self, workspace: str, session_commitment: str, partial: bytes) -> None:
         if type(partial) is not bytes or len(partial) > 262_144:
             raise ProtocolValueError("invalid_event_value_type")
         with self._lock:
@@ -515,6 +616,7 @@ class LocalObservationStore:
             state = self._load(workspace)
             current = time.monotonic() if mono is None else mono
             state.last_stream_reconcile_mono_ms = int(current * 1000)
+            state.monotonic_epoch = self._boot_epoch()
             self._save(workspace, state)
 
     def last_stream_reconcile_mono(self, workspace: str) -> float | None:
@@ -571,9 +673,7 @@ class LocalObservationStore:
             assert state.pending_outbox is not None
             if codex_session_id is None:
                 return tuple(state.pending_outbox)
-            return tuple(
-                item for item in state.pending_outbox if item[0] == codex_session_id
-            )
+            return tuple(item for item in state.pending_outbox if item[0] == codex_session_id)
 
     def pending_outbox_count(self, workspace: str) -> int:
         with self._lock:
@@ -593,9 +693,77 @@ class LocalObservationStore:
                 if session == codex_session_id and envelope.source_identity == source_identity:
                     del state.pending_outbox[index]
                     state.last_successful_drain_mono_ms = int(self._now_mono() * 1000)
+                    state.monotonic_epoch = self._boot_epoch()
                     self._save(workspace, state)
                     return True
             return False
+
+    def quarantine_outbox(
+        self, workspace: str, codex_session_id: str, source_identity: str, reason: str
+    ) -> bool:
+        """Move a permanently-rejected outbox entry into a bounded, visible quarantine.
+
+        Quarantined entries are never treated as committed: they leave the pending
+        drain queue but are retained (never silently dropped) and surface as an
+        ``outbox_quarantined`` coverage gap in status until an operator clears them.
+        """
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.pending_outbox is not None
+            assert state.quarantine is not None
+            assert state.gaps is not None
+            moved: ObservationEnvelope | None = None
+            for index, (session, envelope) in enumerate(state.pending_outbox):
+                if session == codex_session_id and envelope.source_identity == source_identity:
+                    moved = envelope
+                    del state.pending_outbox[index]
+                    break
+            if moved is None:
+                return False
+            already = any(
+                q_session == codex_session_id and q_env.source_identity == source_identity
+                for q_session, q_env, _ in state.quarantine
+            )
+            if not already:
+                state.quarantine.append((codex_session_id, moved, reason))
+                # Bounded detail with permanent aggregate evidence for evictions.
+                while len(state.quarantine) > _MAX_QUARANTINE:
+                    evicted_session, evicted_envelope, evicted_reason = state.quarantine.pop(0)
+                    material = JsonObject(
+                        {
+                            "prior": state.quarantine_evicted_commitment,
+                            "session_commitment": evicted_envelope.session_commitment,
+                            "source_identity": evicted_envelope.source_identity,
+                            "source_commitment": evicted_envelope.cursor.last_source_commitment,
+                            "reason": evicted_reason,
+                            "codex_session_commitment": session_commitment_from_codex_id(
+                                self.key_material(), evicted_session
+                            ),
+                        }
+                    )
+                    state.quarantine_evicted_commitment = canonical_digest(material)
+                    state.quarantine_evicted_count += 1
+                    receipt = evicted_envelope.receipt_time
+                    if state.quarantine_evicted_first is None:
+                        state.quarantine_evicted_first = receipt
+                    state.quarantine_evicted_last = receipt
+                    state.gaps.add(ObservationGapCode.QUARANTINE_DETAIL_EVICTED.value)
+            state.gaps.add(ObservationGapCode.OUTBOX_QUARANTINED.value)
+            self._save(workspace, state)
+            return True
+
+    def quarantined_count(self, workspace: str) -> int:
+        with self._lock:
+            state = self._load(workspace)
+            assert state.quarantine is not None
+            return len(state.quarantine)
+
+    def list_quarantine(self, workspace: str) -> tuple[tuple[str, ObservationEnvelope, str], ...]:
+        with self._lock:
+            state = self._load(workspace)
+            assert state.quarantine is not None
+            return tuple(state.quarantine)
 
     def note_coverage_gap(self, workspace: str, gap_code: str) -> None:
         """Record a safe local coverage gap without retaining payload prose."""
@@ -605,6 +773,63 @@ class LocalObservationStore:
             assert state.gaps is not None
             if type(gap_code) is str and gap_code:
                 state.gaps.add(gap_code)
+            self._save(workspace, state)
+
+    def trust_policy_digest(self, workspace: str, policy_digest: str) -> None:
+        """Persist a tamper-evident local activation cache for one exact digest.
+
+        The task-bundle repository remains the authoritative encrypted trust
+        record. This cache contains no argv or content and cannot activate a
+        different byte digest.
+        """
+
+        import hashlib
+        import hmac
+
+        if (
+            type(policy_digest) is not str
+            or not policy_digest.startswith("sha256:")
+            or len(policy_digest) != 71
+        ):
+            raise ProtocolValueError("invalid_approved_check_policy")
+        with self._lock:
+            state = self._load(workspace)
+            state.trusted_policy_digest = policy_digest
+            state.trusted_policy_mac = hmac.new(
+                self.key_material(),
+                b"yoetz/check-policy-trust/v1\0"
+                + workspace.encode("ascii")
+                + b"\0"
+                + policy_digest.encode("ascii"),
+                hashlib.sha256,
+            ).hexdigest()
+            self._save(workspace, state)
+
+    def policy_digest_is_trusted(self, workspace: str, policy_digest: str) -> bool:
+        import hashlib
+        import hmac
+
+        with self._lock:
+            state = self._load(workspace)
+            expected = hmac.new(
+                self.key_material(),
+                b"yoetz/check-policy-trust/v1\0"
+                + workspace.encode("ascii")
+                + b"\0"
+                + policy_digest.encode("ascii"),
+                hashlib.sha256,
+            ).hexdigest()
+            return (
+                state.trusted_policy_digest == policy_digest
+                and state.trusted_policy_mac is not None
+                and hmac.compare_digest(state.trusted_policy_mac, expected)
+            )
+
+    def revoke_policy_trust(self, workspace: str) -> None:
+        with self._lock:
+            state = self._load(workspace)
+            state.trusted_policy_digest = None
+            state.trusted_policy_mac = None
             self._save(workspace, state)
 
     def ingest(self, envelope: ObservationEnvelope) -> ObservationIngestResult:
@@ -678,6 +903,7 @@ class LocalObservationStore:
                 del state.envelopes[: len(state.envelopes) - _MAX_ENVELOPES]
             state.last_receipt = envelope.receipt_time
             mono_ms = int(self._now_mono() * 1000)
+            state.monotonic_epoch = self._boot_epoch()
             if envelope.source is ObservationSource.CODEX_HOOK:
                 state.last_hook_receipt_mono_ms = mono_ms
             else:
@@ -874,10 +1100,21 @@ class LocalObservationStore:
             if state.last_successful_drain_mono_ms is None
             else state.last_successful_drain_mono_ms / 1000.0
         )
-        consent_active = (
-            consent is not None and consent.revoked_at is None and not consent.paused
-        )
+        # Fence persisted monotonic samples to their boot epoch. After a restart
+        # or reboot the monotonic clock is incomparable, so drop the stale
+        # samples; lifecycle then reports DEGRADED until fresh qualifying
+        # progress arrives in the current epoch instead of trusting bad ages.
+        if not self._epoch_matches(state.monotonic_epoch):
+            last_hook = None
+            last_stream = None
+            last_drain = None
+        consent_active = consent is not None and consent.revoked_at is None and not consent.paused
         mapping_available = bool(state.session_workspaces) or bool(state.codex_session_bindings)
+        bound_sessions = set(state.session_workspaces)
+        ended_sessions = state.ended_sessions or set()
+        # STOPPED once every bound session has ended (consent-stop is handled in
+        # compute_observation_lifecycle via consent_active).
+        session_ended = bool(bound_sessions) and bound_sessions <= ended_sessions
         signals = ObservationHealthSignals(
             consent_active=consent_active,
             mapping_available=mapping_available,
@@ -890,7 +1127,7 @@ class LocalObservationStore:
             last_hook_receipt_monotonic=last_hook,
             last_stream_advancement_monotonic=last_stream,
             last_successful_drain_monotonic=last_drain if pending == 0 else last_drain,
-            session_ended=False,
+            session_ended=session_ended,
         )
         lifecycle = compute_observation_lifecycle(
             signals,
@@ -943,6 +1180,25 @@ class LocalObservationStore:
                 }
             ),
             "dedup": tuple(sorted(state.dedup, key=str.encode)),
+            "ended_sessions": tuple(sorted(state.ended_sessions or set(), key=str.encode)),
+            "session_generations": JsonObject(
+                {
+                    key: value
+                    for key, value in sorted(
+                        (state.session_generations or {}).items(),
+                        key=lambda item: item[0].encode(),
+                    )
+                }
+            ),
+            "ended_session_generations": JsonObject(
+                {
+                    key: value
+                    for key, value in sorted(
+                        (state.ended_session_generations or {}).items(),
+                        key=lambda item: item[0].encode(),
+                    )
+                }
+            ),
             "envelopes": tuple(observation_envelope_to_json(item) for item in state.envelopes),
             "gaps": tuple(sorted(state.gaps, key=str.encode)),
             "unsupported_events": tuple(sorted(state.unsupported_events, key=str.encode)),
@@ -980,6 +1236,10 @@ class LocalObservationStore:
             "last_stream_reconcile_mono_ms": state.last_stream_reconcile_mono_ms,
             "last_hook_receipt_mono_ms": state.last_hook_receipt_mono_ms,
             "last_successful_drain_mono_ms": state.last_successful_drain_mono_ms,
+            # Canonical JSON forbids floats; persist the epoch as integer millis.
+            "monotonic_epoch_ms": (
+                None if state.monotonic_epoch is None else round(state.monotonic_epoch * 1000)
+            ),
             "pending_outbox": tuple(
                 JsonObject(
                     {
@@ -989,6 +1249,30 @@ class LocalObservationStore:
                 )
                 for session, envelope in (state.pending_outbox or ())
             ),
+            "quarantine": tuple(
+                JsonObject(
+                    {
+                        "codex_session_id": session,
+                        "envelope": observation_envelope_to_json(envelope),
+                        "reason": reason,
+                    }
+                )
+                for session, envelope, reason in (state.quarantine or ())
+            ),
+            "quarantine_evicted_count": state.quarantine_evicted_count,
+            "quarantine_evicted_commitment": state.quarantine_evicted_commitment,
+            "quarantine_evicted_first": (
+                None
+                if state.quarantine_evicted_first is None
+                else state.quarantine_evicted_first.wire
+            ),
+            "quarantine_evicted_last": (
+                None
+                if state.quarantine_evicted_last is None
+                else state.quarantine_evicted_last.wire
+            ),
+            "trusted_policy_digest": state.trusted_policy_digest,
+            "trusted_policy_mac": state.trusted_policy_mac,
             "codex_session_bindings": JsonObject(
                 {key: value for key, value in sorted(state.codex_session_bindings.items())}
             ),
@@ -1017,6 +1301,21 @@ class LocalObservationStore:
             for key, value in cast(Mapping[str, JsonValue], raw.get("cursors") or {}).items()
         }
         dedup_raw = raw.get("dedup") or ()
+        ended_sessions_raw = raw.get("ended_sessions") or ()
+        session_generations = {
+            str(key): int(value)
+            for key, value in cast(
+                Mapping[str, JsonValue], raw.get("session_generations") or {}
+            ).items()
+            if type(value) is int and not isinstance(value, bool) and value >= 1
+        }
+        ended_session_generations = {
+            str(key): int(value)
+            for key, value in cast(
+                Mapping[str, JsonValue], raw.get("ended_session_generations") or {}
+            ).items()
+            if type(value) is int and not isinstance(value, bool) and value >= 1
+        }
         envelopes_raw = raw.get("envelopes") or ()
         gaps_raw = raw.get("gaps") or ()
         unsupported_raw = raw.get("unsupported_events") or ()
@@ -1033,7 +1332,7 @@ class LocalObservationStore:
                 stream_partials[str(key)] = base64.b64decode(
                     value[4:].encode("ascii"), validate=True
                 )
-            except (ValueError, OSError):
+            except ValueError, OSError:
                 continue
         hook_sequences: dict[str, int] = {}
         for key, value in cast(Mapping[str, JsonValue], raw.get("hook_sequences") or {}).items():
@@ -1042,7 +1341,9 @@ class LocalObservationStore:
         reconcile_mono = raw.get("last_stream_reconcile_mono_ms")
         last_reconcile = (
             int(reconcile_mono)
-            if type(reconcile_mono) is int and not isinstance(reconcile_mono, bool) and reconcile_mono >= 0
+            if type(reconcile_mono) is int
+            and not isinstance(reconcile_mono, bool)
+            and reconcile_mono >= 0
             else None
         )
         hook_mono_raw = raw.get("last_hook_receipt_mono_ms")
@@ -1059,6 +1360,12 @@ class LocalObservationStore:
             if type(drain_mono_raw) is int
             and not isinstance(drain_mono_raw, bool)
             and drain_mono_raw >= 0
+            else None
+        )
+        epoch_raw = raw.get("monotonic_epoch_ms")
+        monotonic_epoch = (
+            float(epoch_raw) / 1000.0
+            if type(epoch_raw) is int and not isinstance(epoch_raw, bool)
             else None
         )
         bindings = {
@@ -1106,13 +1413,46 @@ class LocalObservationStore:
                         ),
                     )
                 )
-            except (ProtocolValueError, TypeError, ValueError):
+            except ProtocolValueError, TypeError, ValueError:
                 continue
+        quarantine: list[tuple[str, ObservationEnvelope, str]] = []
+        for item in cast(tuple[JsonValue, ...] | list[JsonValue], raw.get("quarantine") or ()):
+            if not isinstance(item, Mapping):
+                continue
+            row = cast(Mapping[str, JsonValue], item)
+            session = row.get("codex_session_id")
+            envelope_raw = row.get("envelope")
+            reason = row.get("reason")
+            if (
+                type(session) is not str
+                or type(reason) is not str
+                or not isinstance(envelope_raw, Mapping)
+            ):
+                continue
+            try:
+                quarantine.append(
+                    (
+                        session,
+                        observation_envelope_from_json(
+                            JsonObject(cast(Mapping[str, JsonValue], envelope_raw))
+                        ),
+                        reason,
+                    )
+                )
+            except ProtocolValueError, TypeError, ValueError:
+                continue
+        raw_quarantine_evicted_count = raw.get("quarantine_evicted_count", 0)
+        quarantine_evicted_count = (
+            raw_quarantine_evicted_count if type(raw_quarantine_evicted_count) is int else 0
+        )
         return _WorkspaceState(
             consent=consent,
             session_workspaces=session_workspaces,
             cursors=cursors,
             dedup=set(cast(tuple[str, ...], dedup_raw)),
+            ended_sessions=set(cast(tuple[str, ...], ended_sessions_raw)),
+            session_generations=session_generations,
+            ended_session_generations=ended_session_generations,
             envelopes=envelopes,
             gaps=set(cast(tuple[str, ...], gaps_raw)),
             unsupported_events=set(cast(tuple[str, ...], unsupported_raw)),
@@ -1127,7 +1467,25 @@ class LocalObservationStore:
             last_stream_reconcile_mono_ms=last_reconcile,
             last_hook_receipt_mono_ms=last_hook_mono,
             last_successful_drain_mono_ms=last_drain_mono,
+            monotonic_epoch=monotonic_epoch,
             pending_outbox=pending_outbox,
+            quarantine=quarantine,
+            quarantine_evicted_count=quarantine_evicted_count,
+            quarantine_evicted_commitment=cast(
+                str | None, raw.get("quarantine_evicted_commitment")
+            ),
+            quarantine_evicted_first=(
+                None
+                if raw.get("quarantine_evicted_first") is None
+                else Timestamp(str(raw.get("quarantine_evicted_first")))
+            ),
+            quarantine_evicted_last=(
+                None
+                if raw.get("quarantine_evicted_last") is None
+                else Timestamp(str(raw.get("quarantine_evicted_last")))
+            ),
+            trusted_policy_digest=cast(str | None, raw.get("trusted_policy_digest")),
+            trusted_policy_mac=cast(str | None, raw.get("trusted_policy_mac")),
             codex_session_bindings=bindings,
         )
 

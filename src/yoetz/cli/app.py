@@ -108,6 +108,10 @@ observe_app = typer.Typer(
     help="Live Codex observation consent and status (local control; not MCP).",
     no_args_is_help=True,
 )
+observe_checks_app = typer.Typer(
+    help="Preview and manage exact-digest approved workspace checks.",
+    no_args_is_help=True,
+)
 
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(state_app, name="state")
@@ -127,6 +131,7 @@ app.add_typer(elevated_app, name="elevated-bootstrap")
 app.add_typer(elevated_app, name="consent")
 app.add_typer(hooks_app, name="hooks")
 app.add_typer(observe_app, name="observe")
+observe_app.add_typer(observe_checks_app, name="checks")
 
 
 def run_async(operation: Callable[[], Awaitable[int]]) -> int:
@@ -403,6 +408,61 @@ def observe_reconcile_cmd(
             json_output=json_output,
         )
     )
+
+
+@observe_checks_app.command("preview")
+def observe_checks_preview_cmd(
+    workspace: Annotated[str | None, typer.Option("--workspace")] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Show exact policy bytes digest and proposed argv without activating it."""
+
+    _finish(
+        _observe_operation("observe_checks_preview")(workspace=workspace, json_output=json_output)
+    )
+
+
+@observe_checks_app.command("trust")
+def observe_checks_trust_cmd(
+    policy_digest: Annotated[str, typer.Option("--policy-digest")],
+    workspace: Annotated[str | None, typer.Option("--workspace")] = None,
+) -> None:
+    """Trust only the exact raw policy digest currently present."""
+
+    _finish(
+        _observe_operation("observe_checks_trust")(workspace=workspace, policy_digest=policy_digest)
+    )
+
+
+@observe_checks_app.command("status")
+def observe_checks_status_cmd(
+    workspace: Annotated[str | None, typer.Option("--workspace")] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Show whether the current exact policy digest is trusted."""
+
+    _finish(
+        _observe_operation("observe_checks_status")(workspace=workspace, json_output=json_output)
+    )
+
+
+@observe_checks_app.command("revoke")
+def observe_checks_revoke_cmd(
+    workspace: Annotated[str | None, typer.Option("--workspace")] = None,
+) -> None:
+    """Revoke workspace check-policy activation."""
+
+    _finish(_observe_operation("observe_checks_revoke")(workspace=workspace))
+
+
+@observe_checks_app.command("run")
+def observe_checks_run_cmd(
+    workspace: Annotated[str | None, typer.Option("--workspace")] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Run exact trusted argv under the enforcing sandbox."""
+
+    _finish(_observe_operation("observe_checks_run")(workspace=workspace, json_output=json_output))
 
 
 def _workflow_command(method: str, request_type: type[BaseModel]) -> Callable[..., None]:

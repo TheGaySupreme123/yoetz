@@ -70,6 +70,14 @@ For `client_kind=mcp_bridge`, the capability set and admission set are exactly t
 methods. The larger closed schema remains parseable for CLI/trusted-local UI, but schema validity
 never grants MCP authority to import source bytes or call another support branch.
 
+The trusted-local CLI subset additionally admits the five observation methods.
+`observation_ingest` may carry at most 16 `ObservationContentChunk` values and 700,000 aggregate
+decoded content bytes, keeping its canonical-base64 frame under
+`MAX_ORDINARY_CONTROL_FRAME_BYTES`. Chunk bytes are ephemeral: ready service encrypts them before
+any durable reference is written. Locked/unavailable service returns a bounded structural failure;
+neither side writes a plaintext retry body. Policy trust and approved-check commands remain
+CLI-local capabilities and do not enlarge MCP admission.
+
 Every subsequent request has one validated `rpc_id`, exact method discriminator, schema-versioned
 body, optional bounded deadline, and service generation from the handshake. `schema_for_method`
 selects the already closed method branch owned by the envelope artifact; no separately extensible

@@ -31,8 +31,15 @@ output.
 - Supporting closed values as needed by the port: ingest results, status queries, control/revoke
   commands, and gap/reason enums — all exact, bounded, and path-free.
 - `ObservationIngestRequest` — redacted local-control ingest body with raw Codex session id +
-  `ObservationEnvelope` only (never caller-supplied Yoetz task/session/writer IDs).
-- Gap codes include `mapping_missing` and `outbox_overflow` for coordinator/outbox honesty.
+  `ObservationEnvelope` plus bounded ephemeral `ObservationContentChunk` values (never
+  caller-supplied Yoetz task/session/writer IDs).
+- `ObservationContentChunk` and `ObservationContentKind` — exact visible-content classification,
+  correlation/source commitments, media type, part index/count, redaction flag, and bytes. At most
+  16 chunks, 524,288 bytes each, and 700,000 bytes per request.
+- Gap codes include `mapping_missing`, `outbox_overflow`, and `outbox_quarantined` for
+  coordinator/outbox honesty, plus content/policy/verification/network and quarantine-eviction
+  limitations. A permanently rejected envelope moves to bounded quarantine rather than being
+  acknowledged as committed.
 
 ## Behavior
 
@@ -59,7 +66,7 @@ classes from trigger-only or empty/degraded status alone.
 ## Invariants
 
 1. No hidden reasoning or complete transcript prose in domain values.
-2. Sensitive evidence is object-ref only.
+2. Sensitive durable evidence is object-ref only; content chunks are ephemeral control inputs.
 3. Session identity is a commitment, never a raw path.
 4. Advice and status stay free of secret-like command output.
 5. Mapping vocabulary may align with import gaps without sharing import allocation state.

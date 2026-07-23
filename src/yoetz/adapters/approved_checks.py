@@ -9,13 +9,14 @@ import stat
 import subprocess
 import tempfile
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Final
 
 from yoetz.adapters.check_sandbox import default_check_sandbox
+from yoetz.observability.privacy import redact_sensitive_content
 from yoetz.ports.check_sandbox import CheckSandboxPort, CheckSandboxStatus
 from yoetz.ports.subject_state import LocalWorkspaceHandle
 from yoetz.protocol.canonical import JsonValue, canonical_digest
@@ -265,9 +266,11 @@ class ApprovedCheckRunner:
         approvals: Mapping[str, ApprovedCheckApproval] | None = None,
         *,
         sandbox: CheckSandboxPort | None = None,
+        output_sink: Callable[[bytes], None] | None = None,
     ) -> None:
         self._approvals = dict(approvals or {})
         self._sandbox = sandbox if sandbox is not None else default_check_sandbox()
+        self._output_sink = output_sink
 
     def register(self, approval: ApprovedCheckApproval) -> None:
         self._approvals[approval.approval_commitment] = approval
@@ -366,9 +369,13 @@ class ApprovedCheckRunner:
             )
             duration_ms = int((time.monotonic() - started) * 1000)
             exit_status = int(process.returncode or 0)
-            captured_len = len(stdout)
-            # Digest only — never retain or return command output bytes.
-            output_digest = "sha256:" + hashlib.sha256(bytes(stdout)).hexdigest()
+            safe_output, _redacted = redact_sensitive_content(bytes(stdout))
+            captured_len = len(safe_output)
+            output_digest = "sha256:" + hashlib.sha256(safe_output).hexdigest()
+            if self._output_sink is not None:
+                # Ephemeral handoff to the ready-service encrypted object writer.
+                # The sink receives only the redacted bounded buffer.
+                self._output_sink(safe_output)
             stdout[:] = b"\x00" * len(stdout)
             del stdout
             if truncated:

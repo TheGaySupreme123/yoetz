@@ -24,6 +24,11 @@ signals. A single historical event must never keep status `active` indefinitely.
 
 Tests inject the monotonic clock via `now_monotonic`.
 
+## Errors and edge cases
+
+Persisted monotonic samples from another boot epoch are incomparable and degrade until fresh
+progress; negative age never crashes status.
+
 ## Invariants
 
 1. Thresholds are owned by the observation subsystem.
@@ -32,3 +37,7 @@ Tests inject the monotonic clock via `now_monotonic`.
 ## Tests
 
 `tests/unit/application/test_observation_health.py`
+
+## Open questions
+
+None.

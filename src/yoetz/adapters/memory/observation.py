@@ -339,9 +339,7 @@ class MemoryObservationStore:
         unsupported = tuple(
             sorted(self._state.unsupported_events.get(workspace_commitment, set()), key=str.encode)
         )
-        consent_active = (
-            consent is not None and consent.revoked_at is None and not consent.paused
-        )
+        consent_active = consent is not None and consent.revoked_at is None and not consent.paused
         last_receipt = self._state.last_receipt.get(workspace_commitment)
         progress = time.monotonic() if last_receipt is not None and any(coverage.values()) else None
         signals = ObservationHealthSignals(

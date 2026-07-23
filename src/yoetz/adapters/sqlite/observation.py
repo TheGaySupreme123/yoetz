@@ -10,6 +10,7 @@ import apsw
 
 from yoetz.domain.observation import (
     AdviceSnapshot,
+    ObservationContentChunk,
     ObservationControlCommand,
     ObservationCursor,
     ObservationEnvelope,
@@ -27,7 +28,9 @@ from yoetz.domain.observation import (
     observation_envelope_from_json,
     observation_envelope_to_json,
 )
-from yoetz.domain.values import JsonObject, JsonValue, Timestamp
+from yoetz.domain.values import JsonObject, JsonValue, Timestamp, format_rfc3339_millis
+from yoetz.kernel.policies.observation_advice import ObservationCheckFact
+from yoetz.ports.objects import ObjectRef
 from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 
@@ -244,6 +247,17 @@ class SqliteObservationStore:
                     "WHERE workspace_commitment = ?",
                     (stamp, command.workspace_commitment),
                 )
+                self._db.execute(
+                    "UPDATE observation_workspace_bindings SET active=0, revoked_at=? "
+                    "WHERE workspace_commitment=? AND active=1",
+                    (stamp, command.workspace_commitment),
+                )
+                self._db.execute(
+                    "UPDATE observation_trusted_check_policies "
+                    "SET state='revoked', state_token=state_token+1, revoked_at=? "
+                    "WHERE workspace_commitment=? AND state='trusted'",
+                    (stamp, command.workspace_commitment),
+                )
             return self._status_unlocked(command.workspace_commitment)
 
     def set_advice_snapshot(
@@ -271,6 +285,357 @@ class SqliteObservationStore:
         if not isinstance(parsed, Mapping):
             return None
         return advice_snapshot_from_json(JsonObject(cast(Mapping[str, JsonValue], parsed)))
+
+    def load_latest_advice_snapshot(self) -> AdviceSnapshot | None:
+        row = self._db.execute(
+            "SELECT snapshot_json FROM observation_advice ORDER BY updated_at DESC LIMIT 1"
+        ).fetchone()
+        if row is None or type(row[0]) is not bytes:
+            return None
+        parsed = strict_json_parse(row[0])
+        if not isinstance(parsed, Mapping):
+            return None
+        return advice_snapshot_from_json(JsonObject(cast(Mapping[str, JsonValue], parsed)))
+
+    def record_advice_history(
+        self,
+        *,
+        workspace: str,
+        snapshot: AdviceSnapshot,
+        verification_state: str,
+        semantic_state: str,
+        freshness: str,
+        recorded_at: Timestamp,
+    ) -> None:
+        advice_id = (
+            "advice_"
+            + canonical_digest(
+                JsonObject(
+                    {
+                        "workspace": workspace,
+                        "suppression_identity": snapshot.suppression_identity,
+                        "evidence_basis_digest": snapshot.evidence_basis_digest,
+                    }
+                )
+            ).removeprefix("sha256:")[:48]
+        )
+        with self._db:
+            self._db.execute(
+                "INSERT INTO observation_advice_history("
+                "advice_id,workspace_commitment,subject_frontier,evidence_basis_digest,"
+                "suppression_identity,snapshot_json,verification_state,semantic_state,"
+                "freshness,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(workspace_commitment,suppression_identity,evidence_basis_digest) "
+                "DO NOTHING",
+                (
+                    advice_id,
+                    workspace,
+                    snapshot.freshness_frontier,
+                    snapshot.evidence_basis_digest,
+                    snapshot.suppression_identity,
+                    canonical_encode(advice_snapshot_to_json(snapshot)),
+                    verification_state,
+                    semantic_state,
+                    freshness,
+                    recorded_at.wire,
+                ),
+            )
+
+    def _inventory_object(self, ref: ObjectRef) -> None:
+        if type(ref) is not ObjectRef:
+            raise _error(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "Observation content object is invalid.",
+                retryable=False,
+            )
+        descriptor = (
+            ref.metadata.kind.value,
+            ref.plaintext_size,
+            ref.commitment,
+            ref.envelope_digest,
+            ref.encryption_format,
+            ref.key_slot,
+        )
+        existing = self._db.execute(
+            "SELECT kind,plaintext_size,commitment,envelope_digest,encryption_format,key_slot "
+            "FROM objects WHERE object_id=?",
+            (ref.object_id,),
+        ).fetchone()
+        if existing is None:
+            self._db.execute(
+                "INSERT INTO objects(object_id,kind,plaintext_size,commitment,envelope_digest,"
+                "encryption_format,key_slot,state,durable_at) "
+                "VALUES(?,?,?,?,?,?,?,'present',?)",
+                (
+                    ref.object_id,
+                    *descriptor,
+                    format_rfc3339_millis(ref.metadata.created_at),
+                ),
+            )
+        elif tuple(existing) != descriptor:
+            raise _error(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "Observation content object identity conflicts.",
+                retryable=False,
+            )
+
+    def record_content_manifest(
+        self,
+        *,
+        workspace: str,
+        logical_identity: str,
+        chunk: ObservationContentChunk,
+        ref: ObjectRef,
+        recorded_at: Timestamp,
+    ) -> None:
+        if type(chunk) is not ObservationContentChunk or type(recorded_at) is not Timestamp:
+            raise _error(
+                PublicErrorCode.INVALID_REQUEST,
+                "Observation content manifest is invalid.",
+                retryable=False,
+            )
+        with self._db:
+            self._inventory_object(ref)
+            self._db.execute(
+                "INSERT INTO observation_content_manifests("
+                "object_id,workspace_commitment,logical_identity,content_kind,"
+                "correlation_identity,source_commitment,media_type,part_index,part_count,"
+                "plaintext_size,content_commitment,redacted,recorded_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(workspace_commitment,logical_identity,content_kind,"
+                "correlation_identity,source_commitment,part_index) DO NOTHING",
+                (
+                    ref.object_id,
+                    workspace,
+                    logical_identity,
+                    chunk.content_kind.value,
+                    chunk.correlation_identity,
+                    chunk.source_commitment,
+                    chunk.media_type,
+                    chunk.part_index,
+                    chunk.part_count,
+                    ref.plaintext_size,
+                    ref.commitment,
+                    int(chunk.redacted),
+                    recorded_at.wire,
+                ),
+            )
+            row = self._db.execute(
+                "SELECT object_id,part_count,content_commitment,redacted "
+                "FROM observation_content_manifests "
+                "WHERE workspace_commitment=? AND logical_identity=? AND content_kind=? "
+                "AND correlation_identity=? AND source_commitment=? AND part_index=?",
+                (
+                    workspace,
+                    logical_identity,
+                    chunk.content_kind.value,
+                    chunk.correlation_identity,
+                    chunk.source_commitment,
+                    chunk.part_index,
+                ),
+            ).fetchone()
+            if row != (ref.object_id, chunk.part_count, ref.commitment, int(chunk.redacted)):
+                raise _error(
+                    PublicErrorCode.STORAGE_CORRUPT,
+                    "Observation content manifest conflicts.",
+                    retryable=False,
+                )
+
+    def content_manifest_object_id(
+        self,
+        *,
+        workspace: str,
+        logical_identity: str,
+        chunk: ObservationContentChunk,
+    ) -> str | None:
+        row = self._db.execute(
+            "SELECT object_id FROM observation_content_manifests "
+            "WHERE workspace_commitment=? AND logical_identity=? AND content_kind=? "
+            "AND correlation_identity=? AND source_commitment=? AND part_index=?",
+            (
+                workspace,
+                logical_identity,
+                chunk.content_kind.value,
+                chunk.correlation_identity,
+                chunk.source_commitment,
+                chunk.part_index,
+            ),
+        ).fetchone()
+        return cast(str, row[0]) if row is not None and type(row[0]) is str else None
+
+    def bind_workspace_locator(
+        self,
+        *,
+        workspace: str,
+        locator_ref: ObjectRef,
+        bound_at: Timestamp,
+    ) -> None:
+        with self._db:
+            self._inventory_object(locator_ref)
+            self._db.execute(
+                "INSERT INTO observation_workspace_bindings("
+                "workspace_commitment,locator_object_id,active,bound_at,revoked_at) "
+                "VALUES(?,?,1,?,NULL) "
+                "ON CONFLICT(workspace_commitment) DO UPDATE SET "
+                "locator_object_id=excluded.locator_object_id,active=1,"
+                "bound_at=excluded.bound_at,revoked_at=NULL",
+                (workspace, locator_ref.object_id, bound_at.wire),
+            )
+
+    def workspace_locator_descriptor(self, workspace: str) -> tuple[str, str] | None:
+        row = self._db.execute(
+            "SELECT binding.locator_object_id,objects.envelope_digest "
+            "FROM observation_workspace_bindings AS binding "
+            "JOIN objects ON objects.object_id=binding.locator_object_id "
+            "WHERE binding.workspace_commitment=? AND binding.active=1",
+            (workspace,),
+        ).fetchone()
+        if row is None or type(row[0]) is not str or type(row[1]) is not str:
+            return None
+        return cast(str, row[0]), cast(str, row[1])
+
+    def record_trusted_check_policy(
+        self,
+        *,
+        workspace: str,
+        policy_digest: str,
+        trust_ref: ObjectRef,
+        trusted_at: Timestamp,
+    ) -> None:
+        with self._db:
+            self._inventory_object(trust_ref)
+            self._db.execute(
+                "UPDATE observation_trusted_check_policies SET state='superseded',"
+                "revoked_at=? WHERE workspace_commitment=? AND state='trusted' "
+                "AND policy_digest<>?",
+                (trusted_at.wire, workspace, policy_digest),
+            )
+            token_row = self._db.execute(
+                "SELECT COALESCE(MAX(state_token),0)+1 "
+                "FROM observation_trusted_check_policies WHERE workspace_commitment=?",
+                (workspace,),
+            ).fetchone()
+            token = int(token_row[0]) if token_row is not None else 1
+            self._db.execute(
+                "INSERT INTO observation_trusted_check_policies("
+                "workspace_commitment,policy_digest,trust_object_id,state,trusted_at,"
+                "revoked_at,state_token) VALUES(?,?,?,'trusted',?,NULL,?) "
+                "ON CONFLICT(workspace_commitment,policy_digest) DO UPDATE SET "
+                "trust_object_id=excluded.trust_object_id,state='trusted',"
+                "trusted_at=excluded.trusted_at,revoked_at=NULL",
+                (
+                    workspace,
+                    policy_digest,
+                    trust_ref.object_id,
+                    trusted_at.wire,
+                    token,
+                ),
+            )
+
+    def policy_digest_is_trusted(self, workspace: str, policy_digest: str) -> bool:
+        return (
+            self._db.execute(
+                "SELECT 1 FROM observation_trusted_check_policies "
+                "WHERE workspace_commitment=? AND policy_digest=? AND state='trusted'",
+                (workspace, policy_digest),
+            ).fetchone()
+            is not None
+        )
+
+    def latest_verification_subject_digest(self, workspace: str) -> str | None:
+        row = self._db.execute(
+            "SELECT subject_state_digest FROM observation_verification_jobs "
+            "WHERE workspace_commitment=? ORDER BY state_token DESC LIMIT 1",
+            (workspace,),
+        ).fetchone()
+        return cast(str, row[0]) if row is not None and type(row[0]) is str else None
+
+    def load_check_facts(self, workspace: str) -> tuple[ObservationCheckFact, ...]:
+        rows = self._db.execute(
+            "SELECT jobs.approval_commitment,jobs.subject_state_digest,results.status,"
+            "jobs.state_token,results.is_current "
+            "FROM observation_verification_results AS results "
+            "JOIN observation_verification_jobs AS jobs ON jobs.job_id=results.job_id "
+            "WHERE results.workspace_commitment=? "
+            "ORDER BY jobs.state_token,results.check_id",
+            (workspace,),
+        ).fetchall()
+        return tuple(
+            ObservationCheckFact(
+                approval_commitment=cast(str, row[0]),
+                subject_state_digest=cast(str, row[1]),
+                status=cast(str, row[2]),
+                cursor_event_position=cast(int, row[3]),
+                is_current=bool(row[4]),
+            )
+            for row in rows
+        )
+
+    def verification_repository(self):
+        from yoetz.adapters.sqlite.observation_verification import (
+            SqliteObservationVerificationRepository,
+        )
+
+        return SqliteObservationVerificationRepository(self._db)
+
+    def record_logical_identity_claim(
+        self,
+        *,
+        workspace: str,
+        logical_identity: str,
+        materialization_digest: str,
+        operation_id: str,
+        source_mask: int,
+        mapping_version: str,
+        materialized_at: Timestamp,
+    ) -> None:
+        if type(source_mask) is not int or source_mask not in {1, 2}:
+            raise _error(
+                PublicErrorCode.INVALID_REQUEST,
+                "Observation source mask is invalid.",
+                retryable=False,
+            )
+        with self._db:
+            existing = self._db.execute(
+                "SELECT canonical_materialization_digest,operation_id,source_mask,mapping_version "
+                "FROM observation_logical_identity "
+                "WHERE workspace_commitment=? AND logical_identity=?",
+                (workspace, logical_identity),
+            ).fetchone()
+            if existing is None:
+                self._db.execute(
+                    "INSERT INTO observation_logical_identity("
+                    "workspace_commitment,logical_identity,canonical_materialization_digest,"
+                    "operation_id,source_mask,mapping_version,materialized_at) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (
+                        workspace,
+                        logical_identity,
+                        materialization_digest,
+                        operation_id,
+                        source_mask,
+                        mapping_version,
+                        materialized_at.wire,
+                    ),
+                )
+                return
+            if (
+                existing[0] != materialization_digest
+                or existing[1] != operation_id
+                or existing[3] != mapping_version
+            ):
+                raise _error(
+                    PublicErrorCode.STORAGE_CORRUPT,
+                    "Observation logical identity conflicts.",
+                    retryable=False,
+                )
+            combined = cast(int, existing[2]) | source_mask
+            if combined != existing[2]:
+                self._db.execute(
+                    "UPDATE observation_logical_identity SET source_mask=? "
+                    "WHERE workspace_commitment=? AND logical_identity=?",
+                    (combined, workspace, logical_identity),
+                )
 
     def _consent_row(self, workspace: str) -> tuple[str | None, bool, str] | None:
         row = self._db.execute(

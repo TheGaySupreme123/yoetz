@@ -18,6 +18,18 @@ environment variable alone.
 `prepare(argv, cwd, env, deny_network=True)` returns a launch plan. When ready and network is
 denied, `network_isolated` is true only if the platform sandbox actually enforces isolation.
 
+## Errors and edge cases
+
+Unsupported platform/tool or invalid launch shape returns unavailable/fails closed.
+
+## Invariants
+
+`network_isolated=true` is an enforcement claim, never an environment marker.
+
 ## Tests
 
 `tests/unit/adapters/test_check_sandbox.py`
+
+## Open questions
+
+None.

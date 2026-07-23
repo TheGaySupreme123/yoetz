@@ -55,7 +55,7 @@ digest of the manifest file.
 
 ### Included inventory
 
-The v0.1 inventory contains exactly 72 entries:
+The v0.1 inventory contains exactly 73 entries:
 
 - all 52 installed JSON Schema artifacts required for six-operation input/output, durable events,
   configuration, receipts, findings, version reporting, local-service control, and privacy/egress,
@@ -70,7 +70,8 @@ The v0.1 inventory contains exactly 72 entries:
   `accepted-entry-identity.case.json`,
   `identifiers.case.json`,
   `object-envelope.case.json`;
-- `migrations/catalog/0001.sql`, `migrations/bundle/0001.sql`, and `migrations/bundle/0002.sql`;
+- `migrations/catalog/0001.sql`, `migrations/bundle/0001.sql`,
+  `migrations/bundle/0002.sql`, and `migrations/bundle/0003.sql`;
 - the canonical Codex `SKILL.md`, its compatibility manifest, and all four harness-neutral
   `guidance/` documents (which Codex installs byte-identically under `references/`);
 - `support/runtime-support.json` as the installed write/integration support allowlist.

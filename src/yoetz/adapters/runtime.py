@@ -28,6 +28,7 @@ from yoetz.ports.ledger import (
     StoredProjection,
 )
 from yoetz.ports.objects import ObjectRef, ObjectStorePort
+from yoetz.ports.observation import TaskObservationPort
 from yoetz.ports.runtime import (
     BundleProvisionCommand,
     BundleProvisionMode,
@@ -175,6 +176,23 @@ class _Entry:
     usages: int = 0
     poisoned: bool = False
     closed: bool = False
+
+
+class _ObservationCapableLedger(Protocol):
+    def open_observation_store(self) -> TaskObservationPort: ...
+
+
+def _observation_for(ledger: LedgerPort) -> TaskObservationPort | None:
+    """Expose the durable observation seam for WRITE-capable concrete ledgers.
+
+    Read facades and ledger adapters without the public accessor simply have no
+    observation seam; production ingest treats that as an unavailable store.
+    """
+
+    opener = getattr(ledger, "open_observation_store", None)
+    if opener is None:
+        return None
+    return cast(_ObservationCapableLedger, ledger).open_observation_store()
 
 
 class _ReadLedger:
@@ -592,10 +610,13 @@ class LocalBundleRuntime(BundleRuntimePort):
         ledger: LedgerPort
         objects: ObjectStorePort
         importer: ImporterPort
+        observation: TaskObservationPort | None = None
         if access in {RouteAccess.WRITE, RouteAccess.IMPORT_REVIEW, RouteAccess.MAINTENANCE}:
             ledger = entry.ledger
             objects = entry.objects
             importer = entry.importer
+            if RuntimeCapability.WRITE in admitted:
+                observation = _observation_for(entry.ledger)
         else:
             ledger = cast(LedgerPort, _ReadLedger(entry.ledger))
             objects = cast(
@@ -619,6 +640,7 @@ class LocalBundleRuntime(BundleRuntimePort):
             protocol_version=versions["protocol_version"],
             bundle_schema_version=versions["bundle_schema_version"],
             fence=entry.fence,
+            observation=observation,
         )
         async with self._lock:
             if entry.poisoned or self._closed:

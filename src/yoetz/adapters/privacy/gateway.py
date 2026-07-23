@@ -273,6 +273,27 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
 
         return self._registry
 
+    def configured_provider_ids(self) -> tuple[str, ...]:
+        """Return bounded structural provider IDs with verified factory builders."""
+
+        return tuple(
+            sorted(
+                {binding.provider_id for binding in self._external_factory_builders},
+                key=str.encode,
+            )
+        )
+
+    def connected_provider_ids(self) -> tuple[str, ...]:
+        """Return provider IDs present in the current generation-fenced registry."""
+
+        registry = self._current_registry()
+        if registry is None:
+            return ()
+        connected = {binding.provider_id for binding in registry.external}
+        if registry.local_model is not None:
+            connected.add(registry.local_model[0].provider_id)
+        return tuple(sorted(connected, key=str.encode))
+
     # -- reconciliation -----------------------------------------------------------------------
 
     async def reconcile_policy(

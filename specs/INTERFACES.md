@@ -1591,6 +1591,10 @@ Shared closed types:
   closed identifier from the capability cell, or an opaque unsupported token), stable source
   identity, `ObservationCursor`, receipt time, bounded allowlisted structural payload, content-
   object references (encrypted object IDs/commitments only), and gap codes.
+- `ObservationContentChunk` — ordinary-control-only bounded visible content carrying exact
+  `content_kind`, correlation identity, source commitment, media type, part index/count, redaction
+  flag, and bytes. At most 16 chunks and 700,000 aggregate input bytes keep the request below the
+  ordinary 1 MiB control-frame cap; each assembled encrypted object remains below 4 MiB.
 - `ObservationCursor` — source generation, byte/event position, last source commitment, and
   mapping version. Cursors are crash-stable and generation-fenced.
 - `ObservationStatus` — lifecycle `active|degraded|stale|stopped`, source coverage, last
@@ -1613,23 +1617,42 @@ Independent verification support (local control, not MCP):
 - Approved-check runner — executes only commitment-approved argv (`shell=False`, bounded
   time/output, sanitized env, no network unless separately authorized); binds results to the
   observed subject-state digest so later edits stale prior success.
+- `.yoetz/checks.toml` — fixed schema `yoetz.approved-check-policy/1`; raw bytes produce the trust
+  digest. Repository content proposes no authority. One trusted-local exact-digest confirmation is
+  retained as an encrypted workspace-scoped record. Any byte change is untrusted.
+- `ObservationVerificationWorker` plus its repository — one generation-fenced lease per workspace;
+  newer subject digests stale older pending work, identical workspace/policy/approval/state tuples
+  are cached, abandoned running work returns to pending, and immutable results record whether the
+  post-run state is still current.
 
-Observation consent is one project-level confirmation recorded as a private workspace commitment
-(never a raw filesystem path in logs, status, or receipts). Consent is separate from egress
-consent. Revocation stops new ingestion and retains already-kept evidence. Sensitive bounded
-evidence lives only in encrypted objects; plaintext observation state is allowlisted structural
-fields plus commitments. Yoetz never retains hidden reasoning or complete transcript prose, never
-creates an unencrypted transcript spool on vault/service outage, and never places secret-like
-command output in status, logs, hook advice, or semantic packets. Semantic review receives only
-minimized approved packets. Unrecognized future Codex events accept the stable envelope plus
-structural facts, record opaque gaps for unknown semantics, and never infer success.
+Observation consent is one project-level confirmation recorded as a private workspace commitment.
+The normalized locator is authenticated encrypted content; plaintext keeps only commitment and
+object ID. Revocation disables/removes the active locator and trust binding while retaining already
+encrypted evidence. Visible task messages, tool input/result, task-linked terminal output,
+changed-file/diff material, approved-check output, lifecycle, and readiness facts may be captured.
+Hidden reasoning, system/platform/developer prompts, credentials, detected secrets, unrelated files,
+and untethered logs are excluded before storage. Secret spans are redacted in memory before
+encryption. SQLite/envelopes retain only encrypted object IDs, commitments, classifications, sizes,
+and relations. Vault/service failure records `content_capture_unavailable` and no plaintext spool.
+Unrecognized visible events accept an opaque stable envelope plus encrypted content and
+`unsupported_event`; unknown semantics never infer success.
+
+Canonical normalization precedes materialization. Equivalent hook/stream host calls share logical
+identity, roles, operation digest, and stable ledger IDs. The logical-identity repository merges a
+two-bit source mask; duplicates retry incomplete content/store/ledger/verification/advice work
+idempotently. Stream cursor advancement occurs only after outbox insertion. Session end is
+generation-scoped; a newer start clears only the old stopped fence. Drain is bounded round-robin
+across workspace sessions. Quarantine eviction retains aggregate commitment, count, first/last
+receipt times, and `quarantine_detail_evicted`.
 
 `hook_observed` (publication channel and artifact-observation class) and `harness_observed`
 authorship require real observation evidence under an active consented observation arm — never a
 trigger-only hook, consent marker, empty status, or degraded/stopped source alone.
 
-Existing v0.1 ledger/object/import data remains readable without rewrite. Migrations may add only
-observation consent, cursor, dedup, and advice state.
+Existing v0.1 ledger/object/import data remains readable without rewrite. Migration `0003` may add
+encrypted observation-content/workspace-binding references, logical identity claims, exact-digest
+trust, verification jobs/leases/results, and advice history/delivery state in addition to `0002`
+consent/cursor/dedup/current-advice state. It adds no plaintext content column.
 
 ### Maintenance
 

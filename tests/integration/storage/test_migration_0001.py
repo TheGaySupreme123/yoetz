@@ -16,7 +16,7 @@ ROOT = Path(__file__).parents[3]
 
 
 def test_root_and_installed_migration_resources_are_byte_identical() -> None:
-    for family, versions in (("catalog", ("0001",)), ("bundle", ("0001", "0002"))):
+    for family, versions in (("catalog", ("0001",)), ("bundle", ("0001", "0002", "0003"))):
         for version in versions:
             root = ROOT / "migrations" / family / f"{version}.sql"
             resource = (
@@ -39,7 +39,7 @@ def test_fresh_migrations_install_identified_foreign_key_clean_schemas() -> None
     assert catalog.execute("PRAGMA foreign_key_check").fetchone() is None
 
     assert bundle.execute("PRAGMA application_id").fetchone() == (0x594F4554,)
-    assert bundle.execute("PRAGMA user_version").fetchone() == (2,)
+    assert bundle.execute("PRAGMA user_version").fetchone() == (3,)
     assert bundle.execute("PRAGMA foreign_keys").fetchone() == (1,)
     assert bundle.execute("PRAGMA trusted_schema").fetchone() == (0,)
     assert bundle.execute("PRAGMA foreign_key_check").fetchone() is None
@@ -49,7 +49,7 @@ def test_fresh_migrations_install_identified_foreign_key_clean_schemas() -> None
     ).fetchone() == ("1",)
     assert bundle.execute(
         "SELECT value FROM bundle_meta WHERE key = 'storage_schema_version'"
-    ).fetchone() == ("2",)
+    ).fetchone() == ("3",)
     assert bundle.execute(
         "SELECT 1 FROM sqlite_schema WHERE name = 'observation_consent'"
     ).fetchone() == (1,)
@@ -79,12 +79,12 @@ def test_bundle_run_migrations_applies_0002_from_schema_version_one() -> None:
 
     report = run_migrations(bundle, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
     assert report.from_version == 1
-    assert report.to_version == 2
-    assert report.applied_versions == ("0002",)
-    assert bundle.execute("PRAGMA user_version").fetchone() == (2,)
+    assert report.to_version == 3
+    assert report.applied_versions == ("0002", "0003")
+    assert bundle.execute("PRAGMA user_version").fetchone() == (3,)
     assert bundle.execute(
         "SELECT value FROM bundle_meta WHERE key = 'storage_schema_version'"
-    ).fetchone() == ("2",)
+    ).fetchone() == ("3",)
     assert bundle.execute(
         "SELECT 1 FROM sqlite_schema WHERE name = 'observation_consent'"
     ).fetchone() == (1,)

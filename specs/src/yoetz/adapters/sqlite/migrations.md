@@ -4,7 +4,7 @@
 `specs/src/yoetz/adapters/sqlite/connection.md`,
 `specs/src/yoetz/ports/maintenance.py.md` (`MaintenanceHandle` only),
 `specs/migrations/catalog/0001.sql.md`, `specs/migrations/bundle/0001.sql.md`,
-`specs/migrations/bundle/0002.sql.md` | **Imported by:**
+`specs/migrations/bundle/0002.sql.md`, `specs/migrations/bundle/0003.sql.md` | **Imported by:**
 `specs/src/yoetz/adapters/sqlite/start_catalog.md`,
 `specs/src/yoetz/adapters/sqlite/repository.md`,
 `specs/src/yoetz/adapters/sqlite/maintenance.py.md`, `specs/src/yoetz/application/start.md`
@@ -23,7 +23,9 @@ unknown schemas, and the absolute rule that canonical event bytes are never rewr
 
 - `CATALOG_MIGRATIONS: tuple[Migration, ...]` and `BUNDLE_MIGRATIONS: tuple[Migration, ...]` —
   ordered frozen migration registries; catalog is exactly `Migration("0001", ddl)`; bundle is
-  contiguous `0001` then `0002` (observation tables) as registered in `specs/INTERFACES.md`.
+  contiguous `0001`, `0002`, then `0003` (encrypted observation content/bindings, logical
+  identity, check-policy trust, verification, and advice history) as registered in
+  `specs/INTERFACES.md`.
 - `initialize_catalog(db) -> None`, `initialize_bundle(db, bundle_meta_seed) -> None` — run all
   registered migrations on a fresh (`uninitialized`) database.
 - `run_migrations(db, registry, *, maintenance: MaintenanceHandle) -> MigrationReport` — upgrade
@@ -33,9 +35,10 @@ unknown schemas, and the absolute rule that canonical event bytes are never rewr
 - `current_schema_version(registry) -> int`.
 
 Reviewable DDL lives in `specs/migrations/catalog/0001.sql.md`,
-`specs/migrations/bundle/0001.sql.md`, and `specs/migrations/bundle/0002.sql.md`; their future SQL
-files are mirrored byte-identically under `src/yoetz/resources/migrations/`. Packaging and startup
-tests assert source/resource/registry equality before any SQL executes.
+`specs/migrations/bundle/0001.sql.md`, `specs/migrations/bundle/0002.sql.md`, and
+`specs/migrations/bundle/0003.sql.md`; their future SQL files are mirrored byte-identically under
+`src/yoetz/resources/migrations/`. Packaging and startup tests assert source/resource/registry
+equality before any SQL executes.
 
 ## Behavior
 
@@ -563,7 +566,7 @@ creates, repairs, or analyzes an access path at open time.
 ### `initialize_bundle(db, bundle_meta_seed)`
 
 Runs on a fresh database inside one transaction (`BEGIN IMMEDIATE` … `COMMIT`): executes every
-registered bundle migration in order (`0001` then `0002`), seeds `counters` with
+registered bundle migration in order (`0001`, `0002`, then `0003`), seeds `counters` with
 `('ingestion_sequence', 1)`, and inserts the required `bundle_meta` keys — protocol version,
 storage schema version equal to `current_schema_version(BUNDLE_MIGRATIONS)`, task ID, current
 global head sequence (`0`)/head digest (`"genesis"`), active projection generation, accepted SQLite

@@ -39,11 +39,11 @@ from yoetz.domain.values import (
     action_id,
     actor_id,
     claim_id,
-    evidence_id,
     event_id,
+    evidence_id,
     result_id,
 )
-from yoetz.protocol.canonical import canonical_digest, request_digest
+from yoetz.protocol.canonical import request_digest
 from yoetz.protocol.coverage import (
     ArtifactObservation,
     AuthorshipAssurance,
@@ -57,11 +57,13 @@ __all__ = [
     "MATERIALIZATION_MAPPING_VERSION",
     "MaterializedObservationBatch",
     "MaterializedObservationDraft",
+    "canonical_logical_identity",
     "materialize_observation_envelope",
     "stable_observation_id",
 ]
 
-MATERIALIZATION_MAPPING_VERSION: Final = "obs-ledger/1.0.0"
+MATERIALIZATION_MAPPING_VERSION: Final = "obs-ledger/1.1.0"
+_LOGICAL_IDENTITY_DOMAIN: Final = "yoetz/observation-logical-identity/v1"
 _ID_DOMAIN: Final = b"yoetz/observation-materialize-id/v1\x00"
 _FILE_TOOLS: Final = frozenset(
     {
@@ -210,11 +212,11 @@ def _draft(
         schema,
         occurred_at,
         tuple(event_id(parent) for parent in parents),
-        cast(object, payload),  # pyright: ignore[reportArgumentType]
+        payload,  # pyright: ignore[reportArgumentType]
         (),
         (),
     )
-    encoded = encode_payload(cast(object, payload))  # pyright: ignore[reportArgumentType]
+    encoded = encode_payload(payload)  # pyright: ignore[reportArgumentType]
     return MaterializedObservationDraft(
         draft=draft,
         payload_bytes=canonical_encode(encoded),
@@ -234,7 +236,13 @@ def materialize_observation_envelope(
     """
 
     if type(envelope) is not ObservationEnvelope:
-        return MaterializedObservationBatch((), coverage_for_channel(PublicationChannel.HOOK_OBSERVED), PublicationChannel.HOOK_OBSERVED, (), "invalid_envelope")
+        return MaterializedObservationBatch(
+            (),
+            coverage_for_channel(PublicationChannel.HOOK_OBSERVED),
+            PublicationChannel.HOOK_OBSERVED,
+            (),
+            "invalid_envelope",
+        )
 
     structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
     gaps = tuple(envelope.gap_codes)
@@ -242,6 +250,16 @@ def materialize_observation_envelope(
     channel = PublicationChannel.HOOK_OBSERVED
     mapping = envelope.cursor.mapping_version or MATERIALIZATION_MAPPING_VERSION
     kind = envelope.event_kind
+    # Codex hook ``PostToolUse`` and session-stream ``item.completed`` are two
+    # observations of the same completed host call. Normalize the stream form
+    # before choosing ledger roles so both sources produce the same
+    # action/result batch and therefore the same operation digest.
+    if (
+        envelope.source is ObservationSource.CODEX_SESSION_STREAM
+        and kind == "item.completed"
+        and _correlation(structural) is not None
+    ):
+        kind = "PostToolUse"
     tool = _tool_name(structural)
     correlation = _correlation(structural)
     unpaired = ObservationGapCode.UNPAIRED_EVENT.value in gaps
@@ -262,7 +280,9 @@ def materialize_observation_envelope(
 
     if kind == "PreToolUse":
         if correlation is None:
-            return MaterializedObservationBatch((), coverage, channel, gaps, "missing_tool_identity")
+            return MaterializedObservationBatch(
+                (), coverage, channel, gaps, "missing_tool_identity"
+            )
         action = stable_observation_id(
             kind=IdKind.ACTION,
             task_id=task_id,
@@ -450,7 +470,9 @@ def materialize_observation_envelope(
     if kind in _SUBAGENT_START or kind in _SUBAGENT_STOP:
         # Assignment requires obligations; record evidence-only until correlation is complete.
         if correlation is None and structural.get("subagent_id") is None:
-            return MaterializedObservationBatch((), coverage, channel, gaps, "missing_subagent_identity")
+            return MaterializedObservationBatch(
+                (), coverage, channel, gaps, "missing_subagent_identity"
+            )
         evidence = stable_observation_id(
             kind=IdKind.EVIDENCE,
             task_id=task_id,
@@ -547,15 +569,53 @@ def materialize_observation_envelope(
     return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
 
 
+def canonical_logical_identity(envelope: ObservationEnvelope) -> str:
+    """Return the canonical logical-observation identity for one envelope.
+
+    Hook ``PostToolUse`` and stream ``item.completed`` copies of the same host
+    call collapse to one identity (session + host call/correlation id + tool
+    family), so cross-source duplicates materialize a single ledger action or
+    result. Consecutive identical commands with *different* host ids stay
+    distinct. Events without a host call id (lifecycle, unsupported, or gap
+    envelopes) fall back to a source-specific opaque identity so unrelated
+    look-alikes never collide.
+    """
+
+    if type(envelope) is not ObservationEnvelope:
+        return _logical_identity_digest(("opaque", "invalid"))
+    structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
+    host_call = _correlation(structural)
+    if host_call is None:
+        return _logical_identity_digest(("opaque", envelope.source.value, envelope.source_identity))
+    family = _action_kind(_tool_name(structural)).value
+    return _logical_identity_digest(("action", envelope.session_commitment, host_call, family))
+
+
+def _logical_identity_digest(components: tuple[str, ...]) -> str:
+    """Hash domain-separated components into a nul-free ``sha256:`` identity.
+
+    The result is safe to embed in canonical request digests (which forbid nul
+    bytes) while remaining a stable equality key across sources.
+    """
+
+    material = _LOGICAL_IDENTITY_DOMAIN.encode() + b"\x00"
+    material += b"\x00".join(component.encode() for component in components)
+    return "sha256:" + hashlib.sha256(material).hexdigest()
+
+
 def observation_operation_digest(
     *,
     task_id: str,
     session_id: str,
     writer_id: str,
-    source_identity: str,
+    logical_identity: str,
     draft_roles: tuple[str, ...],
 ) -> str:
-    """Stable request digest for idempotent observation appends."""
+    """Stable request digest for idempotent observation appends.
+
+    Keyed on the canonical *logical* identity rather than the source-specific
+    identity so matching hook/stream copies produce one ledger operation.
+    """
 
     return request_digest(
         JsonObject(
@@ -565,7 +625,7 @@ def observation_operation_digest(
                 "task_id": task_id,
                 "session_id": session_id,
                 "writer_id": writer_id,
-                "source_identity": source_identity,
+                "logical_identity": logical_identity,
                 "roles": draft_roles,
                 "mapping_version": MATERIALIZATION_MAPPING_VERSION,
             }

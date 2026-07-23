@@ -47,9 +47,9 @@ The implementation-locked capability/resource wire records are closed:
 - subject-state capability is `{status:"present",cells:[...]}` or exactly absent, with each cell
   binding profile/platform/Git/capture-format identities and capability digest;
 - `ResourceIdentity` is `{name,media_type,size_bytes,sha256_digest}`, where size is a canonical
-  decimal string. Resource counts are exactly 53 schemas, 9 canonical vectors, 3 migrations,
-  2 skill resources, 4 guidance resources, and 1 runtime-support resource, totaling 72; the
-  resource list is either intentionally omitted-content empty or exactly 72 identities.
+  decimal string. Resource counts are exactly 53 schemas, 9 canonical vectors, 4 migrations,
+  2 skill resources, 4 guidance resources, and 1 runtime-support resource, totaling 73; the
+  resource list is either intentionally omitted-content empty or exactly 73 identities.
 
 The manifest carries exactly 31 request/result schema-version entries and 16 event entries, the
 two policy identities in canonical `research-evidence`, `work-integrity` order, and bounded

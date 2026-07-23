@@ -83,6 +83,8 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "integer_out_of_safe_range",
     "integer_out_of_sqlite_range",
     "invalid_actor_type",
+    "invalid_approved_check",
+    "invalid_approved_check_policy",
     "invalid_chain",
     "invalid_check_types",
     "invalid_commitment",
@@ -181,7 +183,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 129
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 131
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)

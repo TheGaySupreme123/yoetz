@@ -25,6 +25,7 @@ __all__ = [
     "privacy_request_commitment",
     "redact_diagnostic_record",
     "redact_diagnostic_value",
+    "redact_sensitive_content",
     "scan_for_sensitive_content",
     "session_id_hash",
 ]
@@ -346,6 +347,24 @@ def assert_plaintext_safe(
         "private_key_marker": "private_key_marker_detected",
     }[first.kind]
     raise PrivacyFenceError(reason, surface)
+
+
+def redact_sensitive_content(data: bytes) -> tuple[bytes, bool]:
+    """Replace every detected credential/key span without retaining the match."""
+
+    findings = scan_for_sensitive_content(data)
+    if not findings:
+        return data, False
+    pieces: list[bytes] = []
+    cursor = 0
+    for finding in findings:
+        if finding.start_offset < cursor:
+            continue
+        pieces.append(data[cursor : finding.start_offset])
+        pieces.append(b"[REDACTED]")
+        cursor = finding.end_offset
+    pieces.append(data[cursor:])
+    return b"".join(pieces), True
 
 
 def _safe_mac(handle: MacKeyHandle, domain: bytes, message: bytes) -> str:

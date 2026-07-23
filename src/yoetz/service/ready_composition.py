@@ -31,6 +31,7 @@ from yoetz.adapters.sqlite.migrations import initialize_bundle, initialize_catal
 from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.adapters.sqlite.start_catalog import SqliteStartCatalog
 from yoetz.application.check import FinalSemanticEvaluation
+from yoetz.application.observation_advice import ObservationAdviceContextBuilder
 from yoetz.application.observation_control import build_observation_support_handlers
 from yoetz.application.observation_coordinator import ObservationCoordinator
 from yoetz.application.service import (
@@ -64,6 +65,7 @@ from yoetz.domain.values import (
 from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
 )
+from yoetz.kernel.policies.observation_advice import ObservationCompositionFact
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.control import ControlError
 from yoetz.ports.diagnostics import DiagnosticsPort, RuntimeCapability, StartupCheckResult
@@ -1088,7 +1090,7 @@ async def provide_service_ready_context(
         ids=ids,
     )
     manifest = _version_json()
-    privacy, policy, _gateway = await build_privacy_coordinator(
+    privacy, policy, gateway = await build_privacy_coordinator(
         catalog_db=cast(apsw.Connection, getattr(catalog, "_db")),
         installation_id=cast(str, getattr(vault, "_installation_id")),
         service_generation=service_generation,
@@ -1162,11 +1164,23 @@ async def provide_service_ready_context(
     # Production path: LocalObservationStore (consent/outbox) + ObservationCoordinator
     # routes into the mapped task-bundle SqliteObservationStore. MemoryObservationStore
     # remains test/reference-only and must not be used here.
+    provider_factory_ids = tuple(getattr(gateway, "configured_provider_ids", lambda: ())())
+    connected_provider_ids = tuple(getattr(gateway, "connected_provider_ids", lambda: ())())
+    semantic_configured = config.verification.semantic != "disabled"
+    semantic_ready = semantic_configured and bool(connected_provider_ids)
     observation_coordinator = ObservationCoordinator(
         runtime=runtime,
         local=LocalObservationStore(),
         clock=clock,
         ids=ids,
+        advice_context_builder=ObservationAdviceContextBuilder(
+            composition=ObservationCompositionFact(
+                semantic_configured=semantic_configured,
+                semantic_ready=semantic_ready,
+                provider_factory_ids=provider_factory_ids,
+                connected_provider_ids=connected_provider_ids,
+            )
+        ),
     )
     observation_handlers = build_observation_support_handlers(observation_coordinator)
     return ServiceReadyContext(

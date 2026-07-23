@@ -17,6 +17,7 @@ from yoetz.adapters.memory.ledger import (
     build_append_operation_record,
     load_frozen_case_from_resume,
 )
+from yoetz.adapters.sqlite.observation import SqliteObservationStore
 from yoetz.domain.events import (
     AcceptedEvent,
     CheckRecordedPayload,
@@ -235,6 +236,15 @@ class SqliteLedger:
         self._lock = asyncio.Lock()
         self._state = MemoryLedgerState()
         self._requires_recovery = _head(db).sequence != 0
+
+    def open_observation_store(self) -> SqliteObservationStore:
+        """Public durable-observation seam over this bundle's connection.
+
+        Production code obtains the mapped-task observation store through this
+        accessor rather than reaching into the ledger's private connection.
+        """
+
+        return SqliteObservationStore(self._db)
 
     def _object_ref_from_inventory(self, object_id: str, task: str, media_type: str) -> ObjectRef:
         row = self._db.execute(

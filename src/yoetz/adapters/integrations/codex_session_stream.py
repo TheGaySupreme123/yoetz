@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 from yoetz.adapters.importers.codex_jsonl import (
     SUPPORTED_CODEX_PROFILES,
@@ -167,11 +167,7 @@ class CodexSessionStreamLocator:
                 if walked > _MAX_SESSION_WALK:
                     return None
                 # Never descend through symlinked directories.
-                dirnames[:] = [
-                    name
-                    for name in dirnames
-                    if not (Path(dirpath) / name).is_symlink()
-                ]
+                dirnames[:] = [name for name in dirnames if not (Path(dirpath) / name).is_symlink()]
                 for name in filenames:
                     if session_id not in name:
                         continue
@@ -189,9 +185,7 @@ class CodexSessionStreamLocator:
             return None
         return matches[0]
 
-    def _validate_candidate(
-        self, candidate: Path, *, home: Path, session_id: str
-    ) -> Path | None:
+    def _validate_candidate(self, candidate: Path, *, home: Path, session_id: str) -> Path | None:
         try:
             if candidate.is_symlink() or not candidate.is_file():
                 return None
@@ -222,7 +216,7 @@ class CodexSessionStreamLocator:
     def _is_beneath(path: Path, root: Path) -> bool:
         try:
             path.relative_to(root.resolve(strict=False))
-        except (OSError, ValueError):
+        except OSError, ValueError:
             return False
         return True
 
@@ -234,7 +228,7 @@ class CodexSessionStreamLocator:
             return False
         uid = getattr(os, "getuid", None)
         if callable(uid):
-            return int(stat.st_uid) == int(uid())
+            return int(stat.st_uid) == cast(Callable[[], int], uid)()
         return True
 
 
@@ -586,22 +580,47 @@ def reconcile_session_stream(
     advance = reader.advance(path)
     accepted = 0
     duplicates = 0
+    overflow = False
+    committed_cursor = existing
     for envelope in advance.envelopes:
         result = store.ingest(envelope)
+        if result.disposition.value not in {"accepted", "duplicate"}:
+            break
+        # Enqueue duplicates too: the local observation row may have committed
+        # immediately before an earlier enqueue overflow/crash. This closes the
+        # retry hole without growing the outbox because enqueue is idempotent.
+        if (
+            store.enqueue_outbox(workspace_commitment, codex_session_id, envelope)
+            == ObservationGapCode.OUTBOX_OVERFLOW.value
+        ):
+            overflow = True
+            break
+        committed_cursor = envelope.cursor
         if result.disposition.value == "accepted":
             accepted += 1
-        elif result.disposition.value == "duplicate":
+        else:
             duplicates += 1
-    store.set_stream_cursor(workspace_commitment, session_commitment, advance.cursor)
-    store.set_stream_partial(workspace_commitment, session_commitment, advance.partial_line)
+    if not overflow:
+        committed_cursor = advance.cursor
+    store.set_stream_cursor(workspace_commitment, session_commitment, committed_cursor)
+    # A partial tail belongs to ``advance.cursor``. When overflow leaves the
+    # cursor behind, discard that tail and reread from the last queued line.
+    store.set_stream_partial(
+        workspace_commitment,
+        session_commitment,
+        advance.partial_line if not overflow else b"",
+    )
     store.note_stream_reconcile(workspace_commitment)
+    gaps = advance.gaps
+    if overflow and ObservationGapCode.OUTBOX_OVERFLOW.value not in gaps:
+        gaps = (*gaps, ObservationGapCode.OUTBOX_OVERFLOW.value)
     return {
         "accepted": accepted,
         "duplicates": duplicates,
-        "gaps": advance.gaps,
-        "byte_position": advance.cursor.byte_position,
-        "event_position": advance.cursor.event_position,
-        "generation": advance.cursor.source_generation,
+        "gaps": gaps,
+        "byte_position": committed_cursor.byte_position,
+        "event_position": committed_cursor.event_position,
+        "generation": committed_cursor.source_generation,
         "rotated": advance.rotated,
         "truncated": advance.truncated,
         "resolved": True,

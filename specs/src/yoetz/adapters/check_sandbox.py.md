@@ -18,6 +18,18 @@ Platform adapters for enforcing no-network check execution.
 
 Never claim network isolation from env markers. Unavailable → `sandbox_unavailable`.
 
+## Errors and edge cases
+
+Missing platform sandbox returns unavailable; nested sandbox denial remains a failed check.
+
+## Invariants
+
+No adapter invokes a shell or claims isolation it did not enforce.
+
 ## Tests
 
 `tests/unit/adapters/test_check_sandbox.py`
+
+## Open questions
+
+None.

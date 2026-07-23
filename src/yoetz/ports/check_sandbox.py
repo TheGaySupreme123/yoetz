@@ -37,8 +37,6 @@ class CheckSandboxLaunch:
             raise ValueError("check_sandbox_invalid")
         if type(self.network_isolated) is not bool:
             raise ValueError("check_sandbox_invalid")
-        if not isinstance(self.cwd, Path):
-            raise ValueError("check_sandbox_invalid")
         if self.status is CheckSandboxStatus.UNAVAILABLE and self.network_isolated:
             raise ValueError("check_sandbox_invalid")
 

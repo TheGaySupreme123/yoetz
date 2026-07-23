@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+import asyncio
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Protocol
 
 from yoetz.adapters.approved_checks import (
     ApprovedCheckApproval,
@@ -23,6 +25,9 @@ from yoetz.ports.workspace_inspect import (
 
 __all__ = [
     "InspectionOrchestrationResult",
+    "ObservationVerificationJob",
+    "ObservationVerificationRepository",
+    "ObservationVerificationWorker",
     "SubjectStateDigestFn",
     "orchestrate_changed_path_inspection",
     "run_bound_approved_check",
@@ -36,6 +41,149 @@ class InspectionOrchestrationResult:
     inspect: WorkspaceInspectResult | None
     inspect_fact: ObservationInspectFact | None
     relative_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationVerificationJob:
+    job_id: str
+    workspace_commitment: str
+    policy_digest: str
+    approval_commitment: str
+    subject_state_digest: str
+    state_token: int
+
+
+class ObservationVerificationRepository(Protocol):
+    """Generation-fenced durable verification job/result repository."""
+
+    def enqueue_latest(
+        self,
+        *,
+        workspace: str,
+        policy_digest: str,
+        approvals: tuple[str, ...],
+        subject_state_digest: str,
+        enqueued_at: str,
+    ) -> tuple[str, ...]: ...
+
+    def claim_next(
+        self,
+        *,
+        service_generation: int,
+        lease_owner: str,
+        lease_expires_at: str,
+        now: str,
+    ) -> ObservationVerificationJob | None: ...
+
+    def complete(
+        self,
+        *,
+        job: ObservationVerificationJob,
+        service_generation: int,
+        lease_owner: str,
+        check_id: str,
+        result: ApprovedCheckResult,
+        subject_state_after: str | None,
+        result_commitment: str,
+        output_object_id: str | None,
+        limitations_json: bytes,
+        is_current: bool,
+        recorded_at: str,
+    ) -> None: ...
+
+
+WorkspaceProvider = Callable[[str], LocalWorkspaceHandle]
+PolicyProvider = Callable[[str, str], tuple[ApprovedCheckApproval, ...]]
+SubjectDigestProvider = Callable[[LocalWorkspaceHandle], str]
+OutputPersister = Callable[[ObservationVerificationJob, bytes], Awaitable[str | None]]
+NowProvider = Callable[[], str]
+
+
+@dataclass
+class ObservationVerificationWorker:
+    """Run one serialized, generation-fenced durable verification lease at a time."""
+
+    repository: ObservationVerificationRepository
+    runner: ApprovedCheckRunner
+    workspace_provider: WorkspaceProvider
+    policy_provider: PolicyProvider
+    capture_subject_state: SubjectDigestProvider
+    persist_output: OutputPersister
+    service_generation: int
+    lease_owner: str
+    now: NowProvider
+    lease_expires_at: NowProvider
+
+    def enqueue_if_changed(
+        self,
+        *,
+        workspace: str,
+        policy_digest: str,
+        approvals: tuple[ApprovedCheckApproval, ...],
+        previous_subject_state_digest: str | None,
+        subject_state_digest: str,
+    ) -> tuple[str, ...]:
+        if previous_subject_state_digest == subject_state_digest:
+            return ()
+        return self.repository.enqueue_latest(
+            workspace=workspace,
+            policy_digest=policy_digest,
+            approvals=tuple(item.approval_commitment for item in approvals),
+            subject_state_digest=subject_state_digest,
+            enqueued_at=self.now(),
+        )
+
+    async def run_once(self) -> ObservationVerificationJob | None:
+        job = self.repository.claim_next(
+            service_generation=self.service_generation,
+            lease_owner=self.lease_owner,
+            lease_expires_at=self.lease_expires_at(),
+            now=self.now(),
+        )
+        if job is None:
+            return None
+        workspace = self.workspace_provider(job.workspace_commitment)
+        approvals = self.policy_provider(job.workspace_commitment, job.policy_digest)
+        approval = next(
+            (item for item in approvals if item.approval_commitment == job.approval_commitment),
+            None,
+        )
+        if approval is None:
+            raise RuntimeError("verification_policy_authority_missing")
+        captured: list[bytes] = []
+        original_sink = getattr(self.runner, "_output_sink", None)
+        setattr(self.runner, "_output_sink", captured.append)
+        try:
+            result, _fact = await asyncio.to_thread(
+                run_bound_approved_check,
+                runner=self.runner,
+                workspace=workspace,
+                approval=approval,
+                expected_subject_state_digest=job.subject_state_digest,
+                capture_subject_state=self.capture_subject_state,
+                cursor_event_position=job.state_token,
+            )
+        finally:
+            setattr(self.runner, "_output_sink", original_sink)
+        after = self.capture_subject_state(workspace)
+        current = after == job.subject_state_digest
+        output_object_id = (
+            await self.persist_output(job, captured[-1]) if captured and captured[-1] else None
+        )
+        self.repository.complete(
+            job=job,
+            service_generation=self.service_generation,
+            lease_owner=self.lease_owner,
+            check_id=approval.approval_id,
+            result=result,
+            subject_state_after=after,
+            result_commitment=result.result_digest,
+            output_object_id=output_object_id,
+            limitations_json=b"[]",
+            is_current=current,
+            recorded_at=self.now(),
+        )
+        return job
 
 
 def orchestrate_changed_path_inspection(
