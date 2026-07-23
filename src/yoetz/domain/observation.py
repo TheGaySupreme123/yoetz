@@ -179,6 +179,7 @@ class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum
     SOURCE_LAG = "source_lag"
     MAPPING_MISSING = "mapping_missing"
     OUTBOX_OVERFLOW = "outbox_overflow"
+    OUTBOX_QUARANTINED = "outbox_quarantined"
 
 
 class ObservationIngestDisposition(str, Enum):  # noqa: UP042 - exact durable wire enum
@@ -542,9 +543,7 @@ class AdviceItem:
         object.__setattr__(self, "finding_id", finding_id(self.finding_id))
         object.__setattr__(self, "rule_code", _token(self.rule_code))
         object.__setattr__(self, "priority", _nonnegative(self.priority, maximum=1_000))
-        object.__setattr__(
-            self, "summary", _advice_text(self.summary, maximum=_MAX_ADVICE_SUMMARY)
-        )
+        object.__setattr__(self, "summary", _advice_text(self.summary, maximum=_MAX_ADVICE_SUMMARY))
         object.__setattr__(self, "detail", _advice_text(self.detail, maximum=_MAX_ADVICE_DETAIL))
         object.__setattr__(self, "recommended_next_action", _token(self.recommended_next_action))
         object.__setattr__(self, "evidence_refs", _evidence_refs(self.evidence_refs))
@@ -679,7 +678,11 @@ class ObservationIngestRequest:
     def __post_init__(self) -> None:
         if type(self.codex_session_id) is not str or not self.codex_session_id:
             raise _invalid()
-        if "\x00" in self.codex_session_id or "/" in self.codex_session_id or "\\" in self.codex_session_id:
+        if (
+            "\x00" in self.codex_session_id
+            or "/" in self.codex_session_id
+            or "\\" in self.codex_session_id
+        ):
             raise _invalid()
         if len(self.codex_session_id) > 128:
             raise _invalid()

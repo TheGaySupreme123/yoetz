@@ -66,6 +66,17 @@ SUPPORTED_HOOK_EVENTS: Final = frozenset(
 )
 ADVICE_SAFE_EVENTS: Final = frozenset({"PostToolUse", "SessionStart", "Stop", "SessionEnd"})
 _MAX_ADVICE_CONTEXT: Final = 1_200
+# Ingest rejections that are recoverable: keep the outbox entry pending for a
+# later drain. Anything else is permanently invalid and gets quarantined so it
+# is never silently dropped as if committed.
+_RETRYABLE_INGEST_REJECTIONS: Final = frozenset(
+    {
+        ObservationGapCode.SERVICE_UNAVAILABLE.value,
+        ObservationGapCode.VAULT_LOCKED.value,
+        ObservationGapCode.MAPPING_MISSING.value,
+        "paused",
+    }
+)
 _STRUCTURAL_ALLOW: Final = frozenset(
     {
         "tool_name",
@@ -241,9 +252,7 @@ def map_hook_payload_to_envelope(
         gaps = tuple(
             sorted({*gap_codes, ObservationGapCode.UNSUPPORTED_EVENT.value}, key=str.encode)
         )
-        identity = _source_identity(
-            event_name, payload, structural, event_ordinal=event_ordinal
-        )
+        identity = _source_identity(event_name, payload, structural, event_ordinal=event_ordinal)
         return ObservationEnvelope(
             session_commitment=session_commitment,
             event_kind=_token_or_none(event_name) or "unsupported_event",
@@ -310,7 +319,7 @@ async def _try_service_ingest(
         raw = await client.observation_ingest(body, deadline_ms=3_000)
         try:
             result = observation_ingest_result_from_json(raw)
-        except (ProtocolValueError, TypeError, ValueError):
+        except ProtocolValueError, TypeError, ValueError:
             return ObservationGapCode.SERVICE_UNAVAILABLE.value, None
         if result.disposition is ObservationIngestDisposition.REJECTED:
             reason = result.reason or ObservationGapCode.SERVICE_UNAVAILABLE.value
@@ -340,17 +349,23 @@ async def _drain_outbox(
     for session_id, envelope in pending:
         soft_fail, rejected = await _try_service_ingest(session_id, envelope)
         if soft_fail is not None:
+            # Transport/vault problem: retryable, keep the entry pending.
             store.note_coverage_gap(workspace_commitment, soft_fail)
             continue
         if rejected is not None:
             store.note_coverage_gap(workspace_commitment, rejected)
-            # Keep pending for mapping/consent recovery unless permanently unmapped after attach.
-            if rejected != ObservationGapCode.MAPPING_MISSING.value:
-                store.acknowledge_outbox(
-                    workspace_commitment, session_id, envelope.source_identity
-                )
+            if rejected in _RETRYABLE_INGEST_REJECTIONS:
+                # Recoverable (service, vault, mapping, paused): keep pending.
+                continue
+            # Permanently invalid: move to a bounded, visible quarantine.
+            # Never acknowledge as committed — that would silently drop the row.
+            store.quarantine_outbox(
+                workspace_commitment, session_id, envelope.source_identity, rejected
+            )
             continue
+        # accepted / duplicate: coordinator reconciled the durable ledger.
         store.acknowledge_outbox(workspace_commitment, session_id, envelope.source_identity)
+
 
 async def _try_auto_start(
     codex_session_id: str,
@@ -617,9 +632,7 @@ def handle_observe(
                 async def _ingest_one() -> tuple[str | None, str | None]:
                     return await _try_service_ingest(codex_session_id, envelope)
 
-                soft_fail, rejected = cast(
-                    tuple[str | None, str | None], runner(_ingest_one)
-                )
+                soft_fail, rejected = cast(tuple[str | None, str | None], runner(_ingest_one))
                 if soft_fail is not None:
                     _stderr_line(f"hook_observe_degraded: {soft_fail}")
                     store.note_coverage_gap(workspace_commitment, soft_fail)

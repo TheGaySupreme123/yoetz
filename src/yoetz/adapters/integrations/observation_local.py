@@ -61,6 +61,7 @@ _MAX_ENVELOPES: Final = 256
 _MAX_DEDUP: Final = 4_096
 _MAX_OPEN_PRE: Final = 256
 _MAX_OUTBOX: Final = 512
+_MAX_QUARANTINE: Final = 512
 _MAX_HOOK_SEQUENCES: Final = 256
 
 YOETZ_TOOL_NAMES: Final = frozenset(
@@ -187,6 +188,7 @@ class _WorkspaceState:
     last_hook_receipt_mono_ms: int | None = None
     last_successful_drain_mono_ms: int | None = None
     pending_outbox: list[tuple[str, ObservationEnvelope]] | None = None
+    quarantine: list[tuple[str, ObservationEnvelope, str]] | None = None
     codex_session_bindings: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
@@ -212,6 +214,8 @@ class _WorkspaceState:
             self.hook_sequences = {}
         if self.pending_outbox is None:
             self.pending_outbox = []
+        if self.quarantine is None:
+            self.quarantine = []
         if self.codex_session_bindings is None:
             self.codex_session_bindings = {}
 
@@ -494,9 +498,7 @@ class LocalObservationStore:
             assert state.stream_partials is not None
             return state.stream_partials.get(session_commitment, b"")
 
-    def set_stream_partial(
-        self, workspace: str, session_commitment: str, partial: bytes
-    ) -> None:
+    def set_stream_partial(self, workspace: str, session_commitment: str, partial: bytes) -> None:
         if type(partial) is not bytes or len(partial) > 262_144:
             raise ProtocolValueError("invalid_event_value_type")
         with self._lock:
@@ -571,9 +573,7 @@ class LocalObservationStore:
             assert state.pending_outbox is not None
             if codex_session_id is None:
                 return tuple(state.pending_outbox)
-            return tuple(
-                item for item in state.pending_outbox if item[0] == codex_session_id
-            )
+            return tuple(item for item in state.pending_outbox if item[0] == codex_session_id)
 
     def pending_outbox_count(self, workspace: str) -> int:
         with self._lock:
@@ -596,6 +596,54 @@ class LocalObservationStore:
                     self._save(workspace, state)
                     return True
             return False
+
+    def quarantine_outbox(
+        self, workspace: str, codex_session_id: str, source_identity: str, reason: str
+    ) -> bool:
+        """Move a permanently-rejected outbox entry into a bounded, visible quarantine.
+
+        Quarantined entries are never treated as committed: they leave the pending
+        drain queue but are retained (never silently dropped) and surface as an
+        ``outbox_quarantined`` coverage gap in status until an operator clears them.
+        """
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.pending_outbox is not None
+            assert state.quarantine is not None
+            assert state.gaps is not None
+            moved: ObservationEnvelope | None = None
+            for index, (session, envelope) in enumerate(state.pending_outbox):
+                if session == codex_session_id and envelope.source_identity == source_identity:
+                    moved = envelope
+                    del state.pending_outbox[index]
+                    break
+            if moved is None:
+                return False
+            already = any(
+                q_session == codex_session_id and q_env.source_identity == source_identity
+                for q_session, q_env, _ in state.quarantine
+            )
+            if not already:
+                state.quarantine.append((codex_session_id, moved, reason))
+                # Bounded: drop the oldest quarantined entry if we exceed the cap.
+                while len(state.quarantine) > _MAX_QUARANTINE:
+                    state.quarantine.pop(0)
+            state.gaps.add(ObservationGapCode.OUTBOX_QUARANTINED.value)
+            self._save(workspace, state)
+            return True
+
+    def quarantined_count(self, workspace: str) -> int:
+        with self._lock:
+            state = self._load(workspace)
+            assert state.quarantine is not None
+            return len(state.quarantine)
+
+    def list_quarantine(self, workspace: str) -> tuple[tuple[str, ObservationEnvelope, str], ...]:
+        with self._lock:
+            state = self._load(workspace)
+            assert state.quarantine is not None
+            return tuple(state.quarantine)
 
     def note_coverage_gap(self, workspace: str, gap_code: str) -> None:
         """Record a safe local coverage gap without retaining payload prose."""
@@ -874,9 +922,7 @@ class LocalObservationStore:
             if state.last_successful_drain_mono_ms is None
             else state.last_successful_drain_mono_ms / 1000.0
         )
-        consent_active = (
-            consent is not None and consent.revoked_at is None and not consent.paused
-        )
+        consent_active = consent is not None and consent.revoked_at is None and not consent.paused
         mapping_available = bool(state.session_workspaces) or bool(state.codex_session_bindings)
         signals = ObservationHealthSignals(
             consent_active=consent_active,
@@ -989,6 +1035,16 @@ class LocalObservationStore:
                 )
                 for session, envelope in (state.pending_outbox or ())
             ),
+            "quarantine": tuple(
+                JsonObject(
+                    {
+                        "codex_session_id": session,
+                        "envelope": observation_envelope_to_json(envelope),
+                        "reason": reason,
+                    }
+                )
+                for session, envelope, reason in (state.quarantine or ())
+            ),
             "codex_session_bindings": JsonObject(
                 {key: value for key, value in sorted(state.codex_session_bindings.items())}
             ),
@@ -1033,7 +1089,7 @@ class LocalObservationStore:
                 stream_partials[str(key)] = base64.b64decode(
                     value[4:].encode("ascii"), validate=True
                 )
-            except (ValueError, OSError):
+            except ValueError, OSError:
                 continue
         hook_sequences: dict[str, int] = {}
         for key, value in cast(Mapping[str, JsonValue], raw.get("hook_sequences") or {}).items():
@@ -1042,7 +1098,9 @@ class LocalObservationStore:
         reconcile_mono = raw.get("last_stream_reconcile_mono_ms")
         last_reconcile = (
             int(reconcile_mono)
-            if type(reconcile_mono) is int and not isinstance(reconcile_mono, bool) and reconcile_mono >= 0
+            if type(reconcile_mono) is int
+            and not isinstance(reconcile_mono, bool)
+            and reconcile_mono >= 0
             else None
         )
         hook_mono_raw = raw.get("last_hook_receipt_mono_ms")
@@ -1106,7 +1164,33 @@ class LocalObservationStore:
                         ),
                     )
                 )
-            except (ProtocolValueError, TypeError, ValueError):
+            except ProtocolValueError, TypeError, ValueError:
+                continue
+        quarantine: list[tuple[str, ObservationEnvelope, str]] = []
+        for item in cast(tuple[JsonValue, ...] | list[JsonValue], raw.get("quarantine") or ()):
+            if not isinstance(item, Mapping):
+                continue
+            row = cast(Mapping[str, JsonValue], item)
+            session = row.get("codex_session_id")
+            envelope_raw = row.get("envelope")
+            reason = row.get("reason")
+            if (
+                type(session) is not str
+                or type(reason) is not str
+                or not isinstance(envelope_raw, Mapping)
+            ):
+                continue
+            try:
+                quarantine.append(
+                    (
+                        session,
+                        observation_envelope_from_json(
+                            JsonObject(cast(Mapping[str, JsonValue], envelope_raw))
+                        ),
+                        reason,
+                    )
+                )
+            except ProtocolValueError, TypeError, ValueError:
                 continue
         return _WorkspaceState(
             consent=consent,
@@ -1128,6 +1212,7 @@ class LocalObservationStore:
             last_hook_receipt_mono_ms=last_hook_mono,
             last_successful_drain_mono_ms=last_drain_mono,
             pending_outbox=pending_outbox,
+            quarantine=quarantine,
             codex_session_bindings=bindings,
         )
 

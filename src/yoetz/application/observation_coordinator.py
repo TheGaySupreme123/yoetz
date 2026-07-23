@@ -164,10 +164,13 @@ class ObservationCoordinator:
                 result = await store.ingest(request.envelope)
                 if result.disposition is ObservationIngestDisposition.REJECTED:
                     return result
-                if result.disposition is ObservationIngestDisposition.DUPLICATE:
-                    # Still treat as durable success for outbox ack (idempotent replay).
-                    return result
 
+                # ACCEPTED and DUPLICATE both reconcile the durable ledger before
+                # reporting success. A DUPLICATE is never an early return: the
+                # observation row may already exist while a prior ledger append
+                # failed, so re-run the idempotent materialize/append to repair it.
+                # If any step raises, the broad guard below turns it into a
+                # retryable rejection so the outbox keeps the entry pending.
                 batch = materialize_observation_envelope(request.envelope, task_id=runtime.task_id)
                 if batch.skip_reason is None and batch.drafts:
                     await self._append_materialized(runtime, request.envelope, batch)

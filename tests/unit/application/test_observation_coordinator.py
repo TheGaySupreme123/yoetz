@@ -19,6 +19,7 @@ from yoetz.domain.observation import (
     ObservationGapCode,
     ObservationIngestDisposition,
     ObservationIngestRequest,
+    ObservationIngestResult,
     ObservationSource,
     ObservationStatusQuery,
     observation_ingest_request_from_json,
@@ -131,6 +132,38 @@ def test_local_outbox_enqueue_ack_and_overflow(tmp_path: Path) -> None:
     assert store.pending_outbox_count(workspace) == 1
     assert store.acknowledge_outbox(workspace, "sess-outbox", envelope.source_identity) is True
     assert store.pending_outbox_count(workspace) == 0
+
+
+def test_local_outbox_quarantine_is_visible_and_durable(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "sess-quar")
+    envelope = _envelope(session=session, identity="hook:quar")
+    store.ingest(envelope)
+    assert store.enqueue_outbox(workspace, "sess-quar", envelope) is None
+    assert store.pending_outbox_count(workspace) == 1
+
+    # A permanently-invalid entry is quarantined, not acknowledged as committed.
+    moved = store.quarantine_outbox(
+        workspace, "sess-quar", envelope.source_identity, ObservationGapCode.CONSENT_REVOKED.value
+    )
+    assert moved is True
+    assert store.pending_outbox_count(workspace) == 0
+    assert store.quarantined_count(workspace) == 1
+    quarantined = store.list_quarantine(workspace)
+    assert quarantined[0][0] == "sess-quar"
+    assert quarantined[0][2] == ObservationGapCode.CONSENT_REVOKED.value
+
+    # Visible as a coverage gap and durable across a fresh store instance.
+    observed = store.status(ObservationStatusQuery(workspace))
+    assert ObservationGapCode.OUTBOX_QUARANTINED.value in observed.gaps
+    reopened = LocalObservationStore(_state=tmp_path)
+    assert reopened.quarantined_count(workspace) == 1
+    assert (
+        ObservationGapCode.OUTBOX_QUARANTINED.value
+        in reopened.status(ObservationStatusQuery(workspace)).gaps
+    )
 
 
 def test_local_outbox_overflow_records_gap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -355,6 +388,100 @@ async def test_run_advice_persists_snapshot_with_real_datetime_clock(tmp_path: P
     persisted = store.load_advice_snapshot(workspace)
     assert persisted is not None
     assert persisted.ranked_finding_ids
+
+
+@pytest.mark.anyio
+async def test_duplicate_ingest_reconciles_ledger_instead_of_early_return(tmp_path: Path) -> None:
+    """Regression: a DUPLICATE observation row must still reconcile the ledger.
+
+    The observation row can already exist while an earlier ledger append failed
+    (and its retryable rejection kept the outbox entry pending). On retry the
+    store reports DUPLICATE; the coordinator must NOT return early — it must
+    re-run the idempotent materialize/append to repair the missing ledger
+    operation and refresh advice.
+    """
+
+    from yoetz.adapters.integrations.codex_lifecycle import LifecycleMapping
+
+    calls = {"append": 0, "advice": 0}
+
+    class _DuplicateStore:
+        def grant_consent(self, *args: object) -> None:
+            return None
+
+        def bind_session(self, *args: object) -> None:
+            return None
+
+        async def ingest(self, envelope: ObservationEnvelope):
+            return ObservationIngestResult(
+                ObservationIngestDisposition.DUPLICATE, None, envelope.cursor
+            )
+
+    class _Runtime:
+        task_id = PREFIX_BY_KIND[IdKind.TASK] + str(uuid.uuid4())
+        session_id = PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4())
+        writer_id = PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4())
+        observation = _DuplicateStore()
+
+    class _RuntimePort:
+        async def route(self, command: object) -> object:
+            return _Runtime()
+
+        async def release(self, runtime: object) -> None:
+            return None
+
+    class _Clock:
+        def now_utc(self) -> Timestamp:
+            return Timestamp("2026-01-01T00:00:00.000Z")
+
+    class _Ids:
+        def new(self, kind: IdKind) -> str:
+            return PREFIX_BY_KIND[kind] + str(uuid.uuid4())
+
+    class _RecordingCoordinator(ObservationCoordinator):
+        async def _append_materialized(self, runtime: object, envelope: object, batch: object):  # type: ignore[override]  # noqa: SLF001
+            calls["append"] += 1
+
+        async def _run_advice(self, workspace: str, task_id: str, store: object):  # type: ignore[override]  # noqa: SLF001
+            calls["advice"] += 1
+
+    local = LocalObservationStore(_state=tmp_path)
+    workspace = local.workspace_commitment(str(tmp_path.resolve()))
+    local.grant_consent(workspace)
+    codex_id = "codex-dup-repair"
+    session = local.bind_codex_session(workspace, codex_id)
+
+    mapping = LifecycleMapping(
+        mapping_version=1,
+        codex_session_id=codex_id,
+        yoetz_task_id=_Runtime.task_id,
+        yoetz_session_id=_Runtime.session_id,
+        yoetz_writer_id=_Runtime.writer_id,
+        last_frontier=None,
+    )
+
+    coordinator = _RecordingCoordinator(
+        runtime=_RuntimePort(),  # type: ignore[arg-type]
+        local=local,
+        clock=_Clock(),  # type: ignore[arg-type]
+        ids=_Ids(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,
+    )
+
+    result = await coordinator.ingest_request(
+        ObservationIngestRequest(
+            codex_session_id=codex_id,
+            envelope=_envelope(
+                session=session, kind="PostToolUse", identity="hook:dup", exit_status=1
+            ),
+        )
+    )
+
+    # Reported disposition stays DUPLICATE, but reconciliation still ran.
+    assert result.disposition is ObservationIngestDisposition.DUPLICATE
+    assert calls["append"] == 1, "duplicate must still reconcile the ledger append"
+    assert calls["advice"] == 1, "duplicate must still refresh advice"
 
 
 @pytest.mark.anyio

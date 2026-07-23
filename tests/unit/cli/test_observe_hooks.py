@@ -6,13 +6,16 @@ import io
 import json
 from pathlib import Path
 
+import pytest
+
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
+from yoetz.cli import observe_hooks as observe_hooks_module
 from yoetz.cli.observe_hooks import (
     SUPPORTED_HOOK_EVENTS,
     handle_observe,
     map_hook_payload_to_envelope,
 )
-from yoetz.domain.observation import ObservationGapCode, ObservationSource
+from yoetz.domain.observation import ObservationEnvelope, ObservationGapCode, ObservationSource
 
 _KEY = b"k" * 32
 
@@ -236,3 +239,56 @@ def test_malformed_stdin_exits_zero(tmp_path: Path) -> None:
         skip_service=True,
     )
     assert code == 0
+
+
+def _drain_envelope(store: LocalObservationStore, session: str, identity: str, ordinal: int):
+    payload = {
+        "session_id": session,
+        "hook_event_name": "PostToolUse",
+        "tool_name": "shell",
+        "correlation_id": f"corr-{ordinal}",
+        "exit_status": 1,
+    }
+    commitment = store.session_commitment(session)
+    return map_hook_payload_to_envelope(
+        "PostToolUse",
+        payload,
+        session_commitment=commitment,
+        event_ordinal=ordinal,
+        key_material=store.key_material(),
+    )
+
+
+@pytest.mark.anyio
+async def test_drain_quarantines_permanent_and_keeps_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "sess-drain")
+    perm = _drain_envelope(store, "sess-drain", "hook:perm", 1)
+    retry = _drain_envelope(store, "sess-drain", "hook:retry", 2)
+    store.enqueue_outbox(workspace, "sess-drain", perm)
+    store.enqueue_outbox(workspace, "sess-drain", retry)
+    assert store.pending_outbox_count(workspace) == 2
+
+    async def _fake_ingest(session_id: str, envelope: ObservationEnvelope):
+        if envelope.source_identity == perm.source_identity:
+            # Permanently invalid rejection.
+            return None, ObservationGapCode.CONSENT_REVOKED.value
+        # Retryable rejection.
+        return None, ObservationGapCode.SERVICE_UNAVAILABLE.value
+
+    monkeypatch.setattr(observe_hooks_module, "_try_service_ingest", _fake_ingest)
+
+    await observe_hooks_module._drain_outbox(  # noqa: SLF001
+        store, workspace_commitment=workspace, codex_session_id="sess-drain"
+    )
+
+    # Permanent -> quarantined (never dropped); retryable -> still pending.
+    assert store.quarantined_count(workspace) == 1
+    assert store.list_quarantine(workspace)[0][1].source_identity == perm.source_identity
+    pending = store.list_pending_outbox(workspace)
+    assert len(pending) == 1
+    assert pending[0][1].source_identity == retry.source_identity
