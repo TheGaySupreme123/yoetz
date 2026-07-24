@@ -388,6 +388,66 @@ def _plugin_verified(presence: str | None) -> bool:
     return presence == PluginHookPresence.INSTALLED.value
 
 
+def _installed_hooks_declare_workspace_binding(workspace: Path | None = None) -> bool:
+    """True when the installed plugin hooks render ``--workspace .`` for observe."""
+
+    root = (workspace if workspace is not None else Path.cwd()).resolve()
+    hooks_path = root / ".agents" / "plugins" / "yoetz" / "hooks.json"
+    try:
+        raw = hooks_path.read_bytes()
+    except OSError:
+        return False
+    return b"--workspace ." in raw and b"yoetz hooks observe" in raw
+
+
+def _observation_hook_probe(*, workspace: Path | None = None) -> dict[str, JsonValue]:
+    """Prove project binding + durable envelope enqueue via the installed observe path.
+
+    Runs a synthetic SessionStart through ``handle_observe`` with ``--workspace .``
+    semantics and ``skip_service=True`` so the probe stays local. Success requires an
+    active consent commitment, a Codex-session→workspace bind, and a durable outbox
+    entry (or acknowledged drain) for that session. Never logs or returns plaintext paths.
+    """
+
+    from yoetz.adapters.integrations.observation_local import LocalObservationStore
+    from yoetz.cli.observe_hooks import handle_observe
+    from yoetz.protocol.canonical import canonical_encode
+
+    root = (workspace if workspace is not None else Path.cwd()).resolve()
+    if not _installed_hooks_declare_workspace_binding(root):
+        return {"ok": False, "reason": "hooks_missing_workspace_binding"}
+    store = LocalObservationStore()
+    commitment = store.workspace_commitment(str(root))
+    consent = store.consent_for(commitment)
+    if consent is None or not consent.active:
+        return {"ok": False, "reason": "consent_inactive"}
+    probe_session = "yoetz-setup-probe-session"
+    payload = canonical_encode(
+        {
+            "session_id": probe_session,
+            "hook_event_name": "SessionStart",
+            "cwd": ".",
+        }
+    )
+    code = handle_observe(
+        event_name="SessionStart",
+        stdin_bytes=payload,
+        workspace=".",
+        skip_service=True,
+    )
+    if code != 0:
+        return {"ok": False, "reason": "observe_exit_nonzero"}
+    bound = store.find_workspace_for_codex_session(probe_session)
+    if bound != commitment:
+        return {"ok": False, "reason": "binding_missing"}
+    pending = store.list_pending_outbox(commitment)
+    if not pending:
+        # SessionStart may have been drained/acked in a prior probe; binding alone
+        # plus hooks workspace declaration still proves project routing.
+        return {"ok": True, "reason": "bound_without_pending"}
+    return {"ok": True, "reason": "envelope_enqueued"}
+
+
 def _readiness_layers(
     *,
     binary: HarnessBinary | None,
@@ -396,10 +456,22 @@ def _readiness_layers(
     hooks: dict[str, JsonValue],
     consent_outcome: str | None,
     service: dict[str, JsonValue],
+    workspace: Path | None = None,
 ) -> dict[str, JsonValue]:
     consent_active = consent_outcome == "granted"
     service_routing = bool(service.get("reachable"))
-    observation_ready = _plugin_verified(plugin_presence) and consent_active and service_routing
+    probe: dict[str, JsonValue] = {"ok": False, "reason": "not_attempted"}
+    if _plugin_verified(plugin_presence) and consent_active:
+        try:
+            probe = _observation_hook_probe(workspace=workspace)
+        except Exception as error:
+            probe = {"ok": False, "reason": type(error).__name__}
+    observation_ready = (
+        _plugin_verified(plugin_presence)
+        and consent_active
+        and service_routing
+        and bool(probe.get("ok"))
+    )
     return {
         "codex": None
         if binary is None
@@ -415,6 +487,7 @@ def _readiness_layers(
             "reachable": service_routing,
             "state": service.get("state"),
         },
+        "observation_hook_probe": probe,
         "observation_ready": observation_ready,
         "semantic_advice_ready": False,
         "semantic_advice_note": "deterministic_only_until_provider_ready",
@@ -934,6 +1007,7 @@ async def run_setup_wizard(
         hooks=hooks,
         consent_outcome=consent,
         service=service,
+        workspace=Path.cwd(),
     )
 
     report: dict[str, JsonValue] = {

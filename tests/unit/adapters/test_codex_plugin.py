@@ -130,10 +130,11 @@ def test_render_plugin_tree_wires_observation_and_compat_hooks() -> None:
     assert "yoetz hooks user-prompt-submit" in hooks
     assert "yoetz hooks post-tool-use" in hooks
     assert "yoetz hooks session-start" in hooks
-    assert "yoetz hooks observe --event SessionStart" in hooks
-    assert "yoetz hooks observe --event PreToolUse" in hooks
-    assert "yoetz hooks observe --event PermissionRequest" in hooks
-    assert "yoetz hooks observe --event SubagentStop" in hooks
+    assert "yoetz hooks observe --workspace . --event SessionStart" in hooks
+    assert "yoetz hooks observe --workspace . --event PreToolUse" in hooks
+    assert "yoetz hooks observe --workspace . --event PermissionRequest" in hooks
+    assert "yoetz hooks observe --workspace . --event SubagentStop" in hooks
+    assert '"timeout":3' in hooks.replace(" ", "")
     assert "mcp__yoetz__start" in hooks
     assert "resume|compact" in hooks
 

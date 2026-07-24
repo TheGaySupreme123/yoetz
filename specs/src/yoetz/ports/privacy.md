@@ -25,6 +25,7 @@ and provider implementations to vary without granting CLI/MCP/provider code dire
   - `async complete_agent_projection(request: AgentProjectionRequest, receipt: LocalDisclosureReceipt) -> CompletedAgentProjection`
   - `async reserve(subject: PrivacyAuditSubject) -> PrivacyAuditReservation`
   - `async load(request_id: str, subject_digest: str) -> PrivacyAuditState | None`
+  - `async mark_awaiting_human(reservation_id: str) -> PrivacyAuditState`
   - `async record_human_decision(reservation_id, decision: HumanPrivacyDecision) -> PrivacyAuditState`
   - `async authorize(reservation_id, approved_case_digest, now) -> EgressAuthorization`
   - `async consume(authorization_id, dispatch_id, now) -> ConsumedAuthorization`

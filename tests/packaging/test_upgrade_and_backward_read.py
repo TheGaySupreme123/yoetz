@@ -143,13 +143,16 @@ def test_each_migration_family_has_contiguous_versions(installed: _Installed) ->
     )
     payload = _run_probe(installed, probe)
     assert payload["catalog_versions"] == ["0001"]
-    assert payload["bundle_versions"] == ["0001", "0002", "0003"]
+    assert payload["bundle_versions"] == ["0001", "0002", "0003", "0004"]
     assert payload["catalog_current"] == 1
-    assert payload["bundle_current"] == 3
+    assert payload["bundle_current"] == 4
 
 
 def test_migration_ddl_contains_no_destructive_statement(installed: _Installed) -> None:
-    for family, versions in (("catalog", ("0001",)), ("bundle", ("0001", "0002", "0003"))):
+    for family, versions in (
+        ("catalog", ("0001",)),
+        ("bundle", ("0001", "0002", "0003", "0004")),
+    ):
         for version in versions:
             text = (
                 _REPO_ROOT
@@ -181,7 +184,7 @@ def test_fresh_catalog_and_bundle_initialize_at_current_schema_version(
         "initialize_catalog(catalog)\n"
         "catalog_identity = verify_schema_identity(catalog)\n"
         "bundle = apsw.Connection(':memory:')\n"
-        "initialize_bundle(bundle, {'protocol_version': '0.1', 'storage_schema_version': '3'})\n"
+        "initialize_bundle(bundle, {'protocol_version': '0.1', 'storage_schema_version': '4'})\n"
         "bundle_identity = verify_schema_identity(bundle)\n"
         "print(json.dumps({\n"
         "    'catalog_state': catalog_identity.state,\n"
@@ -195,7 +198,7 @@ def test_fresh_catalog_and_bundle_initialize_at_current_schema_version(
         "catalog_state": "current",
         "catalog_version": 1,
         "bundle_state": "current",
-        "bundle_version": 3,
+        "bundle_version": 4,
     }
 
 

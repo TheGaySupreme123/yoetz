@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Literal, Protocol, cast
 
 from yoetz.application.egress import PrivacyCoordinator
+from yoetz.application.observation_verification import ObservationVerificationSupervisor
 from yoetz.domain.events import RuntimeProfile
 from yoetz.domain.privacy import (
     AuthorizationScope,
@@ -486,6 +487,7 @@ class Application:
     support_handlers: Mapping[ControlMethod, _SupportHandler] = field(
         default_factory=_empty_support_handlers
     )
+    verification_supervisor: ObservationVerificationSupervisor | None = None
     _close_lock: asyncio.Lock = field(init=False, repr=False, compare=False)
     _close_task: asyncio.Task[None] | None = field(
         init=False, default=None, repr=False, compare=False
@@ -775,9 +777,15 @@ class Application:
     async def _close_once(self) -> None:
         failure: BaseException | None = None
         try:
-            await self.privacy.close()
+            if self.verification_supervisor is not None:
+                await self.verification_supervisor.stop()
         except BaseException as exc:
             failure = exc
+        try:
+            await self.privacy.close()
+        except BaseException as exc:
+            if failure is None:
+                failure = exc
         try:
             await self.runtime.close()
         except BaseException as exc:
@@ -816,6 +824,7 @@ class ServiceReadyContext:
     support_handlers: Mapping[ControlMethod, _SupportHandler] = field(
         default_factory=_empty_support_handlers
     )
+    verification_supervisor: ObservationVerificationSupervisor | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -854,7 +863,7 @@ class ReadyApplicationFactory:
             await _close_ready_context(context)
             raise ControlError("service_generation_changed", retryable=True)
         try:
-            return Application(
+            application = Application(
                 context.start_catalog,
                 context.runtime,
                 context.clock,
@@ -872,7 +881,11 @@ class ReadyApplicationFactory:
                 context.policy_packs,
                 context.version_manifest,
                 context.support_handlers,
+                context.verification_supervisor,
             )
+            if context.verification_supervisor is not None:
+                await context.verification_supervisor.start()
+            return application
         except BaseException:
             await _close_ready_context(context)
             raise
@@ -882,6 +895,10 @@ async def _close_ready_context(context: object) -> None:
     if not isinstance(context, ServiceReadyContext):
         return
     try:
-        await context.privacy.close()
+        if context.verification_supervisor is not None:
+            await context.verification_supervisor.stop()
     finally:
-        await context.runtime.close()
+        try:
+            await context.privacy.close()
+        finally:
+            await context.runtime.close()

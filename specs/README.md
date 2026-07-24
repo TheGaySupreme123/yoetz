@@ -132,8 +132,8 @@ implicit composition detail:
 
 ## Status board
 
-The manifest is the canonical inventory. At this draft checkpoint it classifies 628 spec files:
-614 unique future-file owners, 10 directory indexes, and 4 coordination files. Every future owner
+The manifest is the canonical inventory. At this draft checkpoint it classifies 633 spec files:
+619 unique future-file owners, 10 directory indexes, and 4 coordination files. Every future owner
 has all seven required sections; all local Open questions are closed or routed to the central
 decision ledger.
 
@@ -145,15 +145,15 @@ decision ledger.
 | `docs/` public protocol and runbooks | 11 | Already-authored ADRs remain current authorities outside the future-file universe. |
 | `schemas/` | 53 | 1 directory index |
 | `fixtures/` | 49 | 1 directory index |
-| `migrations/` | 4 | — |
+| `migrations/` | 5 | — |
 | `guidance/` harness-neutral agent guidance | 4 | 1 directory index; owned once and shipped byte-identically to every harness and to MCP (ADR-010) |
 | `skills/` | 2 | Per-harness header and manifest only; v0.1 ships exactly one harness, `codex` |
 | `support/` | 4 | Includes the ADR-012 npm launcher (`support/npm-launcher/`), publish-ready but deliberately unpublished. |
-| `src/yoetz/` Python/code files | 169 | — |
-| `src/yoetz/resources/` | 74 | The resource manifest plus exactly 73 installed entries. |
+| `src/yoetz/` Python/code files | 170 | — |
+| `src/yoetz/resources/` | 75 | The resource manifest plus exactly 74 installed entries. |
 | `scripts/` | 6 | — |
-| `tests/` | 213 | 7 suite indexes |
-| **Total future files** | **614** | **10 indexes + 4 coordination files = 628 spec files** |
+| `tests/` | 215 | 7 suite indexes |
+| **Total future files** | **619** | **10 indexes + 4 coordination files = 633 spec files** |
 
 All rows remain `draft` until the founder freeze; “present” is not the same as “reviewed” or
 “locked.” Empirical release cells and independent threat review remain later evidence gates even

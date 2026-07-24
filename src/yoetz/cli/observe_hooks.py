@@ -631,13 +631,21 @@ def handle_observe(
         workspace_locator: str | None = None
         if workspace is not None:
             try:
-                workspace_locator = str(Path(workspace).resolve())
+                # Resolve '.' / relative paths locally; never log or persist plaintext.
+                workspace_locator = str(Path(workspace).expanduser().resolve(strict=False))
                 workspace_commitment = store.workspace_commitment(workspace_locator)
+                consent_probe = store.consent_for(workspace_commitment)
+                if consent_probe is None or not consent_probe.active:
+                    workspace_commitment = None
+                    workspace_locator = None
             except Exception:
                 workspace_commitment = None
                 workspace_locator = None
         if workspace_commitment is None:
+            # Bind only via an existing Codex-session→workspace map for this session.
+            # Never guess a single "active" workspace across consented projects.
             workspace_commitment = store.find_workspace_for_codex_session(codex_session_id)
+            workspace_locator = None
         consent = None if workspace_commitment is None else store.consent_for(workspace_commitment)
         if consent is None or not consent.active:
             # Consent missing/paused/revoked: no ingest, no spool; still exit 0.

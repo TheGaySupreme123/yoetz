@@ -6,8 +6,10 @@ Primary scenario (Definition of Done):
   restart, exposes evidence-linked findings through ordinary status, identifies stale or
   missing verification, and returns a useful bounded recommendation to Codex.
 
-Uses ``composition_harness.ContractObservationPipeline`` until ObservationCoordinator is
-wired into ready composition. Production probes fail with clear Agent A/B/C gap messages.
+Primary coverage targets ready-service composition with the installed Codex plugin.
+``composition_harness.ContractObservationPipeline`` remains a focused local harness for
+consent/outbox/restart probes; it is no longer the sole production DoD gate. Production
+probes fail with clear Agent A/B/C gap messages.
 """
 
 from __future__ import annotations

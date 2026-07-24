@@ -181,7 +181,8 @@ commit or changes application lifetime; request-ID replay resolves ambiguity.
 
 ### Shutdown and relock
 
-`close` stops new method entry, cancels noncommitting/provider work, allows admitted shielded
+`close` stops new method entry, cancels noncommitting/provider work, stops the optional
+`ObservationVerificationSupervisor` when present, allows admitted shielded
 commits to resolve under the lifecycle bound, closes provider/semantic coordinator, then closes
 the bundle runtime and catalog-facing resources. It does not release service singleton or vault
 itself; daemon lifecycle owns their outer order. It emits no stdout and deletes no user data.

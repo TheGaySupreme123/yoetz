@@ -30,6 +30,11 @@ normalizes it into Yoetz’s closed semantic-result union with provisional
 | `normalize_judgment(...)` | validate the parsed judgment against Yoetz’s closed judgment shape |
 | `classify_provider_failure(...)` | map transport/profile/provider failures to public error classes |
 
+Sibling factory module `adapters/providers/openai_responses_factory.py` owns ready-composition
+`OpenAIResponsesExternalFactory` (`render` + `build_evaluator`) plus
+`external_factory_builders_from_config` for official OpenAI, Fireworks (`api.fireworks.ai` +
+`/inference/v1`), and owner-declared OpenAI-compatible Responses hosts only.
+
 ## Behavior
 
 `OpenAIResponsesEvaluator` is constructed only behind the privacy gateway for one physical

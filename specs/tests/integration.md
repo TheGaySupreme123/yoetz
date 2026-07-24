@@ -22,6 +22,7 @@ tests/integration/
     test_migration_0001.py
     test_migration_0002_observation.py
     test_migration_0003_observation.py
+    test_migration_0004_observation.py
     test_append_and_replay.py
     test_projection_rebuild.py
     test_start_catalog_state_machine.py
@@ -51,6 +52,7 @@ tests/integration/
   observation/
     composition_harness.py
     test_acceptance_scenarios.py
+    test_e2e_successor_acceptance.py
     test_production_composition.py
   service/
     test_daemon_clients.py
@@ -83,6 +85,7 @@ tests/integration/objects/test_portable_recovery.py
 tests/integration/objects/test_redaction_and_gc.py
 tests/integration/observation/composition_harness.py
 tests/integration/observation/test_acceptance_scenarios.py
+tests/integration/observation/test_e2e_successor_acceptance.py
 tests/integration/observation/test_production_composition.py
 tests/integration/privacy/test_egress_gateway.py
 tests/integration/privacy/test_plaintext_canary_sweep.py
@@ -101,6 +104,7 @@ tests/integration/storage/test_checkpoint_and_wal_bounds.py
 tests/integration/storage/test_migration_0001.py
 tests/integration/storage/test_migration_0002_observation.py
 tests/integration/storage/test_migration_0003_observation.py
+tests/integration/storage/test_migration_0004_observation.py
 tests/integration/storage/test_migration_rollback.py
 tests/integration/storage/test_owner_generation.py
 tests/integration/storage/test_projection_rebuild.py

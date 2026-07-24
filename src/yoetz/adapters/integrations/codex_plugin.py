@@ -97,7 +97,10 @@ def _hooks_json() -> bytes:
             ]
         }
 
-    observe = "yoetz hooks observe --event"
+    # Project-scoped observe binds cwd ('.') via local resolve + consent commitment.
+    # Timeout stays inside the three-second hook RPC budget (ingest/encrypt/enqueue only).
+    observe = "yoetz hooks observe --workspace . --event"
+    observe_timeout = 3
     body: dict[str, JsonValue] = {
         "description": (
             "Yoetz Codex lifecycle hooks: observation ingress, activation cue, "
@@ -119,7 +122,7 @@ def _hooks_json() -> bytes:
                 _command(
                     "SessionStart",
                     command=f"{observe} SessionStart",
-                    timeout=10,
+                    timeout=observe_timeout,
                     status="Yoetz observe SessionStart",
                 ),
             ],
@@ -127,7 +130,7 @@ def _hooks_json() -> bytes:
                 _command(
                     "SessionEnd",
                     command=f"{observe} SessionEnd",
-                    timeout=10,
+                    timeout=observe_timeout,
                     status="Yoetz observe SessionEnd",
                 )
             ],
@@ -135,7 +138,7 @@ def _hooks_json() -> bytes:
                 _command(
                     "Stop",
                     command=f"{observe} Stop",
-                    timeout=10,
+                    timeout=observe_timeout,
                     status="Yoetz observe Stop",
                 )
             ],
@@ -155,7 +158,7 @@ def _hooks_json() -> bytes:
                 _command(
                     "PreToolUse",
                     command=f"{observe} PreToolUse",
-                    timeout=10,
+                    timeout=observe_timeout,
                     status="Yoetz observe PreToolUse",
                 )
             ],
@@ -174,7 +177,7 @@ def _hooks_json() -> bytes:
                 _command(
                     "PostToolUse",
                     command=f"{observe} PostToolUse",
-                    timeout=10,
+                    timeout=observe_timeout,
                     status="Yoetz observe PostToolUse",
                 ),
             ],
@@ -182,7 +185,7 @@ def _hooks_json() -> bytes:
                 _command(
                     "PermissionRequest",
                     command=f"{observe} PermissionRequest",
-                    timeout=10,
+                    timeout=observe_timeout,
                     status="Yoetz observe PermissionRequest",
                 )
             ],
@@ -190,7 +193,7 @@ def _hooks_json() -> bytes:
                 _command(
                     "PreCompact",
                     command=f"{observe} PreCompact",
-                    timeout=10,
+                    timeout=observe_timeout,
                     status="Yoetz observe PreCompact",
                 )
             ],
@@ -198,7 +201,7 @@ def _hooks_json() -> bytes:
                 _command(
                     "PostCompact",
                     command=f"{observe} PostCompact",
-                    timeout=10,
+                    timeout=observe_timeout,
                     status="Yoetz observe PostCompact",
                 )
             ],
@@ -206,7 +209,7 @@ def _hooks_json() -> bytes:
                 _command(
                     "SubagentStart",
                     command=f"{observe} SubagentStart",
-                    timeout=10,
+                    timeout=observe_timeout,
                     status="Yoetz observe SubagentStart",
                 )
             ],
@@ -214,7 +217,7 @@ def _hooks_json() -> bytes:
                 _command(
                     "SubagentStop",
                     command=f"{observe} SubagentStop",
-                    timeout=10,
+                    timeout=observe_timeout,
                     status="Yoetz observe SubagentStop",
                 )
             ],

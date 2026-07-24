@@ -569,6 +569,26 @@ class MemoryPrivacyAudit:
         del generation, reason
         return 0
 
+    async def mark_awaiting_human(self, reservation_id: str) -> PrivacyAuditState:
+        async with self._lock:
+            row = self._state.audit.get(reservation_id)
+            if row is None or row.status != "reserved":
+                raise ValueError("privacy_audit_state_conflict")
+            self._state.audit[reservation_id] = _AuditRow(
+                row.reservation, row.subject, "awaiting_human", object_ref=row.object_ref
+            )
+            return PrivacyAuditState(
+                PrivacyAuditReservation(
+                    row.reservation.privacy_proposal_id,
+                    row.reservation.request_id,
+                    row.reservation.subject_digest,
+                    "awaiting_human",
+                    row.reservation.policy_generation,
+                    row.reservation.reserved_at,
+                ),
+                "awaiting_human",
+            )
+
     async def record_human_decision(
         self, reservation_id: str, decision: HumanPrivacyDecision
     ) -> PrivacyAuditState:

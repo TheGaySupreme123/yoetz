@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, Protocol, cast
 
@@ -116,6 +117,10 @@ type CallableFacts = Callable[[str], tuple[ObservationCheckFact, ...]]
 type CallableInspect = Callable[[str], ObservationInspectFact | None]
 type CallablePlans = Callable[[str], tuple[str, ...]]
 type CallableSemantic = Callable[[str], ObservationAdviceSemanticAddon | None]
+type CallableSemanticReview = Callable[
+    [tuple[ObservationAdviceCandidate, ...], str, tuple[str, ...]],
+    ObservationAdviceSemanticAddon | None | Awaitable[ObservationAdviceSemanticAddon | None],
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +151,7 @@ class ObservationAdviceContextBuilder:
     composition: ObservationCompositionFact | None = None
     plan_path_digests: CallablePlans | None = None
     semantic_addon: CallableSemantic | None = None
+    semantic_review: CallableSemanticReview | None = None
 
     async def build(self, workspace: str, store: ObservationContextStore) -> AdviceSnapshot | None:
         envelopes = store.list_envelopes(workspace)
@@ -160,21 +166,46 @@ class ObservationAdviceContextBuilder:
                 loaded_items = cast(tuple[object, ...], loaded)
                 if all(type(item) is ObservationCheckFact for item in loaded_items):
                     checks = cast(tuple[ObservationCheckFact, ...], loaded_items)
+        inspect_fact = None if self.inspect_fact is None else self.inspect_fact(workspace)
+        plans = () if self.plan_path_digests is None else self.plan_path_digests(workspace)
+        semantic: ObservationAdviceSemanticAddon | None = None
+        if self.semantic_review is not None:
+            context = ObservationAdviceContext(
+                envelopes=envelopes,
+                lifecycle=status.lifecycle,
+                gaps=status.gaps,
+                check_facts=checks,
+                inspect_fact=inspect_fact,
+                composition=self.composition,
+                plan_path_digests=plans,
+            )
+            candidates = observation_advice_findings(context)
+            basis = evidence_basis_digest(
+                candidates,
+                envelopes,
+                extra={
+                    "policy": f"{OBSERVATION_ADVICE_POLICY_ID}/{OBSERVATION_ADVICE_POLICY_VERSION}",
+                    "lifecycle": status.lifecycle.value,
+                },
+            )
+            reviewed = self.semantic_review(candidates, basis, status.gaps)
+            if inspect.isawaitable(reviewed):
+                semantic = await reviewed
+            else:
+                semantic = reviewed
+        elif self.semantic_addon is not None:
+            semantic = self.semantic_addon(workspace)
         return build_observation_advice_snapshot(
             ObservationAdviceBuildInput(
                 envelopes=envelopes,
                 lifecycle=status.lifecycle,
                 gaps=status.gaps,
                 check_facts=checks,
-                inspect_fact=(None if self.inspect_fact is None else self.inspect_fact(workspace)),
+                inspect_fact=inspect_fact,
                 composition=self.composition,
-                plan_path_digests=(
-                    () if self.plan_path_digests is None else self.plan_path_digests(workspace)
-                ),
+                plan_path_digests=plans,
                 prior_snapshot=store.load_advice_snapshot(workspace),
-                semantic_addon=(
-                    None if self.semantic_addon is None else self.semantic_addon(workspace)
-                ),
+                semantic_addon=semantic,
                 has_real_observation=bool(envelopes),
             )
         )

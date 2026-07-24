@@ -40,7 +40,9 @@ from yoetz.application.observation_materialize import (
 from yoetz.application.observation_verification import (
     ObservationVerificationJob,
     ObservationVerificationRepository,
+    ObservationVerificationSupervisor,
     ObservationVerificationWorker,
+    VerificationDrainHandle,
 )
 from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
 from yoetz.domain.events import EventDraft, EventSchema, encode_payload, media_type_for
@@ -137,9 +139,14 @@ class ObservationCoordinator:
     advice_context_builder: ObservationAdviceContextBuilder = field(
         default_factory=ObservationAdviceContextBuilder
     )
+    verification_supervisor: ObservationVerificationSupervisor | None = None
 
     def __post_init__(self) -> None:
         self._lock = asyncio.Lock()
+        if self.verification_supervisor is None:
+            # Tests and non-ready compositions still drain inline when no supervisor
+            # is attached; production ready composition always injects one.
+            self.verification_supervisor = None
 
     async def ingest_request(self, request: ObservationIngestRequest) -> ObservationIngestResult:
         """Coordinator ingest path used by ordinary-control ``observation_ingest``."""
@@ -240,7 +247,7 @@ class ObservationCoordinator:
                             materialized_at=timestamp_from_datetime(self.clock.now_utc()),
                         )
 
-                await self._run_verification(runtime, workspace, store, envelope)
+                await self._enqueue_verification(runtime, workspace, store, envelope)
                 await self._run_advice(workspace, runtime, store)
                 return result
             except PublicOperationError as exc:
@@ -480,17 +487,50 @@ class ObservationCoordinator:
             object_ids.add(ref.object_id)
         return tuple(sorted(object_ids, key=str.encode)), any_redacted
 
-    async def _run_verification(
+    async def _enqueue_verification(
         self,
         runtime: TaskRuntime,
         workspace: str,
         store: TaskObservationPort,
         envelope: ObservationEnvelope,
     ) -> None:
-        """Capture each completed-action state and drain its durable latest-work queue."""
+        """Capture subject state, enqueue durable work, wake the supervisor.
+
+        When no supervisor is attached (unit tests), drain inline so existing
+        scenarios keep completing within the same await.
+        """
+
+        worker = await self._prepare_verification_worker(runtime, workspace, store, envelope)
+        if worker is None:
+            return
+        if self.verification_supervisor is not None:
+
+            async def _after() -> None:
+                await self._run_advice(workspace, runtime, store)
+
+            self.verification_supervisor.register(
+                VerificationDrainHandle(
+                    workspace_commitment=workspace,
+                    worker=worker,
+                    after_complete=_after,
+                )
+            )
+            self.verification_supervisor.notify(workspace)
+            return
+        while await worker.run_once() is not None:
+            pass
+
+    async def _prepare_verification_worker(
+        self,
+        runtime: TaskRuntime,
+        workspace: str,
+        store: TaskObservationPort,
+        envelope: ObservationEnvelope,
+    ) -> ObservationVerificationWorker | None:
+        """Build a worker and enqueue if subject state changed; never run checks here."""
 
         if envelope.event_kind not in {"PostToolUse", "item.completed"}:
-            return
+            return None
         required = (
             "workspace_locator_descriptor",
             "verification_repository",
@@ -499,25 +539,25 @@ class ObservationCoordinator:
             "record_trusted_check_policy",
         )
         if any(not callable(getattr(store, name, None)) for name in required):
-            return
+            return None
         descriptor = store.workspace_locator_descriptor(workspace)
         if descriptor is None:
             self.local.note_coverage_gap(
                 workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
             )
-            return
+            return None
         locator_ref = await runtime.objects.resolve_verified(*descriptor)
         encrypted = b"".join([chunk async for chunk in runtime.objects.open_verified(locator_ref)])
         parsed = strict_json_parse(encrypted)
         if not isinstance(parsed, dict) and type(parsed) is not JsonObject:
-            return
+            return None
         content_b64 = parsed.get("content_b64")
         content_kind = parsed.get("content_kind")
         if (
             content_kind != ObservationContentKind.WORKSPACE_LOCATOR.value
             or type(content_b64) is not str
         ):
-            return
+            return None
         try:
             locator = base64.b64decode(content_b64.encode("ascii"), validate=True).decode("utf-8")
             handle = open_local_workspace(Path(locator))
@@ -526,10 +566,10 @@ class ObservationCoordinator:
             self.local.note_coverage_gap(
                 workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
             )
-            return
+            return None
         if not self.local.policy_digest_is_trusted(workspace, policy.raw_digest):
             self.local.note_coverage_gap(workspace, ObservationGapCode.POLICY_UNTRUSTED.value)
-            return
+            return None
         now = timestamp_from_datetime(self.clock.now_utc())
         if not store.policy_digest_is_trusted(workspace, policy.raw_digest):
             trust_payload = canonical_encode(
@@ -630,8 +670,41 @@ class ObservationCoordinator:
             previous_subject_state_digest=store.latest_verification_subject_digest(workspace),
             subject_state_digest=current_digest,
         )
-        while await worker.run_once() is not None:
-            pass
+        # Persist inspection snapshot + session route when schema-4 helpers exist.
+        route_recorder = getattr(store, "record_workspace_session_route", None)
+        if callable(route_recorder):
+            route_recorder(
+                workspace=workspace,
+                yoetz_session_id=runtime.session_id,
+                yoetz_task_id=runtime.task_id,
+                yoetz_writer_id=runtime.writer_id,
+                codex_session_commitment=envelope.session_commitment,
+                bound_at=now,
+            )
+        inspect_recorder = getattr(store, "record_inspection_snapshot", None)
+        if callable(inspect_recorder):
+            inspect_recorder(
+                workspace=workspace,
+                yoetz_session_id=runtime.session_id,
+                subject_state_digest=current_digest,
+                changed_paths_digest=current_digest,
+                relative_paths=(),
+                facts_object_id=None,
+                excerpt_object_id=None,
+                recorded_at=now,
+            )
+        return worker
+
+    async def _run_verification(
+        self,
+        runtime: TaskRuntime,
+        workspace: str,
+        store: TaskObservationPort,
+        envelope: ObservationEnvelope,
+    ) -> None:
+        """Deprecated alias: enqueue (+ inline drain without supervisor)."""
+
+        await self._enqueue_verification(runtime, workspace, store, envelope)
 
     async def _encrypt_captured_content(self, runtime: TaskRuntime, content: bytes) -> ObjectRef:
         metadata = ObjectMetadata(
@@ -672,6 +745,15 @@ class ObservationCoordinator:
         if snapshot is not None:
             now = timestamp_from_datetime(self.clock.now_utc())
             store.set_advice_snapshot(workspace, snapshot, now)
+            session_id = runtime.session_id if isinstance(runtime, TaskRuntime) else None
+            session_setter = getattr(store, "set_session_advice_snapshot", None)
+            if callable(session_setter) and type(session_id) is str:
+                session_setter(
+                    workspace=workspace,
+                    yoetz_session_id=session_id,
+                    snapshot=snapshot,
+                    updated_at=now,
+                )
             recorder = getattr(store, "record_advice_history", None)
             if callable(recorder):
                 recorder(

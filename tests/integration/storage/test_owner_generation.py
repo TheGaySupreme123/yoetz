@@ -33,10 +33,10 @@ def _create_current_bundle(path: Path, *, owner_generation: int, owner_nonce: st
                 ("owner_generation", str(owner_generation)),
                 ("owner_nonce", owner_nonce),
                 ("protocol_version", "0.1"),
-                ("storage_schema_version", "3"),
+                ("storage_schema_version", "4"),
             ),
         )
-        db.pragma("user_version", 3)
+        db.pragma("user_version", 4)
     finally:
         db.close()
     path.chmod(0o600)

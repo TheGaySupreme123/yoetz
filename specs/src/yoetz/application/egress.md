@@ -25,7 +25,9 @@ coordinator may reproduce or skip these steps.
 - `async close() -> None` — idempotently enters terminal closure, stops admission, and closes the
   injected gateway exactly once; it releases no vault secret, credential, or content upstream.
 - Closed `SemanticEgressResult`: `SemanticEgressSuccess`, `SemanticEgressAwaitingHuman`,
-  `SemanticEgressBlocked`, `SemanticEgressProviderOutcome`.
+  `SemanticEgressBlocked`, `SemanticEgressProviderOutcome`. Success and provider-outcome variants may
+  carry `privacy_receipt_id` when the durable attempt receipt is readable after gateway completion;
+  absent receipt identity fails closed before inventing final `SemanticProvenance`.
 - Closed `LocalDisclosureResult`: `LocalDisclosureApproved`, `LocalDisclosureBlocked`, or
   `LocalDisclosureUnavailable`, with exact fields owned by `domain/privacy.md` and
   `ports/privacy.md`.
