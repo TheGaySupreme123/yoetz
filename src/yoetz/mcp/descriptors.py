@@ -680,7 +680,9 @@ TOOL_DESCRIPTORS: Final = (
         "publish_work",
         "Publish recorded work",
         "Records a bounded batch of agent-published work events and returns the accepted event "
-        "range and coverage. It has no information about work outside that batch.",
+        "range and coverage. It has no information about work outside that batch. After publishing "
+        "the material claim and evidence, call check, disposition any findings with respond, then "
+        "call receipt before claiming completion.",
         read_only=False,
         idempotent=True,
     ),
@@ -704,11 +706,12 @@ TOOL_DESCRIPTORS: Final = (
     _descriptor(
         "status",
         "Read recorded status",
-        "Reads one bounded, paginated view: assignment, candidate_findings, compact, evidence, "
-        "findings, history, obligations, or versions. Call it when uncertain what you already did "
-        "or committed to, rather than reconstructing from memory. view=findings reads recorded "
-        "findings; view=candidate_findings returns unrecorded deterministic candidates without "
-        "verdicts or IDs.",
+        "Reads one bounded, paginated view: advice, assignment, candidate_findings, compact, "
+        "evidence, findings, history, obligations, or versions. Advice items carry a "
+        "recommended_next_action. Call it when uncertain what you already did or committed to, "
+        "rather than reconstructing from memory. view=findings reads recorded findings; "
+        "view=candidate_findings returns unrecorded deterministic candidates without verdicts or "
+        "IDs.",
         read_only=True,
         idempotent=True,
     ),
@@ -747,15 +750,15 @@ def _digest_descriptor(descriptor: ToolDescriptor) -> str:
 TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "start": "sha256:42509100525d5c866aa21c02cfa33942163967f79968ef1c7c7e00e15fb0e696",
-        "publish_work": "sha256:8203bfce3611794f1164f1416c3e5602c286746d69c0f3385cd0e904b1bd7e19",
+        "publish_work": "sha256:3ad928d63033c61adc1d49cf63d7dd9ccc6e4d0ade0932b4638b62f20d5d273e",
         "check": "sha256:bd78bde8d0586896318534abcc248aa8d87f30ff4952046593549dc57f394500",
         "respond": "sha256:740e576f822636bdcdf4f246a86192a336e7d0284aae611bbc6421ee62ed469a",
-        "status": "sha256:298be02f811b28b0d588ee4cff81cf97a1a47d1f1e2bd7ed7a40d619ad7e4d60",
+        "status": "sha256:99b92f8092623c90f9706f0427f4f81e1cc5f4532571e197344b088e1855351e",
         "receipt": "sha256:75a8a26a45689c4d0fec54ee20784eda43096b8726fd59f924d599f4bd27d095",
     }
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final = (
-    "sha256:fed4821789eb054b73919233b785c2750696f65af7ebe2ea3d98dbc407bbae6f"
+    "sha256:32382f3640d867cfee467cd441cd1b1f973c71baadd73b9c0bada971459db683"
 )
 
 

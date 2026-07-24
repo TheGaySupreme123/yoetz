@@ -61,11 +61,17 @@ descriptor carries `destructiveHint`: no Yoetz operation deletes recorded eviden
 Descriptions are written to answer the follow-up an agent will actually have. `check` states that it
 returns at most `max_findings` findings plus a suppressed count, and that `status` with
 `view=findings` returns the rest — otherwise a capped result reads as a complete one. `status`
-states that it is the bounded, paginated read and names its eight views rather than making the agent
+states that it is the bounded, paginated read and names its nine views rather than making the agent
 discover them by trial. It distinguishes the two that are easily confused: `view=findings` returns
 findings a `check` already recorded, while `view=candidate_findings` runs the deterministic packs
 against the current record and returns candidates only — no verdict, no IDs, nothing recorded. An
 agent that does not know the second exists pays a full `check` to ask a question, or asks nothing.
+It also names `view=advice` and states that advice items carry `recommended_next_action`.
+
+The `publish_work` description carries the completion handoff: after publishing the material claim
+and evidence, call `check` before claiming completion. The tier-0 instructions spell out the full
+publish → check → receipt loop and remind callers that canonical `sequence` and `limit` values are
+JSON strings.
 
 The `start` description also states *when* to call it, not only what it returns: for material
 multi-step, delegated, resumable, or verification-heavy work, before substantive work, skipping

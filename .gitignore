@@ -35,3 +35,6 @@ coverage.xml
 *.swp
 /.debug-mode/
 /.tmp/
+
+# Local Codex/agent handoff drafting inputs (never tracked; fold sanitized conclusions into docs/postmortems/).
+.codex-test-handoff.md

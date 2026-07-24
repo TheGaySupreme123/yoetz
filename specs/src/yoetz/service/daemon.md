@@ -35,7 +35,11 @@ clients, or an already-open database.
 `run_service` performs exactly:
 
 1. Parse/validate service configuration and verified per-user data/runtime paths; configure
-   allowlisted diagnostics; suppress core dumps where supported.
+   allowlisted diagnostics; suppress core dumps where supported. Configuring diagnostics is
+   exactly one `configure_logging(config.logging, LogMode.SERVICE)` call on the same loaded
+   configuration the composition receives, performed before any composition step so an
+   unexpected-dispatch correlation identity always reaches an installed sink
+   (`specs/src/yoetz/observability/logging.md`).
    Production `_SystemClock.now_utc` truncates to whole milliseconds so throttle
    wall-anomaly formatting cannot false-positive into the maximum unlock delay on restart.
    For an already committed passphrase vault, restart loads the live throttle via
@@ -145,6 +149,16 @@ failure body. Privacy projection is skipped for these `ok:false` failures: there
 bearing success body to project, and collapsing a known public code such as `EVENT_INVALID`
 (`unsorted_set_field`) into control `internal_error` is forbidden. Set-field order is never
 auto-sorted; callers must present canonical ASCII order.
+
+Before the generic `Exception` path returns control `internal_error`, the daemon emits one
+structured stderr record whose operation identifies the control method and whose fields carry a
+service-side correlation ID plus a bounded normalized exception-type reason. The same applies if
+public-error projection itself fails. Exception messages and tracebacks remain forbidden by
+ADR-004. Because the frozen v1.0 control error body has no correlation field, this service-side ID
+does not cross the socket; the MCP bridge emits its own public-ID-bound record. Both records also
+carry the caller's own `request_id` from the control body when it is a string, which is the exact
+join key between them: method and timestamp alone do not distinguish two calls of the same method
+in flight at once. A body without a usable request ID omits the field rather than inventing one.
 
 The `context` is the exact service-internal `ClientProjectionContext` from
 `application/service.md`; the daemon rejects a context whose client kind differs from the

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import cast
 
 import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -79,6 +80,22 @@ def test_public_error_and_validation_summaries_are_sanitized() -> None:
     }
     summary = render_safe_compact_summary(result)
     assert summary == f"Error INVALID_REQUEST; retryable: no; correlation: {correlation_id}."
+    all_locations = (
+        {"field": "/request_id", "reason": "missing"},
+        {"field": "/client", "reason": "extra_forbidden"},
+    )
+    multi_location_result = build_public_error_result(
+        PublicErrorCode.INVALID_REQUEST,
+        "The request is invalid.",
+        False,
+        correlation_id,
+        safe_details=all_locations,
+    )
+    multi_location_error = cast(dict[str, object], multi_location_result["error"])
+    assert multi_location_error["safe_details"] == {
+        "fields": ["/request_id", "/client"],
+        "reasons": ["missing", "extra_forbidden"],
+    }
 
     class _Request(BaseModel):
         model_config = ConfigDict(extra="forbid")
@@ -137,7 +154,7 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(item.name for item in TOOL_DESCRIPTORS) == _EXPECTED_TOOL_NAMES
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == _EXPECTED_TOOL_NAMES
     assert TOOL_DESCRIPTOR_SET_DIGEST == (
-        "sha256:fed4821789eb054b73919233b785c2750696f65af7ebe2ea3d98dbc407bbae6f"
+        "sha256:32382f3640d867cfee467cd441cd1b1f973c71baadd73b9c0bada971459db683"
     )
     assert descriptor_for("start").description.startswith(
         "Call for material multi-step, delegated, resumable, or verification-heavy work"
@@ -149,6 +166,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
         _FORBIDDEN_DESCRIPTOR_CLAIMS.search(item.description) is None for item in TOOL_DESCRIPTORS
     )
     assert "uncertain what you already did or committed to" in descriptor_for("status").description
+    assert "recommended_next_action" in descriptor_for("status").description
+    assert "call receipt before claiming completion" in descriptor_for("publish_work").description
     assert server_instructions().encode("utf-8") == read_resource(
         "yoetz://guidance/agent-instructions.md"
     )

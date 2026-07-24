@@ -40,7 +40,7 @@ dependency could leak user plaintext or corrupt the MCP protocol stream.
 
 ```text
 timestamp, level, component, operation, correlation_id,
-session_id_hash, request_id, duration_ms, outcome,
+session_id_hash, request_id, duration_ms, outcome, reason,
 engine_version, policy_version, sqlite_source_id_hash
 ```
 
@@ -122,8 +122,12 @@ call from the MCP last-resort catch path. The fault-injection matrix in
 never reaches MCP content; `specs/tests/subprocess/test_mcp_stdout_purity.py.md` independently
 proves protocol-only stdout.
 
-The helpers inspect neither `exc.args` nor traceback state. Their only exception-independent output
-is a newly generated correlation ID plus fixed bounded component/operation/outcome identity. If
+The helpers inspect neither `exc.args` nor traceback state. Their only exception-dependent output
+is a `reason` token looked up from one closed reviewed registry keyed by exact exception class
+name; an unlisted class (including any dynamically created one, whose name could carry caller
+data) resolves to the fixed `exception_unavailable` sentinel, so no derived class name is ever
+rendered. They
+also emit a newly generated correlation ID plus bounded component/operation/outcome identity. If
 even that structural emission fails, they return/exit according to the public boundary without
 creating a secondary diagnostic artifact.
 
@@ -140,11 +144,16 @@ creating a secondary diagnostic artifact.
   rendered to any sink.
 - Records emitted before `configure_logging` (import-time) must not exist: `__init__.md` bans
   import side effects; tests import every module and assert zero records.
+- Every process entry point installs the sink for its own mode before doing any other work:
+  `service/daemon.md` `run_service` uses `LogMode.service` and `mcp/server.md` `main` uses
+  `LogMode.mcp_stdio`. A process that never calls `configure_logging` silently discards every
+  record, because `StructuredLogger` carries its content in `extra` and only this module's handler
+  renders it; tests assert each entry point installs its mode.
 
 ## Invariants
 
 - stdout is never written by any logging path in any mode.
-- Only the twelve allowlisted fields ever appear in a stderr log line.
+- Only the thirteen allowlisted fields ever appear in a stderr log line.
 - SDK/third-party records are sanitized at all levels; filtering is structural, not
   level-based.
 - No user-controlled plaintext reaches logs; `specs/src/yoetz/observability/privacy.md` and

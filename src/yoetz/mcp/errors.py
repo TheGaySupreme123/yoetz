@@ -187,6 +187,19 @@ def build_public_error_result(
 ) -> dict[str, JsonValue]:
     """Build and schema-check one exact public operation-failure result."""
 
+    if type(safe_details) is tuple:
+        locations = cast(tuple[Mapping[str, str], ...], safe_details)
+        public_error: dict[str, object] = {
+            "code": code.value,
+            "message": message,
+            "retryable": retryable,
+            "correlation_id": correlation_id,
+            "safe_details": {
+                "fields": tuple(location["field"] for location in locations),
+                "reasons": tuple(location["reason"] for location in locations),
+            },
+        }
+        return _validated_failure(public_error, request_id)
     error = PublicOperationError(
         code,
         message,

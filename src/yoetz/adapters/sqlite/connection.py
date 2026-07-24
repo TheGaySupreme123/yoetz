@@ -73,6 +73,7 @@ _WRITER_ALLOWED_PRAGMAS: Final = _READ_ONLY_ALLOWED_PRAGMAS | frozenset(
     {"application_id", "user_version", "wal_checkpoint"}
 )
 _WRITER_SAFE_CONFIGURATION_PRAGMAS: Final = {
+    "defer_foreign_keys": frozenset({None, "ON", "1"}),
     "foreign_keys": frozenset({None, "ON", "1"}),
     "trusted_schema": frozenset({None, "OFF", "0"}),
 }

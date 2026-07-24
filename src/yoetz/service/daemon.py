@@ -50,6 +50,11 @@ from yoetz.config.paths import (
     unlock_throttle_path,
     verify_private_local_bundle,
 )
+from yoetz.observability.logging import (
+    LogMode,
+    configure_logging,
+    record_unexpected_exception_without_raising,
+)
 from yoetz.ports.control import (
     ControlCallRequest,
     ControlClientKind,
@@ -169,6 +174,16 @@ _WORKFLOW_RESULT_MODELS: Final[Mapping[ControlMethod, type[BaseModel]]] = {
     ControlMethod.STATUS: StatusResult,
     ControlMethod.RECEIPT: ReceiptResult,
 }
+
+
+def _safe_body_request_id(request: ControlCallRequest) -> str | None:
+    """Return the caller's already-public request id, or None if the body has no usable one."""
+
+    try:
+        candidate = getattr(request.body, "request_id", None)
+    except BaseException:
+        return None
+    return candidate if type(candidate) is str else None
 
 
 class _Listener(Protocol):
@@ -531,7 +546,13 @@ class ServiceDaemon:
             return self._public_operation_failure_result(request, exc)
         except ControlProtocolError, TypeError, ValueError:
             return self._error_result(request, ControlError("frame_invalid"))
-        except Exception:
+        except Exception as exc:
+            record_unexpected_exception_without_raising(
+                exc,
+                component="service.daemon",
+                operation=f"{request.method.value}_internal_error",
+                request_id=_safe_body_request_id(request),
+            )
             return self._error_result(request, ControlError("internal_error"))
 
     async def lock(self, reason: str = "explicit_lock") -> None:
@@ -781,6 +802,12 @@ class ServiceDaemon:
 
         result_type = _WORKFLOW_RESULT_MODELS.get(request.method)
         if result_type is None or type(error) is not PublicOperationError:
+            record_unexpected_exception_without_raising(
+                error,
+                component="service.daemon",
+                operation=f"{request.method.value}_public_error_internal_error",
+                request_id=_safe_body_request_id(request),
+            )
             return self._error_result(request, ControlError("internal_error"))
         try:
             bound = (
@@ -799,7 +826,13 @@ class ServiceDaemon:
                 candidate["request_id"] = request_id
             body = result_type.model_validate(candidate)
             return self._result(request, body)
-        except Exception:
+        except Exception as exc:
+            record_unexpected_exception_without_raising(
+                exc,
+                component="service.daemon",
+                operation=f"{request.method.value}_public_error_internal_error",
+                request_id=_safe_body_request_id(request),
+            )
             return self._error_result(request, ControlError("internal_error"))
 
     def _validate_success_body(self, request: ControlCallRequest, body: object) -> None:
@@ -1621,7 +1654,9 @@ def _human_error_code(exc: Exception) -> str:
 async def run_service() -> Never:
     """Run one foreground service process until a signal requests bounded shutdown."""
 
-    composition = await _production_composition()
+    config = load_config({}, os.environ, None)
+    configure_logging(config.logging, LogMode.SERVICE)
+    composition = await _production_composition(_config=config)
     daemon = ServiceDaemon(_composition=composition)
     await daemon.serve()
     raise SystemExit(0)

@@ -16,7 +16,11 @@ Never publish chain-of-thought or hidden reasoning; full prompts, transcripts, o
 
 # Before you claim done
 
-Publish the material completion claim and its current evidence, then call `check`. Recheck after a material change, new evidence, or a finding response.
+Publish the material completion claim and its current evidence, call `check`, disposition any findings, then call `receipt`. Recheck after a material change, new evidence, or a finding response. Treat this as the normal publish → check → receipt loop.
+
+# Canonical request values
+
+Fields backed by canonical integers stay JSON strings on the wire. In particular, send frontier `sequence` and pagination `limit` as strings such as `"10"`, never JSON numbers.
 
 # Word conclusions honestly
 

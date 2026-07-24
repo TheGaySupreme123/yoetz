@@ -178,6 +178,10 @@ def test_pragma_state_matches_contract(
             database.execute("ATTACH DATABASE ':memory:' AS forbidden")
         with pytest.raises(apsw.SQLError, match="not authorized to use function"):
             database.execute("SELECT load_extension('forbidden')").fetchall()
+        database.execute("PRAGMA defer_foreign_keys=ON")
+        assert database.pragma("defer_foreign_keys") == 1
+        with pytest.raises(apsw.AuthError):
+            database.execute("PRAGMA writable_schema=ON")
 
         database.set_authorizer(None)
         try:
