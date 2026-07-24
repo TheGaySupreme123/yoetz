@@ -132,8 +132,8 @@ implicit composition detail:
 
 ## Status board
 
-The manifest is the canonical inventory. At this draft checkpoint it classifies 633 spec files:
-619 unique future-file owners, 10 directory indexes, and 4 coordination files. Every future owner
+The manifest is the canonical inventory. At this draft checkpoint it classifies 636 spec files:
+622 unique future-file owners, 10 directory indexes, and 4 coordination files. Every future owner
 has all seven required sections; all local Open questions are closed or routed to the central
 decision ledger.
 
@@ -152,8 +152,8 @@ decision ledger.
 | `src/yoetz/` Python/code files | 170 | — |
 | `src/yoetz/resources/` | 75 | The resource manifest plus exactly 74 installed entries. |
 | `scripts/` | 6 | — |
-| `tests/` | 215 | 7 suite indexes |
-| **Total future files** | **619** | **10 indexes + 4 coordination files = 633 spec files** |
+| `tests/` | 218 | 7 suite indexes |
+| **Total future files** | **622** | **10 indexes + 4 coordination files = 636 spec files** |
 
 All rows remain `draft` until the founder freeze; “present” is not the same as “reviewed” or
 “locked.” Empirical release cells and independent threat review remain later evidence gates even

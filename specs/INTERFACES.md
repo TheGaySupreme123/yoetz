@@ -1976,12 +1976,8 @@ facade and are never MCP tools.
   by config or environment. Ordinary clients never load this object. `release-probe` is available
   only to the service-start release harness and cannot loosen user policy. Shared config values are
   `YoetzConfig`, `MinimalConfig`, `ConfigError`, `PathSafetyError`, `OwnerDeclaredEndpointConfig`,
-  `parse_https_origin`, and the exact endpoint profile ids `openai-responses`,
-  `fireworks-responses`, `owner-declared-openai-responses` (ADR-014), plus factory-supported
-  OpenAI-compatible cells `anthropic-openai-chat-completions`,
-  `google-gemini-openai-chat-completions`, `openrouter-openai-chat-completions`, and
-  `vercel-ai-gateway-openai-responses` (ADR-006 revised 2026-07-24). Live/`assisted` claims stay
-  E-007-gated. Constrained `https_origin` is the only owner-supplied
+  `parse_https_origin`, and the exact endpoint profile ids `openai-responses` /
+  `owner-declared-openai-responses` (ADR-014). Constrained `https_origin` is the only owner-supplied
   locator; free `base_url` remains forbidden. Its composition-only
   `NetworkPolicy` values are exactly `denied|candidate_external|explicit_per_probe`;
   `SemanticPolicy` values are exactly

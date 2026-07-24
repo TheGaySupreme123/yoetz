@@ -503,6 +503,32 @@ class CatalogPrivacyPolicyStore:
                 self._insert_policy(candidate, generation, "tightening", None)
         return PolicyCommitResult(candidate, generation, 0, 0)
 
+    async def reseed_untouched_bootstrap_default(
+        self,
+        scope: AuthorizationScope,
+        *,
+        expected_current: PrivacyPolicy,
+        replacement: PrivacyPolicy,
+    ) -> PrivacyPolicy:
+        """Re-seed the shipped bootstrap default when the stored policy is still exactly it.
+
+        An installation created before the shipped default changed would otherwise keep the older
+        allowlist forever, so the same release behaves differently for new and existing users. The
+        swap happens only when the stored policy equals ``expected_current`` exactly; any owner
+        edit — a tightening, an approved expansion, or a setup choice — leaves the policy alone.
+        """
+
+        now = self._clock.now_utc()
+        async with self._lock:
+            with _transaction(self._db):
+                current = self._current_exact(scope)
+                if current.policy != expected_current:
+                    return current.policy
+                generation = self._next_generation()
+                self._supersede(current.policy, now)
+                self._insert_policy(replacement, generation, "seed", None)
+        return replacement
+
     async def watch_generation(self) -> int:
         row = self._db.execute(
             "SELECT COALESCE(MAX(policy_generation), 0) FROM privacy_policy_versions"

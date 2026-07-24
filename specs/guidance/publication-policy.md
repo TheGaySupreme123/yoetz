@@ -1,64 +1,83 @@
-# Publication policy
+# guidance/publication-policy.md — harness-neutral publication policy reference
 
-## Materiality checklist
+**Wave:** D | **ADRs:** ADR-002, ADR-005, ADR-010 | **Imports (spec-tree):**
+`specs/INTERFACES.md`, `guidance/README.md`, `guidance/workflow.md` | **Imported by:**
+`mcp/resources.md`, every harness skill spec, capability/packaging tests
 
-Publish a fact when it changes an independently reviewable work package, a requested outcome, an obligation, a decision, a material attempt, a result, evidence, a claim, a plan, or a finding response. Keep routine navigation, searches, formatting, generated-file writes, repeated status reads, tool chatter, and per-file bookkeeping out of the ledger.
+## Purpose
 
-For a large inventory, create obligations per coherent work package. Publish one bounded manifest evidence item for its leaf files and one material package transition. Do not create one obligation or routine event per file.
+Define the concise reference document that teaches when material work should be published into the
+Yoetz ledger and when it should stay out of the record. It is normative only insofar as it restates
+the frozen public contract.
 
-## The sixteen event families
+This document is harness-neutral and owned once (ADR-010). It reaches an unprofiled MCP host as the
+`yoetz://guidance/publication-policy.md` resource and a first-party harness as an installed file;
+both are the same bytes.
 
-- `session_opened` — establishes the recorded session; it does not prove workspace access.
-- `session_resumed` — records a resume assertion; it does not prove continuity outside the ledger.
-- `plan_published` — records the current plan; it is not completion.
-- `plan_revised` — records a material plan change; it does not erase the prior plan.
-- `obligation_published` — creates a requested or derived obligation; it is not evidence.
-- `assignment_recorded` — attributes a bounded assignment assertion; it is not authenticated authorship.
-- `decision_recorded` — records a decision and rationale summary; it is not hidden reasoning.
-- `action_recorded` — records a material action assertion; it does not prove the action occurred.
-- `evidence_recorded` — links bounded evidence identity; it does not upgrade its provenance.
-- `claim_recorded` — records a claim to be checked; it is not a verdict.
-- `result_recorded` — records an independently useful result assertion; it is not automatically accepted.
-- `finding_recorded` — records a deterministic or semantic challenge; it is not self-resolving.
-- `response_recorded` — records a response to a finding; it does not erase the finding.
-- `check_recorded` — records a check at one frontier; it becomes stale after material change.
-- `redaction_recorded` — records a bounded redaction fact; it does not prove forensic erasure.
-- `receipt_recorded` — records derived completion wording and limitations; it is not proof of the work.
+## Public surface
 
-## Obligations, evidence, and claims
+- `guidance/publication-policy.md` — public markdown reference, bounded (target ≤12 KiB), with
+  stable headings so an agent can retrieve one section. Addressed by the logical resource name
+  `guidance/publication-policy.md`.
 
-An obligation names what must be satisfied. Evidence is a bounded, provenance-labeled reason to believe something about it. A claim states a conclusion. Link them explicitly; do not substitute a file list for an obligation or a claim for evidence.
+## Behavior
 
-## Subject state and freshness
+The reference contains:
 
-Bind change-sensitive evidence to the exact subject state or frontier it concerns. If a material dependency changed or its state is unknown, mark the evidence stale or limited. Absence of visible source is not evidence that nothing changed.
+- a materiality checklist with positive and negative examples;
+- the 16 event-family cheat sheet, including when each family is appropriate and what it does not
+  prove;
+- obligation/evidence/claim relationships;
+- subject-state binding and stale-evidence examples;
+- event batching, writer-sequence, expected-frontier, and retry examples;
+- multi-agent assignment and attribution rules;
+- forbidden-content guidance, including the semantic-case publication duty: for a material
+  completion check, publish the smallest state-bound diff or symbol plus the directly relevant test
+  or failure excerpt, because self-asserted completion prose alone leaves semantic review blind;
+- four worked mini-flows: code change, research task, plan revision, and a large generated or
+  migrated inventory. The inventory flow groups a 100-file result into independently reviewable
+  work-package obligations, publishes material package transitions, and uses one bounded manifest
+  evidence item for the leaf files in each completed package. It contrasts that with forbidden
+  one-obligation-per-file and routine per-file event streams. The code-change flow shows
+  a bounded state-bound changed hunk/enclosing symbol plus linked test/failure evidence, and
+  contrasts it with forbidden repository-wide or unrelated source publication;
 
-## Batching, sequencing, and retry
+All examples use stable typed IDs, canonical integers, timestamp strings, and bounded payloads.
+The document does not widen the public workflow contract and does not introduce new event families.
 
-Batch facts that belong to one material transition. Preserve writer sequence and expected frontier. On timeout, reuse the same request and operation IDs; never manufacture a replacement event merely because the response was lost.
+## Errors and edge cases
 
-## Multi-agent work
+- If the event registry changes, the reference must be updated in lockstep or the build fails.
+- Example payloads that contain secrets, real repository paths, or production identifiers are
+  invalid.
+- A reference that contradicts `INTERFACES.md` is a build failure, not a soft warning.
+- Naming a harness, install path, provider, or model fails the public-boundary scan; harness-specific
+  ergonomics belong in that harness's own skill spec.
+- Exceeding the size bound fails packaging rather than shipping a document hosts will truncate.
+- Treating enumerable files or tool calls as the publication unit fails conformance; agents must be
+  able to name a coherent work package and its acceptance boundary.
 
-Publish bounded assignments and preserve each delegate's logical writer identity. Treat delegate summaries as claims. Link their accepted evidence separately and record a decision when resolving a contradiction.
+## Invariants
 
-## Forbidden content
+1. The reference teaches publication discipline, not hidden reasoning or full transcripts.
+2. Examples remain small, concrete, and offline-verifiable.
+3. The 16-family cheat sheet matches the frozen registry exactly.
+4. Problem-local excerpts remain ordinary evidence in existing event families; they never create a
+   source-browsing operation or imply independent observation.
+5. The document is harness-neutral and byte-identical wherever it is served.
+6. Work-package transitions are the normative batching unit; leaf files belong in bounded manifest
+   evidence and do not automatically become obligations or events.
 
-Never publish chain-of-thought or hidden reasoning; full prompts, transcripts, or conversation history; credentials or secrets; whole files, repositories, or broad unrelated source. When semantic review would otherwise be blind, publish only the smallest problem-local changed hunk or enclosing symbol needed, with source, state, and coverage labels. For material completion checks, publish the smallest state-bound diff/symbol and the directly relevant test or failure excerpt; never rely on self-asserted completion prose alone.
+## Tests
 
-## Mini-flows
+- `specs/tests/capability.md` — including retrieval by an unprofiled MCP host with no installed
+  skill.
+- `specs/tests/conformance.md`
+- The large-inventory fixture rejects per-file obligation/event amplification and accepts grouped
+  work packages with bounded manifests, partial-package status, and one final package transition.
+- `specs/tests/packaging.md` — byte parity across the resource and every harness install, plus the
+  size bound.
 
-### Code change
+## Open questions
 
-Publish one obligation for the behavior, one material implementation result, a bounded changed-symbol digest or excerpt, and focused test evidence. Do not publish the repository or every edit.
-
-### Research
-
-Publish the question, source identities, bounded supported and contradicted claims, limitations, and the conclusion. Do not paste articles or browsing transcripts.
-
-### Plan revision
-
-Publish the original obligation, the material new fact, and one plan revision explaining which outcome or dependency changed. Routine schedule adjustment needs no event.
-
-### Large generated inventory
-
-For 100 files, group them into independently reviewable packages, record partial package status when useful, attach one bounded member manifest per completed package, and publish one final package transition. One obligation or routine event per file is invalid.
+None.

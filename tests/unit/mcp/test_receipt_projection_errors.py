@@ -1,4 +1,4 @@
-"""MCP bridge maps receipt projection failures without collapsing the connection story."""
+"""MCP bridge maps each receipt projection failure to its own actionable public error."""
 
 from __future__ import annotations
 

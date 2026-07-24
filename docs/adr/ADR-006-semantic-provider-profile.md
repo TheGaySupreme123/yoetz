@@ -23,8 +23,6 @@ and semantic/privacy capability and conformance tests.
    HTTPS origin from service TOML (`[provider.owner_declared_endpoint].https_origin`); it reuses
    the Responses protocol cell, never inherits official OpenAI data-use / `assisted` eligibility,
    and still requires capability evidence for any advertised interoperability claim.
-   **Revised 2026-07-24:** Bundled OpenAI-compatible Chat Completions protocol cells are authorized for exact endpoint profile IDs `anthropic-openai-chat-completions`, `google-gemini-openai-chat-completions`, and `openrouter-openai-chat-completions` (factory-backed; Bearer one-attempt; strict `response_format.json_schema` request shape). `vercel-ai-gateway-openai-responses` reuses the Responses factory with host `ai-gateway.vercel.sh`. Live/`assisted` claims remain gated on E-007 fixtures plus current data-use records; presets are factory-supported configuration, not live-verified endpoints until evidence is recorded.
-
 3. **Local-model adapter:** v0.1 includes the contract for a separately configured local semantic
    evaluator. Its endpoint is an owner-only, service-approved AF_UNIX socket profile; it performs no
    DNS, AF_INET/AF_INET6 connection, redirect, proxy lookup, or fallback. It is a local disclosure

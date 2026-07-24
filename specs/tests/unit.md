@@ -76,6 +76,9 @@ tests/unit/
     test_hooks.py
     test_observe_cli.py
     test_observe_hooks.py
+  mcp/
+    test_receipt_projection_errors.py
+    test_summaries_semantic_lead.py
   observability/
     test_logging_allowlist.py
     test_privacy.py
@@ -86,6 +89,7 @@ tests/unit/
     test_confidential_client.py
     test_confidential_protocol.py
     test_control_protocol.py
+    test_default_agent_context_allowlist.py
     test_elevated_bootstrap.py
     test_lifecycle.py
     test_runtime_context.py
@@ -160,6 +164,8 @@ tests/unit/kernel/test_ranking.py
 tests/unit/kernel/test_receipt_builder.py
 tests/unit/kernel/test_reducers_each_family.py
 tests/unit/kernel/test_replay_and_projections.py
+tests/unit/mcp/test_receipt_projection_errors.py
+tests/unit/mcp/test_summaries_semantic_lead.py
 tests/unit/observability/test_logging_allowlist.py
 tests/unit/observability/test_privacy.py
 tests/unit/privacy/test_catalog_audit.py
@@ -177,6 +183,7 @@ tests/unit/service/test_client.py
 tests/unit/service/test_confidential_client.py
 tests/unit/service/test_confidential_protocol.py
 tests/unit/service/test_control_protocol.py
+tests/unit/service/test_default_agent_context_allowlist.py
 tests/unit/service/test_elevated_bootstrap.py
 tests/unit/service/test_lifecycle.py
 tests/unit/service/test_runtime_context.py

@@ -897,16 +897,6 @@ def provider_endpoint(
             help="Bind the reviewed Fireworks Responses profile.",
         ),
     ] = False,
-    provider_name: Annotated[
-        str | None,
-        typer.Option(
-            "--provider",
-            help=(
-                "Reviewed preset: openai, fireworks, anthropic, gemini, openrouter, "
-                "or vercel-ai-gateway."
-            ),
-        ),
-    ] = None,
     https_origin: Annotated[
         str | None,
         typer.Option(
@@ -920,10 +910,9 @@ def provider_endpoint(
     ] = True,
     json_output: _JSON = False,
 ) -> None:
-    """Write a nonsecret reviewed provider or owner-declared binding to config.toml."""
+    """Write nonsecret Official OpenAI or owner-declared endpoint binding to config.toml."""
 
     from yoetz.cli.provider_binding import (
-        ProviderEndpointChoice,
         apply_provider_endpoint_choice,
         prompt_provider_endpoint_binding,
     )
@@ -934,7 +923,6 @@ def provider_endpoint(
             interactive
             and not official
             and not fireworks
-            and provider_name is None
             and https_origin is None
             and model is None
         ):
@@ -947,35 +935,10 @@ def provider_endpoint(
         if model is None:
             _finish(_usage_failure())
             return
-        if (
-            (official and fireworks)
-            or (provider_name is not None and (official or fireworks or https_origin is not None))
-            or ((official or fireworks) and https_origin is not None)
-        ):
+        if (official and fireworks) or ((official or fireworks) and https_origin is not None):
             _finish(_usage_failure())
             return
-        if provider_name is not None:
-            choices: dict[str, ProviderEndpointChoice] = {
-                "openai": "official_openai",
-                "official_openai": "official_openai",
-                "fireworks": "fireworks",
-                "anthropic": "anthropic",
-                "claude": "anthropic",
-                "anthropic-claude": "anthropic",
-                "gemini": "google_gemini",
-                "google": "google_gemini",
-                "google_gemini": "google_gemini",
-                "google-gemini": "google_gemini",
-                "openrouter": "openrouter",
-                "vercel-ai-gateway": "vercel_ai_gateway",
-                "vercel_ai_gateway": "vercel_ai_gateway",
-            }
-            choice = choices.get(provider_name.strip().lower())
-            if choice is None:
-                _finish(_usage_failure())
-                return
-            path, provider = apply_provider_endpoint_choice(choice, model=model)
-        elif official:
+        if official:
             path, provider = apply_provider_endpoint_choice("official_openai", model=model)
         elif fireworks:
             path, provider = apply_provider_endpoint_choice("fireworks", model=model)
@@ -1226,16 +1189,16 @@ def root(
         bool,
         typer.Option("--fireworks", help="Use the bundled Fireworks Responses profile."),
     ] = False,
-    provider_name: Annotated[
-        str | None,
-        typer.Option(
-            "--provider",
-            help="Reviewed provider preset used with --set.",
-        ),
-    ] = None,
     model: Annotated[
         str | None,
         typer.Option("--model", help="Provider model identifier used with --set."),
+    ] = None,
+    api_key: Annotated[
+        str | None,
+        typer.Option(
+            "--api-key",
+            help="Provider API key value; omit to use a hidden local-terminal prompt.",
+        ),
     ] = None,
 ) -> None:
     if version:
@@ -1244,19 +1207,11 @@ def root(
     if set_provider:
         if context.invoked_subcommand is not None:
             raise typer.BadParameter("--set cannot be combined with a subcommand")
-        if fireworks and provider_name is not None:
-            raise typer.BadParameter("--fireworks and --provider are mutually exclusive")
         operation = _setup_operation("run_provider_setup")
-        arguments: dict[str, object] = {
-            "fireworks": fireworks,
-            "model": model,
-        }
-        if provider_name is not None:
-            arguments["provider"] = provider_name
-        _finish(run_async(lambda: operation(**arguments)))
+        _finish(run_async(lambda: operation(fireworks=fireworks, model=model, api_key=api_key)))
         return
-    if fireworks or provider_name is not None or model is not None:
-        raise typer.BadParameter("--fireworks, --provider, and --model require --set")
+    if fireworks or model is not None or api_key is not None:
+        raise typer.BadParameter("--fireworks, --model, and --api-key require --set")
     if context.invoked_subcommand is not None:
         return
     # Bare invocation (ADR-013): an interactive terminal with no completion marker

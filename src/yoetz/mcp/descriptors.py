@@ -691,9 +691,13 @@ TOOL_DESCRIPTORS: Final = (
         "Check recorded work",
         "Runs the requested recorded-work checks and records the result; it returns at most "
         "max_findings findings plus a suppressed count, and status with view=findings reads the "
-        "rest. A no_issue_detected verdict does not mean the work is correct. Prefer "
-        "semantic_if_configured for material implementation claims; use deterministic_only only "
-        "for explicitly structural checks and disclose that limitation.",
+        "rest. A no_issue_detected verdict does not mean the work is correct. Choose mode "
+        "deliberately: semantic_if_configured for most material implementation or review claims; "
+        "semantic_required when the claim depends on qualitative correctness, design conformance, "
+        "security or privacy reasoning, interoperability, or whether the code satisfies the ask; "
+        "deterministic_only only for explicitly local or structural checks, a semantic-disabled "
+        "policy, or a deliberate no-egress choice, and then disclose that limitation. Omitting "
+        "mode resolves through the configured verification policy.",
         read_only=False,
         idempotent=True,
     ),
@@ -755,14 +759,14 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "start": "sha256:42509100525d5c866aa21c02cfa33942163967f79968ef1c7c7e00e15fb0e696",
         "publish_work": "sha256:3ad928d63033c61adc1d49cf63d7dd9ccc6e4d0ade0932b4638b62f20d5d273e",
-        "check": "sha256:9ab07e072806e6b473dcad812a0397353eb2725a132e27d1b255aea649e64a5a",
+        "check": "sha256:e382bf8897267b9ceb4a8833a43673f7cebcf052aef286848b3f209789399693",
         "respond": "sha256:740e576f822636bdcdf4f246a86192a336e7d0284aae611bbc6421ee62ed469a",
         "status": "sha256:99b92f8092623c90f9706f0427f4f81e1cc5f4532571e197344b088e1855351e",
         "receipt": "sha256:3d50456b00c2fa4e46fc167f97d3db2033d6f02d46a7a6e934b4f28797d69e19",
     }
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final = (
-    "sha256:b9587db7c1573ca58cc6fa4602ac51a7495ff5bff4caf7cc885fc0f18bc548af"
+    "sha256:99dbb6ee49a24168f351c1a3b405dd001c7ee8c8add115b7ac79f4adfa0a7afe"
 )
 
 

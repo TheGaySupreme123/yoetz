@@ -1,59 +1,107 @@
-# Coverage and receipts
+# guidance/coverage-and-receipts.md — harness-neutral coverage and receipt reference
 
-## Coverage is a vector
+**Wave:** D | **ADRs:** ADR-002, ADR-005, ADR-007, ADR-010 | **Imports (spec-tree):**
+`specs/INTERFACES.md`, `guidance/README.md`, `specs/src/yoetz/domain/receipts.md`,
+`specs/src/yoetz/protocol/coverage.md` | **Imported by:** `mcp/resources.md`, every harness skill
+spec, capability/packaging tests
 
-Coverage has six independent dimensions. Do not collapse them into a score or let strength in one compensate for weakness in another:
+## Purpose
 
-- participation: `cooperative_mcp`, `local_cli`, `codex_jsonl_import`, or the applicable recorded mode;
-- authorship: `self_asserted`, `harness_observed`, or stronger only where the frozen contract permits it;
-- artifact observation: `published_only`, `hook_observed`, or an exact stronger reviewed state;
-- content visibility: `none`, `digest_only`, `targeted_excerpt`, or the applicable reviewed content class;
-- provenance: deterministic, semantic-provider, imported, or participant-asserted as recorded;
-- freshness: current, stale, unknown, or redacted according to the named frontier and subject state.
+Define the reference document that teaches how coverage, findings, freshness, and receipt wording
+work together at completion time. It gives an agent the exact conservative language needed to avoid
+overstating evidence.
 
-Use the exact enum values returned by the protocol; this reference does not create additional values. The weakest material dependency bounds the conclusion.
+This document is harness-neutral and owned once (ADR-010). It reaches an unprofiled MCP host as the
+`yoetz://guidance/coverage-and-receipts.md` resource and a first-party harness as an installed file;
+both are the same bytes.
 
-## Evidence and provenance
+It is also where the coverage difference between hosts is explained honestly: an agent publishing
+over MCP earns `cooperative_mcp` with `self_asserted` authorship and `published_only` artifact
+observation, and no harness integration in v0.1 changes that. A capability-proven trigger hook may
+prompt the same `status` re-grounding an agent can initiate itself; it observes nothing and changes
+no coverage. A harness that later supplies observation hooks can earn `hook_observed`; until then,
+a first-party integration buys ergonomics, never a stronger claim.
 
-Deterministic evidence says what a reviewed rule computed from the accepted record. Semantic evidence retains provider, model, policy, request, response, and review provenance. Imported evidence never gains cooperative authorship merely because Yoetz stores it. A digest records identity, not content inspection. TOML, path, or metadata construction is not proof of SDK wire dispatch or semantic review (Yoetz cooperative/evidence boundary).
+## Public surface
 
-## Freshness, redaction, and unknown input
+- `guidance/coverage-and-receipts.md` — public markdown reference, bounded (target ≤12 KiB), with
+  stable headings so an agent can retrieve one section. Addressed by the logical resource name
+  `guidance/coverage-and-receipts.md`.
 
-Evidence bound to an older material state is stale. Hidden, redacted, or unknown-schema material remains a limitation rather than being treated as absent. An import gap is a gap, not an unchanged-state fact.
+## Behavior
 
-## Findings and responses
+The reference contains:
 
-For a finding, choose one recorded response: accept and act; provide additional evidence; revise the claim; dispute with evidence; or state an unresolved limitation. Then recheck after material change. A response never deletes the original challenge.
+- the six coverage dimensions, exact enum values, and default ordering;
+- why coverage is a vector rather than a score;
+- weakest-material-dependency examples;
+- deterministic-vs-semantic origin and provenance rules, including that TOML/path/metadata
+  construction is not proof of SDK wire dispatch or semantic review (cooperative/evidence
+  boundary);
+- freshness, redaction, unknown-schema, and import-gap examples;
+- finding disposition semantics;
+- reviewer-challenge response patterns (`accept/act`, `provide evidence`, `revise claim`, `dispute
+  with evidence`, `state unresolved limitation`) mapped to existing respond/publish/recheck calls;
+- the difference between same state, asserted-but-unobserved change, observed change with hidden
+  content, and reviewed targeted change content;
+- JSON receipt field mapping and derived markdown rules;
+- check-mode and semantic-coverage rules: a clean deterministic-only check is not an implementation
+  review; when the mode is `deterministic_only` (equivalently, semantic status `not_requested`) the
+  coverage carries the `semantic_review_not_requested` gap and completeness is coverage-incomplete
+  even when the verdict is `no_issue_detected`;
+- receipt-format rules: every format projects to agent context under the default policy, and a
+  stricter owner policy that blocks digest-bound `json` surfaces `PRIVACY_AUTHORITY_REQUIRED` with
+  `receipt_json_projection_blocked`, answered by re-requesting `markdown` or `text`; the durable
+  receipt is recorded even when its projection is blocked;
+- approved and forbidden completion-wording examples;
+- the rule that only a recorded `check` bounds final wording, and that a `status`
+  `view=candidate_findings` read never does.
 
-## State examples
+That last rule needs its own short section, because the view is designed to be called often and
+returns something that looks like a check result. It states: candidate findings are what the
+deterministic packs say about the record right now; they carry no verdict, no IDs, and no receipt,
+and reading them is not checking. An empty candidate list means no rule fired at that frontier — it
+is not `no_issue_detected`, which only a recorded check produces. The agent may act on candidates
+freely, and should; it may not report them, cite them, or let them stand in for the check before a
+completion claim. The permitted use is "I saw an unresolved attempt and went back to it." The
+forbidden sentence is "I checked and found nothing," said after a candidate read.
 
-- Same state: evidence may remain current when its exact state binding still matches.
-- Asserted change without observation: record the assertion and keep artifact observation limited.
-- Observed change with hidden content: record observation without claiming content review.
-- Reviewed targeted content: record only the bounded excerpt and its exact provenance.
+The reference stays no stronger than the owning protocol. It uses wording such as “recorded claim”
+and “digest recorded” where the evidence is self-asserted or partial, and it treats stale or
+redacted material as a real limitation.
 
-## Candidate findings are not a check
+## Errors and edge cases
 
-`status` with `view=candidate_findings` is an advisory read of what deterministic packs currently say. Candidates have no verdict, IDs, or receipt and the read records nothing. An empty list means no rule fired at that frontier; it is not `no_issue_detected`.
+- If the coverage registry or receipt schema changes, the reference must change with it.
+- A wording example that claims proof, verification, or completeness beyond the frozen coverage is
+  invalid.
+- Text that presents a candidate read as a check, or an empty candidate list as a clean result, is
+  invalid. The view exists so an agent can correct itself during the work, not so it can reach a
+  conclusion without recording one.
+- Missing or corrupt reference bytes must fail MCP resource registration and installed-skill
+  validation.
+- Text implying that installing a first-party integration or firing a v0.1 trigger-only hook
+  strengthens coverage is invalid. Only a capability-proven, consented observation arm with real
+  observation evidence may earn `hook_observed`.
+- Naming a harness, install path, provider, or model fails the public-boundary scan.
 
-Permitted: “I saw an unresolved attempt and went back to it.”
+## Invariants
 
-Forbidden after only a candidate read: “I checked and found nothing.”
+1. Coverage language never outruns the public contract.
+2. Receipt wording is bounded by the weakest material dependency.
+3. The reference remains usable offline.
+4. Missing source visibility is always a coverage limitation, never an unchanged-state fact.
+5. The document is harness-neutral and byte-identical wherever it is served.
+6. Host ergonomics and coverage strength are described as independent.
 
-## Check mode and semantic coverage
+## Tests
 
-A clean deterministic-only check is not an implementation review. When `mode=deterministic_only` (or semantic status is `not_requested`), the receipt/check coverage includes `semantic_review_not_requested` and completeness is coverage-incomplete even if the verdict is `no_issue_detected`. Prefer `semantic_if_configured` for material claims; reserve `deterministic_only` for structural checks and disclose the limitation.
+- `specs/tests/capability.md` — including retrieval by an unprofiled MCP host with no installed
+  skill.
+- `specs/tests/conformance.md`
+- `specs/tests/packaging.md` — byte parity across the resource and every harness install, plus the
+  size bound.
 
-## Receipt format
+## Open questions
 
-Default agent-context policy can project verification output (findings, obligations, receipt sections) so `json`, `markdown`, and `text` receipts work for the requesting agent. Under a deliberately stricter owner policy, digest-bound `json` may fail closed with `PRIVACY_AUTHORITY_REQUIRED` (`receipt_json_projection_blocked`); re-request `markdown` or `text`, or widen agent-context policy from a local terminal. The durable receipt is still recorded when projection is blocked.
-
-## Receipt fields and wording
-
-Read the receipt's frontier, verdict, coverage vector, finding disposition, evidence provenance, freshness, suppressed counts, and limitations together. Derived Markdown is a human view of the same structured record. Only a current recorded check can bound final wording.
-
-Permitted: “Yoetz found no deterministic issue in the cooperatively published record at the stated frontier; artifact observation remained published-only.”
-
-Forbidden: “Yoetz proved the implementation is complete and correct.”
-
-Installing a harness integration or firing a trigger-only hook does not strengthen coverage. A proven trigger may prompt a bounded status re-grounding; it observes nothing and changes no coverage. Only a capability-proven, consented observation arm with real observation evidence may earn `hook_observed`; an absent, empty, paused, or degraded observation status does not.
+None.

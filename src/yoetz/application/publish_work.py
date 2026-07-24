@@ -201,14 +201,16 @@ def _error(
 
 
 def _event_invalid(reason_code: str = "invalid_event_value_type") -> PublicOperationError:
-    return _error(
-        PublicErrorCode.EVENT_INVALID,
-        (
+    # Only a stale frontier is fixed by rereading status; every other reason needs the event
+    # payload corrected first, and retrying it unchanged would fail the same way.
+    if reason_code == "frontier_changed":
+        message = (
             "The event batch is invalid. Call status to read the current frontier, then retry "
             "idempotently with the same request_id."
-        ),
-        reason_code=reason_code,
-    )
+        )
+    else:
+        message = "The event batch is invalid. Correct the event payload before retrying."
+    return _error(PublicErrorCode.EVENT_INVALID, message, reason_code=reason_code)
 
 
 def _mapping(value: JsonValue) -> Mapping[str, JsonValue]:

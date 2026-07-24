@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Final, Protocol, cast
 
 import apsw
 
@@ -915,6 +915,50 @@ def build_runtime_adapter_factories(
     )
 
 
+# The agent-context allowlist shipped before ADR-009 permitted verification output by default.
+# Kept only to recognize an installation still carrying that untouched seed; see
+# `_reseed_untouched_default_policy`.
+_LEGACY_AGENT_CONTEXT_CATEGORIES: Final = (
+    DataCategory.BOUNDED_STRUCTURAL_METADATA,
+    DataCategory.DECLARED_FILE_TYPE,
+)
+_LEGACY_AGENT_CONTEXT_DATA_CLASSES: Final = (DataClass.PUBLIC_STRUCTURAL,)
+
+
+async def _reseed_untouched_default_policy(
+    policies: CatalogPrivacyPolicyStore,
+    scope: AuthorizationScope,
+    policy: PrivacyPolicy,
+) -> PrivacyPolicy:
+    """Carry an untouched pre-ADR-009 default forward to the current shipped default.
+
+    Without this, an installation seeded before the default widened keeps the narrow
+    agent-context allowlist and still cannot read its own receipts, so the receipt fix would
+    reach only new installations. Recognition is exact: the stored policy must equal the old
+    default rebuilt from its own identity fields, which no owner edit can satisfy.
+    """
+
+    legacy = replace(
+        policy,
+        agent_context_categories=_LEGACY_AGENT_CONTEXT_CATEGORIES,
+        agent_context_data_classes=_LEGACY_AGENT_CONTEXT_DATA_CLASSES,
+    )
+    if policy != legacy:
+        return policy
+    current_default = _denied_policy(
+        installation_id=policy.effective_scope.installation_id,
+        policy_id=policy.policy_id,
+        policy_digest=policy.policy_digest,
+        created_at=policy.created_at,
+    )
+    replacement = replace(current_default, version=policy.version + 1)
+    if replacement == replace(policy, version=policy.version + 1):
+        return policy
+    return await policies.reseed_untouched_bootstrap_default(
+        scope, expected_current=policy, replacement=replacement
+    )
+
+
 def _denied_policy(
     *,
     installation_id: str,
@@ -1023,7 +1067,9 @@ async def build_privacy_coordinator(
     # identity-equal check and fail unlock after the first successful ready activation.
     try:
         effective = await policies.effective_policy(machine_scope)
-        policy = effective.policy
+        policy = await _reseed_untouched_default_policy(policies, machine_scope, effective.policy)
+        if policy is not effective.policy:
+            effective = await policies.effective_policy(machine_scope)
     except ValueError as exc:
         if exc.args != ("privacy_policy_missing",):
             raise

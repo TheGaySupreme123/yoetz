@@ -23,7 +23,7 @@ Tell the user briefly that Yoetz is being used as a local work ledger and verifi
 7. Before completion, publish the intended material completion claim and current evidence, then call `check`. Choose mode deliberately: `semantic_if_configured` for most material implementation/review claims; `semantic_required` when completion depends on qualitative correctness, design conformance, security/privacy reasoning, interoperability, or whether the code satisfies the ask; `deterministic_only` only for explicitly local/structural checks, semantic-disabled policy, or a deliberate no-egress choice — and disclose that limitation. Publish the smallest state-bound diff/symbol and the directly relevant test or failure excerpt; never rely on self-asserted completion prose alone.
 8. Respond to each challenge by accepting and acting, supplying evidence, revising the claim, disputing with evidence, or stating an unresolved limitation. A response does not erase a finding.
 9. Recheck after any material edit, evidence change, plan change, or finding response.
-10. Request a receipt and keep the final answer no stronger than its weakest material coverage, freshness, unresolved findings, and limitations. Prefer receipt format `markdown` or `text`; `json` is an owner-export shape that stricter agent-context policies may block.
+10. Request a receipt and keep the final answer no stronger than its weakest material coverage, freshness, unresolved findings, and limitations. All receipt formats (`json`, `markdown`, `text`) project under default policy; if a stricter owner policy blocks `json`, re-request `markdown` or `text`.
 
 Reuse the original request and operation IDs after timeout or reconnect. A timeout has unknown outcome; retry idempotently or inspect status.
 

@@ -766,6 +766,34 @@ async def test_ready_factory_deterministic_check_records_semantic_not_requested_
         )
         assert checked.outcome == "committed"
         assert "semantic_review_not_requested" in checked.coverage.known_gaps
+        assert checked.semantic_status.value == "not_requested"
+        assert checked.semantic_reason.value == "deterministic_mode"
+
+        # An omitted mode must resolve through VerificationPolicy.default_check_mode. The default
+        # config is semantic="optional" -> semantic_if_configured, so the outcome is
+        # "not configured" rather than "not requested"; the latter would prove the omission had
+        # silently fallen back to deterministic_only.
+        frontier = checked.result_frontier
+        resolved = await app.check(
+            CheckRequest.model_validate(
+                {
+                    **common,
+                    "request_id": "req_00000000-0000-4000-8000-000000000204",
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": {
+                        "sequence": str(frontier.sequence),
+                        "head_digest": frontier.head_digest,
+                    },
+                    "max_findings": "3",
+                    "policy_packs": ["work-integrity/0.1.0"],
+                }
+            )
+        )
+        assert resolved.outcome == "committed"
+        assert resolved.semantic_status.value == "not_configured"
+        assert resolved.semantic_reason.value == "provider_not_configured"
+        assert "semantic_review_not_requested" not in resolved.coverage.known_gaps
     finally:
         if app is not None:
             await app.close()
