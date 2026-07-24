@@ -503,10 +503,13 @@ Shared structural gap codes for optional semantic relevance review (distinct fam
 
 - `optional_semantic_review_blocked_by_policy` — blocked before dispatch by network-egress policy;
 - `semantic_review_not_configured` — evaluator/provider not configured;
-- `semantic_relevance_review_not_run` — evaluation failed/timed out/unavailable without a clean pass.
+- `semantic_relevance_review_not_run` — evaluation failed/timed out/unavailable without a clean pass;
+- `semantic_review_not_requested` — deterministic-only check; semantic review was never requested.
 
 The not-configured and not-run codes share the honest compact limitation that semantic relevance
-review was not run; they must not reuse blocked-by-policy wording.
+review was not run; they must not reuse blocked-by-policy wording. The not-requested code marks every
+deterministic-only check and forces coverage incompleteness without changing the deterministic
+verdict.
 
 ## 9. Kernel (`kernel/`)
 
@@ -1973,9 +1976,14 @@ facade and are never MCP tools.
   by config or environment. Ordinary clients never load this object. `release-probe` is available
   only to the service-start release harness and cannot loosen user policy. Shared config values are
   `YoetzConfig`, `MinimalConfig`, `ConfigError`, `PathSafetyError`, `OwnerDeclaredEndpointConfig`,
-  `parse_https_origin`, and the exact endpoint profile ids `openai-responses` /
-  `owner-declared-openai-responses` (ADR-014). Constrained `https_origin` is the only owner-supplied
-  locator; free `base_url` remains forbidden. Its composition-only
+  `parse_https_origin`, and the exact endpoint profile ids `openai-responses`,
+  `owner-declared-openai-responses` (ADR-014), `anthropic-openai-chat-completions`,
+  `google-gemini-openai-chat-completions`, `openrouter-openai-chat-completions`, and
+  `vercel-ai-gateway-openai-responses`. Every one of the six resolves to exactly one runtime
+  factory in `adapters/providers/factory.py`; the last four carry unknown data-use records and are
+  configured, not live-verified, until their E-007 capability evidence exists. Constrained
+  `https_origin` is the only owner-supplied locator; free `base_url` remains forbidden. Its
+  composition-only
   `NetworkPolicy` values are exactly `denied|candidate_external|explicit_per_probe`;
   `SemanticPolicy` values are exactly
   `optional_local_model|optional_external|scripted_fake|no_implicit_model`.

@@ -651,3 +651,152 @@ async def test_daemon_unlock_installs_real_application_and_dispatches_start(
         assert daemon.status().state is ServiceState.READY
     finally:
         await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_ready_factory_deterministic_check_records_semantic_not_requested_gap(
+    tmp_path: Path,
+) -> None:
+    """Deterministic-only checks under ready composition advertise the not-requested gap."""
+
+    tmp_path.chmod(0o700)
+    clock = _Clock()
+    memory = LocalSecretMemory()
+    lifecycle = ServiceLifecycle(
+        clock,
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "a" * 64,
+        instance_id=_INSTANCE_ID,
+    )
+    await lifecycle.acquire_singleton()
+    await lifecycle.transition(ServiceState.LOCKED)
+    vault = VaultService(
+        installation_id=_INSTALLATION_ID,
+        service_generation=1,
+        mode=VaultMode.UNINITIALIZED,
+        secret_memory=memory,
+        clock=clock,
+        vault_store_factory=lambda: EncryptedVaultStore(tmp_path / "vault"),
+        pristine_state_digest="sha256:" + "b" * 64,
+    )
+    initialize = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"correct horse battery"))
+    await vault.initialize_passphrase(initialize, "sha256:" + "c" * 64)
+    app = None
+    try:
+        factory = build_ready_application_factory(
+            lifecycle=lifecycle,
+            vault=vault,
+            config=YoetzConfig(),
+            paths=_Paths(tmp_path),
+            clock=clock,
+            secret_memory=memory,
+            diagnostics=_Diagnostics(),
+        )
+        app = await factory(1, vault.generation)
+        common = {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "actor": {"actor_id": "harness:pytest", "actor_type": "harness"},
+            "client": {
+                "kind": "cooperative_agent",
+                "version": "0.1.0",
+                "integration": "cooperative_mcp",
+            },
+        }
+        started = await app.start(
+            StartRequest.model_validate(
+                {
+                    **common,
+                    "request_id": "req_00000000-0000-4000-8000-000000000201",
+                    "mode": "create",
+                    "task_title": "Semantic gap under ready composition",
+                    "requested_view": "compact",
+                }
+            )
+        )
+        assert started.ok is True
+        frontier = started.frontier
+        published = await app.publish_work(
+            PublishWorkRequest.model_validate(
+                {
+                    **common,
+                    "request_id": "req_00000000-0000-4000-8000-000000000202",
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": {
+                        "sequence": str(frontier.sequence),
+                        "head_digest": frontier.head_digest,
+                    },
+                    "event_drafts": [
+                        {
+                            "event_id": "evt_00000000-0000-4000-8000-000000000301",
+                            "schema": {"name": "plan_published", "version": "1.0.0"},
+                            "occurred_at": "2026-07-24T12:00:00.000Z",
+                            "causal_parents": [],
+                            "payload": {
+                                "plan_version": 1,
+                                "summary": "Semantic gap path.",
+                                "obligation_refs": [],
+                            },
+                            "artifact_refs": [],
+                            "evidence_refs": [],
+                        }
+                    ],
+                }
+            )
+        )
+        assert published.ok is True
+        frontier = published.result_frontier
+        checked = await app.check(
+            CheckRequest.model_validate(
+                {
+                    **common,
+                    "request_id": "req_00000000-0000-4000-8000-000000000203",
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": {
+                        "sequence": str(frontier.sequence),
+                        "head_digest": frontier.head_digest,
+                    },
+                    "mode": "deterministic_only",
+                    "max_findings": "3",
+                    "policy_packs": ["work-integrity/0.1.0"],
+                }
+            )
+        )
+        assert checked.outcome == "committed"
+        assert "semantic_review_not_requested" in checked.coverage.known_gaps
+        assert checked.semantic_status.value == "not_requested"
+        assert checked.semantic_reason.value == "deterministic_mode"
+
+        # An omitted mode must resolve through VerificationPolicy.default_check_mode. The default
+        # config is semantic="optional" -> semantic_if_configured, so the outcome is
+        # "not configured" rather than "not requested"; the latter would prove the omission had
+        # silently fallen back to deterministic_only.
+        frontier = checked.result_frontier
+        resolved = await app.check(
+            CheckRequest.model_validate(
+                {
+                    **common,
+                    "request_id": "req_00000000-0000-4000-8000-000000000204",
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": {
+                        "sequence": str(frontier.sequence),
+                        "head_digest": frontier.head_digest,
+                    },
+                    "max_findings": "3",
+                    "policy_packs": ["work-integrity/0.1.0"],
+                }
+            )
+        )
+        assert resolved.outcome == "committed"
+        assert resolved.semantic_status.value == "not_configured"
+        assert resolved.semantic_reason.value == "provider_not_configured"
+        assert "semantic_review_not_requested" not in resolved.coverage.known_gaps
+    finally:
+        if app is not None:
+            await app.close()
+        await vault.close()
+        memory.close()
+        await lifecycle.close()

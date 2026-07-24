@@ -1022,12 +1022,13 @@ class PublishWorkRequestModel(PublicRequestModel):
 
 
 class CheckRequestModel(PublicRequestModel):
-    optional_non_null_fields = frozenset({"scope", "max_findings", "policy_packs"})
+    optional_non_null_fields = frozenset({"mode", "scope", "max_findings", "policy_packs"})
 
     session_id: SessionIdWire
     writer_id: WriterIdWire
     expected_frontier: FrontierModel
-    mode: Literal["deterministic_only", "semantic_if_configured", "semantic_required"]
+    # Omitted mode resolves via VerificationPolicy.default_check_mode in the application facade.
+    mode: Literal["deterministic_only", "semantic_if_configured", "semantic_required"] | None = None
     scope: CheckScopeModel | None = None
     max_findings: Literal["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"] | None = None
     policy_packs: tuple[Literal["research-evidence/0.1.0", "work-integrity/0.1.0"], ...] | None = (

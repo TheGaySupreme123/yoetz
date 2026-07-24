@@ -34,8 +34,9 @@ Dispatch is exact reuse: the wizard section calls `run_setup_wizard` interactive
 registration calls `integrate_mcp` (`status|preview|install`) so preview → digest-bound confirm
 → verify gating is unchanged; skill actions send the same
 `{action, harness: codex, kind: skill}` integration requests the `integrate <harness> skill`
-commands send; the provider section first offers Official OpenAI, Fireworks, or custom HTTPS
-origin+model (writes the same `config.toml` fields as `yoetz provider endpoint`), then derives the
+commands send; the provider section first offers Official OpenAI, Fireworks, Anthropic Claude,
+Google Gemini, OpenRouter, Vercel AI Gateway, or custom HTTPS origin+model (writes the same
+`config.toml` fields as `yoetz provider endpoint`), then derives the
 exact credential target from that configured provider and delegates to
 `cli/unlock.set_provider_credential|rotate_provider_credential`
 — the secret is read only inside the existing confidential ceremony; the privacy section performs

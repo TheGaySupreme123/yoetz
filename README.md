@@ -42,7 +42,8 @@ to use when several Codex CLI binaries are found on your PATH or in the standard
 Desktop location (or the Windows Store Codex App package), then previews and — only after an
 explicit `Y` confirmation — registers `yoetz mcp serve` with the chosen Codex
 (`codex mcp get` first; an existing foreign entry is always preserved, never replaced), checks
-whether the local service is reachable, optionally collects the nonsecret Official OpenAI vs
+whether the local service is reachable, optionally collects a reviewed nonsecret provider preset
+(Official OpenAI, Fireworks, Anthropic Claude, Google Gemini, OpenRouter, or Vercel AI Gateway) or
 custom HTTPS origin+model binding (writes service `config.toml`; never secrets), and prints the
 exact next commands for the parts that stay deliberately human-driven:
 
@@ -52,10 +53,16 @@ the standalone Codex CLI and does not fabricate an app installation that OpenAI 
 1. `yoetz service run` — start the persistent local service under a supervisor you choose;
 2. `yoetz privacy setup` — review recipes, provider binding, and egress policy (zero-egress
    until you commit otherwise);
-3. `yoetz provider endpoint` (or edit `config.toml`) — Official OpenAI **or** owner-declared
-   HTTPS origin+model; see examples below;
+3. `yoetz provider endpoint` (or edit `config.toml`) — a reviewed provider preset or
+   owner-declared HTTPS origin+model; reviewed presets use each provider's documented compatible
+   wire style where applicable;
 4. `yoetz provider credential set` — provision the LLM API credential through the confidential
    terminal ceremony (never a flag, file, or environment variable).
+
+Every reviewed preset resolves to a real runtime factory, so a preset you can select is a preset
+Yoetz can dispatch. That is not the same as verified: none of the non-official presets has recorded
+live evidence yet, so Yoetz does not claim any of them as a confirmed working endpoint. That claim
+stays gated by the exact capability evidence described in ADR-006.
 
 ### Example `config.toml` (Official OpenAI)
 

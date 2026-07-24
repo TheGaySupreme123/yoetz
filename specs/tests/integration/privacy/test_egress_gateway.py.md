@@ -18,6 +18,12 @@ network spy distinguishing AF_UNIX from AF_INET/AF_INET6/DNS/redirect.
 
 ## Behavior
 
+Reconciliation is asserted against the real dispatch table, not a stub: a bundled Chat Completions
+preset built by `adapters/providers/factory.md` activates with no unavailable binding, and an empty
+builder table still reports `factory_unavailable` rather than passing quietly. The config-to-policy
+binding key agreement has no other executable owner, and its failure mode is invisible from the
+caller's side — the check returns, the semantic review just never happened.
+
 For each profile assert exact state transitions, adapter constructor count, final bytes, categories,
 scope, review-context selection, omissions, destination and receipt. Confirm-every-request persists
 exact one-dispatch approval across a

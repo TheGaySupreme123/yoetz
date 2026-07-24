@@ -30,9 +30,10 @@ objects, or fall back to direct execution.
   selection plus digest-bound confirmation;
   `menu` (ADR-013), thin wiring over `cli/menu.py` for the interactive control menu — a usage
   failure (exit 2) on a non-TTY, never a prompt;
-  root `--set [--fireworks] [--model MODEL] [--api-key VALUE]`, the short interactive provider
-  setup path from `cli/setup.py`; omitting `--api-key` collects it with hidden local-terminal input,
-  while the explicit value form immediately converts it to the confidential ceremony buffer;
+  root `--set [--provider PROVIDER] [--fireworks] [--model MODEL]`, the short
+  interactive provider setup path from `cli/setup.py`; `PROVIDER` is one of the reviewed OpenAI,
+  Fireworks, Anthropic Claude, Google Gemini, OpenRouter, or Vercel AI Gateway presets. Omitting
+  provider credentials are always collected with hidden local-terminal input;
   `service run|status|lock|stop|unlock|initialize-passphrase` plus trusted-foreground
   `service idle-relock <60..86400|disabled>`;
   `provider credential set|rotate` for foreground confidential provisioning; and
@@ -54,13 +55,12 @@ the interactive `setup run` wizard once and then opens the `cli/menu.py` menu; w
 present it opens the menu directly. `--help`, named subcommands, and every non-TTY invocation are
 unchanged.
 
-Root `yoetz --set --fireworks --model MODEL [--api-key VALUE]` starts the fixed service on demand, initializes or
-unlocks the vault when required, writes the reviewed Fireworks endpoint binding, derives all
-internal credential binding fields, and requests the API key with hidden TTY input when it was not
-supplied. `--fireworks`, `--model`, and `--api-key` without `--set`, or `--set` combined with a
-subcommand, are usage failures. The CLI never echoes the value and overwrites its mutable ceremony
-buffer, while documentation warns that a literal argument can persist in shell history or process
-inspection.
+Root `yoetz --set --provider PROVIDER --model MODEL` starts the fixed service on
+demand, initializes or unlocks the vault when required, writes the selected reviewed endpoint
+binding, derives all internal credential binding fields, and requests the API key with hidden TTY
+input. `--fireworks` remains an alias for `--provider fireworks`. `--provider`, `--fireworks`, and
+`--model` without `--set`, or `--set` combined with a subcommand, are usage failures. The CLI never
+accepts credentials in arguments and overwrites its mutable ceremony buffer.
 
 Except for the explicitly client-local ADR-011 `state capture` support command, every normal
 workflow/support command strictly parses its request, connects to the deterministic same-UID

@@ -109,13 +109,19 @@ For each of the thirty method constants there is a distinct `outcome=error` bran
 same exact body `$def`: `{code, retryable}` and no message/details. `code` is
 `protocol_mismatch|frame_invalid|frame_too_large|request_cancelled|request_timeout|vault_locked|
 service_draining|method_forbidden|service_generation_changed|privacy_projection_unavailable|
-internal_error`; `retryable` is a
-boolean. No null/free-text branch exists. `service_generation_changed` is the wire control reason;
+privacy_projection_blocked|internal_error`; `retryable` is a
+boolean, pinned by `oneOf` branches to `true` for `privacy_projection_unavailable` and `false`
+for `privacy_projection_blocked`. No null/free-text branch exists. `service_generation_changed` is the wire control reason;
 the ordinary client closes the stale session and maps it to public `SERVICE_UNAVAILABLE`, never a
 new workflow error code.
 `privacy_projection_unavailable` is valid only for a ready method whose internal result could not
 obtain its initial local-audit reservation; it is always retryable, contains no result body, and
 maps to public `SERVICE_UNAVAILABLE`.
+`privacy_projection_blocked` is valid only for a `receipt` result whose digest-bound JSON document
+carries a content leaf the active policy blocks; it is never retryable, contains no result body,
+and maps to public `PRIVACY_AUTHORITY_REQUIRED`. The two are distinct because retrying the first
+can succeed and retrying the second cannot: only a different receipt format or a widened
+agent-context policy resolves it.
 
 Handshake/fixed errors plus the closed structural `service_status`, `service_lock`, and
 `service_stop` success bodies are exempt from `privacy_projection`: they are available while no

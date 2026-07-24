@@ -21,6 +21,12 @@ methods use `privacy_receipts_list|privacy_receipts_get`, never the internal aud
 Receipt-list parsing yields the exact bounded `PrivacyReceiptPage`; receipt-get parsing preserves
 the closed `found(PrivacyReceiptView)|not_found` tag and never returns a nullable body.
 
+Assert that both privacy-projection reasons reach the caller with their exact reason and
+retryability and leave the connection open, and that a following call still writes on the same
+stream. Only `service_generation_changed` may be rewritten to a retryable teardown: collapsing a
+projection failure into `service_unavailable` teaches a caller to retry the one request shape that
+cannot succeed.
+
 ## Errors and edge cases
 
 Absent/locked/draining/wrong-peer/stale-generation/partial-response and replay paths.

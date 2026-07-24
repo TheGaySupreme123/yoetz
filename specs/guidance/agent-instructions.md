@@ -38,6 +38,14 @@ Required sections, in this order:
    transcript recorder, not an orchestrator.
 4. **Never publish** — the shortlist, stated as absolutes.
 5. **Before you claim done** — publish the completion claim and current evidence, then `check`.
+   This section also carries the verification-mode decision rule, because an agent that reaches
+   `check` without one defaults to the weakest mode and reads a deterministic verdict as an
+   implementation review: `semantic_if_configured` for most material implementation or review
+   claims; `semantic_required` when the claim depends on qualitative correctness, design
+   conformance, security or privacy reasoning, interoperability, or whether the code satisfies the
+   ask; `deterministic_only` only for explicitly local or structural checks, a semantic-disabled
+   policy, or a deliberate no-egress choice, whose limitation must then be disclosed. It states
+   that omitting `mode` resolves through the configured verification policy.
 6. **Word conclusions honestly** — never stronger than the receipt's weakest coverage; one
    permitted and one forbidden example.
 7. **Never invent Yoetz state** — no fabricated session IDs, findings, or receipts; if a call fails,

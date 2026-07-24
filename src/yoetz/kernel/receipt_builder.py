@@ -26,6 +26,7 @@ from yoetz.domain.findings import (
 from yoetz.domain.receipts import (
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
+    SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
     ReceiptConclusion,
     ReceiptDocument,
     ReceiptGap,
@@ -778,11 +779,17 @@ def _sections(
     items[ReceiptSectionKey.EVIDENCE_AND_CLAIM_BASIS] = (*claim_refs, *evidence_refs)
 
     if gap_codes:
+        not_requested = SEMANTIC_REVIEW_NOT_REQUESTED_GAP in gap_codes
         not_run = (
             SEMANTIC_REVIEW_NOT_CONFIGURED_GAP in gap_codes
             or SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP in gap_codes
         )
-        if not_run:
+        if not_requested:
+            gap_body = (
+                "Semantic review was not requested (deterministic-only check). "
+                f"Coverage is limited by: {', '.join(gap_codes)}."
+            )
+        elif not_run:
             gap_body = (
                 "Semantic relevance review was not run. "
                 f"Coverage is limited by: {', '.join(gap_codes)}."

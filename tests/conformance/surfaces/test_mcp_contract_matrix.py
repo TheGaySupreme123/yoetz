@@ -154,8 +154,15 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(item.name for item in TOOL_DESCRIPTORS) == _EXPECTED_TOOL_NAMES
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == _EXPECTED_TOOL_NAMES
     assert TOOL_DESCRIPTOR_SET_DIGEST == (
-        "sha256:32382f3640d867cfee467cd441cd1b1f973c71baadd73b9c0bada971459db683"
+        "sha256:99dbb6ee49a24168f351c1a3b405dd001c7ee8c8add115b7ac79f4adfa0a7afe"
     )
+    # The check descriptor carries the full mode decision rule, including semantic_required.
+    check_description = descriptor_for("check").description
+    assert "semantic_if_configured for most material implementation" in check_description
+    assert "semantic_required when the claim depends on qualitative correctness" in (
+        check_description
+    )
+    assert "Omitting mode resolves through the configured verification policy" in check_description
     assert descriptor_for("start").description.startswith(
         "Call for material multi-step, delegated, resumable, or verification-heavy work"
     )

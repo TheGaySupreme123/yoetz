@@ -33,7 +33,9 @@ The per-operation helpers format the visible summary for each tool:
 
 - `status` emphasizes frontier, freshness, open obligations, unresolved findings, and gaps;
 - `check` emphasizes the verdict, the number of findings, and the exact bounded semantic
-  status/reason pair;
+  status/reason pair. When `semantic_status` is `not_requested` the summary leads with
+  `Semantic review not requested; deterministic-only check verdict: …` instead of the verdict,
+  because a clean verdict read first is exactly what invites an unsupported completion claim;
 - `receipt` emphasizes the recorded conclusion, frontier, and coverage limitations;
 - public errors emphasize the code, retryability, and correlation ID.
 

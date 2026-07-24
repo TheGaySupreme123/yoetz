@@ -61,7 +61,10 @@ produce different projected views without changing the stored check result.
    UX preflight; any observed pending import returns retryable `OPERATION_PENDING`. This snapshot
    is not authority: `LedgerPort.freeze_case` and the final commit repeat the pending predicate
    atomically.
-2. `mode` is exactly `deterministic_only`, `semantic_if_configured`, or `semantic_required`.
+2. `mode` is exactly `deterministic_only`, `semantic_if_configured`, or `semantic_required`. An
+   omitted wire `mode` is resolved from `VerificationPolicy.default_check_mode` before the domain
+   request is built, so every recorded check event and receipt carries a concrete resolved mode
+   and no downstream reader has to interpret an absent value.
    `max_findings` defaults to `MAX_FINDINGS_DEFAULT` (3) and is in
    `1..MAX_FINDINGS_LIMIT` (10). Normalize an omitted scope to the required internal/event value
    `CheckScopeModel(claim_ids=(), obligation_ids=())`; otherwise copy each validated tuple into
@@ -281,11 +284,15 @@ resume revalidates the object/row facts for the recorded phase before moving for
   diversity-replacing a weak finding cannot strengthen it. Semantic
   findings remain `semantic_model_derived`; deterministic post-validation never upgrades their
   origin.
-- When optional or required semantic evaluation ends without `not_requested` or `succeeded`, the
-  check unions one structural coverage gap via `semantic_coverage_gap_code`: `not_configured` maps
-  to `semantic_review_not_configured`; `blocked_by_policy` maps to
-  `optional_semantic_review_blocked_by_policy`; timeout/failed/unavailable/invalid and other
-  non-success terminals map to `semantic_relevance_review_not_run`. An evaluator exception is caught
+- When semantic evaluation ends anywhere other than `succeeded`, the check unions one structural
+  coverage gap via `semantic_coverage_gap_code`: `not_requested` maps to
+  `semantic_review_not_requested`; `not_configured` maps to `semantic_review_not_configured`;
+  `blocked_by_policy` maps to `optional_semantic_review_blocked_by_policy`;
+  timeout/failed/unavailable/invalid and other non-success terminals map to
+  `semantic_relevance_review_not_run`. Only `succeeded` yields no gap. Adding the gap moves ledger
+  freshness `CURRENT → PARTIAL` and completeness to `COVERAGE_INCOMPLETE`; it never changes the
+  deterministic verdict, so a deterministic-only check still reports what it actually found while
+  disclosing that no semantic review stands behind it. An evaluator exception is caught
   and recorded as `failed/coordinator_failure` with the not-run gap; it never fabricates a clean
   semantic pass. Deterministic findings and verdict material remain intact under optional mode.
 - Result includes exact `CheckPolicyExecution` records in canonical requested-pack order, semantic

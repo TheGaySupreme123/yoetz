@@ -461,6 +461,8 @@ async def test_receipt_request_result_parity() -> None:
     assert cli_projected.root.receipt_id == receipt.receipt_id
     assert cli_projected.root.privacy_projection.sink == "local_human_view"
     assert mcp_projected.root.privacy_projection.sink == "agent_context"
+    assert mcp_projected.root.privacy_projection.omitted_pointers == ()
+    assert mcp_projected.root.document is not None
     assert len(projection.candidates) == 2
 
 
@@ -499,7 +501,7 @@ async def test_json_receipt_projection_fails_closed_when_document_leaves_blocked
             }
         ),
     )
-    with pytest.raises(ControlError, match="privacy_projection_unavailable"):
+    with pytest.raises(ControlError, match="privacy_projection_blocked"):
         await app.project_result_for_client(
             ClientProjectionContext(
                 ControlClientKind.MCP_BRIDGE, ProjectionRenderMode.MACHINE_READABLE, False

@@ -19,6 +19,12 @@ Markers require `live_provider`. Cases cover structured success and safely obser
 invalid output, rate limit, timeout/cancellation where the provider/test environment can reproduce
 them without uncontrolled spend. Each endpoint/model/SDK/region is a distinct evidence cell.
 
+A second parameterized cell covers each bundled non-official preset. It asserts the preset resolves
+to a real factory with its exact host and path, and that its data-use record leaves it
+recommendation-ineligible; it then records `UNSUPPORTED` evidence unless the authorized ready
+ceremony is present. That asymmetry is the point: dispatchability is provable offline, while any
+claim that a host actually returns a valid judgment requires this cell to run authorized.
+
 ## Behavior
 
 Run only in an approved isolated capability environment with an already-ready trusted service. A

@@ -40,6 +40,14 @@ Permitted: “I saw an unresolved attempt and went back to it.”
 
 Forbidden after only a candidate read: “I checked and found nothing.”
 
+## Check mode and semantic coverage
+
+A clean deterministic-only check is not an implementation review. When `mode=deterministic_only` (or semantic status is `not_requested`), the receipt/check coverage includes `semantic_review_not_requested` and completeness is coverage-incomplete even if the verdict is `no_issue_detected`. Prefer `semantic_if_configured` for material claims; reserve `deterministic_only` for structural checks and disclose the limitation.
+
+## Receipt format
+
+Default agent-context policy can project verification output (findings, obligations, receipt sections) so `json`, `markdown`, and `text` receipts work for the requesting agent. Under a deliberately stricter owner policy, digest-bound `json` may fail closed with `PRIVACY_AUTHORITY_REQUIRED` (`receipt_json_projection_blocked`); re-request `markdown` or `text`, or widen agent-context policy from a local terminal. The durable receipt is still recorded when projection is blocked.
+
 ## Receipt fields and wording
 
 Read the receipt's frontier, verdict, coverage vector, finding disposition, evidence provenance, freshness, suppressed counts, and limitations together. Derived Markdown is a human view of the same structured record. Only a current recorded check can bound final wording.

@@ -469,5 +469,9 @@ def test_wire_only_errors_map_to_existing_public_codes() -> None:
         public_error_code_for_control_reason("privacy_projection_unavailable")
         is PublicErrorCode.SERVICE_UNAVAILABLE
     )
+    assert (
+        public_error_code_for_control_reason("privacy_projection_blocked")
+        is PublicErrorCode.PRIVACY_AUTHORITY_REQUIRED
+    )
     assert public_error_code_for_control_reason("vault_locked") is PublicErrorCode.VAULT_LOCKED
     assert public_error_code_for_control_reason("frame_invalid") is PublicErrorCode.INVALID_REQUEST

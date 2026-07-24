@@ -765,6 +765,8 @@ def public_error_code_for_control_reason(reason: str) -> PublicErrorCode:
         "request_timeout",
     }:
         return PublicErrorCode.SERVICE_UNAVAILABLE
+    if reason == "privacy_projection_blocked":
+        return PublicErrorCode.PRIVACY_AUTHORITY_REQUIRED
     if reason == "vault_locked":
         return PublicErrorCode.VAULT_LOCKED
     if reason == "request_cancelled":

@@ -31,7 +31,9 @@ The reference contains:
 - subject-state binding and stale-evidence examples;
 - event batching, writer-sequence, expected-frontier, and retry examples;
 - multi-agent assignment and attribution rules;
-- forbidden-content guidance;
+- forbidden-content guidance, including the semantic-case publication duty: for a material
+  completion check, publish the smallest state-bound diff or symbol plus the directly relevant test
+  or failure excerpt, because self-asserted completion prose alone leaves semantic review blind;
 - four worked mini-flows: code change, research task, plan revision, and a large generated or
   migrated inventory. The inventory flow groups a 100-file result into independently reviewable
   work-package obligations, publishes material package transitions, and uses one bounded manifest

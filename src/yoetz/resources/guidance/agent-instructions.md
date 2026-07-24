@@ -18,6 +18,8 @@ Never publish chain-of-thought or hidden reasoning; full prompts, transcripts, o
 
 Publish the material completion claim and its current evidence, call `check`, disposition any findings, then call `receipt`. Recheck after a material change, new evidence, or a finding response. Treat this as the normal publish → check → receipt loop.
 
+For `check` mode: use `semantic_if_configured` for most material implementation/review claims; use `semantic_required` when the completion claim depends on qualitative correctness, design conformance, security/privacy reasoning, interoperability, or whether the code satisfies the ask; use `deterministic_only` only for explicitly local/structural checks, semantic-disabled policy, or a deliberate no-egress choice — and disclose that limitation. Omitting `mode` resolves via the configured verification policy (default optional → `semantic_if_configured`).
+
 # Canonical request values
 
 Fields backed by canonical integers stay JSON strings on the wire. In particular, send frontier `sequence` and pagination `limit` as strings such as `"10"`, never JSON numbers.

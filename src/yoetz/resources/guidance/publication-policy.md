@@ -43,7 +43,7 @@ Publish bounded assignments and preserve each delegate's logical writer identity
 
 ## Forbidden content
 
-Never publish chain-of-thought or hidden reasoning; full prompts, transcripts, or conversation history; credentials or secrets; whole files, repositories, or broad unrelated source. When semantic review would otherwise be blind, publish only the smallest problem-local changed hunk or enclosing symbol needed, with source, state, and coverage labels.
+Never publish chain-of-thought or hidden reasoning; full prompts, transcripts, or conversation history; credentials or secrets; whole files, repositories, or broad unrelated source. When semantic review would otherwise be blind, publish only the smallest problem-local changed hunk or enclosing symbol needed, with source, state, and coverage labels. For material completion checks, publish the smallest state-bound diff/symbol and the directly relevant test or failure excerpt; never rely on self-asserted completion prose alone.
 
 ## Mini-flows
 

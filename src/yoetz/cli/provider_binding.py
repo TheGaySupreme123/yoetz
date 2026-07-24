@@ -1,4 +1,4 @@
-"""Interactive nonsecret LLM endpoint binding (Official OpenAI vs owner-declared).
+"""Interactive nonsecret LLM endpoint binding for reviewed provider presets.
 
 Writes service-owned ``config.toml`` only. Credentials remain on the confidential
 ``yoetz provider credential`` ceremony path.
@@ -15,9 +15,14 @@ import typer
 from yoetz.config.models import ConfigError, ProviderProfileConfig, YoetzConfig
 from yoetz.config.paths import config_file_path
 from yoetz.config.write import (
+    anthropic_provider,
     fireworks_provider,
+    google_gemini_provider,
     official_openai_provider,
+    openrouter_provider,
     owner_declared_openai_provider,
+    provider_preset,
+    vercel_ai_gateway_provider,
     write_provider_binding,
 )
 
@@ -28,7 +33,15 @@ __all__ = [
     "prompt_provider_endpoint_binding",
 ]
 
-ProviderEndpointChoice = Literal["official_openai", "fireworks", "owner_declared"]
+ProviderEndpointChoice = Literal[
+    "official_openai",
+    "fireworks",
+    "anthropic",
+    "google_gemini",
+    "openrouter",
+    "vercel_ai_gateway",
+    "owner_declared",
+]
 
 NEXT_CREDENTIAL: Final = (
     "run 'yoetz provider credential set' from a local terminal to provision the "
@@ -62,6 +75,14 @@ def apply_provider_endpoint_choice(
         provider = official_openai_provider(model=model)
     elif choice == "fireworks":
         provider = fireworks_provider(model=model)
+    elif choice == "anthropic":
+        provider = anthropic_provider(model=model)
+    elif choice == "google_gemini":
+        provider = google_gemini_provider(model=model)
+    elif choice == "openrouter":
+        provider = openrouter_provider(model=model)
+    elif choice == "vercel_ai_gateway":
+        provider = vercel_ai_gateway_provider(model=model)
     else:
         if https_origin is None:
             raise ConfigError("https_origin_invalid")
@@ -71,36 +92,51 @@ def apply_provider_endpoint_choice(
 
 
 def prompt_provider_endpoint_binding(*, path: Path | None = None) -> Path | None:
-    """TTY prompt: Official OpenAI vs custom HTTPS origin+model; never asks for secrets."""
+    """Prompt for a reviewed provider preset or custom origin; never asks for secrets."""
 
     typer.echo("")
     typer.echo("LLM endpoint (nonsecret)")
     typer.echo("  1  Official OpenAI (api.openai.com)")
     typer.echo("  2  Fireworks AI (api.fireworks.ai/inference/v1)")
-    typer.echo("  3  Custom OpenAI-compatible HTTPS origin")
+    typer.echo("  3  Anthropic Claude (OpenAI-compatible Chat Completions)")
+    typer.echo("  4  Google Gemini (OpenAI-compatible Chat Completions)")
+    typer.echo("  5  OpenRouter (OpenAI-compatible Chat Completions)")
+    typer.echo("  6  Vercel AI Gateway (OpenAI-compatible Responses)")
+    typer.echo("  7  Custom OpenAI-compatible HTTPS origin")
     typer.echo("  s  Skip for now")
     raw = typer.prompt("Select", default="s").strip().lower()
     if raw in {"s", "skip", ""}:
         return None
-    if raw not in {"1", "2", "3"}:
-        typer.echo("invalid_request: choose 1, 2, 3, or s", err=True)
+    if raw not in {"1", "2", "3", "4", "5", "6", "7"}:
+        typer.echo("invalid_request: choose 1, 2, 3, 4, 5, 6, 7, or s", err=True)
         return None
 
-    model = typer.prompt("  Model id").strip()
+    choices: dict[str, ProviderEndpointChoice] = {
+        "1": "official_openai",
+        "2": "fireworks",
+        "3": "anthropic",
+        "4": "google_gemini",
+        "5": "openrouter",
+        "6": "vercel_ai_gateway",
+        "7": "owner_declared",
+    }
+    choice = choices[raw]
+    preset = None if choice == "owner_declared" else provider_preset(choice)
+    model = typer.prompt(
+        "  Model id",
+        default=None if preset is None else preset.default_model,
+        show_default=preset is not None,
+    ).strip()
     try:
-        if raw == "1":
-            written, provider = apply_provider_endpoint_choice(
-                "official_openai", model=model, path=path
-            )
-        elif raw == "2":
-            written, provider = apply_provider_endpoint_choice("fireworks", model=model, path=path)
-        else:
+        if choice == "owner_declared":
             origin = typer.prompt(
                 "  HTTPS origin (https://host[:port] only; no path, userinfo, or secrets)"
             ).strip()
             written, provider = apply_provider_endpoint_choice(
                 "owner_declared", model=model, https_origin=origin, path=path
             )
+        else:
+            written, provider = apply_provider_endpoint_choice(choice, model=model, path=path)
     except ConfigError as error:
         typer.echo(f"invalid_request: {error.reason_code}", err=True)
         return None

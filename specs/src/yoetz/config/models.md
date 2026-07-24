@@ -111,6 +111,12 @@ this table; it does not decide whether a separately reviewed bounded non-LLM cha
   Invalid origins → `ConfigError("https_origin_invalid")`.
 - Official OpenAI continues to use `endpoint_profile_id = "openai-responses"` with the bundled host
   `api.openai.com` resolved by the adapter, not from TOML.
+- Reviewed setup presets also use the exact endpoint-profile identities
+  `anthropic-openai-chat-completions`, `google-gemini-openai-chat-completions`,
+  `openrouter-openai-chat-completions`, and `vercel-ai-gateway-openai-responses`. These identities
+  preserve the provider and wire-style choice in nonsecret config; they are not live-dispatch or
+  release-support claims until the matching capability fixture, data-use record, adapter, and ready
+  composition satisfy ADR-006/E-007.
 - `timeout_seconds: int = 60`; `max_retries: int = 2` (Yoetz-owned budget, ADR-006) —
   both bounded (`1..300`, `0..2`).
 - `capability_profile: str` is required and must match the endpoint/model tuple.

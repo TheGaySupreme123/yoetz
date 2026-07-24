@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Final, Protocol, cast
 
 import apsw
 
@@ -20,11 +20,9 @@ from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
 from yoetz.adapters.privacy.catalog import CatalogPrivacyAudit, CatalogPrivacyPolicyStore
 from yoetz.adapters.privacy.gateway import PolicyEnforcingOutboundGateway
 from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer
+from yoetz.adapters.providers.factory import external_factory_builders_from_config
 from yoetz.adapters.providers.local_model import InstalledLocalModelProfileRegistry
-from yoetz.adapters.providers.openai_responses_factory import (
-    external_factory_builders_from_config,
-    provider_binding_from_config,
-)
+from yoetz.adapters.providers.openai_responses_factory import provider_binding_from_config
 from yoetz.adapters.runtime import RuntimeAdapterFactories, open_local_bundle_runtime
 from yoetz.adapters.sqlite.connection import (
     open_catalog_writer,
@@ -915,6 +913,80 @@ def build_runtime_adapter_factories(
     )
 
 
+# The agent-context allowlist shipped before ADR-009 permitted verification output by default.
+# Kept only to recognize an installation still carrying that untouched seed; see
+# `_reseed_untouched_default_policy`.
+_LEGACY_AGENT_CONTEXT_CATEGORIES: Final = (
+    DataCategory.BOUNDED_STRUCTURAL_METADATA,
+    DataCategory.DECLARED_FILE_TYPE,
+)
+_LEGACY_AGENT_CONTEXT_DATA_CLASSES: Final = (DataClass.PUBLIC_STRUCTURAL,)
+
+# Bootstrap seed identity. The revision names the shipped default's contents, so widening the
+# default mints a distinct `policy_digest` instead of two different payloads sharing one digest:
+# that digest is the CAS precondition for later tightenings and is exposed as `effective_digest`.
+# `None` reproduces the pre-ADR-009 payload and exists only to recognize an untouched old seed.
+_BOOTSTRAP_SEED_SCHEMA: Final = "yoetz.privacy-policy.bootstrap/1"
+_BOOTSTRAP_DEFAULT_REVISION: Final = "2026-07-24-verification-output"
+
+
+def _bootstrap_seed_digest(installation_id: str, *, revision: str | None) -> str:
+    payload: dict[str, CanonicalJsonValue] = {
+        "installation_id": installation_id,
+        "profile": "local_only",
+        "schema": _BOOTSTRAP_SEED_SCHEMA,
+    }
+    if revision is not None:
+        payload["default_revision"] = revision
+    return canonical_digest(payload)
+
+
+def _shipped_default_policy(policy: PrivacyPolicy, *, revision: str | None) -> PrivacyPolicy:
+    """Rebuild a shipped default policy at one revision under an existing policy's identity."""
+
+    rebuilt = _denied_policy(
+        installation_id=policy.effective_scope.installation_id,
+        policy_id=policy.policy_id,
+        policy_digest=_bootstrap_seed_digest(
+            policy.effective_scope.installation_id, revision=revision
+        ),
+        created_at=policy.created_at,
+    )
+    if revision is not None:
+        return rebuilt
+    return replace(
+        rebuilt,
+        agent_context_categories=_LEGACY_AGENT_CONTEXT_CATEGORIES,
+        agent_context_data_classes=_LEGACY_AGENT_CONTEXT_DATA_CLASSES,
+    )
+
+
+async def _reseed_untouched_default_policy(
+    policies: CatalogPrivacyPolicyStore,
+    scope: AuthorizationScope,
+    policy: PrivacyPolicy,
+) -> PrivacyPolicy:
+    """Carry an untouched pre-ADR-009 default forward to the current shipped default.
+
+    Without this, an installation seeded before the default widened keeps the narrow
+    agent-context allowlist and still cannot read its own receipts, so the receipt fix would
+    reach only new installations. Recognition is exact in every field, including the bootstrap
+    seed digest, and the store additionally requires first-run seed provenance, so an owner
+    policy that reproduces the old default's contents is left alone.
+    """
+
+    legacy_default = replace(_shipped_default_policy(policy, revision=None), version=policy.version)
+    if policy != legacy_default:
+        return policy
+    replacement = replace(
+        _shipped_default_policy(policy, revision=_BOOTSTRAP_DEFAULT_REVISION),
+        version=policy.version + 1,
+    )
+    return await policies.reseed_untouched_bootstrap_default(
+        scope, expected_current=policy, replacement=replacement
+    )
+
+
 def _denied_policy(
     *,
     installation_id: str,
@@ -956,11 +1028,20 @@ def _denied_policy(
         local_model_binding=None,
         local_model_categories=(),
         local_model_data_classes=(),
+        # Default LOCAL_ONLY: agent context may receive Yoetz-authored verification
+        # projection content (findings, obligations, receipt sections/human_text) for the
+        # requesting agent's own task. Observation-derived and vault material stay blocked.
+        # See ADR-009 default agent-context disclosure of verification output.
         agent_context_categories=(
             DataCategory.BOUNDED_STRUCTURAL_METADATA,
             DataCategory.DECLARED_FILE_TYPE,
+            DataCategory.FINDING_SUMMARY,
+            DataCategory.OBLIGATION_TEXT,
         ),
-        agent_context_data_classes=(DataClass.PUBLIC_STRUCTURAL,),
+        agent_context_data_classes=(
+            DataClass.PUBLIC_STRUCTURAL,
+            DataClass.ORDINARY_USER_CONTENT,
+        ),
         trusted_human_control_categories=tuple(DataCategory),
         trusted_human_control_data_classes=(
             DataClass.ORDINARY_USER_CONTENT,
@@ -1014,17 +1095,13 @@ async def build_privacy_coordinator(
     # identity-equal check and fail unlock after the first successful ready activation.
     try:
         effective = await policies.effective_policy(machine_scope)
-        policy = effective.policy
+        policy = await _reseed_untouched_default_policy(policies, machine_scope, effective.policy)
+        if policy is not effective.policy:
+            effective = await policies.effective_policy(machine_scope)
     except ValueError as exc:
         if exc.args != ("privacy_policy_missing",):
             raise
-        seed_digest = canonical_digest(
-            {
-                "installation_id": installation_id,
-                "profile": "local_only",
-                "schema": "yoetz.privacy-policy.bootstrap/1",
-            }
-        )
+        seed_digest = _bootstrap_seed_digest(installation_id, revision=_BOOTSTRAP_DEFAULT_REVISION)
         try:
             policy = await seed_policy_if_absent(
                 _denied_policy(

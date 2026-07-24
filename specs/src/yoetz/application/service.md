@@ -22,8 +22,10 @@ MCP, and future UI do not construct or import this facade; they use `ControlClie
   copy of the effective `[verification]` choices: exact
   `semantic: disabled|optional|required` and `max_findings: int` in `1..10`. Its
   `default_check_mode` maps those values one-to-one to
-  `deterministic_only|semantic_if_configured|semantic_required`. It contains no provider,
-  credential, mutable config, or policy-pack implementation.
+  `deterministic_only|semantic_if_configured|semantic_required`, and the facade applies it to a
+  `check` request whose wire `mode` was omitted before delegating, so the resolved mode is what
+  gets recorded. It contains no provider, credential, mutable config, or policy-pack
+  implementation.
 - `enum ProjectionRenderMode` — exactly `human_readable|machine_readable`.
 - `@dataclass(frozen=True, slots=True) class ClientProjectionContext` — service-owned
   `client_kind`, `render_mode`, and boolean `output_is_controlling_tty` facts. It is internal,
@@ -145,9 +147,14 @@ purpose `client_result_projection` and a trusted `ProjectionAuditContext` to
 
 The sole replacement exception is `ReceiptSuccessModel.document` when `format="json"`: that value
 is the exact canonical stored receipt document bound by `receipt_digest`. If any present
-`/document` content leaf is blocked or unclassifiable, projection fails closed with retryable
-`privacy_projection_unavailable` before success serialization and never emits a partly rewritten
-JSON receipt. Markdown/text `human_text` remains an ordinary replaceable content leaf.
+`/document` content leaf is blocked or unclassifiable, projection fails closed with non-retryable
+`privacy_projection_blocked` before success serialization and never emits a partly rewritten
+JSON receipt. Markdown/text `human_text` remains an ordinary replaceable content leaf, so those
+formats degrade with omission markers instead of failing. The two projection reasons are kept
+distinct: `privacy_projection_unavailable` stays the transient reservation failure a replay can
+resolve, and `privacy_projection_blocked` states that this format cannot be delivered under the
+active policy. Under the shipped default policy no receipt format is blocked; the blocked branch
+exists for deliberately stricter owner policies.
 
 There is no free-form marker, null substitution, whole-result fallback that can conceal which
 field was removed, or bridge-local discretion. If no content category is allowed, the caller still

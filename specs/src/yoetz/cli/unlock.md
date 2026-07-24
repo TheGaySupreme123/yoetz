@@ -9,11 +9,11 @@
 Collects bounded first-install initialization, unlock, recovery, provider-credential, security-
 policy authorization, or reauthentication input from a foreground local human and sends exactly
 one accepted secret directly to the service's confidential ingress when the selected ceremony
-requires one. It is the only CLI module that may handle these values. The ADR-012 `yoetz --set
---api-key VALUE` path may supply its credential plus a platform-store-generated auto-unlock
-passphrase directly as mutable buffers; all other missing secrets and every human decision remain
-trusted-foreground prompts. Nonsecret closed ceremony targets may be supplied by their dedicated
-trusted-foreground command.
+requires one. It is the only CLI module that may handle these values. Provider credentials and vault
+passphrases are never accepted in argv. Missing secrets and every human decision remain trusted-
+foreground prompts, with provider credentials collected through the hidden local-terminal
+ceremony. Nonsecret closed ceremony targets may be supplied by their dedicated trusted-foreground
+command.
 
 ## Public surface
 

@@ -691,7 +691,13 @@ TOOL_DESCRIPTORS: Final = (
         "Check recorded work",
         "Runs the requested recorded-work checks and records the result; it returns at most "
         "max_findings findings plus a suppressed count, and status with view=findings reads the "
-        "rest. A no_issue_detected verdict does not mean the work is correct.",
+        "rest. A no_issue_detected verdict does not mean the work is correct. Choose mode "
+        "deliberately: semantic_if_configured for most material implementation or review claims; "
+        "semantic_required when the claim depends on qualitative correctness, design conformance, "
+        "security or privacy reasoning, interoperability, or whether the code satisfies the ask; "
+        "deterministic_only only for explicitly local or structural checks, a semantic-disabled "
+        "policy, or a deliberate no-egress choice, and then disclose that limitation. Omitting "
+        "mode resolves through the configured verification policy.",
         read_only=False,
         idempotent=True,
     ),
@@ -719,7 +725,9 @@ TOOL_DESCRIPTORS: Final = (
         "receipt",
         "Record and read a receipt",
         "Records and returns a receipt of the recorded conclusion and coverage limitations at one "
-        "frontier. It does not establish correctness beyond that recorded coverage.",
+        "frontier. It does not establish correctness beyond that recorded coverage. Prefer format "
+        "markdown or text; json is an owner-export format that stricter agent-context policies may "
+        "block.",
         read_only=False,
         idempotent=True,
     ),
@@ -751,14 +759,14 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "start": "sha256:42509100525d5c866aa21c02cfa33942163967f79968ef1c7c7e00e15fb0e696",
         "publish_work": "sha256:3ad928d63033c61adc1d49cf63d7dd9ccc6e4d0ade0932b4638b62f20d5d273e",
-        "check": "sha256:bd78bde8d0586896318534abcc248aa8d87f30ff4952046593549dc57f394500",
+        "check": "sha256:e382bf8897267b9ceb4a8833a43673f7cebcf052aef286848b3f209789399693",
         "respond": "sha256:740e576f822636bdcdf4f246a86192a336e7d0284aae611bbc6421ee62ed469a",
         "status": "sha256:99b92f8092623c90f9706f0427f4f81e1cc5f4532571e197344b088e1855351e",
-        "receipt": "sha256:75a8a26a45689c4d0fec54ee20784eda43096b8726fd59f924d599f4bd27d095",
+        "receipt": "sha256:3d50456b00c2fa4e46fc167f97d3db2033d6f02d46a7a6e934b4f28797d69e19",
     }
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final = (
-    "sha256:32382f3640d867cfee467cd441cd1b1f973c71baadd73b9c0bada971459db683"
+    "sha256:99dbb6ee49a24168f351c1a3b405dd001c7ee8c8add115b7ac79f4adfa0a7afe"
 )
 
 

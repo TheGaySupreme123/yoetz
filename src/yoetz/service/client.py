@@ -723,10 +723,10 @@ class ServiceClient(ControlClientPort):
             self._pending.pop(request.rpc_id, None)
 
         if result.outcome == "error" and isinstance(result.body, ControlError):
-            if result.body.reason in {
-                "service_generation_changed",
-                "privacy_projection_unavailable",
-            }:
+            # Only generation skew forces connection teardown. Projection errors
+            # (privacy_projection_unavailable / privacy_projection_blocked) must propagate so the
+            # agent can switch format or widen policy on the same connection.
+            if result.body.reason == "service_generation_changed":
                 await self._fail_connection(ControlError("service_unavailable", retryable=True))
                 return ControlResult(
                     protocol_version=result.protocol_version,

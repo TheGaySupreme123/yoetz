@@ -92,7 +92,17 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    project at the policy's data classes without a category grant: that content is already in the
    host's context, so withholding it discloses nothing new and costs the loop. Other-writer
    material, imports, and provider-derived semantic prose — including every reviewer challenge —
-   still require the explicit `agent_context_categories` grant. Provenance is computed from the
+   still require the explicit `agent_context_categories` grant.
+
+   **Revised 2026-07-24 — default agent-context disclosure of verification output.** Under the
+   default LOCAL_ONLY bootstrap policy, `agent_context` may include Yoetz-authored verification
+   projection content for the requesting agent's own task: `finding_summary` and
+   `obligation_text` (receipt document sections, human_text, check findings/obligations). These
+   remain `ordinary_user_content` at the data-class layer; the default policy allowlist is widened
+   rather than reclassifying leaves as public structural. Observation-derived repository/transcript
+   excerpts and vault material stay blocked. Stricter owner policies may still block JSON receipt
+   projection (fail closed as `privacy_projection_blocked` → `PRIVACY_AUTHORITY_REQUIRED`);
+   markdown/text degrade with omission markers. Provenance is computed from the
    ledger, never asserted by a caller; ambiguity or an unresolvable ref denies; it is recomputed per
    projection and never cached across frontiers.
 

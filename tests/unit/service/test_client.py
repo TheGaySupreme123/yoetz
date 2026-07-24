@@ -25,6 +25,7 @@ from yoetz.ports.control import (
 )
 from yoetz.ports.privacy import LocalDisclosureReceiptView, PrivacyReceiptPage
 from yoetz.protocol.ids import IdKind, new_id
+from yoetz.protocol.models import ReceiptRequest
 from yoetz.service.client import (
     GetPrivacyReceiptRequest,
     ListPrivacyReceiptsRequest,
@@ -514,3 +515,75 @@ def test_no_direct_runtime_or_endpoint_constructor_surface() -> None:
             ControlClientKind.CLI,
             _token=None,
         )
+
+
+def _receipt_request(seed: int) -> ReceiptRequest:
+    identity = f"00000000-0000-4000-8000-{seed:012d}"
+    return ReceiptRequest.model_validate(
+        {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "request_id": f"req_{identity}",
+            "actor": {"actor_id": "harness:pytest", "actor_type": "harness"},
+            "client": {
+                "kind": "cooperative_agent",
+                "version": "0.1.0",
+                "integration": "cooperative_mcp",
+            },
+            "session_id": f"ses_{identity}",
+            "writer_id": f"wri_{identity}",
+            "task_id": f"tsk_{identity}",
+            "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
+            "format": "json",
+            "include": "summary",
+            "redaction_profile": "default_local_export",
+        }
+    )
+
+
+@pytest.mark.anyio
+async def test_projection_errors_reach_the_caller_without_closing_the_connection() -> None:
+    """A caller that cannot get one receipt format must be able to ask for another one.
+
+    Collapsing these two reasons into a retryable teardown is what left a real agent retrying the
+    single shape that could never succeed, so the surviving connection is the property under test.
+    """
+
+    stream = _FakeStream()
+    client = _client(stream, ControlClientKind.MCP_BRIDGE)
+    projection_reasons = (
+        ("privacy_projection_blocked", False),
+        ("privacy_projection_unavailable", True),
+    )
+
+    for index, (reason, retryable) in enumerate(projection_reasons, start=1):
+        task = asyncio.create_task(client.receipt(_receipt_request(index)))
+        await _wait_for_sent(stream, index)
+        request = decode_control_frame(stream.sent[index - 1])
+        await stream.feed(
+            encode_control_frame(
+                ControlResult(
+                    protocol_version="1.0",
+                    rpc_id=cast(str, request["rpc_id"]),
+                    service_instance_id=_SERVICE_ID,
+                    service_generation="1",
+                    method=ControlMethod.RECEIPT,
+                    outcome="error",
+                    body=ControlError(reason, retryable=retryable),
+                )
+            )
+        )
+        with pytest.raises(ControlError) as raised:
+            await task
+        # The exact reason survives: rewriting it to service_unavailable hides the remedy.
+        assert raised.value.reason == reason
+        assert raised.value.retryable is retryable
+        assert stream.closed is False
+
+    # The same connection still carries a following call rather than requiring a reconnect.
+    follow_up = asyncio.create_task(client.receipt(_receipt_request(3)))
+    await _wait_for_sent(stream, 3)
+    assert decode_control_frame(stream.sent[2])["method"] == "receipt"
+    follow_up.cancel()
+    await asyncio.gather(follow_up, return_exceptions=True)
+    await client.close()

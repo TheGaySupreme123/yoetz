@@ -503,6 +503,38 @@ class CatalogPrivacyPolicyStore:
                 self._insert_policy(candidate, generation, "tightening", None)
         return PolicyCommitResult(candidate, generation, 0, 0)
 
+    async def reseed_untouched_bootstrap_default(
+        self,
+        scope: AuthorizationScope,
+        *,
+        expected_current: PrivacyPolicy,
+        replacement: PrivacyPolicy,
+    ) -> PrivacyPolicy:
+        """Re-seed the shipped bootstrap default when the stored policy is still exactly it.
+
+        An installation created before the shipped default changed would otherwise keep the older
+        allowlist forever, so the same release behaves differently for new and existing users.
+
+        Two independent conditions gate the swap, because policy contents alone cannot prove
+        origin: the stored row must still carry first-run bootstrap provenance (`change_kind`
+        `seed` with no source proposal), and its decoded policy must equal ``expected_current``
+        exactly. A tightening or an approved expansion records a different `change_kind`, so an
+        owner choice that happens to reproduce the old default's fields is never overwritten.
+        """
+
+        now = self._clock.now_utc()
+        async with self._lock:
+            with _transaction(self._db):
+                current = self._current_exact(scope)
+                if current.policy != expected_current:
+                    return current.policy
+                if not self._is_untouched_bootstrap_seed(scope):
+                    return current.policy
+                generation = self._next_generation()
+                self._supersede(current.policy, now)
+                self._insert_policy(replacement, generation, "seed", None)
+        return replacement
+
     async def watch_generation(self) -> int:
         row = self._db.execute(
             "SELECT COALESCE(MAX(policy_generation), 0) FROM privacy_policy_versions"
@@ -521,6 +553,23 @@ class CatalogPrivacyPolicyStore:
             raise ValueError("privacy_policy_missing")
         policy = _policy_from_bytes(cast(bytes, row[0]))
         return EffectivePrivacyPolicy(policy, cast(int, row[1]), policy.policy_digest)
+
+    def _is_untouched_bootstrap_seed(self, scope: AuthorizationScope) -> bool:
+        """Report whether the current row for the scope is still the first-run bootstrap seed.
+
+        Only `seed_if_absent` and this re-seed write `change_kind='seed'`, and neither carries a
+        source proposal, so the pair is an immutable provenance marker that no owner-driven
+        transition can reproduce.
+        """
+
+        row = self._db.execute(
+            """SELECT change_kind, source_proposal_id FROM privacy_policy_versions
+               WHERE scope_digest = ? AND state = 'current'""",
+            (_scope_digest(scope),),
+        ).fetchone()
+        if row is None:
+            return False
+        return row[0] == "seed" and row[1] is None
 
     def _next_generation(self) -> int:
         row = self._db.execute(

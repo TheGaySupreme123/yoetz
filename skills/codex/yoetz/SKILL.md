@@ -25,3 +25,8 @@ Use only the six registered Yoetz MCP tools and their current schemas. Every too
 - Follow the [cooperative workflow](references/workflow.md#the-ten-steps) for start, publication, re-grounding, check, response, and receipt.
 - Consult [publication policy](references/publication-policy.md#materiality-checklist) before publishing source or a large inventory.
 - Consult [coverage and receipts](references/coverage-and-receipts.md#receipt-fields-and-wording) before a completion claim.
+
+## Check mode and receipts
+
+- Prefer `semantic_if_configured` for material implementation/review claims; use `semantic_required` when qualitative correctness is part of completion; use `deterministic_only` only for structural/no-egress checks and disclose that limitation. Omitting `mode` resolves via policy.
+- Prefer receipt format `markdown` or `text`. Default policy can return usable `json` receipts; if `json` is blocked under a strict policy, switch format rather than retrying forever.

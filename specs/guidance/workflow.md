@@ -86,7 +86,15 @@ IDs, publications, checks, findings, or receipts.
    checking, and an empty list is not a clean result
    (`guidance/coverage-and-receipts.md`).
 7. **Check before completion.** Publish the intended material completion claim and current evidence,
-   then call `check` before telling the user the task is complete.
+   then call `check` before telling the user the task is complete. The step carries the
+   verification-mode decision rule: `semantic_if_configured` for most material implementation or
+   review claims; `semantic_required` when the completion claim depends on qualitative correctness,
+   design conformance, security or privacy reasoning, interoperability, or whether the code
+   satisfies the ask; `deterministic_only` only for explicitly local or structural checks, a
+   semantic-disabled policy, or a deliberate no-egress choice, and then the limitation is disclosed.
+   Omitting `mode` resolves through the configured `VerificationPolicy` default. The step also
+   states the semantic-case publication duty: publish the smallest state-bound diff or symbol and
+   the directly relevant test or failure excerpt rather than self-asserted completion prose alone.
 8. **Respond deliberately.** Read each reviewer challenge as advisory. Accept and act, provide
    evidence, revise the completion claim, dispute with evidence, or state that the limitation cannot
    currently be resolved. Encode those choices through existing `respond` plus material
@@ -95,7 +103,10 @@ IDs, publications, checks, findings, or receipts.
 9. **Recheck after change.** Material edits, new evidence, plan changes, or finding responses require
    a current check; do not reuse a stale verdict.
 10. **Receipt and final answer.** Request a receipt and word the final response no more strongly than
-    the receipt's weakest material coverage, freshness, unresolved findings, and limitations.
+    the receipt's weakest material coverage, freshness, unresolved findings, and limitations. The
+    step states that every receipt format projects under the default agent-context policy, and that
+    a stricter owner policy blocking digest-bound `json` is answered by re-requesting `markdown` or
+    `text`, not by retrying the same shape.
 
 Every mutating call reuses its original request/operation IDs after timeout or reconnect. Timeout
 means unknown outcome; the agent retries idempotently or inspects `status`.

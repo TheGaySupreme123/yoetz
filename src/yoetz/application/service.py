@@ -504,7 +504,13 @@ class Application:
 
     async def check(self, request: object) -> CheckCommitResult:
         from yoetz.application.check import execute_check
+        from yoetz.protocol.models import CheckRequestModel
 
+        # Resolve omitted mode via policy so recorded check events carry the resolved value.
+        if isinstance(request, CheckRequestModel) and request.mode is None:
+            request = request.model_copy(
+                update={"mode": self.verification_policy.default_check_mode}
+            )
         return await execute_check(self, request)  # pyright: ignore[reportArgumentType]
 
     async def respond(self, request: RespondRequest) -> RespondInternalResult:
@@ -718,6 +724,7 @@ class Application:
             raise TypeError("local_disclosure_result_invalid")
         # Digest-bound JSON receipt documents cannot be partly rewritten with omission
         # markers; fail closed when any present document content leaf is blocked.
+        # Distinct from transient privacy_projection_unavailable (LocalDisclosureUnavailable).
         if (
             method is ControlMethod.RECEIPT
             and source.get("format") == "json"
@@ -727,7 +734,7 @@ class Application:
                 for omission in completed.omissions
             )
         ):
-            raise ControlError("privacy_projection_unavailable", retryable=True)
+            raise ControlError("privacy_projection_blocked", retryable=False)
         projected: JsonValue = source
         for omission in completed.omissions:
             projected = _replace_pointer(

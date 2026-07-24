@@ -45,6 +45,14 @@ The reference contains:
 - the difference between same state, asserted-but-unobserved change, observed change with hidden
   content, and reviewed targeted change content;
 - JSON receipt field mapping and derived markdown rules;
+- check-mode and semantic-coverage rules: a clean deterministic-only check is not an implementation
+  review; when the mode is `deterministic_only` (equivalently, semantic status `not_requested`) the
+  coverage carries the `semantic_review_not_requested` gap and completeness is coverage-incomplete
+  even when the verdict is `no_issue_detected`;
+- receipt-format rules: every format projects to agent context under the default policy, and a
+  stricter owner policy that blocks digest-bound `json` surfaces `PRIVACY_AUTHORITY_REQUIRED` with
+  `receipt_json_projection_blocked`, answered by re-requesting `markdown` or `text`; the durable
+  receipt is recorded even when its projection is blocked;
 - approved and forbidden completion-wording examples;
 - the rule that only a recorded `check` bounds final wording, and that a `status`
   `view=candidate_findings` read never does.
