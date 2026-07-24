@@ -13,6 +13,7 @@ from typing import Any, Protocol, cast
 from yoetz.adapters.approved_checks import ApprovedCheckRunner
 from yoetz.adapters.git_subject_state import (
     GitSubjectStateAdapter,
+    list_changed_relative_paths,
     open_local_workspace,
 )
 from yoetz.adapters.integrations.codex_lifecycle import (
@@ -24,6 +25,7 @@ from yoetz.adapters.integrations.observation_local import (
     LocalObservationStore,
     session_commitment_from_codex_id,
 )
+from yoetz.adapters.workspace_inspect import LocalWorkspaceInspectAdapter
 from yoetz.application.observation_advice import (
     ObservationAdviceContextBuilder,
 )
@@ -43,6 +45,7 @@ from yoetz.application.observation_verification import (
     ObservationVerificationSupervisor,
     ObservationVerificationWorker,
     VerificationDrainHandle,
+    orchestrate_changed_path_inspection,
 )
 from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
 from yoetz.domain.events import EventDraft, EventSchema, encode_payload, media_type_for
@@ -147,6 +150,81 @@ class ObservationCoordinator:
             # Tests and non-ready compositions still drain inline when no supervisor
             # is attached; production ready composition always injects one.
             self.verification_supervisor = None
+
+    async def rediscover_pending_verification(self) -> None:
+        """Rebuild drain handles for consented workspaces with durable pending jobs.
+
+        Called once after ready-lifecycle supervisor start so restart reclaim can
+        complete without waiting for a fresh hook ingest.
+        """
+
+        supervisor = self.verification_supervisor
+        if supervisor is None:
+            return
+        for workspace in self.local.list_consented_workspaces():
+            consent = self.local.consent_for(workspace)
+            if consent is None or not consent.active:
+                continue
+            sessions = self.local.codex_sessions_for_workspace(workspace)
+            if not sessions:
+                continue
+            for codex_session_id in sessions:
+                mapping = self.mapping_loader(codex_session_id, _state=self.state_root)
+                if mapping is None:
+                    continue
+                runtime: TaskRuntime | None = None
+                try:
+                    runtime = await self.runtime.route(
+                        RouteCommand(
+                            session_id=mapping.yoetz_session_id,
+                            writer_id=mapping.yoetz_writer_id,
+                            access=RouteAccess.WRITE,
+                            required_capabilities=frozenset(
+                                {
+                                    RuntimeCapability.STRUCTURAL_READ,
+                                    RuntimeCapability.PAYLOAD_READ,
+                                    RuntimeCapability.WRITE,
+                                }
+                            ),
+                        )
+                    )
+                    store = self._observation_store(runtime)
+                    repository = getattr(store, "verification_repository", None)
+                    if not callable(repository):
+                        continue
+                    repo = cast(ObservationVerificationRepository, repository())
+                    pending = repo.list_pending_workspaces()
+                    if workspace not in pending:
+                        continue
+                    worker = await self._rebuild_verification_worker(runtime, workspace, store)
+                    if worker is None:
+                        continue
+
+                    async def _after(
+                        bound_workspace: str = workspace,
+                        bound_runtime: TaskRuntime = runtime,
+                        bound_store: TaskObservationPort = store,
+                    ) -> None:
+                        await self._run_advice(bound_workspace, bound_runtime, bound_store)
+
+                    supervisor.register(
+                        VerificationDrainHandle(
+                            workspace_commitment=workspace,
+                            worker=worker,
+                            after_complete=_after,
+                        )
+                    )
+                    break
+                except Exception:
+                    self.local.note_coverage_gap(
+                        workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+                    )
+                finally:
+                    if runtime is not None:
+                        release = getattr(self.runtime, "release", None)
+                        if release is not None:
+                            await release(runtime)
+        supervisor.notify()
 
     async def ingest_request(self, request: ObservationIngestRequest) -> ObservationIngestResult:
         """Coordinator ingest path used by ordinary-control ``observation_ingest``."""
@@ -683,17 +761,185 @@ class ObservationCoordinator:
             )
         inspect_recorder = getattr(store, "record_inspection_snapshot", None)
         if callable(inspect_recorder):
+            relative_paths: tuple[str, ...] = ()
+            changed_digest = current_digest
+            facts_object_id: str | None = None
+            excerpt_object_id: str | None = None
+            try:
+                relative_paths = list_changed_relative_paths(handle)
+                changed_digest = canonical_digest(
+                    JsonObject({"relative_paths": list(relative_paths)})
+                )
+                orchestration = orchestrate_changed_path_inspection(
+                    workspace=handle,
+                    inspect_port=LocalWorkspaceInspectAdapter(),
+                    relative_paths=relative_paths,
+                    changed_paths_digest=changed_digest,
+                )
+                if orchestration.inspect_fact is not None:
+                    fact_bytes = canonical_encode(
+                        JsonObject(
+                            {
+                                "format": "yoetz.observation-inspect-fact/1",
+                                "selection_digest": orchestration.inspect_fact.selection_digest,
+                                "relative_paths": list(orchestration.inspect_fact.relative_paths),
+                                "changed_paths_digest": changed_digest,
+                            }
+                        )
+                    )
+                    facts_ref = await self._encrypt_captured_content(runtime, fact_bytes)
+                    facts_object_id = facts_ref.object_id
+                if orchestration.inspect is not None and orchestration.inspect.artifacts:
+                    excerpt_parts = tuple(
+                        {
+                            "path": item.relative_path,
+                            "digest": item.content_digest,
+                            "excerpt_b64": base64.b64encode(item.excerpt[:512]).decode("ascii"),
+                        }
+                        for item in orchestration.inspect.artifacts[:16]
+                        if item.excerpt
+                    )
+                    if excerpt_parts:
+                        excerpt_bytes = canonical_encode(
+                            JsonObject(
+                                {
+                                    "format": "yoetz.observation-inspect-excerpt/1",
+                                    "artifacts": list(excerpt_parts),
+                                }
+                            )
+                        )
+                        excerpt_ref = await self._encrypt_captured_content(
+                            runtime, excerpt_bytes
+                        )
+                        excerpt_object_id = excerpt_ref.object_id
+            except Exception:
+                self.local.note_coverage_gap(
+                    workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+                )
+                relative_paths = ()
             inspect_recorder(
                 workspace=workspace,
                 yoetz_session_id=runtime.session_id,
                 subject_state_digest=current_digest,
-                changed_paths_digest=current_digest,
-                relative_paths=(),
-                facts_object_id=None,
-                excerpt_object_id=None,
+                changed_paths_digest=changed_digest,
+                relative_paths=relative_paths,
+                facts_object_id=facts_object_id,
+                excerpt_object_id=excerpt_object_id,
                 recorded_at=now,
             )
         return worker
+
+    async def _rebuild_verification_worker(
+        self,
+        runtime: TaskRuntime,
+        workspace: str,
+        store: TaskObservationPort,
+    ) -> ObservationVerificationWorker | None:
+        """Rebuild a drain worker for already-pending durable jobs (no enqueue)."""
+
+        required = (
+            "workspace_locator_descriptor",
+            "verification_repository",
+            "policy_digest_is_trusted",
+        )
+        if any(not callable(getattr(store, name, None)) for name in required):
+            return None
+        descriptor = store.workspace_locator_descriptor(workspace)
+        if descriptor is None:
+            return None
+        locator_ref = await runtime.objects.resolve_verified(*descriptor)
+        encrypted = b"".join([chunk async for chunk in runtime.objects.open_verified(locator_ref)])
+        parsed = strict_json_parse(encrypted)
+        if not isinstance(parsed, dict) and type(parsed) is not JsonObject:
+            return None
+        content_b64 = parsed.get("content_b64")
+        content_kind = parsed.get("content_kind")
+        if (
+            content_kind != ObservationContentKind.WORKSPACE_LOCATOR.value
+            or type(content_b64) is not str
+        ):
+            return None
+        try:
+            locator = base64.b64decode(content_b64.encode("ascii"), validate=True).decode("utf-8")
+            handle = open_local_workspace(Path(locator))
+            policy, _raw_policy = load_observation_check_policy(Path(locator))
+        except Exception:
+            return None
+        if not store.policy_digest_is_trusted(workspace, policy.raw_digest):
+            return None
+        capture = GitSubjectStateAdapter()
+
+        def subject_digest(_handle: object) -> str:
+            result = capture.capture(
+                SubjectStateCaptureCommand(handle, SubjectStateFormat.GIT_STRUCTURAL_V1)
+            )
+            if result.subject_state is None:
+                raise RuntimeError("subject_state_unavailable")
+            return canonical_digest(
+                JsonObject(
+                    {
+                        "tree_digest": result.subject_state.tree_digest,
+                        "diff_digest": result.subject_state.diff_digest,
+                    }
+                )
+            )
+
+        repository = cast(ObservationVerificationRepository, store.verification_repository())
+
+        async def persist_output(job: ObservationVerificationJob, content: bytes) -> str | None:
+            chunk = ObservationContentChunk(
+                content_kind=ObservationContentKind.APPROVED_CHECK_OUTPUT,
+                correlation_identity=f"check:{job.job_id}",
+                source_commitment=f"hmac-sha256:{'0' * 64}",
+                media_type="text/plain",
+                part_index=0,
+                part_count=1,
+                content=content,
+                redacted=True,
+            )
+            manifest = canonical_encode(
+                JsonObject(
+                    {
+                        "format": "yoetz.observation-content/1",
+                        "content_kind": chunk.content_kind.value,
+                        "correlation_identity": chunk.correlation_identity,
+                        "source_commitment": chunk.source_commitment,
+                        "media_type": chunk.media_type,
+                        "part_index": 0,
+                        "part_count": 1,
+                        "redacted": True,
+                        "content_b64": base64.b64encode(content).decode("ascii"),
+                    }
+                )
+            )
+            ref = await self._encrypt_captured_content(runtime, manifest)
+            store.record_content_manifest(
+                workspace=workspace,
+                logical_identity=f"verification:{job.job_id}",
+                chunk=chunk,
+                ref=ref,
+                recorded_at=timestamp_from_datetime(self.clock.now_utc()),
+            )
+            return ref.object_id
+
+        def now_wire() -> str:
+            return timestamp_from_datetime(self.clock.now_utc()).wire
+
+        def lease_expiry() -> str:
+            return timestamp_from_datetime(self.clock.now_utc() + timedelta(minutes=2)).wire
+
+        return ObservationVerificationWorker(
+            repository=repository,
+            runner=ApprovedCheckRunner({item.approval_commitment: item for item in policy.checks}),
+            workspace_provider=lambda _workspace: handle,
+            policy_provider=lambda _workspace, _digest: policy.checks,
+            capture_subject_state=subject_digest,
+            persist_output=persist_output,
+            service_generation=runtime.fence.service_generation,
+            lease_owner=runtime.fence.service_instance_id,
+            now=now_wire,
+            lease_expires_at=lease_expiry,
+        )
 
     async def _run_verification(
         self,
@@ -741,7 +987,10 @@ class ObservationCoordinator:
     ) -> None:
         task_id = runtime.task_id if isinstance(runtime, TaskRuntime) else runtime
         envelopes = store.list_envelopes(workspace)
-        snapshot = await self.advice_context_builder.build(workspace, store)
+        session_id = runtime.session_id if isinstance(runtime, TaskRuntime) else None
+        snapshot = await self.advice_context_builder.build(
+            workspace, store, yoetz_session_id=session_id if type(session_id) is str else None
+        )
         if snapshot is not None:
             now = timestamp_from_datetime(self.clock.now_utc())
             store.set_advice_snapshot(workspace, snapshot, now)

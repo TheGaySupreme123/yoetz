@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO, Final, cast
@@ -305,8 +306,12 @@ def _visible_content_chunks(
     *,
     envelope: ObservationEnvelope,
     workspace_locator: str | None,
-) -> tuple[ObservationContentChunk, ...]:
-    """Extract only explicitly visible task content and redact it before transport."""
+) -> tuple[tuple[ObservationContentChunk, ...], bool]:
+    """Extract only explicitly visible task content and redact it before transport.
+
+    Returns ``(chunks, truncated)``. Caps set ``truncated`` so callers attach
+    ``truncated_payload`` without inventing success.
+    """
 
     selected: list[tuple[ObservationContentKind, str, bytes]] = []
 
@@ -366,17 +371,25 @@ def _visible_content_chunks(
 
     chunks: list[ObservationContentChunk] = []
     remaining = 680_000
-    for kind, label, raw in selected:
+    truncated = False
+    for selected_index, (kind, label, raw) in enumerate(selected):
         redacted, detected = redact_sensitive_content(raw)
         if not redacted:
             continue
+        if len(redacted) > remaining:
+            truncated = True
         redacted = redacted[:remaining]
         if not redacted:
+            truncated = True
             break
-        parts = [
+        full_parts = [
             redacted[offset : offset + _MAX_CONTENT_CHUNK]
             for offset in range(0, len(redacted), _MAX_CONTENT_CHUNK)
-        ][:16]
+        ]
+        if len(full_parts) > 16:
+            truncated = True
+        parts = full_parts[:16]
+        hit_chunk_cap = False
         for index, part in enumerate(parts):
             chunks.append(
                 ObservationContentChunk(
@@ -391,9 +404,16 @@ def _visible_content_chunks(
                 )
             )
             if len(chunks) >= 16:
-                return tuple(chunks)
+                hit_chunk_cap = True
+                if index + 1 < len(parts):
+                    truncated = True
+                break
         remaining -= len(redacted)
-    return tuple(chunks)
+        if hit_chunk_cap:
+            if selected_index + 1 < len(selected):
+                truncated = True
+            break
+    return tuple(chunks), truncated
 
 
 def _advice_context(snapshot: AdviceSnapshot) -> str:
@@ -695,12 +715,22 @@ def handle_observe(
             source_generation=source_generation,
             gap_codes=tuple(sorted(set(gap_codes), key=str.encode)),
         )
-        content_chunks = _visible_content_chunks(
+        content_chunks, content_truncated = _visible_content_chunks(
             resolved_event,
             payload,
             envelope=envelope,
             workspace_locator=workspace_locator,
         )
+        if content_truncated:
+            envelope = replace(
+                envelope,
+                gap_codes=tuple(
+                    sorted(
+                        {*envelope.gap_codes, ObservationGapCode.TRUNCATED_PAYLOAD.value},
+                        key=str.encode,
+                    )
+                ),
+            )
         content_map = {envelope.source_identity: content_chunks} if content_chunks else None
 
         # Local durable ingest first (never plaintext transcript spool).

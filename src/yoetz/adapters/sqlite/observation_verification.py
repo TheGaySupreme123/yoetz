@@ -128,6 +128,14 @@ class SqliteObservationVerificationRepository:
                 state_token=int(row[5]),
             )
 
+    def list_pending_workspaces(self) -> tuple[str, ...]:
+        rows = self._db.execute(
+            "SELECT DISTINCT workspace_commitment FROM observation_verification_jobs "
+            "WHERE status IN ('pending', 'running') "
+            "ORDER BY workspace_commitment"
+        ).fetchall()
+        return tuple(str(row[0]) for row in rows if type(row[0]) is str)
+
     def complete(
         self,
         *,

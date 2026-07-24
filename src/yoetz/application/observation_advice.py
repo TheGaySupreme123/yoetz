@@ -153,7 +153,13 @@ class ObservationAdviceContextBuilder:
     semantic_addon: CallableSemantic | None = None
     semantic_review: CallableSemanticReview | None = None
 
-    async def build(self, workspace: str, store: ObservationContextStore) -> AdviceSnapshot | None:
+    async def build(
+        self,
+        workspace: str,
+        store: ObservationContextStore,
+        *,
+        yoetz_session_id: str | None = None,
+    ) -> AdviceSnapshot | None:
         envelopes = store.list_envelopes(workspace)
         status = await store.status(ObservationStatusQuery(workspace))
         store_check_facts = getattr(store, "load_check_facts", None)
@@ -195,6 +201,12 @@ class ObservationAdviceContextBuilder:
                 semantic = reviewed
         elif self.semantic_addon is not None:
             semantic = self.semantic_addon(workspace)
+        prior: AdviceSnapshot | None = None
+        session_load = getattr(store, "load_advice_snapshot_for_session", None)
+        if callable(session_load) and type(yoetz_session_id) is str:
+            prior = session_load(workspace=workspace, yoetz_session_id=yoetz_session_id)
+        if prior is None:
+            prior = store.load_advice_snapshot(workspace)
         return build_observation_advice_snapshot(
             ObservationAdviceBuildInput(
                 envelopes=envelopes,
@@ -204,7 +216,7 @@ class ObservationAdviceContextBuilder:
                 inspect_fact=inspect_fact,
                 composition=self.composition,
                 plan_path_digests=plans,
-                prior_snapshot=store.load_advice_snapshot(workspace),
+                prior_snapshot=prior,
                 semantic_addon=semantic,
                 has_real_observation=bool(envelopes),
             )

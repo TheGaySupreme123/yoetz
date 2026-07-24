@@ -78,6 +78,8 @@ class ObservationVerificationRepository(Protocol):
         now: str,
     ) -> ObservationVerificationJob | None: ...
 
+    def list_pending_workspaces(self) -> tuple[str, ...]: ...
+
     def complete(
         self,
         *,
@@ -148,6 +150,28 @@ class ObservationVerificationSupervisor:
         self._closed = False
         self._wake.set()
         self._loop_task = asyncio.create_task(self._run_loop(), name="observation-verification")
+
+    async def rediscover(
+        self,
+        builders: Mapping[str, Callable[[], VerificationDrainHandle | None]],
+    ) -> None:
+        """Register drain handles for workspaces that still have durable pending jobs.
+
+        ``builders`` maps workspace commitment → factory that rebuilds a worker/handle
+        (or returns None when the workspace cannot be opened yet). Called once after
+        ready-lifecycle start so restart reclaim can complete.
+        """
+
+        for workspace, builder in sorted(builders.items(), key=lambda item: item[0].encode()):
+            if self._closed:
+                return
+            if workspace in self._handles:
+                continue
+            handle = builder()
+            if handle is None:
+                continue
+            self.register(handle)
+        self.notify()
 
     async def stop(self) -> None:
         self._closed = True
