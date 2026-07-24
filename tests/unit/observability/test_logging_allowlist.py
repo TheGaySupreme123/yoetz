@@ -74,6 +74,7 @@ def test_allowlisted_fields_are_preserved(capsys: pytest.CaptureFixture[str]) ->
         request_id=_REQUEST_ID,
         duration_ms=17,
         outcome="completed",
+        reason="request_completed",
         engine_version="0.1.0",
         policy_version="0.1.0",
         sqlite_source_id_hash=_SQLITE_HASH,
@@ -92,6 +93,7 @@ def test_allowlisted_fields_are_preserved(capsys: pytest.CaptureFixture[str]) ->
             "request_id": _REQUEST_ID,
             "duration_ms": 17,
             "outcome": "completed",
+            "reason": "request_completed",
             "engine_version": "0.1.0",
             "policy_version": "0.1.0",
             "sqlite_source_id_hash": _SQLITE_HASH,
@@ -184,6 +186,7 @@ def test_exception_objects_are_never_formatted_or_captured(
         "fatal_exception",
     ]
     assert all(record["outcome"] == "internal_error" for record in records)
+    assert records[0]["reason"] == "exception_hostile_exception"
 
 
 @pytest.mark.parametrize("mode", [LogMode.SERVICE, LogMode.CONFIDENTIAL_HELPER])

@@ -297,3 +297,32 @@ CLI/MCP probes and durable ledger claims for runtime health; exec/rollout
 JSONL for what Codex actually called; Agent 2 review for code honesty vs ask;
 Agent 1 handoff for packaging/session metadata. No conclusion relies only on
 Codex’s final answer where logs or independent probes contradict it.
+
+---
+
+## Addendum: `check` root cause and source fix (2026-07-24)
+
+The six opaque `check` failures had one deterministic source cause. The check-only
+`execute_check_commit` path calls `SqliteLedger.freeze_case`, which refreshes derived state through
+repository `_sync_after_mutation`. That transaction executes
+`PRAGMA defer_foreign_keys=ON`, but the writer authorizer did not allowlist the pragma, so APSW
+raised `AuthError`. The daemon's generic exception path then collapsed the failure to control
+`internal_error`, and the MCP bridge returned `INTERNAL_ERROR`.
+
+The source fix permits only `defer_foreign_keys={read,ON,1}`. SQLite resets the setting at commit,
+so foreign-key enforcement is not weakened outside the bounded sync transaction. Regression
+coverage now drives the real ready composition through `start`, three accepted `publish_work`
+batches containing state-sensitive plan/result/claim families, deterministic `check`, privacy
+projection, and closed `CheckResult` validation. A separate pragma-gate test keeps unrelated
+configuration pragmas denied.
+
+The run's `err_*` values remain unresolvable: the bridge minted them without a linked diagnostic,
+and the on-demand service discarded stderr. The source fix now binds unexpected bridge failures to
+the same correlation ID in a structured stderr record and retains detached-service stderr in an
+owner-only log. The service-side frozen control error cannot carry a correlation ID, so service and
+bridge records are joined by method and timestamp. ADR-004 still forbids exception messages and
+tracebacks; diagnostics contain only bounded structural identities.
+
+This addendum describes the fixed source tree and tests. The installed `0.1.0` wheel and any
+already-running local service still carry the old behavior until rebuild, reinstall, and restart;
+no fresh Codex dogfood is claimed here.

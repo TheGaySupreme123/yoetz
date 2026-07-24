@@ -36,6 +36,7 @@ from yoetz.mcp.resources import (
     read_resource as read_guidance_resource,
 )
 from yoetz.mcp.summaries import render_safe_compact_summary
+from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.ports.control import ControlClientKind, ControlError
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id, safe_request_id_from
@@ -200,6 +201,7 @@ def structured_error_result(
     retryable: bool = False,
     request_id: str | None = None,
     safe_details: object | None = None,
+    correlation_id: str | None = None,
 ) -> types.CallToolResult:
     """Build a bounded structured tool error with a prevalidated nested fallback."""
 
@@ -208,7 +210,7 @@ def structured_error_result(
             code,
             message,
             retryable,
-            new_id(IdKind.CORRELATION),
+            correlation_id if correlation_id is not None else new_id(IdKind.CORRELATION),
             request_id=request_id,
             safe_details=safe_details,
         )
@@ -225,7 +227,11 @@ def structured_error_result(
             )
 
 
-def _control_error_result(error: ControlError, request_id: str | None) -> types.CallToolResult:
+def _control_error_result(
+    error: ControlError,
+    request_id: str | None,
+    operation: str,
+) -> types.CallToolResult:
     if error.reason == "vault_locked":
         return structured_error_result(
             PublicErrorCode.VAULT_LOCKED,
@@ -250,10 +256,16 @@ def _control_error_result(error: ControlError, request_id: str | None) -> types.
             retryable=True,
             request_id=request_id,
         )
+    correlation_id = record_unexpected_exception_without_raising(
+        error,
+        component="mcp.bridge",
+        operation=f"{operation}_internal_error",
+    )
     return structured_error_result(
         PublicErrorCode.INTERNAL_ERROR,
         "The bridge could not complete the operation.",
         request_id=request_id,
+        correlation_id=correlation_id,
     )
 
 
@@ -289,6 +301,7 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
     result_type: type[ResultT],
     invoke: Callable[[ServiceClient, RequestT], Awaitable[ResultT]],
     runtime: BridgeRuntime,
+    operation: str,
 ) -> types.CallToolResult:
     request_id = safe_request_id_from(arguments)
     try:
@@ -299,13 +312,19 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
             PublicErrorCode.INVALID_REQUEST,
             "The tool arguments are invalid.",
             request_id=request_id,
-            safe_details=locations[0] if locations else None,
+            safe_details=locations if locations else None,
         )
-    except Exception:
+    except Exception as exc:
+        correlation_id = record_unexpected_exception_without_raising(
+            exc,
+            component="mcp.bridge",
+            operation=f"{operation}_request_internal_error",
+        )
         return structured_error_result(
             PublicErrorCode.INVALID_REQUEST,
             "The tool arguments are invalid.",
             request_id=request_id,
+            correlation_id=correlation_id,
         )
     try:
         result = await _invoke_with_reconnect(runtime, request, invoke)
@@ -322,19 +341,31 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
                 else exc.bind_correlation_id(new_id(IdKind.CORRELATION))
             )
             return _result_from_wire(tool_error_envelope(bound, request_id=request_id))
-        except Exception:
+        except Exception as mapping_exc:
+            correlation_id = record_unexpected_exception_without_raising(
+                mapping_exc,
+                component="mcp.bridge",
+                operation=f"{operation}_public_error_internal_error",
+            )
             return structured_error_result(
                 PublicErrorCode.INTERNAL_ERROR,
                 "The bridge could not complete the operation.",
                 request_id=request_id,
+                correlation_id=correlation_id,
             )
     except ControlError as exc:
-        return _control_error_result(exc, request_id)
-    except Exception:
+        return _control_error_result(exc, request_id, operation)
+    except Exception as exc:
+        correlation_id = record_unexpected_exception_without_raising(
+            exc,
+            component="mcp.bridge",
+            operation=f"{operation}_internal_error",
+        )
         return structured_error_result(
             PublicErrorCode.INTERNAL_ERROR,
             "The bridge could not complete the operation.",
             request_id=request_id,
+            correlation_id=correlation_id,
         )
 
 
@@ -347,6 +378,7 @@ async def dispatch_start(
         StartResult,
         lambda client, request: client.start(request),
         runtime,
+        "start",
     )
 
 
@@ -359,6 +391,7 @@ async def dispatch_publish_work(
         PublishWorkResult,
         lambda client, request: client.publish_work(request),
         runtime,
+        "publish_work",
     )
 
 
@@ -371,6 +404,7 @@ async def dispatch_check(
         CheckResult,
         lambda client, request: client.check(request),
         runtime,
+        "check",
     )
 
 
@@ -383,6 +417,7 @@ async def dispatch_respond(
         RespondResult,
         lambda client, request: client.respond(request),
         runtime,
+        "respond",
     )
 
 
@@ -395,6 +430,7 @@ async def dispatch_status(
         StatusResult,
         lambda client, request: client.status(request),
         runtime,
+        "status",
     )
 
 
@@ -407,6 +443,7 @@ async def dispatch_receipt(
         ReceiptResult,
         lambda client, request: client.receipt(request),
         runtime,
+        "receipt",
     )
 
 

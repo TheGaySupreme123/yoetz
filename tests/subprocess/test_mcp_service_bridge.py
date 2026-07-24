@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sys
 from collections.abc import Awaitable, Callable
 from typing import cast
 
@@ -131,7 +133,10 @@ def _failure[ResultT: BaseModel](result_type: type[ResultT], request_id: str) ->
 
 
 class _FakeClient:
-    def __init__(self, failure: ControlError | PublicOperationError | None = None) -> None:
+    def __init__(
+        self,
+        failure: ControlError | PublicOperationError | RuntimeError | None = None,
+    ) -> None:
         self.failure = failure
         self.calls: list[tuple[str, object]] = []
         self.closed = False
@@ -278,6 +283,52 @@ async def test_public_operation_error_keeps_event_invalid_not_internal_error(
     assert error["safe_details"] == {"reason_code": "unsorted_set_field"}
     assert error["code"] != "INTERNAL_ERROR"
     assert result.structuredContent["request_id"] == _requests()["publish_work"]["request_id"]
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_unexpected_bridge_error_logs_public_correlation_id(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    correlation_id = "err_00000000-0000-4000-8000-000000000098"
+    client = _FakeClient(RuntimeError("must-not-reach-public-output"))
+    _install_clients(monkeypatch, [client])
+
+    def record(
+        exc: BaseException,
+        *,
+        component: str,
+        operation: str,
+    ) -> str:
+        assert type(exc) is RuntimeError
+        print(
+            json.dumps(
+                {
+                    "component": component,
+                    "operation": operation,
+                    "correlation_id": correlation_id,
+                    "reason": "exception_runtime_error",
+                }
+            ),
+            file=sys.stderr,
+        )
+        return correlation_id
+
+    monkeypatch.setattr(bridge, "record_unexpected_exception_without_raising", record)
+    runtime = bridge.build_bridge_runtime()
+
+    result = await bridge.dispatch_check(_requests()["check"], runtime)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert correlation_id in captured.err
+    assert "check_internal_error" in captured.err
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error"]["code"] == "INTERNAL_ERROR"
+    assert result.structuredContent["error"]["correlation_id"] == correlation_id
+    assert "must-not-reach-public-output" not in str(result.structuredContent)
     await bridge.close_bridge_runtime(runtime)
 
 

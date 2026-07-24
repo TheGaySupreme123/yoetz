@@ -10,7 +10,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Final, Literal, TypedDict, cast
+from typing import BinaryIO, Final, Literal, TypedDict, cast
 
 from yoetz import __version__
 from yoetz.adapters.control.unix_socket import (
@@ -18,6 +18,7 @@ from yoetz.adapters.control.unix_socket import (
     LocalControlTransportError,
     connect_control,
 )
+from yoetz.config.paths import ensure_owner_only_dir, log_dir
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
@@ -160,31 +161,47 @@ def _service_environment() -> dict[str, str]:
     }
 
 
+def _open_service_stderr_log() -> BinaryIO:
+    root = log_dir()
+    ensure_owner_only_dir(root)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(root / "service.stderr.jsonl", flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        return cast(BinaryIO, os.fdopen(descriptor, "ab", buffering=0))
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def _spawn_service_process() -> None:
     command = (sys.executable, "-m", "yoetz", "service", "run")
-    if os.name == "nt":
-        creationflags = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) | int(
-            getattr(subprocess, "DETACHED_PROCESS", 0),
-        )
-        subprocess.Popen(  # noqa: S603 - fixed interpreter/module/arguments
-            command,
-            close_fds=True,
-            creationflags=creationflags,
-            env=_service_environment(),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    else:
-        subprocess.Popen(  # noqa: S603 - fixed interpreter/module/arguments
-            command,
-            close_fds=True,
-            env=_service_environment(),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+    with _open_service_stderr_log() as stderr_log:
+        if os.name == "nt":
+            creationflags = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) | int(
+                getattr(subprocess, "DETACHED_PROCESS", 0),
+            )
+            subprocess.Popen(  # noqa: S603 - fixed interpreter/module/arguments
+                command,
+                close_fds=True,
+                creationflags=creationflags,
+                env=_service_environment(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_log,
+            )
+        else:
+            subprocess.Popen(  # noqa: S603 - fixed interpreter/module/arguments
+                command,
+                close_fds=True,
+                env=_service_environment(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_log,
+                start_new_session=True,
+            )
 
 
 @dataclass(frozen=True, slots=True)

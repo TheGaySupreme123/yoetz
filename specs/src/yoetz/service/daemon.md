@@ -146,6 +146,14 @@ bearing success body to project, and collapsing a known public code such as `EVE
 (`unsorted_set_field`) into control `internal_error` is forbidden. Set-field order is never
 auto-sorted; callers must present canonical ASCII order.
 
+Before the generic `Exception` path returns control `internal_error`, the daemon emits one
+structured stderr record whose operation identifies the control method and whose fields carry a
+service-side correlation ID plus a bounded normalized exception-type reason. The same applies if
+public-error projection itself fails. Exception messages and tracebacks remain forbidden by
+ADR-004. Because the frozen v1.0 control error body has no correlation field, this service-side ID
+does not cross the socket; the MCP bridge emits its own public-ID-bound record, and operators join
+the two bounded records by method and timestamp.
+
 The `context` is the exact service-internal `ClientProjectionContext` from
 `application/service.md`; the daemon rejects a context whose client kind differs from the
 authenticated control session. If the trusted adapter supplies no presentation facts, the daemon

@@ -50,6 +50,7 @@ from yoetz.config.paths import (
     unlock_throttle_path,
     verify_private_local_bundle,
 )
+from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.ports.control import (
     ControlCallRequest,
     ControlClientKind,
@@ -531,7 +532,12 @@ class ServiceDaemon:
             return self._public_operation_failure_result(request, exc)
         except ControlProtocolError, TypeError, ValueError:
             return self._error_result(request, ControlError("frame_invalid"))
-        except Exception:
+        except Exception as exc:
+            record_unexpected_exception_without_raising(
+                exc,
+                component="service.daemon",
+                operation=f"{request.method.value}_internal_error",
+            )
             return self._error_result(request, ControlError("internal_error"))
 
     async def lock(self, reason: str = "explicit_lock") -> None:
@@ -781,6 +787,11 @@ class ServiceDaemon:
 
         result_type = _WORKFLOW_RESULT_MODELS.get(request.method)
         if result_type is None or type(error) is not PublicOperationError:
+            record_unexpected_exception_without_raising(
+                error,
+                component="service.daemon",
+                operation=f"{request.method.value}_public_error_internal_error",
+            )
             return self._error_result(request, ControlError("internal_error"))
         try:
             bound = (
@@ -799,7 +810,12 @@ class ServiceDaemon:
                 candidate["request_id"] = request_id
             body = result_type.model_validate(candidate)
             return self._result(request, body)
-        except Exception:
+        except Exception as exc:
+            record_unexpected_exception_without_raising(
+                exc,
+                component="service.daemon",
+                operation=f"{request.method.value}_public_error_internal_error",
+            )
             return self._error_result(request, ControlError("internal_error"))
 
     def _validate_success_body(self, request: ControlCallRequest, body: object) -> None:

@@ -91,6 +91,9 @@ registered tools remain structured tool results.
 - Unexpected bridge/client/SDK errors use prevalidated `INTERNAL_ERROR`; no raw exception/request.
   Known `PublicOperationError` application failures are not unexpected: they use
   `tool_error_envelope` / the service's `ok:false` body and keep their public code.
+  Before sanitizing an unexpected error, the bridge emits one structured stderr record with the
+  tool operation, a bounded exception-type reason, and the exact correlation ID returned in the
+  public error. It never emits the exception message or a traceback.
 - Service reconnect requires fresh same-UID handshake/generation and identical operation request.
 - Clean EOF closes the bridge only; persistent service remains alive.
 - A missing or digest-mismatched descriptor, instruction, or guidance resource fails startup. The

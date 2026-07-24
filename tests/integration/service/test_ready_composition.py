@@ -27,9 +27,15 @@ from yoetz.ports.control import (
 )
 from yoetz.ports.diagnostics import StartupCheckResult
 from yoetz.ports.secret_memory import SecretPurpose
-from yoetz.protocol.canonical import canonical_encode
+from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.ids import IdKind, new_id
-from yoetz.protocol.models import StartRequest, StartResult
+from yoetz.protocol.models import (
+    CheckRequest,
+    CheckResult,
+    PublishWorkRequest,
+    StartRequest,
+    StartResult,
+)
 from yoetz.service.daemon import ServiceComposition, ServiceDaemon
 from yoetz.service.lifecycle import ServiceLifecycle
 from yoetz.service.ready_composition import (
@@ -321,6 +327,228 @@ async def test_ready_factory_installs_application_that_starts(tmp_path: Path) ->
         assert isinstance(projected, StartResult)
         assert projected.root.ok is True
         assert projected.root.request_id == request.request_id
+    finally:
+        if app is not None:
+            await app.close()
+        await vault.close()
+        memory.close()
+        await lifecycle.close()
+
+
+@pytest.mark.anyio
+async def test_ready_factory_completes_and_projects_deterministic_check(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    clock = _Clock()
+    memory = LocalSecretMemory()
+    lifecycle = ServiceLifecycle(
+        clock,
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "7" * 64,
+        instance_id=_INSTANCE_ID,
+    )
+    await lifecycle.acquire_singleton()
+    await lifecycle.transition(ServiceState.LOCKED)
+    vault = VaultService(
+        installation_id=_INSTALLATION_ID,
+        service_generation=1,
+        mode=VaultMode.UNINITIALIZED,
+        secret_memory=memory,
+        clock=clock,
+        vault_store_factory=lambda: EncryptedVaultStore(tmp_path / "vault"),
+        pristine_state_digest="sha256:" + "8" * 64,
+    )
+    initialize = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"correct horse battery"))
+    await vault.initialize_passphrase(initialize, "sha256:" + "9" * 64)
+    app = None
+    try:
+        factory = build_ready_application_factory(
+            lifecycle=lifecycle,
+            vault=vault,
+            config=YoetzConfig(),
+            paths=_Paths(tmp_path),
+            clock=clock,
+            secret_memory=memory,
+            diagnostics=_Diagnostics(),
+        )
+        app = await factory(1, vault.generation)
+        common = {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "actor": {"actor_id": "harness:pytest", "actor_type": "harness"},
+            "client": {
+                "kind": "cooperative_agent",
+                "version": "0.1.0",
+                "integration": "cooperative_mcp",
+            },
+        }
+        start_request = StartRequest.model_validate(
+            {
+                **common,
+                "request_id": "req_00000000-0000-4000-8000-000000000101",
+                "mode": "create",
+                "task_title": "Exercise the ready check path",
+                "requested_view": "compact",
+            }
+        )
+        started = await app.start(start_request)
+        assert started.ok is True
+        frontier = started.frontier
+
+        batches: tuple[tuple[str, list[JsonValue]], ...] = (
+            (
+                "req_00000000-0000-4000-8000-000000000102",
+                [
+                    {
+                        "event_id": "evt_00000000-0000-4000-8000-000000000201",
+                        "schema": {"name": "plan_published", "version": "1.0.0"},
+                        "occurred_at": "2026-07-21T18:00:00.000Z",
+                        "causal_parents": [],
+                        "payload": {
+                            "plan_version": 1,
+                            "summary": "Exercise the ready composition through a closed check.",
+                            "obligation_refs": [],
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    }
+                ],
+            ),
+            (
+                "req_00000000-0000-4000-8000-000000000103",
+                [
+                    {
+                        "event_id": "evt_00000000-0000-4000-8000-000000000202",
+                        "schema": {"name": "action_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-07-21T18:01:00.000Z",
+                        "causal_parents": ["evt_00000000-0000-4000-8000-000000000201"],
+                        "payload": {
+                            "action_id": "act_00000000-0000-4000-8000-000000000201",
+                            "action_kind": "review",
+                            "description": "Ran the ready-composition acceptance path.",
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    },
+                    {
+                        "event_id": "evt_00000000-0000-4000-8000-000000000203",
+                        "schema": {"name": "result_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-07-21T18:02:00.000Z",
+                        "causal_parents": ["evt_00000000-0000-4000-8000-000000000202"],
+                        "payload": {
+                            "result_id": "res_00000000-0000-4000-8000-000000000201",
+                            "action_id": "act_00000000-0000-4000-8000-000000000201",
+                            "outcome": "success",
+                            "summary": "The bounded acceptance path completed.",
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    },
+                ],
+            ),
+            (
+                "req_00000000-0000-4000-8000-000000000104",
+                [
+                    {
+                        "event_id": "evt_00000000-0000-4000-8000-000000000204",
+                        "schema": {"name": "evidence_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-07-21T18:03:00.000Z",
+                        "causal_parents": ["evt_00000000-0000-4000-8000-000000000203"],
+                        "payload": {
+                            "evidence_id": "evd_00000000-0000-4000-8000-000000000201",
+                            "evidence_kind": "test_result",
+                            "strength": "metadata_only",
+                            "observed_at": "2026-07-21T18:03:00.000Z",
+                            "description": "Ready-composition regression coverage.",
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    },
+                    {
+                        "event_id": "evt_00000000-0000-4000-8000-000000000205",
+                        "schema": {"name": "claim_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-07-21T18:04:00.000Z",
+                        "causal_parents": ["evt_00000000-0000-4000-8000-000000000204"],
+                        "payload": {
+                            "claim_id": "clm_00000000-0000-4000-8000-000000000201",
+                            "claim_kind": "completion",
+                            "statement": "The ready-composition check path completed.",
+                            "supporting_refs": ["evd_00000000-0000-4000-8000-000000000201"],
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    },
+                ],
+            ),
+        )
+        for request_id, event_drafts in batches:
+            publish_request = PublishWorkRequest.model_validate(
+                {
+                    **common,
+                    "request_id": request_id,
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": {
+                        "sequence": str(frontier.sequence),
+                        "head_digest": frontier.head_digest,
+                    },
+                    "event_drafts": event_drafts,
+                }
+            )
+            published = await app.publish_work(publish_request)
+            assert published.ok is True
+            frontier = published.result_frontier
+
+        check_request = CheckRequest.model_validate(
+            {
+                **common,
+                "request_id": "req_00000000-0000-4000-8000-000000000105",
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": {
+                    "sequence": str(frontier.sequence),
+                    "head_digest": frontier.head_digest,
+                },
+                "mode": "deterministic_only",
+                "max_findings": "3",
+                "policy_packs": ["work-integrity/0.1.0"],
+            }
+        )
+        checked = await app.check(check_request)
+        assert checked.outcome == "committed"
+        assert checked.verdict.value in {
+            "action_required",
+            "insufficient_coverage",
+            "no_issue_detected",
+        }
+
+        rpc_id = new_id(IdKind.CONTROL_RPC)
+        facts = await app.projection_binding_facts(ControlMethod.CHECK, check_request, checked)
+        projected = await app.project_result_for_client(
+            ClientProjectionContext.fail_safe(ControlClientKind.MCP_BRIDGE),
+            ControlProjectionBinding(
+                rpc_id=rpc_id,
+                method=ControlMethod.CHECK,
+                service_instance_id=_INSTANCE_ID,
+                service_generation=1,
+                original_request_id=facts.original_request_id,
+                route_identity_digest=facts.route_identity_digest,
+                control_request_canonical=canonical_encode(
+                    {
+                        "method": ControlMethod.CHECK.value,
+                        "rpc_id": rpc_id,
+                        "service_generation": "1",
+                        "service_instance_id": _INSTANCE_ID,
+                    }
+                ),
+            ),
+            checked,
+        )
+        assert isinstance(projected, CheckResult)
+        validated = CheckResult.model_validate(
+            projected.model_dump(mode="json", by_alias=True, exclude_unset=True)
+        )
+        assert validated.root.ok is True
+        assert validated.root.verdict == checked.verdict.value
     finally:
         if app is not None:
             await app.close()

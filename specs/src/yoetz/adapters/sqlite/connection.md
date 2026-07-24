@@ -161,6 +161,13 @@ fence) and never creates the file (`SQLITE_OPEN_CREATE` absent; missing file rai
 `StorageUnsafeError("database_missing")`). Read-only connections are used by restore
 verification, recovery preflight, and bounded projection reads under the reviewed read policy.
 
+The writer authorizer permits only the bounded configuration values
+`foreign_keys={read,ON,1}`, `trusted_schema={read,OFF,0}`, and
+`defer_foreign_keys={read,ON,1}`. The last entry exists for repository
+`_sync_after_mutation`: it defers foreign-key checks only inside that method's
+`BEGIN IMMEDIATE` transaction and SQLite resets it automatically at commit. All other
+configuration pragmas remain denied.
+
 ### `SqliteWriterThread`
 
 - Exactly one instance exists per open bundle (plus one for the catalog). Constructor takes the

@@ -54,6 +54,10 @@ return the common protocol failure mapping, which the server later places in `st
 allowlisted public field paths and bounded reason tokens, and never stringifies the exception.
 When an `extra_forbidden` leaf is not allowlisted but an allowlisted parent prefix exists, the
 projected `field` is that parent path with reason `extra_forbidden`.
+The MCP dispatcher preserves the complete returned tuple in `error.safe_details` as two aligned
+bounded arrays, `fields` and `reasons`; index `i` in each array is one `{field, reason}` record.
+This uses the existing public-error safe-detail object schema and does not discard all but the
+first safe location.
 
 ## Errors and edge cases
 

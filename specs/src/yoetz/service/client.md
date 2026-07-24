@@ -84,6 +84,10 @@ collapses `not_found` into an empty view or exposes the internal optional direct
 
 - Direct `connect_service`: service absent → `ControlError(service_unavailable)`.
 - On-demand connect: bounded fixed-command spawn/retry; timeout → retryable `service_unavailable`.
+  The detached child's stdout remains discarded, while stderr appends to the fixed
+  `service.stderr.jsonl` file under `log_dir()` through an owner-only `0600` descriptor in an
+  owner-only `0700` directory. The launcher uses no caller-selected path and never captures stderr
+  in memory.
 - Service locked → structural status remains available; workflow/support calls become the
   sanitized `vault_locked` mapping without a prompt or secret field.
 - Service draining → bounded `service_draining`. Wire `service_generation_changed` closes the stale

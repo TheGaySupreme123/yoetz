@@ -122,8 +122,9 @@ call from the MCP last-resort catch path. The fault-injection matrix in
 never reaches MCP content; `specs/tests/subprocess/test_mcp_stdout_purity.py.md` independently
 proves protocol-only stdout.
 
-The helpers inspect neither `exc.args` nor traceback state. Their only exception-independent output
-is a newly generated correlation ID plus fixed bounded component/operation/outcome identity. If
+The helpers inspect neither `exc.args` nor traceback state. Their only exception-dependent output
+is the exception class's bounded normalized type identity in the allowlisted `reason` field; they
+also emit a newly generated correlation ID plus bounded component/operation/outcome identity. If
 even that structural emission fails, they return/exit according to the public boundary without
 creating a secondary diagnostic artifact.
 
@@ -144,7 +145,7 @@ creating a secondary diagnostic artifact.
 ## Invariants
 
 - stdout is never written by any logging path in any mode.
-- Only the twelve allowlisted fields ever appear in a stderr log line.
+- Only the thirteen allowlisted fields ever appear in a stderr log line.
 - SDK/third-party records are sanitized at all levels; filtering is structural, not
   level-based.
 - No user-controlled plaintext reaches logs; `specs/src/yoetz/observability/privacy.md` and

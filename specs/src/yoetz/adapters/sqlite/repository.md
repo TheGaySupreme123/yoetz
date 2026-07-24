@@ -337,6 +337,12 @@ A present object with an invalid envelope/tag/commitment is storage corruption. 
 availability generations captured with the probe are the structural fence used by `freeze_case`;
 candidate status simply exposes the one read snapshot.
 
+Every mutation path that refreshes derived state calls `_sync_after_mutation` in one
+`BEGIN IMMEDIATE` block. That block sets `PRAGMA defer_foreign_keys=ON`, applies the
+projection/check-state refresh, and commits before returning. The connection authorizer permits
+that exact bounded pragma value; the setting auto-resets at commit and never weakens foreign-key
+enforcement outside the sync transaction.
+
 `query_projection`: validates the typed filter/position and exact requested frontier, then uses
 the view's registered covering index and stable sort key to select at most `limit + 1` rows. It
 returns no more than `limit`, with an exclusive typed next position only when the extra row exists,

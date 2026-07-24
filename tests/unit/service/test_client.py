@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import stat
 from collections.abc import Buffer
 from inspect import signature
-from typing import cast
+from pathlib import Path
+from typing import BinaryIO, cast
 
 import pytest
 
@@ -281,6 +284,35 @@ def test_on_demand_service_environment_strips_secret_shaped_names(
     assert "UNRELATED_TOKEN" not in environment
     assert "YOETZ_UNRELATED_APP_SETTING" not in environment
     assert "must-not-cross" not in environment.values()
+
+
+def test_on_demand_spawn_routes_stderr_to_owner_only_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.service.client as client_module
+
+    log_root = tmp_path / "logs"
+    observed: dict[str, object] = {}
+
+    def popen(command: object, **kwargs: object) -> object:
+        stderr = cast(BinaryIO, kwargs["stderr"])
+        path = log_root / "service.stderr.jsonl"
+        observed["command"] = command
+        observed["path"] = path
+        observed["mode"] = stat.S_IMODE(path.stat().st_mode)
+        observed["fd_mode"] = stat.S_IMODE(os.fstat(stderr.fileno()).st_mode)
+        return object()
+
+    monkeypatch.setattr(client_module, "log_dir", lambda: log_root)
+    monkeypatch.setattr(client_module.subprocess, "Popen", popen)
+
+    client_module._spawn_service_process()  # pyright: ignore[reportPrivateUsage]
+
+    assert observed["path"] == log_root / "service.stderr.jsonl"
+    assert observed["mode"] == 0o600
+    assert observed["fd_mode"] == 0o600
+    assert stat.S_IMODE(log_root.stat().st_mode) == 0o700
 
 
 @pytest.mark.anyio

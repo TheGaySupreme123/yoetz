@@ -40,6 +40,7 @@ _FIELD_ORDER: Final = (
     "request_id",
     "duration_ms",
     "outcome",
+    "reason",
     "engine_version",
     "policy_version",
     "sqlite_source_id_hash",
@@ -87,6 +88,18 @@ def _new_correlation() -> str:
         return new_id(IdKind.CORRELATION)
     except BaseException:
         return _FALLBACK_CORRELATION
+
+
+def _exception_reason(exc: BaseException) -> str:
+    """Return a bounded structural exception-type identity without formatting the exception."""
+
+    name = type(exc).__name__
+    snake = re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+    normalized = re.sub(r"[^a-z0-9_.-]+", "_", snake).strip("_.-")
+    candidate = f"exception_{normalized}"
+    if len(candidate) <= 64 and _COMPONENT_PATTERN.fullmatch(candidate) is not None:
+        return candidate
+    return "exception_unavailable"
 
 
 def _level_name(level_number: int) -> str:
@@ -272,16 +285,21 @@ def get_logger(component: str) -> StructuredLogger:
     return StructuredLogger(component)
 
 
-def record_unexpected_exception_without_raising(exc: BaseException) -> str:
-    """Emit only a new correlation identity for an unexpected internal exception."""
+def record_unexpected_exception_without_raising(
+    exc: BaseException,
+    *,
+    component: str = "process_boundary",
+    operation: str = "unexpected_exception",
+) -> str:
+    """Emit bounded structural identity for an unexpected internal exception."""
 
-    del exc
     correlation_id = _new_correlation()
     try:
-        get_logger("process_boundary").error(
-            "unexpected_exception",
+        get_logger(component).error(
+            operation,
             correlation_id=correlation_id,
             outcome="internal_error",
+            reason=_exception_reason(exc),
         )
     except BaseException:
         pass

@@ -119,6 +119,8 @@ bytes, path, URL, command, or field value in its exception string.
 `redact_diagnostic_value` accepts values only for the exact structural fields documented by
 `observability/logging.md`: timestamps, bounded enums, correlation/request IDs, hashed session IDs,
 durations, version identities, SQLite source-ID hash, counts, booleans, and bounded reason codes.
+The `reason` field may identify only a normalized exception class such as
+`exception_auth_error`; it never contains an exception message.
 
 Rules:
 
