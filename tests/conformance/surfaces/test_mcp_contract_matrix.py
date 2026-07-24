@@ -154,7 +154,7 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(item.name for item in TOOL_DESCRIPTORS) == _EXPECTED_TOOL_NAMES
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == _EXPECTED_TOOL_NAMES
     assert TOOL_DESCRIPTOR_SET_DIGEST == (
-        "sha256:4107e839aa5002347c7da5820733a37f30dd62ce838d68ef31fc95693ef7267f"
+        "sha256:32382f3640d867cfee467cd441cd1b1f973c71baadd73b9c0bada971459db683"
     )
     assert descriptor_for("start").description.startswith(
         "Call for material multi-step, delegated, resumable, or verification-heavy work"
@@ -167,7 +167,7 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     )
     assert "uncertain what you already did or committed to" in descriptor_for("status").description
     assert "recommended_next_action" in descriptor_for("status").description
-    assert "call check before claiming completion" in descriptor_for("publish_work").description
+    assert "call receipt before claiming completion" in descriptor_for("publish_work").description
     assert server_instructions().encode("utf-8") == read_resource(
         "yoetz://guidance/agent-instructions.md"
     )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,8 +16,9 @@ from yoetz.application.service import (
     ProjectionBindingFacts,
     ProjectionRenderMode,
 )
-from yoetz.config.models import YoetzConfig
+from yoetz.config.models import LoggingConfig, YoetzConfig
 from yoetz.domain.values import JsonObject
+from yoetz.observability.logging import LogMode
 from yoetz.ports.control import (
     ControlCallRequest,
     ControlClientKind,
@@ -581,3 +583,43 @@ def test_installation_marker_round_trip_is_canonical_and_self_authenticated(
     marker_path.write_bytes(corrupted)
     with pytest.raises(RuntimeError, match="installation_marker_invalid"):
         store.load()
+
+
+@pytest.mark.anyio
+async def test_service_entry_point_installs_the_structural_log_sink(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unexpected-dispatch correlation ids are useless unless this sink is installed."""
+
+    installed: list[LogMode] = []
+
+    class _Daemon:
+        def __init__(self, *, _composition: object) -> None:
+            del _composition
+
+        async def serve(self) -> None:
+            return None
+
+    async def composition(*, _config: YoetzConfig) -> object:
+        assert type(_config) is YoetzConfig
+        return object()
+
+    def load(
+        overrides: Mapping[str, str], env: Mapping[str, str], path: Path | None
+    ) -> YoetzConfig:
+        del overrides, env, path
+        return YoetzConfig()
+
+    def configure(config: LoggingConfig, mode: LogMode) -> None:
+        del config
+        installed.append(mode)
+
+    monkeypatch.setattr(daemon_module, "load_config", load)
+    monkeypatch.setattr(daemon_module, "configure_logging", configure)
+    monkeypatch.setattr(daemon_module, "_production_composition", composition)
+    monkeypatch.setattr(daemon_module, "ServiceDaemon", _Daemon)
+
+    with pytest.raises(SystemExit):
+        await daemon_module.run_service()
+
+    assert installed == [LogMode.SERVICE]

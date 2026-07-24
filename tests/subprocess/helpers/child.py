@@ -312,7 +312,9 @@ def _verify_owned_group(handle: ChildHandle) -> None:
 
 
 def signal_child(handle: ChildHandle, signal: int) -> None:
-    if type(signal) is not int:
+    # signal.SIGKILL and friends are IntEnum members, so an exact `type(...) is int` check
+    # rejects every real signal; validate the value domain instead.
+    if isinstance(signal, bool) or signal <= 0:
         raise TypeError("child_signal_invalid")
     _verify_owned_group(handle)
     os.killpg(handle.process_group, signal)

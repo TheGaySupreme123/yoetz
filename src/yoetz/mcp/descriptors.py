@@ -681,7 +681,8 @@ TOOL_DESCRIPTORS: Final = (
         "Publish recorded work",
         "Records a bounded batch of agent-published work events and returns the accepted event "
         "range and coverage. It has no information about work outside that batch. After publishing "
-        "the material claim and evidence, call check before claiming completion.",
+        "the material claim and evidence, call check, disposition any findings with respond, then "
+        "call receipt before claiming completion.",
         read_only=False,
         idempotent=True,
     ),
@@ -749,7 +750,7 @@ def _digest_descriptor(descriptor: ToolDescriptor) -> str:
 TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "start": "sha256:42509100525d5c866aa21c02cfa33942163967f79968ef1c7c7e00e15fb0e696",
-        "publish_work": "sha256:9bcecb769503844f9a0740ed171574afbf4f4e3f2bdd1d7061150bc3ffbeb819",
+        "publish_work": "sha256:3ad928d63033c61adc1d49cf63d7dd9ccc6e4d0ade0932b4638b62f20d5d273e",
         "check": "sha256:bd78bde8d0586896318534abcc248aa8d87f30ff4952046593549dc57f394500",
         "respond": "sha256:740e576f822636bdcdf4f246a86192a336e7d0284aae611bbc6421ee62ed469a",
         "status": "sha256:99b92f8092623c90f9706f0427f4f81e1cc5f4532571e197344b088e1855351e",
@@ -757,7 +758,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[str, str]] = MappingProxyType(
     }
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final = (
-    "sha256:4107e839aa5002347c7da5820733a37f30dd62ce838d68ef31fc95693ef7267f"
+    "sha256:32382f3640d867cfee467cd441cd1b1f973c71baadd73b9c0bada971459db683"
 )
 
 

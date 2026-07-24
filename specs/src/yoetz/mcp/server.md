@@ -18,6 +18,11 @@ operations and the same guidance here, with no skill installed and nothing to co
 
 - Low-level MCP `server`, `list_tools`, six `dispatch_<op>`, `call_tool`, result/fallback helpers,
   `list_resources`/`read_resource` delegating to `mcp/resources.md`, and `main`.
+- `main` installs the stdout-safe structural sink with exactly one
+  `configure_logging(<loaded logging config>, LogMode.MCP_STDIO)` call before serving stdio, so a
+  bridge correlation identity always reaches a sink. An unreadable or invalid configuration falls
+  back to the built-in `LoggingConfig` defaults rather than refusing to install a sink; the bridge
+  never fails to start over diagnostics configuration.
 - Frozen `BridgeRuntime` holding public schemas, the frozen descriptor table, the frozen guidance
   resource registry, and one private lazy `ServiceClient(client_kind=mcp_bridge)` slot. The slot is
   initially empty and is touched only by tool dispatch, never resource dispatch.
@@ -92,8 +97,13 @@ registered tools remain structured tool results.
   Known `PublicOperationError` application failures are not unexpected: they use
   `tool_error_envelope` / the service's `ok:false` body and keep their public code.
   Before sanitizing an unexpected error, the bridge emits one structured stderr record with the
-  tool operation, a bounded exception-type reason, and the exact correlation ID returned in the
-  public error. It never emits the exception message or a traceback.
+  tool operation, a bounded exception-type reason, the exact correlation ID returned in the
+  public error, and the caller's own `request_id` when one was recoverable from the arguments —
+  the join key to the service-side record for the same call (`service/daemon.md`). It never emits
+  the exception message or a traceback.
+- A crash inside request validation itself (any non-`ValidationError`) is an unexpected bridge
+  error and returns `INTERNAL_ERROR`, not `INVALID_REQUEST`: the arguments were never shown to be
+  at fault. Ordinary `ValidationError` remains `INVALID_REQUEST` with allowlisted safe locations.
 - Service reconnect requires fresh same-UID handshake/generation and identical operation request.
 - Clean EOF closes the bridge only; persistent service remains alive.
 - A missing or digest-mismatched descriptor, instruction, or guidance resource fails startup. The

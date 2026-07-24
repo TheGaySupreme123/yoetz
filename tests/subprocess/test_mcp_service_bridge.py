@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from typing import cast
 
 import pytest
 from pydantic import BaseModel
 
 import yoetz.mcp.server as bridge
+from yoetz.config.models import LoggingConfig
+from yoetz.observability.logging import LogMode, configure_logging
 from yoetz.ports.control import ControlError
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
@@ -300,6 +303,7 @@ async def test_unexpected_bridge_error_logs_public_correlation_id(
         *,
         component: str,
         operation: str,
+        request_id: str | None = None,
     ) -> str:
         assert type(exc) is RuntimeError
         print(
@@ -308,6 +312,7 @@ async def test_unexpected_bridge_error_logs_public_correlation_id(
                     "component": component,
                     "operation": operation,
                     "correlation_id": correlation_id,
+                    "request_id": request_id,
                     "reason": "exception_runtime_error",
                 }
             ),
@@ -329,6 +334,74 @@ async def test_unexpected_bridge_error_logs_public_correlation_id(
     assert result.structuredContent["error"]["code"] == "INTERNAL_ERROR"
     assert result.structuredContent["error"]["correlation_id"] == correlation_id
     assert "must-not-reach-public-output" not in str(result.structuredContent)
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.fixture
+def _restore_process_logging() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
+    """``configure_logging`` mutates process-global state; restore it for every other test."""
+
+    root = logging.getLogger()
+    root_handlers = tuple(root.handlers)
+    root_level = root.level
+    last_resort = logging.lastResort
+    raise_exceptions = logging.raiseExceptions
+    yield
+    root.handlers.clear()
+    root.handlers.extend(root_handlers)
+    root.setLevel(root_level)
+    logging.lastResort = last_resort
+    logging.raiseExceptions = raise_exceptions
+
+
+def test_bridge_entry_point_installs_the_stdout_safe_structural_sink(
+    monkeypatch: pytest.MonkeyPatch,
+    _restore_process_logging: None,
+) -> None:
+    """Without this call the recorder mints correlation ids that reach no sink at all."""
+
+    installed: list[LogMode] = []
+
+    def configure(config: LoggingConfig, mode: LogMode) -> None:
+        del config
+        installed.append(mode)
+
+    def run(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+
+    monkeypatch.setattr(bridge, "configure_logging", configure)
+    monkeypatch.setattr(bridge.anyio, "run", run)
+
+    bridge.main()
+
+    assert installed == [LogMode.MCP_STDIO]
+
+
+@pytest.mark.anyio
+async def test_unexpected_bridge_error_emits_a_real_structured_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    _restore_process_logging: None,
+) -> None:
+    """Exercise the installed sink rather than a stand-in for the recorder."""
+
+    client = _FakeClient(RuntimeError("must-not-reach-public-output"))
+    _install_clients(monkeypatch, [client])
+    configure_logging(LoggingConfig(), LogMode.MCP_STDIO)
+    runtime = bridge.build_bridge_runtime()
+
+    result = await bridge.dispatch_check(_requests()["check"], runtime)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert result.structuredContent is not None
+    error = cast(dict[str, object], result.structuredContent["error"])
+    emitted = json.loads(captured.err.strip().splitlines()[-1])
+    assert emitted["correlation_id"] == error["correlation_id"]
+    assert emitted["component"] == "mcp.bridge"
+    assert emitted["operation"] == "check_internal_error"
+    assert emitted["reason"] == "exception_runtime_error"
+    assert "must-not-reach-public-output" not in captured.err
     await bridge.close_bridge_runtime(runtime)
 
 

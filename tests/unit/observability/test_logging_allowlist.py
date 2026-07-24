@@ -186,7 +186,8 @@ def test_exception_objects_are_never_formatted_or_captured(
         "fatal_exception",
     ]
     assert all(record["outcome"] == "internal_error" for record in records)
-    assert records[0]["reason"] == "exception_hostile_exception"
+    # An unreviewed class name is never rendered, however well-formed it looks.
+    assert records[0]["reason"] == "exception_unavailable"
 
 
 @pytest.mark.parametrize("mode", [LogMode.SERVICE, LogMode.CONFIDENTIAL_HELPER])
@@ -209,3 +210,51 @@ def test_service_and_confidential_helper_filters_are_exact(
     assert len(logging.getLogger().handlers) == 1
     assert not isinstance(logging.getLogger().handlers[0], logging.FileHandler)
     assert _records(captured.err)[0]["component"] == "sdk"
+
+
+def test_exception_reason_comes_only_from_the_reviewed_registry(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A class name can carry caller data, so only reviewed names may reach a sink."""
+
+    _configure()
+    leaky = type("LeakedSecret_hunter2", (Exception,), {})
+
+    record_unexpected_exception_without_raising(leaky(), component="mcp.bridge")
+
+    records = _records(capsys.readouterr().err)
+    assert len(records) == 1
+    assert records[0]["reason"] == "exception_unavailable"
+    assert "hunter2" not in json.dumps(records[0])
+
+
+def test_reviewed_exception_types_keep_their_fixed_reason(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure()
+
+    record_unexpected_exception_without_raising(RuntimeError("boom"), component="mcp.bridge")
+
+    records = _records(capsys.readouterr().err)
+    assert records[0]["reason"] == "exception_runtime_error"
+    assert "boom" not in json.dumps(records[0])
+
+
+def test_unexpected_exception_record_carries_the_caller_request_id(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The daemon and bridge records for one failed call join on this exact field."""
+
+    _configure()
+
+    correlation_id = record_unexpected_exception_without_raising(
+        RuntimeError("boom"),
+        component="service.daemon",
+        operation="check_internal_error",
+        request_id=_REQUEST_ID,
+    )
+
+    records = _records(capsys.readouterr().err)
+    assert records[0]["request_id"] == _REQUEST_ID
+    assert records[0]["correlation_id"] == correlation_id
+    assert records[0]["operation"] == "check_internal_error"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Final, cast
@@ -17,6 +18,8 @@ from pydantic import AnyUrl, BaseModel, ValidationError
 
 from yoetz import __version__
 from yoetz.adapters.mcp_stdio import bounded_stdio_server
+from yoetz.config.load import load_config
+from yoetz.config.models import LoggingConfig
 from yoetz.mcp.descriptors import TOOL_DESCRIPTORS, ToolDescriptor, server_instructions
 from yoetz.mcp.errors import (
     build_last_resort_internal_error_result,
@@ -36,7 +39,11 @@ from yoetz.mcp.resources import (
     read_resource as read_guidance_resource,
 )
 from yoetz.mcp.summaries import render_safe_compact_summary
-from yoetz.observability.logging import record_unexpected_exception_without_raising
+from yoetz.observability.logging import (
+    LogMode,
+    configure_logging,
+    record_unexpected_exception_without_raising,
+)
 from yoetz.ports.control import ControlClientKind, ControlError
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id, safe_request_id_from
@@ -260,6 +267,7 @@ def _control_error_result(
         error,
         component="mcp.bridge",
         operation=f"{operation}_internal_error",
+        request_id=request_id,
     )
     return structured_error_result(
         PublicErrorCode.INTERNAL_ERROR,
@@ -315,14 +323,17 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
             safe_details=locations if locations else None,
         )
     except Exception as exc:
+        # Only non-ValidationError failures reach here, so the validator itself crashed. That is an
+        # unexpected bridge error, not caller fault (specs/src/yoetz/mcp/server.md).
         correlation_id = record_unexpected_exception_without_raising(
             exc,
             component="mcp.bridge",
             operation=f"{operation}_request_internal_error",
+            request_id=request_id,
         )
         return structured_error_result(
-            PublicErrorCode.INVALID_REQUEST,
-            "The tool arguments are invalid.",
+            PublicErrorCode.INTERNAL_ERROR,
+            "The bridge could not complete the operation.",
             request_id=request_id,
             correlation_id=correlation_id,
         )
@@ -346,6 +357,7 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
                 mapping_exc,
                 component="mcp.bridge",
                 operation=f"{operation}_public_error_internal_error",
+                request_id=request_id,
             )
             return structured_error_result(
                 PublicErrorCode.INTERNAL_ERROR,
@@ -360,6 +372,7 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
             exc,
             component="mcp.bridge",
             operation=f"{operation}_internal_error",
+            request_id=request_id,
         )
         return structured_error_result(
             PublicErrorCode.INTERNAL_ERROR,
@@ -572,9 +585,19 @@ async def run_stdio(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> None:
             await close_bridge_runtime(runtime)
 
 
+def _bridge_logging_config() -> LoggingConfig:
+    # An unreadable or invalid config must never keep the bridge from installing its
+    # stdout-safe sink; the built-in defaults are the same shape the loader would return.
+    try:
+        return load_config({}, os.environ, None).logging
+    except Exception:
+        return LoggingConfig()
+
+
 def main() -> None:
     """Run the MCP bridge on stdio using the SDK-supported latest protocol contract."""
 
     if types.LATEST_PROTOCOL_VERSION not in SUPPORTED_PROTOCOL_VERSIONS:
         raise RuntimeError("mcp_sdk_protocol_registry_invalid")
+    configure_logging(_bridge_logging_config(), LogMode.MCP_STDIO)
     anyio.run(run_stdio)

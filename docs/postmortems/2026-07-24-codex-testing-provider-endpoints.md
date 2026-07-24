@@ -47,7 +47,7 @@ finish without a receipt.
 ### Handoff (Agent 1)
 
 ```bash
-less /Users/shayb/yoetz-core/.codex-test-handoff.md
+less $HOME/yoetz-core/.codex-test-handoff.md
 # mirrored copy from the run:
 less /tmp/codex-provider-endpoints-20260724/  # may include a handoff copy if mirrored
 ```
@@ -58,19 +58,19 @@ Untracked / local drafting artifact — **not** committed on `main`. Path only.
 
 | Artifact | Absolute path |
 | --- | --- |
-| Full rollout session | `/Users/shayb/.codex-testing/sessions/2026/07/24/rollout-2026-07-24T13-19-03-019f93a2-bc0f-7c41-9136-e429e5173e47.jsonl` |
+| Full rollout session | `$HOME/.codex-testing/sessions/2026/07/24/rollout-2026-07-24T13-19-03-019f93a2-bc0f-7c41-9136-e429e5173e47.jsonl` |
 | Exec JSONL (`--json`) | `/tmp/codex-provider-endpoints-20260724/exec-20260724T101902Z.jsonl` |
 | Last message | `/tmp/codex-provider-endpoints-20260724/last-message-20260724T101902Z.txt` |
 | Launch meta | `/tmp/codex-provider-endpoints-20260724/meta-20260724T101902Z.txt` |
 | Prompt | `/tmp/codex-provider-endpoints-20260724/prompt.txt` |
-| Codex home / config | `/Users/shayb/.codex-testing/` · `config.toml` |
+| Codex home / config | `$HOME/.codex-testing/` · `config.toml` |
 
 ```bash
-less /Users/shayb/.codex-testing/sessions/2026/07/24/rollout-2026-07-24T13-19-03-019f93a2-bc0f-7c41-9136-e429e5173e47.jsonl
+less $HOME/.codex-testing/sessions/2026/07/24/rollout-2026-07-24T13-19-03-019f93a2-bc0f-7c41-9136-e429e5173e47.jsonl
 less /tmp/codex-provider-endpoints-20260724/exec-20260724T101902Z.jsonl
 cat /tmp/codex-provider-endpoints-20260724/last-message-20260724T101902Z.txt
-cat /Users/shayb/.codex-testing/config.toml
-CODEX_HOME=/Users/shayb/.codex-testing /Users/shayb/.local/bin/codex-testing mcp list
+cat $HOME/.codex-testing/config.toml
+CODEX_HOME=$HOME/.codex-testing $HOME/.local/bin/codex-testing mcp list
 ```
 
 ### Agent 3 Yoetz health notes
@@ -85,7 +85,7 @@ less /tmp/codex-provider-endpoints-20260724/agent3-pytest-post.txt
 ### Agent transcripts / subagent logs
 
 Parent conversation:
-`/Users/shayb/.cursor/projects/Users-shayb-yoetz-core/agent-transcripts/12e04295-abeb-4242-96ce-0e619110dd5f/`
+`$HOME/.cursor/projects/<workspace>/agent-transcripts/12e04295-abeb-4242-96ce-0e619110dd5f/`
 
 | Role | Subagent transcript |
 | --- | --- |
@@ -94,13 +94,13 @@ Parent conversation:
 | Agent 3 (Yoetz health) | `.../subagents/43cef81c-a5e7-4cfe-8a87-650027a97856.jsonl` |
 
 ```bash
-ls -lt /Users/shayb/.cursor/projects/Users-shayb-yoetz-core/agent-transcripts/12e04295-abeb-4242-96ce-0e619110dd5f/subagents/
+ls -lt $HOME/.cursor/projects/<workspace>/agent-transcripts/12e04295-abeb-4242-96ce-0e619110dd5f/subagents/
 ```
 
 ### Git experiment branch (inspect without merging)
 
 ```bash
-cd /Users/shayb/yoetz-core
+cd $HOME/yoetz-core
 git fetch origin   # optional; branch is local-only unless you push later
 git log --oneline main..codex/provider-endpoints-20260724-luna-high
 git show --stat 9c7ad2b
@@ -117,9 +117,9 @@ git diff main...codex/provider-endpoints-20260724-luna-high
 
 | Item | Value |
 | --- | --- |
-| CLI | `/Users/shayb/.local/bin/yoetz` → uv tool env |
+| CLI | `$HOME/.local/bin/yoetz` → uv tool env |
 | Version | `0.1.0` |
-| Wheel | `/Users/shayb/yoetz-core/dist/yoetz-0.1.0-py3-none-any.whl` |
+| Wheel | `$HOME/yoetz-core/dist/yoetz-0.1.0-py3-none-any.whl` |
 | Wheel SHA-256 | `6fd26f83078816e7deb6f4f3ab15c3e54c01b5414005fe875d20c608ac630008` |
 | Install | `uv tool install … "yoetz[semantic-openai] @ ./dist/yoetz-0.1.0-py3-none-any.whl"` |
 | Python | `3.14.6` (managed) |
@@ -129,9 +129,9 @@ git diff main...codex/provider-endpoints-20260724-luna-high
 ```bash
 yoetz --version
 yoetz version --json
-shasum -a 256 /Users/shayb/yoetz-core/dist/yoetz-0.1.0-py3-none-any.whl
+shasum -a 256 $HOME/yoetz-core/dist/yoetz-0.1.0-py3-none-any.whl
 yoetz service status --json
-yoetz integrate codex mcp status --codex-path /Users/shayb/.local/bin/codex-testing
+yoetz integrate codex mcp status --codex-path $HOME/.local/bin/codex-testing
 ```
 
 **Important:** the installed tool lags the experiment branch. New `--provider`
@@ -244,7 +244,7 @@ gatekeeping completion**.
 ### Packaging / install
 
 ```bash
-cd /Users/shayb/yoetz-core
+cd $HOME/yoetz-core
 rm -rf dist && uv build --no-sources
 uv tool install --managed-python --python 3.14.6 --force --reinstall \
   "yoetz[semantic-openai] @ ./dist/yoetz-0.1.0-py3-none-any.whl"
