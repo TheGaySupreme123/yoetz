@@ -78,7 +78,7 @@ def test_visible_unknown_content_is_redacted_and_hidden_fields_are_ignored(tmp_p
         event_ordinal=1,
         key_material=_KEY,
     )
-    chunks = observe_hooks_module._visible_content_chunks(  # pyright: ignore[reportPrivateUsage]
+    chunks, truncated = observe_hooks_module._visible_content_chunks(  # pyright: ignore[reportPrivateUsage]
         "FutureHostEvent",
         {
             "visibility": "task",
@@ -89,11 +89,32 @@ def test_visible_unknown_content_is_redacted_and_hidden_fields_are_ignored(tmp_p
         envelope=envelope,
         workspace_locator=None,
     )
+    assert truncated is False
     assert len(chunks) == 1
     assert chunks[0].redacted is True
     assert b"sk-abcdefghijklmnopqrstuvwxyz123456" not in chunks[0].content
     assert b"HIDDEN_REASONING_CANARY" not in chunks[0].content
     assert b"SYSTEM_PROMPT_CANARY" not in chunks[0].content
+
+
+def test_content_cap_sets_truncated_flag(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    session = store.session_commitment("sess-trunc")
+    envelope = map_hook_payload_to_envelope(
+        "AgentMessage",
+        {"session_id": "sess-trunc", "message": "x" * 700_000},
+        session_commitment=session,
+        event_ordinal=1,
+        key_material=_KEY,
+    )
+    chunks, truncated = observe_hooks_module._visible_content_chunks(  # pyright: ignore[reportPrivateUsage]
+        "AgentMessage",
+        {"message": "x" * 700_000},
+        envelope=envelope,
+        workspace_locator=None,
+    )
+    assert truncated is True
+    assert chunks
 
 
 def test_identical_tool_calls_remain_distinct(tmp_path: Path) -> None:

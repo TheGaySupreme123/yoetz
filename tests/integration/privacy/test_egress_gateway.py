@@ -329,6 +329,12 @@ class _FullPrivacyAudit:
     async def load(self, request_id: str, subject_digest: str) -> object:
         raise AssertionError("gateway must never call load")
 
+    async def load_disclosure_proposal(self, proposal_id: str) -> object:
+        raise AssertionError("gateway must never call load_disclosure_proposal")
+
+    async def load_authorization(self, authorization_id: str) -> object:
+        raise AssertionError("gateway must never call load_authorization")
+
     async def record_human_decision(self, reservation_id: str, decision: object) -> object:
         raise AssertionError("gateway must never call record_human_decision")
 

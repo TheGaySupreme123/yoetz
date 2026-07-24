@@ -393,6 +393,10 @@ class MemoryPrivacyAudit:
                 return None
             return row.subject
 
+    async def load_authorization(self, authorization_id: str) -> EgressAuthorization | None:
+        del authorization_id
+        return None
+
     async def consume_local(
         self, reservation_id: str, approved_case_digest: str, now: datetime
     ) -> ConsumedLocalDisclosure:

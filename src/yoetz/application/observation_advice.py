@@ -204,7 +204,9 @@ class ObservationAdviceContextBuilder:
         prior: AdviceSnapshot | None = None
         session_load = getattr(store, "load_advice_snapshot_for_session", None)
         if callable(session_load) and type(yoetz_session_id) is str:
-            prior = session_load(workspace=workspace, yoetz_session_id=yoetz_session_id)
+            loaded = session_load(workspace=workspace, yoetz_session_id=yoetz_session_id)
+            if type(loaded) is AdviceSnapshot:
+                prior = loaded
         if prior is None:
             prior = store.load_advice_snapshot(workspace)
         return build_observation_advice_snapshot(

@@ -20,6 +20,7 @@ from yoetz.domain.privacy import (
     DataClass,
     DisclosureProposal,
     DisclosureProvenance,
+    EgressAuthorization,
     EgressChannel,
     EgressReceipt,
     HumanPrivacyDecision,
