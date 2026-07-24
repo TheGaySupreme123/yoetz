@@ -182,6 +182,7 @@ obligation_change_invalid
 obligation_resolution_invalid
 payload_redaction_mismatch
 plan_version_conflict
+privacy_projection_unavailable
 privacy_receipt_not_durable
 provider_attempt_provenance_is_not_final
 public_error_invalid_correlation_id
@@ -189,6 +190,7 @@ public_error_invalid_message
 public_error_missing_correlation_id
 receipt_coverage_mismatch
 receipt_gap_not_in_coverage
+receipt_json_projection_blocked
 receipt_json_shape_invalid
 redaction_target_required
 ref_mirror_mismatch
@@ -235,7 +237,10 @@ including an equal `str` subclass, is a programmer defect and raises ordinary
 `privacy_receipt_not_durable` and `provider_attempt_provenance_is_not_final` are registered here so
 the dependency-root exception can carry them, but their first-raiser and recovery semantics are
 owned exclusively by `application/check.py`; this module does not import privacy, provider, or
-coordinator types.
+coordinator types. `privacy_projection_unavailable` and `receipt_json_projection_blocked` are
+registered for the same reason: they are the `safe_details` reason codes the MCP surface attaches
+to the transient and the policy-blocked receipt-projection failures respectively, and their
+raise sites are owned by `application/service.py` and the control boundary.
 
 ### Correlation lifecycle
 

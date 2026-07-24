@@ -68,6 +68,16 @@ against the current record and returns candidates only — no verdict, no IDs, n
 agent that does not know the second exists pays a full `check` to ask a question, or asks nothing.
 It also names `view=advice` and states that advice items carry `recommended_next_action`.
 
+The `check` description also carries the mode decision rule, because mode is the one input where a
+silent default costs the caller the review it needed: `semantic_if_configured` for most material
+implementation or review claims, `semantic_required` when the claim depends on qualitative
+correctness, design conformance, security or privacy reasoning, interoperability, or whether the
+code satisfies the ask, and `deterministic_only` only for explicitly local or structural checks, a
+semantic-disabled policy, or a deliberate no-egress choice — with that limitation disclosed. It
+states that omitting `mode` resolves through the configured verification policy. The `receipt`
+description states that `markdown` and `text` are the formats to prefer and that `json` is an
+owner-export format a stricter agent-context policy may block.
+
 The `publish_work` description carries the completion handoff: after publishing the material claim
 and evidence, call `check` before claiming completion. The tier-0 instructions spell out the full
 publish → check → receipt loop and remind callers that canonical `sequence` and `limit` values are

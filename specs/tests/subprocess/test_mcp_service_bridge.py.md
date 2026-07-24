@@ -14,6 +14,12 @@ Real installed MCP/daemon transcript tests for absent/locked/ready/draining/rest
 
 Assert no service spawn/unlock tools, structured errors, reconnect/idempotent replay, stdout purity, daemon survives bridge exit.
 
+Assert the two receipt-projection reasons keep their distinct public meaning at the bridge: blocked
+is non-retryable `PRIVACY_AUTHORITY_REQUIRED` carrying `receipt_json_projection_blocked` and a
+message naming the formats that do project; transient stays retryable `SERVICE_UNAVAILABLE`.
+Neither reconnects, and the same client serves the following call, so a caller can switch receipt
+format without a new connection.
+
 ## Errors and edge cases
 
 Response loss, service crash/generation change, malformed MCP/control result, cancellation.

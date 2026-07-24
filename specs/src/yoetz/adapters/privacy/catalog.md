@@ -18,6 +18,10 @@ object references where content exists; it never needs a taskless content-encryp
   catalog roots for task-bundle privacy objects; service-internal, path-free, and read-only.
 - `CatalogPrivacyAudit.get_receipt(...)` / `list_receipts(...)` — indexed bounded structural
   inspection with authenticated service-owned pagination cursors and no object dereference.
+- `CatalogPrivacyPolicyStore.reseed_untouched_bootstrap_default(scope, *, expected_current,
+  replacement) -> PrivacyPolicy` — adapter-internal upgrade path that carries an installation whose
+  stored policy is still the untouched first-run bootstrap seed forward to the current shipped
+  default. It is not part of `PrivacyPolicyStorePort` and is never reachable from a caller request.
 - Internal frozen row codecs for policy generation, overlay, proposal, authorization, dispatch, and
   receipt state. They are not exported or exposed through application results.
 
@@ -71,6 +75,16 @@ missing row.
 receipt in `privacy_audit_records`. They never join to, open, or return the proposal ObjectRef.
 Filters and sort order exactly follow `ports/privacy.md`; the opaque cursor is authenticated by the
 service and is not stored as caller-controlled catalog text.
+
+Re-seeding the shipped default is gated on two independent conditions inside one
+`BEGIN IMMEDIATE`: the stored current row must still carry first-run provenance — `change_kind`
+`seed` with no `source_proposal_id`, which only the bootstrap seed writes — and its decoded policy
+must equal the expected old default in every field. Contents alone cannot prove origin, so an owner
+tightening or approved expansion that happens to reproduce the old default's fields keeps its
+policy. The replacement is written as a new superseding version whose `policy_digest` is derived
+from the shipped default's own revision identity, never inherited from the policy it replaces:
+two different policy payloads sharing one digest would break the digest compare-and-set that guards
+later tightenings.
 
 Policy transition rows contain only their closed nonsecret structural diff; content-bearing policy
 diffs are invalid in v0.1. Policy tightening increments generation, revokes incompatible

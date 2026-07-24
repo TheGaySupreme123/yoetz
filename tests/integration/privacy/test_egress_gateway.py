@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 
 from yoetz.adapters.privacy.gateway import PolicyEnforcingOutboundGateway
 from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer
+from yoetz.adapters.providers.factory import external_factory_builders_from_config
 from yoetz.adapters.providers.fake import (
     FakeSemanticScript,
     ScriptedFakeSemanticEvaluator,
@@ -27,6 +28,8 @@ from yoetz.adapters.providers.local_model import (
     InstalledLocalModelProfileRegistry,
     LocalModelEndpointProfile,
 )
+from yoetz.adapters.providers.openai_responses_factory import provider_binding_from_config
+from yoetz.config.write import anthropic_provider
 from yoetz.domain.findings import SemanticFailureClass
 from yoetz.domain.privacy import (
     ApprovedLocalDisclosureCase,
@@ -371,7 +374,9 @@ def _scope() -> AuthorizationScope:
     return AuthorizationScope(AuthorizationScopeKind.TASK, _INSTALLATION, _WORKSPACE, _TASK)
 
 
-def _channel(channel: EgressChannel, *, enabled: bool) -> ChannelPolicy:
+def _channel(
+    channel: EgressChannel, *, enabled: bool, binding: ProviderBinding | None = None
+) -> ChannelPolicy:
     if not enabled:
         return ChannelPolicy(
             channel, False, (), (), None, (), AuthorizationScopeKind.MACHINE, False, 0, 0, 0
@@ -381,7 +386,7 @@ def _channel(channel: EgressChannel, *, enabled: bool) -> ChannelPolicy:
         True,
         (DataCategory.TASK_DESCRIPTION,),
         (DataClass.ORDINARY_USER_CONTENT,),
-        _provider_binding(),
+        binding if binding is not None else _provider_binding(),
         ("selected-code-review",),
         AuthorizationScopeKind.TASK,
         False,
@@ -392,10 +397,19 @@ def _channel(channel: EgressChannel, *, enabled: bool) -> ChannelPolicy:
 
 
 def _policy(
-    *, external_enabled: bool, local_enabled: bool, version: int = 1, digest: str = _DIGEST
+    *,
+    external_enabled: bool,
+    local_enabled: bool,
+    version: int = 1,
+    digest: str = _DIGEST,
+    binding: ProviderBinding | None = None,
 ) -> PrivacyPolicy:
     channels = tuple(
-        _channel(channel, enabled=(channel is EgressChannel.LLM_INFERENCE and external_enabled))
+        _channel(
+            channel,
+            enabled=(channel is EgressChannel.LLM_INFERENCE and external_enabled),
+            binding=binding,
+        )
         for channel in sorted(EgressChannel, key=lambda item: item.value)
     )
     return PrivacyPolicy(
@@ -975,3 +989,73 @@ def test_evaluator_exception_yields_transport_failed_without_reusable_authorizat
     # though the second attempt's transport is never actually invoked.
     assert len(minter.mint_calls) == 2
     assert factory.built == []  # the raising factory never registers a built evaluator list
+
+
+def test_bundled_chat_completions_binding_reconciles_without_factory_unavailable() -> None:
+    """A configured preset must become a live factory, not an unavailable-binding reconciliation.
+
+    `factory_unavailable` is invisible to the caller: the check still returns, the semantic review
+    simply never happened. Asserting the real dispatch table against the real policy binding is the
+    only place the config-to-gateway key agreement is proven.
+    """
+
+    clock = _Clock()
+    audit = _FullPrivacyAudit()
+    provider = anthropic_provider(model="claude-sonnet-4-6")
+    builders = external_factory_builders_from_config(provider, clock=clock)  # type: ignore[arg-type]
+    binding = provider_binding_from_config(provider)
+    gateway = PolicyEnforcingOutboundGateway(
+        external_factory_builders=builders,  # type: ignore[arg-type]
+        local_model_registry=InstalledLocalModelProfileRegistry(),
+        local_model_resolver=None,
+        credential_minter=_CredentialMinter(),  # type: ignore[arg-type]
+        audit=audit,  # type: ignore[arg-type]
+        classifier=LocalPrivacyEnforcer(),
+        audit_mac=_AuditKey(),  # type: ignore[arg-type]
+        clock=clock,  # type: ignore[arg-type]
+        ids=_Ids(),  # type: ignore[arg-type]
+    )
+    policy = _policy(external_enabled=True, local_enabled=False, binding=binding)
+    effective = EffectivePrivacyPolicy(policy, 1, policy.policy_digest)
+
+    async def run() -> ProviderReconciliation:
+        reconciliation = await gateway.reconcile_policy(effective, _human_authority(available=True))
+        await gateway.close()
+        return reconciliation
+
+    reconciliation = asyncio.run(run())
+
+    assert reconciliation.unavailable_bindings == ()
+    assert reconciliation.activated_count == 1
+
+
+def test_unregistered_endpoint_profile_reports_factory_unavailable_not_a_silent_pass() -> None:
+    """The honest failure for an unbuildable binding stays a reported unavailable reconciliation."""
+
+    clock = _Clock()
+    audit = _FullPrivacyAudit()
+    gateway = PolicyEnforcingOutboundGateway(
+        external_factory_builders={},
+        local_model_registry=InstalledLocalModelProfileRegistry(),
+        local_model_resolver=None,
+        credential_minter=_CredentialMinter(),  # type: ignore[arg-type]
+        audit=audit,  # type: ignore[arg-type]
+        classifier=LocalPrivacyEnforcer(),
+        audit_mac=_AuditKey(),  # type: ignore[arg-type]
+        clock=clock,  # type: ignore[arg-type]
+        ids=_Ids(),  # type: ignore[arg-type]
+    )
+    policy = _policy(external_enabled=True, local_enabled=False)
+    effective = EffectivePrivacyPolicy(policy, 1, policy.policy_digest)
+
+    async def run() -> ProviderReconciliation:
+        reconciliation = await gateway.reconcile_policy(effective, _human_authority(available=True))
+        await gateway.close()
+        return reconciliation
+
+    reconciliation = asyncio.run(run())
+
+    assert reconciliation.activated_count == 0
+    assert [reason for _digest, reason in reconciliation.unavailable_bindings] == [
+        "factory_unavailable"
+    ]

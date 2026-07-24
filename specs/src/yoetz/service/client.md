@@ -96,6 +96,13 @@ collapses `not_found` into an empty view or exposes the internal optional direct
 - Ready-result audit reservation failure → bounded retryable
   `privacy_projection_unavailable`, mapped to public `SERVICE_UNAVAILABLE`; the client receives no
   unprojected body and may replay only the identical operation request.
+- A JSON receipt whose document leaves the active policy blocks → bounded non-retryable
+  `privacy_projection_blocked`, mapped to public `PRIVACY_AUTHORITY_REQUIRED`.
+- Neither projection reason closes the connection: only `service_generation_changed` forces
+  teardown. Both propagate as ordinary errors on a live session so the caller can request another
+  receipt format, or widen agent-context policy, without reconnecting. Collapsing them into a
+  retryable `service_unavailable` teardown is forbidden: it teaches the caller to retry the one
+  shape that cannot succeed.
 - A server peer with wrong UID, unsafe endpoint type/owner/mode, or protocol mismatch is rejected
   before request bytes leave.
 - `fork()` after connect invalidates the inherited client; child use fails closed.

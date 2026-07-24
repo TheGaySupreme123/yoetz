@@ -200,6 +200,8 @@ retained semantic-finding provenance, and version identities. The generic fallba
   `Visibility is reduced by recorded redactions; coverage is not proof of correctness.` when there
   are redactions but no gap; otherwise `Coverage is limited by: {codes}.`, where `codes` is the
   comma-space join of the exact sorted material gap-code tuple; when the gap set includes
+  `semantic_review_not_requested`, the limitations body begins with
+  `Semantic review was not requested (deterministic-only check).`; otherwise when it includes
   `semantic_review_not_configured` or `semantic_relevance_review_not_run`, the limitations body
   begins with `Semantic relevance review was not run.` before that coverage-limited sentence; and
   compact rendering preserves the structural conclusion: unresolved deterministic findings remain

@@ -16,6 +16,9 @@ Required test modules and shared support files:
 ```text
 tests/unit/
   adapters/
+    providers/
+      test_chat_completions_request_shape.py
+      test_factory_dispatch.py
     test_approved_checks.py
     test_check_sandbox.py
     test_codex_capability_harness.py
@@ -118,6 +121,8 @@ fixtures into the suite without adding hidden state.
 This index covers exactly these separately owned future files:
 
 ```text
+tests/unit/adapters/providers/test_chat_completions_request_shape.py
+tests/unit/adapters/providers/test_factory_dispatch.py
 tests/unit/adapters/test_approved_checks.py
 tests/unit/adapters/test_check_sandbox.py
 tests/unit/adapters/test_codex_capability_harness.py

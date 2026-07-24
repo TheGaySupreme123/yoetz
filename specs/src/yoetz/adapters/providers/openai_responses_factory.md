@@ -7,9 +7,12 @@
 ## Purpose
 
 Provide the production `ExternalProviderFactory` that renders approved outbound cases through
-`render_case` and builds `OpenAIResponsesEvaluator` instances for official OpenAI, Fireworks, and
-owner-declared OpenAI-compatible HTTPS endpoints. Native Anthropic/Gemini protocols are out of
-scope.
+`render_case` and builds `OpenAIResponsesEvaluator` instances for official OpenAI, Fireworks,
+Vercel AI Gateway, and owner-declared OpenAI-compatible HTTPS endpoints — every profile that speaks
+the Responses protocol. OpenAI-compatible Chat Completions hosts are a different protocol cell owned
+by `adapters/providers/openai_chat_completions.md`; native Anthropic/Gemini protocols remain out of
+scope entirely. Profile-ID dispatch across both cells is owned by `adapters/providers/factory.md`,
+which calls this module rather than the other way round.
 
 ## Public surface
 
@@ -31,6 +34,8 @@ Factory/render failures surface through the gateway as unavailable/blocked outco
 
 1. No environment/config secret reads inside the factory.
 2. Owner-declared path remains OpenAI Responses wire format only.
+3. Every profile this module builds sends the Responses request shape; a Chat Completions profile
+   reaching here is a dispatch-table defect, not a request this module adapts.
 
 ## Tests
 

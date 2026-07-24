@@ -304,7 +304,10 @@ tombstone intentionally removed.
 - Unknown view/filter, invalid filter combination, cursor mismatch/tampering/expiry policy,
   invalid limit, or future frontier → `INVALID_REQUEST`. This mapping is frozen for v0.1: status is
   a read-only query, so a requested sequence beyond the observed head is invalid query input and
-  never `FRONTIER_CONFLICT`. `FRONTIER_CONFLICT` remains for stale optimistic mutation guards.
+  never `FRONTIER_CONFLICT`. `FRONTIER_CONFLICT` remains for stale optimistic mutation guards. Its
+  message is a bounded static string that names the recovery: call `status` for the current
+  frontier, then retry idempotently with the same request ID. It states no sequence, digest, or
+  other record value.
 - Unknown session/route → `SESSION_NOT_FOUND`; writer/session mismatch → `SESSION_CONFLICT`.
   Canonical ledger/index/digest disagreement → `STORAGE_CORRUPT`; unsupported schema/build →
   `MIGRATION_REQUIRED`/`STORAGE_UNSAFE`.

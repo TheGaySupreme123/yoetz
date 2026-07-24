@@ -82,11 +82,11 @@ Existing-mode `load` does not require first-install authority: an already commit
 may unlock without current presence, while service composition separately fences external
 activation.
 
-When the user supplies `yoetz --set --api-key`, setup may generate a high-entropy passphrase,
-round-trip it through `AutoUnlockPassphraseStore`, and use it to initialize the ordinary encrypted
-passphrase vault. On later service starts the daemon loads that passphrase, unlocks the vault, and
-immediately overwrites its mutable copy. Unsupported/unavailable platform stores fall back to the
-existing explicit hidden passphrase ceremony; no plaintext file or environment fallback exists.
+Provider setup never accepts an API key in argv. It always uses the existing hidden local-terminal
+credential ceremony. The platform credential store may still hold the separate vault-unlock
+passphrase for later service starts; the daemon immediately overwrites its mutable copy after
+unlock. Unsupported/unavailable platform stores fall back to the explicit hidden passphrase
+ceremony; no plaintext file or environment fallback exists.
 
 ## Errors and edge cases
 

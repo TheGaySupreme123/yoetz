@@ -20,7 +20,8 @@ Closed request object with:
 
 - shared envelope fields;
 - `expected_frontier`;
-- check `mode`;
+- check `mode`, optional on the wire: a present value is a closed enum member, and an omitted one
+  resolves through the configured verification policy in the application facade;
 - policy references / policy pack selectors;
 - requested maximum findings;
 - actor/client metadata.
@@ -30,13 +31,14 @@ policy names beyond the registry contract.
 
 ## Errors and edge cases
 
-- Missing frontier or invalid mode fails.
+- Missing frontier or invalid mode fails. A missing `mode` does not fail; it is resolved from
+  policy, never defaulted inside the schema.
 - Extra keys fail.
 
 ## Invariants
 
 1. Frozen-case identity is explicit.
-2. Mode is a closed enum.
+2. Mode is a closed enum when present, and is never `required`.
 3. Policy selection stays bounded.
 
 ## Tests

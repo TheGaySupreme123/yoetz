@@ -105,6 +105,11 @@ returns the original assigned sequences/digests even if retry created different 
   `INVALID_REQUEST`/`LIMIT_EXCEEDED`; duplicate/reused event IDs are never silently dropped.
 - A valid known family presented through the wrong operation/channel is `EVENT_INVALID` with
   `event_family_not_admitted`; authorization is checked before payload object staging.
+- `EVENT_INVALID` messages are bounded static strings selected by reason code: `frontier_changed`
+  names the recovery — call `status` for the current frontier, then retry idempotently with the
+  same request ID — and every other reason says the payload must be corrected before retrying.
+  The two are not interchangeable: telling a caller with a malformed batch to reread status and
+  retry sends it back through the one shape that will fail identically.
 - Stale required frontier → `FRONTIER_CONFLICT`; same request ID with different logical identity →
   `IDEMPOTENCY_CONFLICT`; writer/session mismatch → `SESSION_CONFLICT` or `SESSION_NOT_FOUND`.
 - Object key/path/I/O failures occur before append and map through their typed storage/key failures;

@@ -130,6 +130,10 @@ event/object. Never trust phase alone and never append a second lifecycle event.
   `OPERATION_PENDING`; catalog/bundle contention → `BUNDLE_BUSY`.
 - Unsupported path/build/key/schema maps through `STORAGE_UNSAFE`/`MIGRATION_REQUIRED`; integrity
   mismatch is `STORAGE_CORRUPT`. No raw task/ref/path/key value appears in errors.
+- The `INVALID_REQUEST` message is a bounded static string that names the tool input schema and the
+  required `client` shape (`kind`, `version`, `integration` with exact allowed values). A caller
+  that malformed the first call of the whole loop otherwise has nothing to act on. The message
+  echoes no submitted value, so it stays ADR-004-safe.
 - Cancellation after reservation leaves a resumable phase. Cancellation after completion but before
   delivery is resolved by repeating the same request ID and replaying the stored result.
 - `start_catalog.complete` failure after result publication leaves a pinned unacknowledged result;

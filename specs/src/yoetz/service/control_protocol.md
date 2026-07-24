@@ -43,7 +43,9 @@ calling Python objects directly or inventing a secret-bearing/private service me
   unbounded runtime queue.
 - `class ControlProtocolError(Exception)` carrying only a bounded control reason.
 - `public_error_code_for_control_reason(reason) -> PublicErrorCode` maps wire-only generation and
-  projection failures to the existing public `SERVICE_UNAVAILABLE` code.
+  transient projection failures to the existing public `SERVICE_UNAVAILABLE` code, and the
+  non-retryable `privacy_projection_blocked` to `PRIVACY_AUTHORITY_REQUIRED`. Both remain existing
+  public codes; no new public error code is minted for either.
 
 The wire schemas are the five exact `service/*.schema.json` files named in `ports/control.md`.
 The confidential secret-ingress protocol is deliberately not implemented or imported here.

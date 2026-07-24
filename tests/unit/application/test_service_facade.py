@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import cast
 
 import pytest
@@ -17,6 +18,7 @@ from yoetz.domain.values import JsonObject
 from yoetz.ports.control import ControlClientKind, ControlError, ControlMethod
 from yoetz.ports.start_catalog import StartCatalogPort, TaskRoute, TaskRouteState
 from yoetz.protocol.canonical import canonical_digest
+from yoetz.protocol.models import CheckRequest
 
 _REQUEST = "req_00000000-0000-4000-8000-000000000001"
 _TASK = "tsk_00000000-0000-4000-8000-000000000002"
@@ -246,3 +248,77 @@ async def test_installation_scoped_support_does_not_resolve_a_task_route() -> No
     assert facts.original_request_id is None
     assert facts.route_identity_digest is None
     assert catalog.calls == 0
+
+
+def _check_request(mode: str | None) -> CheckRequest:
+    payload: dict[str, object] = {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": _REQUEST,
+        "actor": {"actor_id": "harness:pytest", "actor_type": "harness"},
+        "client": {
+            "kind": "cooperative_agent",
+            "version": "0.1.0",
+            "integration": "cooperative_mcp",
+        },
+        "session_id": _SESSION,
+        "writer_id": "wri_00000000-0000-4000-8000-000000000004",
+        "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
+    }
+    if mode is not None:
+        payload["mode"] = mode
+    return CheckRequest.model_validate(payload)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("semantic", "expected"),
+    (
+        ("disabled", "deterministic_only"),
+        ("optional", "semantic_if_configured"),
+        ("required", "semantic_required"),
+    ),
+)
+async def test_omitted_check_mode_resolves_through_the_verification_policy(
+    monkeypatch: pytest.MonkeyPatch, semantic: str, expected: str
+) -> None:
+    """The recorded check must carry a concrete mode, never an absent one to interpret later."""
+
+    seen: list[object] = []
+
+    async def _capture(_app: object, request: object) -> object:
+        seen.append(request)
+        return object()
+
+    monkeypatch.setattr("yoetz.application.check.execute_check", _capture)
+    application = _application(_Catalog(_route()))
+    policy = VerificationPolicy(semantic=semantic, max_findings=3)  # type: ignore[arg-type]
+    application = replace(application, verification_policy=policy)
+
+    await application.check(_check_request(None))
+
+    resolved = cast(CheckRequest, seen[0])
+    assert resolved.mode == expected
+
+
+@pytest.mark.anyio
+async def test_present_check_mode_is_never_overridden_by_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller that asked for deterministic_only under a required policy still gets what it asked."""
+
+    seen: list[object] = []
+
+    async def _capture(_app: object, request: object) -> object:
+        seen.append(request)
+        return object()
+
+    monkeypatch.setattr("yoetz.application.check.execute_check", _capture)
+    application = replace(
+        _application(_Catalog(_route())),
+        verification_policy=VerificationPolicy(semantic="required", max_findings=3),
+    )
+
+    await application.check(_check_request("deterministic_only"))
+
+    assert cast(CheckRequest, seen[0]).mode == "deterministic_only"

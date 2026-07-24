@@ -11,9 +11,16 @@ Provide the sole writers that turn validated `YoetzConfig` / provider bindings i
 
 ## Public surface
 
+- `ProviderPreset` / `PROVIDER_PRESETS` — the closed nonsecret setup registry. Each entry carries
+  the exact provider id, endpoint-profile identity/version, capability-profile name, host, fixed
+  path prefix, default model, and API style.
+- `provider_preset(choice) -> ProviderPreset` — resolve a reviewed preset or raise
+  `ConfigError("config_value_invalid")`.
 - `official_openai_provider(...)` / `fireworks_provider(...)` /
-  `owner_declared_openai_provider(...)` — construct exact
-  nonsecret `ProviderProfileConfig` values for Official OpenAI vs owner-declared HTTPS origin.
+  `anthropic_provider(...)` / `google_gemini_provider(...)` /
+  `openrouter_provider(...)` / `vercel_ai_gateway_provider(...)` /
+  `owner_declared_openai_provider(...)` — construct exact nonsecret `ProviderProfileConfig`
+  values for bundled presets or an owner-declared HTTPS origin.
 - `render_config_toml(config) -> str` — deterministic TOML text; round-trips through
   `YoetzConfig.model_validate`.
 - `write_config_toml(config, path=None) -> Path` — atomic replace; default path uses
@@ -25,6 +32,16 @@ Provide the sole writers that turn validated `YoetzConfig` / provider bindings i
 ## Behavior
 
 - Never writes credentials, headers, free `base_url`, or vault material.
+- Bundled setup identities are fixed: Anthropic `api.anthropic.com/v1` and Google Gemini
+  `generativelanguage.googleapis.com/v1beta/openai` use OpenAI-compatible Chat Completions;
+  OpenRouter `openrouter.ai/api/v1` uses Chat Completions; Vercel AI Gateway
+  `ai-gateway.vercel.sh/v1` uses OpenAI-compatible Responses. The path prefix is registry
+  metadata, never a user-editable URL.
+- These presets make nonsecret binding and credential targeting clear. Each one resolves to a
+  runtime factory in `adapters/providers/factory.md`, so no bundled choice can be written here and
+  then fail at dispatch with `factory_unavailable`. Being dispatchable is not being verified: an
+  exact model/endpoint capability fixture and live evidence are still required by ADR-006/E-007
+  before release support is advertised.
 - Omits the `[privacy]` bootstrap section when it equals the safe default (generation-1 seed stays
   load-default; durable privacy desired-state is the separate `privacy_desired` path).
 - Explicit `path=` (tests/tools) may skip platform path-safety directory checks; the default

@@ -91,9 +91,10 @@ _SERVER_NAME: Final = "yoetz"
 _REGISTERED_TOOL_NAMES: Final = frozenset(
     {"start", "publish_work", "check", "respond", "status", "receipt"}
 )
-_RECONNECT_REASONS: Final = frozenset(
-    {"service_unavailable", "privacy_projection_unavailable", "service_generation_changed"}
-)
+# Reconnecting only helps when the connection itself is the problem. A projection failure is
+# answered by the live service and reconnecting around it drops the session for nothing, so both
+# projection reasons are handled in place and surfaced with their own remedy.
+_RECONNECT_REASONS: Final = frozenset({"service_unavailable", "service_generation_changed"})
 
 
 @dataclass(slots=True)

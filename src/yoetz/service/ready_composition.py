@@ -20,11 +20,9 @@ from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
 from yoetz.adapters.privacy.catalog import CatalogPrivacyAudit, CatalogPrivacyPolicyStore
 from yoetz.adapters.privacy.gateway import PolicyEnforcingOutboundGateway
 from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer
+from yoetz.adapters.providers.factory import external_factory_builders_from_config
 from yoetz.adapters.providers.local_model import InstalledLocalModelProfileRegistry
-from yoetz.adapters.providers.openai_responses_factory import (
-    external_factory_builders_from_config,
-    provider_binding_from_config,
-)
+from yoetz.adapters.providers.openai_responses_factory import provider_binding_from_config
 from yoetz.adapters.runtime import RuntimeAdapterFactories, open_local_bundle_runtime
 from yoetz.adapters.sqlite.connection import (
     open_catalog_writer,
@@ -924,6 +922,44 @@ _LEGACY_AGENT_CONTEXT_CATEGORIES: Final = (
 )
 _LEGACY_AGENT_CONTEXT_DATA_CLASSES: Final = (DataClass.PUBLIC_STRUCTURAL,)
 
+# Bootstrap seed identity. The revision names the shipped default's contents, so widening the
+# default mints a distinct `policy_digest` instead of two different payloads sharing one digest:
+# that digest is the CAS precondition for later tightenings and is exposed as `effective_digest`.
+# `None` reproduces the pre-ADR-009 payload and exists only to recognize an untouched old seed.
+_BOOTSTRAP_SEED_SCHEMA: Final = "yoetz.privacy-policy.bootstrap/1"
+_BOOTSTRAP_DEFAULT_REVISION: Final = "2026-07-24-verification-output"
+
+
+def _bootstrap_seed_digest(installation_id: str, *, revision: str | None) -> str:
+    payload: dict[str, CanonicalJsonValue] = {
+        "installation_id": installation_id,
+        "profile": "local_only",
+        "schema": _BOOTSTRAP_SEED_SCHEMA,
+    }
+    if revision is not None:
+        payload["default_revision"] = revision
+    return canonical_digest(payload)
+
+
+def _shipped_default_policy(policy: PrivacyPolicy, *, revision: str | None) -> PrivacyPolicy:
+    """Rebuild a shipped default policy at one revision under an existing policy's identity."""
+
+    rebuilt = _denied_policy(
+        installation_id=policy.effective_scope.installation_id,
+        policy_id=policy.policy_id,
+        policy_digest=_bootstrap_seed_digest(
+            policy.effective_scope.installation_id, revision=revision
+        ),
+        created_at=policy.created_at,
+    )
+    if revision is not None:
+        return rebuilt
+    return replace(
+        rebuilt,
+        agent_context_categories=_LEGACY_AGENT_CONTEXT_CATEGORIES,
+        agent_context_data_classes=_LEGACY_AGENT_CONTEXT_DATA_CLASSES,
+    )
+
 
 async def _reseed_untouched_default_policy(
     policies: CatalogPrivacyPolicyStore,
@@ -934,26 +970,18 @@ async def _reseed_untouched_default_policy(
 
     Without this, an installation seeded before the default widened keeps the narrow
     agent-context allowlist and still cannot read its own receipts, so the receipt fix would
-    reach only new installations. Recognition is exact: the stored policy must equal the old
-    default rebuilt from its own identity fields, which no owner edit can satisfy.
+    reach only new installations. Recognition is exact in every field, including the bootstrap
+    seed digest, and the store additionally requires first-run seed provenance, so an owner
+    policy that reproduces the old default's contents is left alone.
     """
 
-    legacy = replace(
-        policy,
-        agent_context_categories=_LEGACY_AGENT_CONTEXT_CATEGORIES,
-        agent_context_data_classes=_LEGACY_AGENT_CONTEXT_DATA_CLASSES,
-    )
-    if policy != legacy:
+    legacy_default = replace(_shipped_default_policy(policy, revision=None), version=policy.version)
+    if policy != legacy_default:
         return policy
-    current_default = _denied_policy(
-        installation_id=policy.effective_scope.installation_id,
-        policy_id=policy.policy_id,
-        policy_digest=policy.policy_digest,
-        created_at=policy.created_at,
+    replacement = replace(
+        _shipped_default_policy(policy, revision=_BOOTSTRAP_DEFAULT_REVISION),
+        version=policy.version + 1,
     )
-    replacement = replace(current_default, version=policy.version + 1)
-    if replacement == replace(policy, version=policy.version + 1):
-        return policy
     return await policies.reseed_untouched_bootstrap_default(
         scope, expected_current=policy, replacement=replacement
     )
@@ -1073,13 +1101,7 @@ async def build_privacy_coordinator(
     except ValueError as exc:
         if exc.args != ("privacy_policy_missing",):
             raise
-        seed_digest = canonical_digest(
-            {
-                "installation_id": installation_id,
-                "profile": "local_only",
-                "schema": "yoetz.privacy-policy.bootstrap/1",
-            }
-        )
+        seed_digest = _bootstrap_seed_digest(installation_id, revision=_BOOTSTRAP_DEFAULT_REVISION)
         try:
             policy = await seed_policy_if_absent(
                 _denied_policy(

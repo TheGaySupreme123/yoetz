@@ -419,3 +419,61 @@ async def test_cancellation_propagates_without_becoming_a_tool_error(
 
     with pytest.raises(asyncio.CancelledError):
         await bridge.dispatch_start(_requests()["start"], runtime)
+
+
+@pytest.mark.anyio
+async def test_blocked_receipt_projection_keeps_the_client_and_names_the_next_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A policy-blocked receipt format must be answered on the live client, not reconnected around.
+
+    This is the shape a real agent hit five times in a row: a retryable-looking failure plus a
+    torn-down connection taught it to repeat the one request that could never succeed.
+    """
+
+    client = _FakeClient(ControlError("privacy_projection_blocked", retryable=False))
+    remaining = _install_clients(monkeypatch, [client])
+    runtime = bridge.build_bridge_runtime()
+
+    blocked = await bridge.dispatch_receipt(_requests()["receipt"], runtime)
+
+    assert blocked.isError is True
+    assert blocked.structuredContent is not None
+    error = cast(dict[str, JsonValue], blocked.structuredContent["error"])
+    assert error["code"] == "PRIVACY_AUTHORITY_REQUIRED"
+    assert error["retryable"] is False
+    details = cast(dict[str, JsonValue], error["safe_details"])
+    assert details["reason_code"] == "receipt_json_projection_blocked"
+    message = cast(str, error["message"])
+    # The message has to carry the remedy; the reason code alone is not actionable.
+    assert "markdown" in message and "text" in message
+    # No reconnect was attempted and the durable session was never dropped.
+    assert client.closed is False
+    assert len(remaining) == 0
+
+    # The next receipt call reaches the same client, so switching format needs no new connection.
+    follow_up = await bridge.dispatch_receipt(_requests()["receipt"], runtime)
+    assert follow_up.isError is True
+    assert [name for name, _request in client.calls] == ["receipt", "receipt"]
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_transient_projection_failure_stays_retryable_service_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The transient reservation failure keeps its retryable meaning and its own reason code."""
+
+    client = _FakeClient(ControlError("privacy_projection_unavailable", retryable=True))
+    _install_clients(monkeypatch, [client])
+    runtime = bridge.build_bridge_runtime()
+
+    result = await bridge.dispatch_receipt(_requests()["receipt"], runtime)
+
+    assert result.structuredContent is not None
+    error = cast(dict[str, JsonValue], result.structuredContent["error"])
+    assert error["code"] == "SERVICE_UNAVAILABLE"
+    assert error["retryable"] is True
+    details = cast(dict[str, JsonValue], error["safe_details"])
+    assert details["reason_code"] == "privacy_projection_unavailable"
+    await bridge.close_bridge_runtime(runtime)

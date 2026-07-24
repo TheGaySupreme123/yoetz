@@ -58,7 +58,10 @@ resource read reaches `ServiceClient`.
 Each tool dispatcher strictly validates MCP arguments, converts to the exact public request, calls
 `ensure_service_client`, invokes the matching method, validates the public envelope, and returns
 structured content plus a weaker summary. A failed lazy connect clears the slot; a generation change
-closes/clears it before any identical-request reconnect. Service absent, locked, draining, or
+closes/clears it before any identical-request reconnect. Exactly two reasons are reconnectable —
+`service_unavailable` and `service_generation_changed` — because only a broken connection is fixed
+by a new one. A privacy-projection failure was answered by a live service and is returned in place;
+reconnecting around it would drop a healthy session and hide the remedy from the caller. Service absent, locked, draining, or
 generation change becomes one sanitized structured tool error with bounded guidance; the bridge
 stays alive and its static resources remain available. No secret field or direct-execution fallback
 exists.
@@ -104,6 +107,14 @@ registered tools remain structured tool results.
 - A crash inside request validation itself (any non-`ValidationError`) is an unexpected bridge
   error and returns `INTERNAL_ERROR`, not `INVALID_REQUEST`: the arguments were never shown to be
   at fault. Ordinary `ValidationError` remains `INVALID_REQUEST` with allowlisted safe locations.
+- A control error whose reason is `privacy_projection_blocked` returns non-retryable
+  `PRIVACY_AUTHORITY_REQUIRED` with `safe_details` `{reason_code: receipt_json_projection_blocked,
+  operation: receipt, field: format}` and a bounded static message stating that the receipt is
+  durably recorded and naming the two formats that do project plus the local policy widening.
+  `privacy_projection_unavailable` stays retryable `SERVICE_UNAVAILABLE` with `safe_details`
+  `{reason_code: privacy_projection_unavailable}`. Neither message names a policy detail, a
+  pointer, or any receipt content; both are the fixed strings this spec owns, so an agent learns
+  what to do next without the bridge inventing per-call prose.
 - Service reconnect requires fresh same-UID handshake/generation and identical operation request.
 - Clean EOF closes the bridge only; persistent service remains alive.
 - A missing or digest-mismatched descriptor, instruction, or guidance resource fails startup. The

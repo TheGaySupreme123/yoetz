@@ -29,11 +29,24 @@ normalizes it into Yoetz’s closed semantic-result union with provisional
 | `normalize_response(response, profile)` | turn an OpenAI response into a Yoetz semantic result |
 | `normalize_judgment(...)` | validate the parsed judgment against Yoetz’s closed judgment shape |
 | `classify_provider_failure(...)` | map transport/profile/provider failures to public error classes |
+| `JUDGMENT_JSON_SCHEMA` | the one closed judgment schema every provider adapter requests and validates against |
+| `RenderedRequest` | the two body facts (`body`, `body_sha256`) the one-attempt transport binds itself to |
 
 Sibling factory module `adapters/providers/openai_responses_factory.py` owns ready-composition
 `OpenAIResponsesExternalFactory` (`render` + `build_evaluator`) plus
 `external_factory_builders_from_config` for official OpenAI, Fireworks (`api.fireworks.ai` +
-`/inference/v1`), and owner-declared OpenAI-compatible Responses hosts only.
+`/inference/v1`), Vercel AI Gateway (`ai-gateway.vercel.sh` + `/v1`), and owner-declared
+OpenAI-compatible Responses hosts. Chat Completions hosts are a different protocol cell owned by
+`adapters/providers/openai_chat_completions.md`, and profile-ID dispatch across both cells is owned
+by `adapters/providers/factory.md`.
+
+This module remains Responses-only in what it *sends*: it never renders or reads a Chat Completions
+request. Three things are deliberately shared with the sibling adapter rather than duplicated,
+because a second copy of any of them would be a second thing to get wrong: `JUDGMENT_JSON_SCHEMA`,
+`normalize_judgment`, and `OneAttemptCredentialTransport`. The transport accepts any `RenderedRequest`
+and its allowed destinations are exactly `/v1/responses`, `/inference/v1/responses`,
+`/v1/chat/completions`, `/api/v1/chat/completions`, and `/v1beta/openai/chat/completions`; the caller's
+profile still pins which single one this attempt may reach.
 
 ## Behavior
 

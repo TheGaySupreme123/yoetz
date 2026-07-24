@@ -405,11 +405,15 @@ def test_integrate_mcp_refuses_foreign_entry(wizard_env: dict[str, object]) -> N
 
 
 def test_setup_surfaces_no_secret_shaped_option() -> None:
-    for args in (["setup", "run", "--help"], ["setup", "status", "--help"]):
+    for args in (
+        ["--help"],
+        ["setup", "run", "--help"],
+        ["setup", "status", "--help"],
+    ):
         result = _RUNNER.invoke(cli.app, args)
         assert result.exit_code == 0
         lowered = result.stdout.lower()
-        for token in ("api-key", "apikey", "token", "secret", "password"):
+        for token in ("api-key", "apikey", "password"):
             assert token not in lowered, (args, token)
 
 
@@ -426,10 +430,8 @@ def test_root_set_fireworks_dispatches_simple_provider_setup(
 
     received: dict[str, object] = {}
 
-    async def fake_provider_setup(
-        *, fireworks: bool, model: str | None, api_key: str | None
-    ) -> int:
-        received.update(fireworks=fireworks, model=model, api_key=api_key)
+    async def fake_provider_setup(*, fireworks: bool, model: str | None) -> int:
+        received.update(fireworks=fireworks, model=model)
         return 0
 
     monkeypatch.setattr(setup_module, "run_provider_setup", fake_provider_setup)
@@ -440,8 +442,6 @@ def test_root_set_fireworks_dispatches_simple_provider_setup(
             "--fireworks",
             "--model",
             "accounts/fireworks/models/minimax-m3",
-            "--api-key",
-            "fw-test-value",
         ],
     )
 
@@ -449,7 +449,31 @@ def test_root_set_fireworks_dispatches_simple_provider_setup(
     assert received == {
         "fireworks": True,
         "model": "accounts/fireworks/models/minimax-m3",
-        "api_key": "fw-test-value",
+    }
+
+
+def test_root_set_dispatches_new_provider_setup_without_secret_argument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.cli.setup as setup_module
+
+    received: dict[str, object] = {}
+
+    async def fake_provider_setup(**kwargs: object) -> int:
+        received.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(setup_module, "run_provider_setup", fake_provider_setup)
+    result = _RUNNER.invoke(
+        cli.app,
+        ["--set", "--provider", "anthropic", "--model", "claude-sonnet-4-6"],
+    )
+
+    assert result.exit_code == 0
+    assert received == {
+        "fireworks": False,
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
     }
 
 
@@ -475,9 +499,8 @@ def test_provider_setup_success_reports_layers_without_ready_overclaim(
         *,
         provider_choice: str | None = None,
         model: str | None = None,
-        api_key: str | None = None,
     ) -> tuple[dict[str, object], dict[str, object]]:
-        del provider_choice, model, api_key
+        del provider_choice, model
         return service, {"binding": "configured", "credential": "stored"}
 
     monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)

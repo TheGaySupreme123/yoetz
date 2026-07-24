@@ -21,7 +21,10 @@ the six registered control tokens exactly; receipt list/get delegate only to the
 one-to-one; get maps `PrivacyReceiptView` to `found` and `None` to `not_found` without nullable wire
 output.
 
-The contract slice proves `disabled|optional|required` maps exactly to the three check modes and
+The contract slice proves an omitted `check` `mode` is resolved from the verification policy
+before delegation for each of the three policy values, and that a present mode is never overridden,
+so the recorded check always carries a concrete caller-visible mode. It proves
+`disabled|optional|required` maps exactly to the three check modes and
 that a non-bool `max_findings` is limited to `1..10`. It proves only
 `cli + human_readable + output_is_controlling_tty` resolves to `local_human_view`; machine mode,
 missing/non-TTY output, MCP, UI, wrong runtime types, and the explicit fail-safe default resolve to

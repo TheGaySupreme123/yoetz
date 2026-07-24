@@ -17,7 +17,7 @@ import importlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Final, Literal, cast
+from typing import Any, Final, Literal, Protocol, cast
 
 import httpx
 
@@ -48,6 +48,7 @@ from yoetz.protocol.canonical import (
 from yoetz.protocol.models import MAX_REVIEW_CHALLENGES, SemanticStatus
 
 __all__ = [
+    "JUDGMENT_JSON_SCHEMA",
     "OFFICIAL_OPENAI_HOST",
     "OFFICIAL_OPENAI_PATH",
     "OFFICIAL_OPENAI_PORT",
@@ -60,6 +61,7 @@ __all__ = [
     "OpenAIResponsesEvaluator",
     "ProviderDataUseProfile",
     "RenderedOpenAIRequest",
+    "RenderedRequest",
     "classify_provider_failure",
     "normalize_judgment",
     "normalize_response",
@@ -82,7 +84,18 @@ OFFICIAL_OPENAI_PATH: Final = "/v1/responses"
 _HOST: Final = OFFICIAL_OPENAI_HOST
 _PORT: Final = OFFICIAL_OPENAI_PORT
 _PATH: Final = OFFICIAL_OPENAI_PATH
-_ALLOWED_PATHS: Final = frozenset({"/v1/responses", "/inference/v1/responses"})
+# Every destination the one-attempt transport may dispatch to. The Responses paths are this
+# module's own; the Chat Completions paths belong to the sibling adapter, which reuses this
+# transport rather than duplicating credential-injection code.
+_ALLOWED_PATHS: Final = frozenset(
+    {
+        "/v1/responses",
+        "/inference/v1/responses",
+        "/v1/chat/completions",
+        "/api/v1/chat/completions",
+        "/v1beta/openai/chat/completions",
+    }
+)
 _IDENTITY_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$", re.ASCII)
 _MODEL_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$", re.ASCII)
 _HOSTNAME_PATTERN: Final = re.compile(
@@ -146,7 +159,7 @@ _CHALLENGE_JSON_SCHEMA: Final[dict[str, JsonValue]] = {
     },
 }
 
-_JUDGMENT_JSON_SCHEMA: Final[dict[str, JsonValue]] = {
+JUDGMENT_JSON_SCHEMA: Final[dict[str, JsonValue]] = {
     "type": "object",
     "additionalProperties": False,
     "required": ["conclusion", "reviewer_challenges"],
@@ -274,6 +287,20 @@ def owner_declared_data_use_profile(
     )
 
 
+class RenderedRequest(Protocol):
+    """The two body facts the one-attempt transport binds itself to.
+
+    Stated as a protocol so the sibling Chat Completions adapter can reuse this transport with its
+    own rendered type instead of duplicating credential-injection code.
+    """
+
+    @property
+    def body(self) -> bytes: ...
+
+    @property
+    def body_sha256(self) -> str: ...
+
+
 @dataclass(frozen=True, slots=True)
 class RenderedOpenAIRequest:
     """The exact final application JSON body plus its digest and nonsecret dispatch binding."""
@@ -314,14 +341,14 @@ def _build_body_object(case: ApprovedOutboundCase) -> dict[str, JsonValue]:
                 "type": "json_schema",
                 "name": "yoetz_semantic_judgment",
                 "strict": True,
-                "schema": _JUDGMENT_JSON_SCHEMA,
+                "schema": JUDGMENT_JSON_SCHEMA,
             }
         },
     }
 
 
 _PROMPT_DIGEST: Final = "sha256:" + hashlib.sha256(_SYSTEM_INSTRUCTION.encode("utf-8")).hexdigest()
-_SCHEMA_DIGEST: Final = canonical_digest(_JUDGMENT_JSON_SCHEMA)
+_SCHEMA_DIGEST: Final = canonical_digest(JUDGMENT_JSON_SCHEMA)
 
 
 def render_case(case: ApprovedOutboundCase) -> RenderedOpenAIRequest:
@@ -605,7 +632,7 @@ class OneAttemptCredentialTransport(httpx.AsyncBaseTransport):
     def __init__(
         self,
         *,
-        rendered: RenderedOpenAIRequest,
+        rendered: RenderedRequest,
         credential: ProviderCredentialHandle,
         binding: ProviderAttemptAuthBinding,
         host: str = _HOST,

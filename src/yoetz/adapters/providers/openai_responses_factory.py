@@ -94,6 +94,29 @@ def openai_profile_from_provider_config(
             host="api.fireworks.ai",
             base_path_prefix="/inference/v1",
         )
+    if provider.endpoint_profile_id == "vercel-ai-gateway-openai-responses":
+        # The AI Gateway speaks the OpenAI Responses protocol on its own host, so it needs no
+        # adapter of its own — only its endpoint facts and an unknown data-use record.
+        return OpenAIProfile(
+            provider_id=provider.provider_id,
+            model=provider.model,
+            endpoint_profile_id=provider.endpoint_profile_id,
+            endpoint_profile_version=provider.endpoint_profile_version,
+            timeout_seconds=timeout,
+            supports_structured_outputs=True,
+            data_use_profile=owner_declared_data_use_profile(
+                reviewed_at=now,
+                expires_at=now + timedelta(days=30),
+                evidence_digest=canonical_digest(
+                    {
+                        "profile": "vercel-ai-gateway-openai-responses",
+                        "schema": "yoetz.provider-data-use/1",
+                    }
+                ),
+            ),
+            host="ai-gateway.vercel.sh",
+            base_path_prefix="/v1",
+        )
     if provider.endpoint_profile_id == OWNER_DECLARED_ENDPOINT_PROFILE_ID:
         if provider.owner_declared_endpoint is None:
             raise ValueError("owner_declared_endpoint_required")
@@ -163,7 +186,11 @@ class OpenAIResponsesExternalFactory:
 def external_factory_builders_from_config(
     provider: ProviderProfileConfig | None, *, clock: ClockPort
 ) -> dict[ProviderBinding, object]:
-    """Return builders only for official OpenAI / Fireworks / owner-declared Responses."""
+    """Return builders only for the Responses-protocol endpoint profiles.
+
+    Chat Completions profiles are dispatched by `adapters/providers/factory.py`; this module stays
+    Responses-only so neither adapter has to carry the other's request shape.
+    """
 
     if provider is None:
         return {}
@@ -171,6 +198,7 @@ def external_factory_builders_from_config(
         OFFICIAL_OPENAI_ENDPOINT_PROFILE_ID,
         "fireworks-responses",
         OWNER_DECLARED_ENDPOINT_PROFILE_ID,
+        "vercel-ai-gateway-openai-responses",
     }
     if provider.endpoint_profile_id not in allowed:
         return {}
