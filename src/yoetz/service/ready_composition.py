@@ -956,11 +956,20 @@ def _denied_policy(
         local_model_binding=None,
         local_model_categories=(),
         local_model_data_classes=(),
+        # Default LOCAL_ONLY: agent context may receive Yoetz-authored verification
+        # projection content (findings, obligations, receipt sections/human_text) for the
+        # requesting agent's own task. Observation-derived and vault material stay blocked.
+        # See ADR-009 default agent-context disclosure of verification output.
         agent_context_categories=(
             DataCategory.BOUNDED_STRUCTURAL_METADATA,
             DataCategory.DECLARED_FILE_TYPE,
+            DataCategory.FINDING_SUMMARY,
+            DataCategory.OBLIGATION_TEXT,
         ),
-        agent_context_data_classes=(DataClass.PUBLIC_STRUCTURAL,),
+        agent_context_data_classes=(
+            DataClass.PUBLIC_STRUCTURAL,
+            DataClass.ORDINARY_USER_CONTENT,
+        ),
         trusted_human_control_categories=tuple(DataCategory),
         trusted_human_control_data_classes=(
             DataClass.ORDINARY_USER_CONTENT,

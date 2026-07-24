@@ -82,7 +82,17 @@ OFFICIAL_OPENAI_PATH: Final = "/v1/responses"
 _HOST: Final = OFFICIAL_OPENAI_HOST
 _PORT: Final = OFFICIAL_OPENAI_PORT
 _PATH: Final = OFFICIAL_OPENAI_PATH
-_ALLOWED_PATHS: Final = frozenset({"/v1/responses", "/inference/v1/responses"})
+# Include chat-completions destinations so OneAttemptCredentialTransport can be reused by the
+# OpenAI-compatible chat-completions adapter (same Bearer one-attempt auth pattern).
+_ALLOWED_PATHS: Final = frozenset(
+    {
+        "/v1/responses",
+        "/inference/v1/responses",
+        "/v1/chat/completions",
+        "/api/v1/chat/completions",
+        "/v1beta/openai/chat/completions",
+    }
+)
 _IDENTITY_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$", re.ASCII)
 _MODEL_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$", re.ASCII)
 _HOSTNAME_PATTERN: Final = re.compile(

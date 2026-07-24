@@ -6,7 +6,9 @@ import os
 import tempfile
 import tomllib
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final
 
 from yoetz.config.models import (
@@ -19,11 +21,19 @@ from yoetz.config.paths import PathSafetyError, config_file_path, ensure_owner_o
 from yoetz.config.privacy import safe_privacy_bootstrap
 
 __all__ = [
+    "PROVIDER_PRESETS",
+    "ProviderPreset",
+    "anthropic_provider",
     "default_capability_profile",
     "fireworks_provider",
+    "gemini_provider",
+    "google_gemini_provider",
     "official_openai_provider",
+    "openrouter_provider",
     "owner_declared_openai_provider",
+    "provider_preset",
     "render_config_toml",
+    "vercel_ai_gateway_provider",
     "write_config_toml",
     "write_provider_binding",
 ]
@@ -31,6 +41,120 @@ __all__ = [
 _OFFICIAL_CAPABILITY: Final = "openai-responses-structured-1"
 _OWNER_CAPABILITY: Final = "openai-responses-structured-1"
 _FIREWORKS_CAPABILITY: Final = "fireworks-responses-structured-1"
+_ANTHROPIC_CAPABILITY: Final = "anthropic-openai-chat-completions-1"
+_GEMINI_CAPABILITY: Final = "google-gemini-openai-chat-completions-1"
+_OPENROUTER_CAPABILITY: Final = "openrouter-openai-chat-completions-1"
+_VERCEL_AI_GATEWAY_CAPABILITY: Final = "vercel-ai-gateway-openai-responses-1"
+_PROVIDER_CHOICE_ALIASES: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "openai": "official_openai",
+        "official-openai": "official_openai",
+        "claude": "anthropic",
+        "anthropic-claude": "anthropic",
+        "gemini": "google_gemini",
+        "google": "google_gemini",
+        "google-gemini": "google_gemini",
+        "vercel-ai-gateway": "vercel_ai_gateway",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderPreset:
+    """Exact nonsecret endpoint facts displayed by a bundled setup choice."""
+
+    choice: str
+    provider_id: str
+    endpoint_profile_id: str
+    endpoint_profile_version: str
+    capability_profile: str
+    host: str
+    base_path_prefix: str
+    default_model: str
+    api_style: str
+
+
+PROVIDER_PRESETS: Final[Mapping[str, ProviderPreset]] = MappingProxyType(
+    {
+        "official_openai": ProviderPreset(
+            "official_openai",
+            "openai",
+            "openai-responses",
+            "1.0.0",
+            _OFFICIAL_CAPABILITY,
+            "api.openai.com",
+            "/v1",
+            "gpt-4.1-mini",
+            "responses",
+        ),
+        "fireworks": ProviderPreset(
+            "fireworks",
+            "fireworks",
+            "fireworks-responses",
+            "1.0.0",
+            _FIREWORKS_CAPABILITY,
+            "api.fireworks.ai",
+            "/inference/v1",
+            "accounts/fireworks/models/qwen3-235b-a22b",
+            "responses",
+        ),
+        "anthropic": ProviderPreset(
+            "anthropic",
+            "anthropic",
+            "anthropic-openai-chat-completions",
+            "1.0.0",
+            _ANTHROPIC_CAPABILITY,
+            "api.anthropic.com",
+            "/v1",
+            "claude-sonnet-4-6",
+            "chat_completions",
+        ),
+        "google_gemini": ProviderPreset(
+            "google_gemini",
+            "google",
+            "google-gemini-openai-chat-completions",
+            "1.0.0",
+            _GEMINI_CAPABILITY,
+            "generativelanguage.googleapis.com",
+            "/v1beta/openai",
+            "gemini-3.5-flash",
+            "chat_completions",
+        ),
+        "openrouter": ProviderPreset(
+            "openrouter",
+            "openrouter",
+            "openrouter-openai-chat-completions",
+            "1.0.0",
+            _OPENROUTER_CAPABILITY,
+            "openrouter.ai",
+            "/api/v1",
+            "openai/gpt-5.2",
+            "chat_completions",
+        ),
+        "vercel_ai_gateway": ProviderPreset(
+            "vercel_ai_gateway",
+            "vercel-ai-gateway",
+            "vercel-ai-gateway-openai-responses",
+            "1.0.0",
+            _VERCEL_AI_GATEWAY_CAPABILITY,
+            "ai-gateway.vercel.sh",
+            "/v1",
+            "anthropic/claude-sonnet-4-6",
+            "responses",
+        ),
+    }
+)
+
+
+def provider_preset(choice: str) -> ProviderPreset:
+    """Return one closed bundled preset or a bounded configuration error."""
+
+    try:
+        normalized = choice.strip().lower()
+        canonical = _PROVIDER_CHOICE_ALIASES.get(normalized, normalized)
+        return PROVIDER_PRESETS[canonical]
+    except (AttributeError, KeyError, TypeError) as exc:
+        raise ConfigError("config_value_invalid") from exc
 
 
 def default_capability_profile() -> str:
@@ -57,6 +181,27 @@ def official_openai_provider(
     )
 
 
+def _bundled_provider(
+    choice: str,
+    *,
+    model: str,
+    timeout_seconds: int = 60,
+    max_retries: int = 2,
+) -> ProviderProfileConfig:
+    preset = provider_preset(choice)
+    if not model:
+        raise ConfigError("config_value_invalid")
+    return ProviderProfileConfig(
+        provider_id=preset.provider_id,
+        endpoint_profile_id=preset.endpoint_profile_id,
+        endpoint_profile_version=preset.endpoint_profile_version,
+        model=model,
+        capability_profile=preset.capability_profile,
+        timeout_seconds=timeout_seconds,
+        max_retries=max_retries,
+    )
+
+
 def fireworks_provider(
     *,
     model: str,
@@ -74,6 +219,61 @@ def fireworks_provider(
         capability_profile=_FIREWORKS_CAPABILITY,
         timeout_seconds=timeout_seconds,
         max_retries=max_retries,
+    )
+
+
+def anthropic_provider(
+    *,
+    model: str,
+    timeout_seconds: int = 60,
+    max_retries: int = 2,
+) -> ProviderProfileConfig:
+    """Build Anthropic's exact OpenAI-compatible Chat Completions binding."""
+
+    return _bundled_provider(
+        "anthropic", model=model, timeout_seconds=timeout_seconds, max_retries=max_retries
+    )
+
+
+def google_gemini_provider(
+    *,
+    model: str,
+    timeout_seconds: int = 60,
+    max_retries: int = 2,
+) -> ProviderProfileConfig:
+    """Build Google's exact Gemini OpenAI-compatible Chat Completions binding."""
+
+    return _bundled_provider(
+        "google_gemini", model=model, timeout_seconds=timeout_seconds, max_retries=max_retries
+    )
+
+
+gemini_provider = google_gemini_provider
+
+
+def openrouter_provider(
+    *,
+    model: str,
+    timeout_seconds: int = 60,
+    max_retries: int = 2,
+) -> ProviderProfileConfig:
+    """Build OpenRouter's exact OpenAI-compatible Chat Completions binding."""
+
+    return _bundled_provider(
+        "openrouter", model=model, timeout_seconds=timeout_seconds, max_retries=max_retries
+    )
+
+
+def vercel_ai_gateway_provider(
+    *,
+    model: str,
+    timeout_seconds: int = 60,
+    max_retries: int = 2,
+) -> ProviderProfileConfig:
+    """Build Vercel AI Gateway's exact OpenAI-compatible Responses binding."""
+
+    return _bundled_provider(
+        "vercel_ai_gateway", model=model, timeout_seconds=timeout_seconds, max_retries=max_retries
     )
 
 

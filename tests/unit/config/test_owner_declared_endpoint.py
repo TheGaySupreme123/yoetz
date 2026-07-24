@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -21,10 +22,16 @@ from yoetz.config.models import (
     parse_https_origin,
 )
 from yoetz.config.write import (
+    PROVIDER_PRESETS,
+    anthropic_provider,
     fireworks_provider,
+    google_gemini_provider,
     official_openai_provider,
+    openrouter_provider,
     owner_declared_openai_provider,
+    provider_preset,
     render_config_toml,
+    vercel_ai_gateway_provider,
     write_provider_binding,
 )
 
@@ -182,6 +189,53 @@ def test_fireworks_binding_uses_reviewed_responses_base_path(tmp_path: Path) -> 
     )
     assert profile.base_url == "https://api.fireworks.ai/inference/v1"
     assert profile.path == "/inference/v1/responses"
+
+
+@pytest.mark.parametrize(
+    ("choice", "factory", "expected_path"),
+    [
+        ("anthropic", anthropic_provider, "https://api.anthropic.com/v1/chat/completions"),
+        (
+            "google_gemini",
+            google_gemini_provider,
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        ),
+        ("openrouter", openrouter_provider, "https://openrouter.ai/api/v1/chat/completions"),
+        (
+            "vercel_ai_gateway",
+            vercel_ai_gateway_provider,
+            "https://ai-gateway.vercel.sh/v1/responses",
+        ),
+    ],
+)
+def test_bundled_provider_presets_write_exact_nonsecret_bindings(
+    choice: str,
+    factory: Callable[..., ProviderProfileConfig],
+    expected_path: str,
+    tmp_path: Path,
+) -> None:
+    preset = provider_preset(choice)
+    provider = factory(model=preset.default_model)
+    path = write_provider_binding(provider, path=tmp_path / f"{choice}.toml")
+    loaded = YoetzConfig.model_validate(tomllib.loads(path.read_text()), strict=True)
+
+    assert choice in PROVIDER_PRESETS
+    assert loaded.profile == "local-openai"
+    assert loaded.provider == provider
+    assert provider.provider_id == preset.provider_id
+    assert provider.endpoint_profile_id == preset.endpoint_profile_id
+    assert provider.capability_profile == preset.capability_profile
+    assert expected_path == f"https://{preset.host}{preset.base_path_prefix}/" + (
+        "responses" if preset.api_style == "responses" else "chat/completions"
+    )
+    assert "api_key" not in path.read_text()
+
+
+def test_provider_preset_aliases_and_unknown_choices_are_bounded() -> None:
+    assert provider_preset("gemini") == provider_preset("google_gemini")
+    with pytest.raises(ConfigError) as caught:
+        provider_preset("not-a-provider")
+    assert caught.value.reason_code == "config_value_invalid"
 
 
 def test_owner_declared_data_use_never_assisted_eligible() -> None:

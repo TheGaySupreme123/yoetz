@@ -203,7 +203,10 @@ def _error(
 def _event_invalid(reason_code: str = "invalid_event_value_type") -> PublicOperationError:
     return _error(
         PublicErrorCode.EVENT_INVALID,
-        "The event batch is invalid.",
+        (
+            "The event batch is invalid. Call status to read the current frontier, then retry "
+            "idempotently with the same request_id."
+        ),
         reason_code=reason_code,
     )
 

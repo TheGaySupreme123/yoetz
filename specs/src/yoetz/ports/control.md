@@ -52,7 +52,7 @@ implicit cwd exists.
   `peer_untrusted`, `protocol_mismatch`, `frame_invalid`, `frame_too_large`, `request_cancelled`,
   `request_timeout`, `vault_locked`, `service_draining`, `method_forbidden`, `internal_error`.
   Ready-result local-audit reservation failure uses
-  `privacy_projection_unavailable` (retryable, no content result serialized).
+  `privacy_projection_unavailable` (retryable, no content result serialized); `privacy_projection_blocked` (non-retryable JSON receipt fail-closed when document leaves are blocked).
   The wire-only reason `service_generation_changed` is also accepted from a parsed control result
   and maps at the public boundary to `SERVICE_UNAVAILABLE`; it is never exposed as a new public
   error code.
@@ -107,7 +107,8 @@ invoke them, and they cannot dereference proposal/object content.
   closes the connection and fails closed.
 - `service_generation_changed` closes the connection before retry and maps to the public
   `SERVICE_UNAVAILABLE` envelope; the client does not leak the control token into workflow results.
-- `privacy_projection_unavailable` maps to retryable public `SERVICE_UNAVAILABLE`; identical
+- `privacy_projection_unavailable` maps to retryable public `SERVICE_UNAVAILABLE`;
+- `privacy_projection_blocked` maps to non-retryable public `PRIVACY_AUTHORITY_REQUIRED` with safe_details `reason_code=receipt_json_projection_blocked`; identical
   operation replay may recover the committed internal result and retry its local projection. It
   never includes the internal result, receipt ID, policy detail, or candidate bytes.
 - `human_authority_unavailable` is valid only for locked/uninitialized setup rejected before

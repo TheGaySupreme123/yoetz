@@ -60,7 +60,7 @@ _NEXT_SERVICE: Final = "run 'yoetz service run' under your selected user supervi
 _NEXT_UNLOCK: Final = "run 'yoetz service unlock' from a local terminal if the vault is locked"
 _NEXT_PRIVACY: Final = "run 'yoetz privacy setup' to review recipes and provider binding"
 _NEXT_PROVIDER_TOML: Final = (
-    "run 'yoetz provider endpoint' (or edit config.toml) to choose Official OpenAI "
+    "run 'yoetz provider endpoint' (or edit config.toml) to choose a reviewed provider "
     "or an owner-declared HTTPS origin+model — never put API keys in TOML"
 )
 _NEXT_CREDENTIAL: Final = (
@@ -705,12 +705,12 @@ async def _interactive_provider_setup(
     *,
     provider_choice: str | None = None,
     model: str | None = None,
-    api_key: str | None = None,
 ) -> tuple[dict[str, JsonValue], dict[str, JsonValue]]:
     """Run trusted local setup ceremonies while keeping secrets out of wizard state."""
 
-    from yoetz.adapters.keys.os_keyring import AutoUnlockPassphraseStore, OSKeyringError
+    from yoetz.adapters.keys.os_keyring import AutoUnlockPassphraseStore
     from yoetz.cli.provider_binding import (
+        ProviderEndpointChoice,
         apply_provider_endpoint_choice,
         prompt_provider_endpoint_binding,
     )
@@ -721,7 +721,9 @@ async def _interactive_provider_setup(
         unlock_vault,
     )
     from yoetz.config.load import load_config
+    from yoetz.config.models import ConfigError
     from yoetz.config.paths import bundle_root
+    from yoetz.config.write import provider_preset
     from yoetz.service.confidential_protocol import ProviderCredentialTarget
     from yoetz.service.vault import provider_credential_profile_binding
 
@@ -742,24 +744,8 @@ async def _interactive_provider_setup(
         if service.get("reachable") and service.get("state") == "locked":
             if service.get("vault_mode") == "uninitialized":
                 typer.echo("")
-                if api_key is not None:
-                    current_config = load_config({}, {}, None)
-                    auto_store = AutoUnlockPassphraseStore(
-                        bundle_root(_data_dir=current_config.storage.data_dir)
-                    )
-                    try:
-                        auto_passphrase = auto_store.load_or_create()
-                    except OSKeyringError:
-                        typer.echo(
-                            "Platform credential store unavailable; choose a vault passphrase"
-                        )
-                        await initialize_passphrase_vault()
-                    else:
-                        typer.echo("Secure vault setup (platform credential store auto-unlock)")
-                        await initialize_passphrase_vault(bytearray(auto_passphrase))
-                else:
-                    typer.echo("Secure vault setup (hidden local-terminal input)")
-                    await initialize_passphrase_vault()
+                typer.echo("Secure vault setup (hidden local-terminal input)")
+                await initialize_passphrase_vault()
             elif service.get("vault_mode") == "passphrase":
                 typer.echo("")
                 current_config = load_config({}, {}, None)
@@ -792,6 +778,25 @@ async def _interactive_provider_setup(
             wipe_auto_passphrase()
             return service, provider_report
         typer.echo(f"Fireworks model: {selected_model}")
+    elif provider_choice is not None:
+        selected_model = model
+        try:
+            preset = provider_preset(provider_choice)
+            choice = cast(ProviderEndpointChoice, preset.choice)
+            if selected_model is None:
+                selected_model = typer.prompt(
+                    f"{preset.provider_id} model id", default=preset.default_model
+                ).strip()
+            if not selected_model:
+                raise ConfigError("config_value_invalid")
+            written, _provider = apply_provider_endpoint_choice(choice, model=selected_model)
+        except (ConfigError, OSError, ValueError) as error:
+            provider_report["credential_reason"] = getattr(
+                error, "reason_code", "provider_binding_invalid"
+            )
+            wipe_auto_passphrase()
+            return service, provider_report
+        typer.echo(f"{preset.provider_id} model: {selected_model}")
     else:
         written = prompt_provider_endpoint_binding()
     if written is None:
@@ -822,20 +827,11 @@ async def _interactive_provider_setup(
         purpose_digest=storage.purpose_digest,
     )
     typer.echo("")
-    if api_key is None:
-        typer.echo("Provider API key (hidden local-terminal input; stored only in the Yoetz vault)")
-    else:
-        typer.echo("Provider API key supplied by --api-key; storing it only in the Yoetz vault")
+    typer.echo("Provider API key (hidden local-terminal input; stored only in the Yoetz vault)")
     try:
-        supplied_credential = None if api_key is None else bytearray(api_key.encode("utf-8"))
-        if auto_passphrase is None and api_key is not None:
-            current_config = load_config({}, {}, None)
-            auto_passphrase = AutoUnlockPassphraseStore(
-                bundle_root(_data_dir=current_config.storage.data_dir)
-            ).load()
         result = await set_provider_credential(
             target,
-            supplied_credential,
+            None,
             None if auto_passphrase is None else bytearray(auto_passphrase),
         )
     except HumanCeremonyCliError as error:
@@ -881,36 +877,42 @@ def _emit_provider_setup_layer_report() -> None:
 async def run_provider_setup(
     *,
     fireworks: bool = False,
+    provider: str | None = None,
     model: str | None = None,
-    api_key: str | None = None,
 ) -> int:
     """Run only the simple local provider setup path used by ``yoetz --set``."""
 
-    fully_supplied = fireworks and model is not None and api_key is not None
-    if not _is_interactive_terminal() and not fully_supplied:
-        return _usage_failure(
-            "--set requires a local terminal unless --fireworks, --model, and --api-key "
-            "are all supplied"
-        )
+    if fireworks and provider is not None:
+        return _usage_failure("--fireworks and --provider are mutually exclusive")
+    provider_choice = "fireworks" if fireworks else provider
+    if provider_choice is not None:
+        from yoetz.config.models import ConfigError
+        from yoetz.config.write import provider_preset
+
+        try:
+            provider_choice = provider_preset(provider_choice).choice
+        except ConfigError, TypeError:
+            return _usage_failure("--provider must name a reviewed provider preset")
+    if not _is_interactive_terminal():
+        return _usage_failure("--set requires a local terminal for hidden credential input")
     typer.echo("Yoetz LLM setup")
     typer.echo("The API key is entered with hidden input and stored only in the local vault.")
     service = await _service_reachability(start_if_absent=True)
     if not service.get("reachable"):
         typer.echo("provider_setup_failed: service_unavailable", err=True)
         return 20
-    service, provider = await _interactive_provider_setup(
+    service, provider_report = await _interactive_provider_setup(
         service,
-        provider_choice="fireworks" if fireworks else None,
+        provider_choice=provider_choice,
         model=model,
-        api_key=api_key,
     )
-    binding = provider.get("binding")
-    credential = provider.get("credential")
+    binding = provider_report.get("binding")
+    credential = provider_report.get("credential")
     typer.echo("")
     typer.echo(f"Provider binding: {binding}")
     typer.echo(f"API key: {credential}")
     if binding != "configured" or credential != "stored":
-        reason = provider.get("credential_reason")
+        reason = provider_report.get("credential_reason")
         if type(reason) is str:
             typer.echo(f"Reason: {reason}")
         return 20

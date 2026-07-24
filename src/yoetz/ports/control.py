@@ -241,6 +241,7 @@ _CONTROL_ERROR_REASONS = frozenset(
         "method_forbidden",
         "internal_error",
         "privacy_projection_unavailable",
+        "privacy_projection_blocked",
         "service_generation_changed",
     }
 )
@@ -261,6 +262,8 @@ class ControlError(Exception):
             raise TypeError("control_error_retryable_invalid")
         if reason == "privacy_projection_unavailable" and not retryable:
             raise ValueError("privacy_projection_error_must_be_retryable")
+        if reason == "privacy_projection_blocked" and retryable:
+            raise ValueError("privacy_projection_blocked_must_not_be_retryable")
         self.reason = reason
         self.retryable = retryable
         super().__init__(reason)

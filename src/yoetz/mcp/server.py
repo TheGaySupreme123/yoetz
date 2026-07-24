@@ -256,6 +256,30 @@ def _control_error_result(
             "The operation was cancelled.",
             request_id=request_id,
         )
+    if error.reason == "privacy_projection_blocked":
+        return structured_error_result(
+            PublicErrorCode.PRIVACY_AUTHORITY_REQUIRED,
+            (
+                "The receipt is durably recorded, but JSON projection to agent context is blocked "
+                "by the active privacy policy. Re-request with format markdown or text, or widen "
+                "the agent-context policy from a local terminal."
+            ),
+            retryable=False,
+            request_id=request_id,
+            safe_details={
+                "reason_code": "receipt_json_projection_blocked",
+                "operation": "receipt",
+                "field": "format",
+            },
+        )
+    if error.reason == "privacy_projection_unavailable":
+        return structured_error_result(
+            PublicErrorCode.SERVICE_UNAVAILABLE,
+            "Receipt projection is temporarily unavailable; retry after the local service is ready.",
+            retryable=True,
+            request_id=request_id,
+            safe_details={"reason_code": "privacy_projection_unavailable"},
+        )
     if error.reason in {"service_unavailable", "service_draining", "request_timeout"}:
         return structured_error_result(
             PublicErrorCode.SERVICE_UNAVAILABLE,

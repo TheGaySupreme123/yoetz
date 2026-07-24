@@ -109,3 +109,46 @@ def test_semantic_status_reason_cross_pair_is_rejected() -> None:
             SemanticStatus.NOT_CONFIGURED,
             SemanticReason.PROVIDER_TIMEOUT,
         )
+
+
+def test_deterministic_only_marks_semantic_not_requested_gap_without_verdict_change() -> None:
+    from yoetz.application.check import semantic_coverage_gap_code
+    from yoetz.domain.receipts import SEMANTIC_REVIEW_NOT_REQUESTED_GAP
+    from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
+
+    gap = semantic_coverage_gap_code(
+        SemanticStatus.NOT_REQUESTED, SemanticReason.DETERMINISTIC_MODE
+    )
+    assert gap == SEMANTIC_REVIEW_NOT_REQUESTED_GAP
+
+    case = _unsupported_claim_case()
+    assessments, _executions = run_deterministic_policies(
+        case,
+        CheckScope((), ()),
+        ("research-evidence/0.1.0", "work-integrity/0.1.0"),
+    )
+    findings = allocate_findings(_Ids(), tuple(item.candidate for item in assessments))
+    coverage = case_coverage(case)
+    # Simulate check merge: add gap, CURRENT -> PARTIAL, COVERAGE_INCOMPLETE
+    gaps = set(coverage.known_gaps)
+    gaps.add(gap)
+    from dataclasses import replace
+
+    from yoetz.protocol.coverage import LedgerFreshness as LF
+
+    freshness = coverage.ledger_freshness
+    if freshness is LF.CURRENT:
+        freshness = LF.PARTIAL
+    coverage = replace(
+        coverage, ledger_freshness=freshness, known_gaps=tuple(sorted(gaps, key=str.encode))
+    )
+    ranked = rank_findings(
+        findings,
+        (),
+        RankingContext(coverage, CheckCompleteness.COVERAGE_INCOMPLETE),
+        3,
+    )
+    # Verdict still driven by findings, not by the semantic gap alone.
+    assert ranked.verdict is CheckVerdict.ACTION_REQUIRED
+    assert SEMANTIC_REVIEW_NOT_REQUESTED_GAP in coverage.known_gaps
+    assert coverage.ledger_freshness is LF.PARTIAL

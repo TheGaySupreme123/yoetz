@@ -70,6 +70,7 @@ __all__ = [
     "ReceiptVersionSlice",
     "SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP",
     "SEMANTIC_REVIEW_NOT_CONFIGURED_GAP",
+    "SEMANTIC_REVIEW_NOT_REQUESTED_GAP",
     "SchemaVersionEntry",
     "receipt_document_from_json",
     "receipt_document_to_json",
@@ -79,13 +80,16 @@ __all__ = [
 
 # Structural receipt/check coverage gap codes for optional semantic relevance review.
 # Distinct from policy-block; not-configured and evaluator failure share honest not-run wording.
+# semantic_review_not_requested marks every deterministic-only check (semantic never attempted).
 SEMANTIC_REVIEW_NOT_CONFIGURED_GAP: Final = "semantic_review_not_configured"
 SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP: Final = "semantic_relevance_review_not_run"
+SEMANTIC_REVIEW_NOT_REQUESTED_GAP: Final = "semantic_review_not_requested"
 OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP: Final = "optional_semantic_review_blocked_by_policy"
 _SEMANTIC_REVIEW_NOT_RUN_GAPS: Final = frozenset(
     {
         SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
         SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
+        SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
     }
 )
 

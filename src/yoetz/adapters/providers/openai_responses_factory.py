@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from yoetz.adapters.privacy.gateway import ExternalProviderFactory
 from yoetz.adapters.providers.openai_responses import (
     OneAttemptCredentialTransport,
     OpenAIProfile,
@@ -163,22 +162,14 @@ class OpenAIResponsesExternalFactory:
 def external_factory_builders_from_config(
     provider: ProviderProfileConfig | None, *, clock: ClockPort
 ) -> dict[ProviderBinding, object]:
-    """Return builders only for official OpenAI / Fireworks / owner-declared Responses."""
+    """Dispatch to the full factory table (Responses + Chat Completions + Vercel).
 
-    if provider is None:
-        return {}
-    allowed = {
-        OFFICIAL_OPENAI_ENDPOINT_PROFILE_ID,
-        "fireworks-responses",
-        OWNER_DECLARED_ENDPOINT_PROFILE_ID,
-    }
-    if provider.endpoint_profile_id not in allowed:
-        return {}
-    binding = provider_binding_from_config(provider)
-    now = clock.now_utc()
+    Prefer importing from :mod:`yoetz.adapters.providers.factory`. This wrapper remains so
+    existing call sites and tests keep working.
+    """
 
-    def _builder() -> ExternalProviderFactory:
-        profile = openai_profile_from_provider_config(provider, now=now)
-        return OpenAIResponsesExternalFactory(profile, clock)
+    from yoetz.adapters.providers.factory import (
+        external_factory_builders_from_config as _dispatch,
+    )
 
-    return {binding: _builder}
+    return _dispatch(provider, clock=clock)

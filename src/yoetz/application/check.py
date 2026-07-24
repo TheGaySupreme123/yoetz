@@ -21,6 +21,7 @@ from yoetz.domain.receipts import (
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
+    SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
 )
 from yoetz.domain.values import (
     Frontier,
@@ -233,8 +234,10 @@ def semantic_coverage_gap_code(status: SemanticStatus, reason: SemanticReason) -
     """Map a terminal semantic outcome to the receipt/check structural gap code, or None."""
 
     validate_semantic_outcome(status, reason)
-    if status in {SemanticStatus.NOT_REQUESTED, SemanticStatus.SUCCEEDED}:
+    if status is SemanticStatus.SUCCEEDED:
         return None
+    if status is SemanticStatus.NOT_REQUESTED:
+        return SEMANTIC_REVIEW_NOT_REQUESTED_GAP
     if status is SemanticStatus.BLOCKED_BY_POLICY:
         return OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP
     if status is SemanticStatus.NOT_CONFIGURED:
@@ -985,4 +988,7 @@ async def execute_check_commit(app: Application, request: CheckRequest) -> Check
 async def execute_check(app: Application, request: CheckRequest) -> CheckCommitResult:
     """Return the closed sink-independent result for the facade's sole projection step."""
 
+    # Omitted mode resolves via policy so recorded check events always carry a concrete mode.
+    if request.mode is None:
+        request = request.model_copy(update={"mode": app.verification_policy.default_check_mode})
     return await execute_check_commit(app, request)

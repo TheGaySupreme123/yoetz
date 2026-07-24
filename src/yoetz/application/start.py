@@ -163,7 +163,13 @@ def _error(
 
 
 def _invalid_request() -> PublicOperationError:
-    return _error(PublicErrorCode.INVALID_REQUEST, "The start request is invalid.")
+    return _error(
+        PublicErrorCode.INVALID_REQUEST,
+        (
+            "The start request is invalid. Use the tool input schema; client must include "
+            "kind, version, and integration with exact allowed values."
+        ),
+    )
 
 
 def _storage_corrupt(code: str) -> PublicOperationError:

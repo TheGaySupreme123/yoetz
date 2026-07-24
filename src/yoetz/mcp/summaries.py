@@ -112,6 +112,12 @@ def summary_for_check(envelope: object) -> str:
     suppressed = _safe_count(source.get("suppressed_count"))
     status = _safe_token(source.get("semantic_status"))
     reason = _safe_token(source.get("semantic_reason"))
+    if status == "not_requested":
+        return _bounded(
+            f"Semantic review not requested; deterministic-only check verdict: {verdict}; "
+            f"findings returned: {findings}; suppressed: {suppressed}; "
+            f"semantic status/reason: {status}/{reason}; frontier: {_sequence(source)}."
+        )
     return _bounded(
         f"Check verdict: {verdict}; findings returned: {findings}; suppressed: {suppressed}; "
         f"semantic status/reason: {status}/{reason}; frontier: {_sequence(source)}."
