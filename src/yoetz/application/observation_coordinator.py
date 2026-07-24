@@ -808,9 +808,7 @@ class ObservationCoordinator:
                                 }
                             )
                         )
-                        excerpt_ref = await self._encrypt_captured_content(
-                            runtime, excerpt_bytes
-                        )
+                        excerpt_ref = await self._encrypt_captured_content(runtime, excerpt_bytes)
                         excerpt_object_id = excerpt_ref.object_id
             except Exception:
                 self.local.note_coverage_gap(
