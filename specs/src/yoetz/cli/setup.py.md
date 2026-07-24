@@ -67,12 +67,15 @@ canonical JSON, mode 0600, at `setup_marker_path()`; a dry run (`--non-interacti
 canonical JSON in JSON/non-TTY mode or a bounded human summary interactively, and returns 0 for
 every completed run — partial outcomes are reported honestly, not encoded as failures. The report
 includes a `readiness` object with Codex exe/version, MCP registration, plugin installation, hook
-presence/trust, consent, service routing, `observation_ready`, and semantic-advice readiness.
-“Ready to observe” requires verified plugin/hooks + active consent + service routing; stored
-consent alone is insufficient. The human summary reports the same layers as separate structural
-lines. Successful MCP registration is phrased as recorded registration with automatic activation
-not tested; skill support states when no tested capability profile exists. The summary never claims
-or implies that Yoetz is set up or ready on a harness merely because an MCP entry exists.
+presence/trust, consent, service routing, `observation_hook_probe`, `observation_ready`, and
+semantic-advice readiness. “Ready to observe” requires verified plugin/hooks that declare
+`yoetz hooks observe --workspace .`, active consent, service routing, **and** an installed-artifact
+hook probe that proves project binding plus durable envelope enqueue for a synthetic SessionStart.
+Stored consent or plugin presence alone is insufficient. The human summary reports the same layers
+as separate structural lines. Successful MCP registration is phrased as recorded registration with
+automatic activation not tested; skill support states when no tested capability profile exists. The
+summary never claims or implies that Yoetz is set up or ready on a harness merely because an MCP
+entry exists.
 
 When `.yoetz/checks.toml` exists, interactive setup parses fixed schema
 `yoetz.approved-check-policy/1` and shows the exact raw-byte SHA-256 digest plus check IDs before

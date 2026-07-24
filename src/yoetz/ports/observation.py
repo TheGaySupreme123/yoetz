@@ -89,7 +89,46 @@ class TaskObservationPort(Protocol):
 
     def load_advice_snapshot(self, workspace: str) -> AdviceSnapshot | None: ...
 
+    def load_advice_snapshot_for_session(
+        self, *, workspace: str, yoetz_session_id: str
+    ) -> AdviceSnapshot | None: ...
+
+    def set_session_advice_snapshot(
+        self,
+        *,
+        workspace: str,
+        yoetz_session_id: str,
+        snapshot: AdviceSnapshot,
+        updated_at: Timestamp,
+    ) -> None: ...
+
     def load_latest_advice_snapshot(self) -> AdviceSnapshot | None: ...
+
+    def workspace_for_yoetz_session(self, yoetz_session_id: str) -> str | None: ...
+
+    def record_workspace_session_route(
+        self,
+        *,
+        workspace: str,
+        yoetz_session_id: str,
+        yoetz_task_id: str,
+        yoetz_writer_id: str,
+        codex_session_commitment: str,
+        bound_at: Timestamp,
+    ) -> None: ...
+
+    def record_inspection_snapshot(
+        self,
+        *,
+        workspace: str,
+        yoetz_session_id: str,
+        subject_state_digest: str,
+        changed_paths_digest: str,
+        relative_paths: tuple[str, ...],
+        facts_object_id: str | None,
+        excerpt_object_id: str | None,
+        recorded_at: Timestamp,
+    ) -> None: ...
 
     def record_advice_history(
         self,

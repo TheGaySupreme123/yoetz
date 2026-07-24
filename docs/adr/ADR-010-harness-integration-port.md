@@ -137,10 +137,12 @@ adding a harness is still one `HarnessId` value plus adapters, with no shared-ty
 Codex integration, still on protocol version `0.1`. Observation is a sibling local-control
 capability (`ObservationPort`), not a seventh MCP tool and not an `IntegrationsPort` overload.
 Existing v0.1 ledger/object data remains readable. Bundle migration `0002` owns consent, cursor,
-dedup, structural envelopes, and the current advice snapshot. Unreleased migration `0003` is the
-single owner for authenticated encrypted workspace-locator/content references, canonical logical
-identity claims, exact-digest check-policy trust, generation-fenced verification jobs/results, and
-advice history/delivery state. Repositories own those tables; coordinators do not issue private SQL.
+dedup, structural envelopes, and the current advice snapshot. Migration `0003` owns authenticated
+encrypted workspace-locator/content references, canonical logical identity claims, exact-digest
+check-policy trust, generation-fenced verification jobs/results, and advice history/delivery state.
+Migration `0004` owns inspection snapshots, workspace→Yoetz-session routing, and session-scoped
+current advice without rewriting `0003`. Repositories own those tables; coordinators do not issue
+private SQL.
 Observation consent is project-level and separate from egress consent. The plaintext local boundary
 records a private workspace commitment, structural outbox/quarantine evidence, and encrypted object
 identities—never raw task content or a raw path in logs/status/SQLite.
@@ -156,11 +158,17 @@ eviction retains aggregate commitment/count/time range plus a loss gap.
 
 After every completed tool action, ready-service composition captures a descriptor-safe structural
 workspace digest. Real state change enqueues exact-policy verification; unchanged state does not.
-One job runs per workspace, newer pending state coalesces older pending work, abandoned generation
-leases recover after restart, and a result becomes current only if post-run state still matches.
-Deterministic advice consumes this evidence offline and materializes through existing
-`finding_recorded`; ordinary `status(view="advice")` and safe hook context surface the same bounded
-finding/evidence identities. The MCP registry remains exactly six tools.
+Approved checks never execute inside the hook RPC budget. A generation-fenced
+`ObservationVerificationSupervisor` owned by the ready application lifecycle drains pending jobs:
+one job runs per workspace through the enforcing sandbox, newer pending state coalesces older
+pending work, abandoned generation leases recover after restart, and a result becomes current only
+if post-run state still matches. Sandbox absence is an explicit unavailable result, never a pass.
+Bundle migration `0004` owns durable inspection snapshots, workspace→Yoetz-session routes, and
+session-scoped current advice; migration `0003` is immutable. Deterministic advice consumes this
+evidence offline and materializes through existing `finding_recorded`; ordinary
+`status(view="advice")` loads only the advice for the routed workspace and Yoetz session, and safe
+hook context surfaces the same bounded finding/evidence identities. The MCP registry remains exactly
+six tools.
 
 A fork can make Yoetz first-party on another harness by writing one adapter and one profile. It
 edits no port, no registry, no guidance, and no schema. That is the property this ADR exists to

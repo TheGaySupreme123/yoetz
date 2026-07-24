@@ -6,17 +6,24 @@ import asyncio
 import base64
 from collections import Counter
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from yoetz.domain.privacy import (
+    ApprovedLocalDisclosureCase,
     ApprovedLocalItem,
+    ApprovedOutboundCase,
     AuthorizationScope,
     CandidateContext,
     ClassifiedContext,
     ConsentSource,
     DataCategory,
     DataClass,
+    DisclosureProposal,
     DisclosureProvenance,
+    EgressAuthorization,
+    EgressChannel,
+    EgressReceipt,
+    HumanPrivacyDecision,
     LocalDisclosureApproved,
     LocalDisclosureBlocked,
     LocalDisclosureOmission,
@@ -26,7 +33,9 @@ from yoetz.domain.privacy import (
     PreDispatchAuditDecision,
     PrivacyDecision,
     PrivacyOutcome,
+    PrivacyProfile,
     PrivacyReason,
+    ProviderBinding,
     ReceiptCounts,
     ReceiptPolicyBinding,
     ReceiptSecretScan,
@@ -38,19 +47,101 @@ from yoetz.ports.privacy import (
     AgentProjectionRequest,
     DisclosureProposalRequest,
     EffectivePrivacyPolicy,
+    HumanPrivacyControlPort,
     MinimizedDisclosure,
     OutboundGatewayPort,
+    PendingHumanDecision,
     PrivacyAuditPort,
     PrivacyClassifierPort,
     PrivacyPolicyStorePort,
 )
+from yoetz.ports.semantic import (
+    Deadline,
+    SemanticResult,
+    SemanticResultInvalid,
+    SemanticResultLate,
+    SemanticResultRefused,
+    SemanticResultSuccess,
+    SemanticResultTimeout,
+    SemanticResultUnavailable,
+)
 from yoetz.protocol.canonical import canonical_digest, canonical_encode
 from yoetz.protocol.ids import IdKind
 
-__all__ = ["PrivacyCoordinator"]
+__all__ = [
+    "PrivacyCoordinator",
+    "SemanticEgressAwaitingHuman",
+    "SemanticEgressBlocked",
+    "SemanticEgressProviderOutcome",
+    "SemanticEgressResult",
+    "SemanticEgressSuccess",
+]
 
 type LocalDisclosureResult = (
     LocalDisclosureApproved | LocalDisclosureBlocked | LocalDisclosureUnavailable
+)
+
+_SEMANTIC_PURPOSE = "semantic_check"
+_MEDIA_TYPE = "application/json"
+_SCHEMA_ID = "yoetz-semantic-case-1.0.0"
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticEgressSuccess:
+    """Terminal success: durable attempt receipt exists; judgment may steer a check."""
+
+    request_id: str
+    privacy_proposal_id: str
+    authorization_id: str
+    result: SemanticResultSuccess
+    case_digest: str
+    privacy_receipt_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticEgressAwaitingHuman:
+    """Nonterminal: exact prepared case awaits local human decision; no findings."""
+
+    request_id: str
+    privacy_proposal_id: str
+    subject_digest: str
+    expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticEgressBlocked:
+    """Terminal pre-dispatch or human denial/expiry; never invents semantic findings."""
+
+    request_id: str
+    outcome: PrivacyOutcome
+    reason: PrivacyReason
+    privacy_proposal_id: str | None = None
+    receipt_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticEgressProviderOutcome:
+    """Terminal provider attempt that is not a usable success (refuse/timeout/invalid/…)."""
+
+    request_id: str
+    privacy_proposal_id: str
+    authorization_id: str | None
+    result: (
+        SemanticResultRefused
+        | SemanticResultTimeout
+        | SemanticResultInvalid
+        | SemanticResultLate
+        | SemanticResultUnavailable
+    )
+    case_digest: str
+    privacy_receipt_id: str | None = None
+
+
+type SemanticEgressResult = (
+    SemanticEgressSuccess
+    | SemanticEgressAwaitingHuman
+    | SemanticEgressBlocked
+    | SemanticEgressProviderOutcome
 )
 
 
@@ -72,8 +163,10 @@ class PrivacyCoordinator:
         "_close_task",
         "_closed",
         "_gateway",
+        "_human",
         "_ids",
         "_policies",
+        "_service_generation",
     )
 
     def __init__(
@@ -84,7 +177,12 @@ class PrivacyCoordinator:
         gateway: OutboundGatewayPort,
         clock: ClockPort,
         ids: IdPort,
+        *,
+        service_generation: int = 1,
+        human: HumanPrivacyControlPort | None = None,
     ) -> None:
+        if type(service_generation) is not int or service_generation <= 0:
+            raise ValueError("privacy_service_generation_invalid")
         self._policies = policies
         self._classifier = classifier
         self._audit = audit
@@ -92,9 +190,43 @@ class PrivacyCoordinator:
         self._gateway = gateway
         self._clock = clock
         self._ids = ids
+        self._service_generation = service_generation
+        self._human = human
         self._closed = False
         self._close_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
+
+    async def evaluate_semantic(
+        self, candidate: CandidateContext, deadline: Deadline
+    ) -> SemanticEgressResult:
+        if type(candidate) is not CandidateContext or type(deadline) is not Deadline:
+            raise TypeError("semantic_egress_arguments_invalid")
+        async with self._admission_lock:
+            if self._closed:
+                return SemanticEgressBlocked(
+                    candidate.request_id,
+                    PrivacyOutcome.CHANNEL_UNAVAILABLE,
+                    PrivacyReason.CHANNEL_UNAVAILABLE,
+                )
+            return await self._evaluate_semantic_admitted(candidate, deadline)
+
+    async def resume(
+        self, request_id: str, case_digest: str, deadline: Deadline
+    ) -> SemanticEgressResult:
+        if (
+            type(request_id) is not str
+            or type(case_digest) is not str
+            or type(deadline) is not Deadline
+        ):
+            raise TypeError("semantic_egress_resume_invalid")
+        async with self._admission_lock:
+            if self._closed:
+                return SemanticEgressBlocked(
+                    request_id,
+                    PrivacyOutcome.CHANNEL_UNAVAILABLE,
+                    PrivacyReason.CHANNEL_UNAVAILABLE,
+                )
+            return await self._resume_admitted(request_id, case_digest, deadline)
 
     async def prepare_local_disclosure(self, candidate: CandidateContext) -> LocalDisclosureResult:
         if type(candidate) is not CandidateContext or candidate.local_sink is None:
@@ -218,6 +350,760 @@ class PrivacyCoordinator:
                     self._close_task = asyncio.create_task(self._gateway.close())
                 task = self._close_task
         await task
+
+    async def _evaluate_semantic_admitted(
+        self, candidate: CandidateContext, deadline: Deadline
+    ) -> SemanticEgressResult:
+        if candidate.channel is None or candidate.local_sink is not None:
+            return SemanticEgressBlocked(
+                candidate.request_id,
+                PrivacyOutcome.CHANNEL_UNAVAILABLE,
+                PrivacyReason.CHANNEL_UNAVAILABLE,
+            )
+        if candidate.channel is not EgressChannel.LLM_INFERENCE:
+            return await self._complete_semantic_predispatch(
+                candidate,
+                await self._policies.effective_policy(candidate.scope),
+                PrivacyOutcome.CHANNEL_UNAVAILABLE,
+                PrivacyReason.CHANNEL_UNAVAILABLE,
+            )
+        if candidate.purpose != _SEMANTIC_PURPOSE:
+            return SemanticEgressBlocked(
+                candidate.request_id,
+                PrivacyOutcome.BLOCKED_BY_POLICY,
+                PrivacyReason.PURPOSE_NOT_ALLOWED,
+            )
+        if candidate.provider_binding is None or candidate.subject_digest is None:
+            return SemanticEgressBlocked(
+                candidate.request_id,
+                PrivacyOutcome.CHANNEL_UNAVAILABLE,
+                PrivacyReason.CHANNEL_UNAVAILABLE,
+            )
+        if deadline.expired(self._clock.monotonic_seconds()):
+            return SemanticEgressBlocked(
+                candidate.request_id,
+                PrivacyOutcome.TIMEOUT,
+                PrivacyReason.DEADLINE_EXPIRED,
+            )
+
+        effective = await self._policies.effective_policy(candidate.scope)
+        # Concurrent generation change restarts policy evaluation before dispatch.
+        effective = await self._policies.effective_policy(candidate.scope)
+        return await self._semantic_pipeline(candidate, effective, deadline)
+
+    async def _resume_admitted(
+        self, request_id: str, case_digest: str, deadline: Deadline
+    ) -> SemanticEgressResult:
+        state = await self._audit.load(request_id, case_digest)
+        if state is None:
+            return SemanticEgressBlocked(
+                request_id,
+                PrivacyOutcome.AUDIT_FAILED,
+                PrivacyReason.AUDIT_FAILED,
+            )
+        status = state.status
+        if status == "awaiting_human":
+            return SemanticEgressAwaitingHuman(
+                request_id,
+                state.reservation.privacy_proposal_id,
+                state.reservation.subject_digest,
+                state.reservation.reserved_at + timedelta(seconds=60),
+            )
+        if status in {"denied", "expired", "decision_completed"}:
+            return SemanticEgressBlocked(
+                request_id,
+                PrivacyOutcome.HUMAN_DENIED
+                if status == "denied"
+                else PrivacyOutcome.APPROVAL_EXPIRED
+                if status == "expired"
+                else PrivacyOutcome.BLOCKED_BY_POLICY,
+                PrivacyReason.HUMAN_DENIED
+                if status == "denied"
+                else PrivacyReason.AUTHORIZATION_EXPIRED
+                if status == "expired"
+                else PrivacyReason.POLICY_DENIED,
+                privacy_proposal_id=state.reservation.privacy_proposal_id,
+                receipt_id=state.receipt_id,
+            )
+        if status in {"receipt_pending", "attempt_completed"}:
+            # Attempt already consumed; automatic retry requires a fresh evaluate_semantic.
+            return SemanticEgressBlocked(
+                request_id,
+                PrivacyOutcome.APPROVAL_EXPIRED,
+                PrivacyReason.AUTHORIZATION_REUSED,
+                privacy_proposal_id=state.reservation.privacy_proposal_id,
+                receipt_id=state.receipt_id,
+            )
+        if status not in {"reserved", "approved", "authorized"}:
+            return SemanticEgressBlocked(
+                request_id,
+                PrivacyOutcome.AUDIT_FAILED,
+                PrivacyReason.AUDIT_FAILED,
+                privacy_proposal_id=state.reservation.privacy_proposal_id,
+            )
+        if deadline.expired(self._clock.monotonic_seconds()):
+            return SemanticEgressBlocked(
+                request_id,
+                PrivacyOutcome.TIMEOUT,
+                PrivacyReason.DEADLINE_EXPIRED,
+                privacy_proposal_id=state.reservation.privacy_proposal_id,
+            )
+        try:
+            proposal = await self._audit.load_disclosure_proposal(
+                state.reservation.privacy_proposal_id
+            )
+        except Exception:
+            proposal = None
+        if proposal is None or proposal.prepared_case_digest != case_digest:
+            return SemanticEgressBlocked(
+                request_id,
+                PrivacyOutcome.AUDIT_FAILED,
+                PrivacyReason.AUDIT_FAILED,
+                privacy_proposal_id=state.reservation.privacy_proposal_id,
+            )
+        try:
+            effective = await self._policies.effective_policy(proposal.scope)
+        except Exception:
+            return SemanticEgressBlocked(
+                request_id,
+                PrivacyOutcome.AUDIT_FAILED,
+                PrivacyReason.AUDIT_FAILED,
+                privacy_proposal_id=proposal.privacy_proposal_id,
+            )
+        binding = proposal.provider_binding
+        if binding is None and proposal.local_sink is LocalDisclosureSink.LOCAL_MODEL:
+            # Local AF_UNIX semantic resume needs the standing local-model binding.
+            binding = effective.policy.local_model_binding
+        if binding is None:
+            return SemanticEgressBlocked(
+                request_id,
+                PrivacyOutcome.AUDIT_FAILED,
+                PrivacyReason.AUDIT_FAILED,
+                privacy_proposal_id=proposal.privacy_proposal_id,
+            )
+        channel = (
+            EgressChannel.LLM_INFERENCE
+            if proposal.provider_binding is not None or binding.transport == "local_af_unix"
+            else None
+        )
+        candidate = CandidateContext(
+            request_id=request_id,
+            channel=channel,
+            local_sink=None if channel is not None else proposal.local_sink,
+            purpose=proposal.purpose,
+            scope=proposal.scope,
+            subject_digest=case_digest,
+            provider_binding=binding,
+            items=(),
+        )
+        minimized = MinimizedDisclosure(
+            prepared_bytes=proposal.prepared_bytes,
+            included_item_ids=proposal.source_item_digests,
+            source_item_digests=proposal.source_item_digests,
+            approved_categories=proposal.approved_categories,
+            blocked_categories=proposal.blocked_categories,
+            transformation_summary=proposal.transformation_summary,
+            byte_count=len(proposal.prepared_bytes),
+            token_count=proposal.max_tokens,
+            case_digest=proposal.prepared_case_digest,
+            scanner_registry_version="resume",
+            scanner_profile_digest=proposal.policy_digest,
+            forbidden_findings=(),
+        )
+        if status == "authorized":
+            auth_id = state.authorization_id
+            if type(auth_id) is not str:
+                return SemanticEgressBlocked(
+                    request_id,
+                    PrivacyOutcome.AUDIT_FAILED,
+                    PrivacyReason.AUDIT_FAILED,
+                    privacy_proposal_id=proposal.privacy_proposal_id,
+                )
+            try:
+                authorization = await self._audit.load_authorization(auth_id)
+            except Exception:
+                authorization = None
+            if authorization is None:
+                return SemanticEgressBlocked(
+                    request_id,
+                    PrivacyOutcome.AUDIT_FAILED,
+                    PrivacyReason.AUDIT_FAILED,
+                    privacy_proposal_id=proposal.privacy_proposal_id,
+                )
+            return await self._dispatch_approved(
+                candidate,
+                effective,
+                proposal,
+                minimized,
+                ConsentSource.BASELINE_POLICY,
+                deadline,
+                subject_digest=state.reservation.subject_digest,
+                authorization=authorization,
+            )
+        return await self._dispatch_approved(
+            candidate,
+            effective,
+            proposal,
+            minimized,
+            ConsentSource.BASELINE_POLICY,
+            deadline,
+            subject_digest=state.reservation.subject_digest,
+        )
+
+    async def _semantic_pipeline(
+        self,
+        candidate: CandidateContext,
+        effective: EffectivePrivacyPolicy,
+        deadline: Deadline,
+    ) -> SemanticEgressResult:
+        policy = effective.policy
+        binding = candidate.provider_binding
+        assert binding is not None
+
+        if candidate.channel is not EgressChannel.LLM_INFERENCE:
+            return await self._complete_semantic_predispatch(
+                candidate,
+                effective,
+                PrivacyOutcome.CHANNEL_UNAVAILABLE,
+                PrivacyReason.CHANNEL_UNAVAILABLE,
+            )
+
+        llm = next(
+            item for item in policy.channel_policies if item.channel is EgressChannel.LLM_INFERENCE
+        )
+        if policy.profile is PrivacyProfile.LOCAL_ONLY and binding.transport == "external":
+            return await self._complete_semantic_predispatch(
+                candidate,
+                effective,
+                PrivacyOutcome.BLOCKED_BY_POLICY,
+                PrivacyReason.DESTINATION_NOT_ALLOWED,
+            )
+        if not policy.network_egress_permitted or not llm.enabled:
+            if binding.transport == "external":
+                return await self._complete_semantic_predispatch(
+                    candidate,
+                    effective,
+                    PrivacyOutcome.CHANNEL_UNAVAILABLE,
+                    PrivacyReason.CHANNEL_UNAVAILABLE,
+                )
+        if (
+            llm.provider_binding is not None
+            and binding.transport == "external"
+            and llm.provider_binding != binding
+        ):
+            return await self._complete_semantic_predispatch(
+                candidate,
+                effective,
+                PrivacyOutcome.BLOCKED_BY_POLICY,
+                PrivacyReason.DESTINATION_NOT_ALLOWED,
+            )
+        if _SEMANTIC_PURPOSE not in llm.allowed_purposes and llm.enabled:
+            return await self._complete_semantic_predispatch(
+                candidate,
+                effective,
+                PrivacyOutcome.BLOCKED_BY_POLICY,
+                PrivacyReason.PURPOSE_NOT_ALLOWED,
+            )
+
+        classified = self._classifier.classify(candidate, effective)
+        decision = self._semantic_decision(classified, effective, binding)
+        if decision.outcome is not PrivacyOutcome.COMPLETED:
+            return await self._complete_semantic_predispatch(
+                candidate,
+                effective,
+                decision.outcome,
+                decision.reason or PrivacyReason.POLICY_DENIED,
+            )
+
+        minimized = self._classifier.minimize_and_scan(classified, decision)
+        # Re-run policy intersection after preparation.
+        effective = await self._policies.effective_policy(candidate.scope)
+        if minimized.forbidden_findings:
+            return await self._complete_semantic_predispatch(
+                candidate,
+                effective,
+                PrivacyOutcome.BLOCKED_FORBIDDEN_DATA,
+                PrivacyReason.NEVER_SEND_DETECTED,
+            )
+        if not minimized.included_item_ids:
+            return await self._complete_semantic_predispatch(
+                candidate,
+                effective,
+                PrivacyOutcome.BLOCKED_BY_POLICY,
+                PrivacyReason.INSUFFICIENT_APPROVED_CONTEXT,
+            )
+
+        task_id = candidate.scope.task_id
+        if task_id is None:
+            return await self._complete_semantic_predispatch(
+                candidate,
+                effective,
+                PrivacyOutcome.BLOCKED_BY_POLICY,
+                PrivacyReason.SCOPE_MISMATCH,
+            )
+
+        now = self._clock.now_utc()
+        local_sink = (
+            LocalDisclosureSink.LOCAL_MODEL if binding.transport == "local_af_unix" else None
+        )
+        provider_binding = binding if binding.transport == "external" else None
+        try:
+            prepared = await self._audit.prepare_disclosure_proposal(
+                DisclosureProposalRequest(
+                    privacy_proposal_id=self._ids.new(IdKind.PRIVACY_PROPOSAL),
+                    request_id=candidate.request_id,
+                    task_id=task_id,
+                    minimized=minimized,
+                    provider_binding=provider_binding,
+                    local_sink=local_sink,
+                    purpose=candidate.purpose,
+                    scope=candidate.scope,
+                    policy_id=effective.policy.policy_id,
+                    policy_version=effective.policy.version,
+                    policy_generation=effective.generation,
+                    policy_digest=effective.effective_digest,
+                    max_bytes=minimized.byte_count,
+                    max_tokens=minimized.token_count,
+                    expires_at=now
+                    + timedelta(seconds=max(60, llm.authorization_ttl_seconds or 60)),
+                )
+            )
+        except Exception:
+            return SemanticEgressBlocked(
+                candidate.request_id,
+                PrivacyOutcome.AUDIT_FAILED,
+                PrivacyReason.AUDIT_FAILED,
+            )
+
+        proposal = prepared.proposal
+        preview_required = (
+            policy.profile is PrivacyProfile.CONFIRM_EVERY_REQUEST or llm.preview_required
+        )
+        subject_digest = prepared.reservation.subject_digest
+        if preview_required:
+            return await self._handle_human_gate(
+                candidate,
+                effective,
+                proposal,
+                minimized,
+                subject_digest,
+                deadline,
+            )
+        return await self._dispatch_approved(
+            candidate,
+            effective,
+            proposal,
+            minimized,
+            ConsentSource.BASELINE_POLICY,
+            deadline,
+            subject_digest=subject_digest,
+        )
+
+    async def _handle_human_gate(
+        self,
+        candidate: CandidateContext,
+        effective: EffectivePrivacyPolicy,
+        proposal: DisclosureProposal,
+        minimized: MinimizedDisclosure,
+        subject_digest: str,
+        deadline: Deadline,
+    ) -> SemanticEgressResult:
+        if self._human is None:
+            try:
+                await self._audit.mark_awaiting_human(proposal.privacy_proposal_id)
+            except Exception:
+                pass
+            return SemanticEgressAwaitingHuman(
+                candidate.request_id,
+                proposal.privacy_proposal_id,
+                subject_digest,
+                proposal.expires_at,
+            )
+        try:
+            decision = await self._human.request_disclosure_decision(proposal)
+        except Exception:
+            return SemanticEgressBlocked(
+                candidate.request_id,
+                PrivacyOutcome.AUDIT_FAILED,
+                PrivacyReason.AUDIT_FAILED,
+                privacy_proposal_id=proposal.privacy_proposal_id,
+            )
+        if type(decision) is PendingHumanDecision:
+            try:
+                await self._audit.mark_awaiting_human(proposal.privacy_proposal_id)
+            except Exception:
+                pass
+            return SemanticEgressAwaitingHuman(
+                decision.request_id,
+                decision.privacy_proposal_id,
+                subject_digest,
+                decision.expires_at,
+            )
+        if type(decision) is not HumanPrivacyDecision or not decision.approved:
+            try:
+                if type(decision) is HumanPrivacyDecision:
+                    await self._audit.record_human_decision(proposal.privacy_proposal_id, decision)
+            except Exception:
+                pass
+            return await self._complete_semantic_predispatch(
+                candidate,
+                effective,
+                PrivacyOutcome.HUMAN_DENIED,
+                PrivacyReason.HUMAN_DENIED,
+                proposal_id=proposal.privacy_proposal_id,
+            )
+        try:
+            await self._audit.record_human_decision(proposal.privacy_proposal_id, decision)
+        except Exception:
+            return SemanticEgressBlocked(
+                candidate.request_id,
+                PrivacyOutcome.AUDIT_FAILED,
+                PrivacyReason.AUDIT_FAILED,
+                privacy_proposal_id=proposal.privacy_proposal_id,
+            )
+        return await self._dispatch_approved(
+            candidate,
+            effective,
+            proposal,
+            minimized,
+            decision.consent_source,
+            deadline,
+            subject_digest=subject_digest,
+        )
+
+    async def _dispatch_approved(
+        self,
+        candidate: CandidateContext,
+        effective: EffectivePrivacyPolicy,
+        proposal: DisclosureProposal,
+        minimized: MinimizedDisclosure,
+        consent: ConsentSource,
+        deadline: Deadline,
+        *,
+        subject_digest: str,
+        authorization: object | None = None,
+    ) -> SemanticEgressResult:
+        del consent
+        binding = candidate.provider_binding
+        assert binding is not None
+        now = self._clock.now_utc()
+        if proposal.expires_at <= now or deadline.expired(self._clock.monotonic_seconds()):
+            return SemanticEgressBlocked(
+                candidate.request_id,
+                PrivacyOutcome.APPROVAL_EXPIRED,
+                PrivacyReason.AUTHORIZATION_EXPIRED,
+                privacy_proposal_id=proposal.privacy_proposal_id,
+            )
+        minted: EgressAuthorization
+        if type(authorization) is EgressAuthorization:
+            minted = authorization
+        else:
+            try:
+                minted = await self._audit.authorize(
+                    proposal.privacy_proposal_id, proposal.prepared_case_digest, now
+                )
+            except Exception:
+                return SemanticEgressBlocked(
+                    candidate.request_id,
+                    PrivacyOutcome.AUDIT_FAILED,
+                    PrivacyReason.AUDIT_FAILED,
+                    privacy_proposal_id=proposal.privacy_proposal_id,
+                )
+        authorization = minted
+
+        if binding.transport == "local_af_unix":
+            local_case = ApprovedLocalDisclosureCase(
+                self._ids.new(IdKind.OUTBOUND_CASE),
+                candidate.request_id,
+                proposal.privacy_proposal_id,
+                proposal.prepared_bytes,
+                _MEDIA_TYPE,
+                minimized.included_item_ids or proposal.source_item_digests,
+                proposal.approved_categories,
+                proposal.blocked_categories,
+                len(proposal.prepared_bytes),
+                proposal.max_tokens,
+                LocalDisclosureSink.LOCAL_MODEL,
+                binding,
+                candidate.purpose,
+                effective.effective_digest,
+                proposal.prepared_case_digest,
+            )
+            try:
+                result = await self._gateway.dispatch_local_semantic(local_case, deadline)
+            except Exception:
+                return SemanticEgressBlocked(
+                    candidate.request_id,
+                    PrivacyOutcome.TRANSPORT_FAILED,
+                    PrivacyReason.OUTCOME_UNKNOWN,
+                    privacy_proposal_id=proposal.privacy_proposal_id,
+                )
+            return await self._map_provider_result(
+                candidate.request_id,
+                proposal.privacy_proposal_id,
+                None,
+                proposal.prepared_case_digest,
+                subject_digest,
+                result,
+            )
+
+        case = ApprovedOutboundCase(
+            self._ids.new(IdKind.OUTBOUND_CASE),
+            candidate.request_id,
+            proposal.prepared_bytes,
+            _MEDIA_TYPE,
+            _SCHEMA_ID,
+            minimized.included_item_ids,
+            proposal.approved_categories,
+            proposal.blocked_categories,
+            len(proposal.prepared_bytes),
+            proposal.max_tokens,
+            binding,
+            candidate.purpose,
+            authorization.authorization_id,
+            effective.effective_digest,
+            proposal.prepared_case_digest,
+        )
+        try:
+            result = await self._gateway.dispatch_external_semantic(case, authorization, deadline)
+        except Exception:
+            return SemanticEgressBlocked(
+                candidate.request_id,
+                PrivacyOutcome.TRANSPORT_FAILED,
+                PrivacyReason.OUTCOME_UNKNOWN,
+                privacy_proposal_id=proposal.privacy_proposal_id,
+            )
+        return await self._map_provider_result(
+            candidate.request_id,
+            proposal.privacy_proposal_id,
+            authorization.authorization_id,
+            proposal.prepared_case_digest,
+            subject_digest,
+            result,
+        )
+
+    async def _map_provider_result(
+        self,
+        request_id: str,
+        privacy_proposal_id: str,
+        authorization_id: str | None,
+        case_digest: str,
+        subject_digest: str,
+        result: SemanticResult,
+    ) -> SemanticEgressResult:
+        receipt_id: str | None = None
+        try:
+            state = await self._audit.load(request_id, subject_digest)
+            if state is not None:
+                receipt_id = state.receipt_id
+        except Exception:
+            receipt_id = None
+        if type(result) is SemanticResultSuccess:
+            return SemanticEgressSuccess(
+                request_id,
+                privacy_proposal_id,
+                authorization_id or "",
+                result,
+                case_digest,
+                privacy_receipt_id=receipt_id,
+            )
+        if type(result) in {
+            SemanticResultRefused,
+            SemanticResultTimeout,
+            SemanticResultInvalid,
+            SemanticResultLate,
+            SemanticResultUnavailable,
+        }:
+            return SemanticEgressProviderOutcome(
+                request_id,
+                privacy_proposal_id,
+                authorization_id,
+                result,  # type: ignore[arg-type]
+                case_digest,
+                privacy_receipt_id=receipt_id,
+            )
+        return SemanticEgressBlocked(
+            request_id,
+            PrivacyOutcome.TRANSPORT_FAILED,
+            PrivacyReason.OUTCOME_UNKNOWN,
+            privacy_proposal_id=privacy_proposal_id,
+            receipt_id=receipt_id,
+        )
+
+    def _semantic_decision(
+        self,
+        classified: ClassifiedContext,
+        effective: EffectivePrivacyPolicy,
+        binding: ProviderBinding,
+    ) -> PrivacyDecision:
+        policy = effective.policy
+        llm = next(
+            item for item in policy.channel_policies if item.channel is EgressChannel.LLM_INFERENCE
+        )
+        if binding.transport == "local_af_unix":
+            if not policy.local_model_enabled:
+                return PrivacyDecision(
+                    (), (), PrivacyOutcome.CHANNEL_UNAVAILABLE, PrivacyReason.CHANNEL_UNAVAILABLE
+                )
+            ceiling = _LocalCeiling(
+                frozenset(policy.local_model_categories),
+                frozenset(policy.local_model_data_classes),
+            )
+        else:
+            ceiling = _LocalCeiling(
+                frozenset(llm.allowed_categories), frozenset(llm.allowed_data_classes)
+            )
+        if any(item.forbidden_findings for item in classified.items):
+            return PrivacyDecision(
+                (),
+                tuple({item.candidate.category for item in classified.items}),
+                PrivacyOutcome.BLOCKED_FORBIDDEN_DATA,
+                PrivacyReason.NEVER_SEND_DETECTED,
+            )
+        if any(not item.scope_valid for item in classified.items):
+            return PrivacyDecision(
+                (),
+                tuple(
+                    {item.candidate.category for item in classified.items if not item.scope_valid}
+                ),
+                PrivacyOutcome.CLASSIFICATION_UNCERTAIN,
+                PrivacyReason.CLASSIFICATION_UNCERTAIN,
+            )
+        approved = tuple(
+            item.candidate.item_id
+            for item in classified.items
+            if item.candidate.category in ceiling.categories
+            and item.data_class in ceiling.data_classes
+            and item.data_class is not DataClass.SECRET_OR_CRYPTOGRAPHIC
+            and item.scope_valid
+            and not item.forbidden_findings
+        )
+        blocked = tuple(
+            {
+                item.candidate.category
+                for item in classified.items
+                if item.candidate.item_id not in approved
+            }
+        )
+        if not approved and classified.items:
+            return PrivacyDecision(
+                (),
+                blocked,
+                PrivacyOutcome.BLOCKED_BY_POLICY,
+                PrivacyReason.CATEGORY_NOT_ALLOWED,
+            )
+        return PrivacyDecision(approved, blocked, PrivacyOutcome.COMPLETED, None)
+
+    async def _complete_semantic_predispatch(
+        self,
+        candidate: CandidateContext,
+        effective: EffectivePrivacyPolicy,
+        outcome: PrivacyOutcome,
+        reason: PrivacyReason,
+        *,
+        proposal_id: str | None = None,
+    ) -> SemanticEgressBlocked:
+        now = self._clock.now_utc()
+        pid = proposal_id or self._ids.new(IdKind.PRIVACY_PROPOSAL)
+        binding = candidate.provider_binding
+        destination: ProviderBinding | None = (
+            binding if binding is not None and binding.transport == "external" else None
+        )
+        subject_digest = canonical_digest(
+            {
+                "outcome": outcome.value,
+                "policy_digest": effective.effective_digest,
+                "request_id": candidate.request_id,
+                "channel": EgressChannel.LLM_INFERENCE.value,
+            }
+        )
+        subject = PreDispatchAuditDecision(
+            pid,
+            candidate.request_id,
+            EgressChannel.LLM_INFERENCE,
+            None,
+            candidate.purpose,
+            candidate.scope,
+            effective.policy.policy_id,
+            effective.policy.version,
+            effective.effective_digest,
+            None if destination is None else canonical_digest({"binding": destination.provider_id}),
+            tuple(item.category for item in candidate.items),
+            len(candidate.items),
+            len(candidate.items),
+            (),
+            now,
+            subject_digest,
+            outcome,
+            reason,
+        )
+        try:
+            reservation = await self._audit.reserve(subject)
+        except Exception:
+            return SemanticEgressBlocked(
+                candidate.request_id, PrivacyOutcome.AUDIT_FAILED, PrivacyReason.AUDIT_FAILED
+            )
+        if destination is None:
+            # Structural channel/policy block without an exact external destination still receipts.
+            destination = ProviderBinding(
+                "unavailable",
+                "unavailable",
+                "unavailable",
+                "1.0.0",
+                "external",
+            )
+        receipt = EgressReceipt(
+            "1.0.0",
+            self._ids.new(IdKind.EGRESS_RECEIPT),
+            candidate.request_id,
+            pid,
+            EgressChannel.LLM_INFERENCE,
+            outcome,
+            now,
+            candidate.scope,
+            candidate.purpose,
+            destination,
+            ReceiptPolicyBinding(
+                effective.policy.policy_id,
+                effective.policy.version,
+                effective.effective_digest,
+                _scope_digest(candidate.scope),
+            ),
+            ConsentSource.NONE,
+            (),
+            tuple({item.category for item in candidate.items}),
+            ReceiptCounts(
+                len(candidate.items),
+                0,
+                len(candidate.items),
+                0,
+                len(candidate.items),
+                sum(len(item.plaintext) for item in candidate.items),
+                0,
+                None,
+                None,
+            ),
+            ReceiptTransformations(0, 0, len(candidate.items)),
+            ReceiptSecretScan("observability-sensitive-content-v1", f"sha256:{'0' * 64}", 0, True),
+            reason,
+            1,
+        )
+        try:
+            await self._audit.complete_decision(reservation.privacy_proposal_id, receipt)
+        except Exception:
+            return SemanticEgressBlocked(
+                candidate.request_id,
+                PrivacyOutcome.AUDIT_FAILED,
+                PrivacyReason.AUDIT_FAILED,
+                privacy_proposal_id=pid,
+            )
+        return SemanticEgressBlocked(
+            candidate.request_id,
+            outcome,
+            reason,
+            privacy_proposal_id=pid,
+            receipt_id=receipt.receipt_id,
+        )
 
     def _local_decision(
         self, classified: ClassifiedContext, effective: EffectivePrivacyPolicy

@@ -33,6 +33,7 @@ __all__ = [
     "GIT_SUBJECT_STATE_FORMAT",
     "GitStateComponents",
     "GitSubjectStateAdapter",
+    "list_changed_relative_paths",
     "open_local_workspace",
 ]
 
@@ -259,6 +260,49 @@ def open_local_workspace(path: Path) -> LocalWorkspaceHandle:
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+
+
+def list_changed_relative_paths(
+    workspace: LocalWorkspaceHandle,
+    *,
+    max_files: int = MAX_SUBJECT_STATE_FILES,
+) -> tuple[str, ...]:
+    """Return a bounded, sorted set of project-relative changed/untracked paths.
+
+    Sibling to ``capture``: uses the same descriptor-safe Git runner but returns path
+    names only (never file contents). Overflow beyond ``max_files`` raises ValueError
+    rather than silently truncating.
+    """
+
+    from yoetz.ports.workspace_inspect import MAX_INSPECT_FILES
+
+    limit = min(max_files, MAX_INSPECT_FILES, MAX_SUBJECT_STATE_FILES)
+    if type(limit) is not int or limit < 1:
+        raise ValueError("changed_path_limit_invalid")
+    try:
+        payload = _workspace_payload(workspace)
+        runner = _default_runner()
+        _verify_git_root(payload.root, runner)
+        collected: set[str] = set()
+        for args in (
+            ("diff", "--name-only", "-z", "--cached"),
+            ("diff", "--name-only", "-z"),
+            ("ls-files", "--others", "--exclude-standard", "-z"),
+        ):
+            _, raw = runner.run(payload.root, args, stdout_limit=_PATH_OUTPUT_LIMIT)
+            try:
+                for entry in _nul_entries(raw):
+                    _validate_relative_git_path(entry)
+                    collected.add(os.fsdecode(entry))
+            finally:
+                _overwrite(raw)
+        if len(collected) > limit:
+            raise ValueError("file_limit_exceeded")
+        return tuple(sorted(collected, key=str.encode))
+    except _CaptureFailure as exc:
+        raise ValueError(exc.limitation.value) from exc
+    except (_GitProcessFailure, _OutputLimit) as exc:
+        raise ValueError("not_git") from exc
 
 
 class GitSubjectStateAdapter:

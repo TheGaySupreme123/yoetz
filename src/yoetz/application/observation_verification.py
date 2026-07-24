@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
@@ -27,8 +28,10 @@ __all__ = [
     "InspectionOrchestrationResult",
     "ObservationVerificationJob",
     "ObservationVerificationRepository",
+    "ObservationVerificationSupervisor",
     "ObservationVerificationWorker",
     "SubjectStateDigestFn",
+    "VerificationDrainHandle",
     "orchestrate_changed_path_inspection",
     "run_bound_approved_check",
 ]
@@ -75,6 +78,8 @@ class ObservationVerificationRepository(Protocol):
         now: str,
     ) -> ObservationVerificationJob | None: ...
 
+    def list_pending_workspaces(self) -> tuple[str, ...]: ...
+
     def complete(
         self,
         *,
@@ -97,6 +102,114 @@ PolicyProvider = Callable[[str, str], tuple[ApprovedCheckApproval, ...]]
 SubjectDigestProvider = Callable[[LocalWorkspaceHandle], str]
 OutputPersister = Callable[[ObservationVerificationJob, bytes], Awaitable[str | None]]
 NowProvider = Callable[[], str]
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationDrainHandle:
+    """One workspace's durable verification worker plus optional post-drain hook."""
+
+    workspace_commitment: str
+    worker: ObservationVerificationWorker
+    after_complete: Callable[[], Awaitable[None]] | None = None
+
+
+@dataclass
+class ObservationVerificationSupervisor:
+    """Generation-fenced background verification owned by the ready lifecycle.
+
+    Hook ingest only enqueues durable jobs and wakes this supervisor. Approved
+    checks never execute inside the hook RPC budget. Startup discovers already-
+    pending work via registered drain handles; expired leases are reclaimed by
+    ``claim_next``. Shutdown waits for the loop to stop before vault/runtime close.
+    """
+
+    service_generation: int
+
+    def __post_init__(self) -> None:
+        self._handles: dict[str, VerificationDrainHandle] = {}
+        self._wake = asyncio.Event()
+        self._closed = False
+        self._loop_task: asyncio.Task[None] | None = None
+        self._lock = asyncio.Lock()
+
+    def register(self, handle: VerificationDrainHandle) -> None:
+        self._handles[handle.workspace_commitment] = handle
+        self._wake.set()
+
+    def unregister(self, workspace_commitment: str) -> None:
+        self._handles.pop(workspace_commitment, None)
+
+    def notify(self, workspace_commitment: str | None = None) -> None:
+        del workspace_commitment
+        if not self._closed:
+            self._wake.set()
+
+    async def start(self) -> None:
+        if self._loop_task is not None:
+            return
+        self._closed = False
+        self._wake.set()
+        self._loop_task = asyncio.create_task(self._run_loop(), name="observation-verification")
+
+    async def rediscover(
+        self,
+        builders: Mapping[str, Callable[[], VerificationDrainHandle | None]],
+    ) -> None:
+        """Register drain handles for workspaces that still have durable pending jobs.
+
+        ``builders`` maps workspace commitment → factory that rebuilds a worker/handle
+        (or returns None when the workspace cannot be opened yet). Called once after
+        ready-lifecycle start so restart reclaim can complete.
+        """
+
+        for workspace, builder in sorted(builders.items(), key=lambda item: item[0].encode()):
+            if self._closed:
+                return
+            if workspace in self._handles:
+                continue
+            handle = builder()
+            if handle is None:
+                continue
+            self.register(handle)
+        self.notify()
+
+    async def stop(self) -> None:
+        self._closed = True
+        self._wake.set()
+        task = self._loop_task
+        self._loop_task = None
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._handles.clear()
+
+    async def _run_loop(self) -> None:
+        while not self._closed:
+            await self._drain_once()
+            if self._closed:
+                break
+            self._wake.clear()
+            # Always park on the wake event so an empty handle set cannot busy-loop
+            # and starve Application.close / supervisor.stop.
+            try:
+                await asyncio.wait_for(self._wake.wait(), timeout=2.0)
+            except TimeoutError:
+                pass
+
+    async def _drain_once(self) -> None:
+        async with self._lock:
+            handles = tuple(self._handles.values())
+        for handle in handles:
+            if self._closed:
+                return
+            if handle.worker.service_generation != self.service_generation:
+                continue
+            while not self._closed:
+                job = await handle.worker.run_once()
+                if job is None:
+                    break
+                if handle.after_complete is not None:
+                    await handle.after_complete()
 
 
 @dataclass

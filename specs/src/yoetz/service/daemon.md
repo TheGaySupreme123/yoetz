@@ -74,7 +74,16 @@ clients, or an already-open database.
    initializes `catalog.sqlite3`, seeds the current installation ID plus owner generation, constructs
    the local bundle runtime and application facade, reconciles the central egress-policy gateway, and
    selects only the credential-free reviewed bundled provider factories allowed by active policy,
-   once. The denied machine privacy policy is seeded only when no durable current policy exists for
+   once. Official OpenAI Responses, Fireworks Responses-compatible, and owner-declared OpenAI-compatible
+   endpoint profiles receive `OpenAIResponsesExternalFactory` builders from config; Anthropic/Gemini
+   native protocols are not wired. When the reconciled gateway reports a connected provider and
+   verification.semantic is not `disabled`, ready composition grants `RuntimeCapability.SEMANTIC`,
+   injects a privacy-gated check semantic evaluator (`PrivacyCoordinator.evaluate_semantic`), and
+   wires observation advice through `compose_observation_semantic_advisor` /
+   `PrivacyGatedSemanticAdvice`. It also creates an `ObservationVerificationSupervisor` for the
+   generation (started when the ready `Application` opens) and stops it on ready-context/application
+   close before privacy/runtime teardown.
+   The denied machine privacy policy is seeded only when no durable current policy exists for
    the installation scope; later unlocks reuse that durable policy and never re-mint seed identity
    (`policy_id`/`created_at`) that would conflict with `seed_if_absent`. No provider credential is
    retrieved at startup; the gateway

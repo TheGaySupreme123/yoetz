@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -20,6 +21,10 @@ from yoetz.adapters.privacy.catalog import CatalogPrivacyAudit, CatalogPrivacyPo
 from yoetz.adapters.privacy.gateway import PolicyEnforcingOutboundGateway
 from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer
 from yoetz.adapters.providers.local_model import InstalledLocalModelProfileRegistry
+from yoetz.adapters.providers.openai_responses_factory import (
+    external_factory_builders_from_config,
+    provider_binding_from_config,
+)
 from yoetz.adapters.runtime import RuntimeAdapterFactories, open_local_bundle_runtime
 from yoetz.adapters.sqlite.connection import (
     open_catalog_writer,
@@ -31,9 +36,22 @@ from yoetz.adapters.sqlite.migrations import initialize_bundle, initialize_catal
 from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.adapters.sqlite.start_catalog import SqliteStartCatalog
 from yoetz.application.check import FinalSemanticEvaluation
-from yoetz.application.observation_advice import ObservationAdviceContextBuilder
+from yoetz.application.egress import (
+    PrivacyCoordinator,
+    SemanticEgressAwaitingHuman,
+    SemanticEgressBlocked,
+    SemanticEgressProviderOutcome,
+    SemanticEgressSuccess,
+)
+from yoetz.application.observation_advice import (
+    ObservationAdviceContextBuilder,
+    ObservationAdviceSemanticAddon,
+    minimized_semantic_evidence_packet,
+    stable_advice_finding_id,
+)
 from yoetz.application.observation_control import build_observation_support_handlers
 from yoetz.application.observation_coordinator import ObservationCoordinator
+from yoetz.application.observation_verification import ObservationVerificationSupervisor
 from yoetz.application.service import (
     ControlProjectionBinding,
     ReadyApplicationFactory,
@@ -44,15 +62,20 @@ from yoetz.config.models import YoetzConfig
 from yoetz.config.paths import ensure_owner_only_dir, verify_private_local_bundle
 from yoetz.config.privacy import safe_privacy_bootstrap, seed_policy_if_absent
 from yoetz.domain.events import RuntimeProfile
+from yoetz.domain.findings import SemanticDispatchKind, SemanticProvenance
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
+    CandidateContext,
+    CandidateContextItem,
     ChannelPolicy,
     DataCategory,
     DataClass,
     EgressChannel,
+    PrivacyOutcome,
     PrivacyPolicy,
     PrivacyProfile,
+    ProviderBinding,
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
@@ -65,14 +88,24 @@ from yoetz.domain.values import (
 from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
 )
-from yoetz.kernel.policies.observation_advice import ObservationCompositionFact
+from yoetz.kernel.policies.observation_advice import (
+    ObservationAdviceCandidate,
+    ObservationCompositionFact,
+)
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.control import ControlError
 from yoetz.ports.diagnostics import DiagnosticsPort, RuntimeCapability, StartupCheckResult
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.keys import BundleKeys, MacKeyHandle, MacKeyPurpose
 from yoetz.ports.ledger import FrozenCase, LedgerPort
-from yoetz.ports.objects import ObjectRootSnapshot, ObjectStorePort
+from yoetz.ports.objects import (
+    ObjectMetadata,
+    ObjectRef,
+    ObjectRootSnapshot,
+    ObjectSource,
+    ObjectStorePort,
+    StagedObject,
+)
 from yoetz.ports.privacy import HumanAuthorityCapability
 from yoetz.ports.runtime import (
     OwnershipFence,
@@ -84,9 +117,22 @@ from yoetz.ports.runtime import (
     TaskRuntime,
 )
 from yoetz.ports.secret_memory import ProviderAttemptAuthBinding, ProviderCredentialHandle
-from yoetz.ports.start_catalog import WORKSPACE_REF_DOMAIN, TaskRoute, TaskRouteState
+from yoetz.ports.semantic import (
+    Deadline,
+    SemanticResultInvalid,
+    SemanticResultLate,
+    SemanticResultRefused,
+    SemanticResultTimeout,
+    SemanticResultUnavailable,
+)
+from yoetz.ports.start_catalog import (
+    WORKSPACE_REF_DOMAIN,
+    StartCatalogPort,
+    TaskRoute,
+    TaskRouteState,
+)
 from yoetz.protocol.canonical import JsonValue as CanonicalJsonValue
-from yoetz.protocol.canonical import canonical_digest, strict_json_parse
+from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id, validate_id
 from yoetz.protocol.models import SemanticReason, SemanticStatus
@@ -170,13 +216,43 @@ class _CredentialMinter:
         return await self._vault.provider_credential(binding)
 
 
-class _NoopAuditObjectStore:
-    async def commitment_for(self, data: bytes, kind: object) -> str:
-        del data, kind
-        raise PublicOperationError(
-            PublicErrorCode.STORAGE_UNSAFE,
-            "Privacy audit object storage is unavailable.",
-            False,
+class _PrivacyContentObjectStore:
+    """Process-local content store for privacy disclosure proposals (catalog refs only)."""
+
+    def __init__(self, ids: IdPort) -> None:
+        self._ids = ids
+        self._objects: dict[str, bytes] = {}
+
+    async def stage(self, source: ObjectSource, metadata: ObjectMetadata) -> StagedObject:
+        if type(source) is not ObjectSource or source.data is None:
+            raise ValueError("invalid_object_source")
+        object_id = self._ids.new(IdKind.OBJECT)
+        digest = "sha256:" + hashlib.sha256(source.data).hexdigest()
+        commitment = "hmac-sha256:" + ("a" * 64)
+        return StagedObject(
+            object_id,
+            len(source.data),
+            commitment,
+            digest,
+            "yoetz-object/1",
+            "privacy-audit",
+            metadata,
+            source.data,
+        )
+
+    async def finalize(self, staged: StagedObject) -> ObjectRef:
+        handle = staged.staging_handle
+        if type(handle) is not bytes:
+            raise ValueError("privacy_audit_stage_invalid")
+        self._objects[staged.object_id] = handle
+        return ObjectRef(
+            staged.object_id,
+            staged.plaintext_size,
+            staged.commitment,
+            staged.envelope_digest,
+            staged.encryption_format,
+            staged.key_slot,
+            staged.metadata,
         )
 
 
@@ -904,6 +980,7 @@ async def build_privacy_coordinator(
     vault: _Vault,
     clock: ClockPort,
     ids: IdPort,
+    config: YoetzConfig | None = None,
 ) -> tuple[object, PrivacyPolicy, object]:
     """Build and reconcile the fail-closed local privacy coordinator."""
 
@@ -912,12 +989,16 @@ async def build_privacy_coordinator(
     audit_key = vault.installation_mac_handle(MacKeyPurpose.PRIVACY_AUDIT)
     audit = CatalogPrivacyAudit(
         catalog_db,
-        cast(ObjectStorePort, _NoopAuditObjectStore()),
+        cast(ObjectStorePort, _PrivacyContentObjectStore(ids)),
         audit_key,  # pyright: ignore[reportArgumentType]
         clock,
+        service_generation=service_generation,
+    )
+    builders = external_factory_builders_from_config(
+        None if config is None else config.provider, clock=clock
     )
     gateway = PolicyEnforcingOutboundGateway(
-        external_factory_builders={},
+        external_factory_builders=builders,  # type: ignore[arg-type]
         local_model_registry=InstalledLocalModelProfileRegistry(),
         local_model_resolver=None,
         credential_minter=_CredentialMinter(vault),
@@ -980,13 +1061,14 @@ async def build_privacy_coordinator(
     )
     await gateway.reconcile_policy(effective, authority)
     return (
-        __import__("yoetz.application.egress", fromlist=["PrivacyCoordinator"]).PrivacyCoordinator(
+        PrivacyCoordinator(
             policies,
             classifier,
             audit,
             gateway,
             clock,
             ids,
+            service_generation=service_generation,
         ),
         policy,
         gateway,
@@ -1038,16 +1120,228 @@ def _receipt_versions(manifest: Mapping[str, CanonicalJsonValue]) -> ReceiptVers
 async def _semantic_not_configured(
     frozen: FrozenCase, findings: tuple[object, ...]
 ) -> FinalSemanticEvaluation:
-    """Explicit deterministic-only check path when no privacy-ready provider binding exists.
-
-    Observation advice uses ``compose_observation_semantic_advisor`` separately: privacy-gated
-    when a provider binding is configured and ready, otherwise NullSemanticAdvice.
-    """
+    """Explicit deterministic-only check path when no privacy-ready provider binding exists."""
 
     del frozen, findings
     return FinalSemanticEvaluation(
         SemanticStatus.NOT_CONFIGURED, SemanticReason.PROVIDER_NOT_CONFIGURED
     )
+
+
+def _map_blocked(outcome: PrivacyOutcome, reason: object) -> FinalSemanticEvaluation:
+    """Map pre-dispatch privacy blocks to exact semantic status/reason pairs."""
+
+    if outcome is PrivacyOutcome.CHANNEL_UNAVAILABLE:
+        return FinalSemanticEvaluation(
+            SemanticStatus.NOT_CONFIGURED, SemanticReason.PROVIDER_NOT_CONFIGURED
+        )
+    if outcome is PrivacyOutcome.BLOCKED_FORBIDDEN_DATA:
+        return FinalSemanticEvaluation(
+            SemanticStatus.BLOCKED_FORBIDDEN_DATA, SemanticReason.NEVER_SEND_DETECTED
+        )
+    if outcome is PrivacyOutcome.CLASSIFICATION_UNCERTAIN:
+        return FinalSemanticEvaluation(
+            SemanticStatus.CLASSIFICATION_UNCERTAIN, SemanticReason.CLASSIFICATION_UNCERTAIN
+        )
+    if outcome is PrivacyOutcome.HUMAN_DENIED:
+        return FinalSemanticEvaluation(SemanticStatus.HUMAN_DENIED, SemanticReason.HUMAN_DENIED)
+    if outcome is PrivacyOutcome.APPROVAL_EXPIRED:
+        return FinalSemanticEvaluation(
+            SemanticStatus.APPROVAL_EXPIRED, SemanticReason.HUMAN_APPROVAL_EXPIRED
+        )
+    if outcome is PrivacyOutcome.TIMEOUT:
+        return FinalSemanticEvaluation(SemanticStatus.TIMEOUT, SemanticReason.PROVIDER_TIMEOUT)
+    if outcome is PrivacyOutcome.AUDIT_FAILED:
+        return FinalSemanticEvaluation(
+            SemanticStatus.UNAVAILABLE, SemanticReason.AUDIT_RESERVATION_UNAVAILABLE
+        )
+    if outcome is PrivacyOutcome.TRANSPORT_FAILED:
+        return FinalSemanticEvaluation(
+            SemanticStatus.UNAVAILABLE, SemanticReason.TRANSPORT_UNAVAILABLE
+        )
+    if outcome is PrivacyOutcome.BLOCKED_BY_POLICY:
+        reason_name = getattr(reason, "name", None)
+        if reason_name == "PURPOSE_NOT_ALLOWED":
+            return FinalSemanticEvaluation(
+                SemanticStatus.BLOCKED_BY_POLICY, SemanticReason.CHANNEL_DISABLED
+            )
+        if reason_name == "DESTINATION_NOT_ALLOWED":
+            return FinalSemanticEvaluation(
+                SemanticStatus.BLOCKED_BY_POLICY,
+                SemanticReason.PROVIDER_BINDING_NOT_AUTHORIZED,
+            )
+        if reason_name == "SCOPE_MISMATCH":
+            return FinalSemanticEvaluation(
+                SemanticStatus.BLOCKED_BY_POLICY, SemanticReason.SCOPE_NOT_AUTHORIZED
+            )
+        if reason_name == "CATEGORY_NOT_ALLOWED":
+            return FinalSemanticEvaluation(
+                SemanticStatus.BLOCKED_BY_POLICY,
+                SemanticReason.CONTENT_CATEGORY_NOT_AUTHORIZED,
+            )
+        return FinalSemanticEvaluation(
+            SemanticStatus.BLOCKED_BY_POLICY, SemanticReason.NETWORK_EGRESS_DENIED
+        )
+    return FinalSemanticEvaluation(SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE)
+
+
+def _map_provider_outcome(result: SemanticEgressProviderOutcome) -> FinalSemanticEvaluation:
+    provider = result.result
+    if type(provider) is SemanticResultRefused:
+        return FinalSemanticEvaluation(SemanticStatus.REFUSED, SemanticReason.PROVIDER_REFUSED)
+    if type(provider) is SemanticResultTimeout:
+        return FinalSemanticEvaluation(SemanticStatus.TIMEOUT, SemanticReason.PROVIDER_TIMEOUT)
+    if type(provider) is SemanticResultInvalid:
+        return FinalSemanticEvaluation(
+            SemanticStatus.INVALID, SemanticReason.RESPONSE_SCHEMA_INVALID
+        )
+    if type(provider) is SemanticResultLate:
+        return FinalSemanticEvaluation(SemanticStatus.LATE, SemanticReason.DEADLINE_AUTHORITY_LOST)
+    if type(provider) is SemanticResultUnavailable:
+        return FinalSemanticEvaluation(
+            SemanticStatus.UNAVAILABLE, SemanticReason.TRANSPORT_UNAVAILABLE
+        )
+    return FinalSemanticEvaluation(SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE)
+
+
+def _map_egress_to_final(result: object, ids: IdPort) -> FinalSemanticEvaluation:
+    """Map privacy egress outcomes to check FinalSemanticEvaluation without inventing findings."""
+
+    if type(result) is SemanticEgressSuccess:
+        if result.privacy_receipt_id is None:
+            return FinalSemanticEvaluation(
+                SemanticStatus.UNAVAILABLE, SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN
+            )
+        attempt = result.result.provenance
+        authorization = result.authorization_id or None
+        if authorization == "":
+            authorization = None
+        provenance = SemanticProvenance(
+            provider=attempt.provider,
+            endpoint_profile_id=attempt.endpoint_profile_id,
+            endpoint_profile_version=attempt.endpoint_profile_version,
+            model=attempt.model,
+            sdk_version=attempt.sdk_version,
+            prompt_digest=attempt.prompt_digest,
+            schema_digest=attempt.schema_digest,
+            policy_digest=attempt.policy_digest,
+            privacy_policy_digest=attempt.privacy_policy_digest,
+            sampling_params=attempt.sampling_params,
+            latency_ms=attempt.latency_ms,
+            semantic_attempt_id=ids.new(IdKind.SEMANTIC_ATTEMPT),
+            dispatch_kind=SemanticDispatchKind.EXTERNAL,
+            privacy_receipt_id=result.privacy_receipt_id,
+            status=SemanticStatus.SUCCEEDED,
+            reason=SemanticReason.SEMANTIC_COMPLETED,
+            provider_request_id=attempt.provider_request_id,
+            token_usage=attempt.token_usage,
+            cost_fields=attempt.cost_fields,
+            failure_class=attempt.failure_class,
+            egress_authorization_id=authorization,
+        )
+        return FinalSemanticEvaluation(
+            SemanticStatus.SUCCEEDED,
+            SemanticReason.SEMANTIC_COMPLETED,
+            judgment=result.result.judgment,
+            provenance=provenance,
+        )
+    if type(result) is SemanticEgressAwaitingHuman:
+        return FinalSemanticEvaluation(
+            SemanticStatus.AWAITING_HUMAN, SemanticReason.HUMAN_APPROVAL_REQUIRED
+        )
+    if type(result) is SemanticEgressBlocked:
+        return _map_blocked(result.outcome, result.reason)
+    if type(result) is SemanticEgressProviderOutcome:
+        return _map_provider_outcome(result)
+    return FinalSemanticEvaluation(SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE)
+
+
+def _privacy_gated_semantic_evaluator(
+    privacy: PrivacyCoordinator,
+    clock: ClockPort,
+    installation_id: str,
+    provider: ProviderBinding | None,
+    catalog: StartCatalogPort,
+    lookup: MacKeyHandle,
+    ids: IdPort,
+):
+    async def _evaluate(
+        frozen: FrozenCase, findings: tuple[object, ...]
+    ) -> FinalSemanticEvaluation:
+        if provider is None:
+            return await _semantic_not_configured(frozen, findings)
+        try:
+            route = await catalog.resolve_route(frozen.lease.session_id)
+            if route is None or route.state is not TaskRouteState.ACTIVE:
+                return await _semantic_not_configured(frozen, findings)
+            workspace = lookup.mac(
+                WORKSPACE_REF_DOMAIN,
+                f"{route.route_identity_digest}\x00{route.task_id}".encode("ascii"),
+            )
+            scope = AuthorizationScope(
+                AuthorizationScopeKind.TASK,
+                installation_id,
+                workspace,
+                route.task_id,
+            )
+            finding_ids: list[str] = []
+            for finding in findings:
+                finding_id = getattr(finding, "finding_id", None)
+                if type(finding_id) is str:
+                    finding_ids.append(finding_id)
+            case = frozen.case
+            payload = canonical_encode(
+                cast(
+                    CanonicalJsonValue,
+                    {
+                        "dependency_digest": frozen.lease.dependency_digest,
+                        "findings": finding_ids,
+                        "frontier": {
+                            "head_digest": case.frontier.head_digest,
+                            "sequence": case.frontier.sequence,
+                        },
+                        "schema": "yoetz.semantic-check-candidate/1",
+                    },
+                )
+            )
+            candidate = CandidateContext(
+                request_id=frozen.lease.operation_id,
+                channel=EgressChannel.LLM_INFERENCE,
+                local_sink=None,
+                purpose="semantic_check",
+                scope=scope,
+                subject_digest=canonical_digest(
+                    cast(
+                        CanonicalJsonValue,
+                        {
+                            "frontier": {
+                                "head_digest": case.frontier.head_digest,
+                                "sequence": case.frontier.sequence,
+                            },
+                            "schema": "yoetz.semantic-check-subject/1",
+                        },
+                    )
+                ),
+                provider_binding=provider,
+                items=(
+                    CandidateContextItem(
+                        "case-packet",
+                        DataCategory.BOUNDED_STRUCTURAL_METADATA,
+                        scope,
+                        "/case",
+                        payload,
+                    ),
+                ),
+            )
+            deadline = Deadline(clock.now_utc(), clock.monotonic_seconds() + 60.0)
+            result = await privacy.evaluate_semantic(candidate, deadline)
+            return _map_egress_to_final(result, ids)
+        except Exception:
+            return FinalSemanticEvaluation(
+                SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE
+            )
+
+    return _evaluate
 
 
 def _profile(config: YoetzConfig) -> RuntimeProfile:
@@ -1081,9 +1375,10 @@ async def provide_service_ready_context(
     verify_private_local_bundle(paths.bundle)
     ids = IdPort()
     lookup = vault.installation_mac_handle(MacKeyPurpose.CATALOG_LOOKUP)
+    installation_id = cast(str, getattr(vault, "_installation_id"))
     catalog = await open_ready_catalog(
         _catalog_path(paths),
-        installation_id=cast(str, getattr(vault, "_installation_id")),
+        installation_id=installation_id,
         service_generation=service_generation,
         lookup=lookup,
         clock=clock,
@@ -1092,25 +1387,35 @@ async def provide_service_ready_context(
     manifest = _version_json()
     privacy, policy, gateway = await build_privacy_coordinator(
         catalog_db=cast(apsw.Connection, getattr(catalog, "_db")),
-        installation_id=cast(str, getattr(vault, "_installation_id")),
+        installation_id=installation_id,
         service_generation=service_generation,
         vault_generation=vault_generation,
         vault=vault,
         clock=clock,
         ids=ids,
+        config=config,
     )
+    provider_factory_ids = cast(
+        tuple[str, ...], tuple(getattr(gateway, "configured_provider_ids", lambda: ())())
+    )
+    connected_provider_ids = cast(
+        tuple[str, ...], tuple(getattr(gateway, "connected_provider_ids", lambda: ())())
+    )
+    semantic_configured = config.verification.semantic != "disabled"
+    semantic_ready = semantic_configured and bool(connected_provider_ids)
+    capabilities = {
+        RuntimeCapability.STRUCTURAL_READ,
+        RuntimeCapability.PAYLOAD_READ,
+        RuntimeCapability.WRITE,
+    }
+    if semantic_ready:
+        capabilities.add(RuntimeCapability.SEMANTIC)
     runtime_context = ServiceRuntimeContext(
         service_instance_id=cast(str, getattr(lifecycle.instance, "instance_id")),
         service_generation=service_generation,
         vault_generation=vault_generation,
         catalog_generation=catalog.generation,
-        capabilities=frozenset(
-            {
-                RuntimeCapability.STRUCTURAL_READ,
-                RuntimeCapability.PAYLOAD_READ,
-                RuntimeCapability.WRITE,
-            }
-        ),
+        capabilities=frozenset(capabilities),
         version_manifest=cast(Mapping[str, DomainJsonValue], manifest),
         shutdown_token=object(),
     )
@@ -1151,23 +1456,126 @@ async def provide_service_ready_context(
             )
             return AuthorizationScope(
                 AuthorizationScopeKind.TASK,
-                cast(str, getattr(vault, "_installation_id")),
+                installation_id,
                 workspace,
                 task,
             )
         return AuthorizationScope(
             AuthorizationScopeKind.MACHINE,
-            cast(str, getattr(vault, "_installation_id")),
+            installation_id,
         )
 
     versions = _receipt_versions(manifest)
-    # Production path: LocalObservationStore (consent/outbox) + ObservationCoordinator
-    # routes into the mapped task-bundle SqliteObservationStore. MemoryObservationStore
-    # remains test/reference-only and must not be used here.
-    provider_factory_ids = tuple(getattr(gateway, "configured_provider_ids", lambda: ())())
-    connected_provider_ids = tuple(getattr(gateway, "connected_provider_ids", lambda: ())())
-    semantic_configured = config.verification.semantic != "disabled"
-    semantic_ready = semantic_configured and bool(connected_provider_ids)
+    provider_binding: ProviderBinding | None = None
+    if semantic_ready and config.provider is not None:
+        candidate_binding = provider_binding_from_config(config.provider)
+        if candidate_binding.provider_id in connected_provider_ids:
+            provider_binding = candidate_binding
+    semantic_evaluator = (
+        _privacy_gated_semantic_evaluator(
+            cast(PrivacyCoordinator, privacy),
+            clock,
+            installation_id,
+            provider_binding,
+            catalog,
+            lookup,
+            ids,
+        )
+        if semantic_ready
+        else _semantic_not_configured
+    )
+
+    async def _semantic_review(
+        candidates: tuple[ObservationAdviceCandidate, ...],
+        basis: str,
+        gaps: tuple[str, ...],
+    ) -> ObservationAdviceSemanticAddon | None:
+        # Privacy-gated observation semantic path: authorize/dispatch through the coordinator.
+        # Provider failure or no-discrepancy leaves deterministic advice intact (no upgrade).
+        del gaps
+        if not semantic_ready or provider_binding is None:
+            return None
+        packet = minimized_semantic_evidence_packet(
+            candidates,
+            basis,
+            coverage_gaps=(),
+            finding_summaries=tuple(str(item.rule_code) for item in candidates),
+        )
+        try:
+            payload = canonical_encode(cast(CanonicalJsonValue, dict(packet)))
+            subject = (
+                basis
+                if basis.startswith("sha256:")
+                else canonical_digest(cast(CanonicalJsonValue, {"basis": basis}))
+            )
+            machine_scope = AuthorizationScope(AuthorizationScopeKind.MACHINE, installation_id)
+            candidate = CandidateContext(
+                request_id=ids.new(IdKind.REQUEST),
+                channel=EgressChannel.LLM_INFERENCE,
+                local_sink=None,
+                purpose="semantic_check",
+                scope=machine_scope,
+                subject_digest=subject,
+                provider_binding=provider_binding,
+                items=(
+                    CandidateContextItem(
+                        "observation-advice-packet",
+                        DataCategory.BOUNDED_STRUCTURAL_METADATA,
+                        machine_scope,
+                        "/observation-advice",
+                        payload,
+                    ),
+                ),
+            )
+            deadline = Deadline(clock.now_utc(), clock.monotonic_seconds() + 60.0)
+            result = await cast(PrivacyCoordinator, privacy).evaluate_semantic(candidate, deadline)
+        except Exception:
+            return None
+        if type(result) is not SemanticEgressSuccess:
+            return None
+        judgment = result.result.judgment
+        if judgment.conclusion != "challenges_returned" or not judgment.challenges:
+            # Honest attempt receipt without inventing additive findings.
+            return ObservationAdviceSemanticAddon(
+                finding_ids=(),
+                evidence_digest=basis,
+                next_action=None,
+                summaries=(),
+                details=(),
+                provider_identity=provider_binding.provider_id,
+                attempt_receipt=result.privacy_receipt_id or result.authorization_id,
+                failure_reason=None,
+            )
+        # Additive note only when the provider returned post-validated challenges.
+        detail = f"challenges:{len(judgment.challenges)}"
+        digest = canonical_digest(
+            cast(
+                CanonicalJsonValue,
+                {
+                    "basis": basis,
+                    "authorization_id": result.authorization_id,
+                    "challenges": len(judgment.challenges),
+                },
+            )
+        )
+        finding = stable_advice_finding_id("semantic_additive_review", detail, digest)
+        return ObservationAdviceSemanticAddon(
+            finding_ids=(finding,),
+            evidence_digest=digest,
+            next_action=None,
+            summaries=("Privacy-gated semantic observation review",),
+            details=(
+                "Additive semantic note recorded after authorized provider attempt; "
+                "deterministic findings unchanged.",
+            ),
+            provider_identity=provider_binding.provider_id,
+            attempt_receipt=result.privacy_receipt_id or result.authorization_id,
+            failure_reason=None,
+        )
+
+    verification_supervisor = ObservationVerificationSupervisor(
+        service_generation=service_generation
+    )
     observation_coordinator = ObservationCoordinator(
         runtime=runtime,
         local=LocalObservationStore(),
@@ -1179,8 +1587,10 @@ async def provide_service_ready_context(
                 semantic_ready=semantic_ready,
                 provider_factory_ids=provider_factory_ids,
                 connected_provider_ids=connected_provider_ids,
-            )
+            ),
+            semantic_review=_semantic_review if semantic_configured else None,
         ),
+        verification_supervisor=verification_supervisor,
     )
     observation_handlers = build_observation_support_handlers(observation_coordinator)
     return ServiceReadyContext(
@@ -1198,7 +1608,7 @@ async def provide_service_ready_context(
         privacy=privacy,  # pyright: ignore[reportArgumentType]
         status_cursor_key=os.urandom(32),
         waiver_policy_digest=policy.policy_digest,
-        semantic_evaluator=_semantic_not_configured,
+        semantic_evaluator=semantic_evaluator,
         disclosure_scope_for=disclosure_scope_for,
         receipt_version_resolver=lambda _: versions,
         waiver_authorizer=lambda _: False,
@@ -1207,6 +1617,8 @@ async def provide_service_ready_context(
         policy_packs=_policy_packs(manifest),
         version_manifest=manifest,
         support_handlers=observation_handlers,
+        verification_supervisor=verification_supervisor,
+        rediscover_pending_verification=observation_coordinator.rediscover_pending_verification,
     )
 
 

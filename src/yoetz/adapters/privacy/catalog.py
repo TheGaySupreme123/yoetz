@@ -8,7 +8,7 @@ import hmac
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import fields, is_dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Literal, cast
 
@@ -24,6 +24,7 @@ from yoetz.domain.privacy import (
     DataClass,
     DisclosureProposal,
     EgressAuthorization,
+    EgressChannel,
     EgressReceipt,
     HumanPrivacyDecision,
     LocalDisclosureReceipt,
@@ -74,6 +75,7 @@ from yoetz.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
+from yoetz.protocol.ids import IdKind, new_id
 
 __all__ = ["CatalogPrivacyAudit", "CatalogPrivacyPolicyStore", "decode_privacy_policy_canonical"]
 
@@ -83,6 +85,7 @@ _CONTROL_DOMAIN = b"yoetz/privacy-audit/control-request/v1\x00"
 _INTERNAL_RESULT_DOMAIN = b"yoetz/privacy-audit/internal-result/v1\x00"
 _PROJECTION_DOMAIN = b"yoetz/privacy-audit/projection/v1\x00"
 _APPROVAL_DOMAIN = b"yoetz/privacy-audit/local-approval/v1\x00"
+_AUTHORIZATION_DOMAIN = b"yoetz/privacy-audit/authorization/v1\x00"
 _CURSOR_DOMAIN = b"yoetz/privacy-audit/receipt-cursor/v1\x00"
 
 
@@ -578,7 +581,7 @@ class CatalogPrivacyPolicyStore:
 class CatalogPrivacyAudit:
     """Durable privacy audit with objectless atomic client projections."""
 
-    __slots__ = ("_clock", "_db", "_key", "_lock", "_objects")
+    __slots__ = ("_clock", "_db", "_key", "_lock", "_objects", "_service_generation")
 
     def __init__(
         self,
@@ -586,11 +589,16 @@ class CatalogPrivacyAudit:
         objects: ObjectStorePort,
         audit_key: MacKeyHandle,
         clock: ClockPort,
+        *,
+        service_generation: int = 1,
     ) -> None:
+        if type(service_generation) is not int or service_generation <= 0:
+            raise ValueError("privacy_service_generation_invalid")
         self._db = db
         self._objects = objects
         self._key = audit_key
         self._clock = clock
+        self._service_generation = service_generation
         self._lock = asyncio.Lock()
 
     async def complete_agent_projection(
@@ -777,13 +785,14 @@ class CatalogPrivacyAudit:
             proposal_commitment,
         )
         structural = canonical_encode(
-            _json(proposal)
-            if False
-            else {
+            {
+                "max_bytes": request.max_bytes,
+                "max_tokens": request.max_tokens,
                 "policy_digest": request.policy_digest,
                 "prepared_case_digest": request.minimized.case_digest,
                 "proposal_commitment": proposal_commitment,
                 "request_id": request.request_id,
+                "scope": _scope_json(request.scope),
             }
         )
         lookup = _mac(self._key, _LOOKUP_DOMAIN, structural)
@@ -929,6 +938,159 @@ class CatalogPrivacyAudit:
             cast(str | None, row[6]),
         )
 
+    async def load_disclosure_proposal(self, proposal_id: str) -> DisclosureProposal | None:
+        row = self._db.execute(
+            """SELECT content_object_id, content_plaintext_size, content_commitment,
+                      content_envelope_digest, content_encryption_format, content_key_slot,
+                      content_media_type, content_created_at, task_id,
+                      provider_id, model_id, endpoint_profile_id, endpoint_profile_version,
+                      local_sink, destination_kind, policy_version,
+                      subject_structural_canonical, expires_at
+               FROM privacy_audit_records
+               WHERE proposal_id = ? AND subject_kind = 'disclosure'""",
+            (proposal_id,),
+        ).fetchone()
+        if row is None or type(row[0]) is not str or type(row[8]) is not str:
+            return None
+        structural = _mapping(strict_json_parse(cast(bytes, row[16])))
+        task = cast(str, row[8])
+        ref = ObjectRef(
+            cast(str, row[0]),
+            cast(int, row[1]),
+            cast(str, row[2]),
+            cast(str, row[3]),
+            cast(Literal["yoetz-object/1"], row[4]),
+            cast(str, row[5]),
+            ObjectMetadata(
+                ObjectKind.PRIVACY_AUDIT,
+                cast(str, row[6]),
+                task,
+                parse_rfc3339_millis(row[7]),
+            ),
+        )
+        try:
+            body = b"".join([chunk async for chunk in self._objects.open_verified(ref)])
+            parsed = _mapping(strict_json_parse(body))
+        except Exception:
+            return None
+        if parsed.get("schema") != "yoetz.disclosure-proposal/1":
+            return None
+        prepared_b64 = parsed.get("prepared_bytes_base64")
+        if type(prepared_b64) is not str:
+            return None
+        try:
+            prepared_bytes = base64.b64decode(prepared_b64.encode("ascii"), validate=True)
+        except Exception:
+            return None
+        scope_raw = parsed.get("scope")
+        if scope_raw is None and "scope" in structural:
+            scope_raw = structural["scope"]
+        if scope_raw is None:
+            return None
+        binding = None
+        local_sink = None
+        if cast(str | None, row[14]) == "network":
+            provider_id = cast(str | None, row[9])
+            model_id = cast(str | None, row[10])
+            endpoint_id = cast(str | None, row[11])
+            endpoint_version = cast(str | None, row[12])
+            if None in {provider_id, model_id, endpoint_id, endpoint_version}:
+                return None
+            binding = ProviderBinding(
+                cast(str, provider_id),
+                cast(str, model_id),
+                cast(str, endpoint_id),
+                cast(str, endpoint_version),
+                "external",
+            )
+        else:
+            sink_raw = cast(str | None, row[13])
+            if sink_raw is None:
+                return None
+            local_sink = LocalDisclosureSink(sink_raw)
+        transforms_raw = parsed.get("transformation_summary") or []
+        if type(transforms_raw) is not list:
+            return None
+        transforms: list[tuple[str, int]] = []
+        for item in transforms_raw:
+            if type(item) is not list or len(item) != 2:
+                return None
+            if type(item[0]) is not str or type(item[1]) is not int:
+                return None
+            transforms.append((item[0], item[1]))
+        max_bytes = int(cast(int | str, structural.get("max_bytes") or len(prepared_bytes)))
+        max_tokens = int(cast(int | str, structural.get("max_tokens") or 0))
+        commitment = structural.get("proposal_commitment")
+        if type(commitment) is not str:
+            return None
+        try:
+            return DisclosureProposal(
+                cast(str, parsed["privacy_proposal_id"]),
+                cast(str, parsed["request_id"]),
+                task,
+                _strings(parsed.get("source_item_digests") or []),
+                prepared_bytes,
+                tuple(
+                    DataCategory(value)
+                    for value in _strings(parsed.get("approved_categories") or [])
+                ),
+                tuple(
+                    DataCategory(value)
+                    for value in _strings(parsed.get("blocked_categories") or [])
+                ),
+                tuple(transforms),
+                cast(str, parsed["prepared_case_digest"]),
+                binding,
+                local_sink,
+                cast(str, parsed["purpose"]),
+                _scope_from_json(scope_raw),
+                int(cast(int | str, row[15])),
+                cast(str, parsed["policy_digest"]),
+                max_bytes,
+                max_tokens,
+                parse_rfc3339_millis(parsed["expires_at"]),
+                commitment,
+            )
+        except Exception:
+            return None
+
+    async def load_authorization(self, authorization_id: str) -> EgressAuthorization | None:
+        row = self._db.execute(
+            """SELECT authorization_structural_canonical, state
+               FROM privacy_audit_records WHERE authorization_id = ?""",
+            (authorization_id,),
+        ).fetchone()
+        if row is None or row[1] != "authorized" or row[0] is None:
+            return None
+        try:
+            source = _mapping(strict_json_parse(cast(bytes, row[0])))
+            binding_raw = _mapping(source["provider_binding"])
+            return EgressAuthorization(
+                cast(str, source["authorization_id"]),
+                cast(str, source["privacy_proposal_id"]),
+                cast(str, source["case_digest"]),
+                EgressChannel(cast(str, source["channel"])),
+                ProviderBinding(
+                    cast(str, binding_raw["provider_id"]),
+                    cast(str, binding_raw["model_id"]),
+                    cast(str, binding_raw["endpoint_profile_id"]),
+                    cast(str, binding_raw["endpoint_profile_version"]),
+                    "external",
+                ),
+                cast(str, source["purpose"]),
+                _scope_from_json(source["scope"]),
+                cast(int, source["policy_version"]),
+                cast(str, source["policy_digest"]),
+                cast(int, source["max_bytes"]),
+                cast(int, source["max_tokens"]),
+                ConsentSource(cast(str, source["consent_source"])),
+                parse_rfc3339_millis(source["issued_at"]),
+                parse_rfc3339_millis(source["expires_at"]),
+                cast(int, source["service_generation"]),
+            )
+        except Exception:
+            return None
+
     async def consume_local(
         self, reservation_id: str, approved_case_digest: str, now: datetime
     ) -> ConsumedLocalDisclosure:
@@ -975,11 +1137,49 @@ class CatalogPrivacyAudit:
     async def complete_decision(
         self, reservation_id: str, receipt: EgressReceipt | LocalDisclosureReceipt
     ) -> None:
-        if type(receipt) is not LocalDisclosureReceipt:
-            raise ValueError("network_audit_deferred_to_b8")
-        await self._complete_local(
-            reservation_id, receipt, "decision_receipt_pending", "decision_completed"
-        )
+        if type(receipt) is LocalDisclosureReceipt:
+            await self._complete_local(
+                reservation_id, receipt, "decision_receipt_pending", "decision_completed"
+            )
+            return
+        if type(receipt) is not EgressReceipt:
+            raise TypeError("privacy_decision_receipt_invalid")
+        canonical = _receipt_bytes(receipt)
+        digest = canonical_digest(strict_json_parse(canonical))
+        now = self._clock.now_utc()
+        async with self._lock:
+            with _transaction(self._db):
+                changed = (
+                    self._db.execute(
+                        """UPDATE privacy_audit_records
+                           SET state = 'decision_completed',
+                               attempt_result_structural_canonical = ?,
+                               attempt_result_commitment = ?,
+                               receipt_id = ?, receipt_outcome = ?, receipt_reason = ?,
+                               receipt_canonical = ?, receipt_digest = ?,
+                               receipt_finished_at = ?, updated_at = ?
+                           WHERE proposal_id = ? AND state = 'decision_receipt_pending'
+                             AND receipt_id IS NULL""",
+                        (
+                            canonical,
+                            digest,
+                            receipt.receipt_id,
+                            receipt.outcome.value,
+                            None
+                            if receipt.safe_failure_reason is None
+                            else receipt.safe_failure_reason.value,
+                            canonical,
+                            digest,
+                            format_rfc3339_millis(receipt.finished_at),
+                            format_rfc3339_millis(now),
+                            reservation_id,
+                        ),
+                    )
+                    .getconnection()
+                    .changes()
+                )
+                if changed != 1:
+                    raise ValueError("privacy_audit_state_conflict")
 
     async def _complete_local(
         self,
@@ -1192,27 +1392,312 @@ class CatalogPrivacyAudit:
         del generation, reason
         return 0
 
+    async def mark_awaiting_human(self, reservation_id: str) -> PrivacyAuditState:
+        now = self._clock.now_utc()
+        async with self._lock:
+            with _transaction(self._db):
+                row = self._db.execute(
+                    """SELECT request_id, subject_lookup_identity, policy_digest, state, created_at
+                       FROM privacy_audit_records WHERE proposal_id = ?""",
+                    (reservation_id,),
+                ).fetchone()
+                if row is None or row[3] != "reserved":
+                    raise ValueError("privacy_audit_state_conflict")
+                changed = (
+                    self._db.execute(
+                        """UPDATE privacy_audit_records
+                           SET state = 'awaiting_human', updated_at = ?
+                           WHERE proposal_id = ? AND state = 'reserved'""",
+                        (format_rfc3339_millis(now), reservation_id),
+                    )
+                    .getconnection()
+                    .changes()
+                )
+                if changed != 1:
+                    raise ValueError("privacy_audit_state_conflict")
+        reservation = PrivacyAuditReservation(
+            reservation_id,
+            cast(str, row[0]),
+            cast(str, row[1]),
+            "awaiting_human",
+            self._policy_generation(cast(str, row[2])),
+            parse_rfc3339_millis(row[4]),
+        )
+        return PrivacyAuditState(reservation, "awaiting_human")
+
     async def record_human_decision(
         self, reservation_id: str, decision: HumanPrivacyDecision
     ) -> PrivacyAuditState:
-        del reservation_id, decision
-        raise ValueError("network_privacy_authority_unavailable_until_b8")
+        if type(decision) is not HumanPrivacyDecision:
+            raise TypeError("privacy_human_decision_invalid")
+        now = self._clock.now_utc()
+        decision_bytes = canonical_encode(_json(decision))
+        decision_commitment = _mac(self._key, _APPROVAL_DOMAIN, decision_bytes)
+        async with self._lock:
+            with _transaction(self._db):
+                row = self._db.execute(
+                    """SELECT request_id, subject_lookup_identity, policy_digest, state,
+                              subject_structural_canonical, created_at
+                       FROM privacy_audit_records WHERE proposal_id = ?""",
+                    (reservation_id,),
+                ).fetchone()
+                if row is None or row[3] not in {"awaiting_human", "reserved"}:
+                    raise ValueError("privacy_audit_state_conflict")
+                structural = _mapping(strict_json_parse(cast(bytes, row[4])))
+                if structural.get("proposal_commitment") != decision.proposal_commitment:
+                    raise ValueError("privacy_decision_commitment_mismatch")
+                if decision.approved:
+                    next_state = "approved"
+                    self._db.execute(
+                        """UPDATE privacy_audit_records
+                           SET state = ?, consent_source = ?, decision_structural_canonical = ?,
+                               decision_commitment = ?, approval_binding_commitment = ?,
+                               updated_at = ?
+                           WHERE proposal_id = ? AND state IN ('awaiting_human', 'reserved')""",
+                        (
+                            next_state,
+                            decision.consent_source.value,
+                            decision_bytes,
+                            decision_commitment,
+                            _mac(
+                                self._key,
+                                _APPROVAL_DOMAIN,
+                                cast(str, structural["prepared_case_digest"]).encode("ascii"),
+                            ),
+                            format_rfc3339_millis(now),
+                            reservation_id,
+                        ),
+                    )
+                else:
+                    next_state = "denied"
+                    # Denial receipt is completed by the coordinator via complete_decision.
+                    self._db.execute(
+                        """UPDATE privacy_audit_records
+                           SET state = 'decision_receipt_pending', consent_source = ?,
+                               decision_structural_canonical = ?, decision_commitment = ?,
+                               updated_at = ?
+                           WHERE proposal_id = ? AND state IN ('awaiting_human', 'reserved')""",
+                        (
+                            decision.consent_source.value,
+                            decision_bytes,
+                            decision_commitment,
+                            format_rfc3339_millis(now),
+                            reservation_id,
+                        ),
+                    )
+                    next_state = "decision_receipt_pending"
+                if self._db.execute("SELECT changes()").fetchone() is None:
+                    raise ValueError("privacy_audit_state_conflict")
+        reservation = PrivacyAuditReservation(
+            reservation_id,
+            cast(str, row[0]),
+            cast(str, row[1]),
+            next_state,
+            self._policy_generation(cast(str, row[2])),
+            parse_rfc3339_millis(row[5]),
+        )
+        return PrivacyAuditState(reservation, next_state)
 
     async def authorize(
         self, reservation_id: str, approved_case_digest: str, now: datetime
     ) -> EgressAuthorization:
-        del reservation_id, approved_case_digest, now
-        raise ValueError("network_privacy_authority_unavailable_until_b8")
+        async with self._lock:
+            with _transaction(self._db):
+                row = self._db.execute(
+                    """SELECT request_id, subject_lookup_identity, policy_digest, state,
+                              subject_structural_canonical, provider_id, model_id,
+                              endpoint_profile_id, endpoint_profile_version, purpose,
+                              scope_kind, policy_version, expires_at, consent_source,
+                              approval_binding_commitment, destination_kind
+                       FROM privacy_audit_records WHERE proposal_id = ?""",
+                    (reservation_id,),
+                ).fetchone()
+                if row is None or cast(str, row[15]) != "network":
+                    raise ValueError("privacy_audit_authorization_unavailable")
+                if cast(str, row[3]) not in {"reserved", "approved"}:
+                    raise ValueError("privacy_audit_authorization_unavailable")
+                if parse_rfc3339_millis(row[12]) <= now:
+                    raise ValueError("privacy_authorization_expired")
+                structural = _mapping(strict_json_parse(cast(bytes, row[4])))
+                if structural.get("prepared_case_digest") != approved_case_digest:
+                    raise ValueError("privacy_case_digest_mismatch")
+                if "scope" not in structural:
+                    raise ValueError("privacy_audit_authorization_unavailable")
+                provider_id = cast(str | None, row[5])
+                model_id = cast(str | None, row[6])
+                endpoint_id = cast(str | None, row[7])
+                endpoint_version = cast(str | None, row[8])
+                if None in {provider_id, model_id, endpoint_id, endpoint_version}:
+                    raise ValueError("privacy_audit_authorization_unavailable")
+                binding = ProviderBinding(
+                    cast(str, provider_id),
+                    cast(str, model_id),
+                    cast(str, endpoint_id),
+                    cast(str, endpoint_version),
+                    "external",
+                )
+                approval = cast(str | None, row[14]) or _mac(
+                    self._key, _APPROVAL_DOMAIN, approved_case_digest.encode("ascii")
+                )
+                consent = cast(str | None, row[13]) or ConsentSource.BASELINE_POLICY.value
+                authorization_id = new_id(IdKind.EGRESS_AUTHORIZATION)
+                scope = _scope_from_json(structural["scope"])
+                authorization = EgressAuthorization(
+                    authorization_id,
+                    reservation_id,
+                    approved_case_digest,
+                    EgressChannel.LLM_INFERENCE,
+                    binding,
+                    cast(str, row[9]),
+                    scope,
+                    cast(int, row[11]),
+                    cast(str, row[2]),
+                    int(cast(int | str, structural.get("max_bytes") or 0)),
+                    int(cast(int | str, structural.get("max_tokens") or 0)),
+                    ConsentSource(consent),
+                    now,
+                    now + timedelta(seconds=60),
+                    self._service_generation,
+                )
+                auth_bytes = canonical_encode(_json(authorization))
+                auth_commitment = _mac(self._key, _AUTHORIZATION_DOMAIN, auth_bytes)
+                changed = (
+                    self._db.execute(
+                        """UPDATE privacy_audit_records
+                           SET state = 'authorized', consent_source = ?,
+                               approval_binding_commitment = ?,
+                               authorization_id = ?,
+                               authorization_structural_canonical = ?,
+                               authorization_commitment = ?,
+                               updated_at = ?
+                           WHERE proposal_id = ? AND state IN ('reserved', 'approved')
+                             AND authorization_id IS NULL""",
+                        (
+                            consent,
+                            approval,
+                            authorization_id,
+                            auth_bytes,
+                            auth_commitment,
+                            format_rfc3339_millis(now),
+                            reservation_id,
+                        ),
+                    )
+                    .getconnection()
+                    .changes()
+                )
+                if changed != 1:
+                    raise ValueError("privacy_audit_authorization_unavailable")
+        return authorization
 
     async def consume(
         self, authorization_id: str, dispatch_id: str, now: datetime
     ) -> ConsumedAuthorization:
-        del authorization_id, dispatch_id, now
-        raise ValueError("network_privacy_dispatch_unavailable_until_b8")
+        async with self._lock:
+            with _transaction(self._db):
+                row = self._db.execute(
+                    """SELECT authorization_structural_canonical, state
+                       FROM privacy_audit_records WHERE authorization_id = ?""",
+                    (authorization_id,),
+                ).fetchone()
+                if row is None or row[1] != "authorized" or row[0] is None:
+                    raise ValueError("privacy_audit_authorization_unavailable")
+                source = _mapping(strict_json_parse(cast(bytes, row[0])))
+                authorization = EgressAuthorization(
+                    cast(str, source["authorization_id"]),
+                    cast(str, source["privacy_proposal_id"]),
+                    cast(str, source["case_digest"]),
+                    EgressChannel(cast(str, source["channel"])),
+                    ProviderBinding(
+                        cast(
+                            str, cast(dict[str, object], source["provider_binding"])["provider_id"]
+                        ),
+                        cast(str, cast(dict[str, object], source["provider_binding"])["model_id"]),
+                        cast(
+                            str,
+                            cast(dict[str, object], source["provider_binding"])[
+                                "endpoint_profile_id"
+                            ],
+                        ),
+                        cast(
+                            str,
+                            cast(dict[str, object], source["provider_binding"])[
+                                "endpoint_profile_version"
+                            ],
+                        ),
+                        "external",
+                    ),
+                    cast(str, source["purpose"]),
+                    _scope_from_json(source["scope"]),
+                    cast(int, source["policy_version"]),
+                    cast(str, source["policy_digest"]),
+                    cast(int, source["max_bytes"]),
+                    cast(int, source["max_tokens"]),
+                    ConsentSource(cast(str, source["consent_source"])),
+                    parse_rfc3339_millis(source["issued_at"]),
+                    parse_rfc3339_millis(source["expires_at"]),
+                    cast(int, source["service_generation"]),
+                )
+                changed = (
+                    self._db.execute(
+                        """UPDATE privacy_audit_records
+                           SET state = 'receipt_pending', dispatch_id = ?,
+                               dispatch_started_at = ?, consumed_at = ?, updated_at = ?
+                           WHERE authorization_id = ? AND state = 'authorized'
+                             AND dispatch_id IS NULL""",
+                        (
+                            dispatch_id,
+                            format_rfc3339_millis(now),
+                            format_rfc3339_millis(now),
+                            format_rfc3339_millis(now),
+                            authorization_id,
+                        ),
+                    )
+                    .getconnection()
+                    .changes()
+                )
+                if changed != 1:
+                    raise ValueError("privacy_audit_authorization_unavailable")
+        return ConsumedAuthorization(authorization, dispatch_id, now)
 
     async def complete_egress(self, dispatch_id: str, receipt: EgressReceipt) -> None:
-        del dispatch_id, receipt
-        raise ValueError("network_privacy_dispatch_unavailable_until_b8")
+        if type(receipt) is not EgressReceipt:
+            raise TypeError("privacy_egress_receipt_invalid")
+        canonical = _receipt_bytes(receipt)
+        digest = canonical_digest(strict_json_parse(canonical))
+        now = self._clock.now_utc()
+        async with self._lock:
+            with _transaction(self._db):
+                changed = (
+                    self._db.execute(
+                        """UPDATE privacy_audit_records
+                           SET state = 'attempt_completed',
+                               attempt_result_structural_canonical = ?,
+                               attempt_result_commitment = ?,
+                               receipt_id = ?, receipt_outcome = ?, receipt_reason = ?,
+                               receipt_canonical = ?, receipt_digest = ?,
+                               receipt_finished_at = ?, updated_at = ?
+                           WHERE dispatch_id = ? AND state = 'receipt_pending'
+                             AND receipt_id IS NULL""",
+                        (
+                            canonical,
+                            digest,
+                            receipt.receipt_id,
+                            receipt.outcome.value,
+                            None
+                            if receipt.safe_failure_reason is None
+                            else receipt.safe_failure_reason.value,
+                            canonical,
+                            digest,
+                            format_rfc3339_millis(receipt.finished_at),
+                            format_rfc3339_millis(now),
+                            dispatch_id,
+                        ),
+                    )
+                    .getconnection()
+                    .changes()
+                )
+                if changed != 1:
+                    raise ValueError("privacy_egress_receipt_conflict")
 
     def _policy_generation(self, policy_digest: str) -> int:
         row = self._db.execute(

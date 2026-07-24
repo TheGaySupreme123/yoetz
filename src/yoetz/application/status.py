@@ -10,6 +10,7 @@ from typing import Final, Literal, Protocol, cast
 
 from yoetz.application.check import CheckScope, run_deterministic_policies
 from yoetz.domain.findings import FINDING_KIND_TRAITS, FindingOrigin
+from yoetz.domain.observation import AdviceSnapshot
 from yoetz.domain.values import Frontier
 from yoetz.kernel.deterministic_checks import (
     DeterministicAssessment,
@@ -528,19 +529,33 @@ async def execute_status(app: Application, request: StatusRequest) -> StatusInte
                     expected_version,
                 )
             )
-            snapshot = (
-                None
-                if runtime.observation is None
-                else runtime.observation.load_latest_advice_snapshot()
-            )
+            snapshot: AdviceSnapshot | None = None
+            if runtime.observation is not None:
+                workspace = None
+                lookup = getattr(runtime.observation, "workspace_for_yoetz_session", None)
+                if callable(lookup):
+                    workspace = lookup(runtime.session_id)
+                if type(workspace) is str:
+                    session_load = getattr(
+                        runtime.observation, "load_advice_snapshot_for_session", None
+                    )
+                    if callable(session_load):
+                        loaded = session_load(
+                            workspace=workspace, yoetz_session_id=runtime.session_id
+                        )
+                        snapshot = loaded if isinstance(loaded, AdviceSnapshot) else None
+                    else:
+                        loaded = runtime.observation.load_advice_snapshot(workspace)
+                        snapshot = loaded if isinstance(loaded, AdviceSnapshot) else None
             items: tuple[dict[str, JsonValue], ...] = ()
             if snapshot is not None:
+                advice = snapshot
                 verification_state = (
                     "stale"
-                    if "verification_stale" in snapshot.confidence_coverage.known_gaps
+                    if "verification_stale" in advice.confidence_coverage.known_gaps
                     else (
                         "unavailable"
-                        if "policy_untrusted" in snapshot.confidence_coverage.known_gaps
+                        if "policy_untrusted" in advice.confidence_coverage.known_gaps
                         else "current"
                     )
                 )
@@ -552,7 +567,7 @@ async def execute_status(app: Application, request: StatusRequest) -> StatusInte
                         "evidence_commitments": tuple(
                             sorted(
                                 {
-                                    snapshot.evidence_basis_digest,
+                                    advice.evidence_basis_digest,
                                     *(
                                         ref
                                         for ref in item.evidence_refs
@@ -570,7 +585,7 @@ async def execute_status(app: Application, request: StatusRequest) -> StatusInte
                         ),
                         "recommended_next_action": item.recommended_next_action,
                     }
-                    for item in snapshot.ranked_items[: int(request.limit)]
+                    for item in advice.ranked_items[: int(request.limit)]
                 )
             page = StatusAdvicePageModel.model_validate(
                 {

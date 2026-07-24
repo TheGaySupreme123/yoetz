@@ -332,12 +332,22 @@ def hooks_session_start() -> None:
 @hooks_app.command("observe")
 def hooks_observe(
     event: Annotated[str, typer.Option("--event", help="Codex hook event name.")],
+    workspace: Annotated[
+        str | None,
+        typer.Option(
+            "--workspace",
+            help=(
+                "Project workspace path (use '.' for cwd). Resolved locally; only the "
+                "private commitment is retained—never logged or persisted as plaintext."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Unified bounded observation ingress for Codex lifecycle hooks."""
 
     module = importlib.import_module("yoetz.cli.observe_hooks")
     handler = cast(Callable[..., int], getattr(module, "handle_observe"))
-    _finish(handler(event_name=event))
+    _finish(handler(event_name=event, workspace=workspace))
 
 
 def _observe_operation(name: str) -> Callable[..., int]:

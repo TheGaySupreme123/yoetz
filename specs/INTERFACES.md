@@ -1624,6 +1624,10 @@ Independent verification support (local control, not MCP):
   newer subject digests stale older pending work, identical workspace/policy/approval/state tuples
   are cached, abandoned running work returns to pending, and immutable results record whether the
   post-run state is still current.
+- `ObservationVerificationSupervisor` — ready-lifecycle background owner that wakes on enqueue,
+  discovers pending work at startup, drains one serialized check per workspace through the
+  enforcing sandbox, reclaims expired leases, and stops before vault/runtime closure. Hook ingest
+  never executes approved checks inside the three-second RPC budget.
 
 Observation consent is one project-level confirmation recorded as a private workspace commitment.
 The normalized locator is authenticated encrypted content; plaintext keeps only commitment and
@@ -1649,10 +1653,12 @@ receipt times, and `quarantine_detail_evicted`.
 authorship require real observation evidence under an active consented observation arm — never a
 trigger-only hook, consent marker, empty status, or degraded/stopped source alone.
 
-Existing v0.1 ledger/object/import data remains readable without rewrite. Migration `0003` may add
+Existing v0.1 ledger/object/import data remains readable without rewrite. Migration `0003` owns
 encrypted observation-content/workspace-binding references, logical identity claims, exact-digest
 trust, verification jobs/leases/results, and advice history/delivery state in addition to `0002`
-consent/cursor/dedup/current-advice state. It adds no plaintext content column.
+consent/cursor/dedup/current-advice state. Migration `0004` owns inspection snapshots,
+workspace→Yoetz-session routing, and session-scoped current advice without rewriting `0003`. Neither
+adds a plaintext content column.
 
 ### Maintenance
 

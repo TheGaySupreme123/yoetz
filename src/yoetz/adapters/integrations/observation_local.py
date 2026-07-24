@@ -183,6 +183,8 @@ class _WorkspaceState:
     advice_frontier: str | None = None
     advice_snapshot: AdviceSnapshot | None = None
     last_advice_suppression: str | None = None
+    session_advice: dict[str, AdviceSnapshot] | None = None
+    session_advice_suppression: dict[str, str] | None = None
     open_pre: dict[str, str] | None = None
     stream_cursors: dict[str, ObservationCursor] | None = None
     stream_partials: dict[str, bytes] | None = None
@@ -240,10 +242,30 @@ class _WorkspaceState:
             self.session_generations = {}
         if self.ended_session_generations is None:
             self.ended_session_generations = {}
+        if self.session_advice is None:
+            self.session_advice = {}
+        if self.session_advice_suppression is None:
+            self.session_advice_suppression = {}
 
 
 def _cursor_key(source: ObservationSource, session_commitment: str) -> str:
     return f"{source.value}:{session_commitment}"
+
+
+def _load_session_advice(raw: object) -> dict[str, AdviceSnapshot]:
+    if not isinstance(raw, Mapping):
+        return {}
+    result: dict[str, AdviceSnapshot] = {}
+    for key, value in cast(Mapping[str, JsonValue], raw).items():
+        if type(key) is not str or not isinstance(value, Mapping):
+            continue
+        try:
+            result[key] = advice_snapshot_from_json(
+                JsonObject(cast(Mapping[str, JsonValue], value))
+            )
+        except ProtocolValueError, TypeError, ValueError:
+            continue
+    return result
 
 
 def _dedup_key(workspace: str, envelope: ObservationEnvelope) -> str:
@@ -478,19 +500,51 @@ class LocalObservationStore:
             state.advice_frontier = None if snapshot is None else snapshot.freshness_frontier
             self._save(workspace, state)
 
-    def peek_advice_for_delivery(self, workspace: str) -> AdviceSnapshot | None:
+    def set_session_advice_snapshot(
+        self,
+        workspace: str,
+        *,
+        yoetz_session_id: str,
+        snapshot: AdviceSnapshot | None,
+    ) -> None:
+        with self._lock:
+            state = self._load(workspace)
+            if state.session_advice is None:
+                state.session_advice = {}
+            if snapshot is None:
+                state.session_advice.pop(yoetz_session_id, None)
+            else:
+                state.session_advice[yoetz_session_id] = snapshot
+            self._save(workspace, state)
+
+    def peek_advice_for_delivery(
+        self, workspace: str, *, yoetz_session_id: str | None = None
+    ) -> AdviceSnapshot | None:
         """Return a new high-value advice snapshot once per suppression identity."""
 
         with self._lock:
             state = self._load(workspace)
-            snapshot = state.advice_snapshot
+            snapshot: AdviceSnapshot | None = None
+            if type(yoetz_session_id) is str and state.session_advice is not None:
+                snapshot = state.session_advice.get(yoetz_session_id)
             if snapshot is None:
-                return None
-            if state.last_advice_suppression == snapshot.suppression_identity:
+                snapshot = state.advice_snapshot
+            if snapshot is None:
                 return None
             if not snapshot.ranked_finding_ids:
                 return None
-            state.last_advice_suppression = snapshot.suppression_identity
+            if type(yoetz_session_id) is str:
+                if state.session_advice_suppression is None:
+                    state.session_advice_suppression = {}
+                if state.session_advice_suppression.get(yoetz_session_id) == (
+                    snapshot.suppression_identity
+                ):
+                    return None
+                state.session_advice_suppression[yoetz_session_id] = snapshot.suppression_identity
+            else:
+                if state.last_advice_suppression == snapshot.suppression_identity:
+                    return None
+                state.last_advice_suppression = snapshot.suppression_identity
             self._save(workspace, state)
             return snapshot
 
@@ -1210,6 +1264,23 @@ class LocalObservationStore:
                 else advice_snapshot_to_json(state.advice_snapshot)
             ),
             "last_advice_suppression": state.last_advice_suppression,
+            "session_advice": JsonObject(
+                {
+                    key: advice_snapshot_to_json(snapshot)
+                    for key, snapshot in sorted(
+                        (state.session_advice or {}).items(), key=lambda item: item[0].encode()
+                    )
+                }
+            ),
+            "session_advice_suppression": JsonObject(
+                {
+                    key: value
+                    for key, value in sorted(
+                        (state.session_advice_suppression or {}).items(),
+                        key=lambda item: item[0].encode(),
+                    )
+                }
+            ),
             "open_pre": JsonObject({key: value for key, value in sorted(state.open_pre.items())}),
             "stream_cursors": JsonObject(
                 {
@@ -1460,6 +1531,14 @@ class LocalObservationStore:
             advice_frontier=cast(str | None, raw.get("advice_frontier")),
             advice_snapshot=advice_snapshot,
             last_advice_suppression=cast(str | None, raw.get("last_advice_suppression")),
+            session_advice=_load_session_advice(raw.get("session_advice")),
+            session_advice_suppression={
+                key: value
+                for key, value in cast(
+                    Mapping[str, JsonValue], raw.get("session_advice_suppression") or {}
+                ).items()
+                if type(key) is str and type(value) is str
+            },
             open_pre=open_pre,
             stream_cursors=stream_cursors,
             stream_partials=stream_partials,

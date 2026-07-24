@@ -166,6 +166,7 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ("migrations/bundle/0001.sql", "migration", "application/sql", True),
     ("migrations/bundle/0002.sql", "migration", "application/sql", True),
     ("migrations/bundle/0003.sql", "migration", "application/sql", True),
+    ("migrations/bundle/0004.sql", "migration", "application/sql", True),
     ("migrations/catalog/0001.sql", "migration", "application/sql", True),
     (
         "schemas/common/actor-assertion-1.0.0.schema.json",

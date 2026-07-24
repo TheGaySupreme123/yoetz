@@ -286,16 +286,176 @@ class SqliteObservationStore:
             return None
         return advice_snapshot_from_json(JsonObject(cast(Mapping[str, JsonValue], parsed)))
 
-    def load_latest_advice_snapshot(self) -> AdviceSnapshot | None:
-        row = self._db.execute(
-            "SELECT snapshot_json FROM observation_advice ORDER BY updated_at DESC LIMIT 1"
-        ).fetchone()
+    def set_session_advice_snapshot(
+        self,
+        *,
+        workspace: str,
+        yoetz_session_id: str,
+        snapshot: AdviceSnapshot,
+        updated_at: Timestamp,
+    ) -> None:
+        payload = canonical_encode(advice_snapshot_to_json(snapshot))
+        with self._db:
+            self._db.execute(
+                "INSERT INTO observation_session_advice("
+                "workspace_commitment, yoetz_session_id, suppression_identity, "
+                "snapshot_json, updated_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(workspace_commitment, yoetz_session_id) DO UPDATE SET "
+                "suppression_identity=excluded.suppression_identity, "
+                "snapshot_json=excluded.snapshot_json, updated_at=excluded.updated_at",
+                (
+                    workspace,
+                    yoetz_session_id,
+                    snapshot.suppression_identity,
+                    payload,
+                    updated_at.wire,
+                ),
+            )
+            # Keep workspace-keyed current row for older readers.
+            self._db.execute(
+                "INSERT INTO observation_advice(workspace_commitment, suppression_identity, "
+                "snapshot_json, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(workspace_commitment) DO UPDATE SET "
+                "suppression_identity=excluded.suppression_identity, "
+                "snapshot_json=excluded.snapshot_json, updated_at=excluded.updated_at",
+                (workspace, snapshot.suppression_identity, payload, updated_at.wire),
+            )
+
+    def load_advice_snapshot_for_session(
+        self, *, workspace: str, yoetz_session_id: str
+    ) -> AdviceSnapshot | None:
+        try:
+            row = self._db.execute(
+                "SELECT snapshot_json FROM observation_session_advice "
+                "WHERE workspace_commitment = ? AND yoetz_session_id = ?",
+                (workspace, yoetz_session_id),
+            ).fetchone()
+        except Exception:
+            # Pre-0004 bundles: fall back to workspace-scoped advice only.
+            return self.load_advice_snapshot(workspace)
         if row is None or type(row[0]) is not bytes:
             return None
         parsed = strict_json_parse(row[0])
         if not isinstance(parsed, Mapping):
             return None
         return advice_snapshot_from_json(JsonObject(cast(Mapping[str, JsonValue], parsed)))
+
+    def workspace_for_yoetz_session(self, yoetz_session_id: str) -> str | None:
+        try:
+            row = self._db.execute(
+                "SELECT workspace_commitment FROM observation_workspace_session_routes "
+                "WHERE yoetz_session_id = ? AND active = 1",
+                (yoetz_session_id,),
+            ).fetchone()
+        except Exception:
+            return None
+        if row is None or type(row[0]) is not str:
+            return None
+        return row[0]
+
+    def record_workspace_session_route(
+        self,
+        *,
+        workspace: str,
+        yoetz_session_id: str,
+        yoetz_task_id: str,
+        yoetz_writer_id: str,
+        codex_session_commitment: str,
+        bound_at: Timestamp,
+    ) -> None:
+        try:
+            with self._db:
+                self._db.execute(
+                    "UPDATE observation_workspace_session_routes "
+                    "SET active=0, unbound_at=? "
+                    "WHERE workspace_commitment=? AND yoetz_session_id<>? AND active=1",
+                    (bound_at.wire, workspace, yoetz_session_id),
+                )
+                self._db.execute(
+                    "INSERT INTO observation_workspace_session_routes("
+                    "workspace_commitment, yoetz_session_id, yoetz_task_id, yoetz_writer_id, "
+                    "codex_session_commitment, active, bound_at, unbound_at) "
+                    "VALUES(?,?,?,?,?,1,?,NULL) "
+                    "ON CONFLICT(workspace_commitment, yoetz_session_id) DO UPDATE SET "
+                    "yoetz_task_id=excluded.yoetz_task_id, "
+                    "yoetz_writer_id=excluded.yoetz_writer_id, "
+                    "codex_session_commitment=excluded.codex_session_commitment, "
+                    "active=1, bound_at=excluded.bound_at, unbound_at=NULL",
+                    (
+                        workspace,
+                        yoetz_session_id,
+                        yoetz_task_id,
+                        yoetz_writer_id,
+                        codex_session_commitment,
+                        bound_at.wire,
+                    ),
+                )
+        except Exception:
+            return
+
+    def record_inspection_snapshot(
+        self,
+        *,
+        workspace: str,
+        yoetz_session_id: str,
+        subject_state_digest: str,
+        changed_paths_digest: str,
+        relative_paths: tuple[str, ...],
+        facts_object_id: str | None,
+        excerpt_object_id: str | None,
+        recorded_at: Timestamp,
+    ) -> None:
+        snapshot_id = (
+            "insp_"
+            + canonical_digest(
+                JsonObject(
+                    {
+                        "workspace": workspace,
+                        "session": yoetz_session_id,
+                        "subject": subject_state_digest,
+                    }
+                )
+            ).removeprefix("sha256:")[:48]
+        )
+        paths_blob = canonical_encode(JsonObject({"relative_paths": list(relative_paths)}))
+        try:
+            with self._db:
+                self._db.execute(
+                    "UPDATE observation_inspection_snapshots SET is_current=0 "
+                    "WHERE workspace_commitment=? AND yoetz_session_id=? AND is_current=1",
+                    (workspace, yoetz_session_id),
+                )
+                self._db.execute(
+                    "INSERT INTO observation_inspection_snapshots("
+                    "snapshot_id, workspace_commitment, yoetz_session_id, subject_state_digest, "
+                    "changed_paths_digest, relative_paths_json, facts_object_id, "
+                    "excerpt_object_id, is_current, recorded_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,1,?) "
+                    "ON CONFLICT(workspace_commitment, yoetz_session_id, subject_state_digest) "
+                    "DO UPDATE SET changed_paths_digest=excluded.changed_paths_digest, "
+                    "relative_paths_json=excluded.relative_paths_json, "
+                    "facts_object_id=excluded.facts_object_id, "
+                    "excerpt_object_id=excluded.excerpt_object_id, "
+                    "is_current=1, recorded_at=excluded.recorded_at",
+                    (
+                        snapshot_id,
+                        workspace,
+                        yoetz_session_id,
+                        subject_state_digest,
+                        changed_paths_digest,
+                        paths_blob,
+                        facts_object_id,
+                        excerpt_object_id,
+                        recorded_at.wire,
+                    ),
+                )
+        except Exception:
+            return
+
+    def load_latest_advice_snapshot(self) -> AdviceSnapshot | None:
+        """Deprecated: prefer load_advice_snapshot_for_session / workspace_for_yoetz_session."""
+
+        return None
 
     def record_advice_history(
         self,

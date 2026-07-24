@@ -16,6 +16,12 @@ approved checks bound to exact subject-state digests.
 - `ObservationVerificationJob`
 - `ObservationVerificationRepository`
 - `ObservationVerificationWorker.enqueue_if_changed(...)`, `run_once()`
+- `ObservationVerificationSupervisor` — generation-fenced background drain loop owned by ready
+  composition: `start()`, `stop()`, `register()`, `notify()`. Hook ingest only enqueues and wakes;
+  approved checks never run inside the hook RPC budget. Ready composition creates the supervisor with
+  the current `service_generation`, starts it when the ready `Application` is opened, and stops it on
+  application/`ServiceReadyContext` close before privacy/runtime teardown. The loop always parks on
+  its wake event (short timeout) so an empty handle set cannot busy-loop and starve shutdown.
 
 ## Behavior
 
