@@ -212,7 +212,11 @@ class PrivacyCoordinator:
     async def resume(
         self, request_id: str, case_digest: str, deadline: Deadline
     ) -> SemanticEgressResult:
-        if type(request_id) is not str or type(case_digest) is not str or type(deadline) is not Deadline:
+        if (
+            type(request_id) is not str
+            or type(case_digest) is not str
+            or type(deadline) is not Deadline
+        ):
             raise TypeError("semantic_egress_resume_invalid")
         async with self._admission_lock:
             if self._closed:
@@ -511,7 +515,10 @@ class PrivacyCoordinator:
         decision = self._semantic_decision(classified, effective, binding)
         if decision.outcome is not PrivacyOutcome.COMPLETED:
             return await self._complete_semantic_predispatch(
-                candidate, effective, decision.outcome, decision.reason or PrivacyReason.POLICY_DENIED
+                candidate,
+                effective,
+                decision.outcome,
+                decision.reason or PrivacyReason.POLICY_DENIED,
             )
 
         minimized = self._classifier.minimize_and_scan(classified, decision)
@@ -563,7 +570,8 @@ class PrivacyCoordinator:
                     policy_digest=effective.effective_digest,
                     max_bytes=minimized.byte_count,
                     max_tokens=minimized.token_count,
-                    expires_at=now + timedelta(seconds=max(60, llm.authorization_ttl_seconds or 60)),
+                    expires_at=now
+                    + timedelta(seconds=max(60, llm.authorization_ttl_seconds or 60)),
                 )
             )
         except Exception:
@@ -976,9 +984,7 @@ class PrivacyCoordinator:
                 None,
             ),
             ReceiptTransformations(0, 0, len(candidate.items)),
-            ReceiptSecretScan(
-                "observability-sensitive-content-v1", f"sha256:{'0' * 64}", 0, True
-            ),
+            ReceiptSecretScan("observability-sensitive-content-v1", f"sha256:{'0' * 64}", 0, True),
             reason,
             1,
         )
