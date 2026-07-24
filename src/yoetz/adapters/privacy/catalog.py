@@ -938,6 +938,159 @@ class CatalogPrivacyAudit:
             cast(str | None, row[6]),
         )
 
+    async def load_disclosure_proposal(self, proposal_id: str) -> DisclosureProposal | None:
+        row = self._db.execute(
+            """SELECT content_object_id, content_plaintext_size, content_commitment,
+                      content_envelope_digest, content_encryption_format, content_key_slot,
+                      content_media_type, content_created_at, task_id,
+                      provider_id, model_id, endpoint_profile_id, endpoint_profile_version,
+                      local_sink, destination_kind, policy_version,
+                      subject_structural_canonical, expires_at
+               FROM privacy_audit_records
+               WHERE proposal_id = ? AND subject_kind = 'disclosure'""",
+            (proposal_id,),
+        ).fetchone()
+        if row is None or type(row[0]) is not str or type(row[8]) is not str:
+            return None
+        structural = _mapping(strict_json_parse(cast(bytes, row[16])))
+        task = cast(str, row[8])
+        ref = ObjectRef(
+            cast(str, row[0]),
+            cast(int, row[1]),
+            cast(str, row[2]),
+            cast(str, row[3]),
+            cast(Literal["yoetz-object/1"], row[4]),
+            cast(str, row[5]),
+            ObjectMetadata(
+                ObjectKind.PRIVACY_AUDIT,
+                cast(str, row[6]),
+                task,
+                parse_rfc3339_millis(row[7]),
+            ),
+        )
+        try:
+            body = b"".join([chunk async for chunk in self._objects.open_verified(ref)])
+            parsed = _mapping(strict_json_parse(body))
+        except Exception:
+            return None
+        if parsed.get("schema") != "yoetz.disclosure-proposal/1":
+            return None
+        prepared_b64 = parsed.get("prepared_bytes_base64")
+        if type(prepared_b64) is not str:
+            return None
+        try:
+            prepared_bytes = base64.b64decode(prepared_b64.encode("ascii"), validate=True)
+        except Exception:
+            return None
+        scope_raw = parsed.get("scope")
+        if scope_raw is None and "scope" in structural:
+            scope_raw = structural["scope"]
+        if scope_raw is None:
+            return None
+        binding = None
+        local_sink = None
+        if cast(str | None, row[14]) == "network":
+            provider_id = cast(str | None, row[9])
+            model_id = cast(str | None, row[10])
+            endpoint_id = cast(str | None, row[11])
+            endpoint_version = cast(str | None, row[12])
+            if None in {provider_id, model_id, endpoint_id, endpoint_version}:
+                return None
+            binding = ProviderBinding(
+                cast(str, provider_id),
+                cast(str, model_id),
+                cast(str, endpoint_id),
+                cast(str, endpoint_version),
+                "external",
+            )
+        else:
+            sink_raw = cast(str | None, row[13])
+            if sink_raw is None:
+                return None
+            local_sink = LocalDisclosureSink(sink_raw)
+        transforms_raw = parsed.get("transformation_summary") or []
+        if type(transforms_raw) is not list:
+            return None
+        transforms: list[tuple[str, int]] = []
+        for item in transforms_raw:
+            if type(item) is not list or len(item) != 2:
+                return None
+            if type(item[0]) is not str or type(item[1]) is not int:
+                return None
+            transforms.append((item[0], item[1]))
+        max_bytes = int(cast(int | str, structural.get("max_bytes") or len(prepared_bytes)))
+        max_tokens = int(cast(int | str, structural.get("max_tokens") or 0))
+        commitment = structural.get("proposal_commitment")
+        if type(commitment) is not str:
+            return None
+        try:
+            return DisclosureProposal(
+                cast(str, parsed["privacy_proposal_id"]),
+                cast(str, parsed["request_id"]),
+                task,
+                _strings(parsed.get("source_item_digests") or []),
+                prepared_bytes,
+                tuple(
+                    DataCategory(value)
+                    for value in _strings(parsed.get("approved_categories") or [])
+                ),
+                tuple(
+                    DataCategory(value)
+                    for value in _strings(parsed.get("blocked_categories") or [])
+                ),
+                tuple(transforms),
+                cast(str, parsed["prepared_case_digest"]),
+                binding,
+                local_sink,
+                cast(str, parsed["purpose"]),
+                _scope_from_json(scope_raw),
+                int(cast(int | str, row[15])),
+                cast(str, parsed["policy_digest"]),
+                max_bytes,
+                max_tokens,
+                parse_rfc3339_millis(parsed["expires_at"]),
+                commitment,
+            )
+        except Exception:
+            return None
+
+    async def load_authorization(self, authorization_id: str) -> EgressAuthorization | None:
+        row = self._db.execute(
+            """SELECT authorization_structural_canonical, state
+               FROM privacy_audit_records WHERE authorization_id = ?""",
+            (authorization_id,),
+        ).fetchone()
+        if row is None or row[1] != "authorized" or row[0] is None:
+            return None
+        try:
+            source = _mapping(strict_json_parse(cast(bytes, row[0])))
+            binding_raw = _mapping(source["provider_binding"])
+            return EgressAuthorization(
+                cast(str, source["authorization_id"]),
+                cast(str, source["privacy_proposal_id"]),
+                cast(str, source["case_digest"]),
+                EgressChannel(cast(str, source["channel"])),
+                ProviderBinding(
+                    cast(str, binding_raw["provider_id"]),
+                    cast(str, binding_raw["model_id"]),
+                    cast(str, binding_raw["endpoint_profile_id"]),
+                    cast(str, binding_raw["endpoint_profile_version"]),
+                    "external",
+                ),
+                cast(str, source["purpose"]),
+                _scope_from_json(source["scope"]),
+                cast(int, source["policy_version"]),
+                cast(str, source["policy_digest"]),
+                cast(int, source["max_bytes"]),
+                cast(int, source["max_tokens"]),
+                ConsentSource(cast(str, source["consent_source"])),
+                parse_rfc3339_millis(source["issued_at"]),
+                parse_rfc3339_millis(source["expires_at"]),
+                cast(int, source["service_generation"]),
+            )
+        except Exception:
+            return None
+
     async def consume_local(
         self, reservation_id: str, approved_case_digest: str, now: datetime
     ) -> ConsumedLocalDisclosure:

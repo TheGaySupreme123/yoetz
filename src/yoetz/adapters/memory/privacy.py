@@ -386,6 +386,13 @@ class MemoryPrivacyAudit:
                 )
         return None
 
+    async def load_disclosure_proposal(self, proposal_id: str) -> DisclosureProposal | None:
+        async with self._lock:
+            row = self._state.audit.get(proposal_id)
+            if row is None or type(row.subject) is not DisclosureProposal:
+                return None
+            return row.subject
+
     async def consume_local(
         self, reservation_id: str, approved_case_digest: str, now: datetime
     ) -> ConsumedLocalDisclosure:

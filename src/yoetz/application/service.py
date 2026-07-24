@@ -825,6 +825,7 @@ class ServiceReadyContext:
         default_factory=_empty_support_handlers
     )
     verification_supervisor: ObservationVerificationSupervisor | None = None
+    rediscover_pending_verification: Callable[[], Awaitable[None]] | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -885,6 +886,8 @@ class ReadyApplicationFactory:
             )
             if context.verification_supervisor is not None:
                 await context.verification_supervisor.start()
+            if context.rediscover_pending_verification is not None:
+                await context.rediscover_pending_verification()
             return application
         except BaseException:
             await _close_ready_context(context)

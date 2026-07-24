@@ -878,7 +878,10 @@ def handle_observe(
 
         # Nonblocking advice delivery at safe points (suppress Yoetz self-tool loops).
         if not additional and resolved_event in ADVICE_SAFE_EVENTS and not skip_advice_loop:
-            snapshot = store.peek_advice_for_delivery(workspace_commitment)
+            session_id = None if mapping is None else mapping.yoetz_session_id
+            snapshot = store.peek_advice_for_delivery(
+                workspace_commitment, yoetz_session_id=session_id
+            )
             if snapshot is not None:
                 additional = _advice_context(snapshot)
 

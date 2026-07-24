@@ -1029,6 +1029,10 @@ class ObservationCoordinator:
                 )
             # Mirror into local store for hook advice delivery.
             self.local.set_advice_snapshot(workspace, snapshot)
+            if isinstance(runtime, TaskRuntime) and type(session_id) is str:
+                self.local.set_session_advice_snapshot(
+                    workspace, yoetz_session_id=session_id, snapshot=snapshot
+                )
             if isinstance(runtime, TaskRuntime):
                 await self._materialize_advice_findings(runtime, envelopes, snapshot)
         if self.advice_hook is not None:

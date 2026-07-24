@@ -1618,6 +1618,7 @@ async def provide_service_ready_context(
         version_manifest=manifest,
         support_handlers=observation_handlers,
         verification_supervisor=verification_supervisor,
+        rediscover_pending_verification=observation_coordinator.rediscover_pending_verification,
     )
 
 

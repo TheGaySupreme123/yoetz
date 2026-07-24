@@ -447,13 +447,106 @@ class PrivacyCoordinator:
                 PrivacyReason.DEADLINE_EXPIRED,
                 privacy_proposal_id=state.reservation.privacy_proposal_id,
             )
-        # Resume continues from the persisted prepared boundary when still authorized/approved.
-        # Without rehydrated proposal bytes here, fail closed rather than invent a case.
-        return SemanticEgressBlocked(
-            request_id,
-            PrivacyOutcome.AUDIT_FAILED,
-            PrivacyReason.AUDIT_FAILED,
-            privacy_proposal_id=state.reservation.privacy_proposal_id,
+        try:
+            proposal = await self._audit.load_disclosure_proposal(
+                state.reservation.privacy_proposal_id
+            )
+        except Exception:
+            proposal = None
+        if proposal is None or proposal.prepared_case_digest != case_digest:
+            return SemanticEgressBlocked(
+                request_id,
+                PrivacyOutcome.AUDIT_FAILED,
+                PrivacyReason.AUDIT_FAILED,
+                privacy_proposal_id=state.reservation.privacy_proposal_id,
+            )
+        try:
+            effective = await self._policies.effective_policy(proposal.scope)
+        except Exception:
+            return SemanticEgressBlocked(
+                request_id,
+                PrivacyOutcome.AUDIT_FAILED,
+                PrivacyReason.AUDIT_FAILED,
+                privacy_proposal_id=proposal.privacy_proposal_id,
+            )
+        binding = proposal.provider_binding
+        if binding is None and proposal.local_sink is LocalDisclosureSink.LOCAL_MODEL:
+            # Local AF_UNIX semantic resume needs the standing local-model binding.
+            binding = effective.policy.local_model_binding
+        if binding is None:
+            return SemanticEgressBlocked(
+                request_id,
+                PrivacyOutcome.AUDIT_FAILED,
+                PrivacyReason.AUDIT_FAILED,
+                privacy_proposal_id=proposal.privacy_proposal_id,
+            )
+        channel = (
+            EgressChannel.LLM_INFERENCE
+            if proposal.provider_binding is not None or binding.transport == "local_af_unix"
+            else None
+        )
+        candidate = CandidateContext(
+            request_id=request_id,
+            channel=channel,
+            local_sink=None if channel is not None else proposal.local_sink,
+            purpose=proposal.purpose,
+            scope=proposal.scope,
+            subject_digest=case_digest,
+            provider_binding=binding,
+            items=(),
+        )
+        minimized = MinimizedDisclosure(
+            prepared_bytes=proposal.prepared_bytes,
+            included_item_ids=proposal.source_item_digests,
+            source_item_digests=proposal.source_item_digests,
+            approved_categories=proposal.approved_categories,
+            blocked_categories=proposal.blocked_categories,
+            transformation_summary=proposal.transformation_summary,
+            byte_count=len(proposal.prepared_bytes),
+            token_count=proposal.max_tokens,
+            case_digest=proposal.prepared_case_digest,
+            scanner_registry_version="resume",
+            scanner_profile_digest=proposal.policy_digest,
+            forbidden_findings=(),
+        )
+        if status == "authorized":
+            auth_id = state.authorization_id
+            if type(auth_id) is not str:
+                return SemanticEgressBlocked(
+                    request_id,
+                    PrivacyOutcome.AUDIT_FAILED,
+                    PrivacyReason.AUDIT_FAILED,
+                    privacy_proposal_id=proposal.privacy_proposal_id,
+                )
+            try:
+                authorization = await self._audit.load_authorization(auth_id)
+            except Exception:
+                authorization = None
+            if authorization is None:
+                return SemanticEgressBlocked(
+                    request_id,
+                    PrivacyOutcome.AUDIT_FAILED,
+                    PrivacyReason.AUDIT_FAILED,
+                    privacy_proposal_id=proposal.privacy_proposal_id,
+                )
+            return await self._dispatch_approved(
+                candidate,
+                effective,
+                proposal,
+                minimized,
+                ConsentSource.BASELINE_POLICY,
+                deadline,
+                subject_digest=state.reservation.subject_digest,
+                authorization=authorization,
+            )
+        return await self._dispatch_approved(
+            candidate,
+            effective,
+            proposal,
+            minimized,
+            ConsentSource.BASELINE_POLICY,
+            deadline,
+            subject_digest=state.reservation.subject_digest,
         )
 
     async def _semantic_pipeline(
@@ -687,6 +780,7 @@ class PrivacyCoordinator:
         deadline: Deadline,
         *,
         subject_digest: str,
+        authorization: object | None = None,
     ) -> SemanticEgressResult:
         del consent
         binding = candidate.provider_binding
@@ -699,17 +793,22 @@ class PrivacyCoordinator:
                 PrivacyReason.AUTHORIZATION_EXPIRED,
                 privacy_proposal_id=proposal.privacy_proposal_id,
             )
-        try:
-            authorization = await self._audit.authorize(
-                proposal.privacy_proposal_id, proposal.prepared_case_digest, now
-            )
-        except Exception:
-            return SemanticEgressBlocked(
-                candidate.request_id,
-                PrivacyOutcome.AUDIT_FAILED,
-                PrivacyReason.AUDIT_FAILED,
-                privacy_proposal_id=proposal.privacy_proposal_id,
-            )
+        minted: EgressAuthorization
+        if type(authorization) is EgressAuthorization:
+            minted = authorization
+        else:
+            try:
+                minted = await self._audit.authorize(
+                    proposal.privacy_proposal_id, proposal.prepared_case_digest, now
+                )
+            except Exception:
+                return SemanticEgressBlocked(
+                    candidate.request_id,
+                    PrivacyOutcome.AUDIT_FAILED,
+                    PrivacyReason.AUDIT_FAILED,
+                    privacy_proposal_id=proposal.privacy_proposal_id,
+                )
+        authorization = minted
 
         if binding.transport == "local_af_unix":
             local_case = ApprovedLocalDisclosureCase(
