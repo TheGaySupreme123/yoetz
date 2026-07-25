@@ -9,7 +9,7 @@ and findings, error handling, version discovery, and the minimum safe client wor
 
 Yoetz v0.1 is a public alpha protocol. This page is explanatory. Where it repeats a frozen value —
 an enum member, a schema field, a canonical digest — the machine-readable source wins on conflict:
-[`docs/adr/`](../adr/) for architecture decisions, [`specs/INTERFACES.md`](../../specs/INTERFACES.md)
+[`docs/adr/`](../adr/) for architecture decisions, [`docs/INTERFACES.md`](../INTERFACES.md)
 for the shared vocabulary, and the JSON Schemas under [`schemas/`](../../schemas/) plus the golden
 vectors under [`fixtures/`](../../fixtures/) for exact wire shape and byte identity. A conflict
 between this prose and those sources is a documentation defect, not an alternate reading. Clients

@@ -5,18 +5,16 @@ four privacy schemas, the eight ``PRIV-*`` fixtures, the public claim map, and t
 manifest) are complete, self-contained, byte-locked, and free of private material -- and that every
 public privacy claim maps to real, checked-in evidence rather than aspirational prose.
 
-Scope note (verbatim conflict, reported rather than guessed around): this file's spec
-(``specs/tests/packaging/test_privacy_docs_and_resources.py.md``) requires ``PRIVACY.md``, the two
-protocol docs, the root ``schemas/`` tree, and the eight privacy fixtures to be "required source/
-sdist artifacts". The current ``pyproject.toml`` (owned by another wave; this file must not modify
-it) configures the ``uv_build`` backend with no explicit sdist-include list beyond ``README.md`` and
-``src/``, so ``uv build --no-sources`` produces an sdist containing only ``PKG-INFO``, ``README.md``,
-``pyproject.toml``, and ``src/yoetz/**`` -- none of ``PRIVACY.md``, ``docs/``, root ``schemas/``, or
-``fixtures/`` are present. The assertions that depend on sdist inclusion of these root files are
-implemented and precise, but are marked ``xfail`` (strict) with this exact reason so the bounded
-suite stays green while the gap remains visible; every other assertion (source-tree content, schema
-byte parity, fixture/wheel exclusion, wheel resource identity, and public-claim cross-referencing)
-runs for real against the built artifacts.
+Scope note (open gap, reported rather than guessed around): ADR-007 treats ``PRIVACY.md``, the two
+protocol docs, the root ``schemas/`` tree, and the eight privacy fixtures as required source/sdist
+artifacts. The current ``pyproject.toml`` configures the ``uv_build`` backend with no explicit
+sdist-include list beyond ``README.md`` and ``src/``, so ``uv build --no-sources`` produces an sdist
+containing only ``PKG-INFO``, ``README.md``, ``pyproject.toml``, and ``src/yoetz/**`` -- none of
+``PRIVACY.md``, ``docs/``, root ``schemas/``, or ``fixtures/`` are present. The assertions that
+depend on sdist inclusion of these root files are implemented and precise, but are marked ``xfail``
+(strict) with this exact reason so the bounded suite stays green while the gap remains visible;
+every other assertion (source-tree content, schema byte parity, fixture/wheel exclusion, wheel
+resource identity, and public-claim cross-referencing) runs for real against the built artifacts.
 """
 
 from __future__ import annotations

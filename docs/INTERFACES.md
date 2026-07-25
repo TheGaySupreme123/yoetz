@@ -281,7 +281,7 @@ by its canonical prefix and by the durable `event_refs` index. Full accepted-rec
 The entry-digest preimage is that exact record with only `entry_digest` removed; decoded payload
 handles and unknown-only adjacent metadata appear in neither JSON view.
 
-Key payload fields (minimum; full shapes in `specs/src/yoetz/domain/events.md`):
+Key payload fields (minimum; full shapes in `src/yoetz/domain/events.py`):
 
 - `obligation_published`: `obligation_id`, `description`, `evidence_expectation`, optional
   `acceptance_criteria`, `source_refs`.

@@ -2,8 +2,8 @@
 
 **Status:** Superseded in scope by ADR-016 for the general non-default consent catalog; the
 bootstrap secret-ingress lane and FD rules below remain binding.
-**Owning public specs:** `specs/src/yoetz/service/elevated_bootstrap.md`,
-`specs/src/yoetz/cli/elevated.md`, amendments to ADR-008, ADR-009 agent-context wording for
+**Implemented by:** `src/yoetz/service/elevated_bootstrap.py`,
+`src/yoetz/cli/elevated.py`, amendments to ADR-008, ADR-009 agent-context wording for
 structural consent projection only, `guidance/agent-instructions.md`, `OPEN_QUESTIONS.md`.
 **Relates to:** ADR-008 (vault/TTY ceremony), ADR-009 (egress / agent context), ADR-012 (setup).
 

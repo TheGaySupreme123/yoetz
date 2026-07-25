@@ -2,9 +2,9 @@
 
 **Status:** Working decision for spec drafting (2026-07-17). Ratification requires the Git-state
 capability matrix and privacy/path-canary tests from an installed artifact.
-**Owning public specs:** `specs/src/yoetz/ports/subject_state.md`,
-`specs/src/yoetz/adapters/git_subject_state.md`, `specs/src/yoetz/domain/values.md`,
-`specs/src/yoetz/domain/events.md`, and the CLI/capability/subprocess specifications.
+**Implemented by:** `src/yoetz/ports/subject_state.py`,
+`src/yoetz/adapters/git_subject_state.py`, `src/yoetz/domain/values.py`,
+`src/yoetz/domain/events.py`, and the CLI/capability/subprocess suites.
 **Relates to:** ADR-002 (canonical protocol), ADR-005 (Codex capability identity), ADR-009
 (local privacy boundary), and ADR-010 (harness integration).
 

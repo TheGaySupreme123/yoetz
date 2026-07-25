@@ -2,9 +2,9 @@
 
 **Status:** Working decision revised 2026-07-16. Ratification requires the privacy/egress gates in
 ADR-009 plus recorded capability fixtures against every advertised provider/model/endpoint profile.
-**Owning public specs:** `specs/src/yoetz/ports/semantic.md`,
-`specs/src/yoetz/ports/privacy.md`, `specs/src/yoetz/application/egress.md`,
-`specs/src/yoetz/application/check.md`, provider-adapter specs, privacy configuration specs,
+**Implemented by:** `src/yoetz/ports/semantic.py`,
+`src/yoetz/ports/privacy.py`, `src/yoetz/application/egress.py`,
+`src/yoetz/application/check.py`, `src/yoetz/adapters/providers/`, `src/yoetz/config/`,
 and semantic/privacy capability and conformance tests.
 
 ## Decisions

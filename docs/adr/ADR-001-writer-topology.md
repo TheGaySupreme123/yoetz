@@ -3,10 +3,10 @@
 **Status:** Founder-selected working decision (2026-07-14). The persistent-service topology is
 binding for v0.1 specification work. Lifecycle, peer-authentication, and crash-takeover proofs
 remain release gates.
-**Owning public specs:** `docs/adr/ADR-008-local-service-vault-trust-boundary.md`,
-`specs/src/yoetz/service/daemon.md`, `specs/src/yoetz/service/lifecycle.md`,
-`specs/src/yoetz/service/control_protocol.md`, `specs/src/yoetz/ports/runtime.md`,
-`specs/src/yoetz/adapters/runtime.md`, and the service subprocess specifications.
+**Implemented by:** `docs/adr/ADR-008-local-service-vault-trust-boundary.md`,
+`src/yoetz/service/daemon.py`, `src/yoetz/service/lifecycle.py`,
+`src/yoetz/service/control_protocol.py`, `src/yoetz/ports/runtime.py`,
+`src/yoetz/adapters/runtime.py`, and the service subprocess suites under `tests/subprocess/`.
 
 ## Context
 

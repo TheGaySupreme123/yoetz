@@ -1,8 +1,8 @@
 # ADR-013 — Interactive control menu as the default terminal entry point
 
 **Status:** Working decision (2026-07-21), founder-authorized amendment of ADR-012 decision 2.
-**Owning public specs:** `specs/src/yoetz/cli/menu.md` (new), plus the amended
-`specs/src/yoetz/cli/app.md`.
+**Implemented by:** `src/yoetz/cli/menu.py` (new), plus the amended
+`src/yoetz/cli/app.py`.
 **Relates to:** ADR-008 (local service/vault trust boundary), ADR-009 (privacy/egress),
 ADR-012 (first-run setup wizard).
 

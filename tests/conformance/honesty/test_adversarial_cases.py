@@ -16,8 +16,7 @@ from fixture_loader import FixtureLoader, JsonValue
 from yoetz.domain.findings import Finding, FindingKind, finding_from_json
 from yoetz.domain.values import freeze_json
 
-# The exhaustive public policy-rule mapping frozen in specs/fixtures/README.md /
-# fixtures/README.md. Every one of the 14 registered FindingKind values is owned by exactly
+# The exhaustive public policy-rule mapping frozen in fixtures/README.md. Every one of the 14 registered FindingKind values is owned by exactly
 # one of these seven adversarial cases; ADV-005/007/010 exist but are deliberately excluded from
 # this mapping (they exercise plan-revision honesty, crash/retry idempotency, and cross-channel
 # import comparison -- not a new FindingKind of their own).

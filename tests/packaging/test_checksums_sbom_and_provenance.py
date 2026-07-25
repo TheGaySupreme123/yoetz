@@ -4,8 +4,7 @@ Builds the candidate sdist/wheel, independently hashes them, generates a Cyclone
 locked dependency set, and drives the real ``scripts/generate_release_evidence.py`` end to end
 (write, check, and mutation-detection) to prove the release evidence binds the exact candidate
 bytes and never overstates verification (checksums are not signatures; ``signature_status`` is
-always ``not_provided`` at v0.1). See
-``specs/tests/packaging/test_checksums_sbom_and_provenance.py.md``.
+always ``not_provided`` at v0.1).
 """
 
 from __future__ import annotations

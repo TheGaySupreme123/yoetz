@@ -4,8 +4,7 @@ Proves the declared (``pyproject.toml``), locked (``uv.lock``), built (wheel met
 installed (isolated venv) dependency sets agree for the base target and every optional extra, that
 every resolved Python dependency comes from the public registry (never editable/path/git/private-
 index), and that every installed distribution's license normalizes to a reviewed allowlist entry.
-Also checks the Node dev-only toolchain lock never enters the runtime artifact. See
-``specs/tests/packaging/test_dependency_lock_and_licenses.py.md``.
+Also checks the Node dev-only toolchain lock never enters the runtime artifact.
 """
 
 from __future__ import annotations

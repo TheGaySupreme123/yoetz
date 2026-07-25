@@ -322,7 +322,7 @@ async def _exact_frontier(runtime: TaskRuntime, sequence: int | None) -> tuple[F
     if target > head.sequence:
         # Status is a read-only query: a requested sequence beyond the observed head is invalid
         # query input, never a stale optimistic mutation guard. See
-        # specs/src/yoetz/application/status.md "Errors and edge cases".
+        # See the status error mapping in docs/INTERFACES.md.
         raise _error(PublicErrorCode.INVALID_REQUEST, "The requested frontier is in the future.")
     if target == head.sequence:
         return head, head

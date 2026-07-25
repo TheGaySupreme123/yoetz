@@ -349,7 +349,7 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
         )
     except Exception as exc:
         # Only non-ValidationError failures reach here, so the validator itself crashed. That is an
-        # unexpected bridge error, not caller fault (specs/src/yoetz/mcp/server.md).
+        # unexpected bridge error, not caller fault.
         correlation_id = record_unexpected_exception_without_raising(
             exc,
             component="mcp.bridge",

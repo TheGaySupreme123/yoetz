@@ -2,9 +2,9 @@
 
 **Status:** Working decision for spec drafting (2026-07-13). Ratification requires the full
 fault/contention matrix on both advertised platforms.
-**Owning public specs:** `specs/INTERFACES.md`, `specs/src/yoetz/adapters/sqlite/`,
-`specs/src/yoetz/ports/ledger.md`, `specs/src/yoetz/ports/runtime.md`, root and packaged
-migration specs, and the integration/subprocess storage specifications.
+**Implemented by:** `docs/INTERFACES.md`, `src/yoetz/adapters/sqlite/`,
+`src/yoetz/ports/ledger.py`, `src/yoetz/ports/runtime.py`, root and packaged
+`migrations/`, and the storage suites under `tests/integration/storage/` and `tests/subprocess/`.
 
 ## Decisions
 

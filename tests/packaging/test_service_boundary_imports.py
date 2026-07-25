@@ -5,8 +5,7 @@ MCP import graphs can never reach trusted vault/storage/provider/privacy-gateway
 composition; that only ``yoetz.service.daemon`` imports that ready composition; that
 ``HumanControlClient``/``ConfidentialSecretClient`` are reachable only from the trusted CLI unlock/
 privacy helper modules; and that the ADR-011 ``state capture`` command path lazily imports only
-``ports.subject_state`` and ``adapters.git_subject_state``, never trusted composition. See
-``specs/tests/packaging/test_service_boundary_imports.py.md``.
+``ports.subject_state`` and ``adapters.git_subject_state``, never trusted composition.
 """
 
 from __future__ import annotations

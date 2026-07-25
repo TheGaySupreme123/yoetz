@@ -2,14 +2,13 @@
 
 Exercises the real, already-implemented boundary scanner (read-only; this file never modifies
 ``scripts/scan_public_boundary.py``) against synthetic clean and mutated candidates, and against
-the real built wheel/sdist, to prove the invariants from
-``specs/tests/packaging/test_private_boundary_and_secret_scan.py.md``: every candidate member is
+the real built wheel/sdist, to prove the ADR-007 publication invariants: every candidate member is
 scanned, any match or incomplete state blocks publication, reports never reveal matched bytes/
 absolute paths, and exceptions (where they exist) are exact.
 
 Scope notes (verbatim conflicts, reported rather than guessed around):
 
-1. The family/script spec (``specs/scripts/scan_public_boundary.py.md``) describes a reviewed
+1. The scanner (``scripts/scan_public_boundary.py``) is documented as supporting a reviewed
    per-file exception mechanism ("Allow exceptions match exact rule ID + normalized file + bounded
    digest/line context ... every exception states ... keys cannot be allowlisted"). The actual
    ``scripts/scan_public_boundary.py`` has no such mechanism: ``BoundaryRule``/``ScanReport`` carry

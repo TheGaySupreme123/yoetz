@@ -35,7 +35,7 @@
       "requirements": [
         "ADR-005",
         "ADR-010",
-        "specs/tests/capability.md"
+        "docs/runbooks/codex-integration.md"
       ],
       "tests": [
         "tests/capability/test_codex_integration_matrix.py",
@@ -74,7 +74,7 @@
       "requirements": [
         "ADR-002",
         "ADR-010",
-        "specs/INTERFACES.md"
+        "docs/INTERFACES.md"
       ],
       "tests": [
         "tests/conformance/protocol/test_operation_parity.py",
@@ -104,7 +104,7 @@
       ],
       "requirements": [
         "ADR-007",
-        "specs/scripts/generate_release_evidence.py.md"
+        "scripts/verify_resource_manifest.py"
       ],
       "tests": [
         "tests/packaging/test_build_artifacts.py",
@@ -211,7 +211,7 @@
       ],
       "requirements": [
         "ADR-009",
-        "specs/src/yoetz/application/egress.md"
+        "docs/protocol/data-egress-and-privacy.md"
       ],
       "tests": [
         "tests/conformance/privacy/test_never_send_scope_and_channels.py",
@@ -675,7 +675,7 @@
       ],
       "requirements": [
         "ADR-002",
-        "specs/INTERFACES.md"
+        "docs/INTERFACES.md"
       ],
       "tests": [
         "tests/conformance/protocol/test_receipt_wording.py",

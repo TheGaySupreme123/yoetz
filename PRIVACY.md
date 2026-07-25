@@ -186,10 +186,10 @@ The enforceable technical contract, setup behavior, schemas, fixtures, and remai
 independent-review release gates are specified in:
 
 - [`docs/adr/ADR-009-data-egress-privacy.md`](docs/adr/ADR-009-data-egress-privacy.md)
-- [`specs/docs/protocol/data-egress-and-privacy.md.md`](specs/docs/protocol/data-egress-and-privacy.md.md)
-- [`specs/docs/protocol/privacy-setup-wizard.md.md`](specs/docs/protocol/privacy-setup-wizard.md.md)
-- [`specs/schemas/privacy/privacy-policy-1.0.0.schema.json.md`](specs/schemas/privacy/privacy-policy-1.0.0.schema.json.md)
-- [`specs/OPEN_QUESTIONS.md`](specs/OPEN_QUESTIONS.md)
+- [`docs/protocol/data-egress-and-privacy.md`](docs/protocol/data-egress-and-privacy.md)
+- [`docs/protocol/privacy-setup-wizard.md`](docs/protocol/privacy-setup-wizard.md)
+- [`schemas/privacy/privacy-policy-1.0.0.schema.json`](schemas/privacy/privacy-policy-1.0.0.schema.json)
+- [`docs/OPEN_QUESTIONS.md`](docs/OPEN_QUESTIONS.md)
 
 Until those decisions are ratified and their release evidence passes, public claims remain
 explicitly “not yet evidenced.”
@@ -207,6 +207,5 @@ If you believe Yoetz has disclosed, retained, or logged something these commitme
 treat it as a security report: use GitHub private vulnerability reporting or email
 `security@yoetz.dev`. Never open a public issue for a report that may itself contain sensitive
 content. Ordinary non-sensitive questions about privacy behavior belong in repository issues.
-The repository security policy ([`specs/repository/SECURITY.md`](specs/repository/SECURITY.md)
-until the public `SECURITY.md` ships) defines the private routes; they are verified before any
-release that advertises them.
+The repository security policy ([`SECURITY.md`](SECURITY.md)) defines the private routes; they are
+verified before any release that advertises them.

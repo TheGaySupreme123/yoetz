@@ -3,9 +3,9 @@
 **Status:** Founder-directed working decision (2026-07-14). The service-owned trust boundary and
 forbidden secret channels are binding. The concrete cryptographic envelope remains subject to an
 independent threat review before release.
-**Owning public specs:** `docs/adr/ADR-008-local-service-vault-trust-boundary.md`,
-`specs/src/yoetz/service/vault.md`, `specs/src/yoetz/service/unlock.md`,
-`specs/src/yoetz/ports/keys.md`, the key adapters, and the key-recovery runbook.
+**Implemented by:** `docs/adr/ADR-008-local-service-vault-trust-boundary.md`,
+`src/yoetz/service/vault.py`, `src/yoetz/service/unlock.py`,
+`src/yoetz/ports/keys.py`, the key adapters, and the key-recovery runbook.
 
 ## Threat model
 

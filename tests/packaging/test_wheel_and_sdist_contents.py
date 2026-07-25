@@ -2,8 +2,7 @@
 
 Parses the built wheel ZIP and sdist tarball without unsafe extraction, compares their member
 inventories to exact allowlists, validates distribution metadata, and proves the sdist can rebuild
-a candidate-equivalent wheel offline. See
-``specs/tests/packaging/test_wheel_and_sdist_contents.py.md``.
+a candidate-equivalent wheel offline.
 """
 
 from __future__ import annotations

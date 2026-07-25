@@ -4,7 +4,7 @@ Builds the sdist and wheel twice, from two independently created, path-distinct 
 exact committed source tree (``git archive HEAD``), using the pinned ``uv build`` tool with a
 fixed, non-network build environment. Proves the two candidate builds are byte-identical, that
 build output never leaks the local export path, and that the pinned build tool is exactly the one
-ADR-007 requires. See ``specs/tests/packaging/test_build_artifacts.py.md``.
+ADR-007 requires.
 """
 
 from __future__ import annotations

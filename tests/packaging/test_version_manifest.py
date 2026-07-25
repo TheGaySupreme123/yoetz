@@ -4,8 +4,7 @@ Builds the candidate wheel, installs it into a clean isolated tool environment (
 development checkout via ``PYTHONPATH``), and invokes the installed console script and module
 entry from an unrelated working directory with no ambient checkout/private paths. Compares
 reported identities to independently probed facts: the source resource manifest, the pinned
-project metadata, and the installed environment's own package versions. See
-``specs/tests/packaging/test_version_manifest.py.md``.
+project metadata, and the installed environment's own package versions.
 """
 
 from __future__ import annotations

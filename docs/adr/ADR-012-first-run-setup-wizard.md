@@ -3,13 +3,13 @@
 **Status:** Working decision (2026-07-22), founder-authorized amendment of ADR-007 decisions 3, 7,
 and 9. Release ratification still requires the packaging evidence gates those decisions already
 carry; nothing here manufactures platform or capability evidence.
-**Owning public specs:** `specs/src/yoetz/ports/harness_mcp.py.md`,
-`specs/src/yoetz/application/harness_mcp.py.md`,
-`specs/src/yoetz/adapters/integrations/codex_discovery.py.md`,
-`specs/src/yoetz/adapters/integrations/codex_mcp.py.md`, `specs/src/yoetz/cli/setup.py.md`,
-`specs/support/npm-launcher/package.json.md`, `specs/support/npm-launcher/bin/yoetz.js.md`,
-`specs/support/npm-launcher/README.md.md`, plus the amended `specs/src/yoetz/cli/app.md`,
-`specs/src/yoetz/config/paths.md`, and `specs/docs/runbooks/codex-integration.md.md`.
+**Implemented by:** `src/yoetz/ports/harness_mcp.py`,
+`src/yoetz/application/harness_mcp.py`,
+`src/yoetz/adapters/integrations/codex_discovery.py`,
+`src/yoetz/adapters/integrations/codex_mcp.py`, `src/yoetz/cli/setup.py`,
+`support/npm-launcher/package.json`, `support/npm-launcher/bin/yoetz.js`,
+`support/npm-launcher/README.md`, plus the amended `src/yoetz/cli/app.py`,
+`src/yoetz/config/paths.py`, and `docs/runbooks/codex-integration.md`.
 **Relates to:** ADR-005 (Codex capability identity), ADR-007 (packaging/release), ADR-009
 (privacy/egress), ADR-010 (harness integration port).
 

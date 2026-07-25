@@ -121,7 +121,7 @@ _POLICY_SELECTIONS: Final[tuple[tuple[PolicyVersion, ...], ...]] = (
     (_WORK_POLICY,),
     (_RESEARCH_POLICY, _WORK_POLICY),
 )
-# (required priority, owning policy pack) exactly as frozen in specs/INTERFACES.md section 8.
+# (required priority, owning policy pack) exactly as frozen in docs/INTERFACES.md section 8.
 _FINDING_KIND_FACTS: Final[Mapping[FindingKind, tuple[int, str]]] = {
     FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS: (1, "work-integrity"),
     FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED: (2, "work-integrity"),
@@ -274,7 +274,7 @@ def _frontier(draw: st.DrawFn) -> Frontier:
 @st.composite
 def _coverage(draw: st.DrawFn) -> Coverage:
     # publication_channels/check_types/known_gaps are held at one proven-valid baseline (matching
-    # the sole-member ``none`` check-type rule in specs/INTERFACES.md section 5); every ordered
+    # the sole-member ``none`` check-type rule in docs/INTERFACES.md section 5); every ordered
     # dimension is still genuinely varied.
     return Coverage(
         publication_channels=(PublicationChannel.COOPERATIVE_MCP,),

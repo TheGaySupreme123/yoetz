@@ -3,10 +3,10 @@
 **Status:** Working decision revised 2026-07-17. Ratification requires an independent
 privacy/security review plus executable no-bypass, never-send, approval-resume, and zero-egress
 evidence.
-**Owning public specs:** `specs/src/yoetz/domain/privacy.md`,
-`specs/src/yoetz/application/egress.md`,
-`specs/src/yoetz/application/privacy_policy.md`,
-`specs/src/yoetz/ports/privacy.md`, privacy adapters/configuration/audit specs, ADR-006,
+**Implemented by:** `src/yoetz/domain/privacy.py`,
+`src/yoetz/application/egress.py`,
+`src/yoetz/application/privacy_policy.py`,
+`src/yoetz/ports/privacy.py`, the privacy adapters/configuration/audit modules, ADR-006,
 ADR-011 structural subject-state capture, `PRIVACY.md`, the technical privacy protocol, policy
 schemas, fixtures, and tests.
 

@@ -5,12 +5,12 @@ first-party Codex observation amendment 2026-07-22). Ratification requires the p
 byte-parity run plus a capability run proving an unprofiled MCP host completes the workflow from an
 installed artifact, and — for first-party Codex cells that advertise observation — installed-artifact
 evidence that observation ingest earns `hook_observed` only from real observation evidence.
-**Owning public specs:** `specs/guidance/`, `specs/src/yoetz/ports/integrations.py.md`,
-`specs/src/yoetz/ports/observation.py.md`, `specs/src/yoetz/domain/observation.py.md`,
-`specs/src/yoetz/application/integrations.py.md`,
-`specs/src/yoetz/adapters/integrations/codex_skill.py.md`, `specs/src/yoetz/mcp/descriptors.md`,
-`specs/src/yoetz/mcp/resources.md`, `specs/src/yoetz/mcp/server.md`,
-`specs/schemas/common/client-info-1.0.0.schema.json.md`.
+**Implemented by:** `guidance/`, `src/yoetz/ports/integrations.py`,
+`src/yoetz/ports/observation.py`, `src/yoetz/domain/observation.py`,
+`src/yoetz/application/integrations.py`,
+`src/yoetz/adapters/integrations/codex_skill.py`, `src/yoetz/mcp/descriptors.py`,
+`src/yoetz/mcp/resources.py`, `src/yoetz/mcp/server.py`,
+`schemas/common/client-info-1.0.0.schema.json`.
 **Relates to:** ADR-002 (canonical protocol), ADR-005 (Codex capability identity), ADR-007
 (packaging/release), ADR-009 (egress/privacy).
 

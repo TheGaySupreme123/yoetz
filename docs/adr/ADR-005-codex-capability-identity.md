@@ -2,9 +2,9 @@
 
 **Status:** Working decision for spec drafting (2026-07-13). Ratification requires the pinned
 capability matrix run from an installed artifact.
-**Owning public specs:** `specs/src/yoetz/adapters/mcp_stdio.md`,
-`specs/src/yoetz/adapters/importers/codex_jsonl.md`, `specs/src/yoetz/mcp/`, the Codex
-skill specs, and `specs/tests/capability/`.
+**Implemented by:** `src/yoetz/adapters/mcp_stdio.py`,
+`src/yoetz/adapters/importers/codex_jsonl.py`, `src/yoetz/mcp/`, the Codex
+skill files under `skills/codex/`, and `tests/capability/`.
 
 ## Decisions
 

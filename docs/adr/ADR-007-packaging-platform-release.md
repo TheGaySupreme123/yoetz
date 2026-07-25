@@ -2,8 +2,8 @@
 
 **Status:** Implementation lock (2026-07-17). Release ratification still requires clean-VM
 install/upgrade/uninstall evidence from built artifacts and the E-001 release refresh.
-**Owning public specs:** repository-file specs, `specs/src/yoetz/version.md`, packaged resource
-specs, packaging/capability tests, and release workflow/script specs.
+**Implemented by:** repository build metadata, `src/yoetz/version.py`, packaged resource
+manifests, the packaging/capability suites, and the release workflows under `.github/workflows/`.
 
 ## Decisions
 

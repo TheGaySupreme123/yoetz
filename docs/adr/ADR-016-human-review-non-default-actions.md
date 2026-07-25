@@ -2,8 +2,8 @@
 
 **Status:** Working decision — expands ADR-015 from bootstrap-only into a risk-class consent
 framework for every *non-default* Yoetz action agents might request.
-**Owning public specs:** `specs/src/yoetz/service/elevated_bootstrap.md` (consent registry),
-`specs/src/yoetz/cli/elevated.md`, `guidance/agent-instructions.md`, ADR-008/009 amendments,
+**Implemented by:** `src/yoetz/service/elevated_bootstrap.py` (consent registry),
+`src/yoetz/cli/elevated.py`, `guidance/agent-instructions.md`, ADR-008/009 amendments,
 `OPEN_QUESTIONS.md`.
 **Relates to:** ADR-015 (bootstrap path), ADR-008 (vault/TTY), ADR-009 (egress/privacy).
 

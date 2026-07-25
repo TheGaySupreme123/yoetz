@@ -5,8 +5,7 @@ root canonical source tree, the ``src/yoetz/resources`` package tree, the built 
 offline install; that the nine canonical fixtures are the only ``fixtures/`` corpus shipped; and
 that corruption/missing/extra resource drift is detected before decode/use, both at the source
 level (``scripts/verify_resource_manifest.py --check``) and at the installed-package level
-(``yoetz.version.read_verified_resource``). See
-``specs/tests/packaging/test_resource_byte_parity.py.md``.
+(``yoetz.version.read_verified_resource``).
 """
 
 from __future__ import annotations

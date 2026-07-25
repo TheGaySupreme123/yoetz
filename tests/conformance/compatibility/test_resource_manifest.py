@@ -1,7 +1,7 @@
 """Compatibility conformance: the packaged resource manifest matches the reviewed source set.
 
 Grounded entirely in the real, installed ``yoetz.version`` module -- the sole runtime authority for
-resource parity (``specs/src/yoetz/version.md``, "Resource parity"). The positive checks call only
+resource parity (``src/yoetz/version.py``). The positive checks call only
 its public surface (``build_version_manifest``, ``verify_resource_manifest``,
 ``read_verified_resource``). The closed-validation negative cases drive the same private
 ``_load_resource_manifest`` seam ``yoetz.version`` itself uses at startup, reached only through

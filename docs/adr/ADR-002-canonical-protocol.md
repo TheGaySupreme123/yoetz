@@ -2,8 +2,8 @@
 
 **Status:** Working decision for spec drafting (2026-07-13). Ratification requires the golden
 vectors plus an independent-implementation parity run.
-**Owning public specs:** `specs/INTERFACES.md`, `specs/src/yoetz/protocol/`,
-`specs/schemas/`, and `specs/fixtures/canonical/`.
+**Implemented by:** `docs/INTERFACES.md`, `src/yoetz/protocol/`,
+`schemas/`, and `fixtures/canonical/`.
 
 ## Decisions
 
@@ -19,7 +19,7 @@ vectors plus an independent-implementation parity run.
 2. **Digest algorithm:** SHA-256, rendered `sha256:<64 lowercase hex>`. Payload commitments are
    keyed: `hmac-sha256:<hex>` with domain separation (ADR-004 owns keys).
 3. **Identifiers:** typed prefix + `_` + lowercase canonical UUIDv4 from the OS CSPRNG, per the
-   registry in `specs/INTERFACES.md` §1. Server verifies spelling/version/variant/length and
+   registry in `docs/INTERFACES.md` §1. Server verifies spelling/version/variant/length and
    handles reuse via idempotency digests; it never claims to measure caller entropy.
 4. **Idempotency scope:** post-start `(task_id, writer_id, request_id)`; `start` uses
    `(installation_id, request_id)` in the structural catalog. Two byte identities: publication
