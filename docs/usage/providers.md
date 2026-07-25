@@ -72,26 +72,33 @@ in the interactive menu.
 
 ## Readiness (`yoetz provider status`)
 
-Before spending a run on semantic review, ask whether the four structural conditions hold:
+Before spending a run on semantic review, ask whether the five structural conditions hold:
 
 ```text
 yoetz provider status --json
 ```
 
-The report names each condition and the exact next command when one is unmet:
+The report names each condition and the exact next command when one is known to be unmet:
 
-1. `verification.semantic` is not `disabled`
-2. a provider endpoint is bound in `config.toml`
-3. **the bound provider's** credential is connected (service capability `external_provider`)
-4. the effective privacy policy enables the `llm_inference` channel
+1. the local service is running and unlocked
+2. `verification.semantic` is not `disabled`
+3. a provider endpoint is bound in `config.toml`
+4. **the bound provider's** credential is connected (service capability `external_provider`)
+5. the effective privacy policy enables the `llm_inference` channel
 
-Condition 3 is per-provider, not "any credential". If you rebind the endpoint from one preset to
+Condition 4 is per-provider, not "any credential". If you rebind the endpoint from one preset to
 another and do not run the credential ceremony for the new one, the old credential does not carry
 over: readiness stays false and checks report `credential_unavailable` rather than a
 misleading ready state.
 
-Conditions 3 and 4 are independent. Closing only one moves the failure without making semantic
+Conditions 4 and 5 are independent. Closing only one moves the failure without making semantic
 review work — the check reason changes, the outcome does not.
+
+When the service is locked, credential and privacy state are `unknown`, not incomplete. Unknown
+conditions have no remediation command. For `vault_mode=uninitialized`, continue with `yoetz setup`;
+for an existing locked vault, use `yoetz service unlock`; and when the scoped platform entry is stale
+or rejected, use `yoetz service auto-unlock repair`. The JSON field `readiness_determinable`
+distinguishes a known not-ready state from one that cannot yet be read.
 
 `semantic_ready: true` is structural readiness only. It does not prove live provider dispatch.
 

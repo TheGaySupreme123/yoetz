@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -518,3 +521,125 @@ def test_provider_setup_success_reports_layers_without_ready_overclaim(
     assert "Transport probe: not demonstrated" in plain
     assert "Installed artifact evidence: not demonstrated" in plain
     assert "not proof of live provider dispatch or semantic review" in plain
+
+
+def test_uninitialized_provider_setup_provisions_auto_unlock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The wizard must keep the auto-unlock write side reachable in product code."""
+
+    import yoetz.adapters.keys.os_keyring as keyring_module
+    import yoetz.cli.provider_binding as binding_module
+    import yoetz.cli.setup as setup_module
+    import yoetz.cli.unlock as unlock_module
+    import yoetz.config.load as config_module
+    import yoetz.config.paths as paths_module
+
+    calls: list[str] = []
+    supplied: list[bytes] = []
+    loaded_env: list[object] = []
+
+    def fake_load_or_create(_store: object) -> bytearray:
+        calls.append("load_or_create")
+        return bytearray(b"a" * 48)
+
+    async def fake_initialize(passphrase: bytearray | None = None) -> object:
+        supplied.append(bytes(passphrase or b""))
+        return object()
+
+    async def fake_reachability(*, start_if_absent: bool = False) -> dict[str, object]:
+        del start_if_absent
+        return {"reachable": True, "state": "ready", "vault_mode": "passphrase"}
+
+    def fake_bundle_root(*, _data_dir: Path | None = None, _probe: object | None = None) -> Path:
+        del _data_dir, _probe
+        return tmp_path.resolve()
+
+    def fake_load_config(overrides: object, env: object, config_path: object) -> SimpleNamespace:
+        del overrides, config_path
+        loaded_env.append(env)
+        return SimpleNamespace(storage=SimpleNamespace(data_dir=tmp_path))
+
+    monkeypatch.setattr(
+        keyring_module.AutoUnlockPassphraseStore,
+        "load_or_create",
+        fake_load_or_create,
+    )
+    monkeypatch.setattr(unlock_module, "initialize_passphrase_vault", fake_initialize)
+    monkeypatch.setattr(binding_module, "prompt_provider_endpoint_binding", lambda: None)
+    monkeypatch.setattr(config_module, "load_config", fake_load_config)
+    monkeypatch.setattr(paths_module, "bundle_root", fake_bundle_root)
+    monkeypatch.setattr(setup_module, "_service_reachability", fake_reachability)
+
+    service, report = asyncio.run(
+        setup_module._interactive_provider_setup(  # pyright: ignore[reportPrivateUsage]
+            {"reachable": True, "state": "locked", "vault_mode": "uninitialized"}
+        )
+    )
+
+    assert calls == ["load_or_create"]
+    assert loaded_env == [os.environ]
+    assert supplied == [b"a" * 48]
+    assert service["state"] == "ready"
+    assert report["binding"] == "skipped"
+
+
+def test_uninitialized_setup_stops_after_write_with_failed_readback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An ambiguous committed entry must never trigger a different manual passphrase."""
+
+    import yoetz.adapters.keys.os_keyring as keyring_module
+    import yoetz.cli.setup as setup_module
+    import yoetz.cli.unlock as unlock_module
+    import yoetz.config.load as config_module
+    import yoetz.config.paths as paths_module
+
+    class _WriteThenUnreadable:
+        def __init__(self) -> None:
+            self.written: str | None = None
+
+        def get_password(self, service: str, username: str) -> None:
+            del service, username
+            return None
+
+        def set_password(self, service: str, username: str, password: str) -> None:
+            del service, username
+            self.written = password
+
+    backend = _WriteThenUnreadable()
+    store = keyring_module.AutoUnlockPassphraseStore(tmp_path.resolve(), backend=backend)
+    store._backend_id = (  # pyright: ignore[reportPrivateUsage]
+        "keyring.backends.macOS.Keyring"
+    )
+    initialized: list[bytes] = []
+
+    async def fake_initialize(passphrase: bytearray | None = None) -> object:
+        initialized.append(bytes(passphrase or b""))
+        return object()
+
+    def fake_store(_path: Path) -> keyring_module.AutoUnlockPassphraseStore:
+        return store
+
+    def fake_load_config(*_args: object) -> SimpleNamespace:
+        return SimpleNamespace(storage=SimpleNamespace(data_dir=tmp_path))
+
+    def fake_bundle_root(*, _data_dir: Path | None = None) -> Path:
+        del _data_dir
+        return tmp_path.resolve()
+
+    monkeypatch.setattr(keyring_module, "AutoUnlockPassphraseStore", fake_store)
+    monkeypatch.setattr(unlock_module, "initialize_passphrase_vault", fake_initialize)
+    monkeypatch.setattr(config_module, "load_config", fake_load_config)
+    monkeypatch.setattr(paths_module, "bundle_root", fake_bundle_root)
+
+    service, report = asyncio.run(
+        setup_module._interactive_provider_setup(  # pyright: ignore[reportPrivateUsage]
+            {"reachable": True, "state": "locked", "vault_mode": "uninitialized"}
+        )
+    )
+
+    assert backend.written is not None
+    assert initialized == []
+    assert service == {"reachable": True, "state": "locked", "vault_mode": "uninitialized"}
+    assert report["credential_reason"] == "auto_unlock_unverified"

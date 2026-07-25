@@ -26,7 +26,13 @@ ordinary UI content trusted.
 1. **Installation vault key (IVK):** one random 256-bit IVK protects the encrypted per-installation
    key vault. In OS-backed mode the IVK is stored in the verified OS keyring. In explicitly
    selected passphrase mode only an Argon2id-derived key-encryption key and an authenticated
-   envelope wrapping the IVK are persisted; neither the passphrase nor plaintext IVK is stored.
+   envelope wrapping the IVK are persisted in the service bundle; neither the passphrase nor
+   plaintext IVK is stored there. Under the scoped ADR-008 auto-unlock amendment, the exact
+   passphrase may separately live in an allowlisted platform credential store under a
+   bundle-path-digest identity. Fresh setup uses a generated high-entropy value; enable/repair for
+   an existing vault saves a passphrase only after the foreground confidential unlock ceremony
+   proves it against the current envelope. This preserves powered-off/copy-at-rest protection but
+   deliberately does not claim protection from code already executing as the active logged-in UID.
 2. **Bundle master key (BMK):** one random 256-bit BMK per task bundle. A BMK is stored only as an
    IVK-wrapped authenticated vault record and as a short-lived service-memory handle after use.
    A bundle record is never readable by a client process.
@@ -199,19 +205,22 @@ bytes never appear in argv/env; same-UID/supervisor provenance checks; exact siz
 no seek/reopen/path; immediate close; mutable-buffer overwrite; no child inheritance; and failure
 closed on ambiguity.
 
-That mechanism is **not enabled in v0.1 as a generic headless unlock path**. An already initialized keyring vault
-may unlock noninteractively; without measured user presence it is ready only for locally permitted
-work and external activation remains fenced. A pristine headless installation cannot auto-create
-keyring mode unless its exact release cell also carries the required verified
-`UserPresenceCapability`; otherwise it remains setup-required. Passphrase-locked headless startup
-remains locked.
+That mechanism is **not enabled in v0.1 as a generic headless unlock path**. An already initialized
+keyring vault may unlock noninteractively. A passphrase vault may also unlock at restart only from
+the exact bundle-scoped platform entry provisioned through ADR-008 setup or a trusted-TTY repair.
+Without measured user presence either mode is ready only for locally permitted work and external
+activation remains fenced. A pristine headless installation cannot auto-create keyring mode or a
+passphrase auto-unlock entry unless its exact release cell carries the applicable verified setup
+authority; otherwise it remains setup-required.
 **Scoped exception (ADR-015/016):** after exact digest-bound human phrase consent, elevated consent
 may admit secrets on inherited FDs for catalogued `secret_ingress` / `secret_reauth` operations
 (implemented: vault initialize and provider credential set/rotate). That is not generic
 `--password-fd` unlock and does not unlock an already-locked vault without a local TTY ceremony.
 A broader inherited-descriptor unlock API still requires its own reviewed adapter/specification and
-platform tests. This is the resolved F-008 boundary: v0.1 provides unattended readiness through the
-approved OS-keyring path, not noninteractive passphrase unlock.
+platform tests. This is the resolved F-008 boundary: v0.1 provides unattended readiness through an
+approved OS-keyring vault or the exact bundle-scoped platform-entry passphrase restart exception in
+ADR-008. Generic passphrase unlock through an inherited FD, argv, environment, config, stdin, or a
+plaintext path remains prohibited.
 
 ## What stays plaintext
 

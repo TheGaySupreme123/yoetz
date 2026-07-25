@@ -63,6 +63,7 @@ __all__ = [
     "change_idle_relock_policy",
     "initialize_passphrase_vault",
     "portable_recovery",
+    "read_vault_passphrase_for_auto_unlock",
     "retry_keyring",
     "rotate_provider_credential",
     "run_human_ceremony",
@@ -730,6 +731,18 @@ async def unlock_vault(passphrase: bytearray | None = None) -> VaultStateResult:
         passphrase=passphrase,
     )
     return cast(VaultStateResult, result)
+
+
+def read_vault_passphrase_for_auto_unlock() -> bytearray:
+    """Read one existing vault passphrase from the foreground TTY for a repair ceremony."""
+
+    with _ForegroundTerminal() as terminal:
+        return _read_secret(
+            terminal,
+            HumanCeremonyKind.VAULT_UNLOCK,
+            EmptyVaultTarget(expected_mode="passphrase"),
+            ConfidentialSecretPurpose.VAULT_UNLOCK,
+        )
 
 
 async def retry_keyring(

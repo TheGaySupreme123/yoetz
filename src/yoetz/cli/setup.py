@@ -708,7 +708,7 @@ async def _interactive_provider_setup(
 ) -> tuple[dict[str, JsonValue], dict[str, JsonValue]]:
     """Run trusted local setup ceremonies while keeping secrets out of wizard state."""
 
-    from yoetz.adapters.keys.os_keyring import AutoUnlockPassphraseStore
+    from yoetz.adapters.keys.os_keyring import AutoUnlockPassphraseStore, OSKeyringError
     from yoetz.cli.provider_binding import (
         ProviderEndpointChoice,
         apply_provider_endpoint_choice,
@@ -744,11 +744,31 @@ async def _interactive_provider_setup(
         if service.get("reachable") and service.get("state") == "locked":
             if service.get("vault_mode") == "uninitialized":
                 typer.echo("")
-                typer.echo("Secure vault setup (hidden local-terminal input)")
-                await initialize_passphrase_vault()
+                current_config = load_config({}, os.environ, None)
+                auto_store = AutoUnlockPassphraseStore(
+                    bundle_root(_data_dir=current_config.storage.data_dir)
+                )
+                try:
+                    auto_passphrase = auto_store.load_or_create()
+                except OSKeyringError as error:
+                    if error.reason != "unsupported":
+                        provider_report["credential_reason"] = f"auto_unlock_{error.reason}"
+                        typer.echo(
+                            "Platform credential entry could not be verified; vault "
+                            "initialization stopped to avoid a conflicting passphrase. "
+                            "Restore credential-store access, then rerun 'yoetz setup'.",
+                            err=True,
+                        )
+                        return service, provider_report
+                    typer.echo("Platform credential store unavailable; choose a vault passphrase")
+                    typer.echo("Secure vault setup (hidden local-terminal input)")
+                    await initialize_passphrase_vault()
+                else:
+                    typer.echo("Secure vault setup (platform credential store auto-unlock)")
+                    await initialize_passphrase_vault(bytearray(auto_passphrase))
             elif service.get("vault_mode") == "passphrase":
                 typer.echo("")
-                current_config = load_config({}, {}, None)
+                current_config = load_config({}, os.environ, None)
                 auto_store = AutoUnlockPassphraseStore(
                     bundle_root(_data_dir=current_config.storage.data_dir)
                 )

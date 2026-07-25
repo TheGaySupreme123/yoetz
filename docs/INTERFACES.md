@@ -1016,11 +1016,35 @@ values are `VaultMode` (`uninitialized|os_keyring|passphrase`), `VaultState`
 (`locked|unlocking|ready|closing|closed`), `VaultStatus`, `ProviderCredentialBinding`, and
 `VaultError`. Client-visible status never contains a PID, path, username, key locator, provider
 credential presence, user content, or timing history.
+`ServiceStatus.state_reason` is the closed registry `none`,
+`auto_unlock_backend_unavailable`, `auto_unlock_rejected`, `auto_unlock_stale`, `keyring_locked`,
+`keyring_unavailable`, `passphrase_required`, `human_authority_unavailable`,
+`vault_uninitialized`, `unlock_failed`, `explicit_lock`, `idle_relock`, `user_session_locked`,
+`system_suspend`, `monitor_lost`, `shutdown_requested`, or `internal_error`. `keyring_locked`
+applies only to `vault_mode=os_keyring`.
+Passphrase startup with no scoped entry reports `passphrase_required`; a validly encoded entry that
+does not authenticate the current envelope reports `auto_unlock_stale`; structural platform access
+or entry failures use the two other `auto_unlock_*` reasons. None reveals entry bytes, paths, or
+credential/policy state.
 `ServiceStatus.state_reason=human_authority_unavailable` has exactly two valid combinations:
 `state=locked,vault_mode=uninitialized` when pristine setup was blocked before keyring mutation,
 rendered as setup required; and `state=ready,vault_mode=os_keyring` for an existing vault whose
 local workflows are admitted but external-provider capability is absent. Neither combination
 reveals credential or policy state.
+
+`AutoUnlockPassphraseStore` is a trusted-service/setup adapter, not an ordinary control port. Its
+credential-store service name is `yoetz.auto-unlock.v1`; its account identity is
+`bundle-<sha256(os.fsencode(abspath(bundle_root)))>`. It accepts only exact vault-passphrase bytes,
+base64url-encodes them for the allowlisted platform backend, verifies writes by round trip, and
+returns only bounded structural load reasons. Setup, boot, and trusted-TTY repair overwrite mutable
+buffers best-effort. Setup and repair resolve the bundle through the same effective configuration
+and environment inputs as daemon startup. Setup falls back to a human-chosen passphrase only for a
+platform-store failure guaranteed to occur before any write. If a write may have committed but
+cannot be read back exactly, setup stops before vault initialization and requires recovery of
+platform-store access; it never initializes a different manual secret beside the ambiguous entry.
+No MCP method, ordinary control body, config value, environment value, argv value, stdin path, or
+log field can carry the secret. Deletion is not exposed until it can be atomically coupled to a
+human-known passphrase rewrap, so generated-passphrase installations cannot be stranded.
 
 `SecretMemoryPort` exposes `capability`, `capture`, `allocate`, and `close` over opaque one-shot
 `SecretHandle` values. `SecretPurpose` is exactly `vault_initialize`, `vault_unlock`,

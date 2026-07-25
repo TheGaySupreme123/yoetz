@@ -1,7 +1,8 @@
 # ADR-008 — Local service and vault trust boundary
 
-**Status:** Founder-selected working decision (2026-07-14). Binding for v0.1 specification work;
-independent security review remains required before release.
+**Status:** Founder-selected working decision (2026-07-14), amended 2026-07-25 to permit
+bundle-scoped passphrase auto-unlock through an allowlisted platform credential store. Binding for
+v0.1 specification work; independent security review remains required before release.
 **Related:** ADR-001 owns single-writer lifecycle; ADR-004 owns cryptography and recovery; ADR-006
 and the privacy protocol own outbound data authorization.
 
@@ -38,8 +39,9 @@ maintenance, imports, payload access, or egress.
 
 Authenticated local connections and admitted work hold a process-idle lease. Once both counts stay
 zero for 1,800 seconds, the daemon performs its bounded stop and exits. A later fixed on-demand
-launcher start advances the generation and reconnects to the singleton winner; a passphrase-backed
-successor remains locked until a local-human unlock.
+launcher start advances the generation and reconnects to the singleton winner. A passphrase-backed
+successor first tries its exact bundle-scoped auto-unlock entry when one was explicitly provisioned;
+otherwise it remains locked until a local-human unlock.
 
 On a pristine first install, keyring storage usability alone does not select immutable keyring
 mode. Before creating a staging artifact, IVK, keyring entry, or mode marker, the service requires
@@ -64,8 +66,34 @@ the passphrase envelope, empty-vault sentinel/layout, installation ID, and immut
 Later unlock uses the distinct `vault_unlock` purpose. Initialization can never reset/recover an
 existing vault or act as fallback for a missing keyring entry; crash ambiguity fails closed without
 deleting or replacing data.
-Committed passphrase mode never probes or uses keyring during startup. Later foreign/stale entries
-are ignored and not deleted; an explicitly discovered exact-identity contradiction is quarantined.
+
+**2026-07-25 auto-unlock amendment.** Passphrase mode may use one allowlisted platform credential
+store entry named `yoetz.auto-unlock.v1`, scoped by the SHA-256 digest of the absolute service
+bundle path. Interactive first-run setup generates a high-entropy passphrase into a mutable buffer,
+round-trips it through that store, initializes the passphrase envelope through the existing
+confidential ceremony, and overwrites the buffer best-effort. If the platform store is unavailable,
+and that failure is guaranteed to precede any credential write, setup visibly falls back to the
+existing two-entry human passphrase ceremony. If a write may have committed but its read-back cannot
+be verified, setup fails closed before vault initialization and tells the user to restore platform
+credential access and rerun setup; it never creates a different manual passphrase beside an
+ambiguous stored value. Neither path puts the secret in argv, environment, config, stdin, logs,
+ordinary control, or MCP.
+
+At restart the trusted service alone may read that exact scoped entry and submit it directly to the
+vault unlock path. Missing, unavailable, malformed/rejected, and authenticated-but-stale entries
+remain locked and surface bounded `passphrase_required`,
+`auto_unlock_backend_unavailable`, `auto_unlock_rejected`, or `auto_unlock_stale` reasons. The
+service logs one structural outcome/reason and never the entry, bundle path, or derived material.
+Foreign bundle entries are neither read nor deleted.
+
+For an existing human-passphrase vault, `service auto-unlock enable|repair` requires the ordinary
+trusted foreground-TTY unlock ceremony first. Only the exact passphrase that successfully unlocks
+the current envelope is then saved under the scoped platform entry, and every mutable helper buffer
+is overwritten best-effort. This intentionally extends the at-rest trust root from the Argon2id
+envelope alone to the logged-in user's protected credential store. It does not widen privacy
+policy, provider activation, or any egress authorization. A delete-only `disable` would make a
+fresh generated-passphrase vault unrecoverable, so disable remains unavailable until an atomic
+credential-store deletion plus human-passphrase rewrap ceremony is specified and implemented.
 
 Keyring usability is not action-bound human authorization. Under the resolved F-010 decision,
 the first-install gate above prevents a new immutable keyring-mode choice when no verified
@@ -208,15 +236,17 @@ lifetime. A noninteractive MCP process has no acceptable human prompt.
 An anonymous, one-shot descriptor inherited directly from an explicitly configured trusted
 supervisor can avoid argv/env/config/history exposure, but descriptor provenance, inheritance,
 buffering, lifetime, and platform supervisor semantics require a dedicated design and review.
-Resolved decision F-008 requires unattended readiness but does not require unattended passphrase
-transport. v0.1 therefore supports headless readiness only for an already initialized verified
-OS-keyring vault. A pristine headless install cannot auto-select keyring mode without the exact verified
-presence cell, and a passphrase-locked headless service remains locked; there is no generic
-password-fd option. **Amendment (ADR-015/016):** after exact digest-bound human consent, the
+Resolved decision F-008 requires unattended readiness but does not require a generic unattended
+passphrase transport. v0.1 supports restart readiness for an already initialized verified
+OS-keyring vault and for a passphrase vault whose exact bundle-scoped auto-unlock entry was
+provisioned by trusted setup or repair. A pristine headless install still cannot auto-select
+keyring mode or create passphrase auto-unlock without the applicable verified local setup
+authority, and there is no generic password-fd option. **Amendment (ADR-015/016):** after exact
+digest-bound human consent, the
 elevated consent approve path may admit secrets on inherited FDs only for catalogued
 `secret_ingress` / `secret_reauth` operations (implemented: vault initialize and provider
 credential set/rotate). This is not a generic headless unlock FD API and does not unlock an
-already-locked vault without a local TTY ceremony.
+already-locked vault unless the separately scoped platform auto-unlock entry already exists.
 
 ### E. Native vault subprocess — stronger remaining option, not selected for v0.1
 
@@ -284,9 +314,10 @@ vault before first release is the one materially stronger containment choice sti
 ## Consequences
 
 Persistent local service, control protocol, client library, vault state machine, unlock helper,
-and their crash/secret-boundary tests move into v0.1. Native launchd/systemd-user convenience and
-passphrase-based headless unlock remain separate future decisions; neither may be approximated by
-client-side direct access or a secret in argv/env/config/stdin.
+and their crash/secret-boundary tests move into v0.1. Native launchd/systemd-user convenience and a
+generic passphrase transport remain separate future decisions; neither may be approximated by
+client-side direct access or a secret in argv/env/config/stdin. The reviewed bundle-scoped platform
+auto-unlock exception above is the only passphrase restart path.
 The v0.1 helper also owns the explicit first-install passphrase initialization ceremony: two local
 no-echo entries, one transmitted `vault_initialize` secret, atomic vault commit, and fail-closed
 crash recovery.

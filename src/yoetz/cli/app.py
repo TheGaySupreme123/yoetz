@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
+import os
 import sys
 from collections.abc import Awaitable, Callable, Mapping
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, BinaryIO, Final, cast
+from typing import Annotated, Any, BinaryIO, Final, cast
 
 import anyio
 import typer
@@ -82,6 +83,9 @@ integrate_mcp_app = typer.Typer(
 )
 setup_app = typer.Typer(help="Guided first-run harness and provider setup.", no_args_is_help=True)
 service_app = typer.Typer(help="Manage the foreground local service.", no_args_is_help=True)
+auto_unlock_app = typer.Typer(
+    help="Inspect or repair restart-safe passphrase unlock.", no_args_is_help=True
+)
 provider_app = typer.Typer(help="Manage provider setup.", no_args_is_help=True)
 credential_app = typer.Typer(
     help="Provision credentials through a trusted ceremony.", no_args_is_help=True
@@ -120,6 +124,7 @@ integrate_app.add_typer(integrate_skill_app, name="skill")
 integrate_app.add_typer(integrate_mcp_app, name="mcp")
 app.add_typer(setup_app, name="setup")
 app.add_typer(service_app, name="service")
+service_app.add_typer(auto_unlock_app, name="auto-unlock")
 app.add_typer(provider_app, name="provider")
 provider_app.add_typer(credential_app, name="credential")
 app.add_typer(privacy_app, name="privacy")
@@ -758,27 +763,36 @@ async def _trusted_call(operation: Callable[[], Awaitable[object]], json_output:
     except OSError, ProtocolValueError, ValueError:
         return _usage_failure()
     except Exception as error:
-        unlock_module = importlib.import_module("yoetz.cli.unlock")
-        client_module = importlib.import_module("yoetz.service.confidential_client")
-        ceremony_error = cast(type[Exception], getattr(unlock_module, "HumanCeremonyCliError"))
-        client_error = cast(type[Exception], getattr(client_module, "ConfidentialClientError"))
-        if isinstance(error, ceremony_error):
-            reason = cast(str, getattr(error, "reason"))
-            if reason in {"cancelled", "interrupted"}:
-                _stderr("cancelled")
-                return exit_code_for("cancelled")
-            if reason in {"preview_invalid", "result_invalid"}:
-                _stderr("internal_error: the confidential ceremony could not be completed")
-                return exit_code_for(PublicErrorCode.INTERNAL_ERROR)
-            return _usage_failure()
-        if isinstance(error, client_error):
-            reason = cast(str, getattr(error, "reason"))
-            if reason == "cancelled":
-                _stderr("cancelled")
-                return exit_code_for("cancelled")
-            _stderr("service_unavailable: the confidential ceremony could not be completed")
-            return exit_code_for(PublicErrorCode.SERVICE_UNAVAILABLE)
+        failure = _trusted_exception_failure(error)
+        if failure is not None:
+            return failure
         raise
+
+
+def _trusted_exception_failure(error: Exception) -> int | None:
+    """Map trusted-ceremony failures to bounded public CLI outcomes."""
+
+    unlock_module = importlib.import_module("yoetz.cli.unlock")
+    client_module = importlib.import_module("yoetz.service.confidential_client")
+    ceremony_error = cast(type[Exception], getattr(unlock_module, "HumanCeremonyCliError"))
+    client_error = cast(type[Exception], getattr(client_module, "ConfidentialClientError"))
+    if isinstance(error, ceremony_error):
+        reason = cast(str, getattr(error, "reason"))
+        if reason in {"cancelled", "interrupted"}:
+            _stderr("cancelled")
+            return exit_code_for("cancelled")
+        if reason in {"preview_invalid", "result_invalid"}:
+            _stderr("internal_error: the confidential ceremony could not be completed")
+            return exit_code_for(PublicErrorCode.INTERNAL_ERROR)
+        return _usage_failure()
+    if isinstance(error, client_error):
+        reason = cast(str, getattr(error, "reason"))
+        if reason == "cancelled":
+            _stderr("cancelled")
+            return exit_code_for("cancelled")
+        _stderr("service_unavailable: the confidential ceremony could not be completed")
+        return exit_code_for(PublicErrorCode.SERVICE_UNAVAILABLE)
+    return None
 
 
 def _unlock_operation(name: str) -> Callable[[], Awaitable[object]]:
@@ -809,6 +823,136 @@ async def _service_unlock(json_output: bool) -> int:
         "'yoetz service initialize-passphrase' from a local terminal"
     )
     return exit_code_for(PublicErrorCode.VAULT_LOCKED)
+
+
+def _auto_unlock_store() -> Any:
+    """Build the store for the same environment-selected bundle as the daemon."""
+
+    from yoetz.adapters.keys.os_keyring import AutoUnlockPassphraseStore
+    from yoetz.config.load import load_config
+    from yoetz.config.paths import bundle_root
+
+    config = load_config({}, os.environ, None)
+    return AutoUnlockPassphraseStore(bundle_root(_data_dir=config.storage.data_dir))
+
+
+@auto_unlock_app.command("status")
+def service_auto_unlock_status(json_output: _JSON = False) -> None:
+    """Report scoped restart-unlock state without exposing credential material."""
+
+    _finish(run_async(lambda: _service_auto_unlock_status(json_output)))
+
+
+async def _service_auto_unlock_status(json_output: bool) -> int:
+    """Compose platform-entry and live-service evidence into one bounded report."""
+
+    store = _auto_unlock_store()
+    secret, reason = store.load_with_reason()
+    if secret is not None:
+        for index in range(len(secret)):
+            secret[index] = 0
+    service_state: str | None = None
+    service_reason: str | None = None
+    try:
+        client = await build_service_client()
+        try:
+            status = await client.service_status()
+            service_state = status.state.value
+            service_reason = status.state_reason
+        finally:
+            await client.close()
+    except ControlError as error:
+        service_state = error.reason
+        service_reason = error.reason
+    state = (
+        "rejected"
+        if service_reason == "auto_unlock_rejected"
+        else "stale"
+        if service_reason == "auto_unlock_stale"
+        else "provisioned"
+        if reason == "none"
+        else "absent"
+        if reason == "auto_unlock_absent"
+        else "backend_unsupported"
+        if reason == "auto_unlock_backend_unavailable"
+        else "rejected"
+    )
+    report: JsonValue = {
+        "schema": "yoetz.auto-unlock-status/1",
+        "state": state,
+        "service_state": service_state,
+        "service_state_reason": service_reason,
+        "next_command": (
+            "yoetz service auto-unlock repair" if state in {"stale", "absent", "rejected"} else None
+        ),
+    }
+    _human_or_json(report, json_output=json_output)
+    return 0 if state == "provisioned" else 20
+
+
+@auto_unlock_app.command("repair")
+def service_auto_unlock_repair(json_output: _JSON = False) -> None:
+    """Repair restart unlock after proving the current vault passphrase."""
+
+    _finish(run_async(lambda: _service_auto_unlock_repair(json_output)))
+
+
+@auto_unlock_app.command("enable")
+def service_auto_unlock_enable(json_output: _JSON = False) -> None:
+    """Enable restart-safe unlock for an existing passphrase vault."""
+
+    _finish(run_async(lambda: _service_auto_unlock_repair(json_output)))
+
+
+async def _service_auto_unlock_repair(json_output: bool) -> int:
+    """Prove, persist, and wipe one bundle-scoped passphrase."""
+
+    from yoetz.adapters.keys.os_keyring import OSKeyringError
+    from yoetz.cli.unlock import read_vault_passphrase_for_auto_unlock, unlock_vault
+
+    try:
+        client = await build_service_client()
+        try:
+            status = await client.service_status()
+        finally:
+            await client.close()
+    except ControlError as error:
+        return _control_failure(error)
+    if status.vault_mode != "passphrase":
+        _stderr("auto_unlock_unavailable: the vault is not in passphrase mode")
+        return 20
+    if status.state.value != "locked":
+        _stderr("auto_unlock_repair_requires_locked_service: run 'yoetz service lock' and retry")
+        return 20
+
+    try:
+        passphrase = read_vault_passphrase_for_auto_unlock()
+        try:
+            result = await unlock_vault(bytearray(passphrase))
+            if result.state != "ready":
+                _stderr("vault_locked: the passphrase did not unlock the vault")
+                return exit_code_for(PublicErrorCode.VAULT_LOCKED)
+            store = _auto_unlock_store()
+            store.save(passphrase)
+        finally:
+            for index in range(len(passphrase)):
+                passphrase[index] = 0
+    except OSKeyringError as error:
+        _stderr(f"auto_unlock_{error.reason}")
+        return 20
+    except Exception as error:
+        failure = _trusted_exception_failure(error)
+        if failure is not None:
+            return failure
+        raise
+    report: JsonValue = {
+        "schema": "yoetz.auto-unlock-repair/1",
+        "outcome": "repaired",
+        "service_state": "ready",
+        "next_command": "yoetz service auto-unlock status",
+    }
+    _human_or_json(report, json_output=json_output)
+    return 0
 
 
 @service_app.command("initialize-passphrase")
