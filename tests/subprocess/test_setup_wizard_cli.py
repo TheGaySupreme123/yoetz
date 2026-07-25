@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -531,10 +532,12 @@ def test_uninitialized_provider_setup_provisions_auto_unlock(
     import yoetz.cli.provider_binding as binding_module
     import yoetz.cli.setup as setup_module
     import yoetz.cli.unlock as unlock_module
+    import yoetz.config.load as config_module
     import yoetz.config.paths as paths_module
 
     calls: list[str] = []
     supplied: list[bytes] = []
+    loaded_env: list[object] = []
 
     def fake_load_or_create(_store: object) -> bytearray:
         calls.append("load_or_create")
@@ -552,6 +555,11 @@ def test_uninitialized_provider_setup_provisions_auto_unlock(
         del _data_dir, _probe
         return tmp_path.resolve()
 
+    def fake_load_config(overrides: object, env: object, config_path: object) -> SimpleNamespace:
+        del overrides, config_path
+        loaded_env.append(env)
+        return SimpleNamespace(storage=SimpleNamespace(data_dir=tmp_path))
+
     monkeypatch.setattr(
         keyring_module.AutoUnlockPassphraseStore,
         "load_or_create",
@@ -559,6 +567,7 @@ def test_uninitialized_provider_setup_provisions_auto_unlock(
     )
     monkeypatch.setattr(unlock_module, "initialize_passphrase_vault", fake_initialize)
     monkeypatch.setattr(binding_module, "prompt_provider_endpoint_binding", lambda: None)
+    monkeypatch.setattr(config_module, "load_config", fake_load_config)
     monkeypatch.setattr(paths_module, "bundle_root", fake_bundle_root)
     monkeypatch.setattr(setup_module, "_service_reachability", fake_reachability)
 
@@ -569,6 +578,7 @@ def test_uninitialized_provider_setup_provisions_auto_unlock(
     )
 
     assert calls == ["load_or_create"]
+    assert loaded_env == [os.environ]
     assert supplied == [b"a" * 48]
     assert service["state"] == "ready"
     assert report["binding"] == "skipped"
@@ -583,6 +593,7 @@ def test_uninitialized_setup_stops_after_write_with_failed_readback(
     import yoetz.cli.setup as setup_module
     import yoetz.cli.unlock as unlock_module
     import yoetz.config.load as config_module
+    import yoetz.config.paths as paths_module
 
     class _WriteThenUnreadable:
         def __init__(self) -> None:
@@ -613,9 +624,14 @@ def test_uninitialized_setup_stops_after_write_with_failed_readback(
     def fake_load_config(*_args: object) -> SimpleNamespace:
         return SimpleNamespace(storage=SimpleNamespace(data_dir=tmp_path))
 
+    def fake_bundle_root(*, _data_dir: Path | None = None) -> Path:
+        del _data_dir
+        return tmp_path.resolve()
+
     monkeypatch.setattr(keyring_module, "AutoUnlockPassphraseStore", fake_store)
     monkeypatch.setattr(unlock_module, "initialize_passphrase_vault", fake_initialize)
     monkeypatch.setattr(config_module, "load_config", fake_load_config)
+    monkeypatch.setattr(paths_module, "bundle_root", fake_bundle_root)
 
     service, report = asyncio.run(
         setup_module._interactive_provider_setup(  # pyright: ignore[reportPrivateUsage]
