@@ -109,7 +109,10 @@ _SECRET_HEADER = struct.Struct(">4sBBHI")
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 _TOKEN = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", re.ASCII)
-_DATA_CATEGORY_TOKEN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
+# Data categories are snake_case (`bounded_structural_metadata`), which _TOKEN rejects.
+# Accepts either separator so this stays a superset of _TOKEN rather than trading one
+# separator for the other.
+_DATA_CATEGORY_TOKEN = re.compile(r"^[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*$", re.ASCII)
 _IDENTITY = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,127}$", re.ASCII)
 _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$", re.ASCII)
 _VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]{0,127}$", re.ASCII)
