@@ -60,14 +60,21 @@ def _emit(value: Mapping[str, JsonValue], *, json_output: bool) -> None:
 
 
 def _channel_enabled(policy: Mapping[str, object], channel: str) -> bool | None:
-    channels = policy.get("channels")
+    """Read one channel's enabled flag from the canonical effective policy.
+
+    The canonical policy names this list ``channel_policies``; reading any other key silently
+    reports every channel as unknown and makes readiness unreachable.
+    """
+
+    channels = policy.get("channel_policies")
     if not isinstance(channels, list | tuple):
         return None
-    for item in channels:
+    for item in cast("list[object] | tuple[object, ...]", channels):
         if not isinstance(item, Mapping):
             continue
-        if item.get("channel") == channel:
-            return item.get("enabled") is True
+        entry = cast(Mapping[str, object], item)
+        if entry.get("channel") == channel:
+            return entry.get("enabled") is True
     return None
 
 
@@ -182,7 +189,8 @@ async def provider_status_report() -> dict[str, JsonValue]:
         "next_commands": next_commands,
         "notes": (
             "semantic_ready is structural readiness only; it does not prove live provider dispatch.",
-            "credential_connected uses the service external_provider capability when ready.",
+            "credential_connected reports the configured provider's credential, not any provider.",
+            "A credential for a different provider than the bound endpoint does not count.",
         ),
     }
 

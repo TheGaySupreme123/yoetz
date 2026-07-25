@@ -1197,9 +1197,7 @@ class MemoryLedgerAdapter:
                 or self._state.projection != snapshot_projection
                 or self._state.writers.get(command.writer_id) != snapshot_writer
             ):
-                head = Frontier(
-                    self._state.projection.frontier, self._state.projection.head_digest
-                )
+                head = Frontier(self._state.projection.frontier, self._state.projection.head_digest)
                 raise _frontier_conflict(head)
             if command.operation_kind is OperationKind.RECEIPT and self._pending_import(
                 command.session_id

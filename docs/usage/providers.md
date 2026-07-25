@@ -82,8 +82,16 @@ The report names each condition and the exact next command when one is unmet:
 
 1. `verification.semantic` is not `disabled`
 2. a provider endpoint is bound in `config.toml`
-3. a provider credential is connected (service capability `external_provider`)
+3. **the bound provider's** credential is connected (service capability `external_provider`)
 4. the effective privacy policy enables the `llm_inference` channel
+
+Condition 3 is per-provider, not "any credential". If you rebind the endpoint from one preset to
+another and do not run the credential ceremony for the new one, the old credential does not carry
+over: readiness stays false and checks report `credential_unavailable` rather than a
+misleading ready state.
+
+Conditions 3 and 4 are independent. Closing only one moves the failure without making semantic
+review work — the check reason changes, the outcome does not.
 
 `semantic_ready: true` is structural readiness only. It does not prove live provider dispatch.
 

@@ -621,8 +621,9 @@ class ServiceDaemon:
         capabilities = {"confidential_ingress"}
         if lifecycle.state is ServiceState.READY and self._application is not None:
             capabilities.update({"workflow", "maintenance", "import_review"})
-            connected = getattr(self._application, "connected_provider_ids", ())
-            if connected:
+            # Exactly the *configured* provider's credential, not "some provider is connected":
+            # operator readiness surfaces read this capability and must not over-report.
+            if getattr(self._application, "provider_credential_connected", False) is True:
                 capabilities.add("external_provider")
         if self._monitor_state == "active":
             capabilities.add("session_event_monitor")

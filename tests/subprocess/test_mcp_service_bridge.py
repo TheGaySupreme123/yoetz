@@ -380,47 +380,56 @@ async def test_post_commit_response_shaping_failure_is_retryable_with_same_reque
 
 
 def test_publish_work_validation_names_event_drafts_field() -> None:
+    """`event_drafts` is untyped JsonValue to Pydantic, so this exercises schema translation.
+
+    The rejection can only come from `_validate_model_against_schema` re-raising
+    `SchemaInstanceInvalid.absolute_path`; a bare Pydantic field error cannot produce this
+    location. The r4 dogfood returned an empty pointer here, giving the agent nothing to fix.
+    """
+
     from yoetz.mcp.errors import safe_validation_locations
     from yoetz.protocol.models import PublishWorkRequest
 
-    with pytest.raises(Exception) as captured:
-        PublishWorkRequest.model_validate(
-            {
-                **{
-                    "protocol_version": "0.1",
-                    "schema_version": "1.0.0",
-                    "request_id": _id("request", 9),
-                    "session_id": _id("session", 1),
-                    "writer_id": _id("writer", 1),
-                    "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
-                    "actor": {"actor_id": "harness:mcp", "actor_type": "harness"},
-                    "client": {
-                        "kind": "cooperative_agent",
-                        "version": "0.1.0",
-                        "integration": "cooperative_mcp",
+    def arguments(event_id: str) -> dict[str, object]:
+        return {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "request_id": _id("request", 9),
+            "session_id": _id("session", 1),
+            "writer_id": _id("writer", 1),
+            "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
+            "actor": {"actor_id": "harness:mcp", "actor_type": "harness"},
+            "client": {
+                "kind": "cooperative_agent",
+                "version": "0.1.0",
+                "integration": "cooperative_mcp",
+            },
+            "event_drafts": [
+                {
+                    "event_id": event_id,
+                    "schema": {"name": "plan_published", "version": "1.0.0"},
+                    "occurred_at": "2026-01-01T00:00:00.000Z",
+                    "causal_parents": [],
+                    "payload": {
+                        "plan_version": 1,
+                        "summary": "Plan",
+                        "obligation_refs": [],
                     },
-                },
-                "event_drafts": [
-                    {
-                        "event_id": "not-an-id",
-                        "schema": {"name": "plan_published", "version": "1.0.0"},
-                        "occurred_at": "2026-01-01T00:00:00.000Z",
-                        "causal_parents": [],
-                        "payload": {
-                            "plan_version": 1,
-                            "summary": "Plan",
-                            "obligation_refs": [],
-                        },
-                        "artifact_refs": [],
-                        "evidence_refs": [],
-                    }
-                ],
-            }
-        )
+                    "artifact_refs": [],
+                    "evidence_refs": [],
+                }
+            ],
+        }
+
+    # Identical payload with a schema-valid event_id is accepted, so the only difference driving
+    # the rejection below is the field the pointer names.
+    PublishWorkRequest.model_validate(arguments(_id("event", 1)))
+
+    with pytest.raises(Exception) as captured:
+        PublishWorkRequest.model_validate(arguments("not-an-id"))
+
     locations = safe_validation_locations(captured.value)
-    assert locations
-    assert all(item["field"] for item in locations)
-    assert any(item["field"].startswith("/event_drafts") for item in locations)
+    assert [item["field"] for item in locations] == ["/event_drafts/0/event_id"]
 
 
 @pytest.fixture

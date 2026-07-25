@@ -542,9 +542,28 @@ def test_safe_details_allowlist_and_types_are_exact() -> None:
         "1",
         _IntegerSubclass(1),
     )
-    for integer_key in ("count", "limit", "retry_after_ms"):
+    for integer_key in ("count", "limit", "retry_after_ms", "sequence"):
         for rejected in rejected_values:
             assert not normalize_safe_details({integer_key: rejected})
+    # head_digest is a frontier recovery field: accept genesis and exact sha256, nothing else.
+    assert normalize_safe_details({"head_digest": "genesis"})["head_digest"] == "genesis"
+    exact_digest = "sha256:" + "0123456789abcdef" * 4
+    assert normalize_safe_details({"head_digest": exact_digest})["head_digest"] == exact_digest
+    for malformed_digest in (
+        "sha256:" + "0" * 63,
+        "sha256:" + "0" * 65,
+        "sha256:" + "A" * 64,
+        "sha256:" + "g" * 64,
+        "sha512:" + "0" * 64,
+        "0" * 64,
+        " sha256:" + "0" * 64,
+        "sha256:" + "0" * 64 + " ",
+        "GENESIS",
+        "",
+    ):
+        assert not normalize_safe_details({"head_digest": malformed_digest})
+    for rejected in (True, 1, 1.0, None):
+        assert not normalize_safe_details({"head_digest": rejected})
     assert not normalize_safe_details({"component": "ready"})
     assert not normalize_safe_details({"component": _UnsafeEnum.UPPER})
     assert normalize_safe_details({"component": _LowerSnake64Enum.VALUE})

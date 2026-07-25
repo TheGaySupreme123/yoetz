@@ -1492,7 +1492,18 @@ async def provide_service_ready_context(
     )
     semantic_configured = config.verification.semantic != "disabled"
     provider_endpoint_bound = config.provider is not None
-    semantic_ready = semantic_configured and bool(connected_provider_ids) and provider_endpoint_bound
+    # Resolve the binding before readiness: a connected provider that is not the *configured* one
+    # leaves dispatch on the credential-unavailable path, so readiness must track the exact binding
+    # rather than "any provider connected".
+    provider_binding: ProviderBinding | None = None
+    if config.provider is not None:
+        candidate_binding = provider_binding_from_config(config.provider)
+        if candidate_binding.provider_id in connected_provider_ids:
+            provider_binding = candidate_binding
+    provider_credential_connected = provider_binding is not None
+    semantic_ready = (
+        semantic_configured and provider_endpoint_bound and provider_credential_connected
+    )
     capabilities = {
         RuntimeCapability.STRUCTURAL_READ,
         RuntimeCapability.PAYLOAD_READ,
@@ -1558,16 +1569,11 @@ async def provide_service_ready_context(
         )
 
     versions = _receipt_versions(manifest)
-    provider_binding: ProviderBinding | None = None
-    if semantic_ready and config.provider is not None:
-        candidate_binding = provider_binding_from_config(config.provider)
-        if candidate_binding.provider_id in connected_provider_ids:
-            provider_binding = candidate_binding
     if not semantic_configured:
         semantic_evaluator = _semantic_not_configured
     elif not provider_endpoint_bound:
         semantic_evaluator = _semantic_not_configured
-    elif not connected_provider_ids or provider_binding is None:
+    elif provider_binding is None:
         semantic_evaluator = _semantic_credential_unavailable
     else:
         semantic_evaluator = _privacy_gated_semantic_evaluator(
@@ -1715,6 +1721,7 @@ async def provide_service_ready_context(
         verification_supervisor=verification_supervisor,
         rediscover_pending_verification=observation_coordinator.rediscover_pending_verification,
         connected_provider_ids=connected_provider_ids,
+        provider_credential_connected=provider_credential_connected,
         semantic_ready=semantic_ready,
     )
 
