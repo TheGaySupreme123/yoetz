@@ -1,8 +1,7 @@
 # .github/workflows/nightly-fault.yml — supervised crash, state-machine, and scale evidence.
 #
-# Spec: specs/.github/workflows/nightly-fault.yml.md
-# Authority: ADR-001, ADR-003, ADR-004, ADR-006, ADR-007; specs/tests/property.md,
-# specs/tests/subprocess.md, specs/tests/integration.md.
+# Authority: ADR-001, ADR-003, ADR-004, ADR-006, ADR-007; tests/property/,
+# tests/subprocess/, tests/integration/.
 #
 # Runs the expensive deterministic failure and bounded-resource cases intentionally excluded from
 # ordinary PR latency. Exact fault/timing/memory/disk/example budgets are centralized empirical

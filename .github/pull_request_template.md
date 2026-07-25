@@ -5,10 +5,10 @@
 - If this change is design-gated (protocol, privacy/egress, storage/durability, release/packaging,
   ADR / `OPEN_QUESTIONS`), a maintainer acknowledged the issue before this PR was opened.
 
-## Specs
+## Documentation
 
 - Behavior change? `yes` / `no`
-- Owning `specs/` paths updated (list), or `n/a — no behavior change`:
+- Docs updated (ADR, `docs/` page, `docs/INTERFACES.md` entry), or `n/a — no behavior change`:
 
 ## Verification
 

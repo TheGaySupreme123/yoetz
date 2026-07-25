@@ -32,11 +32,11 @@ body:
     validations:
       required: true
   - type: input
-    id: owning-spec
+    id: affected-area
     attributes:
-      label: Owning specs path (if known)
-      description: Path under `specs/`, or `unknown — needs triage`.
-      placeholder: specs/src/yoetz/...
+      label: Affected area or code path (if known)
+      description: Path under `src/`, `schemas/`, or `docs/`, or `unknown — needs triage`.
+      placeholder: src/yoetz/...
     validations:
       required: true
   - type: dropdown

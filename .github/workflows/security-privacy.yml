@@ -1,8 +1,7 @@
 # .github/workflows/security-privacy.yml — dependency, code, artifact, and plaintext-boundary gate.
 #
-# Spec: specs/.github/workflows/security-privacy.yml.md
-# Authority: ADR-003, ADR-004, ADR-005, ADR-007; specs/scripts/scan_public_boundary.py.md;
-# specs/src/yoetz/observability/privacy.md; specs/tests/packaging.md.
+# Authority: ADR-003, ADR-004, ADR-005, ADR-007; scripts/scan_public_boundary.py;
+# src/yoetz/observability/privacy.py; tests/packaging/.
 #
 # Passing is bounded evidence for the tested threat model only — not a declaration of complete
 # security, formal verification, SOC 2, or absence of all vulnerabilities.
@@ -26,9 +25,7 @@ on:
       - "tests/packaging/**"
       - "tests/conformance/privacy/**"
       - "tests/integration/privacy/**"
-      - "specs/.github/workflows/**"
-      - "specs/scripts/scan_public_boundary.py.md"
-      - "specs/src/yoetz/observability/privacy.md"
+      - "scripts/**"
       - "docs/adr/**"
       - "SECURITY.md"
       - "PRIVACY.md"

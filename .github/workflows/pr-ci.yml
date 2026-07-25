@@ -1,7 +1,6 @@
 # .github/workflows/pr-ci.yml — bounded pull-request correctness gate.
 #
-# Spec: specs/.github/workflows/pr-ci.yml.md
-# Authority: ADR-002, ADR-003, ADR-005, ADR-006, ADR-007; specs/INTERFACES.md.
+# Authority: ADR-002, ADR-003, ADR-005, ADR-006, ADR-007; docs/INTERFACES.md.
 #
 # Fast, deterministic evidence that a public change preserves contracts, style/types, pure truth
 # behavior, adapter parity, bounded durable/transport behavior, package construction, and the
@@ -61,7 +60,7 @@ jobs:
       - name: Reject symlink/path escape in owned resource and release roots
         run: |
           set -euo pipefail
-          for root in schemas migrations fixtures skills specs; do
+          for root in schemas migrations fixtures skills; do
             if [ -d "$root" ]; then
               found=$(find "$root" -type l -print)
               if [ -n "$found" ]; then
@@ -82,9 +81,6 @@ jobs:
 
       - name: Check dependency locks without modifying them
         run: uv sync --locked --all-extras --group dev
-
-      - name: Verify spec-tree one-to-one future-file ownership and self-containment
-        run: uv run --locked python scripts/verify_spec_manifest.py --check
 
       - name: Verify generated schemas are exact (no drift)
         run: uv run --locked python scripts/generate_schemas.py --check
@@ -446,8 +442,7 @@ jobs:
         run: |
           uv run --locked python scripts/verify_resource_manifest.py --check
           uv run --locked pytest tests/packaging \
-            -m "not fault and not soak and not live" -q --timeout=180 || \
-            echo "::warning::tests/packaging not yet present; owning spec is specs/tests/packaging.md"
+            -m "not fault and not soak and not live" -q --timeout=180
 
       - name: Install the wheel outside the checkout
         run: |

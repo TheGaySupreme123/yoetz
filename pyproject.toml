@@ -54,7 +54,6 @@ select = ["E4", "E7", "E9", "F", "I", "UP"]
 
 [tool.pyright]
 include = ["src", "tests"]
-exclude = ["specs"]
 extraPaths = ["src", "tests"]
 pythonVersion = "3.14"
 typeCheckingMode = "strict"

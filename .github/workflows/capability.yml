@@ -1,8 +1,7 @@
 # .github/workflows/capability.yml — exact-version external integration capability gate.
 #
-# Spec: specs/.github/workflows/capability.yml.md
-# Authority: ADR-003, ADR-004, ADR-005, ADR-007; specs/tests/capability.md;
-# specs/scripts/generate_capability_matrix.py.md.
+# Authority: ADR-003, ADR-004, ADR-005, ADR-007; tests/capability/;
+# scripts/generate_capability_matrix.py.
 #
 # Probes installed Yoetz artifacts against exact Codex, MCP, platform, key-backend, and optional
 # provider identities and produces redacted capability evidence. Proves only observed cells; keeps

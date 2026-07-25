@@ -1,8 +1,7 @@
 # .github/workflows/release.yml — approval-gated tagged public release pipeline.
 #
-# Spec: specs/.github/workflows/release.yml.md
-# Authority: ADR-003, ADR-004, ADR-005, ADR-006, ADR-007; repository build/resource/script/workflow
-# specs and every release-gate test spec.
+# Authority: ADR-003, ADR-004, ADR-005, ADR-006, ADR-007; docs/INTERFACES.md; the release-gate
+# suites under tests/packaging/ and tests/capability/.
 #
 # Build one immutable candidate from a clean version tag, prove it across advertised environments,
 # assemble honest release evidence, and only then publish the exact tested bytes through protected
@@ -120,9 +119,8 @@ jobs:
       - name: uv sync --locked (verify lockfiles are current)
         run: uv sync --locked --all-extras --group dev
 
-      - name: Verify spec-tree ownership/self-containment and generated schema/resource parity
+      - name: Verify generated schema/resource parity
         run: |
-          uv run --locked python scripts/verify_spec_manifest.py --check
           uv run --locked python scripts/generate_schemas.py --check
           uv run --locked python scripts/verify_resource_manifest.py --check
 
@@ -157,11 +155,6 @@ jobs:
           git archive --format=tar --prefix="yoetz-${{ steps.version.outputs.value }}/" HEAD \
             | (cd "${{ runner.temp }}/source-export" && tar -xf -)
           (cd "${{ runner.temp }}/source-export" && tar -czf "${{ runner.temp }}/source-export.tar.gz" .)
-
-      - name: Rerun the spec-manifest check inside the clean exported candidate
-        run: |
-          cd "${{ runner.temp }}/source-export/yoetz-${{ steps.version.outputs.value }}"
-          uv run --locked python scripts/verify_spec_manifest.py --check
 
   # ---------------------------------------------------------------------------------------------
   # build-candidate
@@ -332,8 +325,7 @@ jobs:
           "${{ runner.temp }}/verify-venv/bin/yoetz" version --json
           uv sync --locked --group dev
           uv run --locked pytest tests/packaging tests/subprocess tests/integration \
-            -m "not fault and not soak and not live" -q --timeout=900 || \
-            echo "::warning::tests/packaging not yet present; owning spec is specs/tests/packaging.md"
+            -m "not fault and not soak and not live" -q --timeout=900
 
       - name: Clean install/upgrade/rollback/uninstall/data-retention/offline reinstall, backup/restore, key backend states
         run: |
@@ -412,8 +404,7 @@ jobs:
           "${{ runner.temp }}/verify-venv/bin/yoetz" version --json
           uv sync --locked --group dev
           uv run --locked pytest tests/packaging tests/subprocess tests/integration \
-            -m "not fault and not soak and not live" -q --timeout=900 || \
-            echo "::warning::tests/packaging not yet present; owning spec is specs/tests/packaging.md"
+            -m "not fault and not soak and not live" -q --timeout=900
 
       - name: Clean install/upgrade/rollback/uninstall/data-retention/offline reinstall, backup/restore, key backend states
         run: |
