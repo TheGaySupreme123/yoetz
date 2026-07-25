@@ -95,9 +95,10 @@ Conditions 4 and 5 are independent. Closing only one moves the failure without m
 review work — the check reason changes, the outcome does not.
 
 When the service is locked, credential and privacy state are `unknown`, not incomplete. Unknown
-conditions have no remediation command; the first command is `yoetz service unlock`, or
-`yoetz service auto-unlock repair` when the scoped platform entry is stale. The JSON field
-`readiness_determinable` distinguishes a known not-ready state from one that cannot yet be read.
+conditions have no remediation command. For `vault_mode=uninitialized`, continue with `yoetz setup`;
+for an existing locked vault, use `yoetz service unlock`; and when the scoped platform entry is stale
+or rejected, use `yoetz service auto-unlock repair`. The JSON field `readiness_determinable`
+distinguishes a known not-ready state from one that cannot yet be read.
 
 `semantic_ready: true` is structural readiness only. It does not prove live provider dispatch.
 

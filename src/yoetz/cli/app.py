@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
+import os
 import sys
 from collections.abc import Awaitable, Callable, Mapping
 from enum import Enum
@@ -769,6 +770,8 @@ async def _trusted_call(operation: Callable[[], Awaitable[object]], json_output:
 
 
 def _trusted_exception_failure(error: Exception) -> int | None:
+    """Map trusted-ceremony failures to bounded public CLI outcomes."""
+
     unlock_module = importlib.import_module("yoetz.cli.unlock")
     client_module = importlib.import_module("yoetz.service.confidential_client")
     ceremony_error = cast(type[Exception], getattr(unlock_module, "HumanCeremonyCliError"))
@@ -823,20 +826,26 @@ async def _service_unlock(json_output: bool) -> int:
 
 
 def _auto_unlock_store() -> Any:
+    """Build the store for the same environment-selected bundle as the daemon."""
+
     from yoetz.adapters.keys.os_keyring import AutoUnlockPassphraseStore
     from yoetz.config.load import load_config
     from yoetz.config.paths import bundle_root
 
-    config = load_config({}, {}, None)
+    config = load_config({}, os.environ, None)
     return AutoUnlockPassphraseStore(bundle_root(_data_dir=config.storage.data_dir))
 
 
 @auto_unlock_app.command("status")
 def service_auto_unlock_status(json_output: _JSON = False) -> None:
+    """Report scoped restart-unlock state without exposing credential material."""
+
     _finish(run_async(lambda: _service_auto_unlock_status(json_output)))
 
 
 async def _service_auto_unlock_status(json_output: bool) -> int:
+    """Compose platform-entry and live-service evidence into one bounded report."""
+
     store = _auto_unlock_store()
     secret, reason = store.load_with_reason()
     if secret is not None:
@@ -856,7 +865,9 @@ async def _service_auto_unlock_status(json_output: bool) -> int:
         service_state = error.reason
         service_reason = error.reason
     state = (
-        "stale"
+        "rejected"
+        if service_reason == "auto_unlock_rejected"
+        else "stale"
         if service_reason == "auto_unlock_stale"
         else "provisioned"
         if reason == "none"
@@ -881,6 +892,8 @@ async def _service_auto_unlock_status(json_output: bool) -> int:
 
 @auto_unlock_app.command("repair")
 def service_auto_unlock_repair(json_output: _JSON = False) -> None:
+    """Repair restart unlock after proving the current vault passphrase."""
+
     _finish(run_async(lambda: _service_auto_unlock_repair(json_output)))
 
 
@@ -892,6 +905,8 @@ def service_auto_unlock_enable(json_output: _JSON = False) -> None:
 
 
 async def _service_auto_unlock_repair(json_output: bool) -> int:
+    """Prove, persist, and wipe one bundle-scoped passphrase."""
+
     from yoetz.adapters.keys.os_keyring import OSKeyringError
     from yoetz.cli.unlock import read_vault_passphrase_for_auto_unlock, unlock_vault
 

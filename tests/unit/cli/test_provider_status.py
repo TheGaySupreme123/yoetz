@@ -313,3 +313,39 @@ async def test_stale_auto_unlock_points_to_repair_first(
     blockers = cast(tuple[dict[str, object], ...], report["blockers"])
     assert blockers[0]["next_command"] == "yoetz service auto-unlock repair"
     assert report["next_commands"] == ("yoetz service auto-unlock repair",)
+
+
+async def test_rejected_auto_unlock_points_to_repair_first(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(
+        monkeypatch,
+        tmp_path,
+        provider=_provider(),
+        service_state="locked",
+        service_state_reason="auto_unlock_rejected",
+    )
+
+    report = await module.provider_status_report()
+
+    blockers = cast(tuple[dict[str, object], ...], report["blockers"])
+    assert blockers[0]["next_command"] == "yoetz service auto-unlock repair"
+    assert report["next_commands"] == ("yoetz service auto-unlock repair",)
+
+
+async def test_uninitialized_vault_points_to_guided_setup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(
+        monkeypatch,
+        tmp_path,
+        provider=_provider(),
+        service_state="locked",
+        service_state_reason="vault_uninitialized",
+    )
+
+    report = await module.provider_status_report()
+
+    blockers = cast(tuple[dict[str, object], ...], report["blockers"])
+    assert blockers[0]["next_command"] == "yoetz setup"
+    assert report["next_commands"] == ("yoetz setup",)

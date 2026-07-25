@@ -7,6 +7,7 @@ dispatch, without claiming a live provider smoke or writing any state.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections.abc import Mapping
 from typing import Final, cast
@@ -104,7 +105,7 @@ def machine_scope_request() -> JsonObject:
 async def provider_status_report() -> dict[str, JsonValue]:
     """Compose a nonsecret readiness snapshot from config, service, and policy."""
 
-    config = load_config({}, {}, None)
+    config = load_config({}, os.environ, None)
     verification_semantic = config.verification.semantic
     semantic_enabled = verification_semantic != "disabled"
     endpoint_bound = config.provider is not None
@@ -156,8 +157,10 @@ async def provider_status_report() -> dict[str, JsonValue]:
 
     blockers: list[dict[str, JsonValue]] = []
     if service_state != "ready":
-        if service_state_reason == "auto_unlock_stale":
+        if service_state_reason in {"auto_unlock_rejected", "auto_unlock_stale"}:
             service_command = "yoetz service auto-unlock repair"
+        elif service_state_reason == "vault_uninitialized":
+            service_command = "yoetz setup"
         elif service_state in {None, "service_unavailable"}:
             service_command = "yoetz service run"
         else:

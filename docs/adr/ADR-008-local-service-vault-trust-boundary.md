@@ -72,8 +72,12 @@ store entry named `yoetz.auto-unlock.v1`, scoped by the SHA-256 digest of the ab
 bundle path. Interactive first-run setup generates a high-entropy passphrase into a mutable buffer,
 round-trips it through that store, initializes the passphrase envelope through the existing
 confidential ceremony, and overwrites the buffer best-effort. If the platform store is unavailable,
-setup visibly falls back to the existing two-entry human passphrase ceremony; it never puts the
-secret in argv, environment, config, stdin, logs, ordinary control, or MCP.
+and that failure is guaranteed to precede any credential write, setup visibly falls back to the
+existing two-entry human passphrase ceremony. If a write may have committed but its read-back cannot
+be verified, setup fails closed before vault initialization and tells the user to restore platform
+credential access and rerun setup; it never creates a different manual passphrase beside an
+ambiguous stored value. Neither path puts the secret in argv, environment, config, stdin, logs,
+ordinary control, or MCP.
 
 At restart the trusted service alone may read that exact scoped entry and submit it directly to the
 vault unlock path. Missing, unavailable, malformed/rejected, and authenticated-but-stale entries

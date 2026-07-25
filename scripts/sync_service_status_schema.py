@@ -14,14 +14,20 @@ from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_enco
 
 
 def _load(path: Path) -> dict[str, JsonValue]:
+    """Load one canonical JSON object from disk."""
+
     return cast(dict[str, JsonValue], json.loads(path.read_bytes()))
 
 
 def _write(path: Path, document: dict[str, JsonValue]) -> None:
+    """Write one canonical JSON object without incidental formatting drift."""
+
     path.write_bytes(canonical_encode(document))
 
 
 def _sync_runtime_support(root: Path) -> None:
+    """Refresh the runtime-support digest after schema resource changes."""
+
     inventory = load_inventory_config()
     resources = collect_source_entries(inventory, repo_root=root)
     generated_manifest = _load_bytes(build_manifest(inventory, resources))
@@ -36,10 +42,14 @@ def _sync_runtime_support(root: Path) -> None:
 
 
 def _load_bytes(value: bytes) -> dict[str, JsonValue]:
+    """Decode one generated canonical JSON object."""
+
     return cast(dict[str, JsonValue], json.loads(value))
 
 
 def main() -> None:
+    """Synchronize the service-status schema and all owned digest dependencies."""
+
     root = Path(__file__).resolve().parent.parent
     status_path = root / "schemas/service/service-status-1.0.0.schema.json"
     status = _load(status_path)

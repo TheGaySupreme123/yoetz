@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -39,6 +41,42 @@ class _Store:
         self.saved = bytes(value)
 
 
+def test_auto_unlock_store_uses_daemon_environment_scope(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import yoetz.adapters.keys.os_keyring as keyring_module
+    import yoetz.config.load as config_module
+    import yoetz.config.paths as paths_module
+
+    selected = tmp_path / "environment-selected-data"
+    sentinel = object()
+    seen: dict[str, object] = {}
+    monkeypatch.setenv("YOETZ_STORAGE_DATA_DIR", str(selected))
+
+    def fake_load(overrides: object, env: object, config_path: object) -> SimpleNamespace:
+        seen["overrides"] = overrides
+        seen["env"] = env
+        seen["config_path"] = config_path
+        return SimpleNamespace(storage=SimpleNamespace(data_dir=selected))
+
+    def fake_bundle_root(*, _data_dir: Path | None = None) -> Path:
+        seen["data_dir"] = _data_dir
+        return selected.resolve()
+
+    def fake_store(bundle: Path) -> object:
+        seen["bundle"] = bundle
+        return sentinel
+
+    monkeypatch.setattr(config_module, "load_config", fake_load)
+    monkeypatch.setattr(paths_module, "bundle_root", fake_bundle_root)
+    monkeypatch.setattr(keyring_module, "AutoUnlockPassphraseStore", fake_store)
+
+    assert module._auto_unlock_store() is sentinel  # pyright: ignore[reportPrivateUsage]
+    assert seen["env"] is os.environ
+    assert seen["data_dir"] == selected
+    assert seen["bundle"] == selected.resolve()
+
+
 @pytest.mark.anyio
 async def test_auto_unlock_status_reports_service_verified_stale_without_secret(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -66,6 +104,27 @@ async def test_auto_unlock_status_reports_service_verified_stale_without_secret(
     }
     assert secret == bytearray(len(secret))
     assert client.closed
+
+
+@pytest.mark.anyio
+async def test_auto_unlock_status_prioritizes_service_rejection(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = _Store(bytearray(b"a" * 48), "none")
+    client = _Client(state="locked", reason="auto_unlock_rejected")
+    monkeypatch.setattr(module, "_auto_unlock_store", lambda: store)
+    monkeypatch.setattr(module, "build_service_client", lambda: _async_value(client))
+
+    assert (
+        await module._service_auto_unlock_status(  # pyright: ignore[reportPrivateUsage]
+            True
+        )
+        == 20
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["state"] == "rejected"
+    assert report["next_command"] == "yoetz service auto-unlock repair"
 
 
 @pytest.mark.anyio

@@ -1037,10 +1037,14 @@ credential-store service name is `yoetz.auto-unlock.v1`; its account identity is
 `bundle-<sha256(os.fsencode(abspath(bundle_root)))>`. It accepts only exact vault-passphrase bytes,
 base64url-encodes them for the allowlisted platform backend, verifies writes by round trip, and
 returns only bounded structural load reasons. Setup, boot, and trusted-TTY repair overwrite mutable
-buffers best-effort. No MCP method, ordinary control body, config value, environment value, argv
-value, stdin path, or log field can carry the secret. Deletion is not exposed until it can be
-atomically coupled to a human-known passphrase rewrap, so generated-passphrase installations cannot
-be stranded.
+buffers best-effort. Setup and repair resolve the bundle through the same effective configuration
+and environment inputs as daemon startup. Setup falls back to a human-chosen passphrase only for a
+platform-store failure guaranteed to occur before any write. If a write may have committed but
+cannot be read back exactly, setup stops before vault initialization and requires recovery of
+platform-store access; it never initializes a different manual secret beside the ambiguous entry.
+No MCP method, ordinary control body, config value, environment value, argv value, stdin path, or
+log field can carry the secret. Deletion is not exposed until it can be atomically coupled to a
+human-known passphrase rewrap, so generated-passphrase installations cannot be stranded.
 
 `SecretMemoryPort` exposes `capability`, `capture`, `allocate`, and `close` over opaque one-shot
 `SecretHandle` values. `SecretPurpose` is exactly `vault_initialize`, `vault_unlock`,

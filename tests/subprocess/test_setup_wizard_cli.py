@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -571,3 +572,58 @@ def test_uninitialized_provider_setup_provisions_auto_unlock(
     assert supplied == [b"a" * 48]
     assert service["state"] == "ready"
     assert report["binding"] == "skipped"
+
+
+def test_uninitialized_setup_stops_after_write_with_failed_readback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An ambiguous committed entry must never trigger a different manual passphrase."""
+
+    import yoetz.adapters.keys.os_keyring as keyring_module
+    import yoetz.cli.setup as setup_module
+    import yoetz.cli.unlock as unlock_module
+    import yoetz.config.load as config_module
+
+    class _WriteThenUnreadable:
+        def __init__(self) -> None:
+            self.written: str | None = None
+
+        def get_password(self, service: str, username: str) -> None:
+            del service, username
+            return None
+
+        def set_password(self, service: str, username: str, password: str) -> None:
+            del service, username
+            self.written = password
+
+    backend = _WriteThenUnreadable()
+    store = keyring_module.AutoUnlockPassphraseStore(tmp_path.resolve(), backend=backend)
+    store._backend_id = (  # pyright: ignore[reportPrivateUsage]
+        "keyring.backends.macOS.Keyring"
+    )
+    initialized: list[bytes] = []
+
+    async def fake_initialize(passphrase: bytearray | None = None) -> object:
+        initialized.append(bytes(passphrase or b""))
+        return object()
+
+    def fake_store(_path: Path) -> keyring_module.AutoUnlockPassphraseStore:
+        return store
+
+    def fake_load_config(*_args: object) -> SimpleNamespace:
+        return SimpleNamespace(storage=SimpleNamespace(data_dir=tmp_path))
+
+    monkeypatch.setattr(keyring_module, "AutoUnlockPassphraseStore", fake_store)
+    monkeypatch.setattr(unlock_module, "initialize_passphrase_vault", fake_initialize)
+    monkeypatch.setattr(config_module, "load_config", fake_load_config)
+
+    service, report = asyncio.run(
+        setup_module._interactive_provider_setup(  # pyright: ignore[reportPrivateUsage]
+            {"reachable": True, "state": "locked", "vault_mode": "uninitialized"}
+        )
+    )
+
+    assert backend.written is not None
+    assert initialized == []
+    assert service == {"reachable": True, "state": "locked", "vault_mode": "uninitialized"}
+    assert report["credential_reason"] == "auto_unlock_unverified"

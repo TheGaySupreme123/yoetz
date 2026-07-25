@@ -217,8 +217,10 @@ may admit secrets on inherited FDs for catalogued `secret_ingress` / `secret_rea
 (implemented: vault initialize and provider credential set/rotate). That is not generic
 `--password-fd` unlock and does not unlock an already-locked vault without a local TTY ceremony.
 A broader inherited-descriptor unlock API still requires its own reviewed adapter/specification and
-platform tests. This is the resolved F-008 boundary: v0.1 provides unattended readiness through the
-approved OS-keyring path, not noninteractive passphrase unlock.
+platform tests. This is the resolved F-008 boundary: v0.1 provides unattended readiness through an
+approved OS-keyring vault or the exact bundle-scoped platform-entry passphrase restart exception in
+ADR-008. Generic passphrase unlock through an inherited FD, argv, environment, config, stdin, or a
+plaintext path remains prohibited.
 
 ## What stays plaintext
 

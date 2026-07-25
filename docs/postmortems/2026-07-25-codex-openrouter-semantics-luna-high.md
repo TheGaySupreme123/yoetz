@@ -6,7 +6,7 @@ improvement program. Revision 1 conclusions about *why* readiness failed are **r
 [§0.2](#02-corrections-to-revision-1).
 **Codex model / effort:** `gpt-5.6-luna` @ `high`
 **Codex binary:** `codex-testing` `0.146.0-alpha.2`
-**Codex session / thread ID:** `019f9a9e-7eac-7a72-8667-d9970a63ae06`
+**Codex session / thread ID:** `<codex-session-id>`
 **Repository baseline packaged:** `29ce77fe` (`main`, includes PR #19 r4 dogfood
 product gaps and PR #20 privacy control wiring)
 **Experiment branch:** `codex/openrouter-semantics-20260725-luna-high`
@@ -152,6 +152,8 @@ rg -n 'yoetz\.|VAULT_LOCKED|INVALID_REQUEST|mcp_tool_call' \
 ```bash
 RUN=/tmp/codex-openrouter-semantics-20260725-luna-high
 DATA="$HOME/Library/Application Support/yoetz"
+YOETZ_REPO=/path/to/yoetz-checkout
+export YOETZ_REPO
 
 # 1. Durable privacy truth: is llm_inference actually enabled?
 python3 - <<'EOF'
@@ -174,7 +176,7 @@ done
 # 3. Is boot-time auto-unlock provisioned for THIS bundle?
 python3 - <<'EOF'
 import hashlib, os, sys
-sys.path.insert(0, '/Users/shayb/yoetz-core/src')
+sys.path.insert(0, os.path.join(os.environ['YOETZ_REPO'], 'src'))
 from yoetz.config.paths import bundle_root
 b = bundle_root()
 print('expected keychain acct = bundle-' +
@@ -191,7 +193,7 @@ git show 2c049e0 -- src/yoetz/cli/setup.py | grep -B18 -A4 load_or_create
 
 | Artifact | Absolute path |
 | --- | --- |
-| Full rollout session | `$HOME/.codex-testing/sessions/2026/07/25/rollout-2026-07-25T21-51-46-019f9a9e-7eac-7a72-8667-d9970a63ae06.jsonl` |
+| Full rollout session | `$HOME/.codex-testing/sessions/2026/07/25/rollout-<timestamp>-<codex-session-id>.jsonl` |
 | Codex home / config | `$HOME/.codex-testing/` · `config.toml` |
 
 ```bash
@@ -314,13 +316,13 @@ account digest matches this bundle exactly:
 
 ```text
 svce = "yoetz.auto-unlock.v1"
-acct = "bundle-02826ab554c535f8eaf74564c6121e59cefe52f9d8b6edddd5c49cf8b2280ba5"
+acct = "bundle-<sha256-of-canonical-bundle-path>"
 cdat = 20260722121217Z
 ```
 
-`sha256(abspath("/Users/shayb/Library/Application Support/yoetz"))` =
-`02826ab554c535f8eaf74564c6121e59cefe52f9d8b6edddd5c49cf8b2280ba5`. Confirmed match. But the entry
-was written on **2026-07-22**, while this installation's vault was initialized fresh on
+The recorded account matched
+`sha256(abspath("<platform-application-data>/yoetz"))` for the inspected bundle. But the entry was
+written on **2026-07-22**, while this installation's vault was initialized fresh on
 **2026-07-25T17:36Z** with a human-typed passphrase. The stored passphrase belongs to a destroyed
 installation, so it cannot unwrap the current `root_envelope`. `daemon.py:1645-1648` catches the
 failure and **silently** proceeds to `LOCKED` — exactly the "stale or mismatched" case the comment
