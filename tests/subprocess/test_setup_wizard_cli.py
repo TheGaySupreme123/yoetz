@@ -417,6 +417,20 @@ def test_setup_surfaces_no_secret_shaped_option() -> None:
             assert token not in lowered, (args, token)
 
 
+def test_provider_help_names_reviewed_choices_and_wire_styles() -> None:
+    root = _plain(_RUNNER.invoke(cli.app, ["--help"]).output)
+    endpoint = _plain(_RUNNER.invoke(cli.app, ["provider", "endpoint", "--help"]).output)
+
+    for output in (root, endpoint):
+        assert "anthropic" in output
+        assert "gemini" in output
+        assert "openrouter" in output
+        assert "vercel-ai-gateway" in output
+    assert "OpenAI-compatible" in endpoint
+    assert "Chat" in endpoint and "Completions" in endpoint
+    assert "OpenAI" in endpoint and "Responses" in endpoint
+
+
 def test_bare_invocation_without_tty_prints_help() -> None:
     result = _RUNNER.invoke(cli.app, [])
     assert result.exit_code == 0

@@ -55,6 +55,12 @@ the interactive `setup run` wizard once and then opens the `cli/menu.py` menu; w
 present it opens the menu directly. `--help`, named subcommands, and every non-TTY invocation are
 unchanged.
 
+Root help names the complete reviewed provider set and its wire style: Official OpenAI, Fireworks,
+Anthropic Claude, Google Gemini, and OpenRouter are available as named presets, with the first two
+using OpenAI Responses and the latter three using OpenAI-compatible Chat Completions; Vercel AI
+Gateway is another OpenAI Responses preset. `yoetz provider endpoint --help` exposes the same
+choices. This is setup guidance, not live interoperability evidence.
+
 Root `yoetz --set --provider PROVIDER --model MODEL` starts the fixed service on
 demand, initializes or unlocks the vault when required, writes the selected reviewed endpoint
 binding, derives all internal credential binding fields, and requests the API key with hidden TTY

@@ -27,7 +27,9 @@ multiple candidates fail closed non-interactively with a `--codex-path` message 
 candidates still complete with `codex_not_found` guidance; `setup status` is read-only with the
 `yoetz.setup-status/1` schema; the `integrate codex mcp` status/preview/install matrix including
 digest binding; install without acceptance and against a foreign entry fails closed with exit 2;
-no secret-shaped option appears in any setup or root help text; a bare non-TTY invocation prints help
+no secret-shaped option appears in any setup or root help text; root/provider endpoint help names
+all reviewed provider choices and their OpenAI Responses vs OpenAI-compatible Chat Completions
+wire styles; a bare non-TTY invocation prints help
 with exit 0; `--fireworks` / `--provider` / `--model` without `--set` exit 2 with a usage failure
 whose plain (ANSI-stripped) output contains `require --set`; a successful `--set` path reports
 layer-separated provider readiness (binding/credential supported; SDK extra / semantic evaluator /

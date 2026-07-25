@@ -96,13 +96,13 @@ def prompt_provider_endpoint_binding(*, path: Path | None = None) -> Path | None
 
     typer.echo("")
     typer.echo("LLM endpoint (nonsecret)")
-    typer.echo("  1  Official OpenAI (api.openai.com)")
-    typer.echo("  2  Fireworks AI (api.fireworks.ai/inference/v1)")
+    typer.echo("  1  Official OpenAI (OpenAI Responses; api.openai.com/v1)")
+    typer.echo("  2  Fireworks AI (OpenAI Responses; api.fireworks.ai/inference/v1)")
     typer.echo("  3  Anthropic Claude (OpenAI-compatible Chat Completions)")
     typer.echo("  4  Google Gemini (OpenAI-compatible Chat Completions)")
     typer.echo("  5  OpenRouter (OpenAI-compatible Chat Completions)")
-    typer.echo("  6  Vercel AI Gateway (OpenAI-compatible Responses)")
-    typer.echo("  7  Custom OpenAI-compatible HTTPS origin")
+    typer.echo("  6  Vercel AI Gateway (OpenAI Responses; ai-gateway.vercel.sh/v1)")
+    typer.echo("  7  Custom OpenAI-compatible HTTPS origin (Responses)")
     typer.echo("  s  Skip for now")
     raw = typer.prompt("Select", default="s").strip().lower()
     if raw in {"s", "skip", ""}:

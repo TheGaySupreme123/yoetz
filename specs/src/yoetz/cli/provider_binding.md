@@ -19,10 +19,11 @@ the same `config.toml` fields the user could edit by hand.
 
 ## Behavior
 
-Interactive prompts never ask for API keys. Reviewed choices bind their exact registry host/path
-and API style without accepting a free path: Fireworks and Vercel AI Gateway use Responses;
-Anthropic Claude, Google Gemini, and OpenRouter use OpenAI-compatible Chat Completions. Presets
-show a documented default model while allowing a nonsecret model override. Writes go through
+Interactive prompts never ask for API keys. The numbered choices identify the protocol style and
+fixed registry location: Official OpenAI, Fireworks, and Vercel AI Gateway use OpenAI Responses;
+Anthropic Claude, Google Gemini, and OpenRouter use OpenAI-compatible Chat Completions. Reviewed
+choices bind their exact registry host/path without accepting a free path. Presets show a
+documented default model while allowing a nonsecret model override. Writes go through
 `config/write.write_provider_binding`; preset selection is not live-dispatch evidence.
 Credentials remain `yoetz provider credential set|rotate`. Owner-declared selections print that
 data-use posture is `unknown` and never inherits `assisted`.

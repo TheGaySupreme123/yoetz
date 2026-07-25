@@ -902,8 +902,9 @@ def provider_endpoint(
         typer.Option(
             "--provider",
             help=(
-                "Reviewed preset: openai, fireworks, anthropic, gemini, openrouter, "
-                "or vercel-ai-gateway."
+                "Reviewed preset and wire style: openai/fireworks (OpenAI Responses), "
+                "anthropic/claude, gemini, or openrouter (OpenAI-compatible Chat Completions), "
+                "or vercel-ai-gateway (OpenAI Responses)."
             ),
         ),
     ] = None,
@@ -1230,7 +1231,10 @@ def root(
         str | None,
         typer.Option(
             "--provider",
-            help="Reviewed provider preset used with --set.",
+            help=(
+                "Reviewed preset used with --set: openai, fireworks, anthropic/claude, "
+                "gemini, openrouter, or vercel-ai-gateway."
+            ),
         ),
     ] = None,
     model: Annotated[
