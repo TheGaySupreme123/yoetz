@@ -1,19 +1,19 @@
 # Yoetz v0.1 — decision ledger and implementation-freeze gates
 
-**Wave:** A–F | **ADRs:** ADR-001 through ADR-014 | **Imports (spec-tree):** all owning specs |
-**Imported by:** `specs/README.md`, ADR ratification, implementation-freeze review
+**ADRs:** ADR-001 through ADR-016 | **Related:** [`docs/INTERFACES.md`](INTERFACES.md),
+[`docs/adr/`](adr/), release-evidence generation
 
 ## Purpose
 
-Keep unresolved choices visible without scattering founder questions, empirical calibration, and
-deferred features through hundreds of files. Owning specs may explain a local uncertainty, but this
-file is the one queue used to decide whether the complete natural-language build is frozen.
+Keep unresolved choices visible in one place instead of scattering founder questions, empirical
+calibration, and deferred features across the repository. An ADR or a code comment may explain a
+local uncertainty; this file is the one queue used to decide whether a release claim may ship.
 
-## Public surface
+## How to read an item
 
 Every item has a stable ID, class (`founder`, `empirical`, `independent-review`, or `deferred`), a
 working default, an owner, and a freeze condition. An item is removed only by recording the answer
-in its owning ADR/spec and moving a short result into the resolved-decisions section below.
+in its owning ADR and moving a short result into the resolved-decisions section below.
 
 ## Behavior
 
@@ -29,7 +29,7 @@ schemas, capability claims, or implicit adapter behavior.
 - A library/tool version is never settled by prose alone; the exact release lock and executable
   capability evidence are authoritative.
 - An empirical threshold cannot quietly change protocol identity or honest wording. Such a change
-  requires an ADR/spec amendment.
+  requires an ADR amendment.
 - A deferred feature cannot be implemented opportunistically while adjacent code is being built.
 
 ## Invariants
@@ -37,15 +37,16 @@ schemas, capability claims, or implicit adapter behavior.
 1. Ignored architecture/strategy inputs are never required to interpret an item or its answer.
 2. Founder questions describe product/legal choices, not measurements engineers can answer.
 3. Release claims remain narrower than the evidence produced by the applicable gate.
-4. Closing an item updates every affected owning spec and fixture in the same review.
+4. Closing an item updates every affected ADR, code path, test, and fixture in the same review.
 
-## Tests
+## Enforcement
 
-`scripts/scan_public_boundary.py` rejects private drafting dependencies; the file-manifest check
-requires every named owning file to exist; release-evidence generation refuses open applicable
-empirical/review gates.
+`scripts/scan_public_boundary.py` rejects private drafting dependencies;
+`tests/conformance/claims/` binds every public claim in `docs/public-claims.json` to real evidence
+and holds each claim at its honest `release_status`; release-evidence generation refuses open
+applicable empirical/review gates.
 
-## Open questions
+## Open items
 
 ### Phase 0 implementation reconciliation — 2026-07-17
 
@@ -166,7 +167,7 @@ that evidence.
 ### Resolved founder and working decisions reflected across the tree
 
 - Ignored architecture/strategy files are private drafting inputs only; the committed ADRs,
-  `INTERFACES.md`, and owning specs are self-contained public authority.
+  `docs/INTERFACES.md`, and the public code and tests are self-contained public authority.
 - Public schema `$id` values are real immutable hosting routes below
   `https://schemas.yoetz.dev/0.1/`. The checked-in `schemas/` tree deploys byte-for-byte at that
   prefix, the local gate resolves the complete manifest with networking disabled, and the release
@@ -294,8 +295,11 @@ that evidence.
   local truth: every post-deterministic provider absence, policy denial, refusal, timeout, invalid,
   stale, late, or exhausted outcome returns the deterministic findings with verdict
   `incomplete_check`, explicit reason, and no semantic findings.
-- Every future source, resource, fixture, test, script, workflow, and public document has one owning
-  natural-language file spec before implementation begins.
+- ~~Every future source, resource, fixture, test, script, workflow, and public document has one
+  owning natural-language file spec before implementation begins.~~ **Superseded 2026-07-25:** the
+  spec-first tree completed its purpose — all 626 declared files were built — and was retired rather
+  than maintained as a second copy of a shipped system. The authority chain is now ADR →
+  `docs/INTERFACES.md` → code and tests. The final tree is recoverable at tag `specs-tree-final`.
 - The public workflow has exactly six operations; import/review, backup/restore/migrate,
   integration, version, and MCP serving are bounded support surfaces rather than extra MCP tools.
 - Candidate findings are ID-free pure-kernel values; the application allocates and durably pins

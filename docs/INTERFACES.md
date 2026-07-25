@@ -1,7 +1,9 @@
 # Yoetz v0.1 — shared interface registry
 
-Canonical names used across all spec files. A spec MUST use these names verbatim. Additions land
-here first. Signatures are Python-flavored natural language, not final code.
+Canonical names used across the codebase, tests, schemas, and public documentation. Code and tests
+MUST use these names verbatim; a name shared across modules is registered here first. Signatures are
+Python-flavored natural language and describe intent — the implementation under `src/yoetz/` is the
+executable truth.
 
 ## 1. Identifiers (`protocol/ids.py`)
 
