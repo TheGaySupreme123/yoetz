@@ -39,6 +39,7 @@ from yoetz.ports.privacy import (
 )
 from yoetz.protocol.canonical import JsonValue, canonical_digest
 from yoetz.protocol.ids import IdKind, validate_id
+from yoetz.protocol.models import DataCategory
 
 __all__ = [
     "AllowedBlockedExample",
@@ -59,6 +60,7 @@ __all__ = [
     "TightenPrivacyPolicyRequest",
     "decide_privacy_policy",
     "is_privacy_tightening",
+    "privacy_widening_summary",
     "privacy_get_effective",
     "privacy_get_setup",
     "privacy_propose_policy",
@@ -420,6 +422,41 @@ def is_privacy_tightening(current: PrivacyPolicy, candidate: PrivacyPolicy) -> b
     """True when ``candidate`` is a non-widening subset/equivalent of ``current``."""
 
     return _is_tightening(current, candidate)
+
+
+def privacy_widening_summary(
+    current: PrivacyPolicy, candidate: PrivacyPolicy
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Every data category and authorization scope ``candidate`` newly permits.
+
+    This is what a human is shown before approving a widen, so it has to cover the same
+    surface :func:`_is_tightening` classifies on — egress channels *and* the local-sink
+    ceilings — or a real widening can be approved against an empty summary. Returns sorted
+    tuples, both empty when nothing widened.
+    """
+
+    categories: set[str] = set()
+    scopes: set[str] = set()
+    for new, old in zip(candidate.channel_policies, current.channel_policies, strict=True):
+        if not new.enabled or _channel_subset(new, old):
+            continue
+        permitted: set[DataCategory] = set(old.allowed_categories) if old.enabled else set()
+        categories.update(item.value for item in new.allowed_categories if item not in permitted)
+        # A disabled channel grants no scope, so any enablement is itself a scope widening.
+        if not old.enabled or _scope_rank(new.scope_ceiling.value) < _scope_rank(
+            old.scope_ceiling.value
+        ):
+            scopes.add(new.scope_ceiling.value)
+    for new_sink, old_sink in (
+        (candidate.local_model_categories, current.local_model_categories),
+        (candidate.agent_context_categories, current.agent_context_categories),
+        (candidate.trusted_human_control_categories, current.trusted_human_control_categories),
+    ):
+        permitted_sink = set(old_sink)
+        categories.update(item.value for item in new_sink if item not in permitted_sink)
+    if candidate.effective_scope != current.effective_scope:
+        scopes.add(candidate.effective_scope.kind.value)
+    return tuple(sorted(categories)), tuple(sorted(scopes))
 
 
 def _is_tightening(current: PrivacyPolicy, candidate: PrivacyPolicy) -> bool:

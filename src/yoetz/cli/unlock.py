@@ -590,8 +590,17 @@ async def _drive_session(
                 ConfidentialSecretPurpose.VAULT_UNLOCK,
             }:
                 supplied = passphrase
-            elif purpose is ConfidentialSecretPurpose.PROVIDER_REAUTHENTICATION:
-                supplied = provider_reauthentication
+            elif purpose in {
+                ConfidentialSecretPurpose.PROVIDER_REAUTHENTICATION,
+                ConfidentialSecretPurpose.PRIVACY_REAUTHENTICATION,
+                ConfidentialSecretPurpose.SECURITY_REAUTHENTICATION,
+            }:
+                # Privacy/security widen ceremonies re-auth with the vault passphrase.
+                supplied = (
+                    provider_reauthentication
+                    if purpose is ConfidentialSecretPurpose.PROVIDER_REAUTHENTICATION
+                    else passphrase
+                )
             if supplied is not None:
                 _validate_secret(supplied, purpose)
                 secret_buffer = supplied
@@ -601,9 +610,8 @@ async def _drive_session(
         elif type(current) is AuthorizationRequiredPhase:
             authorization_source: Literal["os_user_presence", "secret_reauthentication"]
             if (
-                provider_reauthentication is not None
-                and "secret_reauthentication" in current.available_sources
-            ):
+                provider_reauthentication is not None or passphrase is not None
+            ) and "secret_reauthentication" in current.available_sources:
                 authorization_source = "secret_reauthentication"
             elif "os_user_presence" in current.available_sources:
                 authorization_source = "os_user_presence"

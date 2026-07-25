@@ -169,6 +169,12 @@ class MemoryPrivacyPolicyStore:
             self._state.transitions[proposal.privacy_proposal_id] = prepared
         return prepared
 
+    async def load_pending_transition(self, proposal_id: str) -> PreparedPolicyTransition:
+        prepared = self._state.transitions.get(proposal_id)
+        if prepared is None:
+            raise ValueError("privacy_policy_transition_unavailable")
+        return prepared
+
     async def commit_transition(
         self, prepared: PreparedPolicyTransition, decision: HumanPolicyDecision
     ) -> PolicyCommitResult:

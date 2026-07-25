@@ -509,7 +509,12 @@ async def _call_support(
     deadline_ms: int | None,
 ) -> int:
     try:
-        request = _json_object(input_path, inline)
+        if input_path is None and inline is None and method == "privacy_get_effective":
+            from yoetz.cli.provider_status import machine_scope_request
+
+            request = machine_scope_request()
+        else:
+            request = _json_object(input_path, inline)
         client = await build_service_client()
         try:
             result = await getattr(client, method)(request, deadline_ms=deadline_ms)
@@ -1025,7 +1030,9 @@ def privacy_export_desired(
         try:
             client = await build_service_client()
             try:
-                effective = await client.privacy_get_effective(JsonObject({}))
+                from yoetz.cli.provider_status import machine_scope_request
+
+                effective = await client.privacy_get_effective(machine_scope_request())
             finally:
                 await client.close()
         except ControlError as error:
@@ -1069,7 +1076,9 @@ def privacy_apply_desired(
         try:
             client = await build_service_client()
             try:
-                effective = await client.privacy_get_effective(JsonObject({}))
+                from yoetz.cli.provider_status import machine_scope_request
+
+                effective = await client.privacy_get_effective(machine_scope_request())
             finally:
                 await client.close()
         except ControlError as error:

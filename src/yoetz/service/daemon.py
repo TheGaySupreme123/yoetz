@@ -66,7 +66,13 @@ from yoetz.ports.control import (
     ServiceStopResult,
 )
 from yoetz.ports.diagnostics import StartupCheckResult
-from yoetz.ports.secret_memory import HumanAuthorizationProof, SecretHandle, SecretPurpose
+from yoetz.ports.keys import MacKeyPurpose
+from yoetz.ports.secret_memory import (
+    HumanAuthorizationProof,
+    SecretHandle,
+    SecretMemoryError,
+    SecretPurpose,
+)
 from yoetz.protocol.canonical import (
     JsonValue,
     canonical_digest,
@@ -100,6 +106,7 @@ from yoetz.service.confidential_protocol import (
     PortableRecoveryTarget,
     PrivacyDecisionResult,
     PrivacyPendingTarget,
+    PrivacyPolicyDecisionPreview,
     ProviderCredentialResult,
     ProviderCredentialRotatePreview,
     ProviderCredentialSetPreview,
@@ -295,6 +302,24 @@ class _ReadyCloseRelay:
         await close()
 
 
+class _PrivacyPolicyAppRelay:
+    """Late-bound lookup for the ready PrivacyPolicyApplication (human effects)."""
+
+    def __init__(self) -> None:
+        self._getter: Callable[[], object | None] | None = None
+
+    def bind(self, getter: Callable[[], object | None]) -> None:
+        if self._getter is not None or not callable(getter):
+            raise RuntimeError("privacy_policy_app_relay_invalid")
+        self._getter = getter
+
+    def get(self) -> object | None:
+        getter = self._getter
+        if getter is None:
+            return None
+        return getter()
+
+
 @dataclass(frozen=True, slots=True)
 class ServiceComposition:
     """One generation's service-owned components, redacted by construction."""
@@ -315,6 +340,7 @@ class ServiceComposition:
     human_connection_handler: _HumanConnectionHandler | None = None
     ready_activation_relay: _ReadyActivationRelay | None = None
     ready_close_relay: _ReadyCloseRelay | None = None
+    privacy_policy_app_relay: _PrivacyPolicyAppRelay | None = None
 
     def __repr__(self) -> str:
         return "ServiceComposition(<redacted>)"
@@ -334,6 +360,15 @@ class ServiceDaemon:
         if close_relay is not None:
             close_relay.bind(self._close_ready_locked)
         self._application = _composition.application
+        privacy_relay = _composition.privacy_policy_app_relay
+        if privacy_relay is not None:
+            privacy_relay.bind(
+                lambda: (
+                    getattr(getattr(self._application, "privacy", None), "policy_application", None)
+                    if self._application is not None
+                    else None
+                )
+            )
         self._started = False
         self._closed = False
         self._stopping = False
@@ -1210,9 +1245,21 @@ class _InstallationStateStore:
 
 
 class _LockedHumanEffects:
-    def __init__(self, lifecycle: ServiceLifecycle, vault: VaultService) -> None:
+    def __init__(
+        self,
+        lifecycle: ServiceLifecycle,
+        vault: VaultService,
+        privacy_relay: _PrivacyPolicyAppRelay,
+    ) -> None:
         self._lifecycle = lifecycle
         self._vault = vault
+        self._privacy_relay = privacy_relay
+
+    def _privacy_app(self) -> object:
+        app = self._privacy_relay.get()
+        if app is None:
+            raise HumanControlError("kind_forbidden")
+        return app
 
     async def prepare(self, request: ClientOpenEnvelope) -> tuple[HumanPreview, str, int | None]:
         target = request.target
@@ -1260,6 +1307,48 @@ class _LockedHumanEffects:
             else:
                 preview = ProviderCredentialRotatePreview(target)
             return preview, digest, None
+        if type(target) is PrivacyPendingTarget:
+            if not self._vault.ready or mode != "passphrase":
+                raise HumanControlError("kind_forbidden")
+            if (
+                request.ceremony_kind is not HumanCeremonyKind.PRIVACY_POLICY_DECISION
+                or target.decision_kind != "policy"
+            ):
+                raise HumanControlError("kind_forbidden")
+            from yoetz.application.privacy_policy import privacy_widening_summary
+
+            app = self._privacy_app()
+            store = getattr(app, "policy_store", None)
+            if store is None:
+                raise HumanControlError("kind_forbidden")
+            try:
+                prepared = await store.load_pending_transition(target.pending_id)
+            except ValueError as exc:
+                if exc.args == ("privacy_policy_transition_unavailable",):
+                    raise HumanControlError("target_invalid") from exc
+                raise HumanControlError("target_invalid") from exc
+            proposal = prepared.proposal
+            base = await store.effective_policy(proposal.scope)
+            # The human approves against this summary, so it uses the same comparison that
+            # classifies a widen — egress channels and local-sink ceilings alike.
+            categories, scopes = privacy_widening_summary(base.policy, proposal.proposed_policy)
+            digest = canonical_digest(
+                {
+                    "decision_kind": target.decision_kind,
+                    "kind": target.kind,
+                    "pending_id": target.pending_id,
+                }
+            )
+            return (
+                PrivacyPolicyDecisionPreview(
+                    target.pending_id,
+                    prepared.exact_diff_digest,
+                    categories,
+                    scopes,
+                ),
+                digest,
+                proposal.expected_generation,
+            )
         raise HumanControlError("kind_forbidden")
 
     async def complete_portable_recovery(
@@ -1299,8 +1388,96 @@ class _LockedHumanEffects:
         proof: HumanAuthorizationProof | None,
         now_monotonic: float,
     ) -> PrivacyDecisionResult:
-        del target, decision, proof, now_monotonic
-        raise HumanControlError("kind_forbidden")
+        from yoetz.application.privacy_policy import (
+            DecidePrivacyPolicyRequest,
+            PrivacyPolicyApplication,
+            decide_privacy_policy,
+        )
+        from yoetz.ports.privacy import HumanAuthorityCapability, HumanPolicyDecision
+
+        if target.decision_kind != "policy":
+            raise HumanControlError("kind_forbidden")
+        if not self._vault.ready or self._vault.mode.value != "passphrase":
+            raise HumanControlError("kind_forbidden")
+        app = self._privacy_app()
+        if type(app) is not PrivacyPolicyApplication:
+            raise HumanControlError("kind_forbidden")
+        try:
+            prepared = await app.policy_store.load_pending_transition(target.pending_id)
+        except ValueError as exc:
+            if exc.args == ("privacy_policy_transition_unavailable",):
+                raise HumanControlError("target_invalid") from exc
+            raise HumanControlError("target_invalid") from exc
+        target_digest = canonical_digest(
+            {
+                "decision_kind": target.decision_kind,
+                "kind": target.kind,
+                "pending_id": target.pending_id,
+            }
+        )
+        approved = decision == "approve"
+        if approved:
+            if proof is None:
+                raise HumanControlError("reauthentication_unavailable")
+            try:
+                proof.consume(
+                    "privacy_policy_widen",
+                    target_digest,
+                    self._lifecycle.instance.generation,
+                    self._vault.generation,
+                    prepared.proposal.expected_generation,
+                    now_monotonic,
+                )
+            except SecretMemoryError as exc:
+                raise HumanControlError("stale_generation") from exc
+        try:
+            authority_commitment = self._vault.installation_mac_handle(
+                MacKeyPurpose.PRIVACY_AUDIT
+            ).mac(
+                b"yoetz/privacy-audit/local-approval/v1\x00",
+                prepared.prepared_digest.encode("ascii"),
+            )
+            service_generation = self._lifecycle.instance.generation
+            vault_generation = self._vault.generation
+            vault_mode = str(self._vault.mode.value)
+            human_decision = HumanPolicyDecision(
+                prepared.prepared_digest,
+                approved,
+                app.clock.now_utc(),
+                authority_commitment,
+            )
+            authority = HumanAuthorityCapability(
+                "established_passphrase",
+                canonical_digest(
+                    {
+                        "service_generation": str(service_generation),
+                        "source": "established_passphrase",
+                        "vault_generation": str(vault_generation),
+                        "vault_mode": vault_mode,
+                    }
+                ),
+                service_generation,
+                vault_mode,
+                vault_generation,
+                True,
+            )
+            await decide_privacy_policy(
+                app,
+                DecidePrivacyPolicyRequest(prepared, human_decision, authority),
+            )
+        except ValueError as exc:
+            reason = exc.args[0] if exc.args and type(exc.args[0]) is str else ""
+            if reason in {
+                "privacy_policy_stale",
+                "privacy_policy_transition_unavailable",
+                "privacy_policy_decision_expired",
+                "privacy_policy_decision_mismatch",
+            }:
+                return PrivacyDecisionResult("stale", prepared.prepared_digest)
+            raise HumanControlError("internal_error") from exc
+        return PrivacyDecisionResult(
+            "committed" if approved else "denied", prepared.prepared_digest
+        )
 
     async def change_idle_relock_policy(
         self,
@@ -1498,13 +1675,14 @@ async def _production_composition(
             lifecycle=lifecycle,
             activate_ready=relay,
         )
+        privacy_relay = _PrivacyPolicyAppRelay()
         human = HumanControlService(
             clock=clock,
             lifecycle=lifecycle,
             vault=vault,
             unlock=unlock,
             secret_ingress=secret_ingress,
-            effects=_LockedHumanEffects(lifecycle, vault),
+            effects=_LockedHumanEffects(lifecycle, vault, privacy_relay),
             user_presence=None,
         )
         return ServiceComposition(
@@ -1523,6 +1701,7 @@ async def _production_composition(
             human_connection_handler=_HumanConnectionServer(human),
             ready_activation_relay=relay,
             ready_close_relay=ready_close_relay,
+            privacy_policy_app_relay=privacy_relay,
         )
     except BaseException:
         await listeners.close()

@@ -9,6 +9,8 @@ than the bound endpoint.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -66,13 +68,18 @@ class _Client:
         self.closed = True
 
 
+_INSTALLATION_ID = "ins_50000000-0000-4000-8000-000000000001"
+
+
 def _install(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     *,
     semantic: str = "optional",
     provider: ProviderProfileConfig | None = None,
     capabilities: tuple[str, ...] = ("external_provider",),
     llm_inference_enabled: bool = True,
+    installation_state: str | None = None,
 ) -> _Client:
     config = YoetzConfig(
         profile="strict-local" if provider is None else "local-openai",
@@ -90,11 +97,23 @@ def _install(
         return client
 
     monkeypatch.setattr(module, "connect_service", _connect)
+
+    # privacy_get_effective requires a scope, which is read from installation state; without
+    # this the report degrades to "unknown" for every policy-derived condition.
+    state = tmp_path / "state"
+    state.mkdir(exist_ok=True)
+    if installation_state is None:
+        installation_state = json.dumps({"installation_id": _INSTALLATION_ID})
+    if installation_state:
+        (state / "installation-state.json").write_text(installation_state)
+    monkeypatch.setattr(module, "state_dir", lambda: state)
     return client
 
 
-async def test_all_four_conditions_met_reports_ready(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _install(monkeypatch, provider=_provider())
+async def test_all_four_conditions_met_reports_ready(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client = _install(monkeypatch, tmp_path, provider=_provider())
 
     report = await module.provider_status_report()
 
@@ -108,7 +127,7 @@ async def test_all_four_conditions_met_reports_ready(monkeypatch: pytest.MonkeyP
 
 
 async def test_llm_inference_channel_is_actually_read_from_canonical_policy(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A disabled channel must read as disabled, not as unknown.
 
@@ -116,7 +135,7 @@ async def test_llm_inference_channel_is_actually_read_from_canonical_policy(
     for every channel, which silently makes readiness unreachable on a correctly configured host.
     """
 
-    _install(monkeypatch, provider=_provider(), llm_inference_enabled=False)
+    _install(monkeypatch, tmp_path, provider=_provider(), llm_inference_enabled=False)
 
     report = await module.provider_status_report()
 
@@ -133,11 +152,11 @@ async def test_llm_inference_channel_is_actually_read_from_canonical_policy(
 
 
 async def test_credential_for_a_different_provider_is_not_counted(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The service withholds external_provider unless the *configured* provider is connected."""
 
-    _install(monkeypatch, provider=_provider("anthropic"), capabilities=())
+    _install(monkeypatch, tmp_path, provider=_provider("anthropic"), capabilities=())
 
     report = await module.provider_status_report()
 
@@ -152,10 +171,11 @@ async def test_credential_for_a_different_provider_is_not_counted(
 
 
 async def test_unbound_endpoint_and_disabled_semantic_are_named_with_next_commands(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _install(
         monkeypatch,
+        tmp_path,
         semantic="disabled",
         provider=None,
         capabilities=(),
@@ -183,8 +203,10 @@ async def test_unbound_endpoint_and_disabled_semantic_are_named_with_next_comman
     assert len(cast(tuple[object, ...], report["next_commands"])) == 4
 
 
-async def test_report_never_claims_a_live_provider_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(monkeypatch, provider=_provider())
+async def test_report_never_claims_a_live_provider_smoke(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch, tmp_path, provider=_provider())
 
     report = await module.provider_status_report()
 
@@ -192,13 +214,39 @@ async def test_report_never_claims_a_live_provider_smoke(monkeypatch: pytest.Mon
     assert "does not prove live provider dispatch" in notes
 
 
-async def test_exit_code_is_nonzero_when_not_ready(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(monkeypatch, provider=_provider(), capabilities=())
+async def test_exit_code_is_nonzero_when_not_ready(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch, tmp_path, provider=_provider(), capabilities=())
 
     assert await module.run_provider_status(json_output=True) == 20
 
 
-async def test_exit_code_is_zero_when_ready(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(monkeypatch, provider=_provider())
+async def test_exit_code_is_zero_when_ready(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch, tmp_path, provider=_provider())
 
     assert await module.run_provider_status(json_output=True) == 0
+
+
+async def test_missing_installation_state_reports_unknown_not_a_false_ready(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A scope that cannot be built must degrade to "unknown", never to a claimed condition.
+
+    ``privacy_get_effective`` requires a scope built from installation state. When that state is
+    unreadable the policy is never inspected, so every policy-derived condition has to read as
+    unknown and readiness has to be false — the report must not fill the gap with a guess.
+    """
+
+    _install(monkeypatch, tmp_path, provider=_provider(), installation_state="")
+
+    report = await module.provider_status_report()
+
+    assert report["llm_inference_enabled"] is None
+    assert report["semantic_ready"] is False
+    blockers = cast(tuple[dict[str, object], ...], report["blockers"])
+    channel = [item for item in blockers if item.get("condition") == "llm_inference_channel"]
+    assert len(channel) == 1
+    assert channel[0]["state"] == "unknown"
