@@ -1315,6 +1315,8 @@ class _LockedHumanEffects:
                 or target.decision_kind != "policy"
             ):
                 raise HumanControlError("kind_forbidden")
+            from yoetz.application.privacy_policy import privacy_widening_summary
+
             app = self._privacy_app()
             store = getattr(app, "policy_store", None)
             if store is None:
@@ -1327,20 +1329,9 @@ class _LockedHumanEffects:
                 raise HumanControlError("target_invalid") from exc
             proposal = prepared.proposal
             base = await store.effective_policy(proposal.scope)
-            base_categories = {
-                category.value
-                for channel in base.policy.channel_policies
-                if channel.enabled
-                for category in channel.allowed_categories
-            }
-            candidate_categories = {
-                category.value
-                for channel in proposal.proposed_policy.channel_policies
-                if channel.enabled
-                for category in channel.allowed_categories
-            }
-            categories = tuple(sorted(candidate_categories - base_categories))
-            scopes = tuple(sorted({proposal.proposed_policy.effective_scope.kind.value}))
+            # The human approves against this summary, so it uses the same comparison that
+            # classifies a widen — egress channels and local-sink ceilings alike.
+            categories, scopes = privacy_widening_summary(base.policy, proposal.proposed_policy)
             digest = canonical_digest(
                 {
                     "decision_kind": target.decision_kind,

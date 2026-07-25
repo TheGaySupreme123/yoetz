@@ -8,6 +8,7 @@ encoder is asserted against the real envelope rather than against a hand-copied 
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -25,7 +26,11 @@ from yoetz.application.privacy_control import (
     encode_effective_privacy_policy,
     encode_privacy_policy_result,
 )
-from yoetz.application.privacy_policy import PolicyDecisionRequired, PrivacyPolicyResult
+from yoetz.application.privacy_policy import (
+    PolicyDecisionRequired,
+    PrivacyPolicyResult,
+    privacy_widening_summary,
+)
 from yoetz.domain.values import JsonObject, freeze_json
 from yoetz.ports.control import ControlMethod, ControlResult
 from yoetz.ports.privacy import (
@@ -35,6 +40,7 @@ from yoetz.ports.privacy import (
     ProviderReconciliation,
 )
 from yoetz.protocol.canonical import JsonValue
+from yoetz.protocol.models import DataCategory
 from yoetz.service.control_protocol import ControlProtocolError, validate_result
 
 _NOW = datetime(2026, 7, 25, tzinfo=UTC)
@@ -183,3 +189,41 @@ def test_effective_policy_body_carries_the_requested_installation() -> None:
     assert policy["effective_scope"] == freeze_json(
         {"kind": "machine", "installation_id": INSTALLATION_ID}
     )
+
+
+def test_widening_summary_covers_local_sinks_and_scope_ceilings() -> None:
+    """The preview a human approves must name every widening, not just channel categories.
+
+    An enabled-channel-only diff reports an empty summary for a widen that only raises a
+    local-sink ceiling, so the human is asked to approve a change they were never shown.
+    """
+
+    base = local_only_policy()
+    candidate = minimal_external_policy()
+
+    categories, scopes = privacy_widening_summary(base, candidate)
+
+    # llm_inference goes from disabled to enabled, so all five of its categories are new.
+    assert "claim_text" in categories
+    assert "repository_excerpt" in categories
+    # Enabling a channel is itself a scope grant, reported at the channel's ceiling.
+    assert scopes == ("task",)
+
+
+def test_widening_summary_is_empty_when_nothing_widened() -> None:
+    policy = minimal_external_policy()
+
+    assert privacy_widening_summary(policy, policy) == ((), ())
+
+
+def test_widening_summary_reports_a_raised_local_sink_ceiling() -> None:
+    base = local_only_policy()
+    widened = replace(
+        base,
+        local_model_categories=(*base.local_model_categories, DataCategory.CLAIM_TEXT),
+    )
+
+    categories, scopes = privacy_widening_summary(base, widened)
+
+    assert categories == ("claim_text",)
+    assert scopes == ()

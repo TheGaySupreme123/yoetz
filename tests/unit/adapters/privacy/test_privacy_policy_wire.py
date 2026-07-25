@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from builders.privacy_policies import local_only_policy, minimal_external_policy
 from yoetz.adapters.privacy.catalog import (
     decode_privacy_policy_canonical,
@@ -55,3 +57,27 @@ def test_domain_desired_state_shape_still_decodes(tmp_path: Path) -> None:
     path = write_privacy_desired_toml(original, tmp_path / "desired.toml")
     decoded = decode_privacy_policy_canonical(load_privacy_desired_canonical(path))
     assert decoded == original
+
+
+def test_wire_decode_rejects_a_missing_never_send_deny_list() -> None:
+    """``never_send`` is a const deny list; absence must not decode as a valid policy."""
+
+    wire = dict(encode_privacy_policy_json(local_only_policy()))
+    del wire["never_send"]
+    with pytest.raises(ValueError, match="privacy_policy_row_corrupt"):
+        decode_privacy_policy_canonical(canonical_encode(cast(JsonValue, wire)))
+
+
+def test_wire_decode_rejects_a_weakened_never_send_deny_list() -> None:
+    wire = dict(encode_privacy_policy_json(local_only_policy()))
+    never_send = cast(list[JsonValue], wire["never_send"])
+    wire["never_send"] = never_send[1:]
+    with pytest.raises(ValueError, match="privacy_policy_row_corrupt"):
+        decode_privacy_policy_canonical(canonical_encode(cast(JsonValue, wire)))
+
+
+def test_wire_decode_rejects_an_unsupported_schema_version() -> None:
+    wire = dict(encode_privacy_policy_json(local_only_policy()))
+    wire["schema_version"] = "2.0.0"
+    with pytest.raises(ValueError, match="privacy_policy_row_corrupt"):
+        decode_privacy_policy_canonical(canonical_encode(cast(JsonValue, wire)))

@@ -176,7 +176,17 @@ def build_privacy_support_handlers(
                 app, ProposePrivacyPolicyRequest(digest, candidate)
             )
             if type(result) is PolicyDecisionRequired:
-                current = await app.policy_store.effective_policy(result.prepared.proposal.scope)
+                proposal = result.prepared.proposal
+                current = await app.policy_store.effective_policy(proposal.scope)
+                # This is a second read; a concurrent commit in between would otherwise report
+                # a version belonging to a different policy than the one just prepared. The
+                # proposal pins the generation it was prepared against, so disagreement means
+                # the proposal is already stale and the caller must re-read and retry.
+                if current.generation != proposal.expected_generation or (
+                    proposal.expected_policy_digest is not None
+                    and current.effective_digest != proposal.expected_policy_digest
+                ):
+                    raise _policy_rejection()
                 return _encode_decision_required(
                     result, expected_policy_version=current.policy.version
                 )

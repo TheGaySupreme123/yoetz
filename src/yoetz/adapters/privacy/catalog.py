@@ -370,11 +370,16 @@ def _policy_from_domain_mapping(source: dict[str, JsonValue]) -> PrivacyPolicy:
 
 
 def _policy_from_wire_mapping(source: dict[str, JsonValue]) -> PrivacyPolicy:
+    # The frozen schema makes both of these required, and never_send is a const deny list.
+    # Treating either as optional would decode an incomplete or future document as a valid
+    # 1.0.0 policy, which on this boundary means silently accepting a weaker deny list.
+    if source.get("schema_version") != _PRIVACY_POLICY_WIRE_SCHEMA_VERSION:
+        raise ValueError("privacy_policy_row_corrupt")
     channels = source["channel_policies"]
     if type(channels) is not list:
         raise ValueError("privacy_policy_row_corrupt")
     never_send = source.get("never_send")
-    if never_send is not None and tuple(_strings(never_send)) != _NEVER_SEND_WIRE:
+    if never_send is None or tuple(_strings(never_send)) != _NEVER_SEND_WIRE:
         raise ValueError("privacy_policy_row_corrupt")
     ceilings = _mapping(source["local_sink_category_ceilings"])
     local_categories, local_classes = _ceiling_from_wire(ceilings["local_model"])
@@ -600,7 +605,7 @@ class CatalogPrivacyPolicyStore:
     async def load_pending_transition(self, proposal_id: str) -> PreparedPolicyTransition:
         row = self._db.execute(
             """SELECT base_policy_generation, proposal_digest, candidate_policy_canonical,
-                      expires_at, created_at
+                      diff_canonical, expires_at, created_at
                FROM privacy_policy_transitions
                WHERE proposal_id = ? AND state = 'pending'""",
             (proposal_id,),
@@ -608,27 +613,23 @@ class CatalogPrivacyPolicyStore:
         if row is None:
             raise ValueError("privacy_policy_transition_unavailable")
         candidate = _policy_from_bytes(cast(bytes, row[2]))
-        current = await self.effective_policy(candidate.effective_scope)
+        # Rebuild the identity this proposal was prepared with. Deriving the base digest from
+        # the *current* policy instead would silently re-key prepared_digest whenever the
+        # effective policy moves, so the digest a human previewed would not be the digest the
+        # commit is authorised against.
+        diff = cast(bytes, row[3])
+        base_policy_digest = cast(str, _mapping(strict_json_parse(diff))["base_policy_digest"])
         proposal = PolicyTransitionProposal(
             scope=candidate.effective_scope,
             expected_generation=cast(int, row[0]),
             proposed_policy=candidate,
             proposal_digest=cast(str, row[1]),
-            created_at=parse_rfc3339_millis(row[4]),
-            expires_at=parse_rfc3339_millis(row[3]),
+            created_at=parse_rfc3339_millis(row[5]),
+            expires_at=parse_rfc3339_millis(row[4]),
             privacy_proposal_id=proposal_id,
-            expected_policy_digest=current.effective_digest,
+            expected_policy_digest=base_policy_digest,
         )
-        exact_diff_digest = canonical_digest(
-            strict_json_parse(
-                canonical_encode(
-                    {
-                        "base_policy_digest": current.effective_digest,
-                        "candidate_policy_digest": candidate.policy_digest,
-                    }
-                )
-            )
-        )
+        exact_diff_digest = canonical_digest(strict_json_parse(diff))
         prepared_digest = canonical_digest(
             {
                 "diff_digest": exact_diff_digest,
