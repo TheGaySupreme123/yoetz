@@ -26,13 +26,16 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "actor",
         "actor_id",
         "actor_type",
+        "artifact_refs",
         "asserted_by",
         "at_frontier",
+        "causal_parents",
         "client",
         "cursor",
         "disposition",
         "display_name",
         "event_drafts",
+        "event_id",
         "evidence_refs",
         "expected_frontier",
         "external_ref",
@@ -46,6 +49,7 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "limit",
         "max_findings",
         "mode",
+        "name",
         "occurred_at",
         "payload",
         "policy_packs",
@@ -55,6 +59,7 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "redaction_profile",
         "request_id",
         "requested_view",
+        "schema",
         "schema_name",
         "schema_version",
         "scope",
@@ -130,9 +135,12 @@ def safe_validation_locations(exc: object) -> tuple[dict[str, str], ...]:
             continue
         pointer = _pointer_for_location(
             item.get("loc"),
-            project_parent_on_unsafe_leaf=raw_reason == "extra_forbidden",
+            # Project to the nearest allowlisted parent so untrusted leaf keys (payload fields,
+            # extras) never appear, while still naming a useful location such as /event_drafts/0.
+            project_parent_on_unsafe_leaf=True,
         )
-        if pointer is None:
+        # Empty pointers (model-level failures with no path) are not actionable; omit them.
+        if pointer is None or pointer == "":
             continue
         reason = _SAFE_VALIDATION_REASONS.get(raw_reason, "invalid_type_or_value")
         projected.append({"field": pointer, "reason": reason})

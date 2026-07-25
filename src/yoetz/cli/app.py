@@ -885,6 +885,15 @@ credential_app.command("set")(_provider_credential_command("set"))
 credential_app.command("rotate")(_provider_credential_command("rotate"))
 
 
+@provider_app.command("status")
+def provider_status(json_output: _JSON = False) -> None:
+    """Report whether external semantic review is structurally ready to dispatch."""
+
+    from yoetz.cli.provider_status import run_provider_status
+
+    _finish(run_async(lambda: run_provider_status(json_output=json_output)))
+
+
 @provider_app.command("endpoint")
 def provider_endpoint(
     official: Annotated[

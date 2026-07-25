@@ -362,11 +362,10 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
             request_id=request_id,
             correlation_id=correlation_id,
         )
+    # Invoke first. Once this returns, a write may already be durable; response shaping must not
+    # collapse that into a non-retryable INTERNAL_ERROR that steers agents away from same-id resume.
     try:
         result = await _invoke_with_reconnect(runtime, request, invoke)
-        wire = public_model_to_wire(result)
-        validated = result_type.model_validate(wire)
-        return result_from_public_model(validated)
     except PublicOperationError as exc:
         # Defense in depth: the ordinary client normally returns ok:false bodies, but if a
         # PublicOperationError escapes the service boundary, keep the exact public code.
@@ -404,6 +403,29 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
             "The bridge could not complete the operation.",
             request_id=request_id,
             correlation_id=correlation_id,
+        )
+
+    try:
+        wire = public_model_to_wire(result)
+        validated = result_type.model_validate(wire)
+        return result_from_public_model(validated)
+    except Exception as exc:
+        correlation_id = record_unexpected_exception_without_raising(
+            exc,
+            component="mcp.bridge",
+            operation=f"{operation}_response_projection_failed",
+            request_id=request_id,
+        )
+        return structured_error_result(
+            PublicErrorCode.INTERNAL_ERROR,
+            (
+                "The operation completed on the local service, but the bridge could not shape "
+                "the response. Retry with the same request_id to load the stored result."
+            ),
+            retryable=True,
+            request_id=request_id,
+            correlation_id=correlation_id,
+            safe_details={"reason_code": "response_projection_failed"},
         )
 
 

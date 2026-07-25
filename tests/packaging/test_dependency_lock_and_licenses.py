@@ -24,6 +24,52 @@ _REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 _BUILD_TIMEOUT: Final = 120
 _PUBLIC_REGISTRY: Final = "https://pypi.org/simple"
 
+
+def _uv_env() -> dict[str, str]:
+    """Environment for ``uv export`` runs that select their lock mode by flag.
+
+    CI exports ``UV_LOCKED=1`` for the ambient ``uv run --locked`` steps, and uv rejects that
+    together with the ``--frozen`` these exports pass, exiting 2 before doing any work. The lock
+    mode belongs to the command, so drop the inherited variable rather than let the surrounding
+    workflow decide it.
+    """
+
+    env = dict(os.environ)
+    env.pop("UV_LOCKED", None)
+    env.pop("UV_FROZEN", None)
+    return env
+
+
+def _run_checked(
+    command: list[str],
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+    timeout: int,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run a tool and fail with its own stderr instead of a bare ``CalledProcessError``.
+
+    ``check=True`` with captured output reports only an exit status, so a uv failure here shows
+    the argv and nothing about the cause. That turned two separate CI breakages into guesswork.
+    """
+
+    completed = subprocess.run(  # noqa: S603 - fixed argv, no shell, trusted local binary
+        command,
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        check=False,
+        timeout=timeout,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"command failed with exit status {completed.returncode}: {' '.join(command)}\n"
+            f"stdout:\n{completed.stdout.decode('utf-8', errors='replace')}\n"
+            f"stderr:\n{completed.stderr.decode('utf-8', errors='replace')}"
+        )
+    return completed
+
+
 # APSW's own PyPI metadata reports the vague classic marker "any-OSI"; the reviewed disposition is
 # recorded here rather than trusting an uninformative upstream field. APSW itself is zlib-licensed
 # and bundles the public-domain SQLite amalgamation (see ADR-007).
@@ -208,10 +254,8 @@ def _install_isolated(
     """
 
     venv_dir = tmp_path_factory.mktemp("dependency-lock-venv") / "venv"
-    subprocess.run(  # noqa: S603 - fixed argv, no shell
+    _run_checked(
         ["uv", "venv", "--python", "3.14", str(venv_dir)],
-        capture_output=True,
-        check=True,
         timeout=_BUILD_TIMEOUT,
     )
     python = venv_dir / "bin" / "python"
@@ -231,28 +275,34 @@ def _install_isolated(
     ]
     for extra in extras:
         export_command += ["--extra", extra]
-    subprocess.run(  # noqa: S603 - fixed argv, no shell, trusted local uv binary
-        export_command, cwd=_REPO_ROOT, capture_output=True, check=True, timeout=60
+    _run_checked(
+        export_command,
+        cwd=_REPO_ROOT,
+        env=_uv_env(),
+        timeout=60,
     )
-    subprocess.run(  # noqa: S603 - fixed argv, no shell
+    # No --offline here. The pin comes from the hashed requirements file, not from the network
+    # flag: every version and artifact hash is already fixed by the export above, so a resolution
+    # that drifts from the lock cannot succeed. Installing offline additionally requires each
+    # artifact to be hash-checkable in the local uv cache, which a cache populated only by
+    # `uv sync` is not on a clean machine — the packages install fine but leave nothing this
+    # install can verify, so every run on a fresh CI cache failed on the first entry
+    # (`annotated-doc`). True offline behavior is covered separately by test_offline_reinstall.
+    _run_checked(
         [
             "uv",
             "pip",
             "install",
             "--python",
             str(python),
-            "--offline",
             "-r",
             str(requirements_path),
         ],
-        capture_output=True,
-        check=True,
         timeout=_BUILD_TIMEOUT,
     )
-    subprocess.run(  # noqa: S603 - fixed argv, no shell
+    # The wheel itself is a local file installed with --no-deps, so it needs no index at all.
+    _run_checked(
         ["uv", "pip", "install", "--python", str(python), "--offline", "--no-deps", str(wheel)],
-        capture_output=True,
-        check=True,
         timeout=_BUILD_TIMEOUT,
     )
     return python

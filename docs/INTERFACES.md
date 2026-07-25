@@ -83,6 +83,10 @@ binding returns `self`, and different-ID binding is invalid. `as_public_dict()` 
 ordinary dictionary with exactly `code`, `message`, `retryable`, and bound `correlation_id`; it
 adds `safe_details` only when nonempty, as a new ordinary dictionary in ASCII key order. The frozen
 public-error JSON Schema remains a structural superset of this exact mapping-only runtime emitter.
+Allowlisted `safe_details` keys include structural recovery fields such as `reason_code`,
+`sequence`, and `head_digest` (for `FRONTIER_CONFLICT` current-head recovery). Protocol reason
+`response_projection_failed` marks an MCP post-commit shaping failure: the write may already be
+durable, so the public error is retryable and same-`request_id` resume is the recovery path.
 Internal-only value error: `ProtocolValueError(reason_code: str)` — bounded reason codes, never
 free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from codes in
 `cli/exits.py` only.

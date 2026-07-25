@@ -152,6 +152,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "redaction_target_required",
     "ref_mirror_mismatch",
     "response_fields_invalid",
+    "response_projection_failed",
     "schema_artifact_role_invalid",
     "schema_artifact_role_mismatch",
     "schema_bytes_invalid",
@@ -185,7 +186,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 133
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 134
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)
@@ -198,6 +199,7 @@ SAFE_DETAIL_KEYS: tuple[str, ...] = (
     "count",
     "expected_version",
     "field",
+    "head_digest",
     "limit",
     "method",
     "operation",
@@ -206,12 +208,14 @@ SAFE_DETAIL_KEYS: tuple[str, ...] = (
     "reason_code",
     "retry_after_ms",
     "schema_name",
+    "sequence",
     "state",
     "status",
     "view",
 )
 
-_INTEGER_DETAIL_KEYS = frozenset({"count", "limit", "retry_after_ms"})
+_INTEGER_DETAIL_KEYS = frozenset({"count", "limit", "retry_after_ms", "sequence"})
+_HEAD_DIGEST_PATTERN = re.compile(r"^(?:genesis|sha256:[0-9a-f]{64})$", re.ASCII)
 _ENUM_DETAIL_KEYS = frozenset(
     {"component", "method", "operation", "phase", "state", "status", "view"}
 )
@@ -305,6 +309,10 @@ def _normalize_detail(key: str, value: object) -> SafeDetailValue | None:
             and len(value) <= 128
             and _SCHEMA_NAME_PATTERN.fullmatch(value) is not None
         ):
+            return value
+        return None
+    if key == "head_digest":
+        if type(value) is str and _HEAD_DIGEST_PATTERN.fullmatch(value) is not None:
             return value
         return None
     if key == "field" and _valid_json_pointer(value):

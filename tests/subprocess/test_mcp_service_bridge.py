@@ -337,6 +337,101 @@ async def test_unexpected_bridge_error_logs_public_correlation_id(
     await bridge.close_bridge_runtime(runtime)
 
 
+@pytest.mark.anyio
+async def test_post_commit_response_shaping_failure_is_retryable_with_same_request_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A durable invoke must not collapse into non-retryable INTERNAL_ERROR on shape failure."""
+
+    correlation_id = "err_00000000-0000-4000-8000-000000000097"
+    client = _FakeClient()
+    _install_clients(monkeypatch, [client])
+    request_id = cast(str, _requests()["publish_work"]["request_id"])
+
+    def boom(_result: object) -> object:
+        raise RuntimeError("post-commit-shape-failure")
+
+    def record(
+        exc: BaseException,
+        *,
+        component: str,
+        operation: str,
+        request_id: str | None = None,
+    ) -> str:
+        del exc, component, operation, request_id
+        return correlation_id
+
+    monkeypatch.setattr(bridge, "public_model_to_wire", boom)
+    monkeypatch.setattr(bridge, "record_unexpected_exception_without_raising", record)
+    runtime = bridge.build_bridge_runtime()
+
+    result = await bridge.dispatch_publish_work(_requests()["publish_work"], runtime)
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    error = cast(dict[str, object], result.structuredContent["error"])
+    assert error["code"] == "INTERNAL_ERROR"
+    assert error["retryable"] is True
+    assert error["correlation_id"] == correlation_id
+    assert result.structuredContent["request_id"] == request_id
+    assert "same request_id" in cast(str, error["message"])
+    assert error.get("safe_details") == {"reason_code": "response_projection_failed"}
+    await bridge.close_bridge_runtime(runtime)
+
+
+def test_publish_work_validation_names_event_drafts_field() -> None:
+    """`event_drafts` is untyped JsonValue to Pydantic, so this exercises schema translation.
+
+    The rejection can only come from `_validate_model_against_schema` re-raising
+    `SchemaInstanceInvalid.absolute_path`; a bare Pydantic field error cannot produce this
+    location. The r4 dogfood returned an empty pointer here, giving the agent nothing to fix.
+    """
+
+    from yoetz.mcp.errors import safe_validation_locations
+    from yoetz.protocol.models import PublishWorkRequest
+
+    def arguments(event_id: str) -> dict[str, object]:
+        return {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "request_id": _id("request", 9),
+            "session_id": _id("session", 1),
+            "writer_id": _id("writer", 1),
+            "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
+            "actor": {"actor_id": "harness:mcp", "actor_type": "harness"},
+            "client": {
+                "kind": "cooperative_agent",
+                "version": "0.1.0",
+                "integration": "cooperative_mcp",
+            },
+            "event_drafts": [
+                {
+                    "event_id": event_id,
+                    "schema": {"name": "plan_published", "version": "1.0.0"},
+                    "occurred_at": "2026-01-01T00:00:00.000Z",
+                    "causal_parents": [],
+                    "payload": {
+                        "plan_version": 1,
+                        "summary": "Plan",
+                        "obligation_refs": [],
+                    },
+                    "artifact_refs": [],
+                    "evidence_refs": [],
+                }
+            ],
+        }
+
+    # Identical payload with a schema-valid event_id is accepted, so the only difference driving
+    # the rejection below is the field the pointer names.
+    PublishWorkRequest.model_validate(arguments(_id("event", 1)))
+
+    with pytest.raises(Exception) as captured:
+        PublishWorkRequest.model_validate(arguments("not-an-id"))
+
+    locations = safe_validation_locations(captured.value)
+    assert [item["field"] for item in locations] == ["/event_drafts/0/event_id"]
+
+
 @pytest.fixture
 def _restore_process_logging() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
     """``configure_logging`` mutates process-global state; restore it for every other test."""

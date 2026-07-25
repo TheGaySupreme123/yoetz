@@ -488,6 +488,9 @@ class Application:
         default_factory=_empty_support_handlers
     )
     verification_supervisor: ObservationVerificationSupervisor | None = None
+    connected_provider_ids: tuple[str, ...] = ()
+    provider_credential_connected: bool = False
+    semantic_ready: bool = False
     _close_lock: asyncio.Lock = field(init=False, repr=False, compare=False)
     _close_task: asyncio.Task[None] | None = field(
         init=False, default=None, repr=False, compare=False
@@ -495,6 +498,19 @@ class Application:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_close_lock", asyncio.Lock())
+        if type(self.connected_provider_ids) is not tuple or any(
+            type(item) is not str for item in self.connected_provider_ids
+        ):
+            raise TypeError("connected_provider_ids_invalid")
+        if type(self.provider_credential_connected) is not bool:
+            raise TypeError("provider_credential_connected_invalid")
+        if type(self.semantic_ready) is not bool:
+            raise TypeError("semantic_ready_invalid")
+        # Readiness may never outrun the resolved binding. A connected provider that is not the
+        # configured one leaves dispatch on the credential-unavailable path, so a readiness flag
+        # set without it would report ready while every check reports unavailable.
+        if self.semantic_ready and not self.provider_credential_connected:
+            raise ValueError("semantic_ready_without_connected_provider_credential")
 
     async def start(self, request: StartRequest) -> StartInternalResult:
         return await execute_start(self, request)  # pyright: ignore[reportArgumentType]
@@ -833,6 +849,9 @@ class ServiceReadyContext:
     )
     verification_supervisor: ObservationVerificationSupervisor | None = None
     rediscover_pending_verification: Callable[[], Awaitable[None]] | None = None
+    connected_provider_ids: tuple[str, ...] = ()
+    provider_credential_connected: bool = False
+    semantic_ready: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -842,6 +861,19 @@ class ServiceReadyContext:
             or self.vault_generation <= 0
         ):
             raise ValueError("ready_generation_invalid")
+        if type(self.connected_provider_ids) is not tuple or any(
+            type(item) is not str for item in self.connected_provider_ids
+        ):
+            raise TypeError("connected_provider_ids_invalid")
+        if type(self.provider_credential_connected) is not bool:
+            raise TypeError("provider_credential_connected_invalid")
+        if type(self.semantic_ready) is not bool:
+            raise TypeError("semantic_ready_invalid")
+        # Readiness may never outrun the resolved binding. A connected provider that is not the
+        # configured one leaves dispatch on the credential-unavailable path, so a readiness flag
+        # set without it would report ready while every check reports unavailable.
+        if self.semantic_ready and not self.provider_credential_connected:
+            raise ValueError("semantic_ready_without_connected_provider_credential")
 
     def __repr__(self) -> str:
         return "ServiceReadyContext(<redacted>)"
@@ -890,6 +922,9 @@ class ReadyApplicationFactory:
                 context.version_manifest,
                 context.support_handlers,
                 context.verification_supervisor,
+                connected_provider_ids=context.connected_provider_ids,
+                provider_credential_connected=context.provider_credential_connected,
+                semantic_ready=context.semantic_ready,
             )
             if context.verification_supervisor is not None:
                 await context.verification_supervisor.start()

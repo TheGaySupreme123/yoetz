@@ -794,6 +794,33 @@ async def test_ready_factory_deterministic_check_records_semantic_not_requested_
         assert resolved.semantic_status.value == "not_configured"
         assert resolved.semantic_reason.value == "provider_not_configured"
         assert "semantic_review_not_requested" not in resolved.coverage.known_gaps
+
+        # The exact r4 dogfood request: semantic_required against an installation with no bound
+        # provider. SEMANTIC is now advertised whenever semantic is not disabled, so this path
+        # advances through SEMANTIC_WAIT; it must still commit an honest incomplete check rather
+        # than erroring or reporting a clean deterministic pass.
+        frontier = resolved.result_frontier
+        required = await app.check(
+            CheckRequest.model_validate(
+                {
+                    **common,
+                    "request_id": "req_00000000-0000-4000-8000-000000000205",
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": {
+                        "sequence": str(frontier.sequence),
+                        "head_digest": frontier.head_digest,
+                    },
+                    "mode": "semantic_required",
+                    "max_findings": "3",
+                    "policy_packs": ["work-integrity/0.1.0"],
+                }
+            )
+        )
+        assert required.outcome == "committed"
+        assert required.semantic_status.value == "not_configured"
+        assert required.semantic_reason.value == "provider_not_configured"
+        assert required.verdict.value == "incomplete_check"
     finally:
         if app is not None:
             await app.close()

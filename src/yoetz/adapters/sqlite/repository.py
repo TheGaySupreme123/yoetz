@@ -97,8 +97,34 @@ __all__ = ["CheckpointReport", "SqliteLedger"]
 _GENESIS_DIGEST: Final = "genesis"
 
 
-def _public_error(code: PublicErrorCode, *, retryable: bool = False) -> PublicOperationError:
-    return PublicOperationError(code, code.value.lower(), retryable)
+def _public_error(
+    code: PublicErrorCode,
+    *,
+    retryable: bool = False,
+    reason_code: str | None = None,
+    sequence: int | None = None,
+    head_digest: str | None = None,
+) -> PublicOperationError:
+    details: dict[str, str | int] = {}
+    if reason_code is not None:
+        details["reason_code"] = reason_code
+    if sequence is not None:
+        details["sequence"] = sequence
+    if head_digest is not None:
+        details["head_digest"] = head_digest
+    return PublicOperationError(
+        code, code.value.lower(), retryable, safe_details=details if details else None
+    )
+
+
+def _frontier_conflict(head: Frontier) -> PublicOperationError:
+    return _public_error(
+        PublicErrorCode.FRONTIER_CONFLICT,
+        retryable=True,
+        reason_code="frontier_changed",
+        sequence=head.sequence,
+        head_digest=head.head_digest,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -811,7 +837,7 @@ class SqliteLedger:
         self._ensure_writer(command, now)
         current = _head(self._db)
         if current != result.subject_frontier:
-            raise _public_error(PublicErrorCode.FRONTIER_CONFLICT)
+            raise _frontier_conflict(current)
         for record, entry in zip(records, command.entries, strict=True):
             ref = entry.payload_object
             existing = self._db.execute(
@@ -973,7 +999,7 @@ class SqliteLedger:
             records[0].ledger.ingestion_sequence != head.sequence + 1
             or records[0].ledger.previous_entry_digest != head.head_digest
         ):
-            raise _public_error(PublicErrorCode.FRONTIER_CONFLICT)
+            raise _frontier_conflict(head)
         for record in records:
             ref = self._state.object_refs.get(record.payload_ref.object_id)
             if ref is None:

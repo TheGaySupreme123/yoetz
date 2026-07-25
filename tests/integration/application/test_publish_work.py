@@ -154,6 +154,35 @@ async def test_forbidden_family_rejects_before_object_publication() -> None:
     assert app.runtime.release_count == 1
 
 
+async def test_same_request_id_replay_returns_the_stored_result_without_rewriting() -> None:
+    """The recovery the MCP post-commit error advertises must actually work.
+
+    When response shaping fails after a durable commit, the bridge tells the caller to retry with
+    the same request_id. That guidance is only honest if an identical replay returns the committed
+    result instead of appending a second event.
+    """
+
+    app, objects = _composition()
+    first = await execute_publish_work(cast(Application, app), _request())
+    durable_after_first = len(objects._data)  # pyright: ignore[reportPrivateUsage]
+
+    second = await execute_publish_work(cast(Application, app), _request())
+
+    assert first.outcome == "accepted"
+    assert second.outcome == "replayed"
+    # The replayed response must describe the same committed events and frontier as the original.
+    assert second.result_frontier == first.result_frontier
+    assert second.subject_frontier == first.subject_frontier
+    assert tuple(item.event_id for item in second.accepted_events) == tuple(
+        item.event_id for item in first.accepted_events
+    )
+    assert tuple(item.ingestion_sequence for item in second.accepted_events) == tuple(
+        item.ingestion_sequence for item in first.accepted_events
+    )
+    # No second write: the replay reads stored state rather than re-publishing.
+    assert len(objects._data) == durable_after_first  # pyright: ignore[reportPrivateUsage]
+
+
 async def test_same_id_changed_logical_request_conflicts_before_reencryption() -> None:
     app, objects = _composition()
     await execute_publish_work(cast(Application, app), _request())
@@ -170,7 +199,7 @@ async def test_same_id_changed_logical_request_conflicts_before_reencryption() -
 
 async def test_stale_expected_frontier_sequence_conflicts() -> None:
     app, _ = _composition()
-    await execute_publish_work(cast(Application, app), _request())
+    first = await execute_publish_work(cast(Application, app), _request())
 
     with pytest.raises(PublicOperationError) as caught:
         await execute_publish_work(
@@ -184,3 +213,8 @@ async def test_stale_expected_frontier_sequence_conflicts() -> None:
         )
 
     assert caught.value.code is PublicErrorCode.FRONTIER_CONFLICT
+    assert caught.value.retryable is True
+    assert caught.value.safe_details.get("reason_code") == "frontier_changed"
+    # The conflict must carry the *current* head so a caller can retry without a status round-trip.
+    assert caught.value.safe_details.get("sequence") == first.result_frontier.sequence
+    assert caught.value.safe_details.get("head_digest") == first.result_frontier.head_digest
