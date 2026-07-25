@@ -458,6 +458,21 @@ async def test_preunlocked_vault_activates_ready_application_on_daemon_start(
 
 
 @pytest.mark.anyio
+async def test_locked_passphrase_vault_never_reports_keyring_locked(tmp_path: Path) -> None:
+    async def factory(_service_generation: int, _vault_generation: int) -> _Application:
+        return _Application()
+
+    daemon, vault = _locked_daemon(tmp_path, factory)
+    vault.mode = VaultMode.PASSPHRASE
+
+    await daemon.start()
+
+    assert daemon.status().state is ServiceState.LOCKED
+    assert daemon.status().state_reason == "passphrase_required"
+    await daemon.close()
+
+
+@pytest.mark.anyio
 async def test_unlock_activation_revalidates_after_factory_and_closes_partial(
     tmp_path: Path,
 ) -> None:

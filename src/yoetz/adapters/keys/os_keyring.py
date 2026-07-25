@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import os
@@ -15,6 +16,7 @@ from typing import Final, Protocol, cast
 
 import keyring
 
+from yoetz.adapters.keys.vault_passphrase import VaultPassphraseError, validate_passphrase_view
 from yoetz.domain.values import validate_sha256_digest
 from yoetz.ports.secret_memory import (
     SecretConsumer,
@@ -184,11 +186,12 @@ def _overwrite(value: bytearray) -> None:
 
 
 class AutoUnlockPassphraseStore:
-    """Platform-credential-store persistence for one generated Yoetz vault passphrase.
+    """Platform-credential-store persistence for one Yoetz vault passphrase.
 
     The keyring username is a digest of the absolute service bundle path, so independent Yoetz
     data roots never share an auto-unlock secret and the filesystem path is not disclosed to the
-    credential-store label.
+    credential-store label. Fresh setup generates the value; trusted-TTY repair may store an
+    existing passphrase only after the caller proves it unlocks the current vault envelope.
     """
 
     __slots__ = ("_backend", "_backend_id", "_username")
@@ -209,24 +212,42 @@ class AutoUnlockPassphraseStore:
         )
 
     def load(self) -> bytearray | None:
+        value, _reason = self.load_with_reason()
+        return value
+
+    def load_with_reason(self) -> tuple[bytearray | None, str]:
+        """Load the secret and return only a bounded structural failure reason."""
+
         if not self.available:
-            return None
+            return None, "auto_unlock_backend_unavailable"
         try:
             encoded = cast(AnyKeyringBackend, self._backend).get_password(
                 _AUTO_UNLOCK_SERVICE_NAME, self._username
             )
         except Exception:
-            return None
+            return None, "auto_unlock_rejected"
         if encoded is None:
-            return None
+            return None, "auto_unlock_absent"
         try:
-            value = bytearray(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
-        except ValueError, TypeError:
-            return None
-        if not 32 <= len(value) <= 128 or any(byte < 0x20 or byte > 0x7E for byte in value):
+            value = bytearray(
+                base64.b64decode(
+                    encoded + "=" * (-len(encoded) % 4),
+                    altchars=b"-_",
+                    validate=True,
+                )
+            )
+        except binascii.Error, TypeError, ValueError:
+            return None, "auto_unlock_rejected"
+        canonical = base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+        if encoded != canonical:
             _overwrite(value)
-            return None
-        return value
+            return None, "auto_unlock_rejected"
+        try:
+            validate_passphrase_view(memoryview(value))
+        except VaultPassphraseError:
+            _overwrite(value)
+            return None, "auto_unlock_rejected"
+        return value, "none"
 
     def load_or_create(self) -> bytearray:
         existing = self.load()
@@ -249,6 +270,26 @@ class AutoUnlockPassphraseStore:
             _overwrite(generated)
             raise OSKeyringError("locked") from None
         return generated
+
+    def save(self, value: bytearray) -> None:
+        """Replace the scoped entry after the caller proved the same secret unlocks the vault."""
+
+        if not self.available:
+            raise OSKeyringError("unsupported")
+        try:
+            validate_passphrase_view(memoryview(value))
+        except VaultPassphraseError:
+            raise OSKeyringError("entry_invalid")
+        encoded = base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+        try:
+            backend = cast(AnyKeyringBackend, self._backend)
+            backend.set_password(_AUTO_UNLOCK_SERVICE_NAME, self._username, encoded)
+            if backend.get_password(_AUTO_UNLOCK_SERVICE_NAME, self._username) != encoded:
+                raise OSKeyringError("unverified")
+        except OSKeyringError:
+            raise
+        except Exception:
+            raise OSKeyringError("locked") from None
 
 
 class AnyKeyringBackend(Protocol):

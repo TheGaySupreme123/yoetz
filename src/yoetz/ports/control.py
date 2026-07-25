@@ -300,23 +300,26 @@ class ControlResult:
                 raise ValueError("control_method_body_mismatch")
 
 
-_SERVICE_STATE_REASONS = frozenset(
-    {
-        "none",
-        "keyring_locked",
-        "keyring_unavailable",
-        "human_authority_unavailable",
-        "vault_uninitialized",
-        "unlock_failed",
-        "explicit_lock",
-        "idle_relock",
-        "user_session_locked",
-        "system_suspend",
-        "monitor_lost",
-        "shutdown_requested",
-        "internal_error",
-    }
+_SERVICE_STATE_REASON_VALUES = (
+    "none",
+    "auto_unlock_backend_unavailable",
+    "auto_unlock_rejected",
+    "auto_unlock_stale",
+    "keyring_locked",
+    "keyring_unavailable",
+    "passphrase_required",
+    "human_authority_unavailable",
+    "vault_uninitialized",
+    "unlock_failed",
+    "explicit_lock",
+    "idle_relock",
+    "user_session_locked",
+    "system_suspend",
+    "monitor_lost",
+    "shutdown_requested",
+    "internal_error",
 )
+_SERVICE_STATE_REASONS = frozenset(_SERVICE_STATE_REASON_VALUES)
 _VAULT_MODES = frozenset({"uninitialized", "os_keyring", "passphrase"})
 _SERVICE_CAPABILITIES = frozenset(
     {

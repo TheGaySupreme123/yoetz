@@ -53,6 +53,7 @@ from yoetz.config.paths import (
 from yoetz.observability.logging import (
     LogMode,
     configure_logging,
+    get_logger,
     record_unexpected_exception_without_raising,
 )
 from yoetz.ports.control import (
@@ -142,7 +143,7 @@ from yoetz.service.lifecycle import (
 from yoetz.service.ready_composition import build_ready_application_factory
 from yoetz.service.secret_ingress import SecretIngressService
 from yoetz.service.unlock import UnlockCoordinator, UnlockThrottleRecord, UnlockThrottleStore
-from yoetz.service.vault import VaultMode, VaultService
+from yoetz.service.vault import VaultError, VaultMode, VaultService
 
 __all__ = ["ServiceComposition", "ServiceDaemon", "main", "run_service"]
 
@@ -341,6 +342,7 @@ class ServiceComposition:
     ready_activation_relay: _ReadyActivationRelay | None = None
     ready_close_relay: _ReadyCloseRelay | None = None
     privacy_policy_app_relay: _PrivacyPolicyAppRelay | None = None
+    auto_unlock_reason: str = "none"
 
     def __repr__(self) -> str:
         return "ServiceComposition(<redacted>)"
@@ -955,7 +957,18 @@ class ServiceDaemon:
 
     def _locked_reason(self) -> str:
         mode = getattr(self._composition.vault.mode, "value", self._composition.vault.mode)
-        return "vault_uninitialized" if mode == "uninitialized" else "keyring_locked"
+        if mode == "uninitialized":
+            return "vault_uninitialized"
+        if mode == "os_keyring":
+            return "keyring_locked"
+        reason = self._composition.auto_unlock_reason
+        if reason in {
+            "auto_unlock_backend_unavailable",
+            "auto_unlock_rejected",
+            "auto_unlock_stale",
+        }:
+            return reason
+        return "passphrase_required"
 
     def _install_signal_handlers(self) -> None:
         loop = asyncio.get_running_loop()
@@ -1627,6 +1640,8 @@ async def _production_composition(
             writer_instance_id=instance.instance_id,
             clock=clock,
         )
+        auto_unlock_result = "not_applicable"
+        auto_unlock_reason = "none"
         if mode is VaultMode.PASSPHRASE:
             # mode_binding_digest is the *initial* throttle digest frozen at passphrase
             # publication (vault.md). Later unlock attempts advance record_digest, so restart
@@ -1637,18 +1652,38 @@ async def _production_composition(
             record = throttle.open_for_restart()
             if record.installation_id != installation_id:
                 raise RuntimeError("installation_throttle_binding_invalid")
-            auto_passphrase = AutoUnlockPassphraseStore(paths.bundle).load()
+            auto_passphrase, load_reason = AutoUnlockPassphraseStore(
+                paths.bundle
+            ).load_with_reason()
             if auto_passphrase is not None:
                 try:
                     handle = secret_memory.capture(SecretPurpose.VAULT_UNLOCK, auto_passphrase)
                     await vault.unlock(handle)
+                except VaultError:
+                    auto_unlock_result = "failed"
+                    auto_unlock_reason = "auto_unlock_stale"
                 except Exception:
-                    # A missing, locked, stale, or mismatched platform credential never prevents
-                    # the service from starting in its ordinary locked state.
-                    pass
+                    auto_unlock_result = "failed"
+                    auto_unlock_reason = "auto_unlock_rejected"
                 finally:
                     for index in range(len(auto_passphrase)):
                         auto_passphrase[index] = 0
+            else:
+                auto_unlock_result = (
+                    "skipped"
+                    if load_reason in {"auto_unlock_absent", "auto_unlock_backend_unavailable"}
+                    else "failed"
+                )
+                auto_unlock_reason = load_reason
+            if vault.ready:
+                auto_unlock_result = "succeeded"
+                auto_unlock_reason = "none"
+            if auto_unlock_result != "succeeded":
+                get_logger("service.daemon").warning(
+                    "auto_unlock",
+                    outcome=auto_unlock_result,
+                    reason=auto_unlock_reason,
+                )
         relay = _ReadyActivationRelay()
         secret_ingress = SecretIngressService(clock, secret_memory, listener=listeners.secret)
         diagnostics = _NullDiagnostics()
@@ -1702,6 +1737,7 @@ async def _production_composition(
             ready_activation_relay=relay,
             ready_close_relay=ready_close_relay,
             privacy_policy_app_relay=privacy_relay,
+            auto_unlock_reason=auto_unlock_reason,
         )
     except BaseException:
         await listeners.close()

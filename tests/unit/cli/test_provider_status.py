@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -45,20 +46,26 @@ def _policy(*, llm_inference_enabled: bool, profile: str = "local_only") -> dict
 
 
 class _Client:
-    def __init__(self, capabilities: tuple[str, ...], policy: dict[str, object]) -> None:
+    def __init__(
+        self,
+        capabilities: tuple[str, ...],
+        policy: dict[str, object],
+        *,
+        state: str = "ready",
+        state_reason: str = "none",
+    ) -> None:
         self._capabilities = capabilities
         self._policy = policy
+        self._state = state
+        self._state_reason = state_reason
         self.closed = False
 
     async def service_status(self) -> Any:
-        class _State:
-            value = "ready"
-
-        class _Status:
-            state = _State()
-            capabilities = self._capabilities
-
-        return _Status()
+        return SimpleNamespace(
+            state=SimpleNamespace(value=self._state),
+            state_reason=self._state_reason,
+            capabilities=self._capabilities,
+        )
 
     async def privacy_get_effective(self, request: object) -> dict[str, object]:
         del request
@@ -80,13 +87,20 @@ def _install(
     capabilities: tuple[str, ...] = ("external_provider",),
     llm_inference_enabled: bool = True,
     installation_state: str | None = None,
+    service_state: str = "ready",
+    service_state_reason: str = "none",
 ) -> _Client:
     config = YoetzConfig(
         profile="strict-local" if provider is None else "local-openai",
         verification=VerificationConfig(semantic=cast(Any, semantic)),
         provider=provider,
     )
-    client = _Client(capabilities, _policy(llm_inference_enabled=llm_inference_enabled))
+    client = _Client(
+        capabilities,
+        _policy(llm_inference_enabled=llm_inference_enabled),
+        state=service_state,
+        state_reason=service_state_reason,
+    )
 
     def _load(*_args: object) -> YoetzConfig:
         return config
@@ -250,3 +264,52 @@ async def test_missing_installation_state_reports_unknown_not_a_false_ready(
     channel = [item for item in blockers if item.get("condition") == "llm_inference_channel"]
     assert len(channel) == 1
     assert channel[0]["state"] == "unknown"
+    assert "next_command" not in channel[0]
+
+
+async def test_locked_service_reports_real_blocker_first_without_false_remediation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(
+        monkeypatch,
+        tmp_path,
+        provider=_provider(),
+        service_state="locked",
+        service_state_reason="passphrase_required",
+    )
+
+    report = await module.provider_status_report()
+
+    assert report["readiness_determinable"] is False
+    blockers = cast(tuple[dict[str, object], ...], report["blockers"])
+    assert blockers[0] == {
+        "condition": "service_unlocked",
+        "state": "locked",
+        "reason": "passphrase_required",
+        "next_command": "yoetz service unlock",
+    }
+    unknown = tuple(item for item in blockers if item.get("state") == "unknown")
+    assert {item["condition"] for item in unknown} == {
+        "provider_credential",
+        "llm_inference_channel",
+    }
+    assert all("next_command" not in item for item in unknown)
+    assert report["next_commands"] == ("yoetz service unlock",)
+
+
+async def test_stale_auto_unlock_points_to_repair_first(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(
+        monkeypatch,
+        tmp_path,
+        provider=_provider(),
+        service_state="locked",
+        service_state_reason="auto_unlock_stale",
+    )
+
+    report = await module.provider_status_report()
+
+    blockers = cast(tuple[dict[str, object], ...], report["blockers"])
+    assert blockers[0]["next_command"] == "yoetz service auto-unlock repair"
+    assert report["next_commands"] == ("yoetz service auto-unlock repair",)

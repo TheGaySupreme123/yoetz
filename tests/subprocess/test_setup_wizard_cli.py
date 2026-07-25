@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -518,3 +519,55 @@ def test_provider_setup_success_reports_layers_without_ready_overclaim(
     assert "Transport probe: not demonstrated" in plain
     assert "Installed artifact evidence: not demonstrated" in plain
     assert "not proof of live provider dispatch or semantic review" in plain
+
+
+def test_uninitialized_provider_setup_provisions_auto_unlock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The wizard must keep the auto-unlock write side reachable in product code."""
+
+    import yoetz.adapters.keys.os_keyring as keyring_module
+    import yoetz.cli.provider_binding as binding_module
+    import yoetz.cli.setup as setup_module
+    import yoetz.cli.unlock as unlock_module
+    import yoetz.config.paths as paths_module
+
+    calls: list[str] = []
+    supplied: list[bytes] = []
+
+    def fake_load_or_create(_store: object) -> bytearray:
+        calls.append("load_or_create")
+        return bytearray(b"a" * 48)
+
+    async def fake_initialize(passphrase: bytearray | None = None) -> object:
+        supplied.append(bytes(passphrase or b""))
+        return object()
+
+    async def fake_reachability(*, start_if_absent: bool = False) -> dict[str, object]:
+        del start_if_absent
+        return {"reachable": True, "state": "ready", "vault_mode": "passphrase"}
+
+    def fake_bundle_root(*, _data_dir: Path | None = None, _probe: object | None = None) -> Path:
+        del _data_dir, _probe
+        return tmp_path.resolve()
+
+    monkeypatch.setattr(
+        keyring_module.AutoUnlockPassphraseStore,
+        "load_or_create",
+        fake_load_or_create,
+    )
+    monkeypatch.setattr(unlock_module, "initialize_passphrase_vault", fake_initialize)
+    monkeypatch.setattr(binding_module, "prompt_provider_endpoint_binding", lambda: None)
+    monkeypatch.setattr(paths_module, "bundle_root", fake_bundle_root)
+    monkeypatch.setattr(setup_module, "_service_reachability", fake_reachability)
+
+    service, report = asyncio.run(
+        setup_module._interactive_provider_setup(  # pyright: ignore[reportPrivateUsage]
+            {"reachable": True, "state": "locked", "vault_mode": "uninitialized"}
+        )
+    )
+
+    assert calls == ["load_or_create"]
+    assert supplied == [b"a" * 48]
+    assert service["state"] == "ready"
+    assert report["binding"] == "skipped"

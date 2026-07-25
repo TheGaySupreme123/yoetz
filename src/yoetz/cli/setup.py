@@ -708,7 +708,7 @@ async def _interactive_provider_setup(
 ) -> tuple[dict[str, JsonValue], dict[str, JsonValue]]:
     """Run trusted local setup ceremonies while keeping secrets out of wizard state."""
 
-    from yoetz.adapters.keys.os_keyring import AutoUnlockPassphraseStore
+    from yoetz.adapters.keys.os_keyring import AutoUnlockPassphraseStore, OSKeyringError
     from yoetz.cli.provider_binding import (
         ProviderEndpointChoice,
         apply_provider_endpoint_choice,
@@ -744,8 +744,23 @@ async def _interactive_provider_setup(
         if service.get("reachable") and service.get("state") == "locked":
             if service.get("vault_mode") == "uninitialized":
                 typer.echo("")
-                typer.echo("Secure vault setup (hidden local-terminal input)")
-                await initialize_passphrase_vault()
+                current_config = load_config({}, {}, None)
+                auto_store = AutoUnlockPassphraseStore(
+                    bundle_root(_data_dir=current_config.storage.data_dir)
+                )
+                try:
+                    auto_passphrase = auto_store.load_or_create()
+                except OSKeyringError:
+                    typer.echo("Platform credential store unavailable; choose a vault passphrase")
+                    typer.echo("Secure vault setup (hidden local-terminal input)")
+                    await initialize_passphrase_vault()
+                else:
+                    typer.echo("Secure vault setup (platform credential store auto-unlock)")
+                    try:
+                        await initialize_passphrase_vault(bytearray(auto_passphrase))
+                    finally:
+                        for index in range(len(auto_passphrase)):
+                            auto_passphrase[index] = 0
             elif service.get("vault_mode") == "passphrase":
                 typer.echo("")
                 current_config = load_config({}, {}, None)

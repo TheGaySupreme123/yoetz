@@ -73,6 +73,32 @@ def test_auto_unlock_passphrase_round_trips_through_approved_platform_store(
     assert bytes(created) not in repr(store).encode()
 
 
+def test_auto_unlock_load_distinguishes_absent_rejected_and_provisioned(
+    tmp_path: Path,
+) -> None:
+    backend = _AtomicBackend()
+    store = AutoUnlockPassphraseStore(tmp_path.resolve(), backend=backend)
+    store._backend_id = "keyring.backends.macOS.Keyring"  # pyright: ignore[reportPrivateUsage]
+
+    assert store.load_with_reason() == (None, "auto_unlock_absent")
+    backend.values[("yoetz.auto-unlock.v1", store._username)] = "not-base64!"  # pyright: ignore[reportPrivateUsage]
+    assert store.load_with_reason() == (None, "auto_unlock_rejected")
+    backend.values[("yoetz.auto-unlock.v1", store._username)] = "YWFh="  # pyright: ignore[reportPrivateUsage]
+    assert store.load_with_reason() == (None, "auto_unlock_rejected")
+
+    value = bytearray(b"a" * 48)
+    store.save(value)
+    loaded, reason = store.load_with_reason()
+    assert loaded == value
+    assert reason == "none"
+
+    unicode_value = bytearray("correct horse 🔐 battery staple".encode())
+    store.save(unicode_value)
+    loaded, reason = store.load_with_reason()
+    assert loaded == unicode_value
+    assert reason == "none"
+
+
 def test_bundle_hkdf_and_aes_kw_known_answers() -> None:
     kek = bytes.fromhex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
     key = bytes.fromhex("00112233445566778899aabbccddeeff")

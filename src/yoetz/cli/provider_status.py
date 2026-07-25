@@ -118,6 +118,7 @@ async def provider_status_report() -> dict[str, JsonValue]:
         }
 
     service_state: str | None = None
+    service_state_reason: str | None = None
     credential_connected: bool | None = None
     llm_inference_enabled: bool | None = None
     policy_profile: str | None = None
@@ -127,6 +128,7 @@ async def provider_status_report() -> dict[str, JsonValue]:
         try:
             status = await client.service_status()
             service_state = status.state.value
+            service_state_reason = status.state_reason
             if status.state.value == "ready":
                 credential_connected = "external_provider" in status.capabilities
                 try:
@@ -148,10 +150,26 @@ async def provider_status_report() -> dict[str, JsonValue]:
             await client.close()
     except ControlError as error:
         service_state = error.reason
+        service_state_reason = error.reason
         credential_connected = None
         llm_inference_enabled = None
 
     blockers: list[dict[str, JsonValue]] = []
+    if service_state != "ready":
+        if service_state_reason == "auto_unlock_stale":
+            service_command = "yoetz service auto-unlock repair"
+        elif service_state in {None, "service_unavailable"}:
+            service_command = "yoetz service run"
+        else:
+            service_command = "yoetz service unlock"
+        blockers.append(
+            {
+                "condition": "service_unlocked",
+                "state": service_state or "service_unavailable",
+                "reason": service_state_reason,
+                "next_command": service_command,
+            }
+        )
     if not semantic_enabled:
         blockers.append(
             {
@@ -168,25 +186,35 @@ async def provider_status_report() -> dict[str, JsonValue]:
                 "next_command": "yoetz provider endpoint --provider <preset> --model <model>",
             }
         )
-    if credential_connected is not True:
+    if credential_connected is None:
+        blockers.append({"condition": "provider_credential", "state": "unknown"})
+    elif credential_connected is False:
         blockers.append(
             {
                 "condition": "provider_credential",
-                "state": "unknown" if credential_connected is None else "not_connected",
+                "state": "not_connected",
                 "next_command": "yoetz provider credential set",
             }
         )
-    if llm_inference_enabled is not True:
+    if llm_inference_enabled is None:
+        blockers.append({"condition": "llm_inference_channel", "state": "unknown"})
+    elif llm_inference_enabled is False:
         blockers.append(
             {
                 "condition": "llm_inference_channel",
-                "state": "unknown" if llm_inference_enabled is None else "disabled",
+                "state": "disabled",
                 "next_command": "yoetz privacy setup",
             }
         )
 
+    readiness_determinable = (
+        service_state == "ready"
+        and credential_connected is not None
+        and llm_inference_enabled is not None
+    )
     semantic_ready = (
-        semantic_enabled
+        readiness_determinable
+        and semantic_enabled
         and endpoint_bound
         and credential_connected is True
         and llm_inference_enabled is True
@@ -207,6 +235,8 @@ async def provider_status_report() -> dict[str, JsonValue]:
         "llm_inference_enabled": llm_inference_enabled,
         "privacy_profile": policy_profile,
         "service_state": service_state,
+        "service_state_reason": service_state_reason,
+        "readiness_determinable": readiness_determinable,
         "semantic_ready": semantic_ready,
         "blockers": tuple(blockers),
         "next_commands": next_commands,
@@ -214,6 +244,7 @@ async def provider_status_report() -> dict[str, JsonValue]:
             "semantic_ready is structural readiness only; it does not prove live provider dispatch.",
             "credential_connected reports the configured provider's credential, not any provider.",
             "A credential for a different provider than the bound endpoint does not count.",
+            "unknown means the service could not be read, not that the step is incomplete.",
         ),
     }
 
