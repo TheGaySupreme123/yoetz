@@ -37,6 +37,7 @@ __all__ = [
     "SchemaArtifactRole",
     "SchemaCatalog",
     "SchemaDocument",
+    "SchemaInstanceInvalid",
     "SchemaKind",
     "event_schema_versions",
     "load_schema_catalog",
@@ -720,6 +721,22 @@ def event_schema_versions(catalog: SchemaCatalog) -> Mapping[str, str]:
     return catalog.event_schema_versions
 
 
+class SchemaInstanceInvalid(ProtocolValueError):
+    """Schema admission failure with an optional absolute JSON path for caller recovery."""
+
+    __slots__ = ("absolute_path",)
+
+    absolute_path: tuple[str | int, ...]
+
+    def __init__(self, absolute_path: tuple[str | int, ...] = ()) -> None:
+        if type(absolute_path) is not tuple:
+            raise TypeError("schema_instance_path_invalid")
+        if any(type(item) is not str and type(item) is not int for item in absolute_path):
+            raise TypeError("schema_instance_path_invalid")
+        self.absolute_path = absolute_path
+        super().__init__("schema_instance_invalid")
+
+
 def validate_schema_instance(name: str, version: str, value: JsonValue) -> None:
     """Validate a canonical JSON value against one exact local schema."""
 
@@ -735,7 +752,14 @@ def validate_schema_instance(name: str, version: str, value: JsonValue) -> None:
     try:
         validator_api = cast(_ValidatorProtocol, cast(object, validator))
         validator_api.validate(_plain_validation_value(value))
-    except ValidationError:
-        raise ProtocolValueError("schema_instance_invalid") from None
+    except ValidationError as exc:
+        path_items: list[str | int] = []
+        for item in exc.absolute_path:
+            if type(item) is str or type(item) is int:
+                path_items.append(item)
+            else:
+                path_items = []
+                break
+        raise SchemaInstanceInvalid(tuple(path_items)) from None
     except BaseException:
-        raise ProtocolValueError("schema_instance_invalid") from None
+        raise SchemaInstanceInvalid() from None

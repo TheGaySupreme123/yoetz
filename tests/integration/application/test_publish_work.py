@@ -184,3 +184,7 @@ async def test_stale_expected_frontier_sequence_conflicts() -> None:
         )
 
     assert caught.value.code is PublicErrorCode.FRONTIER_CONFLICT
+    assert caught.value.retryable is True
+    assert caught.value.safe_details.get("reason_code") == "frontier_changed"
+    assert caught.value.safe_details.get("sequence") == 1
+    assert type(caught.value.safe_details.get("head_digest")) is str

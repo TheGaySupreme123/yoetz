@@ -132,6 +132,7 @@ receipt_json_shape_invalid
 redaction_target_required
 ref_mirror_mismatch
 response_fields_invalid
+response_projection_failed
 schema_artifact_role_invalid
 schema_artifact_role_mismatch
 schema_bytes_invalid
@@ -329,7 +330,7 @@ def test_public_error_code_membership() -> None:
 def test_protocol_reason_registry_is_exact_and_import_order_independent() -> None:
     source_values = cast(tuple[str, ...], getattr(errors_module, "_PROTOCOL_REASON_CODE_VALUES"))
     assert source_values == _EXPECTED_REASON_CODES
-    assert len(source_values) == 133
+    assert len(source_values) == 134
     assert source_values == tuple(sorted(source_values, key=str.encode))
     assert len(source_values) == len(set(source_values))
     assert PROTOCOL_REASON_CODES == frozenset(_EXPECTED_REASON_CODES)
@@ -486,6 +487,7 @@ def test_safe_details_allowlist_and_types_are_exact() -> None:
         "count",
         "expected_version",
         "field",
+        "head_digest",
         "limit",
         "method",
         "operation",
@@ -494,6 +496,7 @@ def test_safe_details_allowlist_and_types_are_exact() -> None:
         "reason_code",
         "retry_after_ms",
         "schema_name",
+        "sequence",
         "state",
         "status",
         "view",
@@ -506,6 +509,7 @@ def test_safe_details_allowlist_and_types_are_exact() -> None:
             "count": 0,
             "expected_version": "V2-rc.1",
             "field": "/payload/~0/~1//",
+            "head_digest": "genesis",
             "limit": 9_007_199_254_740_991,
             "method": _SafeEnum.READY,
             "operation": _SafeEnum.READY,
@@ -514,6 +518,7 @@ def test_safe_details_allowlist_and_types_are_exact() -> None:
             "reason_code": "invalid_digest",
             "retry_after_ms": 1,
             "schema_name": "accepted-event",
+            "sequence": 5,
             "state": _SafeEnum.READY,
             "status": _SafeEnum.READY,
             "view": _SafeEnum.READY,

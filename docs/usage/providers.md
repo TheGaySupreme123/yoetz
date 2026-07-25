@@ -70,6 +70,23 @@ https_origin = "https://llm.example.com:8443"
 You can edit `config.toml` by hand. Bare `yoetz` also exposes the same binding under **LLM provider**
 in the interactive menu.
 
+## Readiness (`yoetz provider status`)
+
+Before spending a run on semantic review, ask whether the four structural conditions hold:
+
+```text
+yoetz provider status --json
+```
+
+The report names each condition and the exact next command when one is unmet:
+
+1. `verification.semantic` is not `disabled`
+2. a provider endpoint is bound in `config.toml`
+3. a provider credential is connected (service capability `external_provider`)
+4. the effective privacy policy enables the `llm_inference` channel
+
+`semantic_ready: true` is structural readiness only. It does not prove live provider dispatch.
+
 ## The credential ceremony
 
 ```text

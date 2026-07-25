@@ -332,12 +332,18 @@ async def _exact_frontier(runtime: TaskRuntime, sequence: int | None) -> tuple[F
     async for record in runtime.ledger.load_events(runtime.session_id, through=target):
         found = Frontier(record.ledger.ingestion_sequence, record.entry_digest)
     if found is None or found.sequence != target:
-        raise _error(
+        raise PublicOperationError(
             PublicErrorCode.FRONTIER_CONFLICT,
             (
                 "The requested frontier is unavailable. Call status to read the current frontier, "
                 "then retry idempotently with the same request_id."
             ),
+            True,
+            safe_details={
+                "reason_code": "frontier_changed",
+                "sequence": head.sequence,
+                "head_digest": head.head_digest,
+            },
         )
     return found, head
 

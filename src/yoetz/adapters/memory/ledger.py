@@ -186,11 +186,29 @@ def _error(
     *,
     retryable: bool = False,
     reason_code: str | None = None,
+    sequence: int | None = None,
+    head_digest: str | None = None,
 ) -> PublicOperationError:
-    details: dict[str, str] = {}
+    details: dict[str, str | int] = {}
     if reason_code is not None:
         details["reason_code"] = reason_code
+    if sequence is not None:
+        details["sequence"] = sequence
+    if head_digest is not None:
+        details["head_digest"] = head_digest
     return PublicOperationError(code, code.value.lower(), retryable, safe_details=details)
+
+
+def _frontier_conflict(head: Frontier) -> PublicOperationError:
+    """Stale optimistic guard: surface the current head so callers can retry without a status trip."""
+
+    return _error(
+        PublicErrorCode.FRONTIER_CONFLICT,
+        retryable=True,
+        reason_code="frontier_changed",
+        sequence=head.sequence,
+        head_digest=head.head_digest,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1101,7 +1119,7 @@ class MemoryLedgerAdapter:
                 command.expected_frontier is not None
                 and command.expected_frontier != subject.sequence
             ):
-                raise _error(PublicErrorCode.FRONTIER_CONFLICT, reason_code="frontier_changed")
+                raise _frontier_conflict(subject)
             writer = self._state.writers.get(command.writer_id)
             if writer is None:
                 writer = _WriterState(command.task_id, command.session_id)
@@ -1179,7 +1197,10 @@ class MemoryLedgerAdapter:
                 or self._state.projection != snapshot_projection
                 or self._state.writers.get(command.writer_id) != snapshot_writer
             ):
-                raise _error(PublicErrorCode.FRONTIER_CONFLICT, reason_code="frontier_changed")
+                head = Frontier(
+                    self._state.projection.frontier, self._state.projection.head_digest
+                )
+                raise _frontier_conflict(head)
             if command.operation_kind is OperationKind.RECEIPT and self._pending_import(
                 command.session_id
             ):
@@ -1267,12 +1288,14 @@ class MemoryLedgerAdapter:
             frontier.sequence != projection.frontier
             or frontier.head_digest != projection.head_digest
         ):
-            raise _error(PublicErrorCode.FRONTIER_CONFLICT, reason_code="frontier_changed")
+            raise _frontier_conflict(Frontier(projection.frontier, projection.head_digest))
         async with self._lock:
             if projection != self._state.projection or not any(
                 row.session_id == session_id for row in self._state.records
             ):
-                raise _error(PublicErrorCode.FRONTIER_CONFLICT, reason_code="frontier_changed")
+                raise _frontier_conflict(
+                    Frontier(self._state.projection.frontier, self._state.projection.head_digest)
+                )
             by_event = {row.event_id: row for row in self._state.records}
             refs = dict(self._state.object_refs)
             current_records = tuple(
@@ -1558,7 +1581,7 @@ class MemoryLedgerAdapter:
                 projection = self._state.projection
                 frontier = Frontier(projection.frontier, projection.head_digest)
                 if expected_frontier is not None and expected_frontier != frontier.sequence:
-                    raise _error(PublicErrorCode.FRONTIER_CONFLICT, reason_code="frontier_changed")
+                    raise _frontier_conflict(frontier)
                 records = self._state.records
                 writer = self._state.writers.get(writer_id)
                 if writer is None or writer.session_id != session_id:
@@ -1619,7 +1642,7 @@ class MemoryLedgerAdapter:
                 raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
             current = Frontier(self._state.projection.frontier, self._state.projection.head_digest)
             if current != frontier or self._pending_import(session_id):
-                raise _error(PublicErrorCode.FRONTIER_CONFLICT, reason_code="frontier_changed")
+                raise _frontier_conflict(current)
             operation = OperationRecord(
                 writer_id,
                 request_id,
@@ -1901,9 +1924,14 @@ class MemoryLedgerAdapter:
                 raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
             current = Frontier(self._state.projection.frontier, self._state.projection.head_digest)
             if current != frozen.case.frontier or self._state.frozen_cases.get(key) != frozen.case:
-                failure = _error(PublicErrorCode.FRONTIER_CONFLICT, reason_code="frontier_changed")
+                failure = _frontier_conflict(current)
                 canonical = canonical_encode(
-                    {"code": failure.code.value, "reason_code": "frontier_changed"}
+                    {
+                        "code": failure.code.value,
+                        "reason_code": "frontier_changed",
+                        "sequence": current.sequence,
+                        "head_digest": current.head_digest,
+                    }
                 )
                 terminal = replace(
                     record,
@@ -2099,7 +2127,7 @@ class MemoryLedgerAdapter:
                 or self._state.projection != snapshot_projection
                 or self._pending_import(frozen.lease.session_id)
             ):
-                raise _error(PublicErrorCode.FRONTIER_CONFLICT, reason_code="frontier_changed")
+                raise _frontier_conflict(current_head)
             terminal = replace(
                 current_record,
                 state=OperationState.COMPLETE,

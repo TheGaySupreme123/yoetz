@@ -1197,7 +1197,7 @@ def _receipt_versions(manifest: Mapping[str, CanonicalJsonValue]) -> ReceiptVers
 async def _semantic_not_configured(
     frozen: FrozenCase, findings: tuple[object, ...]
 ) -> FinalSemanticEvaluation:
-    """Explicit deterministic-only check path when no privacy-ready provider binding exists."""
+    """Explicit path when semantic review is enabled but no provider endpoint is bound."""
 
     del frozen, findings
     return FinalSemanticEvaluation(
@@ -1205,12 +1205,24 @@ async def _semantic_not_configured(
     )
 
 
+async def _semantic_credential_unavailable(
+    frozen: FrozenCase, findings: tuple[object, ...]
+) -> FinalSemanticEvaluation:
+    """Endpoint is bound but no provider credential is connected in this generation."""
+
+    del frozen, findings
+    return FinalSemanticEvaluation(
+        SemanticStatus.UNAVAILABLE, SemanticReason.CREDENTIAL_UNAVAILABLE
+    )
+
+
 def _map_blocked(outcome: PrivacyOutcome, reason: object) -> FinalSemanticEvaluation:
     """Map pre-dispatch privacy blocks to exact semantic status/reason pairs."""
 
     if outcome is PrivacyOutcome.CHANNEL_UNAVAILABLE:
+        # Distinct from missing credential/endpoint: the channel is present but policy forbids it.
         return FinalSemanticEvaluation(
-            SemanticStatus.NOT_CONFIGURED, SemanticReason.PROVIDER_NOT_CONFIGURED
+            SemanticStatus.BLOCKED_BY_POLICY, SemanticReason.CHANNEL_DISABLED
         )
     if outcome is PrivacyOutcome.BLOCKED_FORBIDDEN_DATA:
         return FinalSemanticEvaluation(
@@ -1479,13 +1491,16 @@ async def provide_service_ready_context(
         tuple[str, ...], tuple(getattr(gateway, "connected_provider_ids", lambda: ())())
     )
     semantic_configured = config.verification.semantic != "disabled"
-    semantic_ready = semantic_configured and bool(connected_provider_ids)
+    provider_endpoint_bound = config.provider is not None
+    semantic_ready = semantic_configured and bool(connected_provider_ids) and provider_endpoint_bound
     capabilities = {
         RuntimeCapability.STRUCTURAL_READ,
         RuntimeCapability.PAYLOAD_READ,
         RuntimeCapability.WRITE,
     }
-    if semantic_ready:
+    # Expose SEMANTIC when the operator has not disabled it so check can report *why* it is
+    # unusable (no endpoint vs no credential vs policy), instead of one opaque not_configured.
+    if semantic_configured:
         capabilities.add(RuntimeCapability.SEMANTIC)
     runtime_context = ServiceRuntimeContext(
         service_instance_id=cast(str, getattr(lifecycle.instance, "instance_id")),
@@ -1548,8 +1563,14 @@ async def provide_service_ready_context(
         candidate_binding = provider_binding_from_config(config.provider)
         if candidate_binding.provider_id in connected_provider_ids:
             provider_binding = candidate_binding
-    semantic_evaluator = (
-        _privacy_gated_semantic_evaluator(
+    if not semantic_configured:
+        semantic_evaluator = _semantic_not_configured
+    elif not provider_endpoint_bound:
+        semantic_evaluator = _semantic_not_configured
+    elif not connected_provider_ids or provider_binding is None:
+        semantic_evaluator = _semantic_credential_unavailable
+    else:
+        semantic_evaluator = _privacy_gated_semantic_evaluator(
             cast(PrivacyCoordinator, privacy),
             clock,
             installation_id,
@@ -1558,9 +1579,6 @@ async def provide_service_ready_context(
             lookup,
             ids,
         )
-        if semantic_ready
-        else _semantic_not_configured
-    )
 
     async def _semantic_review(
         candidates: tuple[ObservationAdviceCandidate, ...],
@@ -1696,6 +1714,8 @@ async def provide_service_ready_context(
         support_handlers=observation_handlers,
         verification_supervisor=verification_supervisor,
         rediscover_pending_verification=observation_coordinator.rediscover_pending_verification,
+        connected_provider_ids=connected_provider_ids,
+        semantic_ready=semantic_ready,
     )
 
 

@@ -982,7 +982,9 @@ class CheckScopeModel(_ClosedModel):
 
 
 def _validate_model_against_schema(model: BaseModel, schema_name: str) -> None:
-    from yoetz.protocol.schemas import validate_schema_instance
+    from pydantic import ValidationError as PydanticValidationError
+
+    from yoetz.protocol.schemas import SchemaInstanceInvalid, validate_schema_instance
 
     dumped = model.model_dump(
         mode="json",
@@ -990,7 +992,23 @@ def _validate_model_against_schema(model: BaseModel, schema_name: str) -> None:
         exclude_unset=True,
         exclude_none=False,
     )
-    validate_schema_instance(schema_name, "1.0.0", cast(JsonValue, dumped))
+    try:
+        validate_schema_instance(schema_name, "1.0.0", cast(JsonValue, dumped))
+    except SchemaInstanceInvalid as exc:
+        # Re-raise with the JSON Schema absolute path so MCP safe_details can name the field.
+        if exc.absolute_path:
+            raise PydanticValidationError.from_exception_data(
+                type(model).__name__,
+                [
+                    {
+                        "type": "value_error",
+                        "loc": tuple(exc.absolute_path),
+                        "input": None,
+                        "ctx": {"error": ValueError("schema_instance_invalid")},
+                    }
+                ],
+            ) from None
+        raise ValueError("schema_instance_invalid") from None
 
 
 class StartRequestModel(PublicRequestModel):
