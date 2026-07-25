@@ -830,6 +830,16 @@ async def _interactive_provider_setup(
         wipe_auto_passphrase()
         return service, provider_report
 
+    # A Keychain-provisioned passphrase vault is already ready without the
+    # human knowing its generated passphrase. Load that same scoped secret
+    # only for the one provider-reauthentication ceremony, so setup asks for
+    # the provider key but never unexpectedly asks the user for a passphrase.
+    if auto_passphrase is None and service.get("vault_mode") == "passphrase":
+        current_config = load_config({}, os.environ, None)
+        auto_passphrase = AutoUnlockPassphraseStore(
+            bundle_root(_data_dir=current_config.storage.data_dir)
+        ).load()
+
     storage = provider_credential_profile_binding(
         provider.provider_id,
         provider.model,

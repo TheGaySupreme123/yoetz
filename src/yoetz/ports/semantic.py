@@ -24,6 +24,7 @@ from yoetz.domain.values import (
     Frontier,
     SubjectStateRelation,
     finding_id,
+    validate_commitment,
     validate_sha256_digest,
 )
 from yoetz.kernel.deterministic_checks import (
@@ -1174,6 +1175,7 @@ class ProviderAttemptProvenance:
     token_usage: TokenUsage | None = None
     cost_fields: CostFields | None = None
     failure_class: SemanticFailureClass | None = None
+    request_commitment: str | None = None
 
     def __post_init__(self) -> None:
         if not _valid_pattern(self.provider, _IDENTITY_PATTERN, 128):
@@ -1215,6 +1217,8 @@ class ProviderAttemptProvenance:
             raise ProtocolValueError("invalid_semantic_provenance")
         if self.failure_class is not None and type(self.failure_class) is not SemanticFailureClass:
             raise ProtocolValueError("invalid_semantic_failure_class")
+        if self.request_commitment is not None:
+            validate_commitment(self.request_commitment)
 
 
 def _validate_result_provenance(

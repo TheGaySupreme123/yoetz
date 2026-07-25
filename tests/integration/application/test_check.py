@@ -200,8 +200,10 @@ class _Runtime:
     def __init__(self, task: TaskRuntime) -> None:
         self.task = task
         self.release_count = 0
+        self.last_command: RouteCommand | None = None
 
-    async def route(self, _command: RouteCommand) -> TaskRuntime:
+    async def route(self, command: RouteCommand) -> TaskRuntime:
+        self.last_command = command
         return self.task
 
     async def release(self, runtime: TaskRuntime) -> None:
@@ -313,6 +315,9 @@ async def test_semantic_required_unavailable_preserves_deterministic_truth() -> 
     assert result.semantic_status is SemanticStatus.NOT_CONFIGURED
     assert result.semantic_provenance is None
     assert result.coverage.known_gaps == ("semantic_review_not_configured",)
+    runtime = cast(_Runtime, app.runtime)
+    assert runtime.last_command is not None
+    assert RuntimeCapability.SEMANTIC in runtime.last_command.required_capabilities
 
 
 @pytest.mark.anyio

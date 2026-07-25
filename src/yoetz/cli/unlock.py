@@ -185,11 +185,13 @@ class _ForegroundTerminal:
         try:
             if not os.isatty(fd):
                 raise HumanCeremonyCliError("tty_required")
-            terminal_stat = os.fstat(fd)
-            terminal_device = terminal_stat.st_rdev
-            if terminal_stat.st_uid != os.geteuid():
-                raise HumanCeremonyCliError("tty_mismatch")
-            if os.fstat(0).st_rdev != terminal_device or os.fstat(2).st_rdev != terminal_device:
+            # macOS can expose /dev/tty as a root-owned controlling-terminal alias
+            # with a different device number than the user's terminal endpoints.
+            # The alias is still the correct no-echo input surface. Require stdin
+            # and stderr to be terminals for the same user-visible endpoint, then
+            # separately verify that this process is foreground on /dev/tty.
+            # Terminal device ownership is not a reliable user-identity signal.
+            if os.fstat(0).st_rdev != os.fstat(2).st_rdev:
                 raise HumanCeremonyCliError("tty_mismatch")
             if os.tcgetpgrp(fd) != os.getpgrp():
                 raise HumanCeremonyCliError("background_process")

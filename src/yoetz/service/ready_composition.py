@@ -92,6 +92,7 @@ from yoetz.kernel.policies.observation_advice import (
     ObservationAdviceCandidate,
     ObservationCompositionFact,
 )
+from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.control import ControlError
 from yoetz.ports.diagnostics import DiagnosticsPort, RuntimeCapability, StartupCheckResult
@@ -1286,60 +1287,88 @@ def _map_blocked(outcome: PrivacyOutcome, reason: object) -> FinalSemanticEvalua
     return FinalSemanticEvaluation(SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE)
 
 
-def _map_provider_outcome(result: SemanticEgressProviderOutcome) -> FinalSemanticEvaluation:
+def _provider_provenance(
+    result: SemanticEgressSuccess | SemanticEgressProviderOutcome,
+    *,
+    status: SemanticStatus,
+    reason: SemanticReason,
+    ids: IdPort,
+) -> SemanticProvenance | None:
+    """Bind a completed external attempt to its durable receipt and request commitment."""
+
+    if (
+        result.privacy_receipt_id is None
+        or result.authorization_id is None
+        or result.request_commitment is None
+    ):
+        return None
+    attempt = result.result.provenance
+    return SemanticProvenance(
+        provider=attempt.provider,
+        endpoint_profile_id=attempt.endpoint_profile_id,
+        endpoint_profile_version=attempt.endpoint_profile_version,
+        model=attempt.model,
+        sdk_version=attempt.sdk_version,
+        prompt_digest=attempt.prompt_digest,
+        schema_digest=attempt.schema_digest,
+        policy_digest=attempt.policy_digest,
+        privacy_policy_digest=attempt.privacy_policy_digest,
+        sampling_params=attempt.sampling_params,
+        latency_ms=attempt.latency_ms,
+        semantic_attempt_id=ids.new(IdKind.SEMANTIC_ATTEMPT),
+        dispatch_kind=SemanticDispatchKind.EXTERNAL,
+        privacy_receipt_id=result.privacy_receipt_id,
+        status=status,
+        reason=reason,
+        provider_request_id=attempt.provider_request_id,
+        token_usage=attempt.token_usage,
+        cost_fields=attempt.cost_fields,
+        failure_class=attempt.failure_class,
+        egress_authorization_id=result.authorization_id,
+        request_commitment=result.request_commitment,
+    )
+
+
+def _map_provider_outcome(
+    result: SemanticEgressProviderOutcome, ids: IdPort
+) -> FinalSemanticEvaluation:
     provider = result.result
+    status: SemanticStatus
+    reason: SemanticReason
     if type(provider) is SemanticResultRefused:
-        return FinalSemanticEvaluation(SemanticStatus.REFUSED, SemanticReason.PROVIDER_REFUSED)
-    if type(provider) is SemanticResultTimeout:
-        return FinalSemanticEvaluation(SemanticStatus.TIMEOUT, SemanticReason.PROVIDER_TIMEOUT)
-    if type(provider) is SemanticResultInvalid:
+        status, reason = SemanticStatus.REFUSED, SemanticReason.PROVIDER_REFUSED
+    elif type(provider) is SemanticResultTimeout:
+        status, reason = SemanticStatus.TIMEOUT, SemanticReason.PROVIDER_TIMEOUT
+    elif type(provider) is SemanticResultInvalid:
+        status, reason = SemanticStatus.INVALID, SemanticReason.RESPONSE_SCHEMA_INVALID
+    elif type(provider) is SemanticResultLate:
+        status, reason = SemanticStatus.LATE, SemanticReason.DEADLINE_AUTHORITY_LOST
+    elif type(provider) is SemanticResultUnavailable:
+        status, reason = SemanticStatus.UNAVAILABLE, SemanticReason.TRANSPORT_UNAVAILABLE
+    else:
+        return FinalSemanticEvaluation(SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE)
+    provenance = _provider_provenance(result, status=status, reason=reason, ids=ids)
+    if provenance is None:
         return FinalSemanticEvaluation(
-            SemanticStatus.INVALID, SemanticReason.RESPONSE_SCHEMA_INVALID
+            SemanticStatus.UNAVAILABLE, SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN
         )
-    if type(provider) is SemanticResultLate:
-        return FinalSemanticEvaluation(SemanticStatus.LATE, SemanticReason.DEADLINE_AUTHORITY_LOST)
-    if type(provider) is SemanticResultUnavailable:
-        return FinalSemanticEvaluation(
-            SemanticStatus.UNAVAILABLE, SemanticReason.TRANSPORT_UNAVAILABLE
-        )
-    return FinalSemanticEvaluation(SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE)
+    return FinalSemanticEvaluation(status, reason, provenance=provenance)
 
 
 def _map_egress_to_final(result: object, ids: IdPort) -> FinalSemanticEvaluation:
     """Map privacy egress outcomes to check FinalSemanticEvaluation without inventing findings."""
 
     if type(result) is SemanticEgressSuccess:
-        if result.privacy_receipt_id is None:
+        provenance = _provider_provenance(
+            result,
+            status=SemanticStatus.SUCCEEDED,
+            reason=SemanticReason.SEMANTIC_COMPLETED,
+            ids=ids,
+        )
+        if provenance is None:
             return FinalSemanticEvaluation(
                 SemanticStatus.UNAVAILABLE, SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN
             )
-        attempt = result.result.provenance
-        authorization = result.authorization_id or None
-        if authorization == "":
-            authorization = None
-        provenance = SemanticProvenance(
-            provider=attempt.provider,
-            endpoint_profile_id=attempt.endpoint_profile_id,
-            endpoint_profile_version=attempt.endpoint_profile_version,
-            model=attempt.model,
-            sdk_version=attempt.sdk_version,
-            prompt_digest=attempt.prompt_digest,
-            schema_digest=attempt.schema_digest,
-            policy_digest=attempt.policy_digest,
-            privacy_policy_digest=attempt.privacy_policy_digest,
-            sampling_params=attempt.sampling_params,
-            latency_ms=attempt.latency_ms,
-            semantic_attempt_id=ids.new(IdKind.SEMANTIC_ATTEMPT),
-            dispatch_kind=SemanticDispatchKind.EXTERNAL,
-            privacy_receipt_id=result.privacy_receipt_id,
-            status=SemanticStatus.SUCCEEDED,
-            reason=SemanticReason.SEMANTIC_COMPLETED,
-            provider_request_id=attempt.provider_request_id,
-            token_usage=attempt.token_usage,
-            cost_fields=attempt.cost_fields,
-            failure_class=attempt.failure_class,
-            egress_authorization_id=authorization,
-        )
         return FinalSemanticEvaluation(
             SemanticStatus.SUCCEEDED,
             SemanticReason.SEMANTIC_COMPLETED,
@@ -1353,7 +1382,7 @@ def _map_egress_to_final(result: object, ids: IdPort) -> FinalSemanticEvaluation
     if type(result) is SemanticEgressBlocked:
         return _map_blocked(result.outcome, result.reason)
     if type(result) is SemanticEgressProviderOutcome:
-        return _map_provider_outcome(result)
+        return _map_provider_outcome(result, ids)
     return FinalSemanticEvaluation(SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE)
 
 
@@ -1409,7 +1438,7 @@ def _privacy_gated_semantic_evaluator(
                 request_id=frozen.lease.operation_id,
                 channel=EgressChannel.LLM_INFERENCE,
                 local_sink=None,
-                purpose="semantic_check",
+                purpose="semantic-review",
                 scope=scope,
                 subject_digest=canonical_digest(
                     cast(
@@ -1437,7 +1466,13 @@ def _privacy_gated_semantic_evaluator(
             deadline = Deadline(clock.now_utc(), clock.monotonic_seconds() + 60.0)
             result = await privacy.evaluate_semantic(candidate, deadline)
             return _map_egress_to_final(result, ids)
-        except Exception:
+        except Exception as exc:
+            record_unexpected_exception_without_raising(
+                exc,
+                component="semantic_composition",
+                operation="semantic_evaluation_failed",
+                request_id=frozen.lease.operation_id,
+            )
             return FinalSemanticEvaluation(
                 SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE
             )
@@ -1626,7 +1661,7 @@ async def provide_service_ready_context(
                 request_id=ids.new(IdKind.REQUEST),
                 channel=EgressChannel.LLM_INFERENCE,
                 local_sink=None,
-                purpose="semantic_check",
+                purpose="semantic-review",
                 scope=machine_scope,
                 subject_digest=subject,
                 provider_binding=provider_binding,

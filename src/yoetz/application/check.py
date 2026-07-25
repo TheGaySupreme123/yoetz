@@ -158,7 +158,11 @@ def check_internal_json(result: CheckCommitResult) -> dict[str, JsonValue]:
         "semantic_provenance": (
             None
             if result.semantic_provenance is None
-            else semantic_provenance_to_json(result.semantic_provenance)
+            # Public Pydantic validation deliberately accepts a built-in dict here
+            # before inspecting the safe identity fields.  The domain encoder
+            # returns an immutable JsonObject, so thaw only its root container;
+            # nested values remain canonical JSON mappings.
+            else dict(semantic_provenance_to_json(result.semantic_provenance).items())
         ),
         "coverage": coverage_to_json(result.coverage),
         "versions": {
@@ -846,12 +850,23 @@ async def execute_check_commit(app: Application, request: CheckRequest) -> Check
 
     scope = normalize_check_scope(request)
     packs = _selected_packs(request)
+    required_capabilities = {
+        RuntimeCapability.WRITE,
+        RuntimeCapability.PAYLOAD_READ,
+    }
+    # A ready service grants SEMANTIC independently of the ordinary write route.  Preserve that
+    # admission on non-deterministic checks; otherwise the leased task runtime loses the
+    # capability and reports provider_not_configured before the configured evaluator can run.
+    # An explicitly semantic request while semantic verification is disabled retains the existing
+    # honest not-configured result instead of becoming a routing failure.
+    if request.mode != "deterministic_only" and app.verification_policy.semantic != "disabled":
+        required_capabilities.add(RuntimeCapability.SEMANTIC)
     runtime = await app.runtime.route(
         RouteCommand(
             request.session_id,
             request.writer_id,
             RouteAccess.WRITE,
-            frozenset({RuntimeCapability.WRITE, RuntimeCapability.PAYLOAD_READ}),
+            frozenset(required_capabilities),
         )
     )
     try:

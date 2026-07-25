@@ -182,5 +182,47 @@ async def test_auto_unlock_repair_maps_missing_trusted_tty_to_usage_failure(
     assert capsys.readouterr().err == "invalid_request: the command input is invalid\n"
 
 
+def test_foreground_terminal_accepts_macos_controlling_tty_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A macOS /dev/tty alias may be root-owned and device-distinct from stdio."""
+
+    opened: list[int] = []
+    closed: list[int] = []
+
+    def fake_open(_path: str, _flags: int) -> int:
+        opened.append(9)
+        return 9
+
+    def fake_close(fd: int) -> None:
+        closed.append(fd)
+
+    def fake_fstat(fd: int) -> SimpleNamespace:
+        if fd in {0, 2}:
+            return SimpleNamespace(st_rdev=101, st_uid=501)
+        assert fd == 9
+        return SimpleNamespace(st_rdev=202, st_uid=0)
+
+    def fake_isatty(_fd: int) -> bool:
+        return True
+
+    def fake_tcgetpgrp(_fd: int) -> int:
+        return 41
+
+    monkeypatch.setattr(unlock_module.os, "isatty", fake_isatty)
+    monkeypatch.setattr(unlock_module.os, "open", fake_open)
+    monkeypatch.setattr(unlock_module.os, "close", fake_close)
+    monkeypatch.setattr(unlock_module.os, "fstat", fake_fstat)
+    monkeypatch.setattr(unlock_module.os, "tcgetpgrp", fake_tcgetpgrp)
+    monkeypatch.setattr(unlock_module.os, "getpgrp", lambda: 41)
+
+    terminal = unlock_module._ForegroundTerminal()  # pyright: ignore[reportPrivateUsage]
+    with terminal:
+        assert terminal.fd == 9
+
+    assert opened == [9]
+    assert closed == [9]
+
+
 async def _async_value(value: Any) -> Any:
     return value

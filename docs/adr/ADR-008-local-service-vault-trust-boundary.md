@@ -156,8 +156,12 @@ after the helper's local two-entry match; unlock is available only for an alread
 passphrase vault. Their handles are not interchangeable. The pure confidential protocol maps the
 wire purpose to one one-shot `SecretHandle(SecretPurpose.vault_unlock)` consumed by the trusted
 unlock coordinator; ordinary clients cannot construct it. The helper must prove a same-user,
-foreground controlling TTY; read directly from `/dev/tty` in no-echo mode; reject stdin,
-redirection, pipes, environment/config/argument input, and noninteractive execution; establish a
+foreground controlling TTY; read directly from `/dev/tty` in no-echo mode; require stdin and
+stderr to be TTYs for the same user-visible terminal, and require the process to be in the
+foreground process group of `/dev/tty`. Terminal-device ownership and device-number equality with
+`/dev/tty` are not user-identity evidence: macOS may expose a root-owned, device-distinct
+controlling-terminal alias. The helper still rejects stdin redirection, pipes,
+environment/config/argument input, and noninteractive execution; establish a
 separately typed peer-authenticated connection; and erase mutable buffers best-effort after the
 service consumes them. No MCP registry, `ServiceClient`, or public application method can reach
 this channel. **Amendment (ADR-015/016):** the founder-authorized `yoetz consent` /

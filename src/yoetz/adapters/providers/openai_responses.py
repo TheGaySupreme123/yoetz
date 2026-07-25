@@ -753,7 +753,15 @@ class OpenAIResponsesEvaluator:
                 )
             )
 
-        body_object = _build_body_object(case)
+        # The one-attempt transport compares the SDK's exact serialized bytes to the
+        # privacy gateway's audited body.  Reconstructing keyword arguments here can
+        # preserve a different insertion order from the canonical rendering, which
+        # correctly fails closed as a body mismatch before credential injection.
+        # Decode the canonical rendering and pass that mapping through unchanged.
+        rendered_body = strict_json_parse(render_case(case).body)
+        if type(rendered_body) is not dict:
+            raise ValueError("openai_rendered_body_invalid")
+        body_object = cast(dict[str, Any], rendered_body)
 
         try:
             openai_module = importlib.import_module("openai")
@@ -776,12 +784,7 @@ class OpenAIResponsesEvaluator:
             http_client=http_client,
         )
         try:
-            response = await client.responses.create(
-                model=body_object["model"],
-                input=body_object["input"],
-                max_output_tokens=OPENAI_MAX_OUTPUT_TOKENS,
-                text=body_object["text"],
-            )
+            response = await client.responses.create(**body_object)
         except Exception as exc:  # noqa: BLE001 - classified below, never re-raised raw
             elapsed_ms = max(0, int((self._clock.monotonic_seconds() - now_monotonic) * 1_000))
             return classify_provider_failure(exc, self._profile, latency_ms=elapsed_ms)

@@ -1273,7 +1273,20 @@ def _privacy_decision_command(kind: str) -> Callable[..., None]:
     ) -> None:
         module = importlib.import_module("yoetz.cli.privacy_control")
         operation = cast(Callable[[str], Awaitable[object]], getattr(module, f"decide_{kind}"))
-        _finish(run_async(lambda: _trusted_call(lambda: operation(pending_id), json_output)))
+
+        async def run_decision() -> object:
+            if kind != "policy":
+                return await operation(pending_id)
+            passphrase = _auto_unlock_store().load()
+            if passphrase is None:
+                return await operation(pending_id)
+            auto_operation = cast(
+                Callable[[str, bytearray], Awaitable[object]],
+                getattr(module, "decide_policy_with_local_reauthentication"),
+            )
+            return await auto_operation(pending_id, passphrase)
+
+        _finish(run_async(lambda: _trusted_call(run_decision, json_output)))
 
     return command
 

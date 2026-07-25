@@ -95,6 +95,7 @@ _INSTALLATION_DOMAINS: Final[Mapping[MacKeyPurpose, frozenset[bytes]]] = {
     MacKeyPurpose.LOG_CORRELATION: frozenset({b"yoetz/session-log-id/v1\x00"}),
     MacKeyPurpose.PRIVACY_AUDIT: frozenset(
         {
+            b"yoetz/privacy-audit/authorization/v1\x00",
             b"yoetz/privacy-audit/control-request/v1\x00",
             b"yoetz/privacy-audit/internal-result/v1\x00",
             b"yoetz/privacy-audit/local-approval/v1\x00",

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Buffer, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +29,19 @@ from yoetz.ports.control import (
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import PublishWorkRequest, PublishWorkResult, StartRequest, StartResult
+from yoetz.service.confidential_protocol import (
+    ClientOpenEnvelope,
+    EmptyVaultTarget,
+    HumanCeremonyBinding,
+    HumanCeremonyKind,
+    KeyringRetryPhase,
+    ServerCloseEnvelope,
+    ServerErrorEnvelope,
+    ServerOpenedEnvelope,
+    VaultUnlockPreview,
+    decode_human_frame,
+    encode_human_frame,
+)
 from yoetz.service.daemon import ServiceComposition, ServiceDaemon
 from yoetz.service.lifecycle import LifecycleError, ServiceLifecycle
 from yoetz.service.vault import VaultMode
@@ -638,3 +651,83 @@ async def test_service_entry_point_installs_the_structural_log_sink(
         await daemon_module.run_service()
 
     assert installed == [LogMode.SERVICE]
+
+
+@pytest.mark.anyio
+async def test_human_connection_cancels_an_open_ceremony_when_terminal_disconnects() -> None:
+    """An interrupted foreground setup must not block every later ceremony."""
+
+    ceremony_id = "a" * 64
+
+    class _Stream:
+        def __init__(self) -> None:
+            self._incoming = bytearray(
+                encode_human_frame(
+                    ClientOpenEnvelope(
+                        "b" * 64,
+                        HumanCeremonyKind.VAULT_UNLOCK,
+                        EmptyVaultTarget(expected_mode="passphrase"),
+                    )
+                )
+            )
+            self.sent: list[bytes] = []
+            self.closed = False
+
+        @property
+        def peer_identity(self) -> object:
+            return object()
+
+        async def receive(self, max_bytes: int) -> bytes:
+            if not self._incoming:
+                return b""
+            size = min(max_bytes, len(self._incoming))
+            chunk = bytes(self._incoming[:size])
+            del self._incoming[:size]
+            return chunk
+
+        async def send_all(self, data: Buffer) -> None:
+            self.sent.append(bytes(data))
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    class _HumanService:
+        def __init__(self) -> None:
+            self.cancelled: list[str] = []
+
+        async def open_ceremony(self, request: ClientOpenEnvelope) -> ServerOpenedEnvelope:
+            return ServerOpenedEnvelope(
+                ceremony_id,
+                1,
+                HumanCeremonyBinding(
+                    binding_version=1,
+                    ceremony_id=ceremony_id,
+                    connection_nonce=request.connection_nonce,
+                    ceremony_kind=HumanCeremonyKind.VAULT_UNLOCK,
+                    service_instance_id=_INSTANCE_ID,
+                    service_generation=7,
+                    vault_generation=3,
+                    policy_generation=None,
+                    target_digest="sha256:" + "2" * 64,
+                    expires_at_monotonic_ms=1_000_000,
+                ),
+                VaultUnlockPreview(),
+                KeyringRetryPhase(),
+            )
+
+        async def cancel(self, received_ceremony_id: str) -> ServerCloseEnvelope:
+            self.cancelled.append(received_ceremony_id)
+            return ServerCloseEnvelope(received_ceremony_id, 3, "cancelled")
+
+    stream = _Stream()
+    service = _HumanService()
+    handler = daemon_module._HumanConnectionServer(service)  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+
+    await handler(stream)
+
+    assert service.cancelled == [ceremony_id]
+    assert stream.closed
+    assert [type(decode_human_frame(item)) for item in stream.sent] == [
+        ServerOpenedEnvelope,
+        ServerErrorEnvelope,
+    ]

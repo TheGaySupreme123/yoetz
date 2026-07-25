@@ -42,6 +42,7 @@ from yoetz.domain.privacy import (
     ReceiptSecretScan,
     ReceiptTransformations,
 )
+from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.privacy import (
@@ -85,7 +86,9 @@ type LocalDisclosureResult = (
     LocalDisclosureApproved | LocalDisclosureBlocked | LocalDisclosureUnavailable
 )
 
-_SEMANTIC_PURPOSE = "semantic_check"
+# This value crosses the privacy-policy boundary, so it must match the
+# documented/recipe vocabulary and the stored provider-credential binding.
+_SEMANTIC_PURPOSE = "semantic-review"
 _MEDIA_TYPE = "application/json"
 _SCHEMA_ID = "yoetz-semantic-case-1.0.0"
 
@@ -100,6 +103,7 @@ class SemanticEgressSuccess:
     result: SemanticResultSuccess
     case_digest: str
     privacy_receipt_id: str | None = None
+    request_commitment: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +143,7 @@ class SemanticEgressProviderOutcome:
     )
     case_digest: str
     privacy_receipt_id: str | None = None
+    request_commitment: str | None = None
 
 
 type SemanticEgressResult = (
@@ -681,7 +686,13 @@ class PrivacyCoordinator:
                     + timedelta(seconds=max(60, llm.authorization_ttl_seconds or 60)),
                 )
             )
-        except Exception:
+        except Exception as exc:
+            record_unexpected_exception_without_raising(
+                exc,
+                component="privacy_egress",
+                operation="audit_prepare_failed",
+                request_id=candidate.request_id,
+            )
             return SemanticEgressBlocked(
                 candidate.request_id,
                 PrivacyOutcome.AUDIT_FAILED,
@@ -815,7 +826,13 @@ class PrivacyCoordinator:
                 minted = await self._audit.authorize(
                     proposal.privacy_proposal_id, proposal.prepared_case_digest, now
                 )
-            except Exception:
+            except Exception as exc:
+                record_unexpected_exception_without_raising(
+                    exc,
+                    component="privacy_egress",
+                    operation="audit_authorize_failed",
+                    request_id=candidate.request_id,
+                )
                 return SemanticEgressBlocked(
                     candidate.request_id,
                     PrivacyOutcome.AUDIT_FAILED,
@@ -911,6 +928,7 @@ class PrivacyCoordinator:
                 receipt_id = state.receipt_id
         except Exception:
             receipt_id = None
+        request_commitment = getattr(result.provenance, "request_commitment", None)
         if type(result) is SemanticResultSuccess:
             return SemanticEgressSuccess(
                 request_id,
@@ -919,6 +937,7 @@ class PrivacyCoordinator:
                 result,
                 case_digest,
                 privacy_receipt_id=receipt_id,
+                request_commitment=request_commitment,
             )
         if type(result) in {
             SemanticResultRefused,
@@ -934,6 +953,7 @@ class PrivacyCoordinator:
                 result,  # type: ignore[arg-type]
                 case_digest,
                 privacy_receipt_id=receipt_id,
+                request_commitment=request_commitment,
             )
         return SemanticEgressBlocked(
             request_id,

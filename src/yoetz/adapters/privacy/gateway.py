@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from types import MappingProxyType
 from typing import Protocol
@@ -542,6 +542,7 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         dispatch_started_at = self._clock.now_utc()
         try:
             result = await evaluator.evaluate(case, deadline)
+            result = _with_request_commitment(result, commitment)
             outcome, receipt_reason = _result_outcome(result)
         except Exception:  # noqa: BLE001 - an ambiguous transport failure never leaks native text
             result = _unknown_outcome_result(case, binding)
@@ -775,6 +776,12 @@ def _bounded_policy_binding(authorization: EgressAuthorization) -> ReceiptPolicy
         authorization.policy_digest,
         _scope_digest(authorization.scope),
     )
+
+
+def _with_request_commitment(result: SemanticResult, commitment: str) -> SemanticResult:
+    """Carry the gateway-bound request commitment into the receipt-bound semantic outcome."""
+
+    return replace(result, provenance=replace(result.provenance, request_commitment=commitment))
 
 
 def _result_outcome(result: SemanticResult) -> tuple[PrivacyOutcome, PrivacyReason | None]:
