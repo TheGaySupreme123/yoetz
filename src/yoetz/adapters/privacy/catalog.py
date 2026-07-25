@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from dataclasses import fields, is_dataclass
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Literal, cast
+from typing import Final, Literal, cast
 
 import apsw
 
@@ -26,6 +26,7 @@ from yoetz.domain.privacy import (
     EgressAuthorization,
     EgressChannel,
     EgressReceipt,
+    ForbiddenDataKind,
     HumanPrivacyDecision,
     LocalDisclosureReceipt,
     LocalDisclosureSink,
@@ -77,7 +78,12 @@ from yoetz.protocol.canonical import (
 )
 from yoetz.protocol.ids import IdKind, new_id
 
-__all__ = ["CatalogPrivacyAudit", "CatalogPrivacyPolicyStore", "decode_privacy_policy_canonical"]
+__all__ = [
+    "CatalogPrivacyAudit",
+    "CatalogPrivacyPolicyStore",
+    "decode_privacy_policy_canonical",
+    "encode_privacy_policy_json",
+]
 
 _LOOKUP_DOMAIN = b"yoetz/privacy-audit/lookup/v1\x00"
 _PROPOSAL_DOMAIN = b"yoetz/privacy-audit/proposal/v1\x00"
@@ -87,6 +93,16 @@ _PROJECTION_DOMAIN = b"yoetz/privacy-audit/projection/v1\x00"
 _APPROVAL_DOMAIN = b"yoetz/privacy-audit/local-approval/v1\x00"
 _AUTHORIZATION_DOMAIN = b"yoetz/privacy-audit/authorization/v1\x00"
 _CURSOR_DOMAIN = b"yoetz/privacy-audit/receipt-cursor/v1\x00"
+
+_PRIVACY_POLICY_WIRE_SCHEMA_VERSION: Final = "1.0.0"
+_WIRE_CHANNEL_ORDER: Final = (
+    EgressChannel.CAPABILITY_TESTING,
+    EgressChannel.CRASH_DIAGNOSTICS,
+    EgressChannel.LLM_INFERENCE,
+    EgressChannel.PRODUCT_TELEMETRY,
+    EgressChannel.UPDATE_CHECKS,
+)
+_NEVER_SEND_WIRE: Final = tuple(sorted(item.value for item in ForbiddenDataKind))
 
 
 def _json(value: object) -> JsonValue:
@@ -142,6 +158,30 @@ def _integer(value: JsonValue) -> int:
     if type(value) is not int:
         raise ValueError("privacy_audit_row_corrupt")
     return value
+
+
+def _uint_from_json(value: JsonValue) -> int:
+    """Accept catalog ints or wire decimal-string counters (``"0"``, ``"300"``)."""
+
+    if type(value) is int:
+        if value < 0:
+            raise ValueError("privacy_audit_row_corrupt")
+        return value
+    if type(value) is str and value.isdecimal():
+        if value != "0" and value.startswith("0"):
+            raise ValueError("privacy_audit_row_corrupt")
+        return int(value)
+    raise ValueError("privacy_audit_row_corrupt")
+
+
+def _enum_values(items: tuple[Enum, ...]) -> list[JsonValue]:
+    encoded: list[JsonValue] = [item.value for item in items]
+    return encoded
+
+
+def _string_values(items: tuple[str, ...]) -> list[JsonValue]:
+    encoded: list[JsonValue] = list(items)
+    return encoded
 
 
 def _local_receipt_from_bytes(data: bytes) -> LocalDisclosureReceipt:
@@ -252,9 +292,7 @@ def _review_from_json(value: JsonValue) -> ReviewSelectionPolicy:
 def _channel_from_json(value: JsonValue) -> ChannelPolicy:
     source = _mapping(value)
     return ChannelPolicy(
-        __import__("yoetz.domain.privacy", fromlist=["EgressChannel"]).EgressChannel(
-            cast(str, source["channel"])
-        ),
+        EgressChannel(cast(str, source["channel"])),
         cast(bool, source["enabled"]),
         tuple(DataCategory(item) for item in _strings(source["allowed_categories"])),
         tuple(DataClass(item) for item in _strings(source["allowed_data_classes"])),
@@ -262,20 +300,54 @@ def _channel_from_json(value: JsonValue) -> ChannelPolicy:
         _strings(source["allowed_purposes"]),
         AuthorizationScopeKind(cast(str, source["scope_ceiling"])),
         cast(bool, source["preview_required"]),
-        _integer(source["max_bytes"]),
-        _integer(source["max_tokens"]),
-        _integer(source["authorization_ttl_seconds"]),
+        _uint_from_json(source["max_bytes"]),
+        _uint_from_json(source["max_tokens"]),
+        _uint_from_json(source["authorization_ttl_seconds"]),
     )
 
 
-def _policy_from_bytes(data: bytes) -> PrivacyPolicy:
-    source = _mapping(strict_json_parse(data))
+def _ceiling_from_wire(value: JsonValue) -> tuple[tuple[DataCategory, ...], tuple[DataClass, ...]]:
+    source = _mapping(value)
+    return (
+        tuple(DataCategory(item) for item in _strings(source["categories"])),
+        tuple(DataClass(item) for item in _strings(source["data_classes"])),
+    )
+
+
+def _ceiling_to_wire(
+    categories: tuple[DataCategory, ...], data_classes: tuple[DataClass, ...]
+) -> dict[str, JsonValue]:
+    return {
+        "categories": _enum_values(categories),
+        "data_classes": _enum_values(data_classes),
+    }
+
+
+def _channel_to_wire(channel: ChannelPolicy) -> dict[str, JsonValue]:
+    body: dict[str, JsonValue] = {
+        "channel": channel.channel.value,
+        "enabled": channel.enabled,
+        "allowed_categories": _enum_values(channel.allowed_categories),
+        "allowed_data_classes": _enum_values(channel.allowed_data_classes),
+        "allowed_purposes": _string_values(channel.allowed_purposes),
+        "scope_ceiling": channel.scope_ceiling.value,
+        "preview_required": channel.preview_required,
+        "max_bytes": str(channel.max_bytes),
+        "max_tokens": str(channel.max_tokens),
+        "authorization_ttl_seconds": str(channel.authorization_ttl_seconds),
+    }
+    if channel.provider_binding is not None:
+        body["provider_binding"] = _json(channel.provider_binding)
+    return body
+
+
+def _policy_from_domain_mapping(source: dict[str, JsonValue]) -> PrivacyPolicy:
     channels = source["channel_policies"]
     if type(channels) is not list:
         raise ValueError("privacy_policy_row_corrupt")
     return PrivacyPolicy(
         cast(str, source["policy_id"]),
-        _integer(source["version"]),
+        _uint_from_json(source["version"]),
         cast(str, source["policy_digest"]),
         PrivacyProfile(cast(str, source["profile"])),
         ReviewContextProfile(cast(str, source["review_context_profile"])),
@@ -285,7 +357,7 @@ def _policy_from_bytes(data: bytes) -> PrivacyPolicy:
         _scope_from_json(source["effective_scope"]),
         tuple(_channel_from_json(item) for item in channels),
         cast(bool, source["local_model_enabled"]),
-        _binding_from_json(source["local_model_binding"]),
+        _binding_from_json(source.get("local_model_binding")),
         tuple(DataCategory(item) for item in _strings(source["local_model_categories"])),
         tuple(DataClass(item) for item in _strings(source["local_model_data_classes"])),
         tuple(DataCategory(item) for item in _strings(source["agent_context_categories"])),
@@ -293,14 +365,118 @@ def _policy_from_bytes(data: bytes) -> PrivacyPolicy:
         tuple(DataCategory(item) for item in _strings(source["trusted_human_control_categories"])),
         tuple(DataClass(item) for item in _strings(source["trusted_human_control_data_classes"])),
         parse_rfc3339_millis(source["created_at"]),
-        cast(str | None, source["supersedes_policy_digest"]),
+        cast(str | None, source.get("supersedes_policy_digest")),
     )
 
 
+def _policy_from_wire_mapping(source: dict[str, JsonValue]) -> PrivacyPolicy:
+    channels = source["channel_policies"]
+    if type(channels) is not list:
+        raise ValueError("privacy_policy_row_corrupt")
+    never_send = source.get("never_send")
+    if never_send is not None and tuple(_strings(never_send)) != _NEVER_SEND_WIRE:
+        raise ValueError("privacy_policy_row_corrupt")
+    ceilings = _mapping(source["local_sink_category_ceilings"])
+    local_categories, local_classes = _ceiling_from_wire(ceilings["local_model"])
+    agent_categories, agent_classes = _ceiling_from_wire(ceilings["agent_context"])
+    trusted_categories, trusted_classes = _ceiling_from_wire(ceilings["trusted_human_control"])
+    return PrivacyPolicy(
+        cast(str, source["policy_id"]),
+        _uint_from_json(source["version"]),
+        cast(str, source["policy_digest"]),
+        PrivacyProfile(cast(str, source["profile"])),
+        ReviewContextProfile(cast(str, source["review_context_profile"])),
+        _review_from_json(source["review_selection"]),
+        cast(bool, source["require_current_provider_data_use_evidence"]),
+        cast(bool, source["network_egress_permitted"]),
+        _scope_from_json(source["effective_scope"]),
+        tuple(_channel_from_json(item) for item in channels),
+        cast(bool, source["local_model_enabled"]),
+        _binding_from_json(source.get("local_model_binding")),
+        local_categories,
+        local_classes,
+        agent_categories,
+        agent_classes,
+        trusted_categories,
+        trusted_classes,
+        parse_rfc3339_millis(source["created_at"]),
+        cast(str | None, source.get("supersedes_policy_digest")),
+    )
+
+
+def _policy_from_bytes(data: bytes) -> PrivacyPolicy:
+    source = _mapping(strict_json_parse(data))
+    if "local_sink_category_ceilings" in source:
+        return _policy_from_wire_mapping(source)
+    return _policy_from_domain_mapping(source)
+
+
 def decode_privacy_policy_canonical(data: bytes) -> PrivacyPolicy:
-    """Decode a canonical privacy-policy JSON document (desired-state apply path)."""
+    """Decode a canonical privacy-policy JSON document (desired-state or wire control)."""
 
     return _policy_from_bytes(data)
+
+
+def encode_privacy_policy_json(policy: PrivacyPolicy) -> dict[str, JsonValue]:
+    """Encode a privacy policy as the wire ``privacy-policy-1.0.0`` JSON object.
+
+    Catalog rows stay domain-shaped; ordinary-control / CLI results must match the frozen
+    schema (``local_sink_category_ceilings``, const ``never_send``, decimal counters).
+    Omits JSON nulls so ``additionalProperties: false`` oneOf arms validate.
+    """
+
+    by_channel = {channel.channel: channel for channel in policy.channel_policies}
+    if set(by_channel) != set(EgressChannel):
+        raise ValueError("privacy_policy_channel_set_invalid")
+    encoded: dict[str, JsonValue] = {
+        "schema_version": _PRIVACY_POLICY_WIRE_SCHEMA_VERSION,
+        "policy_id": policy.policy_id,
+        "version": str(policy.version),
+        "policy_digest": policy.policy_digest,
+        "profile": policy.profile.value,
+        "review_context_profile": policy.review_context_profile.value,
+        "review_selection": _json(policy.review_selection),
+        "require_current_provider_data_use_evidence": (
+            policy.require_current_provider_data_use_evidence
+        ),
+        "network_egress_permitted": policy.network_egress_permitted,
+        "effective_scope": _omit_json_nulls(_json(policy.effective_scope)),
+        "channel_policies": [
+            _channel_to_wire(by_channel[channel]) for channel in _WIRE_CHANNEL_ORDER
+        ],
+        "local_model_enabled": policy.local_model_enabled,
+        "local_sink_category_ceilings": {
+            "local_model": _ceiling_to_wire(
+                policy.local_model_categories, policy.local_model_data_classes
+            ),
+            "agent_context": _ceiling_to_wire(
+                policy.agent_context_categories, policy.agent_context_data_classes
+            ),
+            "trusted_human_control": _ceiling_to_wire(
+                policy.trusted_human_control_categories,
+                policy.trusted_human_control_data_classes,
+            ),
+        },
+        "never_send": _string_values(_NEVER_SEND_WIRE),
+        "created_at": format_rfc3339_millis(policy.created_at),
+    }
+    if policy.local_model_binding is not None:
+        encoded["local_model_binding"] = _json(policy.local_model_binding)
+    if policy.supersedes_policy_digest is not None:
+        encoded["supersedes_policy_digest"] = policy.supersedes_policy_digest
+    return cast(dict[str, JsonValue], _omit_json_nulls(encoded))
+
+
+def _omit_json_nulls(value: JsonValue) -> JsonValue:
+    if type(value) is dict:
+        return {
+            str(key): _omit_json_nulls(item)
+            for key, item in cast(dict[str, JsonValue], value).items()
+            if item is not None
+        }
+    if type(value) is list:
+        return [_omit_json_nulls(item) for item in cast(list[JsonValue], value)]
+    return value
 
 
 @contextmanager
@@ -419,6 +595,47 @@ class CatalogPrivacyPolicyStore:
                         format_rfc3339_millis(now),
                     ),
                 )
+        return PreparedPolicyTransition(proposal, prepared_digest, exact_diff_digest, True)
+
+    async def load_pending_transition(self, proposal_id: str) -> PreparedPolicyTransition:
+        row = self._db.execute(
+            """SELECT base_policy_generation, proposal_digest, candidate_policy_canonical,
+                      expires_at, created_at
+               FROM privacy_policy_transitions
+               WHERE proposal_id = ? AND state = 'pending'""",
+            (proposal_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("privacy_policy_transition_unavailable")
+        candidate = _policy_from_bytes(cast(bytes, row[2]))
+        current = await self.effective_policy(candidate.effective_scope)
+        proposal = PolicyTransitionProposal(
+            scope=candidate.effective_scope,
+            expected_generation=cast(int, row[0]),
+            proposed_policy=candidate,
+            proposal_digest=cast(str, row[1]),
+            created_at=parse_rfc3339_millis(row[4]),
+            expires_at=parse_rfc3339_millis(row[3]),
+            privacy_proposal_id=proposal_id,
+            expected_policy_digest=current.effective_digest,
+        )
+        exact_diff_digest = canonical_digest(
+            strict_json_parse(
+                canonical_encode(
+                    {
+                        "base_policy_digest": current.effective_digest,
+                        "candidate_policy_digest": candidate.policy_digest,
+                    }
+                )
+            )
+        )
+        prepared_digest = canonical_digest(
+            {
+                "diff_digest": exact_diff_digest,
+                "proposal_digest": proposal.proposal_digest,
+                "proposal_id": proposal_id,
+            }
+        )
         return PreparedPolicyTransition(proposal, prepared_digest, exact_diff_digest, True)
 
     async def commit_transition(

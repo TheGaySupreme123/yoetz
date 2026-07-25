@@ -50,6 +50,8 @@ from yoetz.application.observation_advice import (
 from yoetz.application.observation_control import build_observation_support_handlers
 from yoetz.application.observation_coordinator import ObservationCoordinator
 from yoetz.application.observation_verification import ObservationVerificationSupervisor
+from yoetz.application.privacy_control import build_privacy_support_handlers
+from yoetz.application.privacy_policy import PrivacyPolicyApplication
 from yoetz.application.service import (
     ControlProjectionBinding,
     ReadyApplicationFactory,
@@ -1137,16 +1139,26 @@ async def build_privacy_coordinator(
         True,
     )
     await gateway.reconcile_policy(effective, authority)
+    coordinator = PrivacyCoordinator(
+        policies,
+        classifier,
+        audit,
+        gateway,
+        clock,
+        ids,
+        service_generation=service_generation,
+    )
+    policy_app = PrivacyPolicyApplication(
+        policies,
+        audit,
+        gateway,
+        clock,
+        ids,
+        machine_scope,
+    )
+    coordinator.bind_policy_application(policy_app)
     return (
-        PrivacyCoordinator(
-            policies,
-            classifier,
-            audit,
-            gateway,
-            clock,
-            ids,
-            service_generation=service_generation,
-        ),
+        coordinator,
         policy,
         gateway,
     )
@@ -1694,6 +1706,10 @@ async def provide_service_ready_context(
         verification_supervisor=verification_supervisor,
     )
     observation_handlers = build_observation_support_handlers(observation_coordinator)
+    support_handlers = dict(observation_handlers)
+    privacy_app = cast(PrivacyCoordinator, privacy).policy_application
+    if privacy_app is not None:
+        support_handlers.update(build_privacy_support_handlers(privacy_app))
     return ServiceReadyContext(
         service_generation=service_generation,
         vault_generation=vault_generation,
@@ -1717,7 +1733,7 @@ async def provide_service_ready_context(
         profile=_profile(config),
         policy_packs=_policy_packs(manifest),
         version_manifest=manifest,
-        support_handlers=observation_handlers,
+        support_handlers=support_handlers,
         verification_supervisor=verification_supervisor,
         rediscover_pending_verification=observation_coordinator.rediscover_pending_verification,
         connected_provider_ids=connected_provider_ids,

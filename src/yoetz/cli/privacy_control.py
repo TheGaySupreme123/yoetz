@@ -10,12 +10,15 @@ from yoetz.cli.unlock import (
     _cancel_quietly,  # pyright: ignore[reportPrivateUsage]
     _drive_session,  # pyright: ignore[reportPrivateUsage]
     _ForegroundTerminal,  # pyright: ignore[reportPrivateUsage]
+    _overwrite,  # pyright: ignore[reportPrivateUsage]
     _render_preview,  # pyright: ignore[reportPrivateUsage]
+    _SuppliedSecretTerminal,  # pyright: ignore[reportPrivateUsage]
     _verify_preview,  # pyright: ignore[reportPrivateUsage]
 )
 from yoetz.service.confidential_client import HumanControlClient
 from yoetz.service.confidential_protocol import (
     DecisionAction,
+    DecisionRequiredPhase,
     HumanCeremonyKind,
     PrivacyDecisionResult,
     PrivacyDisclosureDecisionPreview,
@@ -103,10 +106,88 @@ async def _decide(
 
 async def decide_policy(
     pending_id: str,
+    *,
+    decision: Literal["approve", "deny"] | None = None,
+    passphrase: bytearray | None = None,
 ) -> PrivacyDecisionResult | PrivacyLocalEditResult:
-    """Decide one exact pending durable-policy proposal on the controlling TTY."""
+    """Decide one exact pending durable-policy proposal on the controlling TTY.
 
+    When ``decision`` and ``passphrase`` are both supplied, the ceremony runs without
+    prompting (same trust boundary as ``unlock_vault(passphrase=...)``).
+    """
+
+    if (decision is None) != (passphrase is None):
+        if passphrase is not None:
+            _overwrite(passphrase)
+        raise ValueError("privacy_decision_supplied_pair_invalid")
+    if decision is not None and passphrase is not None:
+        return await _decide_policy_supplied(pending_id, decision, passphrase)
     return await _decide("policy", pending_id)
+
+
+async def _decide_policy_supplied(
+    pending_id: str,
+    decision: Literal["approve", "deny"],
+    passphrase: bytearray,
+) -> PrivacyDecisionResult:
+    target = PrivacyPendingTarget("policy", pending_id)
+    kind = HumanCeremonyKind.PRIVACY_POLICY_DECISION
+    client = HumanControlClient()
+    terminal = _SuppliedSecretTerminal()
+    try:
+        session = await client.open(kind, target)
+        async with session:
+            try:
+                preview = _verify_preview(kind, target, session)
+                if type(preview) is not PrivacyPolicyDecisionPreview:
+                    raise HumanCeremonyCliError("preview_invalid")
+                current = session.opened.phase
+                if type(current) is DecisionRequiredPhase:
+                    await session.send_action(DecisionAction(decision))
+                    current = await session.wait_phase_or_result()
+                result, _observed = await _drive_session(
+                    session,
+                    _DecisionTerminal(terminal, decision),
+                    kind,
+                    target,
+                    current,
+                    passphrase=passphrase,
+                )
+                return cast(PrivacyDecisionResult, result)
+            except BaseException:
+                await _cancel_quietly(session)
+                raise
+    finally:
+        await client.close()
+        _overwrite(passphrase)
+
+
+class _DecisionTerminal:
+    """Supplied-secret terminal that answers one exact approve/deny choice.
+
+    Every prompt other than the decision stays non-prompting: the wrapped supplied-secret
+    terminal refuses to read, so a ceremony that asks for anything unsupplied fails closed.
+    """
+
+    __slots__ = ("_decision", "_inner")
+
+    def __init__(
+        self, inner: _SuppliedSecretTerminal, decision: Literal["approve", "deny"]
+    ) -> None:
+        self._inner = inner
+        self._decision = decision.encode("ascii")
+
+    def write(self, value: str) -> None:
+        self._inner.write(value)
+
+    def read_secret(self, prompt: str, maximum: int) -> bytearray:
+        return self._inner.read_secret(prompt, maximum)
+
+    def read_choice(self, prompt: str, allowed: tuple[bytes, ...]) -> bytes:
+        del prompt
+        if self._decision not in allowed:
+            raise HumanCeremonyCliError("input_invalid")
+        return self._decision
 
 
 async def decide_disclosure(

@@ -109,6 +109,7 @@ _SECRET_HEADER = struct.Struct(">4sBBHI")
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 _TOKEN = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", re.ASCII)
+_DATA_CATEGORY_TOKEN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
 _IDENTITY = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,127}$", re.ASCII)
 _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$", re.ASCII)
 _VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]{0,127}$", re.ASCII)
@@ -486,11 +487,15 @@ class PrivacyPolicyDecisionPreview:
         if type(self.pending_id) is not str or not self.pending_id:
             raise ValueError("privacy_policy_preview_invalid")
         _require_digest(self.diff_digest, "privacy_policy_preview_invalid")
-        for values in (self.categories, self.scopes):
-            if type(values) is not tuple or tuple(sorted(values)) != values:
+        if type(self.categories) is not tuple or tuple(sorted(self.categories)) != self.categories:
+            raise ValueError("privacy_policy_preview_invalid")
+        for value in self.categories:
+            if type(value) is not str or _DATA_CATEGORY_TOKEN.fullmatch(value) is None:
                 raise ValueError("privacy_policy_preview_invalid")
-            for value in values:
-                _require_token(value, "privacy_policy_preview_invalid")
+        if type(self.scopes) is not tuple or tuple(sorted(self.scopes)) != self.scopes:
+            raise ValueError("privacy_policy_preview_invalid")
+        for value in self.scopes:
+            _require_token(value, "privacy_policy_preview_invalid")
 
 
 @dataclass(frozen=True, slots=True)

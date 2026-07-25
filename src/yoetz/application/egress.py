@@ -7,6 +7,7 @@ import base64
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 
 from yoetz.domain.privacy import (
     ApprovedLocalDisclosureCase,
@@ -67,6 +68,9 @@ from yoetz.ports.semantic import (
 )
 from yoetz.protocol.canonical import canonical_digest, canonical_encode
 from yoetz.protocol.ids import IdKind
+
+if TYPE_CHECKING:
+    from yoetz.application.privacy_policy import PrivacyPolicyApplication
 
 __all__ = [
     "PrivacyCoordinator",
@@ -166,6 +170,7 @@ class PrivacyCoordinator:
         "_human",
         "_ids",
         "_policies",
+        "_policy_app",
         "_service_generation",
     )
 
@@ -192,9 +197,17 @@ class PrivacyCoordinator:
         self._ids = ids
         self._service_generation = service_generation
         self._human = human
+        self._policy_app: PrivacyPolicyApplication | None = None
         self._closed = False
         self._close_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
+
+    @property
+    def policy_application(self) -> PrivacyPolicyApplication | None:
+        return self._policy_app
+
+    def bind_policy_application(self, app: PrivacyPolicyApplication) -> None:
+        self._policy_app = app
 
     async def evaluate_semantic(
         self, candidate: CandidateContext, deadline: Deadline

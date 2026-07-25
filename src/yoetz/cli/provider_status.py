@@ -6,17 +6,19 @@ dispatch, without claiming a live provider smoke or writing any state.
 
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Mapping
 from typing import Final, cast
 
 from yoetz.config.load import load_config
+from yoetz.config.paths import state_dir
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import ControlClientKind, ControlError
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.service.client import connect_service
 
-__all__ = ["provider_status_report", "run_provider_status"]
+__all__ = ["machine_scope_request", "provider_status_report", "run_provider_status"]
 
 _SCHEMA: Final = "yoetz.provider-status/1"
 
@@ -78,6 +80,27 @@ def _channel_enabled(policy: Mapping[str, object], channel: str) -> bool | None:
     return None
 
 
+def machine_scope_request() -> JsonObject:
+    """Build the ``privacy_get_effective`` body for this installation's machine scope.
+
+    ``scope`` is required by the frozen request schema, so an unreadable installation id is
+    reported as a caller error here rather than sent as a body the service must reject.
+    """
+
+    try:
+        state = json.loads((state_dir() / "installation-state.json").read_text())
+        installation_id = state["installation_id"]
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        raise ControlError("invalid_request") from exc
+    if type(installation_id) is not str or not installation_id:
+        raise ControlError("invalid_request")
+    body: dict[str, JsonValue] = {
+        "schema_version": "1.0.0",
+        "scope": {"kind": "machine", "installation_id": installation_id},
+    }
+    return JsonObject(body)
+
+
 async def provider_status_report() -> dict[str, JsonValue]:
     """Compose a nonsecret readiness snapshot from config, service, and policy."""
 
@@ -107,7 +130,7 @@ async def provider_status_report() -> dict[str, JsonValue]:
             if status.state.value == "ready":
                 credential_connected = "external_provider" in status.capabilities
                 try:
-                    effective = await client.privacy_get_effective(JsonObject({}))
+                    effective = await client.privacy_get_effective(machine_scope_request())
                 except Exception:
                     effective = None
                 if isinstance(effective, Mapping):
