@@ -24,6 +24,22 @@ _REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 _BUILD_TIMEOUT: Final = 120
 _PUBLIC_REGISTRY: Final = "https://pypi.org/simple"
 
+
+def _uv_env() -> dict[str, str]:
+    """Environment for ``uv export`` runs that select their lock mode by flag.
+
+    CI exports ``UV_LOCKED=1`` for the ambient ``uv run --locked`` steps, and uv rejects that
+    together with the ``--frozen`` these exports pass, exiting 2 before doing any work. The lock
+    mode belongs to the command, so drop the inherited variable rather than let the surrounding
+    workflow decide it.
+    """
+
+    env = dict(os.environ)
+    env.pop("UV_LOCKED", None)
+    env.pop("UV_FROZEN", None)
+    return env
+
+
 # APSW's own PyPI metadata reports the vague classic marker "any-OSI"; the reviewed disposition is
 # recorded here rather than trusting an uninformative upstream field. APSW itself is zlib-licensed
 # and bundles the public-domain SQLite amalgamation (see ADR-007).
@@ -232,7 +248,12 @@ def _install_isolated(
     for extra in extras:
         export_command += ["--extra", extra]
     subprocess.run(  # noqa: S603 - fixed argv, no shell, trusted local uv binary
-        export_command, cwd=_REPO_ROOT, capture_output=True, check=True, timeout=60
+        export_command,
+        cwd=_REPO_ROOT,
+        env=_uv_env(),
+        capture_output=True,
+        check=True,
+        timeout=60,
     )
     subprocess.run(  # noqa: S603 - fixed argv, no shell
         [

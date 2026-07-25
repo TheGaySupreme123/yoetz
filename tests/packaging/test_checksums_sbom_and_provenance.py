@@ -42,6 +42,21 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _uv_env() -> dict[str, str]:
+    """Environment for ``uv export`` runs that select their lock mode by flag.
+
+    CI exports ``UV_LOCKED=1`` for the ambient ``uv run --locked`` steps, and uv rejects that
+    together with the ``--frozen`` these exports pass, exiting 2 before doing any work. The lock
+    mode belongs to the command, so drop the inherited variable rather than let the surrounding
+    workflow decide it.
+    """
+
+    env = dict(os.environ)
+    env.pop("UV_LOCKED", None)
+    env.pop("UV_FROZEN", None)
+    return env
+
+
 def _build_candidate(out_dir: Path) -> tuple[Path, Path]:
     environment = dict(os.environ)
     environment["TZ"] = "UTC"
@@ -203,6 +218,7 @@ def sbom_document() -> Any:
             "--frozen",
         ],
         cwd=_REPO_ROOT,
+        env=_uv_env(),
         capture_output=True,
         check=True,
         timeout=60,
@@ -247,6 +263,7 @@ def test_sbom_reconciles_with_the_same_locked_target_exported_as_requirements(
             "--frozen",
         ],
         cwd=_REPO_ROOT,
+        env=_uv_env(),
         capture_output=True,
         check=True,
         timeout=60,
