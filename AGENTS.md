@@ -8,12 +8,14 @@ Short contract for coding agents and humans editing this repository. Human proce
 For public behavior, resolve in this order:
 
 1. [`docs/adr/`](docs/adr/) — architecture decisions;
-2. [`specs/INTERFACES.md`](specs/INTERFACES.md) — shared names and trust boundaries;
-3. the owning file under [`specs/`](specs/) for the concrete path (see
-   [`specs/FILE_MANIFEST.md`](specs/FILE_MANIFEST.md)).
+2. [`docs/INTERFACES.md`](docs/INTERFACES.md) — shared names and trust boundaries;
+3. the code and the tests that lock it.
 
-Do not invent behavior that contradicts those authorities. When behavior changes, update the owning
-spec with the code.
+For exact wire shape and byte identity, [`schemas/`](schemas/) and [`fixtures/`](fixtures/) win over
+prose. Start at [`docs/architecture.md`](docs/architecture.md) to find the owning module.
+
+Do not invent behavior that contradicts those authorities. When behavior changes, update the ADR or
+affected `docs/` page in the same change.
 
 ## Intake (required)
 
@@ -29,14 +31,18 @@ uv sync
 uv run pytest <path-to-touched-tests>
 ```
 
-Use Ruff and the pinned npm Pyright (`npx --no-install pyright`) from repository metadata. Prefer
-the smallest relevant test slice.
+Use Ruff and the pinned npm Pyright (`npx --no-install pyright`) from repository metadata. Prefer the
+smallest relevant test slice.
 
 ## Hard rules
 
+- Do not weaken the honesty rules in [`CONTRIBUTING.md`](CONTRIBUTING.md). Coverage-bounded wording,
+  idempotent retryable writes, no user-controlled content in structural tables/logs/errors,
+  deterministic reproducibility, fenced advisory semantic output, and independently authorized
+  network channels are load-bearing, not stylistic.
 - Do not hand-edit generated or frozen artifacts (lock files, generated schema mirrors, release
   manifests); regenerate via owning scripts.
-- Never copy ignored local drafting inputs under `docs/architecture/` (or similar) into public
-  files.
+- Never copy gitignored local drafting inputs under `docs/architecture/` (or similar) into public
+  files. Note that `docs/architecture.md` — the public overview — is a different, tracked file.
 - Disposition every human and code-review-agent comment on a PR: fix it, or reply why it is invalid
   or out of scope. Silence is not merge-ready.

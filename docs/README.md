@@ -1,0 +1,39 @@
+# Yoetz documentation
+
+## Start here
+
+- [Using Yoetz](usage/) — install, first run, the six operations, privacy, providers, receipts.
+- [Architecture](architecture.md) — how the system is put together and why.
+
+## Authority
+
+Resolve questions about public behavior in this order:
+
+1. [`docs/adr/`](adr/) — the architecture decisions.
+2. [`docs/INTERFACES.md`](INTERFACES.md) — shared names and trust boundaries: ID prefixes, error
+   codes, event families, coverage enums, port signatures.
+3. The code and its tests.
+
+For exact wire shape and byte identity, the JSON Schemas under [`schemas/`](../schemas/) and the
+golden vectors under [`fixtures/`](../fixtures/) win over any prose, including these pages.
+
+## Reference
+
+- [`docs/OPEN_QUESTIONS.md`](OPEN_QUESTIONS.md) — the decision ledger: founder, empirical,
+  independent-review, and deferred items still gating release claims.
+- [`docs/protocol/`](protocol/) — the technical protocol: compatibility, data egress and privacy,
+  local service security, the privacy setup wizard.
+- [`docs/runbooks/`](runbooks/) — operational procedures: backup/restore, key recovery, migration
+  rollback, quarantine recovery, Codex integration.
+- [`docs/public-claims.json`](public-claims.json) — every public claim bound to its requirements,
+  surfaces, tests, and honest release status. Enforced by `tests/conformance/claims/`.
+- [`guidance/`](../guidance/) — agent-facing guidance, shipped byte-identically to every harness and
+  over MCP.
+- [`docs/postmortems/`](postmortems/) — dated incident and dogfood records. Historical: they are not
+  updated as the product changes.
+
+## Root documents
+
+[`README.md`](../README.md) · [`PRIVACY.md`](../PRIVACY.md) · [`SECURITY.md`](../SECURITY.md) ·
+[`CONTRIBUTING.md`](../CONTRIBUTING.md) · [`AGENTS.md`](../AGENTS.md) ·
+[`CHANGELOG.md`](../CHANGELOG.md) · [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md)

@@ -54,6 +54,21 @@ released versions.
 
 ### Changed
 
+- **Retired the spec-mirror tree.** Yoetz was built spec-first, with one Markdown owner per planned
+  file at a mirrored path under `specs/` (640 files, ~63k lines) plus a CI-enforced ownership
+  manifest. That method finished its job — all 626 declared files exist — so the tree was removed
+  rather than maintained as a second copy of shipped code. The authority chain is now `docs/adr/` →
+  `docs/INTERFACES.md` → code and tests. `INTERFACES.md` and `OPEN_QUESTIONS.md` moved to `docs/`;
+  `scripts/verify_spec_manifest.py` and its CI gates are gone; required check names are unchanged.
+  The full tree stays recoverable at tag `specs-tree-final` (`git show specs-tree-final:specs/…`).
+- **New user documentation** replacing what the tree conveyed: `docs/architecture.md` (topology,
+  module map, honesty rules), `docs/usage/` (install and first run, the six operations, privacy and
+  semantic review, providers and credentials, receipts and coverage), and `docs/README.md` /
+  `docs/adr/README.md` indexes. `README.md`, `CONTRIBUTING.md`, and `AGENTS.md` were rewritten — the
+  README had still described the repository as containing no implementation.
+- Release and PR CI no longer swallow packaging/subprocess/integration suite failures behind a
+  "tests not yet present" warning; those gates now fail honestly.
+
 - Strengthened contribution intake: issue-first process with duplicate search, design gates for
   protocol/privacy/storage/release/ADR work, mandatory PR checklist, and required disposition of
   human and code-review-agent comments (`CONTRIBUTING.md`, `.github/ISSUE_TEMPLATE/`,
