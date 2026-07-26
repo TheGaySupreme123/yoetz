@@ -56,7 +56,8 @@ released versions.
   `unresolved_finding_count`, `blocking_conditions`), so an agent can see what currently bounds a
   completion conclusion before spending a `check` or `receipt` rather than learning it afterwards
   from an insufficient receipt. Derived per request: it records nothing, creates no verdict or IDs,
-  and never strengthens coverage.
+  and never strengthens coverage. When the compact singleton is unreadable both counts are `null`
+  and the only condition is `readiness_unknown` — unknown is reported as unknown, never as zero.
 
 - A worked `publish_work` example per ordinary publishable event family. Previously only
   `plan_published` had one, and agents hand-derived action/result/evidence/claim shapes from a

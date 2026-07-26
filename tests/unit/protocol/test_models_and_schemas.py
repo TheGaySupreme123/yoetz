@@ -1093,6 +1093,65 @@ def test_all_result_roots_serialize_success_and_shared_failure_without_wrapper()
         assert "root" not in dumped
 
 
+def test_closure_readiness_never_reports_unknown_state_as_a_clean_record() -> None:
+    """Missing compact data must read as unknown, never as zero open obligations.
+
+    Compact omits its singleton when the task title is unreadable. Filling that with zeros would
+    manufacture "nothing is open" out of absent data — exactly the kind of unearned claim the
+    coverage rules forbid.
+    """
+
+    models = _models_module()
+    model = models.StatusClosureReadinessModel
+
+    unknown = model.model_validate(
+        {
+            "open_obligation_count": None,
+            "unresolved_finding_count": None,
+            "blocking_conditions": ["readiness_unknown"],
+        }
+    )
+    assert unknown.open_obligation_count is None
+    assert unknown.blocking_conditions == ("readiness_unknown",)
+
+    # Absent counts must declare themselves unknown...
+    with pytest.raises(ValidationError):
+        model.model_validate(
+            {
+                "open_obligation_count": None,
+                "unresolved_finding_count": None,
+                "blocking_conditions": [],
+            }
+        )
+    # ...known counts must not claim to be unknown...
+    with pytest.raises(ValidationError):
+        model.model_validate(
+            {
+                "open_obligation_count": "0",
+                "unresolved_finding_count": "0",
+                "blocking_conditions": ["readiness_unknown"],
+            }
+        )
+    # ...unknown is never partial...
+    with pytest.raises(ValidationError):
+        model.model_validate(
+            {
+                "open_obligation_count": "2",
+                "unresolved_finding_count": None,
+                "blocking_conditions": ["readiness_unknown"],
+            }
+        )
+    # ...and it is never mixed with conditions derived from data that could not be read.
+    with pytest.raises(ValidationError):
+        model.model_validate(
+            {
+                "open_obligation_count": None,
+                "unresolved_finding_count": None,
+                "blocking_conditions": ["readiness_unknown", "no_plan_published"],
+            }
+        )
+
+
 def test_unknown_fields_and_result_discriminator_are_strict() -> None:
     models = _models_module()
     with pytest.raises(ValidationError):

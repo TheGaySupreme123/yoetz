@@ -750,11 +750,13 @@ class ServiceDaemon:
             )
             self._validate_success_body(request, projected)
             return projected
-        except asyncio.CancelledError:
-            raise
         except ControlError, LifecycleError, PublicOperationError:
             raise
-        except Exception as exc:
+        except (asyncio.CancelledError, Exception) as exc:
+            # Cancellation is reclassified here too. `dispatch` already converts a cancelled call
+            # into a result rather than propagating, and past this point the operation may be
+            # durable — reporting CANCELLED would say the work did not happen and would omit the
+            # replay remedy. This changes only how an already-converted cancellation is described.
             record_unexpected_exception_without_raising(
                 exc,
                 component="service.daemon",

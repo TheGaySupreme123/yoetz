@@ -530,13 +530,17 @@ async def _closure_readiness(
         )
     )
     item = page.items[0] if page.items else None
-    open_obligations = 0
-    unresolved_findings = 0
-    has_plan = False
-    if type(item) is StatusCompactItemModel:
-        open_obligations = int(item.open_obligation_count)
-        unresolved_findings = int(item.unresolved_finding_count)
-        has_plan = item.current_plan_event_id is not None
+    if type(item) is not StatusCompactItemModel:
+        # Compact omits its singleton when the task title is unreadable. Counting that as zero
+        # open obligations would manufacture a clean record out of missing data.
+        return StatusClosureReadinessModel(
+            open_obligation_count=None,
+            unresolved_finding_count=None,
+            blocking_conditions=("readiness_unknown",),
+        )
+    open_obligations = int(item.open_obligation_count)
+    unresolved_findings = int(item.unresolved_finding_count)
+    has_plan = item.current_plan_event_id is not None
     blocking: list[str] = []
     if open_obligations:
         blocking.append("obligations_open")
@@ -557,6 +561,7 @@ async def _closure_readiness(
                     "obligations_open",
                     "findings_unresolved",
                     "no_plan_published",
+                    "readiness_unknown",
                     "projection_stale",
                     "coverage_gaps_declared",
                 ],
@@ -612,6 +617,8 @@ async def execute_status(app: Application, request: StatusRequest) -> StatusInte
                     expected_version,
                 )
             )
+            # The advice view derives from the same compact page closure readiness needs.
+            compact_page = raw_page
             snapshot: AdviceSnapshot | None = None
             if runtime.observation is not None:
                 workspace = None

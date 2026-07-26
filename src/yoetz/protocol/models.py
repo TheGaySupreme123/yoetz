@@ -2009,8 +2009,8 @@ class StatusClosureReadinessModel(_ClosedModel):
     of discovering it afterwards from the receipt.
     """
 
-    open_obligation_count: CanonicalUInt64Wire
-    unresolved_finding_count: CanonicalUInt64Wire
+    open_obligation_count: CanonicalUInt64Wire | None
+    unresolved_finding_count: CanonicalUInt64Wire | None
     blocking_conditions: tuple[
         Literal[
             "obligations_open",
@@ -2018,6 +2018,7 @@ class StatusClosureReadinessModel(_ClosedModel):
             "no_plan_published",
             "projection_stale",
             "coverage_gaps_declared",
+            "readiness_unknown",
         ],
         ...,
     ]
@@ -2025,6 +2026,16 @@ class StatusClosureReadinessModel(_ClosedModel):
     @model_validator(mode="after")
     def _validate_closure_readiness(self) -> StatusClosureReadinessModel:
         _require_unique(self.blocking_conditions, limit=8)
+        # Absent counts mean the compact singleton could not be read (an unreadable task title
+        # omits it). Reporting zero there would assert "nothing is open" from missing data, so
+        # unknown must be null and must say so rather than look like a clean record.
+        unknown = self.open_obligation_count is None or self.unresolved_finding_count is None
+        if unknown != ("readiness_unknown" in self.blocking_conditions):
+            raise ValueError("closure_readiness_unknown_mismatch")
+        if unknown and self.open_obligation_count != self.unresolved_finding_count:
+            raise ValueError("closure_readiness_partial_unknown")
+        if unknown and set(self.blocking_conditions) != {"readiness_unknown"}:
+            raise ValueError("closure_readiness_unknown_not_exclusive")
         return self
 
 
