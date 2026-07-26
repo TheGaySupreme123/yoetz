@@ -1337,8 +1337,10 @@ def privacy_receipts_get(
 
 @app.command("menu")
 def menu_command() -> None:
-    """Open the interactive menu for setup, connections, privacy, and service."""
+    """Open the interactive Yoetz interface for setup, connections, privacy, and service."""
 
+    if _open_tui(first_run=False):
+        return
     module = importlib.import_module("yoetz.cli.menu")
     operation = cast(Callable[[], int], getattr(module, "run_menu"))
     _finish(operation())
@@ -1421,12 +1423,17 @@ def root(
         raise typer.BadParameter("--fireworks, --provider, and --model require --set")
     if context.invoked_subcommand is not None:
         return
-    # Bare invocation (ADR-013): an interactive terminal with no completion marker
-    # gets the first-run wizard once and then lands in the menu; a terminal with the
-    # marker goes straight to the menu; every non-TTY invocation keeps the help text.
+    # Bare invocation (ADR-017, amending ADR-013): a human at a real terminal gets
+    # the full-screen interface, with first run folded into it as its opening
+    # steps rather than a separate wizard. When the terminal UI is unavailable or
+    # declined we fall back to the ADR-013 prompt-loop menu, and every non-TTY,
+    # piped, CI, or `--help` invocation keeps the historical help text.
     module = importlib.import_module("yoetz.cli.setup")
     offer = cast(Callable[[], bool], getattr(module, "should_offer_first_run"))
-    if offer():
+    first_run = offer()
+    if _open_tui(first_run=first_run):
+        return
+    if first_run:
         operation = _setup_operation("run_setup_wizard")
         _finish(
             run_async(
@@ -1446,6 +1453,28 @@ def root(
         return
     typer.echo(context.get_help())
     raise typer.Exit(0)
+
+
+def _open_tui(*, first_run: bool) -> bool:
+    """Open the full-screen interface when this really is a human terminal.
+
+    Returns ``False`` — having emitted nothing — whenever the caller should keep
+    the historical behaviour instead: automation, a pipe, an opt-out, or an
+    installation whose optional rendering dependency is absent.
+    """
+
+    tui = importlib.import_module("yoetz.tui")
+    available = cast(Callable[[], bool], getattr(tui, "tui_available"))
+    supported = cast(Callable[[], bool], getattr(tui, "tui_supported"))
+    if not available() or not supported():
+        return False
+    runner = cast(Callable[..., int], getattr(tui, "run_tui"))
+    unavailable = cast(int, getattr(tui, "TUI_UNAVAILABLE"))
+    code = runner(first_run=first_run)
+    if code == unavailable:
+        return False
+    _finish(code)
+    return True
 
 
 def main() -> None:

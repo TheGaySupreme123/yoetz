@@ -1,0 +1,16 @@
+✓ Harness detected                  verified — Codex Desktop 0.44
+✓ MCP registered                    verified
+✓ MCP verified                      verified
+✓ Guidance installed                verified
+✓ Structural hooks installed        verified
+✓ Project consent active            verified
+✓ Approved-check policy trusted     verified
+✓ Local service reachable           verified — ready
+✓ Vault ready                       verified — os_keyring
+✓ Local deterministic checks        verified
+○ Provider binding saved            not configured
+○ Credential stored                 not configured
+! Provider connection tested        not proven — no live probe has run
+○ Deeper-review evaluator composed  not configured
+○ Privacy permits external review   not configured — local only
+○ Deeper review ready               not configured — external review is off

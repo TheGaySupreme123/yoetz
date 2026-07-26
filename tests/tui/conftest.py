@@ -1,0 +1,50 @@
+"""Shared harness for driving the Yoetz terminal UI in tests."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any, cast
+
+import pytest
+
+from builders.tui_runtime import FakeRuntime
+from yoetz.tui.app import YoetzTui
+
+
+@pytest.fixture
+def make_app(monkeypatch: pytest.MonkeyPatch) -> Callable[..., YoetzTui]:
+    """Build a ``YoetzTui`` over a fake runtime, with the marker write stubbed.
+
+    Completing setup writes a first-run marker into the real state directory;
+    tests must never do that, so the write is replaced with a recorded no-op.
+    """
+
+    import yoetz.cli.setup as setup_module
+
+    written: list[str] = []
+
+    def record(outcome: str) -> bool:
+        written.append(outcome)
+        return True
+
+    monkeypatch.setattr(setup_module, "write_setup_marker", record)
+
+    def build(
+        *,
+        first_run: bool = False,
+        runtime: FakeRuntime | None = None,
+        suspendable: bool = True,
+    ) -> YoetzTui:
+        app = YoetzTui(cast(Any, runtime or FakeRuntime()), first_run=first_run)
+        app.markers_written = written  # type: ignore[attr-defined]
+        if suspendable:
+            # A headless test driver cannot suspend a real terminal. Substituting
+            # the handoff models "the ceremony ran on the controlling TTY" while
+            # keeping every other step — including the consent screen — real.
+            async def handoff(operation: Any) -> Any:
+                return await operation()
+
+            monkeypatch.setattr(app, "hand_over_terminal", handoff)
+        return app
+
+    return build

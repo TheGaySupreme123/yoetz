@@ -43,12 +43,15 @@ from yoetz.protocol.canonical import JsonValue, canonical_encode
 
 __all__ = [
     "SETUP_MARKER_SCHEMA",
+    "apply_codex_integration",
+    "check_policy_preview",
     "integrate_mcp",
     "run_provider_setup",
     "run_setup_wizard",
     "setup_marker_present",
     "setup_status",
     "should_offer_first_run",
+    "write_setup_marker",
 ]
 
 SETUP_MARKER_SCHEMA: Final = "yoetz.setup-wizard-marker/1"
@@ -500,8 +503,17 @@ async def _codex_integration_step(
     interactive: bool,
     accept: bool,
     workspace: Path | None = None,
+    approved_preview_digest: str | None = None,
+    approved_policy_digest: str | None = None,
 ) -> dict[str, JsonValue]:
-    """Preview and apply one Codex integration: plugin + MCP + consent."""
+    """Preview and apply one Codex integration: plugin + MCP + consent.
+
+    ``approved_preview_digest``/``approved_policy_digest`` let a caller that has
+    already shown a human the exact preview echo both digests back. They are a
+    *stricter* gate than ``accept``, not a softer one: the step re-previews and
+    refuses as stale if either digest has moved since the approval was shown,
+    and only an explicitly echoed policy digest activates the policy trust.
+    """
 
     mcp_service = HarnessMcpService(CodexMcpAdapter())
     plugin_service = CodexPluginService()
@@ -539,8 +551,26 @@ async def _codex_integration_step(
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
 
+    if approved_preview_digest is not None and approved_preview_digest != mcp_preview.preview_digest:
+        return {
+            "outcome": "failed",
+            "reason": "preview_stale",
+            "state": mcp_preview.state_before.value,
+            "plugin": {"outcome": "skipped", "presence": plugin_preview.presence_before.value},
+            "observation_consent": {"outcome": "absent", "workspace_commitment": None},
+        }
+
     accepted = accept
     policy_digest_confirmed = False
+    if approved_preview_digest is not None:
+        # The caller displayed this exact preview and collected an explicit yes.
+        accepted = True
+        shown = check_policy.get("policy_digest")
+        policy_digest_confirmed = (
+            approved_policy_digest is not None
+            and type(shown) is str
+            and approved_policy_digest == shown
+        )
     if interactive and not accepted:
         _emit_registration_preview(binary, check_policy)
         typer.echo(
@@ -672,6 +702,43 @@ async def _register_step(
     """Backward-compatible name for the complete Codex integration step."""
 
     return await _codex_integration_step(binary, interactive=interactive, accept=accept)
+
+
+async def apply_codex_integration(
+    binary: HarnessBinary,
+    *,
+    workspace: Path | None = None,
+    approved_preview_digest: str,
+    approved_policy_digest: str | None = None,
+) -> dict[str, JsonValue]:
+    """Apply the exact integration a caller already previewed and got approved.
+
+    This exists so a non-prompt front end (the terminal UI) can reuse the whole
+    plugin → MCP → consent → policy-trust sequence with its gates intact instead
+    of reassembling it. It never prompts, and it refuses rather than proceed when
+    the preview it is handed no longer matches what the services would propose.
+    """
+
+    return await _codex_integration_step(
+        binary,
+        interactive=False,
+        accept=False,
+        workspace=workspace,
+        approved_preview_digest=approved_preview_digest,
+        approved_policy_digest=approved_policy_digest,
+    )
+
+
+def check_policy_preview(workspace: Path | None = None) -> dict[str, JsonValue]:
+    """Public path-free approved-check policy preview for non-prompt front ends."""
+
+    return _check_policy_preview(workspace)
+
+
+def write_setup_marker(outcome: str) -> bool:
+    """Record first-run completion; shared by the wizard and the terminal UI."""
+
+    return _write_setup_marker(outcome)
 
 
 async def _service_reachability(*, start_if_absent: bool = False) -> dict[str, JsonValue]:

@@ -85,3 +85,64 @@ def test_launcher_fails_with_guidance_when_uv_is_absent(tmp_path: Path) -> None:
     stderr = completed.stderr.decode("utf-8")
     assert "uv" in stderr
     assert "astral.sh/uv" in stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is a contributor-only tool")
+def test_launcher_reports_signal_termination_as_the_conventional_exit_code(
+    tmp_path: Path,
+) -> None:
+    """A script that checks exit codes must see the same value either entry point gives.
+
+    `npx yoetz` has to be interchangeable with the Python console script, and an
+    interrupted interactive session exits 130 there.
+    """
+
+    node = shutil.which("node")
+    assert node is not None
+    shim_dir = tmp_path / "shims"
+    shim_dir.mkdir()
+    (shim_dir / "uv").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    # Kill the child with SIGINT, exactly as Ctrl-C at a terminal would.
+    (shim_dir / "uvx").write_text("#!/bin/sh\nkill -INT $$\n", encoding="utf-8")
+    os.chmod(shim_dir / "uv", 0o755)
+    os.chmod(shim_dir / "uvx", 0o755)
+
+    completed = subprocess.run(
+        (node, str(_LAUNCHER_DIR / "bin" / "yoetz.js")),
+        env={**os.environ, "PATH": str(shim_dir)},
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 130
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is a contributor-only tool")
+def test_launcher_guidance_names_the_runtime_and_a_concrete_install_command(
+    tmp_path: Path,
+) -> None:
+    node = shutil.which("node")
+    assert node is not None
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    completed = subprocess.run(
+        (node, str(_LAUNCHER_DIR / "bin" / "yoetz.js")),
+        env={**os.environ, "PATH": str(empty_dir)},
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    stderr = completed.stderr.decode("utf-8")
+    assert "Python 3.14" in stderr
+    assert "astral.sh/uv/install.sh" in stderr
+    assert "never installs anything itself" in stderr
+
+
+def test_launcher_never_reimplements_setup_or_interface_logic() -> None:
+    """The launcher stays a delegator: no TTY probing, no setup, no interface."""
+
+    source = (_LAUNCHER_DIR / "bin" / "yoetz.js").read_text(encoding="utf-8")
+    for forbidden in ("isTTY", "readline", "prompt(", "createInterface", "pip install"):
+        assert forbidden not in source, forbidden
+    # stdio must be inherited so the child sees the real controlling terminal.
+    assert 'stdio: "inherit"' in source

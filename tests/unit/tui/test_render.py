@@ -1,0 +1,368 @@
+"""Rendering: exact wording, honest claims, and narrow-terminal behaviour.
+
+These tests are the reason rendering is a pure function. The wording of an
+approval screen, a readiness summary, or a privacy disclosure is a product
+promise, so it is asserted directly rather than inferred from a screenshot.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+
+import pytest
+
+import builders.tui as build
+from yoetz.tui.models import LayerState, PrivacyChoice, ProviderPosture, ReadinessLayer
+from yoetz.tui.render import (
+    MIN_ASCII_WIDTH,
+    render_detection,
+    render_doctor,
+    render_finish,
+    render_foreign_entry,
+    render_integration_preview,
+    render_integration_technical_details,
+    render_layers,
+    render_privacy_disclosure,
+    render_project_trust,
+    render_provider_endpoint,
+    render_provider_failure,
+    render_provider_stored,
+    render_receipt,
+    render_session_header,
+    render_status,
+    render_welcome,
+    render_work_detail,
+    yoetz_mark,
+)
+
+Snapshot = Callable[[str, Sequence[str]], None]
+
+WIDE = 76
+NARROW = 40
+
+
+# ---------------------------------------------------------------------------
+# First run
+# ---------------------------------------------------------------------------
+
+
+def test_welcome_shows_the_wordmark_only_when_the_terminal_can_hold_it() -> None:
+    assert yoetz_mark(MIN_ASCII_WIDTH) != ()
+    assert yoetz_mark(MIN_ASCII_WIDTH - 1) == ()
+    assert "Welcome to Yoetz" in "\n".join(render_welcome(NARROW))
+
+
+def test_welcome_renders_at_wide_and_narrow_widths(assert_snapshot: Snapshot) -> None:
+    assert_snapshot("welcome_wide", render_welcome(WIDE))
+    assert_snapshot("welcome_narrow", render_welcome(NARROW))
+
+
+def test_detection_distinguishes_found_from_not_yet_connected(
+    assert_snapshot: Snapshot,
+) -> None:
+    lines = render_detection(build.detection(), WIDE)
+    assert_snapshot("detection", lines)
+    # Being detected is never rendered as being connected.
+    assert any(line.startswith("✓ Codex Desktop") for line in lines)
+    assert "○ Yoetz is not connected yet" in lines
+
+
+def test_detection_without_a_harness_says_so_rather_than_claiming_one() -> None:
+    lines = render_detection(build.detection(harnesses=()), WIDE)
+    assert "○ No supported agent installation found" in lines
+    assert not any(line.startswith("✓ Codex") for line in lines)
+
+
+def test_project_trust_names_the_repository_root_it_applies_to() -> None:
+    lines = render_project_trust(build.detection(), WIDE)
+    assert any("You are in" in line for line in lines)
+    assert "Do you trust the contents of this project?" in lines
+
+
+def test_launching_from_a_subdirectory_explains_that_trust_covers_the_root() -> None:
+    lines = render_project_trust(
+        build.detection(launched_from_subdirectory=True, cwd="/Users/dev/Projects/yoetz/src"),
+        WIDE,
+    )
+    joined = " ".join(lines)
+    assert "subfolder" in joined
+    assert "repository root" in joined
+
+
+def test_integration_preview_states_every_change_and_every_safety_boundary(
+    assert_snapshot: Snapshot,
+) -> None:
+    lines = render_integration_preview(build.plan(), WIDE)
+    assert_snapshot("integration_preview", lines)
+    joined = "\n".join(lines)
+    for promise in (
+        "No repository contents are uploaded during setup",
+        "No API key is written to the project",
+        "External LLM review remains off",
+        "A foreign MCP entry will never be replaced",
+    ):
+        assert promise in joined
+    assert "Register MCP server: yoetz mcp serve" in joined
+    assert "7f8a92bd" in joined
+
+
+def test_integration_preview_hides_paths_and_digests_behind_technical_details() -> None:
+    plan = build.plan()
+    friendly = "\n".join(render_integration_preview(plan, WIDE))
+    assert plan.executable_path not in friendly
+    assert plan.preview_digest not in friendly
+
+    technical = "\n".join(render_integration_technical_details(plan, 120))
+    assert plan.executable_path in technical
+    assert plan.preview_digest in technical
+    assert plan.mcp_command in technical
+    assert "6" in technical  # planned file count
+
+
+def test_a_foreign_entry_is_a_block_that_reports_nothing_was_changed() -> None:
+    lines = render_foreign_entry("", WIDE)
+    joined = "\n".join(lines)
+    assert lines[0].startswith("■")
+    assert "Nothing was replaced or removed." in lines
+    assert "force" not in joined.lower()
+    assert "replace" not in joined.lower().replace("was replaced", "")
+
+
+def test_finish_reports_off_layers_as_off_and_never_as_verified(
+    assert_snapshot: Snapshot,
+) -> None:
+    lines = render_finish(build.snapshot(), WIDE)
+    assert_snapshot("finish", lines)
+    joined = "\n".join(lines)
+    assert "Nothing is being sent to an external review model." in joined
+    assert "External review" in joined
+    external = next(line for line in lines if line.startswith("External review"))
+    assert external.endswith("off")
+
+
+# ---------------------------------------------------------------------------
+# Readiness honesty
+# ---------------------------------------------------------------------------
+
+
+def test_every_readiness_layer_is_rendered_separately(assert_snapshot: Snapshot) -> None:
+    lines = render_layers(build.layers(), 100)
+    assert_snapshot("layers", lines)
+    assert len(lines) == len(build.layers())
+    for label in (
+        "Harness detected",
+        "MCP registered",
+        "MCP verified",
+        "Guidance installed",
+        "Structural hooks installed",
+        "Project consent active",
+        "Approved-check policy trusted",
+        "Local service reachable",
+        "Vault ready",
+        "Provider binding saved",
+        "Credential stored",
+        "Provider connection tested",
+        "Deeper-review evaluator composed",
+        "Privacy permits external review",
+        "Deeper review ready",
+    ):
+        assert any(label in line for line in lines), label
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        (LayerState.VERIFIED, "verified"),
+        (LayerState.UNPROVEN, "not proven"),
+        (LayerState.NOT_CONFIGURED, "not configured"),
+        (LayerState.BLOCKED, "blocked"),
+        (LayerState.UNKNOWN, "unknown"),
+    ],
+)
+def test_a_layer_never_reads_stronger_than_its_state(state: LayerState, expected: str) -> None:
+    layer = ReadinessLayer("k", "Some layer", state)
+    line = render_layers((layer,), 80)[0]
+    assert expected in line
+    if state is not LayerState.VERIFIED:
+        assert "verified" not in line
+
+
+def test_status_keeps_registration_and_verification_apart(
+    assert_snapshot: Snapshot,
+) -> None:
+    lines = render_status(build.snapshot(), WIDE)
+    assert_snapshot("status", lines)
+    assert "Nothing is leaving this computer." in lines
+    assert any(line.startswith("Open work") for line in lines)
+
+
+def test_status_reports_unreadable_work_as_unavailable_not_as_zero() -> None:
+    lines = render_status(build.snapshot(work_readable=False), WIDE)
+    joined = "\n".join(lines)
+    assert "unavailable" in joined
+    assert "0 tasks" not in joined
+
+
+def test_status_makes_no_privacy_claim_when_the_policy_cannot_be_read() -> None:
+    from yoetz.tui.models import PrivacyPosture
+
+    unreadable = PrivacyPosture(profile=None, llm_inference_enabled=None, readable=False)
+    lines = render_status(build.snapshot(privacy=unreadable), WIDE)
+    joined = "\n".join(lines)
+    assert "Nothing is leaving this computer." not in joined
+    assert "could not be read" in joined
+
+
+# ---------------------------------------------------------------------------
+# Provider
+# ---------------------------------------------------------------------------
+
+
+def test_the_endpoint_screen_warns_that_storing_a_key_enables_nothing() -> None:
+    joined = "\n".join(render_provider_endpoint(build.OPENAI, "gpt-4.1-mini", WIDE))
+    assert "api.openai.com/v1" in joined
+    assert "does not switch external review on" in joined
+
+
+def test_stored_configuration_is_never_reported_as_a_working_provider(
+    assert_snapshot: Snapshot,
+) -> None:
+    lines = render_provider_stored(build.UNTESTED_PROVIDER, WIDE)
+    assert_snapshot("provider_stored", lines)
+    assert "✓ Provider binding saved" in lines
+    assert "✓ API key stored securely" in lines
+    assert "! Live provider connection has not been tested" in lines
+    assert "! External semantic review is not yet proven ready" in lines
+
+
+def test_a_tested_provider_is_the_only_way_to_earn_the_verified_symbol() -> None:
+    tested = ProviderPosture(
+        endpoint_bound=True,
+        provider_id="openai",
+        model="gpt-4.1-mini",
+        endpoint_profile_id="openai-responses",
+        credential_connected=True,
+        llm_inference_enabled=True,
+        semantic_enabled=True,
+        semantic_ready=True,
+        readiness_determinable=True,
+        transport_tested=True,
+    )
+    lines = render_provider_stored(tested, WIDE)
+    assert "✓ Live provider connection responded" in lines
+    assert not any(line.startswith("!") for line in lines)
+
+
+def test_a_provider_failure_does_not_downgrade_local_readiness() -> None:
+    lines = render_provider_failure("Authentication failed", WIDE)
+    joined = "\n".join(lines)
+    assert lines[0].startswith("■")
+    assert "Local Yoetz verification is still ready." in lines
+    assert "Your API key remains stored securely." in lines
+    assert "Authentication failed" in joined
+
+
+# ---------------------------------------------------------------------------
+# Privacy
+# ---------------------------------------------------------------------------
+
+
+def test_widening_privacy_discloses_categories_provider_scope_and_never_send(
+    assert_snapshot: Snapshot,
+) -> None:
+    lines = render_privacy_disclosure(
+        build.LOCAL_ONLY,
+        PrivacyChoice.MINIMAL_EXTERNAL.label,
+        categories=("Structural facts: counts, verdicts, coverage, and check names",),
+        provider="openai",
+        model="gpt-4.1-mini",
+        endpoint="openai-responses",
+        purpose="verification review of recorded work",
+        scope="this installation",
+        never_send=("API keys, passphrases, and anything else secret",),
+        notes=("This provider connection has never been tested.",),
+        width=WIDE,
+    )
+    assert_snapshot("privacy_widening", lines)
+    joined = "\n".join(lines)
+    assert "local only → Minimal external review" in joined
+    assert "Never sent, under any choice" in joined
+    assert "never been tested" in joined
+
+
+def test_local_only_is_the_privacy_choice_described_as_the_default() -> None:
+    assert "default" in PrivacyChoice.LOCAL_ONLY.description
+    assert PrivacyChoice.LOCAL_ONLY.label == "Local only"
+
+
+# ---------------------------------------------------------------------------
+# Work, receipts, diagnosis
+# ---------------------------------------------------------------------------
+
+
+def test_work_detail_shows_every_layer_a_receipt_would_report(
+    assert_snapshot: Snapshot,
+) -> None:
+    lines = render_work_detail(build.work_detail(), 100)
+    assert_snapshot("work_detail", lines)
+    for label in ("Claims", "Checks", "Coverage", "Findings", "Limitations", "Receipt"):
+        assert any(line.startswith(label) or line == label for line in lines), label
+
+
+def test_receipt_foregrounds_the_verdict_and_what_was_not_verified(
+    assert_snapshot: Snapshot,
+) -> None:
+    lines = render_receipt(build.receipt(), 100)
+    assert_snapshot("receipt", lines)
+    assert lines[0].startswith("Verdict:")
+    joined = "\n".join(lines)
+    assert "What was not verified" in joined
+    assert "Deeper review: not available for this receipt" in joined
+
+
+def test_doctor_reports_problems_and_never_claims_to_have_fixed_them(
+    assert_snapshot: Snapshot,
+) -> None:
+    lines = render_doctor(build.doctor(), 100)
+    assert_snapshot("doctor", lines)
+    joined = "\n".join(lines)
+    assert "Suggested next steps" in joined
+    assert "Nothing above was changed. Diagnosis never repairs on its own." in lines
+
+
+# ---------------------------------------------------------------------------
+# Narrow terminals
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("width", [30, 40, 52, 80, 120])
+def test_no_renderer_ever_overflows_the_width_it_was_given(width: int) -> None:
+    renders = (
+        render_welcome(width),
+        render_detection(build.detection(), width),
+        render_project_trust(build.detection(), width),
+        render_integration_preview(build.plan(), width),
+        render_layers(build.layers(), width),
+        render_status(build.snapshot(), width),
+        render_finish(build.snapshot(), width),
+        render_provider_stored(build.UNTESTED_PROVIDER, width),
+        render_receipt(build.receipt(), width),
+        render_doctor(build.doctor(), width),
+    )
+    for lines in renders:
+        for line in lines:
+            assert len(line) <= width, f"{len(line)} > {width}: {line!r}"
+
+
+def test_the_session_header_middle_truncates_a_long_project_path() -> None:
+    lines = render_session_header(
+        version="0.1.0",
+        project_root="/Users/dev/Projects/deeply/nested/workspace/yoetz",
+        harness_state="connected",
+        privacy_summary="local only",
+        width=48,
+    )
+    joined = "\n".join(lines)
+    assert ">_ Yoetz (v0.1.0)" in joined
+    assert "…" in joined
+    assert "/privacy to change" in joined
