@@ -1556,7 +1556,16 @@ class _HumanConnectionServer:
             raise
         except Exception as exc:
             code = _human_error_code(exc)
-            error = ServerErrorEnvelope(code, False, ceremony_id, error_step)
+            # Correlation starts only once the client sends an action or the
+            # daemon starts a secret ingress step.  A terminal can close just
+            # after ServerOpened; that has a ceremony id but no valid next step
+            # to put on a correlated error envelope.
+            error = ServerErrorEnvelope(
+                code,
+                False,
+                ceremony_id if error_step is not None else None,
+                error_step,
+            )
             try:
                 await _write_human_envelope(stream, error)
                 if ceremony_id is not None and error_step is not None:
@@ -1568,6 +1577,18 @@ class _HumanConnectionServer:
             except Exception:
                 pass
         finally:
+            # A foreground terminal can disappear between the opened preview and
+            # its next action (for example, Ctrl-C at a secret prompt).  The
+            # human-control service owns one ceremony globally, so leaving it
+            # active would make every later ceremony fail state_forbidden until
+            # the daemon is restarted.  A completed/cancelled ceremony has
+            # already cleared itself; in that case cancel simply reports replay
+            # and is deliberately ignored.
+            if ceremony_id is not None:
+                try:
+                    await self._service.cancel(ceremony_id)
+                except Exception:
+                    pass
             await stream.aclose()
 
 

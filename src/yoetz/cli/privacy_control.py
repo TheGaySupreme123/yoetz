@@ -30,6 +30,7 @@ __all__ = [
     "PrivacyLocalEditResult",
     "decide_disclosure",
     "decide_policy",
+    "decide_policy_with_local_reauthentication",
 ]
 
 
@@ -45,6 +46,8 @@ class PrivacyLocalEditResult:
 async def _decide(
     decision_kind: Literal["policy", "disclosure"],
     pending_id: str,
+    *,
+    passphrase: bytearray | None = None,
 ) -> PrivacyDecisionResult | PrivacyLocalEditResult:
     target = PrivacyPendingTarget(decision_kind, pending_id)
     kind = (
@@ -93,6 +96,7 @@ async def _decide(
                         kind,
                         target,
                         current,
+                        passphrase=passphrase,
                     )
                     if observed_decision is not None:
                         raise HumanCeremonyCliError("result_invalid")
@@ -123,6 +127,25 @@ async def decide_policy(
     if decision is not None and passphrase is not None:
         return await _decide_policy_supplied(pending_id, decision, passphrase)
     return await _decide("policy", pending_id)
+
+
+async def decide_policy_with_local_reauthentication(
+    pending_id: str,
+    passphrase: bytearray,
+) -> PrivacyDecisionResult | PrivacyLocalEditResult:
+    """Keep policy approval explicit while using a provisioned local unlock secret.
+
+    The caller obtains the secret from the same per-installation platform store
+    used for restart auto-unlock.  The policy preview and approve/deny decision
+    still happen on the controlling terminal; only the subsequent
+    reauthentication secret is supplied without asking a user to know a
+    generated value.
+    """
+
+    try:
+        return await _decide("policy", pending_id, passphrase=passphrase)
+    finally:
+        _overwrite(passphrase)
 
 
 async def _decide_policy_supplied(

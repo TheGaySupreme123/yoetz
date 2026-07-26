@@ -643,3 +643,86 @@ def test_uninitialized_setup_stops_after_write_with_failed_readback(
     assert initialized == []
     assert service == {"reachable": True, "state": "locked", "vault_mode": "uninitialized"}
     assert report["credential_reason"] == "auto_unlock_unverified"
+
+
+def test_ready_auto_unlock_vault_reuses_scoped_secret_for_provider_reauthentication(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Fresh Keychain-backed setup must ask only for the provider credential."""
+
+    import yoetz.adapters.keys.os_keyring as keyring_module
+    import yoetz.cli.provider_binding as binding_module
+    import yoetz.cli.setup as setup_module
+    import yoetz.cli.unlock as unlock_module
+    import yoetz.config.load as config_module
+    import yoetz.config.paths as paths_module
+    import yoetz.config.write as write_module
+
+    loaded: list[bytes] = []
+    supplied_reauthentication: list[bytes | None] = []
+
+    def fake_load(_store: object) -> bytearray:
+        loaded.append(b"a" * 48)
+        return bytearray(b"a" * 48)
+
+    def fake_load_config(*_args: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            storage=SimpleNamespace(data_dir=tmp_path),
+            provider=SimpleNamespace(
+                provider_id="fireworks",
+                model="accounts/fireworks/models/minimax-m3",
+                endpoint_profile_id="fireworks-responses",
+                endpoint_profile_version="1.0.0",
+            ),
+        )
+
+    def fake_bundle_root(*, _data_dir: Path | None = None) -> Path:
+        del _data_dir
+        return tmp_path.resolve()
+
+    def fake_write(_choice: str, *, model: str) -> tuple[Path, object]:
+        assert _choice == "fireworks"
+        assert model == "accounts/fireworks/models/minimax-m3"
+        return tmp_path / "config.toml", object()
+
+    async def fake_set(
+        _target: object,
+        _credential: bytearray | None,
+        reauthentication: bytearray | None,
+    ) -> SimpleNamespace:
+        supplied_reauthentication.append(
+            None if reauthentication is None else bytes(reauthentication)
+        )
+        return SimpleNamespace(activation_status="stored")
+
+    async def fake_reachability(*, start_if_absent: bool = False) -> dict[str, object]:
+        del start_if_absent
+        return {"reachable": True, "state": "ready", "vault_mode": "passphrase"}
+
+    def fake_provider_preset(_provider: str) -> SimpleNamespace:
+        return SimpleNamespace(choice="fireworks")
+
+    monkeypatch.setattr(keyring_module.AutoUnlockPassphraseStore, "load", fake_load)
+    monkeypatch.setattr(config_module, "load_config", fake_load_config)
+    monkeypatch.setattr(paths_module, "bundle_root", fake_bundle_root)
+    monkeypatch.setattr(binding_module, "apply_provider_endpoint_choice", fake_write)
+    monkeypatch.setattr(unlock_module, "set_provider_credential", fake_set)
+    monkeypatch.setattr(setup_module, "_service_reachability", fake_reachability)
+    monkeypatch.setattr(
+        write_module,
+        "provider_preset",
+        fake_provider_preset,
+    )
+
+    _service, report = asyncio.run(
+        setup_module._interactive_provider_setup(  # pyright: ignore[reportPrivateUsage]
+            {"reachable": True, "state": "ready", "vault_mode": "passphrase"},
+            provider_choice="fireworks",
+            model="accounts/fireworks/models/minimax-m3",
+        )
+    )
+
+    assert loaded == [b"a" * 48]
+    assert supplied_reauthentication == [b"a" * 48]
+    assert report["binding"] == "configured"
+    assert report["credential"] == "stored"

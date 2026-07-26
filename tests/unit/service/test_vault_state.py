@@ -97,6 +97,10 @@ async def test_bundle_and_installation_handles_are_generation_fenced(tmp_path: P
 
     catalog = service.installation_mac_handle(MacKeyPurpose.CATALOG_LOOKUP)
     assert catalog.mac(b"yoetz/start-title/v1\x00", b"title").startswith("hmac-sha256:")
+    privacy_audit = service.installation_mac_handle(MacKeyPurpose.PRIVACY_AUDIT)
+    assert privacy_audit.mac(
+        b"yoetz/privacy-audit/authorization/v1\x00", b"authorization"
+    ).startswith("hmac-sha256:")
     with pytest.raises(KeyStoreError, match="mac_domain_forbidden"):
         catalog.mac(b"yoetz/session-log-id/v1\x00", b"title")
 
