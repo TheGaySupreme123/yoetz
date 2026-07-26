@@ -504,16 +504,21 @@ async def _import_status(runtime: TaskRuntime) -> StatusImportStatusModel:
 
 
 async def _closure_readiness(
-    runtime: TaskRuntime, frontier: Frontier
+    runtime: TaskRuntime,
+    frontier: Frontier,
+    compact_page: ProjectionPage | None = None,
 ) -> StatusClosureReadinessModel:
     """Derive what currently bounds a completion conclusion, from the compact projection.
 
     Computed on every view so an agent never has to switch views — or spend a check and a receipt
     — to learn that the record cannot yet support a completion claim. This reads only; it records
     nothing and changes no coverage.
+
+    ``view=compact`` already loads exactly this page, so it passes it in rather than paying for a
+    second identical query. Compact admits no filter or position, so the page is equivalent.
     """
 
-    page = await runtime.ledger.query_projection(
+    page = compact_page or await runtime.ledger.query_projection(
         ProjectionQuery(
             runtime.session_id,
             "compact",
@@ -592,7 +597,7 @@ async def execute_status(app: Application, request: StatusRequest) -> StatusInte
                 raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")
 
         import_status = await _import_status(runtime)
-        closure_readiness = await _closure_readiness(runtime, frontier)
+        compact_page: ProjectionPage | None = None
         if request.view == "advice":
             if position is not None:
                 raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")
@@ -704,6 +709,8 @@ async def execute_status(app: Application, request: StatusRequest) -> StatusInte
                 expected_version,
             )
             raw_page = await runtime.ledger.query_projection(query)
+            if request.view == "compact":
+                compact_page = raw_page
             next_cursor = (
                 None
                 if raw_page.next_position is None
@@ -723,6 +730,7 @@ async def execute_status(app: Application, request: StatusRequest) -> StatusInte
             lag = raw_page.lag
             projection_version = raw_page.projection_version
             rebuild_state = raw_page.rebuild_state
+        closure_readiness = await _closure_readiness(runtime, frontier, compact_page)
         return StatusInternalResult(
             "0.1",
             "1.0.0",

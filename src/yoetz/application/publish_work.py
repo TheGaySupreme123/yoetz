@@ -206,6 +206,21 @@ def _error(
     return PublicOperationError(code, message, retryable, safe_details=details)
 
 
+# The event-draft envelope fields, which are frozen schema names rather than caller-chosen keys.
+# Only these may appear after the draft ordinal in a public error location.
+_LOCATABLE_DRAFT_SUBFIELDS: Final = frozenset(
+    {
+        "artifact_refs",
+        "causal_parents",
+        "event_id",
+        "evidence_refs",
+        "occurred_at",
+        "payload",
+        "schema",
+    }
+)
+
+
 def _draft_pointer(event_index: int, subfield: str | None) -> str | None:
     """Locate one rejected draft without ever naming caller-supplied keys or values.
 
@@ -245,19 +260,6 @@ def _event_invalid(
             # whole batch; a batch may carry up to MAX_EVENTS_PER_BATCH drafts.
             details["field"] = pointer
     return PublicOperationError(PublicErrorCode.EVENT_INVALID, message, False, safe_details=details)
-
-
-_LOCATABLE_DRAFT_SUBFIELDS: Final = frozenset(
-    {
-        "artifact_refs",
-        "causal_parents",
-        "event_id",
-        "evidence_refs",
-        "occurred_at",
-        "payload",
-        "schema",
-    }
-)
 
 
 def _mapping(value: JsonValue) -> Mapping[str, JsonValue]:
