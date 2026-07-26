@@ -132,6 +132,16 @@ The ordinary control channel carries canonical, bounded workflow/support envelop
 service status. Its method registry contains no unlock method and its request models cannot carry
 secret bytes.
 
+Control failures are bounded reasons, not messages, and the reason must not misdescribe durable
+state. A handler returning is the commit boundary: everything after it — projection binding,
+client projection, and success-body validation — only shapes the response. An unexpected failure
+there is reported as the retryable `response_projection_failed`, which states that the operation
+stands and that the caller resolves it by replaying the same `request_id`. Reporting it as the
+generic non-retryable `internal_error` would assert something false about the ledger and steer a
+caller away from the idempotent replay that recovers it. Deliberate bounded failures raised in the
+same window — `privacy_projection_blocked`, `privacy_projection_unavailable`, and public
+application errors — already describe real conditions and pass through unchanged.
+
 The service exposes three fixed owner-only same-UID endpoints: ordinary control; YZS1 one-secret
 ingress; and YZH1 multi-phase human control. YZH1 is the sole challenge/binding creator, returns
 bounded structural previews, supports zero-secret keyring retry, coordinates provider credential

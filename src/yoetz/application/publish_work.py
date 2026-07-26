@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from typing import Literal, Protocol, cast
+from typing import Final, Literal, Protocol, cast
 
 from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
 from yoetz.domain.events import (
@@ -21,6 +21,7 @@ from yoetz.domain.events import (
 from yoetz.domain.values import (
     Actor,
     ActorType,
+    EventId,
     Frontier,
     actor_id,
     event_id,
@@ -66,7 +67,12 @@ from yoetz.protocol.coverage import (
     coverage_for_channel,
     coverage_to_json,
 )
-from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
+from yoetz.protocol.errors import (
+    PROTOCOL_REASON_CODES,
+    ProtocolValueError,
+    PublicErrorCode,
+    PublicOperationError,
+)
 from yoetz.protocol.models import (
     MAX_CANONICAL_REQUEST_BYTES,
     MAX_EVENTS_PER_BATCH,
@@ -200,7 +206,28 @@ def _error(
     return PublicOperationError(code, message, retryable, safe_details=details)
 
 
-def _event_invalid(reason_code: str = "invalid_event_value_type") -> PublicOperationError:
+def _draft_pointer(event_index: int, subfield: str | None) -> str | None:
+    """Locate one rejected draft without ever naming caller-supplied keys or values.
+
+    Every segment is a frozen schema name plus the draft's ordinal, which is bounded by
+    ``MAX_EVENTS_PER_BATCH``. Nothing here is derived from the submitted payload.
+    """
+
+    if type(event_index) is not int or not 0 <= event_index < MAX_EVENTS_PER_BATCH:
+        return None
+    if subfield is None:
+        return f"/event_drafts/{event_index}"
+    if subfield not in _LOCATABLE_DRAFT_SUBFIELDS:
+        return None
+    return f"/event_drafts/{event_index}/{subfield}"
+
+
+def _event_invalid(
+    reason_code: str = "invalid_event_value_type",
+    *,
+    event_index: int | None = None,
+    subfield: str | None = None,
+) -> PublicOperationError:
     # Only a stale frontier is fixed by rereading status; every other reason needs the event
     # payload corrected first, and retrying it unchanged would fail the same way.
     if reason_code == "frontier_changed":
@@ -210,7 +237,27 @@ def _event_invalid(reason_code: str = "invalid_event_value_type") -> PublicOpera
         )
     else:
         message = "The event batch is invalid. Correct the event payload before retrying."
-    return _error(PublicErrorCode.EVENT_INVALID, message, reason_code=reason_code)
+    details: dict[str, str] = {"reason_code": reason_code}
+    if event_index is not None:
+        pointer = _draft_pointer(event_index, subfield)
+        if pointer is not None:
+            # Which draft failed is the difference between a one-line fix and re-deriving the
+            # whole batch; a batch may carry up to MAX_EVENTS_PER_BATCH drafts.
+            details["field"] = pointer
+    return PublicOperationError(PublicErrorCode.EVENT_INVALID, message, False, safe_details=details)
+
+
+_LOCATABLE_DRAFT_SUBFIELDS: Final = frozenset(
+    {
+        "artifact_refs",
+        "causal_parents",
+        "event_id",
+        "evidence_refs",
+        "occurred_at",
+        "payload",
+        "schema",
+    }
+)
 
 
 def _mapping(value: JsonValue) -> Mapping[str, JsonValue]:
@@ -259,34 +306,66 @@ def _coverage_for(channel: PublicationChannel, *, has_unknown: bool) -> Coverage
     )
 
 
-def _decode_draft(value: JsonValue) -> _PreparedDraft:
+def _reason_code_of(exc: BaseException, fallback: str = "invalid_event_value_type") -> str:
+    reason = exc.args[0] if exc.args and type(exc.args[0]) is str else fallback
+    return reason if reason in PROTOCOL_REASON_CODES else fallback
+
+
+def _decode_draft(value: JsonValue, event_index: int) -> _PreparedDraft:
+    """Decode one draft, attributing any rejection to that draft and its owning field."""
+
     source = _mapping(value)
-    schema_source = _mapping(_field(source, "schema"))
-    schema = EventSchema(
-        cast(str, _field(schema_source, "name")),
-        cast(str, _field(schema_source, "version")),
+
+    def _locate[T](subfield: str, decode: Callable[[], T]) -> T:
+        try:
+            return decode()
+        except PublicOperationError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise _event_invalid(
+                _reason_code_of(exc), event_index=event_index, subfield=subfield
+            ) from exc
+
+    schema_source = _locate("schema", lambda: _mapping(_field(source, "schema")))
+    schema = _locate(
+        "schema",
+        lambda: EventSchema(
+            cast(str, _field(schema_source, "name")),
+            cast(str, _field(schema_source, "version")),
+        ),
     )
-    raw_payload = freeze_json(_field(source, "payload"))
+    raw_payload = _locate("payload", lambda: freeze_json(_field(source, "payload")))
     if schema in PAYLOAD_TYPES:
-        payload: EventPayload | DomainJsonValue = decode_payload(schema, raw_payload)
-        payload_json = encode_payload(payload)
+        payload: EventPayload | DomainJsonValue = _locate(
+            "payload", lambda: decode_payload(schema, raw_payload)
+        )
+        payload_json = _locate("payload", lambda: encode_payload(payload))
         projection_status = "projected"
     else:
         payload = raw_payload
         payload_json = cast(JsonValue, raw_payload)
         projection_status = "unknown_unprojected"
     draft = EventDraft(
-        event_id(_field(source, "event_id")),
+        _locate("event_id", lambda: event_id(_field(source, "event_id"))),
         schema,
-        timestamp_from_string(_field(source, "occurred_at")),
-        tuple(event_id(value) for value in _tuple_field(source, "causal_parents")),
+        _locate("occurred_at", lambda: timestamp_from_string(_field(source, "occurred_at"))),
+        _locate(
+            "causal_parents",
+            lambda: tuple(event_id(item) for item in _tuple_field(source, "causal_parents")),
+        ),
         payload,
-        tuple(object_id(value) for value in _tuple_field(source, "artifact_refs")),
-        tuple(
-            evidence_id(value)
-            if type(value) is str and value.startswith("evd_")
-            else result_id(value)
-            for value in _tuple_field(source, "evidence_refs")
+        _locate(
+            "artifact_refs",
+            lambda: tuple(object_id(item) for item in _tuple_field(source, "artifact_refs")),
+        ),
+        _locate(
+            "evidence_refs",
+            lambda: tuple(
+                evidence_id(item)
+                if type(item) is str and item.startswith("evd_")
+                else result_id(item)
+                for item in _tuple_field(source, "evidence_refs")
+            ),
         ),
     )
     return _PreparedDraft(draft, canonical_encode(payload_json), projection_status)
@@ -302,10 +381,10 @@ def _validate_admission(
     if trusted_import and not app.authorizes_import_publication(request):
         raise _event_invalid("event_family_not_admitted")
     admitted = _IMPORT_FAMILIES if trusted_import else _ORDINARY_FAMILIES
-    for item in drafts:
+    for index, item in enumerate(drafts):
         known = item.draft.schema in PAYLOAD_TYPES
         if (known and item.draft.schema.name not in admitted) or (not known and not trusted_import):
-            raise _event_invalid("event_family_not_admitted")
+            raise _event_invalid("event_family_not_admitted", event_index=index, subfield="schema")
     if request.expected_frontier is None and any(
         item.draft.schema in PAYLOAD_TYPES and item.draft.schema.name in _STATE_SENSITIVE_FAMILIES
         for item in drafts
@@ -316,11 +395,20 @@ def _validate_admission(
 def _validate_order(drafts: tuple[_PreparedDraft, ...]) -> None:
     event_ids = tuple(item.draft.event_id for item in drafts)
     if len(event_ids) != len(set(event_ids)):
-        raise _event_invalid("duplicate_set_member")
+        seen: set[EventId] = set()
+        duplicate_at = 0
+        for index, value in enumerate(event_ids):
+            if value in seen:
+                duplicate_at = index
+                break
+            seen.add(value)
+        raise _event_invalid("duplicate_set_member", event_index=duplicate_at, subfield="event_id")
     position = {event_id: index for index, event_id in enumerate(event_ids)}
     for index, item in enumerate(drafts):
         if any(position.get(parent, -1) >= index for parent in item.draft.causal_parents):
-            raise _event_invalid("invalid_event_value_type")
+            raise _event_invalid(
+                "invalid_event_value_type", event_index=index, subfield="causal_parents"
+            )
 
 
 def prepare_publication(
@@ -333,17 +421,24 @@ def prepare_publication(
 
     if not 1 <= len(request.event_drafts) <= MAX_EVENTS_PER_BATCH:
         raise _error(PublicErrorCode.INVALID_REQUEST, "The event batch size is invalid.")
+    decoded: list[_PreparedDraft] = []
+    for index, value in enumerate(request.event_drafts):
+        try:
+            decoded.append(_decode_draft(value, index))
+        except PublicOperationError:
+            raise
+        except (TypeError, ValueError) as exc:
+            # Anything not already attributed to a field still names its draft, so the caller
+            # never has to re-derive which member of the batch was rejected.
+            raise _event_invalid(_reason_code_of(exc), event_index=index) from exc
+    drafts = tuple(decoded)
     try:
-        drafts = tuple(_decode_draft(value) for value in request.event_drafts)
         _validate_order(drafts)
         _validate_admission(app, request, channel, drafts)
     except PublicOperationError:
         raise
     except (TypeError, ValueError) as exc:
-        reason = (
-            exc.args[0] if exc.args and type(exc.args[0]) is str else "invalid_event_value_type"
-        )
-        raise _event_invalid(reason) from exc
+        raise _event_invalid(_reason_code_of(exc)) from exc
 
     has_unknown = any(item.projection_status == "unknown_unprojected" for item in drafts)
     coverage = _coverage_for(channel, has_unknown=has_unknown)
@@ -655,6 +750,27 @@ async def execute_publish_work(
                 command,
             )
             append_result = await run_prepared_append(runtime.ledger, mutation)
-        return await _internal_result(request, runtime, prepared, append_result)
+        # The batch is durable from here on. Bounded PublicOperationError values (STORAGE_CORRUPT
+        # and friends) stay exactly as raised because they already describe the stored state
+        # truthfully. Only an unexpected failure is reshaped, so that assembling the response can
+        # never present an accepted write as a non-retryable failure.
+        try:
+            return await _internal_result(request, runtime, prepared, append_result)
+        except PublicOperationError:
+            raise
+        except Exception as exc:
+            # OPERATION_PENDING is the existing "durably underway, resolve by replaying the same
+            # request_id" signal, and _preflight_replay returns the stored result on that retry.
+            # A fallback INTERNAL_ERROR here would both break the module's closed code inventory
+            # and tell the caller the batch failed.
+            raise _error(
+                PublicErrorCode.OPERATION_PENDING,
+                (
+                    "The event batch was accepted, but its response could not be assembled. "
+                    "Retry with the same request_id to load the stored result."
+                ),
+                retryable=True,
+                reason_code="response_projection_failed",
+            ) from exc
     finally:
         await app.runtime.release(runtime)

@@ -72,6 +72,27 @@ def _composition() -> tuple[_Application, MemoryObjects]:
     return _Application(runtime), objects
 
 
+def _draft(
+    *,
+    event_tail: int,
+    action_tail: int,
+    action_kind: str = "other",
+) -> dict[str, object]:
+    return {
+        "event_id": f"evt_00000000-0000-4000-8000-{event_tail:012d}",
+        "schema": {"name": "action_recorded", "version": "1.0.0"},
+        "occurred_at": "2026-07-19T12:00:00.000Z",
+        "causal_parents": (),
+        "payload": {
+            "action_id": f"act_00000000-0000-4000-8000-{action_tail:012d}",
+            "action_kind": action_kind,
+            "description": "Materialized one coherent slice",
+        },
+        "artifact_refs": (),
+        "evidence_refs": (),
+    }
+
+
 def _request(
     *,
     family: str = "action_recorded",
@@ -80,6 +101,7 @@ def _request(
     event_tail: int = 202,
     action_tail: int = 203,
     expected_frontier: object = None,
+    event_drafts: tuple[dict[str, object], ...] | None = None,
 ) -> PublishWorkRequestModel:
     seed = append_command()
     payload: object
@@ -105,7 +127,8 @@ def _request(
             "session_id": seed.session_id,
             "writer_id": seed.writer_id,
             "expected_frontier": expected_frontier,
-            "event_drafts": (
+            "event_drafts": event_drafts
+            or (
                 {
                     "event_id": f"evt_00000000-0000-4000-8000-{event_tail:012d}",
                     "schema": {"name": family, "version": "1.0.0"},
@@ -124,6 +147,50 @@ def _request(
             },
         }
     )
+
+
+async def test_rejected_draft_is_located_by_ordinal_without_echoing_payload_content() -> None:
+    """A multi-draft batch must say which draft failed, using only frozen names and an ordinal.
+
+    The 2026-07-26 dogfood published a four-event batch whose only diagnostic was
+    ``reason_code: invalid_event_enum`` — enough to know something was wrong, not enough to know
+    which event or field to fix.
+    """
+
+    app, _objects = _composition()
+    secret = "never-echo-this-private-title"
+    forbidden: dict[str, object] = {
+        "event_id": "evt_00000000-0000-4000-8000-000000000305",
+        "schema": {"name": "session_opened", "version": "1.0.0"},
+        "occurred_at": "2026-07-19T12:00:00.000Z",
+        "causal_parents": (),
+        "payload": {
+            "task_title": secret,
+            "client_kind": "test_client",
+            "client_version": "0.1.0",
+            "integration": "local_cli",
+            "profile": "test-fake",
+        },
+        "artifact_refs": (),
+        "evidence_refs": (),
+    }
+    request = _request(
+        event_drafts=(
+            _draft(event_tail=301, action_tail=302),
+            _draft(event_tail=303, action_tail=304),
+            forbidden,
+        )
+    )
+
+    with pytest.raises(PublicOperationError) as caught:
+        await execute_publish_work(cast(Application, app), request)
+
+    details = caught.value.safe_details
+    # The ordinal is the failing draft, not merely the first one.
+    assert details["field"] == "/event_drafts/2/schema"
+    assert details["reason_code"] == "event_family_not_admitted"
+    assert secret not in repr(dict(details))
+    assert secret not in caught.value.message
 
 
 async def test_publish_is_object_first_atomic_and_same_id_replay_is_stable() -> None:
@@ -149,7 +216,12 @@ async def test_forbidden_family_rejects_before_object_publication() -> None:
         await execute_publish_work(cast(Application, app), _request(family="session_opened"))
 
     assert caught.value.code is PublicErrorCode.EVENT_INVALID
-    assert caught.value.safe_details == {"reason_code": "event_family_not_admitted"}
+    # The rejected draft is named by ordinal and owning field so a multi-draft batch does not
+    # have to be re-derived to find the one bad member.
+    assert caught.value.safe_details == {
+        "reason_code": "event_family_not_admitted",
+        "field": "/event_drafts/0/schema",
+    }
     assert len(objects._data) == before  # pyright: ignore[reportPrivateUsage]
     assert app.runtime.release_count == 1
 

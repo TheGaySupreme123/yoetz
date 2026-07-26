@@ -57,6 +57,8 @@ from yoetz.protocol.models import (
     StatusCandidateFindingItemModel,
     StatusCandidateFindingsFilterModel,
     StatusCandidateFindingsPageModel,
+    StatusClosureReadinessModel,
+    StatusCompactItemModel,
     StatusCompactPageModel,
     StatusEvidenceFilterModel,
     StatusEvidencePageModel,
@@ -105,6 +107,7 @@ class StatusInternalResult:
     coverage: Coverage
     gaps: tuple[str, ...]
     import_status: StatusImportStatusModel
+    closure_readiness: StatusClosureReadinessModel
 
     def as_json(self) -> dict[str, JsonValue]:
         return {
@@ -128,6 +131,9 @@ class StatusInternalResult:
             "gaps": self.gaps,
             "import_status": cast(
                 JsonValue, self.import_status.model_dump(mode="json", exclude_none=False)
+            ),
+            "closure_readiness": cast(
+                JsonValue, self.closure_readiness.model_dump(mode="json", exclude_none=False)
             ),
         }
 
@@ -497,6 +503,65 @@ async def _import_status(runtime: TaskRuntime) -> StatusImportStatusModel:
     )
 
 
+async def _closure_readiness(
+    runtime: TaskRuntime, frontier: Frontier
+) -> StatusClosureReadinessModel:
+    """Derive what currently bounds a completion conclusion, from the compact projection.
+
+    Computed on every view so an agent never has to switch views — or spend a check and a receipt
+    — to learn that the record cannot yet support a completion claim. This reads only; it records
+    nothing and changes no coverage.
+    """
+
+    page = await runtime.ledger.query_projection(
+        ProjectionQuery(
+            runtime.session_id,
+            "compact",
+            None,
+            frontier,
+            1,
+            None,
+            None,
+        )
+    )
+    item = page.items[0] if page.items else None
+    open_obligations = 0
+    unresolved_findings = 0
+    has_plan = False
+    if type(item) is StatusCompactItemModel:
+        open_obligations = int(item.open_obligation_count)
+        unresolved_findings = int(item.unresolved_finding_count)
+        has_plan = item.current_plan_event_id is not None
+    blocking: list[str] = []
+    if open_obligations:
+        blocking.append("obligations_open")
+    if unresolved_findings:
+        blocking.append("findings_unresolved")
+    if not has_plan:
+        blocking.append("no_plan_published")
+    if page.rebuild_state != "current" or page.lag:
+        blocking.append("projection_stale")
+    if page.gaps:
+        blocking.append("coverage_gaps_declared")
+    return StatusClosureReadinessModel(
+        open_obligation_count=str(open_obligations),
+        unresolved_finding_count=str(unresolved_findings),
+        blocking_conditions=cast(
+            tuple[
+                Literal[
+                    "obligations_open",
+                    "findings_unresolved",
+                    "no_plan_published",
+                    "projection_stale",
+                    "coverage_gaps_declared",
+                ],
+                ...,
+            ],
+            tuple(blocking),
+        ),
+    )
+
+
 async def execute_status(app: Application, request: StatusRequest) -> StatusInternalResult:
     """Return one typed status page without creating a task-ledger consequence."""
 
@@ -527,6 +592,7 @@ async def execute_status(app: Application, request: StatusRequest) -> StatusInte
                 raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")
 
         import_status = await _import_status(runtime)
+        closure_readiness = await _closure_readiness(runtime, frontier)
         if request.view == "advice":
             if position is not None:
                 raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")
@@ -677,6 +743,7 @@ async def execute_status(app: Application, request: StatusRequest) -> StatusInte
             coverage,
             gaps,
             import_status,
+            closure_readiness,
         )
     except (TypeError, ValueError) as exc:
         if isinstance(exc, PublicOperationError):

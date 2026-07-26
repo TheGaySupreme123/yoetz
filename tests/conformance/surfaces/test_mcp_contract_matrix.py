@@ -33,8 +33,13 @@ from yoetz.mcp.resources import (
     read_resource,
 )
 from yoetz.mcp.summaries import render_safe_compact_summary
-from yoetz.protocol.errors import PublicErrorCode
-from yoetz.protocol.models import PublishWorkRequest, StartRequest, StatusRequest
+from yoetz.protocol.errors import SAFE_DETAIL_KEYS, PublicErrorCode
+from yoetz.protocol.models import (
+    FRONTIER_LEAVES,
+    PublishWorkRequest,
+    StartRequest,
+    StatusRequest,
+)
 from yoetz.protocol.schemas import validate_schema_instance
 
 _EXPECTED_TOOL_NAMES = ("start", "publish_work", "check", "respond", "status", "receipt")
@@ -140,6 +145,61 @@ def test_forbidden_client_id_projects_parent_path_in_safe_details() -> None:
     assert "invented-client-id" not in repr(locations)
     # "id" must not be a generally trusted location segment.
     assert '"id"' not in repr(locations)
+
+
+def test_frontier_leaf_names_are_locatable_in_safe_details() -> None:
+    """A wrong frontier key must name the missing leaf, not just the object holding it.
+
+    The 2026-07-26 dogfood sent ``digest`` instead of ``head_digest``; the whole diagnostic was
+    "/expected_frontier missing", which does not say what to write. Frontier leaves are frozen
+    schema names already trusted as ``SAFE_DETAIL_KEYS``, so they are safe to locate.
+    """
+
+    assert set(FRONTIER_LEAVES) <= set(SAFE_DETAIL_KEYS)
+
+    examples = descriptor_for("publish_work").input_schema["examples"]
+    assert isinstance(examples, list)
+    base = examples[0]
+    assert isinstance(base, dict)
+
+    with pytest.raises(ValidationError) as captured:
+        PublishWorkRequest.model_validate(
+            {**base, "expected_frontier": {"sequence": "10", "digest": f"sha256:{'a' * 64}"}}
+        )
+    locations = safe_validation_locations(captured.value)
+
+    assert {"field": "/expected_frontier/head_digest", "reason": "missing"} in locations
+    # The caller-supplied extra key is still projected to its parent and never named.
+    assert {"field": "/expected_frontier", "reason": "extra_forbidden"} in locations
+    assert not any(item["field"].endswith("/digest") for item in locations)
+
+
+def test_rejected_event_draft_is_located_by_ordinal() -> None:
+    """A bad draft in a batch must be identified by its ordinal, never by echoing its content."""
+
+    examples = descriptor_for("publish_work").input_schema["examples"]
+    assert isinstance(examples, list)
+    base = cast(dict[str, object], examples[0])
+    good = cast(list[object], base["event_drafts"])[0]
+    assert isinstance(good, dict)
+    secret = "NOT-A-REAL-ENUM-never-echo-this"
+    bad: dict[str, object] = {
+        **good,
+        "event_id": "evt_00000000-0000-4000-8000-000000000099",
+        "schema": {"name": "action_recorded", "version": "1.0.0"},
+        "payload": {
+            "action_id": "act_00000000-0000-4000-8000-000000000098",
+            "action_kind": secret,
+            "description": "x",
+        },
+    }
+
+    with pytest.raises(ValidationError) as captured:
+        PublishWorkRequest.model_validate({**base, "event_drafts": [good, bad]})
+    locations = safe_validation_locations(captured.value)
+
+    assert any(item["field"] == "/event_drafts/1" for item in locations)
+    assert secret not in repr(locations)
 
 
 def test_unknown_tool_message_is_sanitized() -> None:
@@ -254,7 +314,7 @@ def test_presentation_examples_admit_under_catalog_models() -> None:
     publish_examples = descriptor_for("publish_work").input_schema["examples"]
     assert isinstance(start_examples, list) and len(start_examples) == 1
     assert isinstance(status_examples, list) and len(status_examples) == 1
-    assert isinstance(publish_examples, list) and len(publish_examples) == 1
+    assert isinstance(publish_examples, list) and publish_examples
     start_example = start_examples[0]
     status_example = status_examples[0]
     publish_example = publish_examples[0]
@@ -263,14 +323,29 @@ def test_presentation_examples_admit_under_catalog_models() -> None:
     assert isinstance(publish_example, dict)
     StartRequest.model_validate(start_example)
     StatusRequest.model_validate(status_example)
-    PublishWorkRequest.model_validate(publish_example)
     event_drafts = publish_example["event_drafts"]
     assert isinstance(event_drafts, list) and event_drafts
     first_draft = event_drafts[0]
     assert isinstance(first_draft, dict)
     schema = first_draft["schema"]
     assert isinstance(schema, dict)
+    # The first example stays the smallest possible starting publication.
     assert schema["name"] == "plan_published"
+
+    # Every ordinary publishable family carries a worked example, and each one is a request an
+    # agent could send unchanged. Copying a valid shape is the whole point of shipping these.
+    exercised: set[str] = set()
+    for example in publish_examples:
+        assert isinstance(example, dict)
+        PublishWorkRequest.model_validate(example)
+        drafts = example["event_drafts"]
+        assert isinstance(drafts, list)
+        for draft in drafts:
+            assert isinstance(draft, dict)
+            draft_schema = draft["schema"]
+            assert isinstance(draft_schema, dict)
+            exercised.add(cast(str, draft_schema["name"]))
+    assert exercised == ORDINARY_MCP_PUBLISH_EVENT_FAMILIES
 
 
 def test_presentation_input_schema_is_projection_of_catalog_shape() -> None:

@@ -18,6 +18,7 @@ import pytest
 
 from yoetz.cli import provider_status as module
 from yoetz.config.models import ProviderProfileConfig, VerificationConfig, YoetzConfig
+from yoetz.ports.control import ControlError
 
 pytestmark = pytest.mark.anyio
 
@@ -287,6 +288,9 @@ async def test_locked_service_reports_real_blocker_first_without_false_remediati
         "state": "locked",
         "reason": "passphrase_required",
         "next_command": "yoetz service unlock",
+        "probed_lifecycle": "user_service_no_autostart",
+        # A locked service is present, so MCP shares it rather than starting a new one.
+        "mcp_local_composition": "shares_this_service",
     }
     unknown = tuple(item for item in blockers if item.get("state") == "unknown")
     assert {item["condition"] for item in unknown} == {
@@ -295,6 +299,35 @@ async def test_locked_service_reports_real_blocker_first_without_false_remediati
     }
     assert all("next_command" not in item for item in unknown)
     assert report["next_commands"] == ("yoetz service unlock",)
+
+
+async def test_absent_service_names_the_probed_lifecycle_and_the_mcp_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An absent service must not read as a contradiction of a working MCP session.
+
+    The 2026-07-26 dogfood saw `service_unavailable` here while MCP-local work and live semantic
+    dispatch succeeded, because the bridge starts the service on demand and this surface never
+    does. The report has to say which lifecycle it probed.
+    """
+
+    _install(monkeypatch, tmp_path, provider=_provider())
+
+    async def _refuse(_kind: object) -> object:
+        raise ControlError("service_unavailable", retryable=True)
+
+    monkeypatch.setattr(module, "connect_service", _refuse)
+
+    report = await module.provider_status_report()
+
+    blockers = cast(tuple[dict[str, object], ...], report["blockers"])
+    assert blockers[0]["condition"] == "service_unlocked"
+    assert blockers[0]["state"] == "service_unavailable"
+    assert blockers[0]["probed_lifecycle"] == "user_service_no_autostart"
+    assert blockers[0]["mcp_local_composition"] == "starts_on_demand"
+    # The existing remediation for an operator who wants a persistent service is unchanged.
+    assert blockers[0]["next_command"] == "yoetz service run"
+    assert report["semantic_ready"] is False
 
 
 async def test_stale_auto_unlock_points_to_repair_first(

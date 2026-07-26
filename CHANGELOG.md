@@ -52,6 +52,37 @@ released versions.
   unpublished (`"private": true`) until a separate release decision.
 - A README Getting started section documenting the install and first-run path.
 
+- `closure_readiness` on every `status` success (`open_obligation_count`,
+  `unresolved_finding_count`, `blocking_conditions`), so an agent can see what currently bounds a
+  completion conclusion before spending a `check` or `receipt` rather than learning it afterwards
+  from an insufficient receipt. Derived per request: it records nothing, creates no verdict or IDs,
+  and never strengthens coverage.
+
+- A worked `publish_work` example per ordinary publishable event family. Previously only
+  `plan_published` had one, and agents hand-derived action/result/evidence/claim shapes from a
+  large `oneOf`.
+
+### Fixed
+
+- **An accepted write is never reported as an unqualified failure.** A handler returning is the
+  commit boundary; response shaping happens after it. An unexpected failure in that window now
+  surfaces as the retryable `response_projection_failed` naming same-`request_id` replay, instead
+  of a generic non-retryable `INTERNAL_ERROR` that both misdescribed the ledger and steered callers
+  away from the idempotent replay that recovers it (ADR-008). Deliberate bounded failures raised in
+  the same window pass through unchanged.
+
+- Validation failures inside `expected_frontier`/`at_frontier` now name the offending leaf
+  (`head_digest`, `sequence`) instead of projecting to the parent object, which reported only that
+  something in the frontier was wrong. Caller-supplied extra keys are still never echoed.
+
+- `EVENT_INVALID` now locates the rejected draft by ordinal and owning field (for example
+  `/event_drafts/2/schema`), so a multi-draft batch no longer has to be re-derived to find the one
+  bad member. The pointer is built only from frozen schema names and a bounded index.
+
+- `yoetz provider status` now states which lifecycle it probed (`user_service_no_autostart`) and
+  whether MCP-local composition starts on demand, so an absent service no longer reads as
+  contradicting a working MCP session.
+
 ### Changed
 
 - **Retired the spec-mirror tree.** Yoetz was built spec-first, with one Markdown owner per planned

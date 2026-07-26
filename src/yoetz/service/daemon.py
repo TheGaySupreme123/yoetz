@@ -699,6 +699,33 @@ class ServiceDaemon:
                         )
                 except TimeoutError as exc:
                     raise ControlError("request_timeout", retryable=True) from exc
+            # The handler has returned, so a write may already be durable. Everything below only
+            # shapes the response; an unexpected failure there must not be reported as a failed
+            # operation.
+            return await self._project_completed_response(
+                projection_context, request, application, internal
+            )
+        finally:
+            if admission is not None:
+                await self._composition.lifecycle.release(admission)
+
+    async def _project_completed_response(
+        self,
+        projection_context: ClientProjectionContext,
+        request: ControlCallRequest,
+        application: _ReadyApplication,
+        internal: object,
+    ) -> object:
+        """Shape one already-completed operation, never collapsing a commit into a plain failure.
+
+        Bounded failures raised deliberately here (``ControlError`` such as
+        ``privacy_projection_blocked``, ``LifecycleError``, ``PublicOperationError``) already carry
+        an accurate caller-safe meaning and pass through untouched. Only an unexpected exception is
+        reclassified, as ``response_projection_failed``: the operation stands, and the caller must
+        be told to resume by replaying the same ``request_id`` rather than treating it as failed.
+        """
+
+        try:
             if request.method in _PROJECTION_EXEMPT_METHODS:
                 self._validate_success_body(request, internal)
                 return internal
@@ -723,9 +750,18 @@ class ServiceDaemon:
             )
             self._validate_success_body(request, projected)
             return projected
-        finally:
-            if admission is not None:
-                await self._composition.lifecycle.release(admission)
+        except asyncio.CancelledError:
+            raise
+        except ControlError, LifecycleError, PublicOperationError:
+            raise
+        except Exception as exc:
+            record_unexpected_exception_without_raising(
+                exc,
+                component="service.daemon",
+                operation=f"{request.method.value}_response_projection_failed",
+                request_id=_safe_body_request_id(request),
+            )
+            raise ControlError("response_projection_failed", retryable=True) from exc
 
     async def _accept_loop(
         self,
