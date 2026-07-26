@@ -67,8 +67,9 @@ https_origin = "https://llm.example.com:8443"
 # no api_key / headers / path / http — credentials stay in the ceremony
 ```
 
-You can edit `config.toml` by hand. Bare `yoetz` also exposes the same binding under **LLM provider**
-in the interactive menu.
+You can edit `config.toml` by hand. `/provider` in the terminal interface writes the same binding:
+it shows the endpoint and privacy posture before asking for anything secret, and states that
+storing a key does not switch external review on.
 
 ## Readiness (`yoetz provider status`)
 
@@ -116,11 +117,34 @@ value, a log line, a trace, a transcript, or anything reachable from LLM context
 
 If you find yourself wanting to pass a key as a flag, that is the design working as intended.
 
+`/provider` in the terminal interface uses this exact ceremony and has no credential path of its
+own. It asks for explicit consent, then suspends the full-screen interface and hands the
+controlling terminal to the ceremony, which opens `/dev/tty` and disables echo itself. No secret
+byte enters the interface's state, transcript, logs, or any snapshot. Where an environment cannot
+suspend, the interface says so and names this command rather than offering to take the key through
+the window.
+
 ## Binding a provider does not enable egress
 
 A bound provider plus a stored credential still sends nothing until privacy policy permits it. See
 [Privacy and semantic review](privacy-and-semantic-review.md). Every network channel is
 independently authorized.
+
+**Configuration is also not readiness.** Storing a binding and a credential are two facts; a
+working provider is a third, and it is only established by a successful probe. The terminal
+interface reports them separately and always has:
+
+```text
+✓ Provider binding saved
+✓ API key stored securely
+! Live provider connection has not been tested
+! External semantic review is not yet proven ready
+```
+
+This build exposes no bounded live provider probe from the local service, so a connection test in
+the interface reports itself as unavailable rather than reporting a pass
+([ADR-017](../adr/ADR-017-full-screen-terminal-interface.md), *Known limitations*). A provider
+that fails never downgrades local deterministic readiness.
 
 ## Checking what you have
 

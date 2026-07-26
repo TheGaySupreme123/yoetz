@@ -500,3 +500,74 @@ async def test_service_shows_state_and_offers_lifecycle_actions(
         assert view is not None
         labels = [option.label for option in view.options]  # type: ignore[attr-defined]
         assert labels == ["Unlock", "Set up a passphrase", "Lock now", "Stop the service"]
+
+
+# ---------------------------------------------------------------------------
+# Layout
+# ---------------------------------------------------------------------------
+
+
+async def test_the_transcript_gets_the_space_and_the_composer_stays_one_line(
+    make_app: MakeApp,
+) -> None:
+    """A container defaulting to ``1fr`` once ate the whole transcript.
+
+    The shape of this interface is the product: a large scrollable history with
+    a single composer line and a one-line footer beneath it.
+    """
+
+    from yoetz.tui.widgets.composer import Composer, Footer
+    from yoetz.tui.widgets.history import History
+
+    app = make_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        history = app.query_one(History).region
+        composer = app.query_one(Composer).region
+        footer = app.query_one(Footer).region
+
+        assert composer.height == 1
+        assert footer.height == 1
+        # The history takes everything the header and bottom pane do not.
+        assert history.height >= 15
+        assert history.y + history.height <= composer.y
+        assert footer.y == 29
+
+
+async def test_a_temporary_view_replaces_the_composer_and_then_restores_it(
+    make_app: MakeApp,
+) -> None:
+    """Opening a view must not cost the user the line they were writing."""
+
+    from yoetz.tui.widgets.views import Option, SelectionView
+
+    app = make_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.composer.text = "half typed"
+        await pilot.pause()
+
+        app.push_view(SelectionView(name="probe", options=[Option("a", "Alpha")]))
+        await pilot.pause()
+        assert app.open_view is not None
+        assert app.composer.display is False
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.open_view is None
+        assert app.composer.display is True
+        assert app.composer.text == "half typed"
+
+
+async def test_option_rows_use_the_width_the_terminal_actually_has(
+    make_app: MakeApp,
+) -> None:
+    """Rows were once laid out against a width the widget did not have yet."""
+
+    app = make_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await run_command(pilot, app, "/service")
+        view = app.open_view
+        assert view is not None
+        assert view.region.width >= 90

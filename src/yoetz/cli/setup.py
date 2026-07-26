@@ -551,7 +551,10 @@ async def _codex_integration_step(
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
 
-    if approved_preview_digest is not None and approved_preview_digest != mcp_preview.preview_digest:
+    if (
+        approved_preview_digest is not None
+        and approved_preview_digest != mcp_preview.preview_digest
+    ):
         return {
             "outcome": "failed",
             "reason": "preview_stale",

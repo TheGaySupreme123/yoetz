@@ -46,6 +46,7 @@ Screen {
 
 #history {
     height: 1fr;
+    min-height: 3;
     padding: 0 1;
     scrollbar-size-vertical: 1;
     background: $background;
@@ -68,6 +69,18 @@ Screen {
     max-height: 60%;
     dock: bottom;
     background: $background;
+}
+
+/* A Vertical defaults to 1fr, which would take the transcript's space. The
+ * composer must only ever be as tall as its popup plus one input line. */
+#composer-area {
+    height: auto;
+}
+
+#command-popup {
+    height: auto;
+    max-height: 12;
+    padding: 0 1;
 }
 
 #composer-row {

@@ -8,6 +8,40 @@ released versions.
 
 ### Added
 
+- **Full-screen terminal interface** as the interactive entry point (ADR-017, amending ADR-013
+  decisions 1–2 and ADR-012 decision 2 as ADR-013 left it). Bare `yoetz` and `yoetz menu` on a
+  real terminal open one continuous surface — session header, transcript, composer, and a stack
+  of temporary views — with first run folded in as its opening steps rather than a separate
+  wizard pass. Slash commands `/status`, `/work`, `/check`, `/receipt`, `/connect`, `/privacy`,
+  `/provider`, `/service`, `/doctor`, `/help`, `/quit` name existing operations in plain
+  language. Readiness renders as fifteen independently falsifiable layers rather than one
+  "connected" state; `✓` is reachable only from a layer the owning service reported as verified.
+
+  The interface adds no authority: `yoetz/tui/runtime.py` is the sole bridge to application
+  services and originates no decision. MCP registration keeps preview → digest-bound confirm →
+  verify (now via `setup.apply_codex_integration`, which requires the caller to echo back the
+  exact preview *and* policy digests it displayed and refuses as stale if either moved — stricter
+  than `--accept`, which still activates no policy trust). A foreign MCP entry remains a terminal
+  block with no force-replace path. Privacy widening renders the exact disclosure and then hands
+  off to `yoetz privacy propose|decide`; the interface never widens policy itself. No secret ever
+  enters the interface: credential entry suspends the full-screen app and hands the controlling
+  terminal to the existing confidential ceremony.
+
+  Non-interactive behavior is unchanged. The interface opens only when stdin and stdout are both
+  TTYs, `TERM` is usable, no CI marker is set, and `YOETZ_TUI` is not `0`; pipes, redirects, CI,
+  `--help`, `--json`, named subcommands, `yoetz mcp serve`, and the protocol fixtures keep their
+  exact previous bytes, and a bare non-TTY `yoetz` still prints help. Installations without the
+  rendering dependency fall back to the ADR-013 prompt-loop menu, which remains supported.
+
+  Adds one pinned runtime dependency, `textual==8.2.8` (with `linkify-it-py`, `mdit-py-plugins`,
+  `uc-micro-py`; all MIT, all on the reviewed-license allowlist).
+
+### Changed
+
+- The npm launcher propagates signal termination as the conventional `128+n` exit code and gives
+  actionable, platform-specific guidance when `uv` is absent. It still installs nothing, bundles
+  nothing, and duplicates no setup or interface logic.
+
 - First-party Codex **live observation and advice** as a required v0.1 capability (ADR-010
   amendment): dual-source ingest (hooks primary + selective session-stream reconciliation), local
   `ObservationPort` control (`yoetz observe status|grant|pause|resume|revoke|reconcile`), unified

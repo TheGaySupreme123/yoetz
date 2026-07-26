@@ -231,7 +231,9 @@ class SelectionView(BaseView):
     # -- rendering ------------------------------------------------------
 
     def _option_lines(self) -> Text:
-        width = max(self.size.width - 2, 30)
+        # Before the first layout the widget reports zero width; fall back to a
+        # readable default rather than wrapping every label into a column.
+        width = max(self.size.width - 2, 60)
         text = Text()
         if not self._visible:
             return Text("no matching options", style="bright_black")
@@ -272,6 +274,12 @@ class SelectionView(BaseView):
             self.query_one("#view-search", Input).focus()
         else:
             self.focus()
+        self._refresh_options()
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Re-lay the rows against the width the widget actually has."""
+
+        self._refresh_options()
 
     def _refresh_options(self) -> None:
         try:

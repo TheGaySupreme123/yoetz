@@ -705,9 +705,6 @@ class YoetzTui(App[int]):
         snapshot = await self.runtime.status_snapshot()
         await self._refresh_header()
         self.say(Level.VERIFIED, "", render_finish(snapshot, self.body_width))
-        self.footer_widget.set_state(
-            left="? for shortcuts", right=self._footer_right(snapshot.privacy.summary)
-        )
 
     async def _resume_flow(self) -> None:
         """Post-install landing: a header, a tip, and the composer. No dashboard."""
@@ -736,16 +733,24 @@ class YoetzTui(App[int]):
                 "foreign_present": "blocked — another tool owns the name",
             }.get(mcp, mcp)
         privacy = await self.runtime.privacy_posture()
+        vault = await self.runtime.vault_posture()
         self.header_widget.set_state(
             version=__version__,
             project=middle_truncate(str(self.runtime.project_root()), 48),
             harness=state,
             privacy=privacy.summary,
         )
-        self.footer_widget.set_state(right=self._footer_right(privacy.summary))
+        self.footer_widget.set_state(right=self._footer_right(privacy.summary, vault.ready))
 
-    def _footer_right(self, privacy_summary: str) -> str:
-        return f"{privacy_summary} · ready"
+    def _footer_right(self, privacy_summary: str, service_ready: bool) -> str:
+        """The footer states what was observed, never a default optimism.
+
+        "ready" here means the local service reported itself ready. A footer that
+        says it regardless would be the smallest possible version of exactly the
+        dishonesty this product exists to avoid.
+        """
+
+        return f"{privacy_summary} · {'ready' if service_ready else 'service not ready'}"
 
     # ------------------------------------------------------------------
     # Commands

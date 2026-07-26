@@ -107,6 +107,7 @@ def test_an_interactive_terminal_opens_the_interface_instead_of_the_menu(
     monkeypatch.setattr(tui, "tui_available", _gate(True))
     monkeypatch.setattr(tui, "tui_supported", lambda: True)
     monkeypatch.setattr(tui, "run_tui", fake_run)
+
     def refuse_menu() -> int:
         pytest.fail("the prompt menu must not open")
 
@@ -125,6 +126,7 @@ def test_a_first_run_terminal_folds_setup_into_the_interface(
     monkeypatch.setattr(setup_module, "should_offer_first_run", lambda: True)
     monkeypatch.setattr(tui, "tui_available", _gate(True))
     monkeypatch.setattr(tui, "tui_supported", lambda: True)
+
     def record(*, first_run: bool = False, cwd: object = None) -> int:
         calls.append(first_run)
         return 0
@@ -159,6 +161,7 @@ def test_named_subcommands_never_open_the_interface(
 ) -> None:
     monkeypatch.setattr(tui, "tui_available", _gate(True))
     monkeypatch.setattr(tui, "tui_supported", lambda: True)
+
     def refuse(*, first_run: bool = False, cwd: object = None) -> int:
         pytest.fail("a named command must not open the UI")
 
