@@ -71,6 +71,7 @@ class _Credential:
             for index in range(len(secret)):
                 secret[index] = 0
 
+
 def _case() -> ApprovedOutboundCase:
     payload = canonical_encode({"schema": "yoetz.semantic-check-candidate/1"})
     return ApprovedOutboundCase(

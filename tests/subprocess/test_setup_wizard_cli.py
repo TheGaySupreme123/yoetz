@@ -690,7 +690,9 @@ def test_ready_auto_unlock_vault_reuses_scoped_secret_for_provider_reauthenticat
         _credential: bytearray | None,
         reauthentication: bytearray | None,
     ) -> SimpleNamespace:
-        supplied_reauthentication.append(None if reauthentication is None else bytes(reauthentication))
+        supplied_reauthentication.append(
+            None if reauthentication is None else bytes(reauthentication)
+        )
         return SimpleNamespace(activation_status="stored")
 
     async def fake_reachability(*, start_if_absent: bool = False) -> dict[str, object]:

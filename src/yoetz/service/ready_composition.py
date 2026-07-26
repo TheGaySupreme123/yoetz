@@ -1294,13 +1294,23 @@ def _provider_provenance(
     reason: SemanticReason,
     ids: IdPort,
 ) -> SemanticProvenance | None:
-    """Bind a completed external attempt to its durable receipt and request commitment."""
+    """Bind a completed attempt to its dispatch-specific durable privacy authority."""
 
-    if (
-        result.privacy_receipt_id is None
-        or result.authorization_id is None
-        or result.request_commitment is None
-    ):
+    if result.privacy_receipt_id is None:
+        return None
+    if result.dispatch_kind is SemanticDispatchKind.EXTERNAL:
+        if result.authorization_id is None or result.request_commitment is None:
+            return None
+        egress_authorization_id = result.authorization_id
+        local_disclosure_reservation_id = None
+        request_commitment = result.request_commitment
+    elif result.dispatch_kind is SemanticDispatchKind.LOCAL_MODEL:
+        if result.authorization_id is not None or result.request_commitment is not None:
+            return None
+        egress_authorization_id = None
+        local_disclosure_reservation_id = result.privacy_proposal_id
+        request_commitment = None
+    else:
         return None
     attempt = result.result.provenance
     return SemanticProvenance(
@@ -1316,7 +1326,7 @@ def _provider_provenance(
         sampling_params=attempt.sampling_params,
         latency_ms=attempt.latency_ms,
         semantic_attempt_id=ids.new(IdKind.SEMANTIC_ATTEMPT),
-        dispatch_kind=SemanticDispatchKind.EXTERNAL,
+        dispatch_kind=result.dispatch_kind,
         privacy_receipt_id=result.privacy_receipt_id,
         status=status,
         reason=reason,
@@ -1324,8 +1334,9 @@ def _provider_provenance(
         token_usage=attempt.token_usage,
         cost_fields=attempt.cost_fields,
         failure_class=attempt.failure_class,
-        egress_authorization_id=result.authorization_id,
-        request_commitment=result.request_commitment,
+        egress_authorization_id=egress_authorization_id,
+        local_disclosure_reservation_id=local_disclosure_reservation_id,
+        request_commitment=request_commitment,
     )
 
 
