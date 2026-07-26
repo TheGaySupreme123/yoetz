@@ -338,6 +338,35 @@ async def test_unexpected_bridge_error_logs_public_correlation_id(
 
 
 @pytest.mark.anyio
+async def test_service_post_commit_projection_failure_maps_to_the_same_retryable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The service's own post-commit failure must read exactly like the bridge's.
+
+    The daemon raises ``response_projection_failed`` when shaping an already-completed operation
+    fails. An agent cannot tell which side lost the response, so both must produce one identical
+    retryable remedy rather than a bare "the bridge could not complete the operation".
+    """
+
+    client = _FakeClient(ControlError("response_projection_failed", retryable=True))
+    _install_clients(monkeypatch, [client])
+    request_id = cast(str, _requests()["publish_work"]["request_id"])
+    runtime = bridge.build_bridge_runtime()
+
+    result = await bridge.dispatch_publish_work(_requests()["publish_work"], runtime)
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    error = cast(dict[str, object], result.structuredContent["error"])
+    assert error["code"] == "INTERNAL_ERROR"
+    assert error["retryable"] is True
+    assert result.structuredContent["request_id"] == request_id
+    assert "same request_id" in cast(str, error["message"])
+    assert error.get("safe_details") == {"reason_code": "response_projection_failed"}
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
 async def test_post_commit_response_shaping_failure_is_retryable_with_same_request_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

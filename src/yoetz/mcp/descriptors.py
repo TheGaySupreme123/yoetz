@@ -135,8 +135,27 @@ def _example_id(kind: str, seed: int) -> str:
         "session": "ses",
         "writer": "wri",
         "event": "evt",
+        "action": "act",
+        "claim": "clm",
+        "evidence": "evd",
+        "obligation": "obl",
+        "result": "res",
     }
     return f"{prefixes[kind]}_00000000-0000-4000-8000-{seed:012d}"
+
+
+def _example_draft(seed: int, family: str, payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """One minimal valid draft envelope for a family, so agents copy shape rather than guess it."""
+
+    return {
+        "event_id": _example_id("event", seed),
+        "schema": {"name": family, "version": "1.0.0"},
+        "occurred_at": "2026-01-01T00:00:00.000Z",
+        "causal_parents": [],
+        "payload": payload,
+        "artifact_refs": [],
+        "evidence_refs": [],
+    }
 
 
 _EXAMPLE_ACTOR: Final[dict[str, JsonValue]] = {
@@ -148,6 +167,8 @@ _EXAMPLE_CLIENT: Final[dict[str, JsonValue]] = {
     "version": "0.1.0",
     "integration": "cooperative_mcp",
 }
+# A syntactically valid non-genesis head. Read the real one from status; never reuse this value.
+_EXAMPLE_HEAD_DIGEST: Final = "sha256:" + "0" * 64
 
 _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = MappingProxyType(
     {
@@ -176,6 +197,9 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                 "client": dict(_EXAMPLE_CLIENT),
             },
         ),
+        # One worked draft per ordinary publishable family. The plan example alone left agents
+        # hand-deriving action/result/evidence/claim shapes from a large oneOf, which is where
+        # routine publication attempts actually fail.
         "publish-work-request": (
             {
                 "protocol_version": "0.1",
@@ -185,19 +209,140 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                 "writer_id": _example_id("writer", 1),
                 "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
                 "event_drafts": [
-                    {
-                        "event_id": _example_id("event", 1),
-                        "schema": {"name": "plan_published", "version": "1.0.0"},
-                        "occurred_at": "2026-01-01T00:00:00.000Z",
-                        "causal_parents": [],
-                        "payload": {
+                    _example_draft(
+                        1,
+                        "plan_published",
+                        {
                             "plan_version": 1,
                             "summary": "Initial plan",
                             "obligation_refs": [],
                         },
-                        "artifact_refs": [],
-                        "evidence_refs": [],
-                    }
+                    )
+                ],
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 4),
+                "session_id": _example_id("session", 1),
+                "writer_id": _example_id("writer", 1),
+                "expected_frontier": {"sequence": "1", "head_digest": _EXAMPLE_HEAD_DIGEST},
+                "event_drafts": [
+                    _example_draft(
+                        2,
+                        "obligation_published",
+                        {
+                            "obligation_id": _example_id("obligation", 1),
+                            "description": "State the outcome this work owes.",
+                            "evidence_expectation": "A named test run or reviewed diff.",
+                            "status": "open",
+                        },
+                    ),
+                    _example_draft(
+                        3,
+                        "assignment_recorded",
+                        {
+                            "assignee_actor_id": "harness:mcp-example",
+                            "obligation_ids": [_example_id("obligation", 1)],
+                            "scope_description": "One independently reviewable work package.",
+                        },
+                    ),
+                    _example_draft(
+                        4,
+                        "decision_recorded",
+                        {
+                            "statement": "Keep the existing adapter instead of adding one.",
+                            "rationale": "The current path already covers the requested case.",
+                            "authority": "harness:mcp-example",
+                        },
+                    ),
+                ],
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 5),
+                "session_id": _example_id("session", 1),
+                "writer_id": _example_id("writer", 1),
+                "expected_frontier": {"sequence": "4", "head_digest": _EXAMPLE_HEAD_DIGEST},
+                "event_drafts": [
+                    _example_draft(
+                        5,
+                        "action_recorded",
+                        {
+                            "action_id": _example_id("action", 1),
+                            "action_kind": "command",
+                            # action_kind "command" additionally requires command.
+                            "command": "pytest -q",
+                            "description": "Ran the focused test slice for the touched module.",
+                        },
+                    ),
+                    _example_draft(
+                        6,
+                        "result_recorded",
+                        {
+                            "result_id": _example_id("result", 1),
+                            "action_id": _example_id("action", 1),
+                            "outcome": "success",
+                            "summary": "The focused slice passed.",
+                        },
+                    ),
+                    _example_draft(
+                        7,
+                        "evidence_recorded",
+                        {
+                            "evidence_id": _example_id("evidence", 1),
+                            "evidence_kind": "test_result",
+                            # Each strength requires its own proof field; content_digest
+                            # requires content_digest.
+                            "strength": "content_digest",
+                            "content_digest": _EXAMPLE_HEAD_DIGEST,
+                            "observed_at": "2026-01-01T00:00:00.000Z",
+                            "description": "Focused test slice for the touched module.",
+                        },
+                    ),
+                    _example_draft(
+                        8,
+                        "claim_recorded",
+                        {
+                            "claim_id": _example_id("claim", 1),
+                            "claim_kind": "completion",
+                            "statement": "The requested change is implemented and covered.",
+                            "supporting_refs": [_example_id("evidence", 1)],
+                        },
+                    ),
+                ],
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 6),
+                "session_id": _example_id("session", 1),
+                "writer_id": _example_id("writer", 1),
+                "expected_frontier": {"sequence": "8", "head_digest": _EXAMPLE_HEAD_DIGEST},
+                "event_drafts": [
+                    _example_draft(
+                        9,
+                        "plan_revised",
+                        {
+                            "plan_version": 2,
+                            "supersedes_plan_version": 1,
+                            "reason": "The reviewed scope changed after inspecting the source.",
+                            "summary": "Revised plan",
+                            "obligation_changes": [
+                                {
+                                    "obligation_id": _example_id("obligation", 1),
+                                    "change": "carried",
+                                }
+                            ],
+                        },
+                    )
                 ],
                 "actor": dict(_EXAMPLE_ACTOR),
                 "client": dict(_EXAMPLE_CLIENT),

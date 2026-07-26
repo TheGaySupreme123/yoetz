@@ -20,12 +20,20 @@ Tell the user briefly that Yoetz is being used as a local work ledger and verifi
 4. Delegate with the session, task, distinct logical writer, and bounded assignment context. Do not send or publish full transcripts.
 5. Publish material work-package transitions: assignment, decision, blocked attempt, independently useful result, completion, or revision. Omit routine reads, searches, formatting, and per-file mechanics.
 6. Stay next to the record. After resume, compaction, handoff, or uncertainty about what is already done or committed, call `status`. `view=candidate_findings` is an advisory read: it creates no verdict, IDs, receipt, or event.
-7. Before completion, publish the intended material completion claim and current evidence, then call `check`. Choose mode deliberately: `semantic_if_configured` for most material implementation/review claims; `semantic_required` when completion depends on qualitative correctness, design conformance, security/privacy reasoning, interoperability, or whether the code satisfies the ask; `deterministic_only` only for explicitly local/structural checks, semantic-disabled policy, or a deliberate no-egress choice — and disclose that limitation. Publish the smallest state-bound diff/symbol and the directly relevant test or failure excerpt; never rely on self-asserted completion prose alone.
+7. Before completion, publish the intended material completion claim and current evidence, then call `check`. Read `closure_readiness` on any `status` result first: it names the open obligations, unresolved findings, and declared gaps that currently bound a conclusion. Spending a check or receipt while those stand returns a predictably insufficient result; resolve or explicitly record them instead. Choose mode deliberately: `semantic_if_configured` for most material implementation/review claims; `semantic_required` when completion depends on qualitative correctness, design conformance, security/privacy reasoning, interoperability, or whether the code satisfies the ask; `deterministic_only` only for explicitly local/structural checks, semantic-disabled policy, or a deliberate no-egress choice — and disclose that limitation. Publish the smallest state-bound diff/symbol and the directly relevant test or failure excerpt; never rely on self-asserted completion prose alone.
 8. Respond to each challenge by accepting and acting, supplying evidence, revising the claim, disputing with evidence, or stating an unresolved limitation. A response does not erase a finding.
 9. Recheck after any material edit, evidence change, plan change, or finding response.
 10. Request a receipt and keep the final answer no stronger than its weakest material coverage, freshness, unresolved findings, and limitations. All receipt formats (`json`, `markdown`, `text`) project under default policy; if a stricter owner policy blocks `json`, re-request `markdown` or `text`.
 
-Reuse the original request and operation IDs after timeout or reconnect. A timeout has unknown outcome; retry idempotently or inspect status.
+## State the record you changed
+
+Using Yoetz is itself a state change. A run that starts a task, advances the ledger, or obtains a check or receipt has changed durable local state even when it edited no product file. Separate the two in the final answer instead of collapsing them.
+
+Permitted: “No product source, provider configuration, credential binding, or privacy authorization was changed. This run created a Yoetz task, published N events, and recorded one check and one receipt.”
+
+Forbidden: “Nothing changed” or “no runtime state changed” after a real session, publication, check, or receipt.
+
+Reuse the original request and operation IDs after timeout or reconnect. A timeout has unknown outcome; retry idempotently or inspect status. An operation that reports failure after its write may have committed: read `status` for the authoritative frontier before assuming it failed, and resolve a retryable failure by replaying the same `request_id` rather than composing a new one.
 
 ## Multi-agent attribution and handoff
 

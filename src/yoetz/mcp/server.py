@@ -95,6 +95,14 @@ _REGISTERED_TOOL_NAMES: Final = frozenset(
 # answered by the live service and reconnecting around it drops the session for nothing, so both
 # projection reasons are handled in place and surfaced with their own remedy.
 _RECONNECT_REASONS: Final = frozenset({"service_unavailable", "service_generation_changed"})
+# One wording for both post-commit projection failures — the service's own (control reason
+# `response_projection_failed`) and the bridge's. In both the operation stands and the only safe
+# recovery is replaying the same request_id, so the caller must never see them differ.
+_RESPONSE_PROJECTION_FAILED_MESSAGE: Final = (
+    "The operation completed on the local service, but its response could not be shaped. "
+    "Retry with the same request_id to load the stored result."
+)
+_RESPONSE_PROJECTION_FAILED_DETAILS: Final = {"reason_code": "response_projection_failed"}
 
 
 @dataclass(slots=True)
@@ -273,6 +281,14 @@ def _control_error_result(
                 "field": "format",
             },
         )
+    if error.reason == "response_projection_failed":
+        return structured_error_result(
+            PublicErrorCode.INTERNAL_ERROR,
+            _RESPONSE_PROJECTION_FAILED_MESSAGE,
+            retryable=True,
+            request_id=request_id,
+            safe_details=dict(_RESPONSE_PROJECTION_FAILED_DETAILS),
+        )
     if error.reason == "privacy_projection_unavailable":
         return structured_error_result(
             PublicErrorCode.SERVICE_UNAVAILABLE,
@@ -418,14 +434,11 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
         )
         return structured_error_result(
             PublicErrorCode.INTERNAL_ERROR,
-            (
-                "The operation completed on the local service, but the bridge could not shape "
-                "the response. Retry with the same request_id to load the stored result."
-            ),
+            _RESPONSE_PROJECTION_FAILED_MESSAGE,
             retryable=True,
             request_id=request_id,
             correlation_id=correlation_id,
-            safe_details={"reason_code": "response_projection_failed"},
+            safe_details=dict(_RESPONSE_PROJECTION_FAILED_DETAILS),
         )
 
 

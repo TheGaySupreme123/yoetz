@@ -22,6 +22,9 @@ from yoetz.service.client import connect_service
 __all__ = ["machine_scope_request", "provider_status_report", "run_provider_status"]
 
 _SCHEMA: Final = "yoetz.provider-status/1"
+# This report probes the persistent user service over the fixed endpoint only. It never starts
+# one, unlike the MCP bridge's connect-on-demand path.
+_PROBED_LIFECYCLE: Final = "user_service_no_autostart"
 
 
 def _stdout_json(value: JsonValue) -> None:
@@ -53,6 +56,12 @@ def _emit(value: Mapping[str, JsonValue], *, json_output: bool) -> None:
         for item in blockers:
             if isinstance(item, Mapping):
                 print(f"  - {item.get('condition')}: {item.get('next_command')}")
+                if item.get("mcp_local_composition") == "starts_on_demand":
+                    print(
+                        "    (this check probes the running user service and never starts one; "
+                        "the MCP bridge starts it on demand, but this check does not probe "
+                        "that path)"
+                    )
             else:
                 print(f"  - {item}")
     next_steps = value.get("next_commands")
@@ -79,6 +88,21 @@ def _channel_enabled(policy: Mapping[str, object], channel: str) -> bool | None:
         if entry.get("channel") == channel:
             return entry.get("enabled") is True
     return None
+
+
+def _mcp_local_composition(service_state: str | None, *, service_observed: bool) -> str:
+    """Say what the MCP-local path would find, only from what this probe actually established.
+
+    A service that answered is shared by both surfaces. An absent one is started on demand by the
+    bridge. Every other refusal — an untrusted peer, a protocol mismatch — proves neither, so it
+    stays `unknown` instead of asserting a lifecycle this check never observed.
+    """
+
+    if service_observed:
+        return "shares_this_service"
+    if service_state in {None, "service_unavailable"}:
+        return "starts_on_demand"
+    return "unknown"
 
 
 def machine_scope_request() -> JsonObject:
@@ -123,11 +147,15 @@ async def provider_status_report() -> dict[str, JsonValue]:
     credential_connected: bool | None = None
     llm_inference_enabled: bool | None = None
     policy_profile: str | None = None
+    # Set only when a service actually answered, so presence is observed rather than inferred
+    # from the shape of a refusal.
+    service_observed = False
 
     try:
         client = await connect_service(ControlClientKind.CLI)
         try:
             status = await client.service_status()
+            service_observed = True
             service_state = status.state.value
             service_state_reason = status.state_reason
             if status.state.value == "ready":
@@ -171,6 +199,14 @@ async def provider_status_report() -> dict[str, JsonValue]:
                 "state": service_state or "service_unavailable",
                 "reason": service_state_reason,
                 "next_command": service_command,
+                # This surface deliberately connects without starting anything, so an absent
+                # service reads as unavailable here while the MCP bridge — which connects on
+                # demand — starts the same service and succeeds. Naming the probed lifecycle
+                # keeps the two reports from looking like a contradiction.
+                "probed_lifecycle": _PROBED_LIFECYCLE,
+                "mcp_local_composition": _mcp_local_composition(
+                    service_state, service_observed=service_observed
+                ),
             }
         )
     if not semantic_enabled:

@@ -127,6 +127,10 @@ class _Application:
         self.projections: list[ClientProjectionContext] = []
         self.close_count = 0
         self.publish_work_error: PublicOperationError | None = None
+        # Stands in for an accepted, durable batch so the post-commit response path can be
+        # exercised without a real ledger.
+        self.publish_work_result: PublishWorkResult | None = None
+        self.projection_error: BaseException | None = None
 
     async def start(self, request: object) -> StartResult:
         assert isinstance(request, StartRequest)
@@ -153,6 +157,8 @@ class _Application:
         await asyncio.sleep(0)
         if self.publish_work_error is not None:
             raise self.publish_work_error
+        if self.publish_work_result is not None:
+            return self.publish_work_result
         raise AssertionError("publish_work_error_required")
 
     async def review(self, request: object) -> JsonObject:
@@ -178,6 +184,8 @@ class _Application:
         method = binding.method
         assert method in {ControlMethod.START, ControlMethod.REVIEW, ControlMethod.PUBLISH_WORK}
         self.projections.append(context)
+        if self.projection_error is not None:
+            raise self.projection_error
         assert isinstance(result, StartResult | PublishWorkResult | JsonObject)
         return result
 
@@ -345,6 +353,76 @@ async def test_public_operation_error_surfaces_as_ok_false_not_internal_error() 
     assert application.publish_work_calls == 1
     assert application.projections == []
     assert not isinstance(result.body, ControlError)
+    await daemon.close()
+
+
+def _accepted_publish_work_result(request_id: str) -> PublishWorkResult:
+    """An ok:false body is enough here: only the post-commit response path is under test."""
+
+    return PublishWorkResult.model_validate(
+        {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "request_id": request_id,
+            "ok": False,
+            "error": {
+                "code": "INVALID_REQUEST",
+                "message": "The request is invalid.",
+                "retryable": False,
+                "correlation_id": f"err_{_UUID}",
+            },
+        }
+    )
+
+
+@pytest.mark.anyio
+async def test_post_commit_projection_failure_is_retryable_not_plain_internal_error() -> None:
+    """An accepted write must never be surfaced to the caller as an unqualified failure.
+
+    The handler returns (so a batch may already be durable) and only then does response shaping
+    fail. Reporting that as a bare non-retryable ``internal_error`` would tell the agent the
+    operation failed and steer it away from the same-``request_id`` replay that recovers it.
+    """
+
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    body = _publish_work_body()
+    application.publish_work_result = _accepted_publish_work_result(body.request_id)
+    application.projection_error = RuntimeError("post-commit-shape-failure")
+
+    result = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.PUBLISH_WORK, body),
+    )
+
+    assert result.outcome == "error"
+    assert isinstance(result.body, ControlError)
+    assert result.body.reason == "response_projection_failed"
+    assert result.body.retryable is True
+    # The operation itself ran exactly once and is not retried behind the caller's back.
+    assert application.publish_work_calls == 1
+    assert len(application.projections) == 1
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_deliberate_post_commit_control_error_is_not_reclassified() -> None:
+    """Bounded projection failures already say something true and must survive unchanged."""
+
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    body = _publish_work_body()
+    application.publish_work_result = _accepted_publish_work_result(body.request_id)
+    application.projection_error = ControlError("privacy_projection_blocked")
+
+    result = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.PUBLISH_WORK, body),
+    )
+
+    assert result.outcome == "error"
+    assert isinstance(result.body, ControlError)
+    assert result.body.reason == "privacy_projection_blocked"
     await daemon.close()
 
 

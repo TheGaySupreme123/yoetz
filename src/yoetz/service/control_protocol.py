@@ -771,7 +771,9 @@ def public_error_code_for_control_reason(reason: str) -> PublicErrorCode:
         return PublicErrorCode.VAULT_LOCKED
     if reason == "request_cancelled":
         return PublicErrorCode.CANCELLED
-    if reason == "internal_error":
+    # The operation completed; only its response could not be shaped. The public code stays
+    # INTERNAL_ERROR, but the bridge pairs it with retryable=True and a same-request_id remedy.
+    if reason in {"internal_error", "response_projection_failed"}:
         return PublicErrorCode.INTERNAL_ERROR
     if reason in {
         "frame_invalid",

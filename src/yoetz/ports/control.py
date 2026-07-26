@@ -242,6 +242,7 @@ _CONTROL_ERROR_REASONS = frozenset(
         "internal_error",
         "privacy_projection_unavailable",
         "privacy_projection_blocked",
+        "response_projection_failed",
         "service_generation_changed",
     }
 )
@@ -264,6 +265,10 @@ class ControlError(Exception):
             raise ValueError("privacy_projection_error_must_be_retryable")
         if reason == "privacy_projection_blocked" and retryable:
             raise ValueError("privacy_projection_blocked_must_not_be_retryable")
+        # The operation already committed; only the response could not be shaped. Surfacing it as
+        # non-retryable would steer callers away from the same-request_id replay that recovers it.
+        if reason == "response_projection_failed" and not retryable:
+            raise ValueError("response_projection_error_must_be_retryable")
         self.reason = reason
         self.retryable = retryable
         super().__init__(reason)

@@ -9,9 +9,9 @@ from typing import Final, cast
 from pydantic import ValidationError
 
 from yoetz.protocol.canonical import JsonValue
-from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+from yoetz.protocol.errors import SAFE_DETAIL_KEYS, PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id
-from yoetz.protocol.models import OperationFailureModel
+from yoetz.protocol.models import FRONTIER_LEAVES, OperationFailureModel
 
 __all__ = [
     "build_last_resort_internal_error_result",
@@ -43,6 +43,9 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "finding_frontier",
         "finding_id",
         "format",
+        # Frontier leaves. Without them a wrong key inside expected_frontier/at_frontier projects
+        # to the parent object and the caller learns only that "something" there is wrong.
+        "head_digest",
         "include",
         "integration",
         "kind",
@@ -63,6 +66,7 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "schema_name",
         "schema_version",
         "scope",
+        "sequence",
         "session_id",
         "subject_state",
         "task_id",
@@ -242,3 +246,11 @@ def build_last_resort_internal_error_result() -> dict[str, JsonValue]:
 
 # Fail startup if the supposedly universal literal branch ever leaves the shared schema contract.
 OperationFailureModel.model_validate(build_last_resort_internal_error_result())
+
+# Frontier leaves are hand-authored on every state-sensitive publish, and getting one wrong is the
+# single most common routine payload mistake. They are frozen schema names already trusted as
+# SAFE_DETAIL_KEYS, so failing to locate one is a diagnostic gap, not a safety property.
+if not set(FRONTIER_LEAVES) <= _SAFE_LOCATION_SEGMENTS:
+    raise RuntimeError("safe_location_segments_missing_frontier_leaf")
+if not set(FRONTIER_LEAVES) <= set(SAFE_DETAIL_KEYS):
+    raise RuntimeError("safe_detail_keys_missing_frontier_leaf")

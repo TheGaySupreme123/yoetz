@@ -2001,6 +2001,44 @@ class StatusImportStatusModel(_ClosedModel):
     source_identity_digest: Sha256Digest | None
 
 
+class StatusClosureReadinessModel(_ClosedModel):
+    """What currently bounds a completion conclusion, before a check or receipt is spent.
+
+    Advisory and derived: reading it records nothing, creates no verdict, and never strengthens
+    coverage. It exists so an agent can see that a check would come back coverage-bounded instead
+    of discovering it afterwards from the receipt.
+    """
+
+    open_obligation_count: CanonicalUInt64Wire | None
+    unresolved_finding_count: CanonicalUInt64Wire | None
+    blocking_conditions: tuple[
+        Literal[
+            "obligations_open",
+            "findings_unresolved",
+            "no_plan_published",
+            "projection_stale",
+            "coverage_gaps_declared",
+            "readiness_unknown",
+        ],
+        ...,
+    ]
+
+    @model_validator(mode="after")
+    def _validate_closure_readiness(self) -> StatusClosureReadinessModel:
+        _require_unique(self.blocking_conditions, limit=8)
+        # Absent counts mean the compact singleton could not be read (an unreadable task title
+        # omits it). Reporting zero there would assert "nothing is open" from missing data, so
+        # unknown must be null and must say so rather than look like a clean record.
+        unknown = self.open_obligation_count is None or self.unresolved_finding_count is None
+        if unknown != ("readiness_unknown" in self.blocking_conditions):
+            raise ValueError("closure_readiness_unknown_mismatch")
+        if unknown and self.open_obligation_count != self.unresolved_finding_count:
+            raise ValueError("closure_readiness_partial_unknown")
+        if unknown and set(self.blocking_conditions) != {"readiness_unknown"}:
+            raise ValueError("closure_readiness_unknown_not_exclusive")
+        return self
+
+
 class StatusObligationItemModel(_ClosedModel):
     optional_non_null_fields = frozenset({"acceptance_criteria"})
 
@@ -2155,6 +2193,7 @@ class StatusSuccessModel(_ClosedModel):
     coverage: CoverageModel
     gaps: tuple[CodeWire, ...]
     import_status: StatusImportStatusModel
+    closure_readiness: StatusClosureReadinessModel
     privacy_projection: PrivacyProjectionModel
 
     @model_validator(mode="before")
@@ -2375,7 +2414,7 @@ _COMMON_SUCCESS_LEAVES: Final = (
     "/session_id",
     "/task_id",
 )
-_FRONTIER_LEAVES: Final = ("head_digest", "sequence")
+FRONTIER_LEAVES: Final = ("head_digest", "sequence")
 _COVERAGE_LEAVES: Final = (
     "artifact_observation",
     "authorship_assurance",
@@ -2470,7 +2509,7 @@ _RECEIPT_DOCUMENT_VERSION_LEAVES: Final = (
 _START_STRUCTURAL_POINTERS: Final = (
     _COMMON_SUCCESS_LEAVES
     + ("/outcome", "/writer_id")
-    + _prefix_leaf_patterns("/frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/compact/coverage", _COVERAGE_LEAVES)
     + (
         "/compact/current_plan_event_id",
@@ -2486,8 +2525,8 @@ _START_STRUCTURAL_POINTERS: Final = (
 _PUBLISH_STRUCTURAL_POINTERS: Final = (
     _COMMON_SUCCESS_LEAVES
     + ("/gaps/*", "/outcome", "/warning_codes/*", "/writer_id")
-    + _prefix_leaf_patterns("/subject_frontier", _FRONTIER_LEAVES)
-    + _prefix_leaf_patterns("/result_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/subject_frontier", FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/result_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/coverage", _COVERAGE_LEAVES)
     + _prefix_leaf_patterns("/privacy_projection", _PRIVACY_PROJECTION_LEAVES)
     + _prefix_leaf_patterns("/versions", _BASIC_VERSION_LEAVES)
@@ -2521,8 +2560,8 @@ _CHECK_STRUCTURAL_POINTERS: Final = (
         "/verdict",
         "/writer_id",
     )
-    + _prefix_leaf_patterns("/subject_frontier", _FRONTIER_LEAVES)
-    + _prefix_leaf_patterns("/result_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/subject_frontier", FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/result_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/coverage", _COVERAGE_LEAVES)
     + _prefix_leaf_patterns("/privacy_projection", _PRIVACY_PROJECTION_LEAVES)
     + _prefix_leaf_patterns("/versions", _BASIC_VERSION_LEAVES)
@@ -2544,7 +2583,7 @@ _CHECK_STRUCTURAL_POINTERS: Final = (
             "subject_refs/*",
         ),
     )
-    + _prefix_leaf_patterns("/findings/*/subject_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/findings/*/subject_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/findings/*/coverage", _COVERAGE_LEAVES)
     + _prefix_leaf_patterns("/findings/*/provenance", _SEMANTIC_PROVENANCE_LEAVES)
     + _prefix_leaf_patterns("/findings/*/summary", _OMITTED_CONTENT_LEAVES)
@@ -2554,8 +2593,8 @@ _CHECK_STRUCTURAL_POINTERS: Final = (
 _RESPOND_STRUCTURAL_POINTERS: Final = (
     _COMMON_SUCCESS_LEAVES
     + ("/warning_codes/*", "/writer_id")
-    + _prefix_leaf_patterns("/subject_frontier", _FRONTIER_LEAVES)
-    + _prefix_leaf_patterns("/result_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/subject_frontier", FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/result_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/coverage", _COVERAGE_LEAVES)
     + _prefix_leaf_patterns("/privacy_projection", _PRIVACY_PROJECTION_LEAVES)
     + _prefix_leaf_patterns("/versions", _BASIC_VERSION_LEAVES)
@@ -2567,7 +2606,7 @@ _RESPOND_STRUCTURAL_POINTERS: Final = (
         "/response",
         ("disposition", "finding_id", "response_event_id", "waiver_expiry", "waiver_scope"),
     )
-    + _prefix_leaf_patterns("/response/finding_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/response/finding_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/response/evidence/*", ("reference_id",))
     + _prefix_leaf_patterns("/response/reason", _OMITTED_CONTENT_LEAVES)
     + _prefix_leaf_patterns(
@@ -2586,10 +2625,10 @@ _STATUS_COMMON_STRUCTURAL_POINTERS: Final = (
         "/view",
         "/writer_id",
     )
-    + _prefix_leaf_patterns("/requested_frontier", _FRONTIER_LEAVES)
-    + _prefix_leaf_patterns("/head_frontier", _FRONTIER_LEAVES)
-    + _prefix_leaf_patterns("/subject_frontier", _FRONTIER_LEAVES)
-    + _prefix_leaf_patterns("/result_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/requested_frontier", FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/head_frontier", FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/subject_frontier", FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/result_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/coverage", _COVERAGE_LEAVES)
     + _prefix_leaf_patterns("/privacy_projection", _PRIVACY_PROJECTION_LEAVES)
     + _prefix_leaf_patterns(
@@ -2600,6 +2639,14 @@ _STATUS_COMMON_STRUCTURAL_POINTERS: Final = (
             "report_evidence_id",
             "source_identity_digest",
             "terminal_count",
+        ),
+    )
+    + _prefix_leaf_patterns(
+        "/closure_readiness",
+        (
+            "blocking_conditions/*",
+            "open_obligation_count",
+            "unresolved_finding_count",
         ),
     )
 )
@@ -2650,7 +2697,7 @@ _STATUS_CANDIDATE_FINDINGS_STRUCTURAL_POINTERS: Final = (
         ),
     )
     + _prefix_leaf_patterns("/page/items/*/coverage", _COVERAGE_LEAVES)
-    + _prefix_leaf_patterns("/page/items/*/subject_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/page/items/*/subject_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/detail", _OMITTED_CONTENT_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/summary", _OMITTED_CONTENT_LEAVES)
 )
@@ -2741,7 +2788,7 @@ _STATUS_FINDINGS_STRUCTURAL_POINTERS: Final = (
         ),
     )
     + _prefix_leaf_patterns("/page/items/*/coverage", _COVERAGE_LEAVES)
-    + _prefix_leaf_patterns("/page/items/*/subject_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/page/items/*/subject_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/provenance", _SEMANTIC_PROVENANCE_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/detail", _OMITTED_CONTENT_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/reason", _OMITTED_CONTENT_LEAVES)
@@ -2811,8 +2858,8 @@ _RECEIPT_STRUCTURAL_POINTERS: Final = (
         "/redaction_profile",
         "/suppressed_finding_count",
     )
-    + _prefix_leaf_patterns("/subject_frontier", _FRONTIER_LEAVES)
-    + _prefix_leaf_patterns("/result_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/subject_frontier", FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/result_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/coverage", _COVERAGE_LEAVES)
     + _prefix_leaf_patterns("/privacy_projection", _PRIVACY_PROJECTION_LEAVES)
     + _prefix_leaf_patterns("/versions", _RECEIPT_VERSION_LEAVES)
@@ -2832,7 +2879,7 @@ _RECEIPT_STRUCTURAL_POINTERS: Final = (
         ),
     )
     + _prefix_leaf_patterns("/document/coverage", _COVERAGE_LEAVES)
-    + _prefix_leaf_patterns("/document/subject_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/document/subject_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/document/versions", _RECEIPT_DOCUMENT_VERSION_LEAVES)
     + _prefix_leaf_patterns(
         "/document/findings/*",
@@ -2847,7 +2894,7 @@ _RECEIPT_STRUCTURAL_POINTERS: Final = (
         ),
     )
     + _prefix_leaf_patterns("/document/findings/*/coverage", _COVERAGE_LEAVES)
-    + _prefix_leaf_patterns("/document/findings/*/subject_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/document/findings/*/subject_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns(
         "/document/findings/*/provenance",
         _SEMANTIC_PROVENANCE_LEAVES,
@@ -2860,7 +2907,7 @@ _RECEIPT_STRUCTURAL_POINTERS: Final = (
         "/document/responses/*",
         ("disposition", "evidence_refs/*", "finding_id", "waiver_expiry", "waiver_scope"),
     )
-    + _prefix_leaf_patterns("/document/responses/*/finding_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/document/responses/*/finding_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/document/gaps/*", ("code", "subject_refs/*"))
     + _prefix_leaf_patterns("/document/redactions/*", ("category", "count", "reason"))
     + _prefix_leaf_patterns("/document/sections/*", ("key",))
@@ -3062,7 +3109,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 697:
+    if len(result) != 700:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

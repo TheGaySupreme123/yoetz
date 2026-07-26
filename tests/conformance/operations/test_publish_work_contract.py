@@ -114,7 +114,10 @@ def test_ordinary_channel_rejects_reserved_families(family: str) -> None:
         )
 
     assert caught.value.code is PublicErrorCode.EVENT_INVALID
-    assert caught.value.safe_details == {"reason_code": "event_family_not_admitted"}
+    assert caught.value.safe_details == {
+        "reason_code": "event_family_not_admitted",
+        "field": "/event_drafts/0/schema",
+    }
 
 
 def _action_drafts(count: int) -> tuple[dict[str, object], ...]:
@@ -204,7 +207,12 @@ def test_unsorted_causal_parents_reject_as_event_invalid_unsorted_set_field() ->
         )
 
     assert caught.value.code is PublicErrorCode.EVENT_INVALID
-    assert caught.value.safe_details == {"reason_code": "unsorted_set_field"}
+    # The draft is located even when the rejection comes from a whole-draft invariant rather
+    # than a single field.
+    assert caught.value.safe_details == {
+        "reason_code": "unsorted_set_field",
+        "field": "/event_drafts/0",
+    }
 
 
 def _unknown_import_request() -> PublishWorkRequestModel:

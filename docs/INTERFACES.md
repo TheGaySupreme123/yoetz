@@ -778,7 +778,8 @@ in `ports/ledger.md`; `limit` is `1..100`, the expected version is absent on a f
 filter/position must match the view. `ProjectionPage(view, items, requested_frontier,
 head_frontier, effective_frontier, lag, projection_version, rebuild_state, coverage, gaps,
 next_position)` contains at most the requested count of pre-client-projection typed rows. It never
-contains opaque cursor bytes, a request envelope, import status, result frontier, or privacy
+contains opaque cursor bytes, a request envelope, import status, closure readiness, result
+frontier, or privacy
 projection. The application alone authenticates/decodes a versioned opaque `ProjectionCursor`
 into a typed position and encodes `next_position` back. Adapters filter and page at the
 storage/projection boundary; application code MUST NOT materialize an unbounded `ProjectionState`
@@ -977,6 +978,14 @@ It has no privacy decision, unlock, secret, credential, key-handle, decrypted-ob
 arbitrary-path, or policy-loosening field or method. `service_status` is available while locked;
 task operations are not. MCP cannot invoke lifecycle, privacy-control, or observation-control
 methods.
+
+`ControlError` carries one bounded reason and a `retryable` flag. `response_projection_failed` is
+reserved for the window after a handler returns, where a write may already be durable and only the
+response could not be shaped; it is always `retryable=True`, and the bridge answers it with the
+same-`request_id` replay remedy it uses for its own projection failures. Deliberate bounded
+failures raised in that window — `privacy_projection_blocked`, `privacy_projection_unavailable`,
+and any `PublicOperationError` — already state something true and pass through unchanged. An
+accepted write must never surface as an unqualified failure.
 
 `ports/privacy.py` owns the shared receipt-inspection values `PrivacyReceiptAudience`,
 `PrivacyReceiptQuery`, `PrivacyReceiptPage` (positive snapshot generation, bounded unique
@@ -1864,7 +1873,22 @@ One public async method
 per operation: `start`, `publish_work`, `check`, `respond`, `status`, `receipt`, plus
 `import_codex_jsonl` and `review` (support). All accept/return Yoetz request/result dataclasses
 (`StartRequest/StartResult`, etc.), never SDK types. All expected failures leave as
-`PublicOperationError`. Only `ServiceDaemon` constructs and calls this facade after lifecycle/vault
+`PublicOperationError`.
+
+Every `status` success carries `closure_readiness(open_obligation_count,
+unresolved_finding_count, blocking_conditions)` beside `import_status`, on every view. Its
+`blocking_conditions` are exactly
+`obligations_open|findings_unresolved|no_plan_published|projection_stale|coverage_gaps_declared|
+readiness_unknown`. It is derived per request from the compact projection: reading it records
+nothing, creates no verdict or IDs, and never strengthens coverage. It exists so a check or receipt
+is not spent before the record can support a conclusion.
+
+Compact omits its singleton when the task title is unreadable. Readiness never fills that gap with
+zeros, which would assert a clean record from missing data: both counts are then `null` and
+`blocking_conditions` is exactly `("readiness_unknown",)`. Unknown is a bounded state, not a
+default.
+
+Only `ServiceDaemon` constructs and calls this facade after lifecycle/vault
 readiness and control admission; CLI, MCP, and UI call `ServiceClient` instead and cannot import
 runtime composition. Backup/restore/migrate and Codex skill lifecycle are composed through the
 separate `MaintenanceService` and `IntegrationService`; they are not methods on the six-operation
