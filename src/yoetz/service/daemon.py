@@ -174,6 +174,15 @@ _PROJECTION_EXEMPT_METHODS = _STRUCTURAL_METHODS | {
     ControlMethod.PRIVACY_RECEIPTS_LIST,
     ControlMethod.PRIVACY_RECEIPTS_GET,
 }
+# Methods that never append to the ledger. A projection failure on one of these cannot have left
+# a durable write behind, so its remedy is repeating the request, not same-request_id replay.
+_READ_ONLY_METHODS: Final[frozenset[ControlMethod]] = frozenset(
+    {
+        ControlMethod.STATUS,
+        ControlMethod.PRIVACY_RECEIPTS_LIST,
+        ControlMethod.PRIVACY_RECEIPTS_GET,
+    }
+)
 _WORKFLOW_RESULT_MODELS: Final[Mapping[ControlMethod, type[BaseModel]]] = {
     ControlMethod.START: StartResult,
     ControlMethod.PUBLISH_WORK: PublishWorkResult,
@@ -721,8 +730,14 @@ class ServiceDaemon:
         Bounded failures raised deliberately here (``ControlError`` such as
         ``privacy_projection_blocked``, ``LifecycleError``, ``PublicOperationError``) already carry
         an accurate caller-safe meaning and pass through untouched. Only an unexpected exception is
-        reclassified, as ``response_projection_failed``: the operation stands, and the caller must
-        be told to resume by replaying the same ``request_id`` rather than treating it as failed.
+        reclassified, and the reclassification depends on what the method could have changed:
+
+        - a write may already be durable, so it becomes ``response_projection_failed`` and the
+          caller is told to resume by replaying the same ``request_id``;
+        - a read changed nothing, so it becomes ``read_projection_failed`` and the caller is told
+          to repeat the request. Advertising same-``request_id`` replay for a read is false: no
+          operation record exists to replay against, and the caller waits on a recovery that
+          cannot arrive.
         """
 
         try:
@@ -757,13 +772,18 @@ class ServiceDaemon:
             # into a result rather than propagating, and past this point the operation may be
             # durable — reporting CANCELLED would say the work did not happen and would omit the
             # replay remedy. This changes only how an already-converted cancellation is described.
+            reason = (
+                "read_projection_failed"
+                if request.method in _READ_ONLY_METHODS
+                else "response_projection_failed"
+            )
             record_unexpected_exception_without_raising(
                 exc,
                 component="service.daemon",
-                operation=f"{request.method.value}_response_projection_failed",
+                operation=f"{request.method.value}_{reason}",
                 request_id=_safe_body_request_id(request),
             )
-            raise ControlError("response_projection_failed", retryable=True) from exc
+            raise ControlError(reason, retryable=True) from exc
 
     async def _accept_loop(
         self,

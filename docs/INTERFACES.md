@@ -87,6 +87,8 @@ Allowlisted `safe_details` keys include structural recovery fields such as `reas
 `sequence`, and `head_digest` (for `FRONTIER_CONFLICT` current-head recovery). Protocol reason
 `response_projection_failed` marks an MCP post-commit shaping failure: the write may already be
 durable, so the public error is retryable and same-`request_id` resume is the recovery path.
+`read_projection_failed` is its read-only counterpart: nothing was appended, so the remedy is
+repeating the request rather than a same-`request_id` replay that has no operation record to load.
 Internal-only value error: `ProtocolValueError(reason_code: str)` — bounded reason codes, never
 free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from codes in
 `cli/exits.py` only.
@@ -986,6 +988,18 @@ same-`request_id` replay remedy it uses for its own projection failures. Deliber
 failures raised in that window — `privacy_projection_blocked`, `privacy_projection_unavailable`,
 and any `PublicOperationError` — already state something true and pass through unchanged. An
 accepted write must never surface as an unqualified failure.
+
+`read_projection_failed` covers the same window for methods that append nothing
+(`_READ_ONLY_METHODS` in `service/daemon.py`: `status` plus the two privacy receipt reads). It is
+also always `retryable=True`, but its remedy is a fresh request: advertising same-`request_id`
+replay for a read points the caller at an operation record that was never written. Only `status`
+can reach the reclassification, since both privacy reads are projection-exempt. `check` and
+`receipt` append their own events and are therefore writes, not reads.
+
+Inside that window the projection internals fail bounded so the reclassification stays rare: an
+unclassifiable result leaf and an omission pointer that does not resolve in the body both raise
+`privacy_projection_blocked` (fail closed — content that cannot be proven safe is not disclosed)
+rather than escaping as `KeyError`, `IndexError`, or `ProtocolValueError`.
 
 `ports/privacy.py` owns the shared receipt-inspection values `PrivacyReceiptAudience`,
 `PrivacyReceiptQuery`, `PrivacyReceiptPage` (positive snapshot generation, bounded unique

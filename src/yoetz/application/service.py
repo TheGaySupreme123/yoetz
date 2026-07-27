@@ -42,6 +42,7 @@ from yoetz.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
+from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.ids import IdKind, validate_id
 from yoetz.protocol.models import (
     CheckResult,
@@ -414,6 +415,10 @@ def _segments(pointer: str) -> tuple[str, ...]:
 
 
 def _replace_pointer(root: JsonValue, pointer: str, replacement: JsonValue) -> JsonValue:
+    # Every failure here is a bounded ValueError. This runs inside the post-commit projection
+    # window, where an unexpected exception (KeyError from a missing key, IndexError or
+    # ValueError from a non-numeric array segment) is reclassified as response_projection_failed
+    # and turns a durable success into an apparent failure the caller cannot replay away.
     parts = _segments(pointer)
 
     def replace_at(value: JsonValue, depth: int) -> JsonValue:
@@ -422,11 +427,17 @@ def _replace_pointer(root: JsonValue, pointer: str, replacement: JsonValue) -> J
         part = parts[depth]
         if isinstance(value, Mapping):
             source = dict(cast(Mapping[str, JsonValue], value))
+            if part not in source:
+                raise ValueError("projection_pointer_unresolved")
             source[part] = replace_at(source[part], depth + 1)
             return source
         if type(value) in {tuple, list}:
             source_list = list(cast(tuple[JsonValue, ...] | list[JsonValue], value))
+            if not part.isascii() or not part.isdecimal() or (part != "0" and part.startswith("0")):
+                raise ValueError("projection_pointer_unresolved")
             index = int(part)
+            if index >= len(source_list):
+                raise ValueError("projection_pointer_unresolved")
             source_list[index] = replace_at(source_list[index], depth + 1)
             return tuple(source_list)
         raise ValueError("projection_pointer_invalid")
@@ -679,11 +690,18 @@ class Application:
         sink = resolve_client_disclosure_sink(context)
         items: list[CandidateContextItem] = []
         for ordinal, (pointer, value) in enumerate(_leaves(source), start=1):
-            classification = (
-                classify_result_leaf(method.value, source, pointer)
-                if method in _WORKFLOW_METHODS
-                else _classify_support_result_leaf(method, source, pointer)
-            )
+            # A leaf that cannot be classified cannot be proven safe to disclose. Fail closed with
+            # a bounded reason instead of letting ProtocolValueError escape: this runs post-commit,
+            # where an unexpected exception becomes response_projection_failed and reports a
+            # durable success as a failure that no replay can clear.
+            try:
+                classification = (
+                    classify_result_leaf(method.value, source, pointer)
+                    if method in _WORKFLOW_METHODS
+                    else _classify_support_result_leaf(method, source, pointer)
+                )
+            except ProtocolValueError as exc:
+                raise ControlError("privacy_projection_blocked", retryable=False) from exc
             if classification == "public_structural":
                 continue
             items.append(
@@ -753,15 +771,22 @@ class Application:
             raise ControlError("privacy_projection_blocked", retryable=False)
         projected: JsonValue = source
         for omission in completed.omissions:
-            projected = _replace_pointer(
-                projected,
-                omission.json_pointer,
-                {
-                    "omitted": True,
-                    "category": omission.category.value,
-                    "reason": omission.reason,
-                },
-            )
+            # An omission whose pointer does not resolve in this body means the privacy decision
+            # and the body disagree — the blocked content would stay in the response. Fail closed
+            # with a bounded reason; letting the ValueError escape would instead report the
+            # already-durable operation as an unreplayable failure.
+            try:
+                projected = _replace_pointer(
+                    projected,
+                    omission.json_pointer,
+                    {
+                        "omitted": True,
+                        "category": omission.category.value,
+                        "reason": omission.reason,
+                    },
+                )
+            except ValueError as exc:
+                raise ControlError("privacy_projection_blocked", retryable=False) from exc
         if not isinstance(projected, Mapping):
             raise TypeError("projected_control_body_invalid")
         receipt = completed.receipt

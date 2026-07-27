@@ -243,6 +243,7 @@ _CONTROL_ERROR_REASONS = frozenset(
         "privacy_projection_unavailable",
         "privacy_projection_blocked",
         "response_projection_failed",
+        "read_projection_failed",
         "service_generation_changed",
     }
 )
@@ -269,6 +270,10 @@ class ControlError(Exception):
         # non-retryable would steer callers away from the same-request_id replay that recovers it.
         if reason == "response_projection_failed" and not retryable:
             raise ValueError("response_projection_error_must_be_retryable")
+        # A read never committed anything, so its remedy is a fresh request rather than a
+        # same-request_id replay. It stays retryable because repeating the read is the fix.
+        if reason == "read_projection_failed" and not retryable:
+            raise ValueError("read_projection_error_must_be_retryable")
         self.reason = reason
         self.retryable = retryable
         super().__init__(reason)

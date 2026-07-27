@@ -21,10 +21,13 @@ Use only the six registered Yoetz MCP tools and their current schemas. Every too
 
 ## Shared guidance
 
-- Read [agent instructions](references/agent-instructions.md) for the non-negotiable safety floor.
-- Follow the [cooperative workflow](references/workflow.md#the-ten-steps) for start, publication, re-grounding, check, response, and receipt.
-- Consult [publication policy](references/publication-policy.md#materiality-checklist) before publishing source or a large inventory.
-- Consult [coverage and receipts](references/coverage-and-receipts.md#receipt-fields-and-wording) before a completion claim.
+Read these with the MCP `resources/read` request for the exact URI. They are served by the `yoetz`
+server itself, so they resolve without any repository checkout.
+
+- Read `yoetz://guidance/agent-instructions.md` for the non-negotiable safety floor.
+- Follow `yoetz://guidance/workflow.md` (section `the-ten-steps`) for start, publication, re-grounding, check, response, and receipt.
+- Consult `yoetz://guidance/publication-policy.md` (section `materiality-checklist`) before publishing source or a large inventory.
+- Consult `yoetz://guidance/coverage-and-receipts.md` (section `receipt-fields-and-wording`) before a completion claim.
 
 ## Check mode and receipts
 

@@ -103,6 +103,14 @@ _RESPONSE_PROJECTION_FAILED_MESSAGE: Final = (
     "Retry with the same request_id to load the stored result."
 )
 _RESPONSE_PROJECTION_FAILED_DETAILS: Final = {"reason_code": "response_projection_failed"}
+# A read never appended, so there is no stored result and no operation record to replay against.
+# Telling the caller to reuse the request_id would send it after a recovery that cannot exist.
+_READ_PROJECTION_FAILED_MESSAGE: Final = (
+    "The read completed on the local service, but its response could not be shaped. No durable "
+    "state changed. Repeat the request with a new request_id, or read status view=versions for "
+    "the authoritative frontier."
+)
+_READ_PROJECTION_FAILED_DETAILS: Final = {"reason_code": "read_projection_failed"}
 
 
 @dataclass(slots=True)
@@ -288,6 +296,14 @@ def _control_error_result(
             retryable=True,
             request_id=request_id,
             safe_details=dict(_RESPONSE_PROJECTION_FAILED_DETAILS),
+        )
+    if error.reason == "read_projection_failed":
+        return structured_error_result(
+            PublicErrorCode.INTERNAL_ERROR,
+            _READ_PROJECTION_FAILED_MESSAGE,
+            retryable=True,
+            request_id=request_id,
+            safe_details=dict(_READ_PROJECTION_FAILED_DETAILS),
         )
     if error.reason == "privacy_projection_unavailable":
         return structured_error_result(

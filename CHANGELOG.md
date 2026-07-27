@@ -65,6 +65,27 @@ released versions.
 
 ### Fixed
 
+- **A read is no longer told to replay a write.** A projection failure on `status` (or a privacy
+  receipt read) advertised the same-`request_id` replay remedy as an accepted write, but a read
+  appends nothing, so no operation record exists to replay against and the caller waited on a
+  recovery that could not arrive. Reads now surface the retryable `read_projection_failed`, whose
+  remedy is repeating the request. Observed in the 2026-07-27 Codex dogfood, where a compact
+  `status` call failed twice and its exact replay failed again.
+
+- **The post-commit projection window fails bounded instead of arbitrarily.** Any unexpected
+  exception in that window converts a durable operation into an apparent failure that replay
+  cannot repair, because replay re-runs the same deterministic projection. Two reachable sites are
+  now closed: a result leaf that cannot be classified, and an omission whose pointer does not
+  resolve in the body — the latter previously raised a bare `KeyError` for the synthetic
+  `/leaf-N` pointer produced when an origin pointer exceeds 256 bytes. Both now fail closed as
+  `privacy_projection_blocked`: content that cannot be proven safe to disclose is not disclosed.
+
+- **Installed guidance no longer points at files that were never packaged.** `skills/codex/yoetz/SKILL.md`
+  linked four `references/*.md` paths absent from both the repository skill directory and the
+  packaged resources; it now names the `yoetz://guidance/*.md` URIs the server already serves. A
+  packaging test resolves every reference the installed skill names, reading only the packaged
+  tree.
+
 - **An accepted write is never reported as an unqualified failure.** A handler returning is the
   commit boundary; response shaping happens after it. An unexpected failure in that window now
   surfaces as the retryable `response_projection_failed` naming same-`request_id` replay, instead
