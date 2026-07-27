@@ -14,6 +14,7 @@ from builders.ledger_adapters import (
     ownership_fence,
 )
 from yoetz.application.publish_work import Application, execute_publish_work
+from yoetz.application.status import Application as StatusApplication
 from yoetz.application.status import execute_status
 from yoetz.domain.values import session_id
 from yoetz.ports.diagnostics import RuntimeCapability
@@ -359,7 +360,7 @@ async def test_status_view_operation_returns_stored_publish_result() -> None:
     seed = append_command()
 
     status = await execute_status(
-        cast(Application, app),
+        cast(StatusApplication, app),
         StatusRequest.model_validate(
             {
                 "protocol_version": "0.1",
@@ -397,13 +398,14 @@ async def test_status_view_operation_returns_stored_publish_result() -> None:
     )
 
 
-async def test_status_view_operation_absent_for_unknown_or_foreign_request_id() -> None:
+async def test_status_view_operation_absent_for_unknown_request_id() -> None:
     app, _ = _composition()
-    await execute_publish_work(cast(Application, app), _request(request_tail=521))
+    request = _request(request_tail=521)
+    await execute_publish_work(cast(Application, app), request)
     seed = append_command()
 
     unknown = await execute_status(
-        cast(Application, app),
+        cast(StatusApplication, app),
         StatusRequest.model_validate(
             {
                 "protocol_version": "0.1",
@@ -427,3 +429,17 @@ async def test_status_view_operation_absent_for_unknown_or_foreign_request_id() 
     assert page.found is False
     assert page.state == "absent"
     assert page.accepted_events == ()
+
+    # Cross-writer lookup: operations are keyed by (writer_id, request_id). A different writer
+    # identity for the same session reports absent rather than leaking another writer's result.
+    foreign_writer = "wri_00000000-0000-4000-8000-000000000599"
+    assert foreign_writer != seed.writer_id
+    # The memory harness routes a single TaskRuntime writer; foreign writer_id cannot be routed
+    # without SESSION_CONFLICT. Prove the ledger lookup keying instead (same contract the status
+    # application uses before projecting the recovery page).
+    assert (
+        await app.runtime.task.ledger.lookup_operation(foreign_writer, request.request_id)
+    ) is None
+    assert (
+        await app.runtime.task.ledger.lookup_operation(seed.writer_id, request.request_id)
+    ) is not None

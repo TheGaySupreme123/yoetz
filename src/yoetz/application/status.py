@@ -47,8 +47,13 @@ from yoetz.protocol.coverage import (
     AUTHORSHIP_ASSURANCE_ORDER,
     EVIDENCE_IMMUTABILITY_ORDER,
     LEDGER_FRESHNESS_ORDER,
+    ArtifactObservation,
+    AuthorshipAssurance,
     CheckType,
     Coverage,
+    EvidenceImmutability,
+    LedgerFreshness,
+    PublicationChannel,
     coverage_to_json,
 )
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
@@ -612,6 +617,28 @@ async def _import_status(runtime: TaskRuntime) -> StatusImportStatusModel:
     )
 
 
+def _unknown_structural_coverage() -> Coverage:
+    """Honest coverage when a structural recovery path cannot load a projection page."""
+
+    return Coverage(
+        publication_channels=(PublicationChannel.LOCAL_CLI,),
+        authorship_assurance=AuthorshipAssurance.SELF_ASSERTED,
+        artifact_observation=ArtifactObservation.PUBLISHED_ONLY,
+        evidence_immutability=EvidenceImmutability.METADATA_ONLY,
+        ledger_freshness=LedgerFreshness.UNKNOWN,
+        check_types=(CheckType.NONE,),
+        known_gaps=(),
+    )
+
+
+def _readiness_unknown() -> StatusClosureReadinessModel:
+    return StatusClosureReadinessModel(
+        open_obligation_count=None,
+        unresolved_finding_count=None,
+        blocking_conditions=("readiness_unknown",),
+    )
+
+
 async def _closure_readiness(
     runtime: TaskRuntime,
     frontier: Frontier,
@@ -627,26 +654,30 @@ async def _closure_readiness(
     second identical query. Compact admits no filter or position, so the page is equivalent.
     """
 
-    page = compact_page or await runtime.ledger.query_projection(
-        ProjectionQuery(
-            runtime.session_id,
-            "compact",
-            None,
-            frontier,
-            1,
-            None,
-            None,
-        )
-    )
+    if compact_page is not None:
+        page = compact_page
+    else:
+        try:
+            page = await runtime.ledger.query_projection(
+                ProjectionQuery(
+                    runtime.session_id,
+                    "compact",
+                    None,
+                    frontier,
+                    1,
+                    None,
+                    None,
+                )
+            )
+        except PublicOperationError:
+            # Secondary enrichment only: do not fail a structural status page because the
+            # compact projection is lagging, rebuilding, or temporarily unreadable.
+            return _readiness_unknown()
     item = page.items[0] if page.items else None
     if type(item) is not StatusCompactItemModel:
         # Compact omits its singleton when the task title is unreadable. Counting that as zero
         # open obligations would manufacture a clean record out of missing data.
-        return StatusClosureReadinessModel(
-            open_obligation_count=None,
-            unresolved_finding_count=None,
-            blocking_conditions=("readiness_unknown",),
-        )
+        return _readiness_unknown()
     open_obligations = int(item.open_obligation_count)
     unresolved_findings = int(item.unresolved_finding_count)
     has_plan = item.current_plan_event_id is not None
@@ -728,27 +759,38 @@ async def execute_status(app: Application, request: StatusRequest) -> StatusInte
                 raise _error(
                     PublicErrorCode.STORAGE_CORRUPT, "The stored operation result is invalid."
                 ) from exc
-            # Operation recovery is structural: reuse the compact page for coverage/closure
-            # readiness and frontiers without materializing payload content.
-            raw_page = await runtime.ledger.query_projection(
-                ProjectionQuery(
-                    runtime.session_id,
-                    ProjectionView.COMPACT.value,
-                    None,
-                    frontier,
-                    1,
-                    None,
-                    expected_version,
+            # Operation recovery is structural: the operation page is authoritative. Compact
+            # projection only enriches coverage/closure/frontiers and must not fail recovery
+            # when lagging, rebuilding, or missing.
+            try:
+                raw_page = await runtime.ledger.query_projection(
+                    ProjectionQuery(
+                        runtime.session_id,
+                        ProjectionView.COMPACT.value,
+                        None,
+                        frontier,
+                        1,
+                        None,
+                        expected_version,
+                    )
                 )
-            )
-            compact_page = raw_page
-            coverage = raw_page.coverage
-            gaps = raw_page.gaps
-            head = raw_page.head_frontier
-            effective = raw_page.effective_frontier
-            lag = raw_page.lag
-            projection_version = raw_page.projection_version
-            rebuild_state = raw_page.rebuild_state
+            except PublicOperationError:
+                compact_page = None
+                coverage = _unknown_structural_coverage()
+                gaps = ()
+                effective = frontier
+                lag = head.sequence - frontier.sequence
+                projection_version = runtime.projection_version
+                rebuild_state = "rebuild_required"
+            else:
+                compact_page = raw_page
+                coverage = raw_page.coverage
+                gaps = raw_page.gaps
+                head = raw_page.head_frontier
+                effective = raw_page.effective_frontier
+                lag = raw_page.lag
+                projection_version = raw_page.projection_version
+                rebuild_state = raw_page.rebuild_state
         elif request.view == "advice":
             if position is not None:
                 raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")

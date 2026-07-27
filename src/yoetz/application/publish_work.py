@@ -838,7 +838,13 @@ async def execute_publish_work(
         # never blocked by body validation or a stale pre-append frontier.
         existing = await _resolve_existing_operation(runtime, request)
         if existing is not None:
-            assert existing.result_canonical is not None
+            # COMPLETE without a result body is storage corruption, not a programming assert:
+            # under -O a bare assert would skip and later raise TypeError on decode.
+            if existing.result_canonical is None:
+                raise _error(
+                    PublicErrorCode.STORAGE_CORRUPT,
+                    "The stored operation result is invalid.",
+                )
             stored = _decode_stored_append_result(existing.result_canonical)
             try:
                 prepared = prepare_publication(request, channel=channel, app=app)

@@ -33,7 +33,7 @@ Permitted: “No product source, provider configuration, credential binding, or 
 
 Forbidden: “Nothing changed” or “no runtime state changed” after a real session, publication, check, or receipt.
 
-Reuse the original request and operation IDs after timeout or reconnect. A timeout has unknown outcome; retry idempotently or inspect status. An operation that reports failure after its write may have committed: read `status` for the authoritative frontier before assuming it failed. Prefer `status view=operation` with the write's `request_id` to load the stored result without reconstructing the body; when replaying a write, reuse the same `request_id` rather than composing a new one — a matching body returns the stored result, and a different body returns `REQUEST_IDENTITY_CONFLICT` with the committed frontier rather than re-appending.
+Reuse the original request and operation IDs after timeout or reconnect. A timeout has unknown outcome; retry idempotently or inspect status. An operation that reports failure after its write may have committed: read `status` for the authoritative frontier before assuming it failed. Prefer `status view=operation` with the write's `request_id` as a state lookup without reconstructing the body — a complete `publish_work` surfaces stored frontiers and accepted event ids; pending, quarantined, absent, and non-publish states report only what is honest for that state. When replaying a write, reuse the same `request_id` rather than composing a new one — a matching body returns the stored result, and a different body returns `REQUEST_IDENTITY_CONFLICT` with the committed frontier rather than re-appending.
 
 ## Multi-agent attribution and handoff
 

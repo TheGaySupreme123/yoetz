@@ -105,10 +105,13 @@ different body (or a body that cannot be prepared), the public code is
 append. If an exact validated full success body was durably stored, replay to the same ordinary
 disclosure sink returns that body without running privacy projection again.
 The preferred recovery read after any ambiguous write is `status view=operation` with
-`filter.operation_request_id` set to the write's `request_id`: it returns the operation state
-(`absent`/`pending`/`complete`/`quarantined`), frontiers, and accepted event ids/digests for the
-authenticated writer without requiring a reconstructed publish body. Lookups are scoped to the
-caller writer; another writer's `request_id` is reported as absent.
+`filter.operation_request_id` set to the write's `request_id`: it is a state lookup for that
+operation identity (`absent`/`pending`/`complete`/`quarantined`) for the authenticated writer,
+without requiring a reconstructed publish body. Stored result detail is state-conditional: only
+`complete` + `publish_work` carries outcome, subject/result frontiers, and accepted event
+ids/digests; `pending`/`quarantined` report kind without those fields; `absent` reports none of
+them; non-publish completions report kind without append-shaped event detail. Lookups are scoped
+to the caller writer; another writer's `request_id` is reported as absent.
 `read_projection_failed` is the read-only counterpart: nothing was appended, so the remedy is
 repeating the request rather than a same-`request_id` replay that has no operation record to load.
 When a non-publish write surfaces `response_projection_failed` and the committed frontier is known,
@@ -818,8 +821,10 @@ nothing. SQLite uses the co-located importer rows; memory uses one shared task-s
 
 `ProjectionView` is `compact`, `assignment`, `obligations`, `findings`, `candidate_findings`,
 `evidence`, `history`, or `versions`. Application status also admits `view=operation` (operation
-recovery keyed by `filter.operation_request_id`); that view is not a projection row query. The
-port-owned row-query view excludes `candidate_findings` and `operation` and is exactly
+recovery keyed by `filter.operation_request_id`); that view is not a projection row query — the
+operation record is authoritative, and compact projection is only secondary enrichment for
+coverage/closure and must not fail recovery on projection lag or rebuild. The port-owned
+row-query view excludes `candidate_findings` and `operation` and is exactly
 `compact|assignment|obligations|findings|evidence|history|versions`.
 `ProjectionQuery(session_id, view, filter, requested_frontier, limit, position,
 expected_projection_version)` uses the exact typed filter and repository-position variants frozen

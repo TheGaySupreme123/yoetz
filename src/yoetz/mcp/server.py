@@ -542,6 +542,7 @@ async def _publish_recovery_from_envelope(
     if envelope is None:
         return None
     op_request_id, session_id, writer_id, actor, client = envelope
+    recovery_request_id = request_id if request_id is not None else op_request_id
     status_request_id = new_id(IdKind.REQUEST)
     try:
         status_request = StatusRequest.model_validate(
@@ -558,8 +559,22 @@ async def _publish_recovery_from_envelope(
                 "client": dict(client),
             }
         )
-    except Exception:
+    except ValidationError:
+        # Envelope fields are not a valid status request; fall through to body validation error.
         return None
+    except Exception as exc:
+        correlation_id = record_unexpected_exception_without_raising(
+            exc,
+            component="mcp.bridge",
+            operation="publish_work_recovery_request_internal_error",
+            request_id=recovery_request_id,
+        )
+        return structured_error_result(
+            PublicErrorCode.INTERNAL_ERROR,
+            "The bridge could not complete the operation.",
+            request_id=recovery_request_id,
+            correlation_id=correlation_id,
+        )
     try:
         await ensure_service_client(runtime)
         status_result = await _invoke_with_reconnect(
@@ -567,8 +582,44 @@ async def _publish_recovery_from_envelope(
             status_request,
             lambda service, request: service.status(request),
         )
-    except Exception:
-        return None
+    except PublicOperationError as exc:
+        # Writer ownership, session conflicts, and other public codes must not collapse into
+        # INVALID_REQUEST from the outer body-validation path.
+        try:
+            bound = (
+                exc
+                if exc.correlation_id is not None
+                else exc.bind_correlation_id(new_id(IdKind.CORRELATION))
+            )
+            return _result_from_wire(tool_error_envelope(bound, request_id=recovery_request_id))
+        except Exception as mapping_exc:
+            correlation_id = record_unexpected_exception_without_raising(
+                mapping_exc,
+                component="mcp.bridge",
+                operation="publish_work_recovery_public_error_internal_error",
+                request_id=recovery_request_id,
+            )
+            return structured_error_result(
+                PublicErrorCode.INTERNAL_ERROR,
+                "The bridge could not complete the operation.",
+                request_id=recovery_request_id,
+                correlation_id=correlation_id,
+            )
+    except ControlError as exc:
+        return _control_error_result(exc, recovery_request_id, "publish_work_recovery")
+    except Exception as exc:
+        correlation_id = record_unexpected_exception_without_raising(
+            exc,
+            component="mcp.bridge",
+            operation="publish_work_recovery_status_internal_error",
+            request_id=recovery_request_id,
+        )
+        return structured_error_result(
+            PublicErrorCode.INTERNAL_ERROR,
+            "The bridge could not complete the operation.",
+            request_id=recovery_request_id,
+            correlation_id=correlation_id,
+        )
     try:
         wire = public_model_to_wire(status_result)
         if wire.get("ok") is not True:
@@ -585,13 +636,13 @@ async def _publish_recovery_from_envelope(
                 PublicErrorCode.OPERATION_PENDING,
                 "The operation is still pending.",
                 retryable=True,
-                request_id=request_id if request_id is not None else op_request_id,
+                request_id=recovery_request_id,
             )
         if state == "quarantined":
             return structured_error_result(
                 PublicErrorCode.STORAGE_CORRUPT,
                 "The stored operation is quarantined.",
-                request_id=request_id if request_id is not None else op_request_id,
+                request_id=recovery_request_id,
             )
         if state != "complete":
             return None
@@ -613,11 +664,22 @@ async def _publish_recovery_from_envelope(
                 "The request ID was already used with a different request body. "
                 "Read status view=operation for the stored result of that request_id."
             ),
-            request_id=request_id if request_id is not None else op_request_id,
+            request_id=recovery_request_id,
             safe_details=details,
         )
-    except Exception:
-        return None
+    except Exception as exc:
+        correlation_id = record_unexpected_exception_without_raising(
+            exc,
+            component="mcp.bridge",
+            operation="publish_work_recovery_response_internal_error",
+            request_id=recovery_request_id,
+        )
+        return structured_error_result(
+            PublicErrorCode.INTERNAL_ERROR,
+            "The bridge could not complete the operation.",
+            request_id=recovery_request_id,
+            correlation_id=correlation_id,
+        )
 
 
 async def dispatch_publish_work(
