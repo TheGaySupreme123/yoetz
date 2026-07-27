@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final, Never, Protocol, cast
 
 import anyio
@@ -39,6 +40,8 @@ from yoetz.application.service import (
     ControlProjectionBinding,
     ProjectedControlBody,
     ProjectionBindingFacts,
+    UnprojectedControlBody,
+    internal_control_json,
 )
 from yoetz.config.load import load_config
 from yoetz.config.models import YoetzConfig
@@ -80,7 +83,7 @@ from yoetz.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
-from yoetz.protocol.errors import PublicOperationError
+from yoetz.protocol.errors import PublicOperationError, SafeDetailValue
 from yoetz.protocol.ids import IdKind, new_id, validate_id
 from yoetz.protocol.models import (
     CheckResult,
@@ -174,6 +177,15 @@ _PROJECTION_EXEMPT_METHODS = _STRUCTURAL_METHODS | {
     ControlMethod.PRIVACY_RECEIPTS_LIST,
     ControlMethod.PRIVACY_RECEIPTS_GET,
 }
+# Methods that never append to the ledger. A projection failure on one of these cannot have left
+# a durable write behind, so its remedy is repeating the request, not same-request_id replay.
+_READ_ONLY_METHODS: Final[frozenset[ControlMethod]] = frozenset(
+    {
+        ControlMethod.STATUS,
+        ControlMethod.PRIVACY_RECEIPTS_LIST,
+        ControlMethod.PRIVACY_RECEIPTS_GET,
+    }
+)
 _WORKFLOW_RESULT_MODELS: Final[Mapping[ControlMethod, type[BaseModel]]] = {
     ControlMethod.START: StartResult,
     ControlMethod.PUBLISH_WORK: PublishWorkResult,
@@ -182,6 +194,30 @@ _WORKFLOW_RESULT_MODELS: Final[Mapping[ControlMethod, type[BaseModel]]] = {
     ControlMethod.STATUS: StatusResult,
     ControlMethod.RECEIPT: ReceiptResult,
 }
+
+
+def _accepted_state(internal: object) -> Mapping[str, SafeDetailValue] | None:
+    """Read where a committed operation landed, for an error that has no success body.
+
+    Structural only: the resulting frontier and how many events were accepted. Returns None
+    whenever any part is missing or malformed, because a partial answer about durability is worse
+    than none — the caller falls back to reading `status`, which is where they were before.
+    """
+
+    try:
+        source = internal_control_json(cast(UnprojectedControlBody, internal))
+        frontier = source["result_frontier"]
+        if not isinstance(frontier, Mapping):
+            return None
+        sequence = int(cast(str, frontier["sequence"]))
+        head_digest = frontier["head_digest"]
+        events = source.get("accepted_events")
+        count = len(cast("tuple[object, ...] | list[object]", events)) if events is not None else 0
+        if type(head_digest) is not str or sequence < 0:
+            return None
+        return MappingProxyType({"count": count, "head_digest": head_digest, "sequence": sequence})
+    except BaseException:
+        return None
 
 
 def _safe_body_request_id(request: ControlCallRequest) -> str | None:
@@ -721,8 +757,14 @@ class ServiceDaemon:
         Bounded failures raised deliberately here (``ControlError`` such as
         ``privacy_projection_blocked``, ``LifecycleError``, ``PublicOperationError``) already carry
         an accurate caller-safe meaning and pass through untouched. Only an unexpected exception is
-        reclassified, as ``response_projection_failed``: the operation stands, and the caller must
-        be told to resume by replaying the same ``request_id`` rather than treating it as failed.
+        reclassified, and the reclassification depends on what the method could have changed:
+
+        - a write may already be durable, so it becomes ``response_projection_failed`` and the
+          caller is told to resume by replaying the same ``request_id``;
+        - a read changed nothing, so it becomes ``read_projection_failed`` and the caller is told
+          to repeat the request. Advertising same-``request_id`` replay for a read is false: no
+          operation record exists to replay against, and the caller waits on a recovery that
+          cannot arrive.
         """
 
         try:
@@ -757,13 +799,21 @@ class ServiceDaemon:
             # into a result rather than propagating, and past this point the operation may be
             # durable — reporting CANCELLED would say the work did not happen and would omit the
             # replay remedy. This changes only how an already-converted cancellation is described.
+            reason = (
+                "read_projection_failed"
+                if request.method in _READ_ONLY_METHODS
+                else "response_projection_failed"
+            )
             record_unexpected_exception_without_raising(
                 exc,
                 component="service.daemon",
-                operation=f"{request.method.value}_response_projection_failed",
+                operation=f"{request.method.value}_{reason}",
                 request_id=_safe_body_request_id(request),
             )
-            raise ControlError("response_projection_failed", retryable=True) from exc
+            accepted_state = (
+                None if reason == "read_projection_failed" else _accepted_state(internal)
+            )
+            raise ControlError(reason, retryable=True, accepted_state=accepted_state) from exc
 
     async def _accept_loop(
         self,

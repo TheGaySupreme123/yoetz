@@ -145,6 +145,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "public_error_invalid_correlation_id",
     "public_error_invalid_message",
     "public_error_missing_correlation_id",
+    "read_projection_failed",
     "receipt_coverage_mismatch",
     "receipt_gap_not_in_coverage",
     "receipt_json_projection_blocked",
@@ -186,7 +187,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 134
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 135
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)

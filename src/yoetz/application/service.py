@@ -82,6 +82,7 @@ __all__ = [
     "ServiceReadyContext",
     "UnprojectedControlBody",
     "VerificationPolicy",
+    "internal_control_json",
     "resolve_client_disclosure_sink",
 ]
 
@@ -387,6 +388,17 @@ def _internal_json(result: UnprojectedControlBody) -> dict[str, JsonValue]:
     raise TypeError("unprojected_control_body_invalid")
 
 
+def internal_control_json(result: UnprojectedControlBody) -> dict[str, JsonValue]:
+    """Public alias for reading an unprojected body's structural facts.
+
+    The daemon needs the committed frontier when response projection has failed and there is no
+    success body left to read it from. That is a legitimate structural read, not a projection, so
+    it does not go through the privacy path.
+    """
+
+    return _internal_json(result)
+
+
 def _escape_pointer(value: str) -> str:
     return value.replace("~", "~0").replace("/", "~1")
 
@@ -414,6 +426,10 @@ def _segments(pointer: str) -> tuple[str, ...]:
 
 
 def _replace_pointer(root: JsonValue, pointer: str, replacement: JsonValue) -> JsonValue:
+    # Every failure here is a bounded ValueError. This runs inside the post-commit projection
+    # window, where an unexpected exception (KeyError from a missing key, IndexError or
+    # ValueError from a non-numeric array segment) is reclassified as response_projection_failed
+    # and turns a durable success into an apparent failure the caller cannot replay away.
     parts = _segments(pointer)
 
     def replace_at(value: JsonValue, depth: int) -> JsonValue:
@@ -422,11 +438,17 @@ def _replace_pointer(root: JsonValue, pointer: str, replacement: JsonValue) -> J
         part = parts[depth]
         if isinstance(value, Mapping):
             source = dict(cast(Mapping[str, JsonValue], value))
+            if part not in source:
+                raise ValueError("projection_pointer_unresolved")
             source[part] = replace_at(source[part], depth + 1)
             return source
         if type(value) in {tuple, list}:
             source_list = list(cast(tuple[JsonValue, ...] | list[JsonValue], value))
+            if not part.isascii() or not part.isdecimal() or (part != "0" and part.startswith("0")):
+                raise ValueError("projection_pointer_unresolved")
             index = int(part)
+            if index >= len(source_list):
+                raise ValueError("projection_pointer_unresolved")
             source_list[index] = replace_at(source_list[index], depth + 1)
             return tuple(source_list)
         raise ValueError("projection_pointer_invalid")
@@ -679,6 +701,12 @@ class Application:
         sink = resolve_client_disclosure_sink(context)
         items: list[CandidateContextItem] = []
         for ordinal, (pointer, value) in enumerate(_leaves(source), start=1):
+            # A leaf that cannot be classified stops the projection before any response exists, so
+            # nothing is disclosed. The daemon reclassifies the escaping ProtocolValueError by
+            # method: a write keeps the same-request_id remedy, a read is told to repeat. Naming it
+            # privacy_projection_blocked here would be both wrong (no policy blocked it) and worse
+            # for a write, since that reason is non-retryable and would describe a durable append
+            # as a refusal.
             classification = (
                 classify_result_leaf(method.value, source, pointer)
                 if method in _WORKFLOW_METHODS
@@ -753,6 +781,10 @@ class Application:
             raise ControlError("privacy_projection_blocked", retryable=False)
         projected: JsonValue = source
         for omission in completed.omissions:
+            # An omission whose pointer does not resolve means the privacy decision and the body
+            # disagree. `_replace_pointer` raises a bounded, named ValueError rather than a bare
+            # KeyError or IndexError; either way the projection stops before a response exists, so
+            # the blocked content is never disclosed, and the daemon reclassifies by method.
             projected = _replace_pointer(
                 projected,
                 omission.json_pointer,

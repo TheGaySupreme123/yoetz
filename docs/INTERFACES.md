@@ -87,6 +87,17 @@ Allowlisted `safe_details` keys include structural recovery fields such as `reas
 `sequence`, and `head_digest` (for `FRONTIER_CONFLICT` current-head recovery). Protocol reason
 `response_projection_failed` marks an MCP post-commit shaping failure: the write may already be
 durable, so the public error is retryable and same-`request_id` resume is the recovery path.
+`read_projection_failed` is its read-only counterpart: nothing was appended, so the remedy is
+repeating the request rather than a same-`request_id` replay that has no operation record to load.
+When the committed frontier is known, `response_projection_failed` also carries `sequence`,
+`head_digest`, and `count` in `safe_details`, so a caller can state what landed without a second
+`status` call.
+
+MCP resource discovery: `resources/list` serves the four `yoetz://guidance/*.md` entries and
+validates against the MCP `ListResourcesResult` schema (`tests/subprocess/test_mcp_resource_discovery.py`).
+`resources/templates/list` answers method-not-found because no templates are declared and the
+capability is not advertised — that pairing is conformant and is asserted, not "fixed". Guidance
+must not present template discovery as a recovery path.
 Internal-only value error: `ProtocolValueError(reason_code: str)` — bounded reason codes, never
 free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from codes in
 `cli/exits.py` only.
@@ -986,6 +997,21 @@ same-`request_id` replay remedy it uses for its own projection failures. Deliber
 failures raised in that window — `privacy_projection_blocked`, `privacy_projection_unavailable`,
 and any `PublicOperationError` — already state something true and pass through unchanged. An
 accepted write must never surface as an unqualified failure.
+
+`read_projection_failed` covers the same window for methods that append nothing
+(`_READ_ONLY_METHODS` in `service/daemon.py`: `status` plus the two privacy receipt reads). It is
+also always `retryable=True`, but its remedy is a fresh request: advertising same-`request_id`
+replay for a read points the caller at an operation record that was never written. Only `status`
+can reach the reclassification, since both privacy reads are projection-exempt. `check` and
+`receipt` append their own events and are therefore writes, not reads.
+
+Inside that window the projection internals fail with bounded, named errors rather than bare
+`KeyError`/`IndexError`: `_replace_pointer` raises `projection_pointer_unresolved` for an omission
+pointer absent from the body and `projection_pointer_invalid` for a malformed one. These are not
+remapped to `privacy_projection_blocked` — no policy blocked them, and that reason is
+non-retryable, so it would describe an already-durable append as a refusal. They reach the daemon
+and are reclassified by method. Either way the projection stops before a response exists, so
+blocked content is never disclosed.
 
 `ports/privacy.py` owns the shared receipt-inspection values `PrivacyReceiptAudience`,
 `PrivacyReceiptQuery`, `PrivacyReceiptPage` (positive snapshot generation, bounded unique

@@ -138,8 +138,10 @@ def _example_id(kind: str, seed: int) -> str:
         "action": "act",
         "claim": "clm",
         "evidence": "evd",
+        "finding": "fnd",
         "obligation": "obl",
         "result": "res",
+        "task": "tsk",
     }
     return f"{prefixes[kind]}_00000000-0000-4000-8000-{seed:012d}"
 
@@ -180,6 +182,54 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                 "mode": "create",
                 "task_title": "Example task",
                 "requested_view": "compact",
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+        ),
+        # check, respond, and receipt had no worked example at all. Every tool an agent must call
+        # to reach a completion claim now shows one, so authoring never depends on reading source.
+        "check-request": (
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 7),
+                "session_id": _example_id("session", 1),
+                "writer_id": _example_id("writer", 1),
+                "expected_frontier": {"sequence": "1", "head_digest": _EXAMPLE_HEAD_DIGEST},
+                "mode": "semantic_if_configured",
+                "max_findings": "3",
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+        ),
+        "respond-request": (
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 8),
+                "session_id": _example_id("session", 1),
+                "writer_id": _example_id("writer", 1),
+                "expected_frontier": {"sequence": "1", "head_digest": _EXAMPLE_HEAD_DIGEST},
+                "finding_id": _example_id("finding", 1),
+                "finding_frontier": {"sequence": "1", "head_digest": _EXAMPLE_HEAD_DIGEST},
+                "disposition": "acknowledged",
+                "reason": "The finding is accurate; the obligation stays open until it is fixed.",
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+        ),
+        "receipt-request": (
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 9),
+                "task_id": _example_id("task", 1),
+                "session_id": _example_id("session", 1),
+                "writer_id": _example_id("writer", 1),
+                "expected_frontier": {"sequence": "1", "head_digest": _EXAMPLE_HEAD_DIGEST},
+                "format": "markdown",
+                "include": "standard",
+                "redaction_profile": "default_local_export",
                 "actor": dict(_EXAMPLE_ACTOR),
                 "client": dict(_EXAMPLE_CLIENT),
             },

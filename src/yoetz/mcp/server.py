@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Final, cast
 
@@ -20,8 +20,14 @@ from yoetz import __version__
 from yoetz.adapters.mcp_stdio import bounded_stdio_server
 from yoetz.config.load import load_config
 from yoetz.config.models import LoggingConfig
-from yoetz.mcp.descriptors import TOOL_DESCRIPTORS, ToolDescriptor, server_instructions
+from yoetz.mcp.descriptors import (
+    TOOL_DESCRIPTORS,
+    ToolDescriptor,
+    descriptor_for,
+    server_instructions,
+)
 from yoetz.mcp.errors import (
+    authoring_hint,
     build_last_resort_internal_error_result,
     build_public_error_result,
     safe_validation_locations,
@@ -45,7 +51,7 @@ from yoetz.observability.logging import (
     record_unexpected_exception_without_raising,
 )
 from yoetz.ports.control import ControlClientKind, ControlError
-from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError, SafeDetailValue
 from yoetz.protocol.ids import IdKind, new_id, safe_request_id_from
 from yoetz.protocol.models import (
     CheckRequest,
@@ -103,6 +109,33 @@ _RESPONSE_PROJECTION_FAILED_MESSAGE: Final = (
     "Retry with the same request_id to load the stored result."
 )
 _RESPONSE_PROJECTION_FAILED_DETAILS: Final = {"reason_code": "response_projection_failed"}
+# When the committed frontier is known, say so plainly. "Retry with the same request_id" is a true
+# remedy but an incomplete answer: it leaves the caller unable to state what landed until a second
+# status call returns, which is exactly the guessing the 2026-07-27 dogfood had to do.
+_ACCEPTED_WRITE_PROJECTION_FAILED_MESSAGE: Final = (
+    "The write was accepted and is durable at the frontier in safe_details (sequence, "
+    "head_digest, count), but its response could not be shaped. Retry with the same request_id "
+    "to load the stored result; do not re-send the events under a new request_id."
+)
+# A read never appended, so there is no stored result and no operation record to replay against.
+# Telling the caller to reuse the request_id would send it after a recovery that cannot exist.
+_READ_PROJECTION_FAILED_MESSAGE: Final = (
+    "The read completed on the local service, but its response could not be shaped. No durable "
+    "state changed. Repeat the request with a new request_id, or read status view=versions for "
+    "the authoritative frontier."
+)
+_READ_PROJECTION_FAILED_DETAILS: Final = {"reason_code": "read_projection_failed"}
+
+
+def _authoring_hint_for(operation: str, locations: Sequence[Mapping[str, str]]) -> str:
+    """Look up the frozen presentation schema for one tool and hint from it, or say nothing."""
+
+    try:
+        return authoring_hint(descriptor_for(operation).input_schema, locations)
+    except Exception:
+        # A hint is a convenience. Never let building one turn a clear validation error into an
+        # internal error.
+        return ""
 
 
 @dataclass(slots=True)
@@ -282,12 +315,26 @@ def _control_error_result(
             },
         )
     if error.reason == "response_projection_failed":
+        details: dict[str, SafeDetailValue] = dict(_RESPONSE_PROJECTION_FAILED_DETAILS)
+        message = _RESPONSE_PROJECTION_FAILED_MESSAGE
+        if error.accepted_state:
+            # Where the write landed, so the caller can continue without a second status call.
+            details.update(error.accepted_state)
+            message = _ACCEPTED_WRITE_PROJECTION_FAILED_MESSAGE
         return structured_error_result(
             PublicErrorCode.INTERNAL_ERROR,
-            _RESPONSE_PROJECTION_FAILED_MESSAGE,
+            message,
             retryable=True,
             request_id=request_id,
-            safe_details=dict(_RESPONSE_PROJECTION_FAILED_DETAILS),
+            safe_details=details,
+        )
+    if error.reason == "read_projection_failed":
+        return structured_error_result(
+            PublicErrorCode.INTERNAL_ERROR,
+            _READ_PROJECTION_FAILED_MESSAGE,
+            retryable=True,
+            request_id=request_id,
+            safe_details=dict(_READ_PROJECTION_FAILED_DETAILS),
         )
     if error.reason == "privacy_projection_unavailable":
         return structured_error_result(
@@ -359,7 +406,7 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
         locations = safe_validation_locations(exc)
         return structured_error_result(
             PublicErrorCode.INVALID_REQUEST,
-            "The tool arguments are invalid.",
+            "The tool arguments are invalid." + _authoring_hint_for(operation, locations),
             request_id=request_id,
             safe_details=locations if locations else None,
         )

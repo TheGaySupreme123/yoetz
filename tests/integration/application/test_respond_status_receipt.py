@@ -796,6 +796,21 @@ async def test_receipt_build_context_is_complete() -> None:
     gaps = cast(tuple[Mapping[str, JsonValue], ...], document["gaps"])
     assert any(cast(str, gap["code"]) == "check_not_applicable" for gap in gaps)
 
+    # The bare code is honest but not interpretable: the 2026-07-27 dogfood saw
+    # `check_not_applicable` immediately after a check that succeeded with external provenance and
+    # could not tell which of four readings was meant. The limitations section must say which.
+    sections = cast(tuple[Mapping[str, JsonValue], ...], document["sections"])
+    limitations = next(
+        cast(str, section["body"])
+        for section in sections
+        if cast(str, section["key"]) == "limitations_and_coverage"
+    )
+    assert "A check is recorded, but it tested subject frontier" in limitations
+    assert f"rather than frontier {receipt.subject_frontier.sequence}" in limitations
+    # Name the trap directly: a successful external review does not travel to a later subject.
+    assert "including one backed by external review" in limitations
+    assert "Re-run check at this frontier to make it count." in limitations
+
     text_wire: dict[str, JsonValue] = {
         **receipt_wire,
         "request_id": protocol_id("req_", 912),

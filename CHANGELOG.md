@@ -65,6 +65,44 @@ released versions.
 
 ### Fixed
 
+- **A post-commit projection failure now says where the write landed.** `response_projection_failed`
+  carries the committed `sequence`, `head_digest`, and accepted event `count` in `safe_details`, so
+  a caller can state what became durable without spending a second `status` call. Values pass the
+  existing allowlist, so this stays structural.
+
+- **Invalid tool arguments name what is admitted.** The response listed field locations only; it
+  now also names the admitted enum members and the required identifier pattern for the rejected
+  top-level fields, and points at the tool's worked example — all from checked-in schema bytes.
+  `check`, `respond`, and `receipt` gained the worked examples they never had.
+
+- **A receipt explains why a check does or does not count.** `check_not_applicable` appearing right
+  after a successful externally-reviewed check read as a contradiction. The limitations section now
+  states that the recorded check tested a different subject frontier, that its verdict stands only
+  for what it tested, and that re-running `check` at this frontier is what makes it contribute.
+  `check_not_recorded` and `check_payload_unavailable` are explained the same way.
+
+- **A read is no longer told to replay a write.** A projection failure on `status` (or a privacy
+  receipt read) advertised the same-`request_id` replay remedy as an accepted write, but a read
+  appends nothing, so no operation record exists to replay against and the caller waited on a
+  recovery that could not arrive. Reads now surface the retryable `read_projection_failed`, whose
+  remedy is repeating the request. Observed in the 2026-07-27 Codex dogfood, where a compact
+  `status` call failed twice and its exact replay failed again.
+
+- **The post-commit projection window fails with bounded, named errors.** Rewriting a blocked leaf
+  raised a bare `KeyError` when the omission pointer did not resolve in the body — reachable via
+  the synthetic `/leaf-N` pointer produced when an origin pointer exceeds 256 bytes — and a bare
+  `ValueError`/`IndexError` for a malformed or out-of-range array segment. These now raise
+  `projection_pointer_unresolved`/`projection_pointer_invalid`. They are deliberately not remapped
+  to `privacy_projection_blocked`: no policy blocked them, and that reason is non-retryable, so it
+  would describe an already-durable append as a refusal. The projection stops before a response
+  exists either way, so blocked content is never disclosed.
+
+- **Installed guidance no longer points at files that were never packaged.** `skills/codex/yoetz/SKILL.md`
+  linked four `references/*.md` paths absent from both the repository skill directory and the
+  packaged resources; it now names the `yoetz://guidance/*.md` URIs the server already serves. A
+  packaging test resolves every reference the installed skill names, reading only the packaged
+  tree.
+
 - **An accepted write is never reported as an unqualified failure.** A handler returning is the
   commit boundary; response shaping happens after it. An unexpected failure in that window now
   surfaces as the retryable `response_projection_failed` naming same-`request_id` replay, instead
