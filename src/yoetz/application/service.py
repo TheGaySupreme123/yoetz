@@ -42,7 +42,6 @@ from yoetz.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
-from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.ids import IdKind, validate_id
 from yoetz.protocol.models import (
     CheckResult,
@@ -690,18 +689,17 @@ class Application:
         sink = resolve_client_disclosure_sink(context)
         items: list[CandidateContextItem] = []
         for ordinal, (pointer, value) in enumerate(_leaves(source), start=1):
-            # A leaf that cannot be classified cannot be proven safe to disclose. Fail closed with
-            # a bounded reason instead of letting ProtocolValueError escape: this runs post-commit,
-            # where an unexpected exception becomes response_projection_failed and reports a
-            # durable success as a failure that no replay can clear.
-            try:
-                classification = (
-                    classify_result_leaf(method.value, source, pointer)
-                    if method in _WORKFLOW_METHODS
-                    else _classify_support_result_leaf(method, source, pointer)
-                )
-            except ProtocolValueError as exc:
-                raise ControlError("privacy_projection_blocked", retryable=False) from exc
+            # A leaf that cannot be classified stops the projection before any response exists, so
+            # nothing is disclosed. The daemon reclassifies the escaping ProtocolValueError by
+            # method: a write keeps the same-request_id remedy, a read is told to repeat. Naming it
+            # privacy_projection_blocked here would be both wrong (no policy blocked it) and worse
+            # for a write, since that reason is non-retryable and would describe a durable append
+            # as a refusal.
+            classification = (
+                classify_result_leaf(method.value, source, pointer)
+                if method in _WORKFLOW_METHODS
+                else _classify_support_result_leaf(method, source, pointer)
+            )
             if classification == "public_structural":
                 continue
             items.append(
@@ -771,22 +769,19 @@ class Application:
             raise ControlError("privacy_projection_blocked", retryable=False)
         projected: JsonValue = source
         for omission in completed.omissions:
-            # An omission whose pointer does not resolve in this body means the privacy decision
-            # and the body disagree — the blocked content would stay in the response. Fail closed
-            # with a bounded reason; letting the ValueError escape would instead report the
-            # already-durable operation as an unreplayable failure.
-            try:
-                projected = _replace_pointer(
-                    projected,
-                    omission.json_pointer,
-                    {
-                        "omitted": True,
-                        "category": omission.category.value,
-                        "reason": omission.reason,
-                    },
-                )
-            except ValueError as exc:
-                raise ControlError("privacy_projection_blocked", retryable=False) from exc
+            # An omission whose pointer does not resolve means the privacy decision and the body
+            # disagree. `_replace_pointer` raises a bounded, named ValueError rather than a bare
+            # KeyError or IndexError; either way the projection stops before a response exists, so
+            # the blocked content is never disclosed, and the daemon reclassifies by method.
+            projected = _replace_pointer(
+                projected,
+                omission.json_pointer,
+                {
+                    "omitted": True,
+                    "category": omission.category.value,
+                    "reason": omission.reason,
+                },
+            )
         if not isinstance(projected, Mapping):
             raise TypeError("projected_control_body_invalid")
         receipt = completed.receipt

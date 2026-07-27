@@ -72,13 +72,14 @@ released versions.
   remedy is repeating the request. Observed in the 2026-07-27 Codex dogfood, where a compact
   `status` call failed twice and its exact replay failed again.
 
-- **The post-commit projection window fails bounded instead of arbitrarily.** Any unexpected
-  exception in that window converts a durable operation into an apparent failure that replay
-  cannot repair, because replay re-runs the same deterministic projection. Two reachable sites are
-  now closed: a result leaf that cannot be classified, and an omission whose pointer does not
-  resolve in the body — the latter previously raised a bare `KeyError` for the synthetic
-  `/leaf-N` pointer produced when an origin pointer exceeds 256 bytes. Both now fail closed as
-  `privacy_projection_blocked`: content that cannot be proven safe to disclose is not disclosed.
+- **The post-commit projection window fails with bounded, named errors.** Rewriting a blocked leaf
+  raised a bare `KeyError` when the omission pointer did not resolve in the body — reachable via
+  the synthetic `/leaf-N` pointer produced when an origin pointer exceeds 256 bytes — and a bare
+  `ValueError`/`IndexError` for a malformed or out-of-range array segment. These now raise
+  `projection_pointer_unresolved`/`projection_pointer_invalid`. They are deliberately not remapped
+  to `privacy_projection_blocked`: no policy blocked them, and that reason is non-retryable, so it
+  would describe an already-durable append as a refusal. The projection stops before a response
+  exists either way, so blocked content is never disclosed.
 
 - **Installed guidance no longer points at files that were never packaged.** `skills/codex/yoetz/SKILL.md`
   linked four `references/*.md` paths absent from both the repository skill directory and the

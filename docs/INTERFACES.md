@@ -996,10 +996,13 @@ replay for a read points the caller at an operation record that was never writte
 can reach the reclassification, since both privacy reads are projection-exempt. `check` and
 `receipt` append their own events and are therefore writes, not reads.
 
-Inside that window the projection internals fail bounded so the reclassification stays rare: an
-unclassifiable result leaf and an omission pointer that does not resolve in the body both raise
-`privacy_projection_blocked` (fail closed — content that cannot be proven safe is not disclosed)
-rather than escaping as `KeyError`, `IndexError`, or `ProtocolValueError`.
+Inside that window the projection internals fail with bounded, named errors rather than bare
+`KeyError`/`IndexError`: `_replace_pointer` raises `projection_pointer_unresolved` for an omission
+pointer absent from the body and `projection_pointer_invalid` for a malformed one. These are not
+remapped to `privacy_projection_blocked` — no policy blocked them, and that reason is
+non-retryable, so it would describe an already-durable append as a refusal. They reach the daemon
+and are reclassified by method. Either way the projection stops before a response exists, so
+blocked content is never disclosed.
 
 `ports/privacy.py` owns the shared receipt-inspection values `PrivacyReceiptAudience`,
 `PrivacyReceiptQuery`, `PrivacyReceiptPage` (positive snapshot generation, bounded unique
