@@ -218,24 +218,6 @@ def _lock_file(descriptor: int) -> None:
         return
 
 
-def _trim_file(path: Path) -> None:
-    """Keep a suffix of the ring so the file stays under the size cap."""
-
-    flags = os.O_RDWR | os.O_CREAT
-    flags |= getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    with _lock:
-        try:
-            descriptor = os.open(path, flags, 0o600)
-        except OSError:
-            return
-        try:
-            _lock_file(descriptor)
-            _trim_descriptor(descriptor)
-        finally:
-            os.close(descriptor)
-
-
 def _trim_descriptor(descriptor: int) -> None:
     """Rewrite the ring under an already-held exclusive lock on ``descriptor``."""
 

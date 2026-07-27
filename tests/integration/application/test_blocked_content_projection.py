@@ -22,6 +22,7 @@ from builders.start_application import (
     start_request,
 )
 from yoetz.application.egress import PrivacyCoordinator
+from yoetz.application.publish_work import PublishWorkInternalResult
 from yoetz.application.service import (
     Application,
     ClientProjectionContext,
@@ -332,6 +333,7 @@ async def test_blocked_content_projects_for_every_event_family_and_the_compact_v
         ),
     }
     plan = await app.publish_work(PublishWorkRequest.model_validate(plan_wire))
+    assert type(plan) is PublishWorkInternalResult
     projected_plan = await _project(app, ControlMethod.PUBLISH_WORK, plan_wire, plan, 920)
 
     # Blocked summaries are replaced by omission markers rather than leaking or failing.
@@ -409,6 +411,7 @@ async def test_blocked_content_projects_for_every_event_family_and_the_compact_v
         ),
     }
     work = await app.publish_work(PublishWorkRequest.model_validate(work_wire))
+    assert type(work) is PublishWorkInternalResult
     projected_work = await _project(app, ControlMethod.PUBLISH_WORK, work_wire, work, 940)
 
     # The exact four families of the run's second publication, spanning three data categories

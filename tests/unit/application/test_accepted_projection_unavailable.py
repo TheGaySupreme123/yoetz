@@ -10,12 +10,16 @@ import pytest
 from yoetz.application.publish_work import build_accepted_projection_unavailable_result
 from yoetz.domain.values import Frontier
 from yoetz.ports.ledger import AcceptedEventSummary
+from yoetz.protocol import models as protocol_models
 from yoetz.protocol.models import (
-    _PUBLISH_FIXED_SUMMARY,
-    _PUBLISH_SUMMARY_CATEGORY,
     PublishWorkAcceptedProjectionUnavailableModel,
     PublishWorkResult,
 )
+
+# Registry maps are module-private; getattr matches other coverage tests and avoids
+# reportPrivateUsage while still locking constructibility to every published family.
+_PUBLISH_SUMMARY_CATEGORY = getattr(protocol_models, "_PUBLISH_SUMMARY_CATEGORY")
+_PUBLISH_FIXED_SUMMARY = getattr(protocol_models, "_PUBLISH_FIXED_SUMMARY")
 
 _CORRELATION = "err_00000000-0000-4000-8000-000000000042"
 _TASK = "tsk_00000000-0000-4000-8000-000000000001"

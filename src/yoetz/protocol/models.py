@@ -1458,7 +1458,57 @@ type PublishWorkResultBranch = Annotated[
 
 
 class PublishWorkResultModel(PublicResultModel[PublishWorkResultBranch]):
-    pass
+    """RootModel wrapper with typed success-field accessors for static checkers.
+
+    Pydantic RootModel delegates attributes to ``root`` at runtime, but pyright does not
+    synthesize those members. After the three-way publish result discriminator, call sites that
+    hold ``PublishWorkInternalResult | PublishWorkResult`` need these fields to exist on both
+    arms. Failure roots raise ``AttributeError`` for success-only names (callers check ``ok``).
+    """
+
+    @property
+    def ok(self) -> bool:
+        return self.root.ok
+
+    @property
+    def outcome(self) -> Literal["accepted", "replayed"]:
+        root = self.root
+        if type(root) is PublishWorkSuccessModel:
+            return root.outcome
+        if type(root) is PublishWorkAcceptedProjectionUnavailableModel:
+            return root.outcome
+        raise AttributeError("outcome")
+
+    @property
+    def subject_frontier(self) -> FrontierModel:
+        root = self.root
+        if type(root) is PublishWorkSuccessModel:
+            return root.subject_frontier
+        if type(root) is PublishWorkAcceptedProjectionUnavailableModel:
+            return root.subject_frontier
+        raise AttributeError("subject_frontier")
+
+    @property
+    def result_frontier(self) -> FrontierModel:
+        root = self.root
+        if type(root) is PublishWorkSuccessModel:
+            return root.result_frontier
+        if type(root) is PublishWorkAcceptedProjectionUnavailableModel:
+            return root.result_frontier
+        raise AttributeError("result_frontier")
+
+    @property
+    def accepted_events(
+        self,
+    ) -> (
+        tuple[PublishWorkAcceptedEventModel, ...] | tuple[PublishWorkAcceptedMinimalEventModel, ...]
+    ):
+        root = self.root
+        if type(root) is PublishWorkSuccessModel:
+            return root.accepted_events
+        if type(root) is PublishWorkAcceptedProjectionUnavailableModel:
+            return root.accepted_events
+        raise AttributeError("accepted_events")
 
 
 class CheckPolicyExecutionModel(_ClosedModel):
