@@ -150,9 +150,9 @@ The run started from clean `main` and `origin/main` at `25bf8c2`, then created
 
 The isolated launcher remained:
 
-- `/Users/shayb/.local/bin/codex-testing`;
+- `~/.local/bin/codex-testing`;
 - version `0.146.0-alpha.2`;
-- isolated state under `/Users/shayb/.codex-testing`;
+- isolated state under `~/.codex-testing`;
 - Yoetz MCP registration enabled.
 
 The first parent launch used an unsupported `-a` placement and exited before the Codex agent
