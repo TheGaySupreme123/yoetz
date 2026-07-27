@@ -1129,6 +1129,7 @@ def provider_endpoint(
             interactive
             and not official
             and not fireworks
+            and not grok
             and provider_name is None
             and https_origin is None
             and model is None
