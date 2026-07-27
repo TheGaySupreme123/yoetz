@@ -3,6 +3,9 @@
 Replays the two `start` calls that failed in the 2026-07-27 Codex dogfood. Both were answerable
 from the frozen presentation schema, but the response named only field locations, so the agent
 read product source and conformance tests to author a request instead.
+
+Nested `/event_drafts/N` failures from the same dogfood must name payload enums (and event
+families) rather than falling back to a bare "see the examples entry" hint.
 """
 
 from __future__ import annotations
@@ -12,11 +15,22 @@ from typing import Any, cast
 
 import pytest
 
-from yoetz.mcp.descriptors import descriptor_for
+from yoetz.mcp.descriptors import ORDINARY_MCP_PUBLISH_EVENT_FAMILIES, descriptor_for
 from yoetz.mcp.errors import authoring_hint
+from yoetz.mcp.resources import read_resource
 from yoetz.protocol.canonical import JsonValue
 
 _START_SCHEMA = descriptor_for("start").input_schema
+_PUBLISH_SCHEMA = descriptor_for("publish_work").input_schema
+
+_NESTED_ENUM_CASES = (
+    ("/event_drafts/0/payload/action_kind", "action_kind", "command"),
+    ("/event_drafts/0/payload/outcome", "outcome", "success"),
+    ("/event_drafts/0/payload/claim_kind", "claim_kind", "completion"),
+    ("/event_drafts/0/payload/evidence_kind", "evidence_kind", "test_result"),
+    ("/event_drafts/0/payload/strength", "strength", "content_digest"),
+    ("/event_drafts/0/payload/status", "status", "open"),
+)
 
 
 def _locations(*fields: str) -> Sequence[Mapping[str, str]]:
@@ -57,9 +71,14 @@ def test_the_hint_is_bounded() -> None:
     assert hint.count(" admits ") <= 3
 
 
-def test_nested_and_unknown_locations_are_skipped() -> None:
-    # Nested pointers would need a full $defs walk; unknown names must never be echoed back.
-    assert authoring_hint(_START_SCHEMA, _locations("/actor/actor_type")).count(" admits ") == 0
+def test_nested_actor_type_names_admitted_values() -> None:
+    hint = authoring_hint(_START_SCHEMA, _locations("/actor/actor_type"))
+    assert "actor_type admits" in hint
+    assert "harness" in hint
+
+
+def test_unknown_locations_are_skipped() -> None:
+    # Unknown names must never be echoed back as admitted labels.
     assert authoring_hint(_START_SCHEMA, _locations("/not_a_field")).count(" admits ") == 0
 
 
@@ -95,3 +114,132 @@ def test_every_workflow_tool_can_produce_a_hint() -> None:
     for name in ("start", "publish_work", "check", "respond", "status", "receipt"):
         schema = cast(dict[str, Any], descriptor_for(name).input_schema)
         assert "examples entry" in authoring_hint(schema, ()), name
+
+
+def test_event_draft_index_names_admitted_families_not_bare_fallback() -> None:
+    # Run-3 failures #4/#6/#7 landed on /event_drafts/N with only "see the examples entry".
+    hint = authoring_hint(_PUBLISH_SCHEMA, _locations("/event_drafts/2"))
+    assert "event family admits" in hint
+    for family in sorted(ORDINARY_MCP_PUBLISH_EVENT_FAMILIES):
+        assert family in hint
+    assert hint != (
+        " Hint: see the examples entry in this tool's input schema for a complete request."
+    )
+
+
+@pytest.mark.parametrize(("pointer", "label", "member"), _NESTED_ENUM_CASES)
+def test_nested_payload_enums_name_admitted_members(pointer: str, label: str, member: str) -> None:
+    hint = authoring_hint(_PUBLISH_SCHEMA, _locations(pointer))
+    assert f"{label} admits" in hint
+    assert member in hint
+    assert "see the examples entry for" in hint
+
+
+def test_hostile_payload_values_never_appear_in_hints() -> None:
+    secret = "never-echo-hostile-payload-value-9f3a"
+    # Locations carry only allowlisted pointers; the hint builder must not accept or echo secrets.
+    hint = authoring_hint(
+        _PUBLISH_SCHEMA,
+        (
+            {"field": "/event_drafts/0/payload/action_kind", "reason": "invalid_value"},
+            {"field": secret, "reason": "invalid_value"},
+        ),
+    )
+    assert secret not in hint
+    assert "action_kind admits" in hint
+
+
+def test_hint_construction_failure_degrades_to_example_fallback() -> None:
+    # A hint must never turn a clear validation error into an internal error.
+    class _Boom(dict):
+        def get(self, key: object, default: object = None) -> object:  # noqa: ANN401
+            if key == "examples":
+                raise RuntimeError("forced_hint_failure")
+            return super().get(key, default)
+
+    schema = _Boom(cast(Mapping[str, JsonValue], _PUBLISH_SCHEMA))
+    hint = authoring_hint(schema, _locations("/event_drafts/0/payload/action_kind"))
+    assert hint == (
+        " Hint: see the examples entry in this tool's input schema for a complete request."
+    )
+
+
+def test_publish_work_examples_cover_ordinary_families_and_cross_refs() -> None:
+    examples = cast(list[JsonValue], _PUBLISH_SCHEMA["examples"])
+    families: set[str] = set()
+    for example in examples:
+        assert isinstance(example, Mapping)
+        drafts = cast(Mapping[str, JsonValue], example).get("event_drafts")
+        assert isinstance(drafts, list)
+        for draft in cast(list[JsonValue], drafts):
+            assert isinstance(draft, Mapping)
+            schema = cast(Mapping[str, JsonValue], draft).get("schema")
+            assert isinstance(schema, Mapping)
+            name = cast(Mapping[str, JsonValue], schema).get("name")
+            assert type(name) is str
+            families.add(name)
+    assert ORDINARY_MCP_PUBLISH_EVENT_FAMILIES <= families
+    # Cross-event refs: claim supporting_refs point at an evidence id from the same batch.
+    cross = cast(Mapping[str, JsonValue], examples[2])
+    drafts = cast(list[JsonValue], cross["event_drafts"])
+    evidence_ids = {
+        cast(Mapping[str, JsonValue], cast(Mapping[str, JsonValue], d)["payload"])["evidence_id"]
+        for d in drafts
+        if cast(Mapping[str, JsonValue], cast(Mapping[str, JsonValue], d)["schema"])["name"]
+        == "evidence_recorded"
+    }
+    claim = next(
+        cast(Mapping[str, JsonValue], cast(Mapping[str, JsonValue], d)["payload"])
+        for d in drafts
+        if cast(Mapping[str, JsonValue], cast(Mapping[str, JsonValue], d)["schema"])["name"]
+        == "claim_recorded"
+    )
+    supporting = cast(list[JsonValue], claim["supporting_refs"])
+    assert evidence_ids
+    assert set(supporting) & evidence_ids
+
+
+def test_every_worked_example_validates_against_its_request_schema() -> None:
+    from yoetz.protocol.models import (
+        CheckRequestModel,
+        PublishWorkRequestModel,
+        ReceiptRequestModel,
+        RespondRequestModel,
+        StartRequestModel,
+        StatusRequestModel,
+    )
+
+    validators = {
+        "start": StartRequestModel,
+        "publish_work": PublishWorkRequestModel,
+        "check": CheckRequestModel,
+        "respond": RespondRequestModel,
+        "status": StatusRequestModel,
+        "receipt": ReceiptRequestModel,
+    }
+    for name, model in validators.items():
+        schema = descriptor_for(name).input_schema
+        examples = cast(list[JsonValue], schema["examples"])
+        for example in examples:
+            model.model_validate(example)
+
+
+def test_guidance_uris_in_tool_descriptions_resolve() -> None:
+    for name in ("start", "publish_work", "check", "respond", "status", "receipt"):
+        description = descriptor_for(name).description
+        assert "yoetz://guidance/" in description
+        uri = description.rsplit("Guidance: ", 1)[1].rstrip(".")
+        payload = read_resource(uri)
+        assert payload.startswith(b"#") or payload.startswith(b"Yoetz")
+
+
+def test_invalid_request_message_names_registered_guidance() -> None:
+    from yoetz.mcp.server import _invalid_request_message
+
+    publish_message = _invalid_request_message(
+        "publish_work", _locations("/event_drafts/0/payload/action_kind")
+    )
+    assert "action_kind admits" in publish_message
+    assert "yoetz://guidance/publication-policy.md" in publish_message
+    start_message = _invalid_request_message("start", _locations("/mode"))
+    assert "yoetz://guidance/workflow.md" in start_message

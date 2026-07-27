@@ -303,7 +303,7 @@ _STATUS_PAGE_DEF_BY_VIEW_FOR_TEST: tuple[tuple[str, str], ...] = (
 )
 _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
     ("check", None): 127,
-    ("publish_work", None): 50,
+    ("publish_work", None): 57,
     ("receipt", None): 155,
     ("respond", None): 53,
     ("start", None): 35,
@@ -1720,7 +1720,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     rules = cast(tuple[Any, ...], getattr(models, "_RESULT_LEAF_RULES"))
 
     derived_patterns = _derived_result_success_patterns(catalog)
-    assert len(derived_patterns) == 704
+    assert len(derived_patterns) == 711
 
     derived_counts = {
         context: sum(1 for method, view, _ in derived_patterns if (method, view) == context)
@@ -1729,7 +1729,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert derived_counts == _EXPECTED_RESULT_PATTERN_COUNTS
 
     assert type(rules) is tuple
-    assert len(rules) == 720
+    assert len(rules) == 727
     assert rules == tuple(sorted(rules, key=_test_rule_sort_key))
 
     rule_keys = {
@@ -1738,7 +1738,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert len(rule_keys) == len(rules)
 
     registry_patterns = {(rule.method, rule.status_view, rule.segments) for rule in rules}
-    assert len(registry_patterns) == 704
+    assert len(registry_patterns) == 711
     assert registry_patterns == derived_patterns
 
     content_rules = _expected_nonpublish_content_rules(models)
@@ -2034,6 +2034,14 @@ def _derived_result_success_patterns(
                 _schema_mapping(reduced),
             )
             derived.update((method, None, pattern) for pattern in reduced_patterns)
+        dry_run = definitions.get("dry_run")
+        if dry_run is not None:
+            dry_run_patterns = _walk_schema_leaf_patterns(
+                catalog,
+                document,
+                _schema_mapping(dry_run),
+            )
+            derived.update((method, None, pattern) for pattern in dry_run_patterns)
 
     status_document = catalog.by_name_version[("status-result", "1.0.0")]
     status_success = _schema_success_definition(status_document)

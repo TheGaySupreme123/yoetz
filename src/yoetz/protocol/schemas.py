@@ -753,13 +753,62 @@ def validate_schema_instance(name: str, version: str, value: JsonValue) -> None:
         validator_api = cast(_ValidatorProtocol, cast(object, validator))
         validator_api.validate(_plain_validation_value(value))
     except ValidationError as exc:
-        path_items: list[str | int] = []
-        for item in exc.absolute_path:
-            if type(item) is str or type(item) is int:
-                path_items.append(item)
-            else:
-                path_items = []
-                break
-        raise SchemaInstanceInvalid(tuple(path_items)) from None
+        raise SchemaInstanceInvalid(_best_schema_instance_path(exc)) from None
     except BaseException:
         raise SchemaInstanceInvalid() from None
+
+
+def _path_items_from(error: ValidationError) -> tuple[str | int, ...] | None:
+    """Return a typed absolute path, or None when any segment is unusable."""
+
+    path_items: list[str | int] = []
+    for item in error.absolute_path:
+        if type(item) is str or type(item) is int:
+            path_items.append(item)
+        else:
+            return None
+    return tuple(path_items)
+
+
+def _best_schema_instance_path(exc: ValidationError) -> tuple[str | int, ...]:
+    """Prefer the deepest actionable nested path under a ``oneOf`` failure.
+
+    Jsonschema reports a failed event-draft union at ``event_drafts/N``. The nested context
+    already names the matching branch's payload field (for example ``action_kind``); surfacing
+    that path is what makes nested authoring hints possible without reading caller values.
+    """
+
+    best_path = _path_items_from(exc) or ()
+    best_score = -1
+
+    def score(error: ValidationError, path: tuple[str | int, ...]) -> int:
+        points = len(path) * 10
+        validator = error.validator
+        if validator in {"enum", "const", "pattern"}:
+            points += 100
+        elif validator in {"type", "minLength", "maxLength", "minItems", "maxItems"}:
+            points += 50
+        elif validator == "required":
+            points += 30
+        elif validator == "additionalProperties":
+            points -= 40
+        elif validator == "oneOf":
+            points -= 10
+        if "payload" in path:
+            points += 20
+        return points
+
+    def visit(error: ValidationError) -> None:
+        nonlocal best_path, best_score
+        path = _path_items_from(error)
+        if path is not None:
+            points = score(error, path)
+            if points > best_score or (points == best_score and len(path) > len(best_path)):
+                best_score = points
+                best_path = path
+        for nested in error.context or ():
+            if isinstance(nested, ValidationError):
+                visit(nested)
+
+    visit(exc)
+    return best_path

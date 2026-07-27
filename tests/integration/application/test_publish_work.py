@@ -22,7 +22,12 @@ from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.objects import ObjectStorePort
 from yoetz.ports.runtime import RouteCommand, TaskRuntime
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
-from yoetz.protocol.models import PublishWorkRequestModel, StatusOperationPageModel, StatusRequest
+from yoetz.protocol.models import (
+    PublishWorkDryRunModel,
+    PublishWorkRequestModel,
+    StatusOperationPageModel,
+    StatusRequest,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -442,4 +447,48 @@ async def test_status_view_operation_absent_for_unknown_request_id() -> None:
     ) is None
     assert (
         await app.runtime.task.ledger.lookup_operation(seed.writer_id, request.request_id)
+    ) is not None
+
+
+async def test_dry_run_appends_nothing_and_leaves_request_id_reusable() -> None:
+    """dry_run validates without durable effects; the same request_id still publishes later."""
+
+    app, objects = _composition()
+    frontier_before = await app.runtime.task.ledger.load_frontier()
+    durable_before = len(objects._data)  # pyright: ignore[reportPrivateUsage]
+    request = _request(
+        request_tail=601,
+        event_tail=602,
+        action_tail=603,
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    preview_payload = request.model_dump(mode="json", by_alias=True, exclude_none=True)
+    preview_payload["dry_run"] = True
+    preview_request = PublishWorkRequestModel.model_validate(preview_payload)
+
+    preview = await execute_publish_work(cast(Application, app), preview_request)
+
+    assert preview.ok is True
+    assert preview.outcome == "dry_run"
+    assert preview.subject_frontier.sequence == str(frontier_before.sequence)
+    assert preview.result_frontier == preview.subject_frontier
+    assert type(preview.root) is PublishWorkDryRunModel
+    assert preview.root.evidential is False
+    assert len(preview.root.would_accept) == 1
+    assert preview.root.would_accept[0].event_id == request.event_drafts[0]["event_id"]
+
+    frontier_after_preview = await app.runtime.task.ledger.load_frontier()
+    assert frontier_after_preview.sequence == frontier_before.sequence
+    assert frontier_after_preview.head_digest == frontier_before.head_digest
+    assert len(objects._data) == durable_before  # pyright: ignore[reportPrivateUsage]
+    assert (
+        await app.runtime.task.ledger.lookup_operation(request.writer_id, request.request_id)
+    ) is None
+
+    accepted = await execute_publish_work(cast(Application, app), request)
+    assert accepted.ok is True
+    assert accepted.outcome == "accepted"
+    assert accepted.result_frontier.sequence != str(frontier_before.sequence)
+    assert (
+        await app.runtime.task.ledger.lookup_operation(request.writer_id, request.request_id)
     ) is not None

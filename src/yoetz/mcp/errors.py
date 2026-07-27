@@ -27,16 +27,32 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "actor",
         "actor_id",
         "actor_type",
+        # Frozen payload field names. Without them a nested enum failure (action_kind) projects
+        # only to /event_drafts/N and the hint cannot name admitted members.
+        "action_id",
+        "action_kind",
         "artifact_refs",
         "asserted_by",
+        "assignee_actor_id",
         "at_frontier",
+        "authority",
         "causal_parents",
+        "change",
+        "claim_id",
+        "claim_kind",
         "client",
+        "command",
+        "content_digest",
         "cursor",
+        "description",
         "disposition",
         "display_name",
+        "dry_run",
         "event_drafts",
         "event_id",
+        "evidence_expectation",
+        "evidence_id",
+        "evidence_kind",
         "evidence_refs",
         "expected_frontier",
         "external_ref",
@@ -54,23 +70,39 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "max_findings",
         "mode",
         "name",
+        "obligation_changes",
+        "obligation_id",
+        "obligation_ids",
+        "obligation_refs",
+        "observed_at",
         "occurred_at",
         "operation_request_id",
+        "outcome",
         "payload",
+        "plan_version",
         "policy_packs",
         "protocol_version",
         "publication_channel",
+        "rationale",
         "reason",
         "redaction_profile",
         "request_id",
         "requested_view",
+        "result_id",
         "schema",
         "schema_name",
         "schema_version",
         "scope",
+        "scope_description",
         "sequence",
         "session_id",
+        "statement",
+        "status",
+        "strength",
         "subject_state",
+        "summary",
+        "supersedes_plan_version",
+        "supporting_refs",
         "task_id",
         "task_title",
         "version",
@@ -99,7 +131,12 @@ _MAX_VALIDATION_LOCATIONS: Final = 8
 # Bounded so the hint stays a hint: a long enum dump would bury the field locations it explains.
 _MAX_HINT_FIELDS: Final = 3
 _MAX_HINT_ENUM_MEMBERS: Final = 8
+# Schema-name unions (ordinary publish families) are larger than payload enums; keep a separate
+# bound so `/event_drafts/N` can name admitted families without dumping unbounded oneOf lists.
+_MAX_HINT_SCHEMA_NAMES: Final = 16
 _MAX_HINT_PATTERN_CHARS: Final = 96
+_MAX_HINT_REF_HOPS: Final = 8
+_MAX_HINT_POINTER_SEGMENTS: Final = 8
 _LOCAL_DEFS_PREFIX: Final = "#/$defs/"
 
 
@@ -161,15 +198,17 @@ def safe_validation_locations(exc: object) -> tuple[dict[str, str], ...]:
 
 
 def authoring_hint(schema: object, locations: Sequence[Mapping[str, str]]) -> str:
-    """Name the admitted values for the rejected top-level fields, from the frozen schema.
+    """Name the admitted values for rejected fields, from the frozen presentation schema.
 
     An agent that cannot author `start` cannot use the product at all, and the 2026-07-27 dogfood
     burned two calls plus a source-reading detour on exactly that: an empty object, then a guessed
     request-id shape and a mode that is not an admitted value. Field locations alone did not close
-    the gap because they say where, not what.
+    the gap because they say where, not what. Nested `/event_drafts/N` failures need the same:
+    walk local ``$defs`` so payload enums such as `action_kind` are named.
 
-    Every character comes from the checked-in presentation schema — enum members and the worked
-    example's own keys — so no caller-controlled text can reach the message.
+    Every character comes from the checked-in presentation schema — enum members, consts, bounded
+    patterns, and the worked example's own keys — so no caller-controlled text can reach the
+    message.
     """
 
     if not isinstance(schema, Mapping):
@@ -178,46 +217,265 @@ def authoring_hint(schema: object, locations: Sequence[Mapping[str, str]]) -> st
     properties = document.get("properties")
     if not isinstance(properties, Mapping):
         return ""
-    fields = cast(Mapping[str, JsonValue], properties)
     parts: list[str] = []
     seen: set[str] = set()
-    for location in locations:
-        pointer = location.get("field", "")
-        # Only top-level scalar fields; nested pointers would need the $defs walk and the example
-        # already shows their shape.
-        if not pointer.startswith("/") or pointer.count("/") != 1:
-            continue
-        name = pointer[1:]
-        if name in seen or name not in fields:
-            continue
-        seen.add(name)
-        admitted = _admitted_values(_resolved(document, fields[name]))
-        if admitted:
-            parts.append(f"{name} admits {admitted}")
-        if len(parts) == _MAX_HINT_FIELDS:
-            break
-    if _has_example(document):
-        parts.append("see the examples entry in this tool's input schema for a complete request")
+    example_families: list[str] = []
+    try:
+        for location in locations:
+            pointer = location.get("field", "")
+            if type(pointer) is not str or not pointer.startswith("/"):
+                continue
+            label, admitted, family = _hint_for_pointer(document, pointer)
+            if not admitted or label in seen:
+                continue
+            seen.add(label)
+            parts.append(f"{label} admits {admitted}")
+            if family is not None and family not in example_families:
+                example_families.append(family)
+            if len(parts) == _MAX_HINT_FIELDS:
+                break
+        if _has_example(document):
+            if example_families:
+                named = ", ".join(example_families[:_MAX_HINT_FIELDS])
+                parts.append(
+                    f"see the examples entry for {named} in this tool's input schema "
+                    "for a complete request"
+                )
+            else:
+                parts.append(
+                    "see the examples entry in this tool's input schema for a complete request"
+                )
+    except Exception:
+        # A hint must never turn a clear validation error into an internal error — including when
+        # even the example probe fails. Prefer the checked-in fallback text over silence or raise.
+        try:
+            has_example = _has_example(document)
+        except Exception:
+            has_example = True
+        return (
+            " Hint: see the examples entry in this tool's input schema for a complete request."
+            if has_example
+            else ""
+        )
     if not parts:
         return ""
     return " Hint: " + "; ".join(parts) + "."
 
 
-def _resolved(document: Mapping[str, JsonValue], field: JsonValue) -> JsonValue:
-    """Follow one local ``$defs`` reference. Identifier fields are refs, not inline enums."""
+def _hint_for_pointer(
+    document: Mapping[str, JsonValue], pointer: str
+) -> tuple[str, str, str | None]:
+    """Return ``(label, admitted_values, example_family_or_none)`` for one pointer."""
 
-    if not isinstance(field, Mapping):
-        return field
-    reference = cast(Mapping[str, JsonValue], field).get("$ref")
-    if type(reference) is not str or not reference.startswith(_LOCAL_DEFS_PREFIX):
-        return field
-    definitions = document.get("$defs")
-    if not isinstance(definitions, Mapping):
-        return field
-    # One hop only: a chain would need cycle handling for no practical gain.
-    return cast(Mapping[str, JsonValue], definitions).get(
-        reference.removeprefix(_LOCAL_DEFS_PREFIX), field
-    )
+    raw_segments = pointer.removeprefix("/").split("/")
+    if not raw_segments or raw_segments == [""]:
+        return "", "", None
+    if len(raw_segments) > _MAX_HINT_POINTER_SEGMENTS:
+        return "", "", None
+    segments: list[str | int] = []
+    for item in raw_segments:
+        if item.isdigit():
+            segments.append(int(item))
+        else:
+            segments.append(item)
+    node: JsonValue = cast(JsonValue, document)
+    family: str | None = None
+    for index, segment in enumerate(segments):
+        node = _resolve_local(document, node)
+        if type(segment) is int:
+            if not isinstance(node, Mapping):
+                return "", "", None
+            items = cast(Mapping[str, JsonValue], node).get("items")
+            if items is None:
+                return "", "", None
+            node = items
+            continue
+        # At a discriminated union, prefer the branch that can continue the remaining path.
+        remaining = segments[index:]
+        selected = _select_union_branch(document, node, remaining)
+        if selected is not None:
+            branch_node, branch_family = selected
+            if branch_family is not None:
+                family = branch_family
+            node = branch_node
+        elif _is_schema_discriminator_path(remaining):
+            # Ambiguous oneOf (every branch has schema/name): name admitted families instead of
+            # walking the shared base pattern that does not say which schemas are publishable.
+            admitted = _union_schema_names(document, node)
+            if admitted:
+                return "schema.name", admitted, family
+        node = _resolve_local(document, node)
+        if not isinstance(node, Mapping):
+            return "", "", None
+        source = cast(Mapping[str, JsonValue], node)
+        props = source.get("properties")
+        if not isinstance(props, Mapping):
+            # Discriminator failures land on schema/name; admit consts from the enclosing oneOf.
+            if segment == "name":
+                admitted = _union_schema_names(document, node)
+                if admitted:
+                    return "schema.name", admitted, family
+            return "", "", None
+        fields = cast(Mapping[str, JsonValue], props)
+        if segment not in fields:
+            return "", "", None
+        node = fields[segment]
+    node = _resolve_local(document, node)
+    leaf = raw_segments[-1]
+    # An array-item pointer (/event_drafts/N) names the admitted event families.
+    if leaf.isdigit():
+        admitted = _union_schema_names(document, node)
+        return ("event family", admitted, family) if admitted else ("", "", None)
+    admitted = _admitted_values(node)
+    if not admitted and isinstance(node, Mapping):
+        admitted = _union_schema_names(document, node)
+        if admitted and leaf in {"schema", "name"}:
+            return "schema.name" if leaf == "name" else "schema", admitted, family
+    if not admitted:
+        return "", "", None
+    return leaf, admitted, family
+
+
+def _select_union_branch(
+    document: Mapping[str, JsonValue],
+    node: JsonValue,
+    remaining: Sequence[str | int],
+) -> tuple[JsonValue, str | None] | None:
+    """Pick the oneOf/anyOf branch that can resolve the remaining pointer, if unique enough."""
+
+    if not isinstance(node, Mapping) or not remaining:
+        return None
+    source = cast(Mapping[str, JsonValue], node)
+    options = source.get("oneOf")
+    if not isinstance(options, list):
+        options = source.get("anyOf")
+    if not isinstance(options, list) or not options:
+        return None
+    matches: list[tuple[JsonValue, str | None]] = []
+    for branch in cast(list[JsonValue], options):
+        resolved = _resolve_local(document, branch)
+        family = _schema_name_const(document, resolved)
+        if _branch_covers_path(document, resolved, remaining):
+            matches.append((resolved, family))
+    if not matches:
+        return None
+    # Prefer a branch whose family const is known when several cover the path.
+    if len(matches) == 1:
+        return matches[0]
+    with_family = [item for item in matches if item[1] is not None]
+    if len(with_family) == 1:
+        return with_family[0]
+    # Ambiguous: stay on the union node so callers can name admitted schema names.
+    return None
+
+
+def _branch_covers_path(
+    document: Mapping[str, JsonValue],
+    branch: JsonValue,
+    remaining: Sequence[str | int],
+) -> bool:
+    node: JsonValue = branch
+    for index, segment in enumerate(remaining):
+        node = _resolve_local(document, node)
+        if type(segment) is int:
+            if not isinstance(node, Mapping):
+                return False
+            items = cast(Mapping[str, JsonValue], node).get("items")
+            if items is None:
+                return False
+            node = items
+            continue
+        nested = _select_union_branch(document, node, remaining[index:])
+        if nested is not None:
+            node = nested[0]
+        node = _resolve_local(document, node)
+        if not isinstance(node, Mapping):
+            return False
+        props = cast(Mapping[str, JsonValue], node).get("properties")
+        if not isinstance(props, Mapping):
+            return False
+        fields = cast(Mapping[str, JsonValue], props)
+        if segment not in fields:
+            return False
+        node = fields[segment]
+    return True
+
+
+def _schema_name_const(document: Mapping[str, JsonValue], branch: JsonValue) -> str | None:
+    node = _resolve_local(document, branch)
+    if not isinstance(node, Mapping):
+        return None
+    props = cast(Mapping[str, JsonValue], node).get("properties")
+    if not isinstance(props, Mapping):
+        return None
+    schema_node = cast(Mapping[str, JsonValue], props).get("schema")
+    schema_node = _resolve_local(document, schema_node) if schema_node is not None else None
+    if not isinstance(schema_node, Mapping):
+        return None
+    schema_props = cast(Mapping[str, JsonValue], schema_node).get("properties")
+    if not isinstance(schema_props, Mapping):
+        return None
+    name_node = cast(Mapping[str, JsonValue], schema_props).get("name")
+    name_node = _resolve_local(document, name_node) if name_node is not None else None
+    if not isinstance(name_node, Mapping):
+        return None
+    const_name = cast(Mapping[str, JsonValue], name_node).get("const")
+    return const_name if type(const_name) is str else None
+
+
+def _is_schema_discriminator_path(remaining: Sequence[str | int]) -> bool:
+    if not remaining:
+        return False
+    if remaining == ["schema"] or remaining == ["name"]:
+        return True
+    return list(remaining) == ["schema", "name"]
+
+
+def _union_schema_names(document: Mapping[str, JsonValue], node: JsonValue) -> str:
+    resolved = _resolve_local(document, node)
+    if not isinstance(resolved, Mapping):
+        return ""
+    source = cast(Mapping[str, JsonValue], resolved)
+    options = source.get("oneOf")
+    if not isinstance(options, list):
+        options = source.get("anyOf")
+    if not isinstance(options, list):
+        return ""
+    names: list[str] = []
+    for branch in cast(list[JsonValue], options):
+        family = _schema_name_const(document, branch)
+        if family is not None and family not in names:
+            names.append(family)
+        if len(names) > _MAX_HINT_SCHEMA_NAMES:
+            return ""
+    if not names or len(names) > _MAX_HINT_SCHEMA_NAMES:
+        return ""
+    return ", ".join(sorted(names))
+
+
+def _resolve_local(document: Mapping[str, JsonValue], field: JsonValue) -> JsonValue:
+    """Follow local ``#/$defs/`` references only, bounded against cycles and chains."""
+
+    current = field
+    seen: set[str] = set()
+    for _ in range(_MAX_HINT_REF_HOPS):
+        if not isinstance(current, Mapping):
+            return current
+        reference = cast(Mapping[str, JsonValue], current).get("$ref")
+        if type(reference) is not str or not reference.startswith(_LOCAL_DEFS_PREFIX):
+            return current
+        if reference in seen:
+            return field
+        seen.add(reference)
+        definitions = document.get("$defs")
+        if not isinstance(definitions, Mapping):
+            return field
+        key = reference.removeprefix(_LOCAL_DEFS_PREFIX)
+        nxt = cast(Mapping[str, JsonValue], definitions).get(key)
+        if nxt is None:
+            return field
+        current = nxt
+    return field
 
 
 def _admitted_values(field: JsonValue) -> str:

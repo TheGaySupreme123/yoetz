@@ -1032,10 +1032,14 @@ class StartRequestModel(PublicRequestModel):
 
 
 class PublishWorkRequestModel(PublicRequestModel):
+    optional_non_null_fields = frozenset({"dry_run"})
+
     session_id: SessionIdWire
     writer_id: WriterIdWire
     expected_frontier: FrontierModel | None
     event_drafts: tuple[JsonValue, ...]
+    # When true, validate the batch and return a non-evidential preview without appending.
+    dry_run: bool | None = None
 
     @model_validator(mode="after")
     def _validate_publish_work_request(self) -> PublishWorkRequestModel:
@@ -1438,8 +1442,59 @@ class PublishWorkAcceptedProjectionUnavailableModel(_ClosedModel):
         return self
 
 
+class PublishWorkDryRunPreviewEventModel(_ClosedModel):
+    """Structural preview of one draft that would be accepted on a real publish."""
+
+    event_id: EventIdWire
+    schema_name: SchemaNameWire
+    schema_version: SemverWire
+    causal_parents: tuple[EventIdWire, ...]
+    artifact_refs: tuple[ObjectIdWire, ...]
+    evidence_refs: tuple[EvidenceOrResultIdWire, ...]
+
+    @model_validator(mode="after")
+    def _validate_preview_refs(self) -> PublishWorkDryRunPreviewEventModel:
+        _require_unique(self.causal_parents, limit=32)
+        _require_unique(self.artifact_refs, limit=64)
+        _require_unique(self.evidence_refs, limit=64)
+        return self
+
+
+class PublishWorkDryRunModel(_ClosedModel):
+    """Non-evidential validation preview: nothing was appended and nothing is citable.
+
+    Same discipline as ``status view=candidate_findings``: the body is advisory. It is not a
+    check, publication, coverage source, or receipt input. ``evidential`` is always false.
+    """
+
+    protocol_version: Literal["0.1"]
+    schema_version: Literal["1.0.0"]
+    request_id: RequestIdWire
+    ok: Literal[True]
+    outcome: Literal["dry_run"]
+    evidential: Literal[False]
+    task_id: TaskIdWire
+    session_id: SessionIdWire
+    writer_id: WriterIdWire
+    subject_frontier: FrontierModel
+    result_frontier: FrontierModel
+    would_accept: tuple[PublishWorkDryRunPreviewEventModel, ...]
+    coverage: CoverageModel
+    gaps: tuple[CodeWire, ...]
+
+    @model_validator(mode="after")
+    def _validate_publish_dry_run(self) -> PublishWorkDryRunModel:
+        if not 1 <= len(self.would_accept) <= MAX_EVENTS_PER_BATCH:
+            raise ValueError("dry_run_preview_count_invalid")
+        if self.subject_frontier != self.result_frontier:
+            raise ValueError("dry_run_frontier_moved")
+        _require_unique(self.gaps, limit=64)
+        _validate_model_against_schema(self, "publish-work-result")
+        return self
+
+
 def _publish_work_result_kind(value: object) -> str:
-    """Discriminate the three publish result shapes without overloading ``ok`` alone."""
+    """Discriminate the publish result shapes without overloading ``ok`` alone."""
 
     if isinstance(value, Mapping):
         source = cast(Mapping[object, object], value)
@@ -1447,11 +1502,15 @@ def _publish_work_result_kind(value: object) -> str:
             return "failure"
         if source.get("response_completeness") == "accepted_projection_unavailable":
             return "accepted_projection_unavailable"
+        if source.get("outcome") == "dry_run":
+            return "dry_run"
         return "success"
     if getattr(value, "ok", None) is False:
         return "failure"
     if getattr(value, "response_completeness", None) == "accepted_projection_unavailable":
         return "accepted_projection_unavailable"
+    if getattr(value, "outcome", None) == "dry_run":
+        return "dry_run"
     return "success"
 
 
@@ -1461,6 +1520,7 @@ type PublishWorkResultBranch = Annotated[
         PublishWorkAcceptedProjectionUnavailableModel,
         Tag("accepted_projection_unavailable"),
     ]
+    | Annotated[PublishWorkDryRunModel, Tag("dry_run")]
     | Annotated[OperationFailureModel, Tag("failure")],
     Discriminator(_publish_work_result_kind),
 ]
@@ -1470,7 +1530,7 @@ class PublishWorkResultModel(PublicResultModel[PublishWorkResultBranch]):
     """RootModel wrapper with typed success-field accessors for static checkers.
 
     Pydantic RootModel delegates attributes to ``root`` at runtime, but pyright does not
-    synthesize those members. After the three-way publish result discriminator, call sites that
+    synthesize those members. After the publish result discriminator, call sites that
     hold ``PublishWorkInternalResult | PublishWorkResult`` need these fields to exist on both
     arms. Failure roots raise ``AttributeError`` for success-only names (callers check ``ok``).
     """
@@ -1480,11 +1540,13 @@ class PublishWorkResultModel(PublicResultModel[PublishWorkResultBranch]):
         return self.root.ok
 
     @property
-    def outcome(self) -> Literal["accepted", "replayed"]:
+    def outcome(self) -> Literal["accepted", "replayed", "dry_run"]:
         root = self.root
         if type(root) is PublishWorkSuccessModel:
             return root.outcome
         if type(root) is PublishWorkAcceptedProjectionUnavailableModel:
+            return root.outcome
+        if type(root) is PublishWorkDryRunModel:
             return root.outcome
         raise AttributeError("outcome")
 
@@ -1495,6 +1557,8 @@ class PublishWorkResultModel(PublicResultModel[PublishWorkResultBranch]):
             return root.subject_frontier
         if type(root) is PublishWorkAcceptedProjectionUnavailableModel:
             return root.subject_frontier
+        if type(root) is PublishWorkDryRunModel:
+            return root.subject_frontier
         raise AttributeError("subject_frontier")
 
     @property
@@ -1503,6 +1567,8 @@ class PublishWorkResultModel(PublicResultModel[PublishWorkResultBranch]):
         if type(root) is PublishWorkSuccessModel:
             return root.result_frontier
         if type(root) is PublishWorkAcceptedProjectionUnavailableModel:
+            return root.result_frontier
+        if type(root) is PublishWorkDryRunModel:
             return root.result_frontier
         raise AttributeError("result_frontier")
 
@@ -2723,6 +2789,7 @@ _PUBLISH_STRUCTURAL_POINTERS: Final = (
     _COMMON_SUCCESS_LEAVES
     + (
         "/correlation_id",
+        "/evidential",
         "/gaps/*",
         "/outcome",
         "/reason_code",
@@ -2752,6 +2819,17 @@ _PUBLISH_STRUCTURAL_POINTERS: Final = (
     + _prefix_leaf_patterns(
         "/accepted_events/*/summary",
         _OMITTED_CONTENT_LEAVES,
+    )
+    + _prefix_leaf_patterns(
+        "/would_accept/*",
+        (
+            "artifact_refs/*",
+            "causal_parents/*",
+            "event_id",
+            "evidence_refs/*",
+            "schema_name",
+            "schema_version",
+        ),
     )
 )
 
@@ -3340,7 +3418,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 720:
+    if len(result) != 727:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

@@ -6,6 +6,7 @@ import asyncio
 import os
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Final, cast
 
 import anyio
@@ -117,17 +118,43 @@ _READ_PROJECTION_FAILED_MESSAGE: Final = (
     "the authoritative frontier."
 )
 _READ_PROJECTION_FAILED_DETAILS: Final = {"reason_code": "read_projection_failed"}
+_PUBLICATION_GUIDANCE_URI: Final = "yoetz://guidance/publication-policy.md"
+_WORKFLOW_GUIDANCE_URI: Final = "yoetz://guidance/workflow.md"
+_GUIDANCE_BY_OPERATION: Final = MappingProxyType(
+    {
+        "start": _WORKFLOW_GUIDANCE_URI,
+        "publish_work": _PUBLICATION_GUIDANCE_URI,
+        "check": "yoetz://guidance/coverage-and-receipts.md",
+        "respond": _PUBLICATION_GUIDANCE_URI,
+        "status": _WORKFLOW_GUIDANCE_URI,
+        "receipt": "yoetz://guidance/coverage-and-receipts.md",
+    }
+)
 
 
 def _authoring_hint_for(operation: str, locations: Sequence[Mapping[str, str]]) -> str:
     """Look up the frozen presentation schema for one tool and hint from it, or say nothing."""
 
     try:
-        return authoring_hint(descriptor_for(operation).input_schema, locations)
+        hint = authoring_hint(descriptor_for(operation).input_schema, locations)
     except Exception:
         # A hint is a convenience. Never let building one turn a clear validation error into an
         # internal error.
-        return ""
+        hint = ""
+    guidance = _GUIDANCE_BY_OPERATION.get(operation)
+    if guidance is None:
+        return hint
+    # Only the registered URI — never synthesized prose. Manifest verification happens at read.
+    suffix = f" Guidance: {guidance}."
+    if hint.endswith("."):
+        return hint[:-1] + ";" + suffix
+    if hint:
+        return hint + suffix
+    return " Hint:" + suffix
+
+
+def _invalid_request_message(operation: str, locations: Sequence[Mapping[str, str]]) -> str:
+    return "The tool arguments are invalid." + _authoring_hint_for(operation, locations)
 
 
 @dataclass(slots=True)
@@ -400,7 +427,7 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
         locations = safe_validation_locations(exc)
         return structured_error_result(
             PublicErrorCode.INVALID_REQUEST,
-            "The tool arguments are invalid." + _authoring_hint_for(operation, locations),
+            _invalid_request_message(operation, locations),
             request_id=request_id,
             safe_details=locations if locations else None,
         )
@@ -697,7 +724,7 @@ async def dispatch_publish_work(
         locations = safe_validation_locations(exc)
         return structured_error_result(
             PublicErrorCode.INVALID_REQUEST,
-            "The tool arguments are invalid." + _authoring_hint_for("publish_work", locations),
+            _invalid_request_message("publish_work", locations),
             request_id=request_id,
             safe_details=locations if locations else None,
         )

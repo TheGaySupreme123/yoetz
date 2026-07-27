@@ -78,7 +78,11 @@ from yoetz.protocol.errors import (
 from yoetz.protocol.models import (
     MAX_CANONICAL_REQUEST_BYTES,
     MAX_EVENTS_PER_BATCH,
+    CoverageModel,
+    FrontierModel,
     PublishWorkAcceptedEventModel,
+    PublishWorkDryRunModel,
+    PublishWorkDryRunPreviewEventModel,
     PublishWorkRequestModel,
     PublishWorkResult,
     PublishWorkResultModel,
@@ -799,6 +803,72 @@ def accepted_projection_unavailable_from_append(
     )
 
 
+async def _execute_dry_run(
+    app: Application,
+    request: PublishWorkRequestModel,
+    channel: PublicationChannel,
+    runtime: TaskRuntime,
+) -> PublishWorkResult:
+    """Validate a batch and return a non-evidential preview without any durable side effects."""
+
+    # Intentionally skip operation lookup: dry_run must not consume or conflict on request_id.
+    prepared = prepare_publication(request, channel=channel, app=app)
+    current = await runtime.ledger.load_frontier()
+    if request.expected_frontier is not None:
+        expected_sequence = int(request.expected_frontier.sequence)
+        if expected_sequence != current.sequence:
+            raise PublicOperationError(
+                PublicErrorCode.FRONTIER_CONFLICT,
+                (
+                    "The event batch is invalid. Call status to read the current frontier, then "
+                    "retry idempotently with the same request_id."
+                ),
+                False,
+                safe_details={"reason_code": "frontier_changed"},
+            )
+        if request.expected_frontier.head_digest != current.head_digest:
+            raise PublicOperationError(
+                PublicErrorCode.FRONTIER_CONFLICT,
+                (
+                    "The event batch is invalid. Call status to read the current frontier, then "
+                    "retry idempotently with the same request_id."
+                ),
+                False,
+                safe_details={"reason_code": "frontier_changed"},
+            )
+    frontier = FrontierModel.model_validate(dict(current.as_wire()))
+    preview = tuple(
+        PublishWorkDryRunPreviewEventModel(
+            event_id=item.draft.event_id,
+            schema_name=item.draft.schema.name,
+            schema_version=item.draft.schema.version,
+            causal_parents=item.draft.causal_parents,
+            artifact_refs=item.draft.artifact_refs,
+            evidence_refs=tuple(str(ref) for ref in item.draft.evidence_refs),
+        )
+        for item in prepared.drafts
+    )
+    body = PublishWorkDryRunModel(
+        protocol_version="0.1",
+        schema_version="1.0.0",
+        request_id=request.request_id,
+        ok=True,
+        outcome="dry_run",
+        evidential=False,
+        task_id=runtime.task_id,
+        session_id=runtime.session_id,
+        writer_id=cast(str, runtime.writer_id),
+        subject_frontier=frontier,
+        result_frontier=frontier,
+        would_accept=preview,
+        coverage=CoverageModel.model_validate(coverage_to_json(prepared.coverage)),
+        gaps=prepared.coverage.known_gaps,
+    )
+    return PublishWorkResultModel.model_validate(
+        body.model_dump(mode="json", by_alias=True, exclude_unset=True)
+    )
+
+
 async def execute_publish_work(
     app: Application,
     request: PublishWorkRequestModel,
@@ -810,6 +880,9 @@ async def execute_publish_work(
     the stored result without re-appending. A completed operation with a different body returns
     ``REQUEST_IDENTITY_CONFLICT`` with the stored frontier — never ``INVALID_REQUEST`` and never
     a second append.
+
+    ``dry_run: true`` validates the full batch and returns a non-evidential preview without
+    appending, recording an operation, consuming ``request_id``, or moving the frontier.
     """
 
     request_bytes = canonical_encode(
@@ -833,6 +906,9 @@ async def execute_publish_work(
     try:
         if runtime.session_id != request.session_id or runtime.writer_id != request.writer_id:
             raise _error(PublicErrorCode.SESSION_CONFLICT, "The writer route is inconsistent.")
+
+        if request.dry_run is True:
+            return await _execute_dry_run(app, request, channel, runtime)
 
         # Resolve replay before prepare_publication and before expected_frontier so recovery is
         # never blocked by body validation or a stale pre-append frontier.

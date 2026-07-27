@@ -40,7 +40,14 @@ actions, results, evidence. Publish material transitions — an assignment, a de
 attempt, an independently useful result, a completion, a revision. Skip routine reads, searches,
 formatting, and per-file mechanics.
 
+Set `dry_run: true` to validate a batch and preview what would be accepted without appending. The
+preview is not evidential and is not citable as a check, publication, or coverage source. Reuse the
+same `request_id` for the real publish after the preview succeeds.
+
 Yoetz does not watch your workspace. What is published is what exists.
+
+Authoring help for MCP: tool descriptions name `yoetz://guidance/publication-policy.md`; invalid
+requests include that URI and nested field hints from the presentation schema.
 
 ### `check`
 Runs the deterministic policy packs over the recorded state and returns findings with an exact
