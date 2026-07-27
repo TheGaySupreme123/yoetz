@@ -908,11 +908,12 @@ TOOL_DESCRIPTORS: Final = (
         "status",
         "Read recorded status",
         "Reads one bounded, paginated view: advice, assignment, candidate_findings, compact, "
-        "evidence, findings, history, obligations, or versions. Advice items carry a "
+        "evidence, findings, history, obligations, operation, or versions. Advice items carry a "
         "recommended_next_action. Call it when uncertain what you already did or committed to, "
-        "rather than reconstructing from memory. view=findings reads recorded findings; "
-        "view=candidate_findings returns unrecorded deterministic candidates without verdicts or "
-        "IDs.",
+        "rather than reconstructing from memory. view=operation takes filter.operation_request_id "
+        "and returns that operation's stored result for recovery without resending the body. "
+        "view=findings reads recorded findings; view=candidate_findings returns unrecorded "
+        "deterministic candidates without verdicts or IDs.",
         read_only=True,
         idempotent=True,
     ),
@@ -956,12 +957,12 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[str, str]] = MappingProxyType(
         "publish_work": "sha256:3ad928d63033c61adc1d49cf63d7dd9ccc6e4d0ade0932b4638b62f20d5d273e",
         "check": "sha256:e382bf8897267b9ceb4a8833a43673f7cebcf052aef286848b3f209789399693",
         "respond": "sha256:740e576f822636bdcdf4f246a86192a336e7d0284aae611bbc6421ee62ed469a",
-        "status": "sha256:99b92f8092623c90f9706f0427f4f81e1cc5f4532571e197344b088e1855351e",
+        "status": "sha256:813f99c86c78a99f2cdb3b469825f0427c9dad013c0b4910ef7fb598ef750f6f",
         "receipt": "sha256:3d50456b00c2fa4e46fc167f97d3db2033d6f02d46a7a6e934b4f28797d69e19",
     }
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final = (
-    "sha256:99dbb6ee49a24168f351c1a3b405dd001c7ee8c8add115b7ac79f4adfa0a7afe"
+    "sha256:c812b652374aa5c80677447055460e84ffacde437d7f7e69ca1a001548b10752"
 )
 
 

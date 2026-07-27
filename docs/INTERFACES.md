@@ -65,9 +65,9 @@ lookup, or kind-from-ID public API.
 `PublicErrorCode` is declared exactly as `class PublicErrorCode(str, Enum)`, with explicit string
 values equal to the member spellings and this frozen order:
 `INVALID_REQUEST`, `PROTOCOL_VERSION_UNSUPPORTED`, `SESSION_NOT_FOUND`, `SESSION_CONFLICT`,
-`IDEMPOTENCY_CONFLICT`, `OPERATION_PENDING`, `FRONTIER_CONFLICT`, `EVENT_INVALID`,
-`LIMIT_EXCEEDED`, `BUNDLE_BUSY`, `STORAGE_UNSAFE`, `STORAGE_CORRUPT`, `MIGRATION_REQUIRED`,
-`SERVICE_UNAVAILABLE`, `VAULT_LOCKED`, `PRIVACY_AUTHORITY_REQUIRED`,
+`IDEMPOTENCY_CONFLICT`, `REQUEST_IDENTITY_CONFLICT`, `OPERATION_PENDING`, `FRONTIER_CONFLICT`,
+`EVENT_INVALID`, `LIMIT_EXCEEDED`, `BUNDLE_BUSY`, `STORAGE_UNSAFE`, `STORAGE_CORRUPT`,
+`MIGRATION_REQUIRED`, `SERVICE_UNAVAILABLE`, `VAULT_LOCKED`, `PRIVACY_AUTHORITY_REQUIRED`,
 `PROVIDER_UNAVAILABLE`, `PROVIDER_REFUSED`, `PROVIDER_TIMEOUT`, `SEMANTIC_RESULT_INVALID`,
 `CANCELLED`, `INTERNAL_ERROR`.
 
@@ -95,10 +95,23 @@ with `ok: true`, `response_completeness: "accepted_projection_unavailable"`,
 subject/result frontiers, and accepted event ids, entry digests, and ingestion sequences — built
 only from `AppendResult` / the closed internal result, never from privacy projection. The caller
 does not need a second `status` call or a same-`request_id` replay to learn what landed.
-For `publish_work`, completed-operation replay is still resolved before `expected_frontier`; it
-never re-appends the accepted events. If an exact validated full success body was durably stored,
-replay to the same ordinary disclosure sink returns that body without running privacy projection
-again.
+For `publish_work`, completed-operation replay is resolved before body preparation and before
+`expected_frontier`; it never re-appends the accepted events. Replay keys only on
+`(task_id, writer_id, request_id)` from the request envelope. When the body matches the stored
+request digest, the stored result is returned. When the same `request_id` is reused with a
+different body (or a body that cannot be prepared), the public code is
+`REQUEST_IDENTITY_CONFLICT` with `reason_code: request_identity_conflict`, carrying the committed
+`sequence`, `head_digest`, and accepted-event `count` — never `INVALID_REQUEST` and never a second
+append. If an exact validated full success body was durably stored, replay to the same ordinary
+disclosure sink returns that body without running privacy projection again.
+The preferred recovery read after any ambiguous write is `status view=operation` with
+`filter.operation_request_id` set to the write's `request_id`: it is a state lookup for that
+operation identity (`absent`/`pending`/`complete`/`quarantined`) for the authenticated writer,
+without requiring a reconstructed publish body. Stored result detail is state-conditional: only
+`complete` + `publish_work` carries outcome, subject/result frontiers, and accepted event
+ids/digests; `pending`/`quarantined` report kind without those fields; `absent` reports none of
+them; non-publish completions report kind without append-shaped event detail. Lookups are scoped
+to the caller writer; another writer's `request_id` is reported as absent.
 `read_projection_failed` is the read-only counterpart: nothing was appended, so the remedy is
 repeating the request rather than a same-`request_id` replay that has no operation record to load.
 When a non-publish write surfaces `response_projection_failed` and the committed frontier is known,
@@ -807,8 +820,11 @@ commit, and `append_batch` does the same for a new
 nothing. SQLite uses the co-located importer rows; memory uses one shared task-state lock.
 
 `ProjectionView` is `compact`, `assignment`, `obligations`, `findings`, `candidate_findings`,
-`evidence`, `history`, or `versions`. The port-owned row-query view excludes
-`candidate_findings` and is exactly
+`evidence`, `history`, or `versions`. Application status also admits `view=operation` (operation
+recovery keyed by `filter.operation_request_id`); that view is not a projection row query — the
+operation record is authoritative, and compact projection is only secondary enrichment for
+coverage/closure and must not fail recovery on projection lag or rebuild. The port-owned
+row-query view excludes `candidate_findings` and `operation` and is exactly
 `compact|assignment|obligations|findings|evidence|history|versions`.
 `ProjectionQuery(session_id, view, filter, requested_frontier, limit, position,
 expected_projection_version)` uses the exact typed filter and repository-position variants frozen

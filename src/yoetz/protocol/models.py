@@ -1143,6 +1143,12 @@ class StatusObligationsFilterModel(_ClosedModel):
     status: Literal["open", "resolved"] | None = None
 
 
+class StatusOperationFilterModel(_ClosedModel):
+    """Keys a status read at one prior operation identity for the authenticated writer."""
+
+    operation_request_id: RequestIdWire
+
+
 type StatusFilter = (
     StatusAssignmentFilterModel
     | StatusCandidateFindingsFilterModel
@@ -1150,6 +1156,7 @@ type StatusFilter = (
     | StatusFindingsFilterModel
     | StatusHistoryFilterModel
     | StatusObligationsFilterModel
+    | StatusOperationFilterModel
 )
 
 _STATUS_FILTER_BY_VIEW: Final[Mapping[str, type[_ClosedModel]]] = MappingProxyType(
@@ -1160,6 +1167,7 @@ _STATUS_FILTER_BY_VIEW: Final[Mapping[str, type[_ClosedModel]]] = MappingProxyTy
         "findings": StatusFindingsFilterModel,
         "history": StatusHistoryFilterModel,
         "obligations": StatusObligationsFilterModel,
+        "operation": StatusOperationFilterModel,
     }
 )
 
@@ -1178,6 +1186,7 @@ class StatusRequestModel(PublicRequestModel):
         "findings",
         "history",
         "obligations",
+        "operation",
         "versions",
     ]
     limit: CanonicalPageLimitWire
@@ -2254,6 +2263,73 @@ class StatusVersionsPageModel(_ClosedModel):
         return self
 
 
+class StatusOperationAcceptedEventModel(_ClosedModel):
+    event_id: EventIdWire
+    entry_digest: Sha256Digest
+    ingestion_sequence: CanonicalUInt64Wire
+    writer_sequence: CanonicalUInt64Wire
+    projection_status: Literal["projected", "unknown_unprojected"]
+
+
+class StatusOperationPageModel(_ClosedModel):
+    """One request-id-keyed operation recovery page for the authenticated writer."""
+
+    operation_request_id: RequestIdWire
+    found: bool
+    state: Literal["absent", "pending", "complete", "quarantined"]
+    operation_kind: Literal["start", "publish_work", "check", "respond", "receipt"] | None = None
+    outcome: Literal["accepted", "replayed"] | None = None
+    subject_frontier: FrontierModel | None = None
+    result_frontier: FrontierModel | None = None
+    accepted_events: tuple[StatusOperationAcceptedEventModel, ...] = ()
+    next_cursor: None = None
+
+    @model_validator(mode="after")
+    def _validate_operation_page(self) -> StatusOperationPageModel:
+        if self.state == "absent":
+            if (
+                self.found
+                or self.operation_kind is not None
+                or self.outcome is not None
+                or self.subject_frontier is not None
+                or self.result_frontier is not None
+                or self.accepted_events
+            ):
+                raise ValueError("status_operation_page_invalid")
+            return self
+        if not self.found or self.operation_kind is None:
+            raise ValueError("status_operation_page_invalid")
+        if self.state == "complete" and self.operation_kind == "publish_work":
+            if (
+                self.outcome is None
+                or self.subject_frontier is None
+                or self.result_frontier is None
+                or not self.accepted_events
+            ):
+                raise ValueError("status_operation_page_invalid")
+            if len(self.accepted_events) > MAX_EVENTS_PER_BATCH:
+                raise ValueError("status_page_limit")
+            return self
+        if self.state == "complete":
+            # Non-publish completions are reported without append-shaped event detail.
+            if (
+                self.outcome is not None
+                or self.subject_frontier is not None
+                or self.result_frontier is not None
+                or self.accepted_events
+            ):
+                raise ValueError("status_operation_page_invalid")
+            return self
+        if (
+            self.outcome is not None
+            or self.subject_frontier is not None
+            or self.result_frontier is not None
+            or self.accepted_events
+        ):
+            raise ValueError("status_operation_page_invalid")
+        return self
+
+
 type StatusPage = (
     StatusAdvicePageModel
     | StatusAssignmentPageModel
@@ -2263,6 +2339,7 @@ type StatusPage = (
     | StatusFindingsPageModel
     | StatusHistoryPageModel
     | StatusObligationsPageModel
+    | StatusOperationPageModel
     | StatusVersionsPageModel
 )
 
@@ -2276,6 +2353,7 @@ _STATUS_PAGE_BY_VIEW: Final[Mapping[str, type[_ClosedModel]]] = MappingProxyType
         "findings": StatusFindingsPageModel,
         "history": StatusHistoryPageModel,
         "obligations": StatusObligationsPageModel,
+        "operation": StatusOperationPageModel,
         "versions": StatusVersionsPageModel,
     }
 )
@@ -2298,6 +2376,7 @@ class StatusSuccessModel(_ClosedModel):
         "findings",
         "history",
         "obligations",
+        "operation",
         "versions",
     ]
     requested_frontier: FrontierModel
@@ -2954,6 +3033,27 @@ _STATUS_OBLIGATIONS_STRUCTURAL_POINTERS: Final = (
     + _prefix_leaf_patterns("/page/items/*/evidence_expectation", _OMITTED_CONTENT_LEAVES)
 )
 
+_STATUS_OPERATION_STRUCTURAL_POINTERS: Final = (
+    (
+        "/page/accepted_events/*/entry_digest",
+        "/page/accepted_events/*/event_id",
+        "/page/accepted_events/*/ingestion_sequence",
+        "/page/accepted_events/*/projection_status",
+        "/page/accepted_events/*/writer_sequence",
+        "/page/found",
+        "/page/next_cursor",
+        "/page/operation_kind",
+        "/page/operation_request_id",
+        "/page/outcome",
+        # Nullable frontier objects are leaves when null and expand when present.
+        "/page/result_frontier",
+        "/page/state",
+        "/page/subject_frontier",
+    )
+    + _prefix_leaf_patterns("/page/subject_frontier", FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/page/result_frontier", FRONTIER_LEAVES)
+)
+
 _STATUS_VERSIONS_STRUCTURAL_POINTERS: Final = ("/page/next_cursor",) + _prefix_leaf_patterns(
     "/page/items/*",
     (
@@ -3155,6 +3255,11 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
         _STATUS_OBLIGATIONS_STRUCTURAL_POINTERS,
         status_view="obligations",
     )
+    add_structural(
+        "status",
+        _STATUS_OPERATION_STRUCTURAL_POINTERS,
+        status_view="operation",
+    )
     add_structural("status", _STATUS_VERSIONS_STRUCTURAL_POINTERS, status_view="versions")
     add_structural("receipt", _RECEIPT_STRUCTURAL_POINTERS)
 
@@ -3235,7 +3340,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 703:
+    if len(result) != 720:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

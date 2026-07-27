@@ -26,6 +26,7 @@ class PublicErrorCode(str, Enum):  # noqa: UP042 - the wire contract requires th
     SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
     SESSION_CONFLICT = "SESSION_CONFLICT"
     IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
+    REQUEST_IDENTITY_CONFLICT = "REQUEST_IDENTITY_CONFLICT"
     OPERATION_PENDING = "OPERATION_PENDING"
     FRONTIER_CONFLICT = "FRONTIER_CONFLICT"
     EVENT_INVALID = "EVENT_INVALID"
@@ -152,6 +153,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "receipt_json_shape_invalid",
     "redaction_target_required",
     "ref_mirror_mismatch",
+    "request_identity_conflict",
     "response_fields_invalid",
     "response_projection_failed",
     "schema_artifact_role_invalid",
@@ -187,7 +189,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 135
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 136
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)

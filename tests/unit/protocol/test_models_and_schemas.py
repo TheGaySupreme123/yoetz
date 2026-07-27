@@ -298,6 +298,7 @@ _STATUS_PAGE_DEF_BY_VIEW_FOR_TEST: tuple[tuple[str, str], ...] = (
     ("findings", "findings_page"),
     ("history", "history_page"),
     ("obligations", "obligations_page"),
+    ("operation", "operation_page"),
     ("versions", "versions_page"),
 )
 _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
@@ -315,6 +316,7 @@ _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
     ("status", "findings"): 66,
     ("status", "history"): 10,
     ("status", "obligations"): 19,
+    ("status", "operation"): 17,
     ("status", "versions"): 12,
 }
 
@@ -1718,7 +1720,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     rules = cast(tuple[Any, ...], getattr(models, "_RESULT_LEAF_RULES"))
 
     derived_patterns = _derived_result_success_patterns(catalog)
-    assert len(derived_patterns) == 687
+    assert len(derived_patterns) == 704
 
     derived_counts = {
         context: sum(1 for method, view, _ in derived_patterns if (method, view) == context)
@@ -1727,7 +1729,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert derived_counts == _EXPECTED_RESULT_PATTERN_COUNTS
 
     assert type(rules) is tuple
-    assert len(rules) == 703
+    assert len(rules) == 720
     assert rules == tuple(sorted(rules, key=_test_rule_sort_key))
 
     rule_keys = {
@@ -1736,7 +1738,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert len(rule_keys) == len(rules)
 
     registry_patterns = {(rule.method, rule.status_view, rule.segments) for rule in rules}
-    assert len(registry_patterns) == 687
+    assert len(registry_patterns) == 704
     assert registry_patterns == derived_patterns
 
     content_rules = _expected_nonpublish_content_rules(models)
@@ -2359,7 +2361,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 1_313
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 1_329
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:

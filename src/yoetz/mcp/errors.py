@@ -55,6 +55,7 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "mode",
         "name",
         "occurred_at",
+        "operation_request_id",
         "payload",
         "policy_packs",
         "protocol_version",

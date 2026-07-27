@@ -27,6 +27,8 @@ from yoetz.ports.ledger import (
     HistoryProjectionPosition,
     IdProjectionPosition,
     ObligationsProjectionFilter,
+    OperationKind,
+    OperationState,
     ProjectionFilter,
     ProjectionPage,
     ProjectionPosition,
@@ -45,8 +47,13 @@ from yoetz.protocol.coverage import (
     AUTHORSHIP_ASSURANCE_ORDER,
     EVIDENCE_IMMUTABILITY_ORDER,
     LEDGER_FRESHNESS_ORDER,
+    ArtifactObservation,
+    AuthorshipAssurance,
     CheckType,
     Coverage,
+    EvidenceImmutability,
+    LedgerFreshness,
+    PublicationChannel,
     coverage_to_json,
 )
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
@@ -70,6 +77,8 @@ from yoetz.protocol.models import (
     StatusImportStatusModel,
     StatusObligationsFilterModel,
     StatusObligationsPageModel,
+    StatusOperationFilterModel,
+    StatusOperationPageModel,
     StatusPage,
     StatusRequest,
     StatusVersionsPageModel,
@@ -315,7 +324,112 @@ def _port_filter(value: StatusFilter | None) -> ProjectionFilter | None:
             value.actor_id,
             None if value.after_sequence is None else int(value.after_sequence),
         )
+    if type(value) is StatusOperationFilterModel:
+        # Operation recovery is ledger-operation keyed, not a projection row query.
+        raise ValueError("status_filter_invalid")
     raise ValueError("status_filter_invalid")
+
+
+def _mapping(value: JsonValue) -> dict[str, JsonValue]:
+    if type(value) is not dict:
+        raise ValueError("status_operation_result_invalid")
+    source = cast(dict[str, object], value)
+    if any(type(key) is not str for key in source):
+        raise ValueError("status_operation_result_invalid")
+    return cast(dict[str, JsonValue], source)
+
+
+def _operation_page_from_record(
+    operation_request_id: str,
+    operation: object | None,
+) -> StatusOperationPageModel:
+    """Project one operation record into the recovery page, or a bounded not-found page."""
+
+    if operation is None:
+        return StatusOperationPageModel.model_validate(
+            {
+                "operation_request_id": operation_request_id,
+                "found": False,
+                "state": "absent",
+            }
+        )
+    from yoetz.ports.ledger import OperationRecord as _OperationRecord
+
+    if type(operation) is not _OperationRecord:
+        raise ValueError("status_operation_result_invalid")
+    record = operation
+    kind = record.operation_kind.value
+    if record.state is OperationState.PENDING:
+        return StatusOperationPageModel.model_validate(
+            {
+                "operation_request_id": operation_request_id,
+                "found": True,
+                "state": "pending",
+                "operation_kind": kind,
+            }
+        )
+    if record.state is OperationState.QUARANTINED:
+        return StatusOperationPageModel.model_validate(
+            {
+                "operation_request_id": operation_request_id,
+                "found": True,
+                "state": "quarantined",
+                "operation_kind": kind,
+            }
+        )
+    if record.state is not OperationState.COMPLETE or record.result_canonical is None:
+        raise ValueError("status_operation_result_invalid")
+    # Only publish_work stores the AppendResult shape used here. Other complete kinds surface
+    # without accepted-event detail so recovery stays bounded and honest.
+    if record.operation_kind is not OperationKind.PUBLISH_WORK:
+        return StatusOperationPageModel.model_validate(
+            {
+                "operation_request_id": operation_request_id,
+                "found": True,
+                "state": "complete",
+                "operation_kind": kind,
+            }
+        )
+    try:
+        source = _mapping(strict_json_parse(record.result_canonical))
+        accepted_raw = source["accepted"]
+        if type(accepted_raw) is not tuple and type(accepted_raw) is not list:
+            raise ValueError("status_operation_result_invalid")
+        accepted = tuple(
+            {
+                "event_id": cast(str, item["event_id"]),
+                "entry_digest": cast(str, item["entry_digest"]),
+                "ingestion_sequence": cast(str, item["ingestion_sequence"]),
+                "writer_sequence": cast(str, item["writer_sequence"]),
+                "projection_status": cast(str, item["projection_status"]),
+            }
+            for item in (
+                _mapping(cast(JsonValue, value))
+                for value in cast(tuple[object, ...] | list[object], accepted_raw)
+            )
+        )
+        subject = cast(dict[str, object], source["subject_frontier"])
+        result = cast(dict[str, object], source["result_frontier"])
+        return StatusOperationPageModel.model_validate(
+            {
+                "operation_request_id": operation_request_id,
+                "found": True,
+                "state": "complete",
+                "operation_kind": "publish_work",
+                "outcome": "accepted",
+                "subject_frontier": {
+                    "sequence": cast(str, subject["sequence"]),
+                    "head_digest": cast(str, subject["head_digest"]),
+                },
+                "result_frontier": {
+                    "sequence": cast(str, result["sequence"]),
+                    "head_digest": cast(str, result["head_digest"]),
+                },
+                "accepted_events": accepted,
+            }
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("status_operation_result_invalid") from exc
 
 
 async def _exact_frontier(runtime: TaskRuntime, sequence: int | None) -> tuple[Frontier, Frontier]:
@@ -503,6 +617,28 @@ async def _import_status(runtime: TaskRuntime) -> StatusImportStatusModel:
     )
 
 
+def _unknown_structural_coverage() -> Coverage:
+    """Honest coverage when a structural recovery path cannot load a projection page."""
+
+    return Coverage(
+        publication_channels=(PublicationChannel.LOCAL_CLI,),
+        authorship_assurance=AuthorshipAssurance.SELF_ASSERTED,
+        artifact_observation=ArtifactObservation.PUBLISHED_ONLY,
+        evidence_immutability=EvidenceImmutability.METADATA_ONLY,
+        ledger_freshness=LedgerFreshness.UNKNOWN,
+        check_types=(CheckType.NONE,),
+        known_gaps=(),
+    )
+
+
+def _readiness_unknown() -> StatusClosureReadinessModel:
+    return StatusClosureReadinessModel(
+        open_obligation_count=None,
+        unresolved_finding_count=None,
+        blocking_conditions=("readiness_unknown",),
+    )
+
+
 async def _closure_readiness(
     runtime: TaskRuntime,
     frontier: Frontier,
@@ -518,26 +654,30 @@ async def _closure_readiness(
     second identical query. Compact admits no filter or position, so the page is equivalent.
     """
 
-    page = compact_page or await runtime.ledger.query_projection(
-        ProjectionQuery(
-            runtime.session_id,
-            "compact",
-            None,
-            frontier,
-            1,
-            None,
-            None,
-        )
-    )
+    if compact_page is not None:
+        page = compact_page
+    else:
+        try:
+            page = await runtime.ledger.query_projection(
+                ProjectionQuery(
+                    runtime.session_id,
+                    "compact",
+                    None,
+                    frontier,
+                    1,
+                    None,
+                    None,
+                )
+            )
+        except PublicOperationError:
+            # Secondary enrichment only: do not fail a structural status page because the
+            # compact projection is lagging, rebuilding, or temporarily unreadable.
+            return _readiness_unknown()
     item = page.items[0] if page.items else None
     if type(item) is not StatusCompactItemModel:
         # Compact omits its singleton when the task title is unreadable. Counting that as zero
         # open obligations would manufacture a clean record out of missing data.
-        return StatusClosureReadinessModel(
-            open_obligation_count=None,
-            unresolved_finding_count=None,
-            blocking_conditions=("readiness_unknown",),
-        )
+        return _readiness_unknown()
     open_obligations = int(item.open_obligation_count)
     unresolved_findings = int(item.unresolved_finding_count)
     has_plan = item.current_plan_event_id is not None
@@ -603,7 +743,55 @@ async def execute_status(app: Application, request: StatusRequest) -> StatusInte
 
         import_status = await _import_status(runtime)
         compact_page: ProjectionPage | None = None
-        if request.view == "advice":
+        if request.view == "operation":
+            if position is not None:
+                raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")
+            if type(request.filter) is not StatusOperationFilterModel:
+                raise _error(PublicErrorCode.INVALID_REQUEST, "The status filter is invalid.")
+            if request.cursor is not None:
+                raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")
+            operation = await runtime.ledger.lookup_operation(
+                request.writer_id, request.filter.operation_request_id
+            )
+            try:
+                page = _operation_page_from_record(request.filter.operation_request_id, operation)
+            except ValueError as exc:
+                raise _error(
+                    PublicErrorCode.STORAGE_CORRUPT, "The stored operation result is invalid."
+                ) from exc
+            # Operation recovery is structural: the operation page is authoritative. Compact
+            # projection only enriches coverage/closure/frontiers and must not fail recovery
+            # when lagging, rebuilding, or missing.
+            try:
+                raw_page = await runtime.ledger.query_projection(
+                    ProjectionQuery(
+                        runtime.session_id,
+                        ProjectionView.COMPACT.value,
+                        None,
+                        frontier,
+                        1,
+                        None,
+                        expected_version,
+                    )
+                )
+            except PublicOperationError:
+                compact_page = None
+                coverage = _unknown_structural_coverage()
+                gaps = ()
+                effective = frontier
+                lag = head.sequence - frontier.sequence
+                projection_version = runtime.projection_version
+                rebuild_state = "rebuild_required"
+            else:
+                compact_page = raw_page
+                coverage = raw_page.coverage
+                gaps = raw_page.gaps
+                head = raw_page.head_frontier
+                effective = raw_page.effective_frontier
+                lag = raw_page.lag
+                projection_version = raw_page.projection_version
+                rebuild_state = raw_page.rebuild_state
+        elif request.view == "advice":
             if position is not None:
                 raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")
             raw_page = await runtime.ledger.query_projection(

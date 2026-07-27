@@ -214,7 +214,7 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(item.name for item in TOOL_DESCRIPTORS) == _EXPECTED_TOOL_NAMES
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == _EXPECTED_TOOL_NAMES
     assert TOOL_DESCRIPTOR_SET_DIGEST == (
-        "sha256:99dbb6ee49a24168f351c1a3b405dd001c7ee8c8add115b7ac79f4adfa0a7afe"
+        "sha256:c812b652374aa5c80677447055460e84ffacde437d7f7e69ca1a001548b10752"
     )
     # The check descriptor carries the full mode decision rule, including semantic_required.
     check_description = descriptor_for("check").description

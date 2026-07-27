@@ -255,6 +255,7 @@ def test_exit_code_matrix() -> None:
         PublicErrorCode.SESSION_NOT_FOUND: 10,
         PublicErrorCode.SESSION_CONFLICT: 10,
         PublicErrorCode.IDEMPOTENCY_CONFLICT: 10,
+        PublicErrorCode.REQUEST_IDENTITY_CONFLICT: 10,
         PublicErrorCode.OPERATION_PENDING: 11,
         PublicErrorCode.FRONTIER_CONFLICT: 10,
         PublicErrorCode.EVENT_INVALID: 2,
@@ -275,7 +276,7 @@ def test_exit_code_matrix() -> None:
     }
     # The closed public enum has exactly this many members; a missing or extra member here (or
     # in ``PUBLIC_EXIT_CODES``) is itself a contract break, not merely an incomplete sample.
-    assert len(expected) == 22
+    assert len(expected) == 23
     assert set(expected) == set(PublicErrorCode)
     assert dict(PUBLIC_EXIT_CODES) == expected
     for code, exit_code in expected.items():

@@ -27,6 +27,7 @@ _STATUS_VIEW_BY_PAGE_MODEL = {
     "StatusFindingsPageModel": "findings",
     "StatusHistoryPageModel": "history",
     "StatusObligationsPageModel": "obligations",
+    "StatusOperationPageModel": "operation",
     "StatusVersionsPageModel": "versions",
 }
 
