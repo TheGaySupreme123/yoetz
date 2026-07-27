@@ -16,6 +16,7 @@ from yoetz.config.write import (
     anthropic_provider,
     fireworks_provider,
     google_gemini_provider,
+    grok_provider,
     official_openai_provider,
     openrouter_provider,
     owner_declared_openai_provider,
@@ -82,6 +83,12 @@ def _built(provider: ProviderProfileConfig) -> object:
             "openrouter.ai",
             "/api/v1/chat/completions",
         ),
+        (
+            grok_provider(model="grok-4.5"),
+            ChatCompletionsExternalFactory,
+            "api.x.ai",
+            "/v1/chat/completions",
+        ),
     ),
 )
 def test_each_bundled_preset_dispatches_to_its_exact_endpoint(
@@ -131,6 +138,7 @@ def test_chat_completions_bindings_carry_unknown_data_use_facts() -> None:
         anthropic_provider(model="claude-sonnet-4-6"),
         google_gemini_provider(model="gemini-3.5-flash"),
         openrouter_provider(model="openai/gpt-5.2"),
+        grok_provider(model="grok-4.5"),
     ):
         profile = getattr(_built(provider), "profile")
         data_use = profile.data_use_profile

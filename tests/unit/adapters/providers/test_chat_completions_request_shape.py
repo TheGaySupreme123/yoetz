@@ -38,13 +38,16 @@ _JUDGMENT = (
 def _profile(
     enforcement: StructuredOutputEnforcement = "provider_enforced",
     *,
+    provider_id: str = "openrouter",
+    model: str = "openai/gpt-5.2",
+    endpoint_profile_id: str = "openrouter-openai-chat-completions",
     host: str = "openrouter.ai",
     prefix: str = "/api/v1",
 ) -> ChatCompletionsProfile:
     return ChatCompletionsProfile(
-        provider_id="openrouter",
-        model="openai/gpt-5.2",
-        endpoint_profile_id="openrouter-openai-chat-completions",
+        provider_id=provider_id,
+        model=model,
+        endpoint_profile_id=endpoint_profile_id,
         endpoint_profile_version="1.0.0",
         timeout_seconds=60,
         structured_output_enforcement=enforcement,
@@ -56,7 +59,13 @@ def _profile(
     )
 
 
-def _case(payload: bytes | None = None) -> ApprovedOutboundCase:
+def _case(
+    payload: bytes | None = None,
+    *,
+    provider_id: str = "openrouter",
+    model: str = "openai/gpt-5.2",
+    endpoint_profile_id: str = "openrouter-openai-chat-completions",
+) -> ApprovedOutboundCase:
     body = (
         payload
         if payload is not None
@@ -76,9 +85,9 @@ def _case(payload: bytes | None = None) -> ApprovedOutboundCase:
         byte_count=len(body),
         token_count=16,
         provider_binding=ProviderBinding(
-            provider_id="openrouter",
-            model_id="openai/gpt-5.2",
-            endpoint_profile_id="openrouter-openai-chat-completions",
+            provider_id=provider_id,
+            model_id=model,
+            endpoint_profile_id=endpoint_profile_id,
             endpoint_profile_version="1.0.0",
             transport="external",
         ),
@@ -145,6 +154,32 @@ def test_response_format_follows_the_recorded_endpoint_capability() -> None:
     instruction = cast(str, system["content"])
     assert "one JSON object and nothing else" in instruction
     assert "reviewer_challenges" in instruction
+
+
+def test_grok_profile_renders_the_exact_xai_chat_completions_shape() -> None:
+    profile = _profile(
+        provider_id="xai",
+        model="grok-4.5",
+        endpoint_profile_id="xai-openai-chat-completions",
+        host="api.x.ai",
+        prefix="/v1",
+    )
+    case = _case(
+        provider_id="xai",
+        model="grok-4.5",
+        endpoint_profile_id="xai-openai-chat-completions",
+    )
+
+    body = cast(dict[str, JsonValue], strict_json_parse(render_case(case, profile).body))
+    response_format = cast(dict[str, JsonValue], body["response_format"])
+    json_schema = cast(dict[str, JsonValue], response_format["json_schema"])
+
+    assert body["model"] == "grok-4.5"
+    assert profile.base_url == "https://api.x.ai/v1"
+    assert profile.path == "/v1/chat/completions"
+    assert response_format["type"] == "json_schema"
+    assert json_schema["name"] == "yoetz_semantic_judgment"
+    assert json_schema["strict"] is True
 
 
 def test_rendered_body_is_deterministic_and_digest_bound() -> None:

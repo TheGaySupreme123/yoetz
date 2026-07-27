@@ -18,6 +18,7 @@ from yoetz.config.write import (
     anthropic_provider,
     fireworks_provider,
     google_gemini_provider,
+    grok_provider,
     official_openai_provider,
     openrouter_provider,
     owner_declared_openai_provider,
@@ -39,6 +40,7 @@ ProviderEndpointChoice = Literal[
     "anthropic",
     "google_gemini",
     "openrouter",
+    "grok",
     "vercel_ai_gateway",
     "owner_declared",
 ]
@@ -81,6 +83,8 @@ def apply_provider_endpoint_choice(
         provider = google_gemini_provider(model=model)
     elif choice == "openrouter":
         provider = openrouter_provider(model=model)
+    elif choice == "grok":
+        provider = grok_provider(model=model)
     elif choice == "vercel_ai_gateway":
         provider = vercel_ai_gateway_provider(model=model)
     else:
@@ -101,14 +105,15 @@ def prompt_provider_endpoint_binding(*, path: Path | None = None) -> Path | None
     typer.echo("  3  Anthropic Claude (OpenAI-compatible Chat Completions)")
     typer.echo("  4  Google Gemini (OpenAI-compatible Chat Completions)")
     typer.echo("  5  OpenRouter (OpenAI-compatible Chat Completions)")
-    typer.echo("  6  Vercel AI Gateway (OpenAI-compatible Responses)")
-    typer.echo("  7  Custom OpenAI-compatible HTTPS origin")
+    typer.echo("  6  Grok / xAI (OpenAI-compatible Chat Completions)")
+    typer.echo("  7  Vercel AI Gateway (OpenAI-compatible Responses)")
+    typer.echo("  8  Custom OpenAI-compatible HTTPS origin")
     typer.echo("  s  Skip for now")
     raw = typer.prompt("Select", default="s").strip().lower()
     if raw in {"s", "skip", ""}:
         return None
-    if raw not in {"1", "2", "3", "4", "5", "6", "7"}:
-        typer.echo("invalid_request: choose 1, 2, 3, 4, 5, 6, 7, or s", err=True)
+    if raw not in {"1", "2", "3", "4", "5", "6", "7", "8"}:
+        typer.echo("invalid_request: choose 1, 2, 3, 4, 5, 6, 7, 8, or s", err=True)
         return None
 
     choices: dict[str, ProviderEndpointChoice] = {
@@ -117,8 +122,9 @@ def prompt_provider_endpoint_binding(*, path: Path | None = None) -> Path | None
         "3": "anthropic",
         "4": "google_gemini",
         "5": "openrouter",
-        "6": "vercel_ai_gateway",
-        "7": "owner_declared",
+        "6": "grok",
+        "7": "vercel_ai_gateway",
+        "8": "owner_declared",
     }
     choice = choices[raw]
     preset = None if choice == "owner_declared" else provider_preset(choice)

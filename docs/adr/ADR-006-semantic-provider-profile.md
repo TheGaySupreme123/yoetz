@@ -24,12 +24,14 @@ and semantic/privacy capability and conformance tests.
    the Responses protocol cell, never inherits official OpenAI data-use / `assisted` eligibility,
    and still requires capability evidence for any advertised interoperability claim.
 
-   **Amended 2026-07-24 — the OpenAI-compatible Chat Completions protocol cell.** Four further
-   exact, versioned profile kinds are authorized, each pinned to one host and one fixed path
+   **Amended 2026-07-24; extended 2026-07-27 for the Grok/xAI dogfood path — the
+   OpenAI-compatible Chat Completions protocol cell.** Five further exact, versioned profile
+   kinds are authorized, each pinned to one host and one fixed path
    prefix, none of them owner-editable: `anthropic-openai-chat-completions`
    (`api.anthropic.com/v1`), `google-gemini-openai-chat-completions`
-   (`generativelanguage.googleapis.com/v1beta/openai`), and `openrouter-openai-chat-completions`
-   (`openrouter.ai/api/v1`) use the OpenAI-compatible Chat Completions cell;
+   (`generativelanguage.googleapis.com/v1beta/openai`), `openrouter-openai-chat-completions`
+   (`openrouter.ai/api/v1`), and `xai-openai-chat-completions` (`api.x.ai/v1`) use the
+   OpenAI-compatible Chat Completions cell;
    `vercel-ai-gateway-openai-responses` (`ai-gateway.vercel.sh/v1`) reuses the Responses cell and
    needs no adapter of its own. A configurable profile with no runtime factory is not a neutral
    omission — it reports `factory_unavailable` and the requested review silently never runs — so
@@ -38,7 +40,7 @@ and semantic/privacy capability and conformance tests.
    Structured-output enforcement is recorded per profile from the vendor's own documentation, not
    assumed: a host documented to ignore `response_format` receives the judgment shape in the
    instruction instead, and any answer that is not the exact judgment shape degrades to an honest
-   invalid semantic result, never a fabricated pass. None of the four inherits official OpenAI
+   invalid semantic result, never a fabricated pass. None of the five inherits official OpenAI
    data-use or `assisted` eligibility; each carries an unknown data-use record until a reviewed one
    exists. Being dispatchable is not being verified: advertising any of them as a working endpoint
    still requires the exact model/endpoint capability fixture and live evidence E-007 names.

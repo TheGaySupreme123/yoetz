@@ -480,6 +480,24 @@ def test_root_set_dispatches_new_provider_setup_without_secret_argument(
     }
 
 
+def test_root_set_grok_dispatches_simple_provider_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.cli.setup as setup_module
+
+    received: dict[str, object] = {}
+
+    async def fake_provider_setup(**kwargs: object) -> int:
+        received.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(setup_module, "run_provider_setup", fake_provider_setup)
+    result = _RUNNER.invoke(cli.app, ["--set", "--grok", "--model", "grok-4.5"])
+
+    assert result.exit_code == 0
+    assert received == {"fireworks": False, "model": "grok-4.5", "grok": True}
+
+
 def test_provider_flags_require_set() -> None:
     # Rich may colorize option tokens inside the Error panel (e.g. FORCE_COLOR CI),
     # splitting "--set" across ANSI codes; assert on the stripped combined output.

@@ -26,6 +26,7 @@ from yoetz.config.write import (
     anthropic_provider,
     fireworks_provider,
     google_gemini_provider,
+    grok_provider,
     official_openai_provider,
     openrouter_provider,
     owner_declared_openai_provider,
@@ -201,6 +202,7 @@ def test_fireworks_binding_uses_reviewed_responses_base_path(tmp_path: Path) -> 
             "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
         ),
         ("openrouter", openrouter_provider, "https://openrouter.ai/api/v1/chat/completions"),
+        ("grok", grok_provider, "https://api.x.ai/v1/chat/completions"),
         (
             "vercel_ai_gateway",
             vercel_ai_gateway_provider,
@@ -233,6 +235,8 @@ def test_bundled_provider_presets_write_exact_nonsecret_bindings(
 
 def test_provider_preset_aliases_and_unknown_choices_are_bounded() -> None:
     assert provider_preset("gemini") == provider_preset("google_gemini")
+    assert provider_preset("xai") == provider_preset("grok")
+    assert provider_preset("x-ai") == provider_preset("grok")
     with pytest.raises(ConfigError) as caught:
         provider_preset("not-a-provider")
     assert caught.value.reason_code == "config_value_invalid"

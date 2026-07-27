@@ -50,8 +50,9 @@ exactly those contracts and connects the steps without weakening any existing tr
    from Codex capability support (E-002/E-013 are untouched); "registered" never implies "Codex
    will successfully connect".
 
-The short `yoetz --set --fireworks --model MODEL` path is a provider-only entry into the same setup
-ceremonies. It derives internal provider bindings and always collects the API key through hidden TTY
+The short `yoetz --set --fireworks --model MODEL` and `yoetz --set --grok --model MODEL` paths are
+provider-only entries into the same setup ceremonies. They derive internal provider bindings and
+always collect the API key through hidden TTY
 input. Credential-valued command arguments are not accepted, so noninteractive setup cannot bypass
 the local confidential ceremony. Repeating the same command updates the exact stored profile
 credential through generation-CAS.
