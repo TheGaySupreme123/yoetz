@@ -151,13 +151,15 @@ def test_hostile_payload_values_never_appear_in_hints() -> None:
 
 def test_hint_construction_failure_degrades_to_example_fallback() -> None:
     # A hint must never turn a clear validation error into an internal error.
-    class _Boom(dict):
-        def get(self, key: object, default: object = None) -> object:  # noqa: ANN401
+    class _Boom(dict[str, JsonValue]):
+        def get(  # type: ignore[override]
+            self, key: object, default: object = None
+        ) -> object:
             if key == "examples":
                 raise RuntimeError("forced_hint_failure")
-            return super().get(key, default)
+            return super().get(key, default)  # type: ignore[arg-type]
 
-    schema = _Boom(cast(Mapping[str, JsonValue], _PUBLISH_SCHEMA))
+    schema: Mapping[str, JsonValue] = _Boom(_PUBLISH_SCHEMA)
     hint = authoring_hint(schema, _locations("/event_drafts/0/payload/action_kind"))
     assert hint == (
         " Hint: see the examples entry in this tool's input schema for a complete request."
@@ -182,12 +184,16 @@ def test_publish_work_examples_cover_ordinary_families_and_cross_refs() -> None:
     # Cross-event refs: claim supporting_refs point at an evidence id from the same batch.
     cross = cast(Mapping[str, JsonValue], examples[2])
     drafts = cast(list[JsonValue], cross["event_drafts"])
-    evidence_ids = {
-        cast(Mapping[str, JsonValue], cast(Mapping[str, JsonValue], d)["payload"])["evidence_id"]
-        for d in drafts
-        if cast(Mapping[str, JsonValue], cast(Mapping[str, JsonValue], d)["schema"])["name"]
-        == "evidence_recorded"
-    }
+    evidence_ids: set[str] = set()
+    for d in drafts:
+        draft_map = cast(Mapping[str, JsonValue], d)
+        schema_map = cast(Mapping[str, JsonValue], draft_map["schema"])
+        if schema_map["name"] != "evidence_recorded":
+            continue
+        payload_map = cast(Mapping[str, JsonValue], draft_map["payload"])
+        evidence_value = payload_map["evidence_id"]
+        assert type(evidence_value) is str
+        evidence_ids.add(evidence_value)
     claim = next(
         cast(Mapping[str, JsonValue], cast(Mapping[str, JsonValue], d)["payload"])
         for d in drafts
@@ -234,12 +240,12 @@ def test_guidance_uris_in_tool_descriptions_resolve() -> None:
 
 
 def test_invalid_request_message_names_registered_guidance() -> None:
-    from yoetz.mcp.server import _invalid_request_message
+    from yoetz.mcp.server import invalid_request_message
 
-    publish_message = _invalid_request_message(
+    publish_message = invalid_request_message(
         "publish_work", _locations("/event_drafts/0/payload/action_kind")
     )
     assert "action_kind admits" in publish_message
     assert "yoetz://guidance/publication-policy.md" in publish_message
-    start_message = _invalid_request_message("start", _locations("/mode"))
+    start_message = invalid_request_message("start", _locations("/mode"))
     assert "yoetz://guidance/workflow.md" in start_message

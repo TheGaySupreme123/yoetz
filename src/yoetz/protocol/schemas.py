@@ -807,8 +807,7 @@ def _best_schema_instance_path(exc: ValidationError) -> tuple[str | int, ...]:
                 best_score = points
                 best_path = path
         for nested in error.context or ():
-            if isinstance(nested, ValidationError):
-                visit(nested)
+            visit(nested)
 
     visit(exc)
     return best_path

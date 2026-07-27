@@ -153,7 +153,9 @@ def _authoring_hint_for(operation: str, locations: Sequence[Mapping[str, str]]) 
     return " Hint:" + suffix
 
 
-def _invalid_request_message(operation: str, locations: Sequence[Mapping[str, str]]) -> str:
+def invalid_request_message(operation: str, locations: Sequence[Mapping[str, str]]) -> str:
+    """Compose the public INVALID_REQUEST message (schema hint + guidance URI when known)."""
+
     return "The tool arguments are invalid." + _authoring_hint_for(operation, locations)
 
 
@@ -427,7 +429,7 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
         locations = safe_validation_locations(exc)
         return structured_error_result(
             PublicErrorCode.INVALID_REQUEST,
-            _invalid_request_message(operation, locations),
+            invalid_request_message(operation, locations),
             request_id=request_id,
             safe_details=locations if locations else None,
         )
@@ -724,7 +726,7 @@ async def dispatch_publish_work(
         locations = safe_validation_locations(exc)
         return structured_error_result(
             PublicErrorCode.INVALID_REQUEST,
-            _invalid_request_message("publish_work", locations),
+            invalid_request_message("publish_work", locations),
             request_id=request_id,
             safe_details=locations if locations else None,
         )

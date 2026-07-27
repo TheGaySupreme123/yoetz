@@ -105,6 +105,7 @@ _MODULE_CODE_INVENTORY: dict[str, frozenset[PublicErrorCode]] = {
     "publish_work.py": frozenset(
         {
             PublicErrorCode.EVENT_INVALID,
+            PublicErrorCode.FRONTIER_CONFLICT,
             PublicErrorCode.IDEMPOTENCY_CONFLICT,
             PublicErrorCode.INVALID_REQUEST,
             PublicErrorCode.LIMIT_EXCEEDED,

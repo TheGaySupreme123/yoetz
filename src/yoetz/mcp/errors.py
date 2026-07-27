@@ -317,7 +317,7 @@ def _hint_for_pointer(
                     return "schema.name", admitted, family
             return "", "", None
         fields = cast(Mapping[str, JsonValue], props)
-        if segment not in fields:
+        if type(segment) is not str or segment not in fields:
             return "", "", None
         node = fields[segment]
     node = _resolve_local(document, node)
@@ -395,7 +395,7 @@ def _branch_covers_path(
         if not isinstance(props, Mapping):
             return False
         fields = cast(Mapping[str, JsonValue], props)
-        if segment not in fields:
+        if type(segment) is not str or segment not in fields:
             return False
         node = fields[segment]
     return True

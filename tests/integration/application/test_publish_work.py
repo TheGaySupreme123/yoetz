@@ -475,7 +475,8 @@ async def test_dry_run_appends_nothing_and_leaves_request_id_reusable() -> None:
     assert type(preview.root) is PublishWorkDryRunModel
     assert preview.root.evidential is False
     assert len(preview.root.would_accept) == 1
-    assert preview.root.would_accept[0].event_id == request.event_drafts[0]["event_id"]
+    draft0 = cast(dict[str, object], request.event_drafts[0])
+    assert preview.root.would_accept[0].event_id == draft0["event_id"]
 
     frontier_after_preview = await app.runtime.task.ledger.load_frontier()
     assert frontier_after_preview.sequence == frontier_before.sequence
@@ -492,3 +493,92 @@ async def test_dry_run_appends_nothing_and_leaves_request_id_reusable() -> None:
     assert (
         await app.runtime.task.ledger.lookup_operation(request.writer_id, request.request_id)
     ) is not None
+
+
+async def test_dry_run_rejects_duplicate_event_id_like_real_publish() -> None:
+    """would_accept must not be a false positive when the event id is already on the ledger."""
+
+    app, _objects = _composition()
+    first = _request(
+        request_tail=611,
+        event_tail=612,
+        action_tail=613,
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    accepted = await execute_publish_work(cast(Application, app), first)
+    assert accepted.outcome == "accepted"
+    frontier = await app.runtime.task.ledger.load_frontier()
+
+    reuse = _request(
+        request_tail=614,
+        event_tail=612,
+        action_tail=615,
+        expected_frontier={
+            "sequence": str(frontier.sequence),
+            "head_digest": frontier.head_digest,
+        },
+    )
+    preview_payload = reuse.model_dump(mode="json", by_alias=True, exclude_none=True)
+    preview_payload["dry_run"] = True
+    with pytest.raises(PublicOperationError) as caught:
+        await execute_publish_work(
+            cast(Application, app), PublishWorkRequestModel.model_validate(preview_payload)
+        )
+    assert caught.value.code is PublicErrorCode.EVENT_INVALID
+
+
+async def test_dry_run_rejects_missing_causal_parent_like_real_publish() -> None:
+    """A parent that is neither in the ledger nor earlier in the batch cannot would_accept."""
+
+    app, _objects = _composition()
+    draft = _draft(event_tail=622, action_tail=623)
+    draft["causal_parents"] = ("evt_00000000-0000-4000-8000-000000000999",)
+    request = _request(
+        request_tail=621,
+        event_drafts=(draft,),
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    preview_payload = request.model_dump(mode="json", by_alias=True, exclude_none=True)
+    preview_payload["dry_run"] = True
+    with pytest.raises(PublicOperationError) as caught:
+        await execute_publish_work(
+            cast(Application, app), PublishWorkRequestModel.model_validate(preview_payload)
+        )
+    assert caught.value.code is PublicErrorCode.EVENT_INVALID
+    # Real publish fails the same way.
+    with pytest.raises(PublicOperationError) as real:
+        await execute_publish_work(cast(Application, app), request)
+    assert real.value.code is PublicErrorCode.EVENT_INVALID
+
+
+async def test_dry_run_frontier_gate_matches_sequence_only_publish_predicate() -> None:
+    """Mismatched head_digest with matching sequence is accepted by both dry_run and publish."""
+
+    app, _objects = _composition()
+    first = _request(
+        request_tail=631,
+        event_tail=632,
+        action_tail=633,
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    accepted = await execute_publish_work(cast(Application, app), first)
+    assert accepted.outcome == "accepted"
+    frontier = await app.runtime.task.ledger.load_frontier()
+    # Sequence is correct; digest is deliberately wrong (not the acceptance gate for publish).
+    second = _request(
+        request_tail=634,
+        event_tail=635,
+        action_tail=636,
+        expected_frontier={
+            "sequence": str(frontier.sequence),
+            "head_digest": "sha256:" + ("ab" * 32),
+        },
+    )
+    preview_payload = second.model_dump(mode="json", by_alias=True, exclude_none=True)
+    preview_payload["dry_run"] = True
+    preview = await execute_publish_work(
+        cast(Application, app), PublishWorkRequestModel.model_validate(preview_payload)
+    )
+    assert preview.outcome == "dry_run"
+    published = await execute_publish_work(cast(Application, app), second)
+    assert published.outcome == "accepted"

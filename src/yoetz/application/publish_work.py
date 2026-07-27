@@ -5,16 +5,36 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Final, Literal, Protocol, cast
 
 from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
 from yoetz.domain.events import (
     PAYLOAD_TYPES,
+    AcceptedEvent,
+    ActionRecordedPayload,
+    AssignmentRecordedPayload,
+    CheckRecordedPayload,
+    ClaimRecordedPayload,
+    DecisionRecordedPayload,
     EventDraft,
     EventPayload,
     EventSchema,
+    EvidenceRecordedPayload,
+    FindingRecordedPayload,
+    LedgerChain,
     LedgerRecord,
+    ObligationPublishedPayload,
+    PayloadRef,
+    PlanPublishedPayload,
+    PlanRevisedPayload,
+    ProjectionLocator,
+    RedactionRecordedPayload,
+    RedactionState,
+    ResponseRecordedPayload,
+    ResultRecordedPayload,
     UnknownEvent,
+    WriterChain,
     decode_payload,
     encode_payload,
     media_type_for,
@@ -24,18 +44,25 @@ from yoetz.domain.values import (
     ActorType,
     EventId,
     Frontier,
+    ObjectId,
     actor_id,
     event_id,
     evidence_id,
     freeze_json,
     frontier_from_json,
     object_id,
+    request_id,
     result_id,
+    session_id,
+    task_id,
+    timestamp_from_datetime,
     timestamp_from_string,
+    writer_id,
 )
 from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
 )
+from yoetz.kernel.reducers import replay
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ledger import (
@@ -57,7 +84,9 @@ from yoetz.ports.runtime import (
 )
 from yoetz.protocol.canonical import (
     JsonValue,
+    canonical_digest,
     canonical_encode,
+    entry_digest,
     request_digest,
     strict_json_parse,
 )
@@ -803,6 +832,258 @@ def accepted_projection_unavailable_from_append(
     )
 
 
+def _logical_key_for_payload(payload: EventPayload, draft_event_id: str) -> str | None:
+    if type(payload) in {PlanPublishedPayload, PlanRevisedPayload}:
+        return str(cast(PlanPublishedPayload | PlanRevisedPayload, payload).plan_version)
+    if type(payload) is ObligationPublishedPayload:
+        return payload.obligation_id
+    if type(payload) in {AssignmentRecordedPayload, DecisionRecordedPayload, CheckRecordedPayload}:
+        return draft_event_id
+    if type(payload) is ActionRecordedPayload:
+        return payload.action_id
+    if type(payload) is ResultRecordedPayload:
+        return payload.result_id
+    if type(payload) is EvidenceRecordedPayload:
+        return payload.evidence_id
+    if type(payload) is ClaimRecordedPayload:
+        return payload.claim_id
+    if type(payload) is FindingRecordedPayload:
+        return payload.finding_id
+    if type(payload) is ResponseRecordedPayload:
+        return payload.finding_id
+    return None
+
+
+def _redaction_targets_for_payload(
+    payload: EventPayload,
+) -> tuple[tuple[EventId, ...], tuple[ObjectId, ...]]:
+    if type(payload) is RedactionRecordedPayload:
+        return payload.target_event_ids, payload.target_object_ids
+    return (), ()
+
+
+def _provisional_record_for_dry_run(
+    *,
+    item: _PreparedDraft,
+    author: Actor,
+    channel: PublicationChannel,
+    coverage: Coverage,
+    runtime: TaskRuntime,
+    operation: str,
+    offset: int,
+    ingestion_sequence: int,
+    writer_sequence: int,
+    previous_ledger_digest: str,
+    previous_writer_digest: str,
+    accepted_at: datetime,
+) -> LedgerRecord:
+    """Build one non-durable ledger preimage for read-only projection preflight."""
+
+    draft = item.draft
+    known_payload = item.projection_status == "projected"
+    payload_json: JsonValue = (
+        encode_payload(cast(EventPayload, draft.payload))
+        if known_payload
+        else cast(JsonValue, draft.payload)
+    )
+    payload_digest = canonical_digest(payload_json)
+    logical_key: str | None = None
+    target_events: tuple[EventId, ...] = ()
+    target_objects: tuple[ObjectId, ...] = ()
+    if known_payload:
+        typed_payload = cast(EventPayload, draft.payload)
+        logical_key = _logical_key_for_payload(typed_payload, draft.event_id)
+        target_events, target_objects = _redaction_targets_for_payload(typed_payload)
+    locator = ProjectionLocator(
+        draft.schema,
+        logical_key,
+        payload_digest,
+        target_events,
+        target_objects,
+    )
+    # Synthetic object identity: dry-run never stages; digests stay chain-local to preflight.
+    synthetic_object = f"obj_00000000-0000-4000-8000-{offset + 900_000:012d}"
+    media_type = media_type_for(draft.schema.name)
+    # Commitments are hmac-sha256; reuse the payload digest hex under that prefix for shape only.
+    commitment = f"hmac-sha256:{payload_digest.removeprefix('sha256:')}"
+    payload_ref = PayloadRef(
+        object_id(synthetic_object),
+        media_type,
+        len(item.payload_bytes),
+        commitment,
+    )
+    timestamp = timestamp_from_datetime(accepted_at)
+    preimage = {
+        "protocol": "yoetz.event",
+        "protocol_version": "0.1",
+        "event_id": draft.event_id,
+        "task_id": runtime.task_id,
+        "session_id": runtime.session_id,
+        "schema": {"name": draft.schema.name, "version": draft.schema.version},
+        "author": {
+            "actor_id": author.actor_id,
+            "actor_type": author.actor_type.value,
+            "assurance": author.assurance.value,
+        },
+        "writer": {
+            "writer_id": cast(str, runtime.writer_id),
+            "sequence": str(writer_sequence),
+            "previous_entry_digest": previous_writer_digest,
+        },
+        "ledger": {
+            "ingestion_sequence": str(ingestion_sequence),
+            "previous_entry_digest": previous_ledger_digest,
+            "accepted_at": timestamp.wire,
+        },
+        "operation_id": operation,
+        "occurred_at": draft.occurred_at.wire,
+        "causal_parents": draft.causal_parents,
+        "publication_channel": channel.value,
+        "coverage": coverage_to_json(coverage),
+        "payload_ref": {
+            "object_id": synthetic_object,
+            "media_type": media_type,
+            "plaintext_size": len(item.payload_bytes),
+            "commitment": commitment,
+            "encryption_format": "yoetz-object/1",
+        },
+        "redaction": "present",
+        "artifact_refs": draft.artifact_refs,
+        "evidence_refs": draft.evidence_refs,
+    }
+    digest = entry_digest(preimage)
+    writer = WriterChain(
+        writer_id(cast(str, runtime.writer_id)),
+        writer_sequence,
+        previous_writer_digest,
+    )
+    ledger = LedgerChain(ingestion_sequence, previous_ledger_digest, timestamp)
+    if known_payload:
+        return AcceptedEvent(
+            event_id=draft.event_id,
+            task_id=task_id(runtime.task_id),
+            session_id=session_id(runtime.session_id),
+            schema=draft.schema,
+            author=author,
+            writer=writer,
+            ledger=ledger,
+            operation_id=request_id(operation),
+            occurred_at=draft.occurred_at,
+            causal_parents=draft.causal_parents,
+            publication_channel=channel,
+            coverage=coverage,
+            payload_ref=payload_ref,
+            redaction=RedactionState.PRESENT,
+            artifact_refs=draft.artifact_refs,
+            evidence_refs=draft.evidence_refs,
+            entry_digest=digest,
+            payload=cast(EventPayload, draft.payload),
+            projection_locator=locator,
+        )
+    return UnknownEvent(
+        event_id=draft.event_id,
+        task_id=task_id(runtime.task_id),
+        session_id=session_id(runtime.session_id),
+        schema=draft.schema,
+        author=author,
+        writer=writer,
+        ledger=ledger,
+        operation_id=request_id(operation),
+        occurred_at=draft.occurred_at,
+        causal_parents=draft.causal_parents,
+        publication_channel=channel,
+        coverage=coverage,
+        payload_ref=payload_ref,
+        redaction=RedactionState.PRESENT,
+        artifact_refs=draft.artifact_refs,
+        evidence_refs=draft.evidence_refs,
+        entry_digest=digest,
+        payload=cast(DomainJsonValue, draft.payload),
+        projection_locator=locator,
+        canonical_payload_digest=payload_digest,
+    )
+
+
+async def _preflight_dry_run_feasibility(
+    runtime: TaskRuntime,
+    request: PublishWorkRequestModel,
+    prepared: PreparedPublication,
+) -> Frontier:
+    """Reject batches the real append path would reject before reporting would_accept.
+
+    Matches ``append_batch`` acceptance for frontier sequence, event-id uniqueness, causal
+    parents, and projection replay — without staging objects or mutating durable state.
+    """
+
+    current = await runtime.ledger.load_frontier()
+    # Ordinary publish passes only the integer sequence into AppendCommand; digest is not a gate.
+    if request.expected_frontier is not None:
+        expected_sequence = int(request.expected_frontier.sequence)
+        if expected_sequence != current.sequence:
+            raise PublicOperationError(
+                PublicErrorCode.FRONTIER_CONFLICT,
+                (
+                    "The event batch is invalid. Call status to read the current frontier, then "
+                    "retry idempotently with the same request_id."
+                ),
+                True,
+                safe_details={"reason_code": "frontier_changed"},
+            )
+
+    existing_records: list[LedgerRecord] = []
+    seen: set[str] = set()
+    writer_sequence = 1
+    previous_writer_digest = "genesis"
+    async for record in runtime.ledger.load_events(runtime.session_id):
+        existing_records.append(record)
+        seen.add(str(record.event_id))
+        if str(record.writer.writer_id) == cast(str, runtime.writer_id):
+            writer_sequence = int(record.writer.sequence) + 1
+            previous_writer_digest = record.entry_digest
+
+    prior_batch: set[str] = set()
+    for index, item in enumerate(prepared.drafts):
+        event_key = str(item.draft.event_id)
+        if event_key in seen or event_key in prior_batch:
+            raise _event_invalid("duplicate_set_member", event_index=index, subfield="event_id")
+        if any(
+            parent not in seen and parent not in prior_batch for parent in item.draft.causal_parents
+        ):
+            raise _event_invalid(
+                "invalid_event_value_type", event_index=index, subfield="causal_parents"
+            )
+        prior_batch.add(event_key)
+
+    # Fixed synthetic accepted_at for chain continuity only; dry-run is not evidential.
+    accepted_at_dt = datetime(2026, 1, 1, tzinfo=UTC)
+    previous_ledger = current.head_digest
+    provisional: list[LedgerRecord] = []
+    try:
+        for offset, item in enumerate(prepared.drafts):
+            record = _provisional_record_for_dry_run(
+                item=item,
+                author=prepared.author,
+                channel=prepared.channel,
+                coverage=prepared.coverage,
+                runtime=runtime,
+                operation=request.request_id,
+                offset=offset,
+                ingestion_sequence=current.sequence + offset + 1,
+                writer_sequence=writer_sequence + offset,
+                previous_ledger_digest=previous_ledger,
+                previous_writer_digest=(
+                    previous_writer_digest if offset == 0 else provisional[offset - 1].entry_digest
+                ),
+                accepted_at=accepted_at_dt,
+            )
+            provisional.append(record)
+            previous_ledger = record.entry_digest
+        replay((*existing_records, *provisional))
+    except ValueError, ProtocolValueError, TypeError, PublicOperationError:
+        raise _event_invalid("invalid_event_value_type") from None
+    return current
+
+
 async def _execute_dry_run(
     app: Application,
     request: PublishWorkRequestModel,
@@ -813,29 +1094,7 @@ async def _execute_dry_run(
 
     # Intentionally skip operation lookup: dry_run must not consume or conflict on request_id.
     prepared = prepare_publication(request, channel=channel, app=app)
-    current = await runtime.ledger.load_frontier()
-    if request.expected_frontier is not None:
-        expected_sequence = int(request.expected_frontier.sequence)
-        if expected_sequence != current.sequence:
-            raise PublicOperationError(
-                PublicErrorCode.FRONTIER_CONFLICT,
-                (
-                    "The event batch is invalid. Call status to read the current frontier, then "
-                    "retry idempotently with the same request_id."
-                ),
-                False,
-                safe_details={"reason_code": "frontier_changed"},
-            )
-        if request.expected_frontier.head_digest != current.head_digest:
-            raise PublicOperationError(
-                PublicErrorCode.FRONTIER_CONFLICT,
-                (
-                    "The event batch is invalid. Call status to read the current frontier, then "
-                    "retry idempotently with the same request_id."
-                ),
-                False,
-                safe_details={"reason_code": "frontier_changed"},
-            )
+    current = await _preflight_dry_run_feasibility(runtime, request, prepared)
     frontier = FrontierModel.model_validate(dict(current.as_wire()))
     preview = tuple(
         PublishWorkDryRunPreviewEventModel(
