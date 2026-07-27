@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from typing import cast
 
 import pytest
 
+from yoetz.application.publish_work import PublishWorkInternalResult
 from yoetz.application.service import (
     Application,
     ClientProjectionContext,
@@ -14,11 +16,23 @@ from yoetz.application.service import (
 )
 from yoetz.domain.events import RuntimeProfile
 from yoetz.domain.privacy import LocalDisclosureSink
-from yoetz.domain.values import JsonObject
+from yoetz.domain.values import Frontier, JsonObject
 from yoetz.ports.control import ControlClientKind, ControlError, ControlMethod
+from yoetz.ports.publish_response_catalog import (
+    PublishResponseCatalogPort,
+    PublishResponseKey,
+    StoredPublishResponse,
+)
 from yoetz.ports.start_catalog import StartCatalogPort, TaskRoute, TaskRouteState
-from yoetz.protocol.canonical import canonical_digest
-from yoetz.protocol.models import CheckRequest
+from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
+from yoetz.protocol.coverage import PublicationChannel, coverage_for_channel
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+from yoetz.protocol.models import (
+    CheckRequest,
+    PublishWorkAcceptedEventModel,
+    PublishWorkResult,
+    PublishWorkVersionSliceModel,
+)
 
 _REQUEST = "req_00000000-0000-4000-8000-000000000001"
 _TASK = "tsk_00000000-0000-4000-8000-000000000002"
@@ -36,6 +50,22 @@ class _Catalog:
         return self.route
 
 
+class _Responses:
+    def __init__(self) -> None:
+        self.value: StoredPublishResponse | None = None
+        self.put_calls = 0
+
+    async def lookup(self, key: PublishResponseKey) -> StoredPublishResponse | None:
+        del key
+        return self.value
+
+    async def put_if_absent(self, value: StoredPublishResponse) -> StoredPublishResponse:
+        self.put_calls += 1
+        if self.value is None:
+            self.value = value
+        return self.value
+
+
 def _route(*, task_id: str = _TASK, state: TaskRouteState = TaskRouteState.ACTIVE) -> TaskRoute:
     return TaskRoute(
         task_id,
@@ -49,9 +79,10 @@ def _route(*, task_id: str = _TASK, state: TaskRouteState = TaskRouteState.ACTIV
     )
 
 
-def _application(catalog: _Catalog) -> Application:
+def _application(catalog: _Catalog, responses: _Responses | None = None) -> Application:
     return Application(
         start_catalog=cast(StartCatalogPort, catalog),
+        publish_responses=cast(PublishResponseCatalogPort, responses or catalog),
         runtime=object(),  # pyright: ignore[reportArgumentType]
         clock=object(),  # pyright: ignore[reportArgumentType]
         ids=object(),  # pyright: ignore[reportArgumentType]
@@ -68,6 +99,114 @@ def _application(catalog: _Catalog) -> Application:
         policy_packs=("research-evidence/0.1.0", "work-integrity/0.1.0"),
         version_manifest={},
     )
+
+
+def _publish_internal() -> PublishWorkInternalResult:
+    return PublishWorkInternalResult(
+        protocol_version="0.1",
+        schema_version="1.0.0",
+        request_id=_REQUEST,
+        request_digest="sha256:" + "1" * 64,
+        ok=True,
+        outcome="accepted",
+        task_id=_TASK,
+        session_id=_SESSION,
+        writer_id="wri_00000000-0000-4000-8000-000000000004",
+        subject_frontier=Frontier.genesis(),
+        result_frontier=Frontier(1, "sha256:" + "2" * 64),
+        accepted_events=(
+            PublishWorkAcceptedEventModel(
+                event_id="evt_00000000-0000-4000-8000-000000000005",
+                schema_name="action_recorded",
+                schema_version="1.0.0",
+                writer_sequence="1",
+                ingestion_sequence="1",
+                accepted_at="2026-07-27T12:00:00.000Z",
+                predecessor_digest="genesis",
+                entry_digest="sha256:" + "2" * 64,
+                projection_status="projected",
+            ),
+        ),
+        warning_codes=(),
+        coverage=coverage_for_channel(PublicationChannel.LOCAL_CLI),
+        gaps=(),
+        versions=PublishWorkVersionSliceModel(
+            protocol_version="0.1",
+            engine_version="0.1.0",
+            projection_version="0.1.0",
+            policy_packs=("research-evidence/0.1.0", "work-integrity/0.1.0"),
+        ),
+    )
+
+
+def _projected(internal: PublishWorkInternalResult) -> PublishWorkResult:
+    wire = internal.as_json()
+    accepted = cast(tuple[dict[str, object], ...], wire["accepted_events"])
+    for event in accepted:
+        event.pop("summary", None)
+    return PublishWorkResult.model_validate(
+        {
+            **wire,
+            "privacy_projection": {
+                "sink": "agent_context",
+                "local_disclosure_receipt_id": "egr_00000000-0000-4000-8000-000000000006",
+                "policy_id": "pvy_00000000-0000-4000-8000-000000000007",
+                "policy_version": "1",
+                "policy_digest": "sha256:" + "3" * 64,
+                "included_categories": (),
+                "blocked_categories": (),
+                "omitted_pointers": (),
+                "projection_commitment": "hmac-sha256:" + "4" * 64,
+            },
+        }
+    )
+
+
+@pytest.mark.anyio
+async def test_publish_response_round_trip_is_structural_and_returns_catalog_winner() -> None:
+    responses = _Responses()
+    app = _application(_Catalog(_route()), responses)
+    internal = _publish_internal()
+    projected = _projected(internal)
+
+    persisted = await app.store_publish_response(
+        internal, LocalDisclosureSink.AGENT_CONTEXT, projected
+    )
+    loaded = await app.load_publish_response(internal, LocalDisclosureSink.AGENT_CONTEXT)
+
+    assert persisted == projected
+    assert loaded == projected
+    assert responses.put_calls == 1
+    assert responses.value is not None
+    assert b'"summary"' not in responses.value.result_canonical
+    assert responses.value.key.task_id == internal.task_id
+    assert responses.value.key.session_id == internal.session_id
+    assert "request_digest" not in internal.as_json()
+
+
+@pytest.mark.anyio
+async def test_publish_response_load_rejects_content_summary_and_identity_mismatch() -> None:
+    responses = _Responses()
+    app = _application(_Catalog(_route()), responses)
+    internal = _publish_internal()
+    key = app.publish_response_key(internal, LocalDisclosureSink.AGENT_CONTEXT)
+    wire = cast(dict[str, object], _projected(internal).model_dump(mode="json", exclude_unset=True))
+    accepted = cast(list[dict[str, object]], wire["accepted_events"])
+    accepted[0]["summary"] = "caller content"
+    canonical = canonical_encode(cast(JsonValue, wire))
+    responses.value = StoredPublishResponse(
+        key,
+        canonical,
+        "sha256:" + hashlib.sha256(canonical).hexdigest(),
+    )
+    with pytest.raises(PublicOperationError) as content_failure:
+        await app.load_publish_response(internal, LocalDisclosureSink.AGENT_CONTEXT)
+    assert content_failure.value.code is PublicErrorCode.STORAGE_CORRUPT
+
+    other = replace(internal, task_id="tsk_00000000-0000-4000-8000-000000000099")
+    with pytest.raises(PublicOperationError) as identity_failure:
+        await app.load_publish_response(other, LocalDisclosureSink.AGENT_CONTEXT)
+    assert identity_failure.value.code is PublicErrorCode.STORAGE_CORRUPT
 
 
 @pytest.mark.parametrize(

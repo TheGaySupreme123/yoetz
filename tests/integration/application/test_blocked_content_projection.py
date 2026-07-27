@@ -54,6 +54,7 @@ from yoetz.domain.values import Frontier
 from yoetz.ports.control import ControlClientKind, ControlMethod
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
+from yoetz.ports.publish_response_catalog import PublishResponseCatalogPort
 from yoetz.ports.runtime import BundleRuntimePort, RouteCommand, TaskRuntime
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.models import (
@@ -230,6 +231,7 @@ def _application() -> tuple[Application, _BlockEverything]:
     runtime = _BlockedRuntime(clock, ids)
     app = Application(
         start_catalog=catalog.delegate,
+        publish_responses=cast(PublishResponseCatalogPort, catalog.delegate),
         runtime=cast(BundleRuntimePort, runtime),
         clock=clock,
         ids=ids,

@@ -235,10 +235,13 @@ async def test_same_request_id_replay_returns_the_stored_result_without_rewritin
     """
 
     app, objects = _composition()
-    first = await execute_publish_work(cast(Application, app), _request())
+    request = _request(expected_frontier={"sequence": "0", "head_digest": "genesis"})
+    first = await execute_publish_work(cast(Application, app), request)
     durable_after_first = len(objects._data)  # pyright: ignore[reportPrivateUsage]
 
-    second = await execute_publish_work(cast(Application, app), _request())
+    # This exact frontier is stale after the first append. Completed-operation replay must resolve
+    # before the ledger evaluates it, or this would incorrectly become FRONTIER_CONFLICT.
+    second = await execute_publish_work(cast(Application, app), request)
 
     assert first.outcome == "accepted"
     assert second.outcome == "replayed"

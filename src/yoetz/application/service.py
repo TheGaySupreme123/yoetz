@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -10,6 +11,7 @@ from typing import Literal, Protocol, cast
 
 from yoetz.application.egress import PrivacyCoordinator
 from yoetz.application.observation_verification import ObservationVerificationSupervisor
+from yoetz.application.unit_of_work import run_publish_response_commit
 from yoetz.domain.events import RuntimeProfile
 from yoetz.domain.privacy import (
     AuthorizationScope,
@@ -34,6 +36,11 @@ from yoetz.ports.clock import ClockPort
 from yoetz.ports.control import ControlClientKind, ControlError, ControlMethod
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import CheckCommitResult, FrozenCase
+from yoetz.ports.publish_response_catalog import (
+    PublishResponseCatalogPort,
+    PublishResponseKey,
+    StoredPublishResponse,
+)
 from yoetz.ports.runtime import BundleRuntimePort, TaskRuntime
 from yoetz.ports.start_catalog import StartCatalogPort, TaskRouteState
 from yoetz.protocol.canonical import (
@@ -42,6 +49,7 @@ from yoetz.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, validate_id
 from yoetz.protocol.models import (
     CheckResult,
@@ -69,6 +77,7 @@ from yoetz.protocol.models import (
     StatusResultModel,
     StatusSuccessModel,
     classify_result_leaf,
+    public_model_to_wire,
 )
 
 __all__ = [
@@ -491,6 +500,7 @@ class Application:
     """Ready-only facade with one sink-independent workflow and one disclosure boundary."""
 
     start_catalog: StartCatalogPort
+    publish_responses: PublishResponseCatalogPort
     runtime: BundleRuntimePort
     clock: ClockPort
     ids: IdPort
@@ -539,6 +549,101 @@ class Application:
 
     async def publish_work(self, request: PublishWorkRequest) -> PublishWorkInternalResult:
         return await execute_publish_work(self, request)  # pyright: ignore[reportArgumentType]
+
+    def publish_response_key(
+        self, result: PublishWorkInternalResult, sink: LocalDisclosureSink
+    ) -> PublishResponseKey:
+        if type(result) is not PublishWorkInternalResult or type(sink) is not LocalDisclosureSink:
+            raise TypeError("publish_response_identity_invalid")
+        return PublishResponseKey(
+            result.task_id,
+            result.session_id,
+            result.writer_id,
+            result.request_id,
+            result.request_digest,
+            sink,
+        )
+
+    def _decode_publish_response(
+        self,
+        result: PublishWorkInternalResult,
+        key: PublishResponseKey,
+        stored: StoredPublishResponse,
+    ) -> PublishWorkResult:
+        try:
+            if type(stored) is not StoredPublishResponse or stored.key != key:
+                raise ValueError("stored_publish_response_identity_invalid")
+            expected_digest = f"sha256:{hashlib.sha256(stored.result_canonical).hexdigest()}"
+            if stored.result_digest != expected_digest:
+                raise ValueError("stored_publish_response_digest_invalid")
+            source = strict_json_parse(stored.result_canonical)
+            if canonical_encode(source) != stored.result_canonical or not isinstance(
+                source, Mapping
+            ):
+                raise ValueError("stored_publish_response_canonical_invalid")
+            wire = cast(Mapping[str, JsonValue], source)
+            accepted = wire.get("accepted_events")
+            if type(accepted) not in {tuple, list} or any(
+                not isinstance(item, Mapping) or "summary" in item
+                for item in cast(tuple[JsonValue, ...] | list[JsonValue], accepted)
+            ):
+                raise ValueError("stored_publish_response_content_invalid")
+            projected = PublishWorkResultModel.model_validate(wire)
+            if type(projected.root) is not PublishWorkSuccessModel:
+                raise ValueError("stored_publish_response_result_invalid")
+            success = projected.root
+            if (
+                success.request_id != result.request_id
+                or success.task_id != result.task_id
+                or success.session_id != result.session_id
+                or success.writer_id != result.writer_id
+                or success.privacy_projection.sink != key.sink.value
+            ):
+                raise ValueError("stored_publish_response_identity_invalid")
+            if canonical_encode(public_model_to_wire(projected)) != stored.result_canonical:
+                raise ValueError("stored_publish_response_canonical_invalid")
+            return projected
+        except (TypeError, ValueError) as exc:
+            raise PublicOperationError(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "The stored publish response is invalid.",
+                False,
+            ) from exc
+
+    async def load_publish_response(
+        self, result: PublishWorkInternalResult, sink: LocalDisclosureSink
+    ) -> PublishWorkResult | None:
+        key = self.publish_response_key(result, sink)
+        stored = await self.publish_responses.lookup(key)
+        if stored is None:
+            return None
+        return self._decode_publish_response(result, key, stored)
+
+    async def store_publish_response(
+        self,
+        result: PublishWorkInternalResult,
+        sink: LocalDisclosureSink,
+        projected: ProjectedControlBody,
+    ) -> PublishWorkResult:
+        if type(projected) is not PublishWorkResultModel:
+            raise TypeError("projected_publish_response_invalid")
+        key = self.publish_response_key(result, sink)
+        wire = public_model_to_wire(projected)
+        accepted = wire.get("accepted_events")
+        if type(accepted) not in {tuple, list}:
+            raise TypeError("projected_publish_response_invalid")
+        accepted_items = cast(tuple[JsonValue, ...] | list[JsonValue], accepted)
+        if any(not isinstance(item, Mapping) or "summary" in item for item in accepted_items):
+            raise TypeError("projected_publish_response_invalid")
+        canonical = canonical_encode(wire)
+        candidate = StoredPublishResponse(
+            key,
+            canonical,
+            f"sha256:{hashlib.sha256(canonical).hexdigest()}",
+        )
+        self._decode_publish_response(result, key, candidate)
+        winner = await run_publish_response_commit(self.publish_responses, candidate)
+        return self._decode_publish_response(result, key, winner)
 
     async def check(self, request: object) -> CheckCommitResult:
         from yoetz.application.check import execute_check
@@ -861,6 +966,7 @@ class ServiceReadyContext:
     vault_generation: int
     generation_is_current: Callable[[int, int], bool]
     start_catalog: StartCatalogPort
+    publish_responses: PublishResponseCatalogPort
     runtime: BundleRuntimePort
     clock: ClockPort
     ids: IdPort
@@ -937,6 +1043,7 @@ class ReadyApplicationFactory:
         try:
             application = Application(
                 context.start_catalog,
+                context.publish_responses,
                 context.runtime,
                 context.clock,
                 context.ids,

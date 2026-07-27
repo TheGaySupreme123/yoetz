@@ -39,6 +39,7 @@ from yoetz.domain.receipts import PolicyVersionEntry, ReceiptVersionSlice, Schem
 from yoetz.domain.values import Frontier
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
+from yoetz.ports.publish_response_catalog import PublishResponseCatalogPort
 from yoetz.ports.runtime import BundleRuntimePort, RouteCommand, TaskRuntime
 from yoetz.protocol.canonical import JsonValue, canonical_digest
 from yoetz.protocol.models import FrontierModel, PublishWorkRequest
@@ -198,6 +199,7 @@ async def test_post_commit_retry_resolves_one_effect(tmp_path: Path) -> None:
     runtime = _StrictLocalRuntime(clock, _start_runtime.ids)
     app = Application(
         start_catalog=catalog.delegate,
+        publish_responses=cast(PublishResponseCatalogPort, catalog.delegate),
         runtime=cast(BundleRuntimePort, runtime),
         clock=clock,
         ids=_start_runtime.ids,

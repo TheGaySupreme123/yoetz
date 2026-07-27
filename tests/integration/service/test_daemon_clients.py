@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Buffer, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 import yoetz.service.daemon as daemon_module
+from yoetz.application.publish_work import PublishWorkInternalResult
 from yoetz.application.service import (
     ClientProjectionContext,
     ControlProjectionBinding,
@@ -17,7 +19,8 @@ from yoetz.application.service import (
     ProjectionRenderMode,
 )
 from yoetz.config.models import LoggingConfig, YoetzConfig
-from yoetz.domain.values import JsonObject
+from yoetz.domain.privacy import LocalDisclosureSink
+from yoetz.domain.values import Frontier, JsonObject
 from yoetz.observability.logging import LogMode
 from yoetz.ports.control import (
     ControlCallRequest,
@@ -26,9 +29,18 @@ from yoetz.ports.control import (
     ControlMethod,
     ServiceState,
 )
+from yoetz.protocol.canonical import canonical_digest
+from yoetz.protocol.coverage import PublicationChannel, coverage_for_channel
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id
-from yoetz.protocol.models import PublishWorkRequest, PublishWorkResult, StartRequest, StartResult
+from yoetz.protocol.models import (
+    PublishWorkAcceptedEventModel,
+    PublishWorkRequest,
+    PublishWorkResult,
+    PublishWorkVersionSliceModel,
+    StartRequest,
+    StartResult,
+)
 from yoetz.service.confidential_protocol import (
     ClientOpenEnvelope,
     EmptyVaultTarget,
@@ -130,7 +142,13 @@ class _Application:
         # Stands in for an accepted, durable batch so the post-commit response path can be
         # exercised without a real ledger.
         self.publish_work_result: PublishWorkResult | None = None
+        self.publish_work_internal: PublishWorkInternalResult | None = None
         self.projection_error: BaseException | None = None
+        self.projection_failures = 0
+        self.append_count = 0
+        self.publish_response_lookups = 0
+        self.publish_response_stores = 0
+        self.cached_publish_response: PublishWorkResult | None = None
 
     async def start(self, request: object) -> StartResult:
         assert isinstance(request, StartRequest)
@@ -151,7 +169,7 @@ class _Application:
             }
         )
 
-    async def publish_work(self, request: object) -> PublishWorkResult:
+    async def publish_work(self, request: object) -> PublishWorkResult | PublishWorkInternalResult:
         assert isinstance(request, PublishWorkRequest)
         self.publish_work_calls += 1
         await asyncio.sleep(0)
@@ -159,7 +177,34 @@ class _Application:
             raise self.publish_work_error
         if self.publish_work_result is not None:
             return self.publish_work_result
+        if self.publish_work_internal is not None:
+            outcome = "accepted" if self.append_count == 0 else "replayed"
+            if self.append_count == 0:
+                self.append_count += 1
+            return replace(self.publish_work_internal, outcome=outcome)
         raise AssertionError("publish_work_error_required")
+
+    async def load_publish_response(
+        self, result: PublishWorkInternalResult, sink: LocalDisclosureSink
+    ) -> PublishWorkResult | None:
+        del result
+        assert sink is LocalDisclosureSink.AGENT_CONTEXT
+        self.publish_response_lookups += 1
+        return self.cached_publish_response
+
+    async def store_publish_response(
+        self,
+        result: PublishWorkInternalResult,
+        sink: LocalDisclosureSink,
+        projected: ProjectedControlBody,
+    ) -> PublishWorkResult:
+        del result
+        assert sink is LocalDisclosureSink.AGENT_CONTEXT
+        assert isinstance(projected, PublishWorkResult)
+        self.publish_response_stores += 1
+        if self.cached_publish_response is None:
+            self.cached_publish_response = projected
+        return self.cached_publish_response
 
     async def review(self, request: object) -> JsonObject:
         assert isinstance(request, JsonObject)
@@ -184,8 +229,13 @@ class _Application:
         method = binding.method
         assert method in {ControlMethod.START, ControlMethod.REVIEW, ControlMethod.PUBLISH_WORK}
         self.projections.append(context)
+        if self.projection_failures:
+            self.projection_failures -= 1
+            raise RuntimeError("one-shot-projection-failure")
         if self.projection_error is not None:
             raise self.projection_error
+        if type(result) is PublishWorkInternalResult:
+            return _projected_publish_work_result(result)
         assert isinstance(result, StartResult | PublishWorkResult | JsonObject)
         return result
 
@@ -375,6 +425,68 @@ def _accepted_publish_work_result(request_id: str) -> PublishWorkResult:
     )
 
 
+def _publish_work_internal(request: PublishWorkRequest) -> PublishWorkInternalResult:
+    frontier = Frontier(1, "sha256:" + "4" * 64)
+    return PublishWorkInternalResult(
+        protocol_version="0.1",
+        schema_version="1.0.0",
+        request_id=request.request_id,
+        request_digest=canonical_digest({"request_id": request.request_id}),
+        ok=True,
+        outcome="accepted",
+        task_id="tsk_00000000-0000-4000-8000-000000000020",
+        session_id=request.session_id,
+        writer_id=request.writer_id,
+        subject_frontier=Frontier.genesis(),
+        result_frontier=frontier,
+        accepted_events=(
+            PublishWorkAcceptedEventModel(
+                event_id=cast(str, cast(Mapping[str, object], request.event_drafts[0])["event_id"]),
+                schema_name="plan_published",
+                schema_version="1.0.0",
+                writer_sequence="1",
+                ingestion_sequence="1",
+                accepted_at="2026-01-01T00:00:00.000Z",
+                predecessor_digest="genesis",
+                entry_digest=frontier.head_digest,
+                projection_status="projected",
+            ),
+        ),
+        warning_codes=(),
+        coverage=coverage_for_channel(PublicationChannel.LOCAL_CLI),
+        gaps=(),
+        versions=PublishWorkVersionSliceModel(
+            protocol_version="0.1",
+            engine_version="0.1.0",
+            projection_version="0.1.0",
+            policy_packs=("research-evidence/0.1.0", "work-integrity/0.1.0"),
+        ),
+    )
+
+
+def _projected_publish_work_result(internal: PublishWorkInternalResult) -> PublishWorkResult:
+    wire = internal.as_json()
+    accepted = cast(tuple[dict[str, object], ...], wire["accepted_events"])
+    for event in accepted:
+        event.pop("summary", None)
+    return PublishWorkResult.model_validate(
+        {
+            **wire,
+            "privacy_projection": {
+                "sink": "agent_context",
+                "local_disclosure_receipt_id": "egr_00000000-0000-4000-8000-000000000021",
+                "policy_id": "pvy_00000000-0000-4000-8000-000000000022",
+                "policy_version": "1",
+                "policy_digest": "sha256:" + "5" * 64,
+                "included_categories": (),
+                "blocked_categories": (),
+                "omitted_pointers": (),
+                "projection_commitment": "hmac-sha256:" + "6" * 64,
+            },
+        }
+    )
+
+
 @pytest.mark.anyio
 async def test_post_commit_projection_failure_is_retryable_not_plain_internal_error() -> None:
     """An accepted write must never be surfaced to the caller as an unqualified failure.
@@ -402,6 +514,46 @@ async def test_post_commit_projection_failure_is_retryable_not_plain_internal_er
     # The operation itself ran exactly once and is not retried behind the caller's back.
     assert application.publish_work_calls == 1
     assert len(application.projections) == 1
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_publish_replay_recovers_one_shot_projection_failure_and_then_uses_cache() -> None:
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    body = _publish_work_body()
+    application.publish_work_internal = _publish_work_internal(body)
+    application.projection_failures = 1
+
+    first_request = _request(daemon, ControlMethod.PUBLISH_WORK, body)
+    first = await daemon.dispatch(ControlClientKind.MCP_BRIDGE, first_request)
+    assert first.outcome == "error"
+    assert isinstance(first.body, ControlError)
+    assert first.body.reason == "response_projection_failed"
+    assert dict(first.body.accepted_state) == {
+        "count": 1,
+        "head_digest": "sha256:" + "4" * 64,
+        "sequence": 1,
+    }
+
+    # The byte-identical body still carries its now-stale genesis frontier. Operation replay wins
+    # before frontier handling, and the handler never appends a duplicate.
+    second_request = _request(daemon, ControlMethod.PUBLISH_WORK, body)
+    second = await daemon.dispatch(ControlClientKind.MCP_BRIDGE, second_request)
+    assert second.outcome == "ok"
+    assert application.append_count == 1
+    assert len(application.projections) == 2
+    assert application.publish_response_stores == 1
+
+    third_request = _request(daemon, ControlMethod.PUBLISH_WORK, body)
+    third = await daemon.dispatch(ControlClientKind.MCP_BRIDGE, third_request)
+    assert third.outcome == "ok"
+    assert third.body == second.body
+    assert third.rpc_id != second.rpc_id
+    assert application.append_count == 1
+    assert len(application.projections) == 2
+    assert application.publish_response_lookups == 3
+    assert application.publish_response_stores == 1
     await daemon.close()
 
 

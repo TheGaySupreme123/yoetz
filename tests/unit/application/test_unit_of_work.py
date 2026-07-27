@@ -22,8 +22,10 @@ from yoetz.application.unit_of_work import (
     resolve_ambiguous_start,
     run_catalog_transition,
     run_prepared_append,
+    run_publish_response_commit,
 )
 from yoetz.domain.events import EventDraft, EventPayload
+from yoetz.domain.privacy import LocalDisclosureSink
 from yoetz.domain.values import Frontier, parse_rfc3339_millis
 from yoetz.ports.ledger import (
     AcceptedEventSummary,
@@ -38,6 +40,11 @@ from yoetz.ports.ledger import (
     OperationState,
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef
+from yoetz.ports.publish_response_catalog import (
+    PublishResponseCatalogPort,
+    PublishResponseKey,
+    StoredPublishResponse,
+)
 from yoetz.ports.runtime import StartCompletionEvidence, StartMilestone
 from yoetz.ports.start_catalog import (
     EncryptedResultRef,
@@ -339,6 +346,42 @@ def _catalog(value: _CatalogDouble) -> StartCatalogPort:
     return cast(StartCatalogPort, value)
 
 
+class _PublishResponseCatalogDouble:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.calls = 0
+        self.winner: StoredPublishResponse | None = None
+
+    async def lookup(self, key: PublishResponseKey) -> StoredPublishResponse | None:
+        del key
+        return self.winner
+
+    async def put_if_absent(self, response: StoredPublishResponse) -> StoredPublishResponse:
+        self.calls += 1
+        self.entered.set()
+        await self.release.wait()
+        if self.winner is None:
+            self.winner = response
+        return self.winner
+
+
+def _stored_publish_response() -> StoredPublishResponse:
+    canonical = b'{"ok":true}'
+    return StoredPublishResponse(
+        PublishResponseKey(
+            "tsk_00000000-0000-4000-8000-000000000019",
+            "ses_00000000-0000-4000-8000-000000000020",
+            "wri_00000000-0000-4000-8000-000000000021",
+            "req_00000000-0000-4000-8000-000000000022",
+            "sha256:" + "d" * 64,
+            LocalDisclosureSink.AGENT_CONTEXT,
+        ),
+        canonical,
+        "sha256:" + hashlib.sha256(canonical).hexdigest(),
+    )
+
+
 def test_prepared_mutation_is_immutable_and_mirrors_the_exact_command() -> None:
     prepared = _prepared()
     with pytest.raises(FrozenInstanceError):
@@ -408,6 +451,24 @@ async def test_cancellation_pending_before_submission_never_calls_port() -> None
     with pytest.raises(asyncio.CancelledError):
         await cancelled_caller()
     assert adapter.calls == 0
+
+
+@pytest.mark.anyio
+async def test_publish_response_commit_is_shielded_and_returns_the_persisted_winner() -> None:
+    adapter = _PublishResponseCatalogDouble()
+    response = _stored_publish_response()
+    task = asyncio.create_task(
+        run_publish_response_commit(cast(PublishResponseCatalogPort, adapter), response)
+    )
+    await adapter.entered.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    adapter.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert adapter.winner is response
+    assert adapter.calls == 1
 
 
 @pytest.mark.anyio

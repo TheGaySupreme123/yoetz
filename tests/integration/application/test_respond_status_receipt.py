@@ -40,6 +40,7 @@ from yoetz.domain.values import Frontier, session_id
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.ledger import CheckCommitResult
+from yoetz.ports.publish_response_catalog import PublishResponseCatalogPort
 from yoetz.ports.runtime import BundleRuntimePort, RouteCommand, TaskRuntime
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.coverage import CheckType
@@ -223,6 +224,7 @@ def _build_app(
     runtime = _WorkflowRuntime(clock, ids)
     app = Application(
         start_catalog=catalog.delegate,
+        publish_responses=cast(PublishResponseCatalogPort, catalog.delegate),
         runtime=cast(BundleRuntimePort, runtime),
         clock=clock,
         ids=ids,

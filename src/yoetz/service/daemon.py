@@ -35,6 +35,7 @@ from yoetz.adapters.keys.os_keyring import AutoUnlockPassphraseStore
 from yoetz.adapters.keys.secret_memory import LocalSecretMemory
 from yoetz.adapters.keys.vault_passphrase import VaultRootEnvelope
 from yoetz.adapters.session_events import SessionEventMonitor
+from yoetz.application.publish_work import PublishWorkInternalResult
 from yoetz.application.service import (
     ClientProjectionContext,
     ControlProjectionBinding,
@@ -42,6 +43,7 @@ from yoetz.application.service import (
     ProjectionBindingFacts,
     UnprojectedControlBody,
     internal_control_json,
+    resolve_client_disclosure_sink,
 )
 from yoetz.config.load import load_config
 from yoetz.config.models import YoetzConfig
@@ -53,6 +55,7 @@ from yoetz.config.paths import (
     unlock_throttle_path,
     verify_private_local_bundle,
 )
+from yoetz.domain.privacy import LocalDisclosureSink
 from yoetz.observability.logging import (
     LogMode,
     configure_logging,
@@ -270,6 +273,17 @@ class _Vault(Protocol):
 
 
 class _ReadyApplication(Protocol):
+    async def load_publish_response(
+        self, result: PublishWorkInternalResult, sink: LocalDisclosureSink
+    ) -> PublishWorkResult | None: ...
+
+    async def store_publish_response(
+        self,
+        result: PublishWorkInternalResult,
+        sink: LocalDisclosureSink,
+        projected: ProjectedControlBody,
+    ) -> PublishWorkResult: ...
+
     async def projection_binding_facts(
         self,
         method: ControlMethod,
@@ -771,6 +785,17 @@ class ServiceDaemon:
             if request.method in _PROJECTION_EXEMPT_METHODS:
                 self._validate_success_body(request, internal)
                 return internal
+            publish_result = internal if type(internal) is PublishWorkInternalResult else None
+            publish_sink = (
+                resolve_client_disclosure_sink(projection_context)
+                if publish_result is not None
+                else None
+            )
+            if publish_result is not None and publish_sink is not None:
+                stored = await application.load_publish_response(publish_result, publish_sink)
+                if stored is not None:
+                    self._validate_success_body(request, stored)
+                    return stored
             facts = await application.projection_binding_facts(
                 request.method,
                 request.body,
@@ -791,6 +816,14 @@ class ServiceDaemon:
                 internal,
             )
             self._validate_success_body(request, projected)
+            if publish_result is not None and publish_sink is not None:
+                persisted = await application.store_publish_response(
+                    publish_result,
+                    publish_sink,
+                    projected,
+                )
+                self._validate_success_body(request, persisted)
+                return persisted
             return projected
         except ControlError, LifecycleError, PublicOperationError:
             raise
@@ -1069,7 +1102,9 @@ class ServiceDaemon:
 
 def _is_ready_application(value: object) -> bool:
     return (
-        callable(getattr(value, "projection_binding_facts", None))
+        callable(getattr(value, "load_publish_response", None))
+        and callable(getattr(value, "store_publish_response", None))
+        and callable(getattr(value, "projection_binding_facts", None))
         and callable(getattr(value, "project_result_for_client", None))
         and callable(getattr(value, "close", None))
     )

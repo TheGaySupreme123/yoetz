@@ -41,6 +41,7 @@ from yoetz.domain.values import Frontier
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.ledger import CheckCommitResult
+from yoetz.ports.publish_response_catalog import PublishResponseCatalogPort
 from yoetz.ports.runtime import BundleRuntimePort, RouteCommand, TaskRuntime
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.models import CheckRequest, FrontierModel, PublishWorkRequest
@@ -147,6 +148,7 @@ def _build_strict_local_application() -> tuple[Application, _StrictLocalRuntime,
     runtime = _StrictLocalRuntime(clock, ids)
     app = Application(
         start_catalog=catalog.delegate,
+        publish_responses=cast(PublishResponseCatalogPort, catalog.delegate),
         runtime=cast(BundleRuntimePort, runtime),
         clock=clock,
         ids=ids,
