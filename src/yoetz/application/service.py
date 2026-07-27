@@ -548,7 +548,9 @@ class Application:
     async def start(self, request: StartRequest) -> StartInternalResult:
         return await execute_start(self, request)  # pyright: ignore[reportArgumentType]
 
-    async def publish_work(self, request: PublishWorkRequest) -> PublishWorkInternalResult:
+    async def publish_work(
+        self, request: PublishWorkRequest
+    ) -> PublishWorkInternalResult | PublishWorkResult:
         return await execute_publish_work(self, request)  # pyright: ignore[reportArgumentType]
 
     def publish_response_key(

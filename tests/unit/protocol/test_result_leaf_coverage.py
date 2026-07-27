@@ -176,6 +176,7 @@ def test_every_publish_event_family_classifies_its_summary() -> None:
 def test_publish_result_leaves_other_than_summary_classify() -> None:
     patterns: set[tuple[str, ...]] = set()
     _leaf_patterns(getattr(models, "PublishWorkSuccessModel"), (), patterns)
+    _leaf_patterns(getattr(models, "PublishWorkAcceptedProjectionUnavailableModel"), (), patterns)
     uncovered = sorted(
         "/" + "/".join(pattern)
         for pattern in patterns

@@ -16,8 +16,10 @@ from pydantic import (
     BaseModel,
     BeforeValidator,
     ConfigDict,
+    Discriminator,
     Field,
     RootModel,
+    Tag,
     field_validator,
     model_validator,
 )
@@ -79,6 +81,8 @@ __all__ = [
     "PublicRequestModel",
     "PublicResultModel",
     "PublicationChannel",
+    "PublishWorkAcceptedMinimalEventModel",
+    "PublishWorkAcceptedProjectionUnavailableModel",
     "PublishWorkRequest",
     "PublishWorkRequestModel",
     "PublishWorkResult",
@@ -1384,13 +1388,127 @@ class PublishWorkSuccessModel(_ClosedModel):
         return self
 
 
+class PublishWorkAcceptedMinimalEventModel(_ClosedModel):
+    """Structural acceptance facts available from the ledger append result alone."""
+
+    event_id: EventIdWire
+    entry_digest: Sha256Digest
+    ingestion_sequence: CanonicalUInt64Wire
+
+
+class PublishWorkAcceptedProjectionUnavailableModel(_ClosedModel):
+    """Total acceptance when privacy projection cannot shape the full success body.
+
+    Built only from committed ledger facts plus a correlation id for operator diagnostics. It is a
+    true success (`ok: true`), not an error bent into one: the write is durable and the caller does
+    not need a second `status` call or same-`request_id` replay to learn what landed.
+    """
+
+    protocol_version: Literal["0.1"]
+    schema_version: Literal["1.0.0"]
+    request_id: RequestIdWire
+    ok: Literal[True]
+    response_completeness: Literal["accepted_projection_unavailable"]
+    reason_code: Literal["response_projection_failed"]
+    correlation_id: CorrelationIdWire
+    outcome: Literal["accepted", "replayed"]
+    task_id: TaskIdWire
+    session_id: SessionIdWire
+    writer_id: WriterIdWire
+    subject_frontier: FrontierModel
+    result_frontier: FrontierModel
+    accepted_events: tuple[PublishWorkAcceptedMinimalEventModel, ...]
+
+    @model_validator(mode="after")
+    def _validate_publish_accepted_projection_unavailable(
+        self,
+    ) -> PublishWorkAcceptedProjectionUnavailableModel:
+        if not 1 <= len(self.accepted_events) <= MAX_EVENTS_PER_BATCH:
+            raise ValueError("accepted_event_count_invalid")
+        _validate_model_against_schema(self, "publish-work-result")
+        return self
+
+
+def _publish_work_result_kind(value: object) -> str:
+    """Discriminate the three publish result shapes without overloading ``ok`` alone."""
+
+    if isinstance(value, Mapping):
+        source = cast(Mapping[object, object], value)
+        if source.get("ok") is False:
+            return "failure"
+        if source.get("response_completeness") == "accepted_projection_unavailable":
+            return "accepted_projection_unavailable"
+        return "success"
+    if getattr(value, "ok", None) is False:
+        return "failure"
+    if getattr(value, "response_completeness", None) == "accepted_projection_unavailable":
+        return "accepted_projection_unavailable"
+    return "success"
+
+
 type PublishWorkResultBranch = Annotated[
-    PublishWorkSuccessModel | OperationFailureModel, Field(discriminator="ok")
+    Annotated[PublishWorkSuccessModel, Tag("success")]
+    | Annotated[
+        PublishWorkAcceptedProjectionUnavailableModel,
+        Tag("accepted_projection_unavailable"),
+    ]
+    | Annotated[OperationFailureModel, Tag("failure")],
+    Discriminator(_publish_work_result_kind),
 ]
 
 
 class PublishWorkResultModel(PublicResultModel[PublishWorkResultBranch]):
-    pass
+    """RootModel wrapper with typed success-field accessors for static checkers.
+
+    Pydantic RootModel delegates attributes to ``root`` at runtime, but pyright does not
+    synthesize those members. After the three-way publish result discriminator, call sites that
+    hold ``PublishWorkInternalResult | PublishWorkResult`` need these fields to exist on both
+    arms. Failure roots raise ``AttributeError`` for success-only names (callers check ``ok``).
+    """
+
+    @property
+    def ok(self) -> bool:
+        return self.root.ok
+
+    @property
+    def outcome(self) -> Literal["accepted", "replayed"]:
+        root = self.root
+        if type(root) is PublishWorkSuccessModel:
+            return root.outcome
+        if type(root) is PublishWorkAcceptedProjectionUnavailableModel:
+            return root.outcome
+        raise AttributeError("outcome")
+
+    @property
+    def subject_frontier(self) -> FrontierModel:
+        root = self.root
+        if type(root) is PublishWorkSuccessModel:
+            return root.subject_frontier
+        if type(root) is PublishWorkAcceptedProjectionUnavailableModel:
+            return root.subject_frontier
+        raise AttributeError("subject_frontier")
+
+    @property
+    def result_frontier(self) -> FrontierModel:
+        root = self.root
+        if type(root) is PublishWorkSuccessModel:
+            return root.result_frontier
+        if type(root) is PublishWorkAcceptedProjectionUnavailableModel:
+            return root.result_frontier
+        raise AttributeError("result_frontier")
+
+    @property
+    def accepted_events(
+        self,
+    ) -> (
+        tuple[PublishWorkAcceptedEventModel, ...] | tuple[PublishWorkAcceptedMinimalEventModel, ...]
+    ):
+        root = self.root
+        if type(root) is PublishWorkSuccessModel:
+            return root.accepted_events
+        if type(root) is PublishWorkAcceptedProjectionUnavailableModel:
+            return root.accepted_events
+        raise AttributeError("accepted_events")
 
 
 class CheckPolicyExecutionModel(_ClosedModel):
@@ -2524,7 +2642,15 @@ _START_STRUCTURAL_POINTERS: Final = (
 
 _PUBLISH_STRUCTURAL_POINTERS: Final = (
     _COMMON_SUCCESS_LEAVES
-    + ("/gaps/*", "/outcome", "/warning_codes/*", "/writer_id")
+    + (
+        "/correlation_id",
+        "/gaps/*",
+        "/outcome",
+        "/reason_code",
+        "/response_completeness",
+        "/warning_codes/*",
+        "/writer_id",
+    )
     + _prefix_leaf_patterns("/subject_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/result_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/coverage", _COVERAGE_LEAVES)
@@ -3109,7 +3235,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 700:
+    if len(result) != 703:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

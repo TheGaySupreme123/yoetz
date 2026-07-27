@@ -85,18 +85,25 @@ adds `safe_details` only when nonempty, as a new ordinary dictionary in ASCII ke
 public-error JSON Schema remains a structural superset of this exact mapping-only runtime emitter.
 Allowlisted `safe_details` keys include structural recovery fields such as `reason_code`,
 `sequence`, and `head_digest` (for `FRONTIER_CONFLICT` current-head recovery). Protocol reason
-`response_projection_failed` marks an MCP post-commit shaping failure: the write may already be
-durable, so the public error is retryable and same-`request_id` resume is the recovery path. For
-`publish_work`, completed-operation replay is resolved before `expected_frontier`; it never
-re-appends the accepted events. If an exact validated response body was durably stored, replay to
-the same ordinary disclosure sink returns that body without running privacy projection again. If
-projection failed before a response body existed, replay resolves the stored operation and retries
-response projection instead.
-`read_projection_failed` is its read-only counterpart: nothing was appended, so the remedy is
+`response_projection_failed` marks a post-commit shaping failure for non-`publish_work` writes (and
+for the genuinely impossible case where even the minimal publish envelope cannot be built): the
+write may already be durable, so the public error is retryable and same-`request_id` resume is the
+recovery path. For `publish_work`, a post-commit projection failure after a successful append is
+not reported as an error at all. The daemon returns a reduced total-acceptance success branch
+with `ok: true`, `response_completeness: "accepted_projection_unavailable"`,
+`reason_code: "response_projection_failed"`, a `correlation_id` for operator diagnostics, the
+subject/result frontiers, and accepted event ids, entry digests, and ingestion sequences — built
+only from `AppendResult` / the closed internal result, never from privacy projection. The caller
+does not need a second `status` call or a same-`request_id` replay to learn what landed.
+For `publish_work`, completed-operation replay is still resolved before `expected_frontier`; it
+never re-appends the accepted events. If an exact validated full success body was durably stored,
+replay to the same ordinary disclosure sink returns that body without running privacy projection
+again.
+`read_projection_failed` is the read-only counterpart: nothing was appended, so the remedy is
 repeating the request rather than a same-`request_id` replay that has no operation record to load.
-When the committed frontier is known, `response_projection_failed` also carries `sequence`,
-`head_digest`, and `count` in `safe_details`, so a caller can state what landed without a second
-`status` call.
+When a non-publish write surfaces `response_projection_failed` and the committed frontier is known,
+the control error also carries `sequence`, `head_digest`, and `count` in `accepted_state` /
+`safe_details`.
 
 MCP resource discovery: `resources/list` serves the four `yoetz://guidance/*.md` entries and
 validates against the MCP `ListResourcesResult` schema (`tests/subprocess/test_mcp_resource_discovery.py`).
@@ -1011,12 +1018,21 @@ task operations are not. MCP cannot invoke lifecycle, privacy-control, or observ
 methods.
 
 `ControlError` carries one bounded reason and a `retryable` flag. `response_projection_failed` is
-reserved for the window after a handler returns, where a write may already be durable and only the
-response could not be shaped; it is always `retryable=True`, and the bridge answers it with the
-same-`request_id` replay remedy it uses for its own projection failures. Deliberate bounded
-failures raised in that window — `privacy_projection_blocked`, `privacy_projection_unavailable`,
-and any `PublicOperationError` — already state something true and pass through unchanged. An
-accepted write must never surface as an unqualified failure.
+reserved for the window after a handler returns for non-`publish_work` writes (and the impossible
+minimal-envelope path), where a write may already be durable and only the response could not be
+shaped; it is always `retryable=True`, and the bridge answers it with the same-`request_id` replay
+remedy it uses for its own projection failures. For `publish_work` that same window returns the
+reduced total-acceptance success envelope instead of a `ControlError`. Deliberate bounded failures
+raised in that window — `privacy_projection_blocked`, `privacy_projection_unavailable`, and any
+`PublicOperationError` — already state something true and pass through unchanged. An accepted
+durable publish must never surface as a failure (`INTERNAL_ERROR` or otherwise).
+
+Unexpected exceptions recorded in that window (and at other process boundaries) emit the existing
+stderr structural line and also append one owner-only JSONL diagnostic record under `log_dir()`
+(`service.diagnostics.jsonl`, mode `0o600`, size-capped ring). Fields are limited to
+`timestamp`, `correlation_id`, `component`, `operation`, `reason`, and optional `request_id` — no
+exception text, payload, or paths. `yoetz service diagnostics --correlation-id err_…` reads that
+ring.
 
 `PublishResponseCatalogPort` is the publish-only durable control-boundary response store. Its key
 is `(task_id, session_id, writer_id, request_id, request_digest, sink)`, where `sink` is exactly

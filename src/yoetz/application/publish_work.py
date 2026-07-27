@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Final, Literal, Protocol, cast
@@ -78,6 +79,8 @@ from yoetz.protocol.models import (
     MAX_EVENTS_PER_BATCH,
     PublishWorkAcceptedEventModel,
     PublishWorkRequestModel,
+    PublishWorkResult,
+    PublishWorkResultModel,
     PublishWorkVersionSliceModel,
 )
 
@@ -85,6 +88,7 @@ __all__ = [
     "Application",
     "PreparedPublication",
     "PublishWorkInternalResult",
+    "build_accepted_projection_unavailable_result",
     "execute_publish_work",
     "prepare_publication",
 ]
@@ -660,10 +664,103 @@ async def _internal_result(
     )
 
 
+def build_accepted_projection_unavailable_result(
+    *,
+    request_id: str,
+    outcome: Literal["accepted", "replayed"],
+    task_id: str,
+    session_id: str,
+    writer_id: str,
+    subject_frontier: Frontier,
+    result_frontier: Frontier,
+    accepted: tuple[AcceptedEventSummary, ...] | tuple[PublishWorkAcceptedEventModel, ...],
+    correlation_id: str,
+) -> PublishWorkResult:
+    """Build the reduced total-acceptance envelope from ledger facts alone.
+
+    Constructible by construction from ``AppendResult`` or the closed internal result — never from
+    privacy projection or event payload content. A committed publish must always be able to emit
+    this shape; if it cannot, that is a genuine internal defect rather than a reported failure of
+    the write itself.
+    """
+
+    events = tuple(
+        {
+            "event_id": item.event_id,
+            "entry_digest": item.entry_digest,
+            "ingestion_sequence": (
+                item.ingestion_sequence
+                if type(item.ingestion_sequence) is str
+                else str(item.ingestion_sequence)
+            ),
+        }
+        for item in accepted
+    )
+    body = {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": request_id,
+        "ok": True,
+        "response_completeness": "accepted_projection_unavailable",
+        "reason_code": "response_projection_failed",
+        "correlation_id": correlation_id,
+        "outcome": outcome,
+        "task_id": task_id,
+        "session_id": session_id,
+        "writer_id": writer_id,
+        "subject_frontier": dict(subject_frontier.as_wire().items()),
+        "result_frontier": dict(result_frontier.as_wire().items()),
+        "accepted_events": events,
+    }
+    return PublishWorkResultModel.model_validate(body)
+
+
+def accepted_projection_unavailable_from_internal(
+    internal: PublishWorkInternalResult,
+    *,
+    correlation_id: str,
+) -> PublishWorkResult:
+    """Reduce a closed internal publication success to the total-acceptance envelope."""
+
+    return build_accepted_projection_unavailable_result(
+        request_id=internal.request_id,
+        outcome=internal.outcome,
+        task_id=internal.task_id,
+        session_id=internal.session_id,
+        writer_id=internal.writer_id,
+        subject_frontier=internal.subject_frontier,
+        result_frontier=internal.result_frontier,
+        accepted=internal.accepted_events,
+        correlation_id=correlation_id,
+    )
+
+
+def accepted_projection_unavailable_from_append(
+    request: PublishWorkRequestModel,
+    runtime: TaskRuntime,
+    result: AppendResult,
+    *,
+    correlation_id: str,
+) -> PublishWorkResult:
+    """Reduce a committed append to the total-acceptance envelope without reloading events."""
+
+    return build_accepted_projection_unavailable_result(
+        request_id=request.request_id,
+        outcome=result.outcome,
+        task_id=runtime.task_id,
+        session_id=runtime.session_id,
+        writer_id=cast(str, runtime.writer_id),
+        subject_frontier=result.subject_frontier,
+        result_frontier=result.result_frontier,
+        accepted=result.accepted,
+        correlation_id=correlation_id,
+    )
+
+
 async def execute_publish_work(
     app: Application,
     request: PublishWorkRequestModel,
-) -> PublishWorkInternalResult:
+) -> PublishWorkInternalResult | PublishWorkResult:
     """Publish one all-or-nothing batch behind the ready application facade."""
 
     request_bytes = canonical_encode(
@@ -757,25 +854,49 @@ async def execute_publish_work(
             append_result = await run_prepared_append(runtime.ledger, mutation)
         # The batch is durable from here on. Bounded PublicOperationError values (STORAGE_CORRUPT
         # and friends) stay exactly as raised because they already describe the stored state
-        # truthfully. Only an unexpected failure is reshaped, so that assembling the response can
-        # never present an accepted write as a non-retryable failure.
+        # truthfully. Only an unexpected failure falls back to the reduced total-acceptance
+        # envelope so assembling the full closed model can never present an accepted write as a
+        # failure.
         try:
             return await _internal_result(request, runtime, prepared, append_result, digest)
         except PublicOperationError:
             raise
-        except Exception as exc:
-            # OPERATION_PENDING is the existing "durably underway, resolve by replaying the same
-            # request_id" signal, and _preflight_replay returns the stored result on that retry.
-            # A fallback INTERNAL_ERROR here would both break the module's closed code inventory
-            # and tell the caller the batch failed.
-            raise _error(
-                PublicErrorCode.OPERATION_PENDING,
-                (
-                    "The event batch was accepted, but its response could not be assembled. "
-                    "Retry with the same request_id to load the stored result."
-                ),
-                retryable=True,
-                reason_code="response_projection_failed",
-            ) from exc
+        except (asyncio.CancelledError, Exception) as exc:
+            # CancelledError is BaseException, not Exception. Cancellation after a durable append
+            # must not surface as request_cancelled — the write already landed.
+            from yoetz.observability.logging import record_unexpected_exception_without_raising
+
+            correlation_id = record_unexpected_exception_without_raising(
+                exc,
+                component="application.publish_work",
+                operation="publish_work_internal_result_failed",
+                request_id=request.request_id,
+            )
+            try:
+                return accepted_projection_unavailable_from_append(
+                    request,
+                    runtime,
+                    append_result,
+                    correlation_id=correlation_id,
+                )
+            except (asyncio.CancelledError, Exception) as envelope_exc:
+                # Genuinely impossible for a committed AppendResult: every accepted summary already
+                # carries the three structural fields the reduced envelope needs. Keep the legacy
+                # retryable reason only if even that construction fails.
+                record_unexpected_exception_without_raising(
+                    envelope_exc,
+                    component="application.publish_work",
+                    operation="publish_work_accepted_envelope_failed",
+                    request_id=request.request_id,
+                )
+                raise _error(
+                    PublicErrorCode.OPERATION_PENDING,
+                    (
+                        "The event batch was accepted, but its response could not be assembled. "
+                        "Retry with the same request_id to load the stored result."
+                    ),
+                    retryable=True,
+                    reason_code="response_projection_failed",
+                ) from envelope_exc
     finally:
         await app.runtime.release(runtime)

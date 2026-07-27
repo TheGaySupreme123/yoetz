@@ -35,7 +35,11 @@ from yoetz.adapters.keys.os_keyring import AutoUnlockPassphraseStore
 from yoetz.adapters.keys.secret_memory import LocalSecretMemory
 from yoetz.adapters.keys.vault_passphrase import VaultRootEnvelope
 from yoetz.adapters.session_events import SessionEventMonitor
-from yoetz.application.publish_work import PublishWorkInternalResult
+from yoetz.application.publish_work import (
+    PublishWorkInternalResult,
+    accepted_projection_unavailable_from_internal,
+    build_accepted_projection_unavailable_result,
+)
 from yoetz.application.service import (
     ClientProjectionContext,
     ControlProjectionBinding,
@@ -56,6 +60,7 @@ from yoetz.config.paths import (
     verify_private_local_bundle,
 )
 from yoetz.domain.privacy import LocalDisclosureSink
+from yoetz.domain.values import frontier_from_json
 from yoetz.observability.logging import (
     LogMode,
     configure_logging,
@@ -90,7 +95,10 @@ from yoetz.protocol.errors import PublicOperationError, SafeDetailValue
 from yoetz.protocol.ids import IdKind, new_id, validate_id
 from yoetz.protocol.models import (
     CheckResult,
+    PublishWorkAcceptedProjectionUnavailableModel,
     PublishWorkResult,
+    PublishWorkResultModel,
+    PublishWorkSuccessModel,
     ReceiptResult,
     RespondResult,
     StartResult,
@@ -220,6 +228,57 @@ def _accepted_state(internal: object) -> Mapping[str, SafeDetailValue] | None:
             return None
         return MappingProxyType({"count": count, "head_digest": head_digest, "sequence": sequence})
     except BaseException:
+        return None
+
+
+def _publish_accepted_projection_unavailable(
+    internal: object,
+    *,
+    correlation_id: str,
+    request_id: str | None,
+) -> PublishWorkResult | None:
+    """Return the reduced total-acceptance envelope for a committed publish, or None.
+
+    ``correlation_id`` is minted by the caller so the envelope, the diagnostic ring, and any
+    fallback ``ControlError`` path share one id. Returns None only when the minimal envelope cannot
+    be built — which must be impossible for a valid ``PublishWorkInternalResult``.
+    """
+
+    try:
+        if type(internal) is PublishWorkInternalResult:
+            return accepted_projection_unavailable_from_internal(
+                internal, correlation_id=correlation_id
+            )
+        if type(internal) is PublishWorkResultModel:
+            root = internal.root
+            if type(root) is PublishWorkAcceptedProjectionUnavailableModel:
+                return internal
+            if type(root) is PublishWorkSuccessModel:
+                return build_accepted_projection_unavailable_result(
+                    request_id=root.request_id,
+                    outcome=root.outcome,
+                    task_id=root.task_id,
+                    session_id=root.session_id,
+                    writer_id=root.writer_id,
+                    subject_frontier=frontier_from_json(
+                        root.subject_frontier.model_dump(mode="json")
+                    ),
+                    result_frontier=frontier_from_json(
+                        root.result_frontier.model_dump(mode="json")
+                    ),
+                    accepted=root.accepted_events,
+                    correlation_id=correlation_id,
+                )
+        return None
+    except BaseException as envelope_exc:
+        # A second diagnostic for envelope construction only — reuses the same request_id but a
+        # distinct operation so operators can see the reduction itself failed after the first log.
+        record_unexpected_exception_without_raising(
+            envelope_exc,
+            component="service.daemon",
+            operation="publish_work_accepted_envelope_failed",
+            request_id=request_id,
+        )
         return None
 
 
@@ -773,8 +832,10 @@ class ServiceDaemon:
         an accurate caller-safe meaning and pass through untouched. Only an unexpected exception is
         reclassified, and the reclassification depends on what the method could have changed:
 
-        - a write may already be durable, so it becomes ``response_projection_failed`` and the
-          caller is told to resume by replaying the same ``request_id``;
+        - a committed ``publish_work`` returns the reduced total-acceptance envelope
+          (``response_completeness: accepted_projection_unavailable``) so a durable write is never
+          reported as a failure;
+        - other writes become ``response_projection_failed`` with same-``request_id`` replay;
         - a read changed nothing, so it becomes ``read_projection_failed`` and the caller is told
           to repeat the request. Advertising same-``request_id`` replay for a read is false: no
           operation record exists to replay against, and the caller waits on a recovery that
@@ -783,6 +844,12 @@ class ServiceDaemon:
 
         try:
             if request.method in _PROJECTION_EXEMPT_METHODS:
+                self._validate_success_body(request, internal)
+                return internal
+            # Application-layer fallback already produced the reduced acceptance envelope.
+            if type(internal) is PublishWorkResultModel and type(internal.root) is (
+                PublishWorkAcceptedProjectionUnavailableModel
+            ):
                 self._validate_success_body(request, internal)
                 return internal
             facts = await application.projection_binding_facts(
@@ -841,18 +908,28 @@ class ServiceDaemon:
             # Cancellation is reclassified here too. `dispatch` already converts a cancelled call
             # into a result rather than propagating, and past this point the operation may be
             # durable — reporting CANCELLED would say the work did not happen and would omit the
-            # replay remedy. This changes only how an already-converted cancellation is described.
+            # recovery facts. This changes only how an already-converted cancellation is described.
+            request_id = _safe_body_request_id(request)
             reason = (
                 "read_projection_failed"
                 if request.method in _READ_ONLY_METHODS
                 else "response_projection_failed"
             )
-            record_unexpected_exception_without_raising(
+            # One correlation id for the unexpected failure path: shared by the reduced publish
+            # envelope (when built) and the diagnostic ring; no second mint on ControlError fallback.
+            correlation_id = record_unexpected_exception_without_raising(
                 exc,
                 component="service.daemon",
                 operation=f"{request.method.value}_{reason}",
-                request_id=_safe_body_request_id(request),
+                request_id=request_id,
             )
+            if request.method is ControlMethod.PUBLISH_WORK:
+                reduced = _publish_accepted_projection_unavailable(
+                    internal, correlation_id=correlation_id, request_id=request_id
+                )
+                if reduced is not None:
+                    self._validate_success_body(request, reduced)
+                    return reduced
             accepted_state = (
                 None if reason == "read_projection_failed" else _accepted_state(internal)
             )

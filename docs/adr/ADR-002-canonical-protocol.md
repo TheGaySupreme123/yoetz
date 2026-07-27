@@ -35,6 +35,11 @@ vectors plus an independent-implementation parity run.
    independently SemVer'd starting `1.0.0`; unknown public request versions are rejected
    (`PROTOCOL_VERSION_UNSUPPORTED` / `INVALID_REQUEST`); unknown *event* schemas are preserved
    opaque. JSON Schema draft 2020-12 with `$id` under `https://schemas.yoetz.dev/0.1/`.
+   Pre-1.0 result contracts may add reduced success branches when that is the honest outcome: the
+   `publish_work` result is a three-way union of full success, reduced total acceptance
+   (`response_completeness: "accepted_projection_unavailable"` after a durable append whose full
+   privacy projection failed), and operation failure. The reduced branch is still `ok: true` and
+   is constructible from ledger append facts alone.
 7. **Golden vectors:** `fixtures/canonical/` freezes: canonicalization vectors (positive +
    rejection), request-digest vectors, accepted-envelope/entry-digest vectors, and ID-validation
    vectors. Released bytes are permanent compatibility obligations.

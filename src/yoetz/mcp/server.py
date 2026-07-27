@@ -51,7 +51,7 @@ from yoetz.observability.logging import (
     record_unexpected_exception_without_raising,
 )
 from yoetz.ports.control import ControlClientKind, ControlError
-from yoetz.protocol.errors import PublicErrorCode, PublicOperationError, SafeDetailValue
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id, safe_request_id_from
 from yoetz.protocol.models import (
     CheckRequest,
@@ -109,14 +109,6 @@ _RESPONSE_PROJECTION_FAILED_MESSAGE: Final = (
     "Retry with the same request_id to load the stored result."
 )
 _RESPONSE_PROJECTION_FAILED_DETAILS: Final = {"reason_code": "response_projection_failed"}
-# When the committed frontier is known, say so plainly. "Retry with the same request_id" is a true
-# remedy but an incomplete answer: it leaves the caller unable to state what landed until a second
-# status call returns, which is exactly the guessing the 2026-07-27 dogfood had to do.
-_ACCEPTED_WRITE_PROJECTION_FAILED_MESSAGE: Final = (
-    "The write was accepted and is durable at the frontier in safe_details (sequence, "
-    "head_digest, count), but its response could not be shaped. Retry with the same request_id "
-    "to load the stored result; do not re-send the events under a new request_id."
-)
 # A read never appended, so there is no stored result and no operation record to replay against.
 # Telling the caller to reuse the request_id would send it after a recovery that cannot exist.
 _READ_PROJECTION_FAILED_MESSAGE: Final = (
@@ -315,15 +307,17 @@ def _control_error_result(
             },
         )
     if error.reason == "response_projection_failed":
-        details: dict[str, SafeDetailValue] = dict(_RESPONSE_PROJECTION_FAILED_DETAILS)
-        message = _RESPONSE_PROJECTION_FAILED_MESSAGE
+        # Accepted durable publish_work usually returns the reduced total-acceptance envelope
+        # instead. This mapping remains for non-publish writes and for the genuinely impossible
+        # case where even the minimal publish envelope cannot be built. When the daemon attached
+        # accepted_state (sequence/head_digest/count), surface those structural facts so the
+        # agent does not need a second status call to learn where the write landed.
+        details: dict[str, object] = dict(_RESPONSE_PROJECTION_FAILED_DETAILS)
         if error.accepted_state:
-            # Where the write landed, so the caller can continue without a second status call.
             details.update(error.accepted_state)
-            message = _ACCEPTED_WRITE_PROJECTION_FAILED_MESSAGE
         return structured_error_result(
             PublicErrorCode.INTERNAL_ERROR,
-            message,
+            _RESPONSE_PROJECTION_FAILED_MESSAGE,
             retryable=True,
             request_id=request_id,
             safe_details=details,

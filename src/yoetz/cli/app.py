@@ -595,6 +595,39 @@ def service_run() -> None:
     daemon_main()
 
 
+@service_app.command("diagnostics")
+def service_diagnostics(
+    correlation_id: Annotated[
+        str,
+        typer.Option(
+            "--correlation-id",
+            help="Exact err_… correlation id from a public error or reduced accept envelope.",
+        ),
+    ],
+    json_output: _JSON = False,
+) -> None:
+    """Resolve one durable owner-only diagnostic record by correlation id."""
+
+    try:
+        from yoetz.observability.diagnostics import lookup_diagnostic_records
+        from yoetz.protocol.ids import IdKind, validate_id
+
+        validate_id(IdKind.CORRELATION, correlation_id)
+        records = lookup_diagnostic_records(correlation_id)
+        output = cast(
+            JsonValue,
+            {
+                "correlation_id": correlation_id,
+                "count": len(records),
+                "records": [dict(item) for item in records],
+            },
+        )
+        _human_or_json(output, json_output=json_output)
+        _finish(0 if records else 1)
+    except OSError, TypeError, ValueError:
+        _finish(_usage_failure())
+
+
 @mcp_app.command("serve")
 def mcp_serve() -> None:
     """Run the MCP stdio bridge."""
