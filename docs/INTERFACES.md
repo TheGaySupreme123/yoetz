@@ -528,6 +528,10 @@ review was not run; they must not reuse blocked-by-policy wording. The not-reque
 deterministic-only check and forces coverage incompleteness without changing the deterministic
 verdict.
 
+The check-applicability gap family follows the same material-state rule: `check_not_applicable`
+means material work was appended after the recorded check and superseded its verdict, never that
+the frontier merely advanced.
+
 ## 9. Kernel (`kernel/`)
 
 - `ProjectionState` (frozen): `frontier`, `head_digest`, `plans`, `obligations`, `decisions`,
@@ -633,7 +637,10 @@ verdict.
   `availability` is the current `CaseAvailabilityFacts`, `coverage` is the weakest material fold,
   `gaps` is the exact sorted typed `CaseGap` tuple after check/semantic/availability accounting, and
   `applicable_check` is the exact readable `CheckRecordedPayload` that still applies to this
-  material state or `None`. The application constructs this context; the builder never imports a
+  material state or `None`. A check applies when no event of a material family has been appended
+  after its subject frontier; an immaterial advance — `check_recorded`, `receipt_recorded`,
+  `session_opened`, `session_resumed` — never revokes it. Frontier equality is not the rule: a
+  check necessarily advances the frontier past the subject it tested. The application constructs this context; the builder never imports a
   port type or re-derives applicability.
 - `build_receipt(context, receipt_id, task_id, session_id, generated_at,
   versions: ReceiptVersionSlice, redaction_profile, include) -> ReceiptDocument`. Every

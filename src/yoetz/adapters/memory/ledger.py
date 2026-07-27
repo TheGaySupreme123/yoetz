@@ -78,7 +78,7 @@ from yoetz.kernel.projections import (
     empty_projection_state,
     projection_digest,
 )
-from yoetz.kernel.reducers import replay
+from yoetz.kernel.reducers import is_material_event_family, replay
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
@@ -132,9 +132,11 @@ from yoetz.protocol.canonical import (
 )
 from yoetz.protocol.coverage import (
     AuthorshipAssurance,
+    Coverage,
     PublicationChannel,
     coverage_for_channel,
     coverage_to_json,
+    weakest,
 )
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
@@ -661,6 +663,36 @@ def _status_gap_codes(markers: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(sorted({marker.split(":", 1)[0] for marker in markers}, key=str.encode))
 
 
+def _compact_status_coverage(
+    records: tuple[LedgerRecord, ...], projection: ProjectionState
+) -> Coverage:
+    """Fold the applicable check's coverage into the compact-status baseline.
+
+    The newest record's envelope (often an engine-derived ``receipt_recorded``) hardcodes
+    ``check_types=(none,)`` even immediately after a rich check; the check's real coverage
+    lives in its payload. The receipt applicability rule decides whether the projected latest
+    check still covers this state: it does unless material work was appended after it.
+    """
+
+    baseline = records[-1].coverage
+    latest = projection.latest_tested_state
+    if latest is None:
+        return baseline
+    check_record = next(
+        (record for record in records if record.event_id == latest.source_check_event_id),
+        None,
+    )
+    if check_record is None or type(check_record.payload) is not CheckRecordedPayload:
+        return baseline
+    if any(
+        is_material_event_family(record.schema.name)
+        and record.ledger.ingestion_sequence > check_record.ledger.ingestion_sequence
+        for record in records
+    ):
+        return baseline
+    return weakest(baseline, check_record.payload.coverage)
+
+
 def _obligation_item(
     obligation: str,
     record: object,
@@ -921,7 +953,9 @@ def _projection_items(
                 open_obligations=open_obligations[:10],
                 unresolved_findings=unresolved_findings[:10],
                 freshness=projection.freshness.value,
-                coverage=CoverageModel.model_validate(coverage_to_json(records[-1].coverage)),
+                coverage=CoverageModel.model_validate(
+                    coverage_to_json(_compact_status_coverage(records, projection))
+                ),
                 gaps=_status_gap_codes(projection.coverage_gaps),
             ),
         )
