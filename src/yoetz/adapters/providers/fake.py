@@ -10,7 +10,7 @@ and never invents richer provenance than a live adapter would produce.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from threading import Lock
 from typing import Final
 
@@ -87,6 +87,24 @@ def _provenance(
         token_usage=token_usage,
         cost_fields=cost_fields,
         failure_class=failure_class,
+    )
+
+
+def _with_policy_digest(result: SemanticResult, policy_digest: str) -> SemanticResult:
+    """Bind a scripted step's provenance to the policy digest that authorized this dispatch.
+
+    A script is authored before any case exists, so the scripted steps carry a placeholder digest.
+    Rebinding at dispatch time keeps the fake honest in exactly the way a live adapter is: the
+    approved case is the only source of the policy digest, and the fake never asserts one of its
+    own. The gateway rebinds this again, authoritatively; doing it here means the fake is never
+    wrong even when driven directly.
+    """
+
+    return replace(
+        result,
+        provenance=replace(
+            result.provenance, policy_digest=policy_digest, privacy_policy_digest=policy_digest
+        ),
     )
 
 
@@ -230,7 +248,9 @@ class ScriptedFakeSemanticEvaluator:
         if self._clock is not None:
             now = self._clock.monotonic_seconds() + step.delay_seconds
             if deadline.expired(now):
-                return SemanticResultTimeout(_provenance(SemanticStatus.TIMEOUT))
+                return _with_policy_digest(
+                    SemanticResultTimeout(_provenance(SemanticStatus.TIMEOUT)), case.policy_digest
+                )
         elif step.delay_seconds:
             await anyio.sleep(step.delay_seconds)
-        return step.result
+        return _with_policy_digest(step.result, case.policy_digest)

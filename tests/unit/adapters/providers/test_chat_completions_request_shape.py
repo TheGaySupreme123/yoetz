@@ -191,11 +191,15 @@ def test_a_non_external_binding_cannot_reach_the_adapter_at_all() -> None:
 def test_exact_judgment_shape_succeeds() -> None:
     response = _Response(_Choice(_Message(content=_JUDGMENT)))
 
-    result = normalize_response(response, _profile(), latency_ms=12)
+    result = normalize_response(response, _profile(), policy_digest=_DIGEST, latency_ms=12)
 
     assert type(result) is SemanticResultSuccess
     assert result.judgment.conclusion == "no_material_discrepancy"
     assert result.provenance.provider_request_id == "chatcmpl-1"
+    # The adapter reports the policy that authorized the dispatch, never a minted placeholder.
+    assert result.provenance.policy_digest == _case().policy_digest
+    assert result.provenance.privacy_policy_digest == _case().policy_digest
+    assert result.provenance.policy_digest != "sha256:" + "0" * 64
 
 
 def test_prose_answer_degrades_to_invalid_rather_than_a_fabricated_pass() -> None:
@@ -203,7 +207,9 @@ def test_prose_answer_degrades_to_invalid_rather_than_a_fabricated_pass() -> Non
 
     response = _Response(_Choice(_Message(content="Looks good to me! No issues found.")))
 
-    result = normalize_response(response, _profile("prompt_only"), latency_ms=12)
+    result = normalize_response(
+        response, _profile("prompt_only"), policy_digest=_DIGEST, latency_ms=12
+    )
 
     assert type(result) is SemanticResultInvalid
     assert result.provenance.failure_class is SemanticFailureClass.RESPONSE_SCHEMA
@@ -228,14 +234,21 @@ def test_prose_answer_degrades_to_invalid_rather_than_a_fabricated_pass() -> Non
 def test_non_judgment_answers_map_to_their_exact_terminal(
     response: _Response, expected: type[object]
 ) -> None:
-    assert type(normalize_response(response, _profile(), latency_ms=5)) is expected
+    assert (
+        type(normalize_response(response, _profile(), policy_digest=_DIGEST, latency_ms=5))
+        is expected
+    )
 
 
 def test_transport_and_status_failures_keep_their_public_class() -> None:
     import httpx
 
-    timeout = classify_provider_failure(httpx.TimeoutException("x"), _profile(), latency_ms=1)
-    transport = classify_provider_failure(httpx.ConnectError("x"), _profile(), latency_ms=1)
+    timeout = classify_provider_failure(
+        httpx.TimeoutException("x"), _profile(), policy_digest=_DIGEST, latency_ms=1
+    )
+    transport = classify_provider_failure(
+        httpx.ConnectError("x"), _profile(), policy_digest=_DIGEST, latency_ms=1
+    )
 
     assert type(timeout) is SemanticResultTimeout
     assert type(transport) is SemanticResultUnavailable
@@ -250,7 +263,7 @@ def test_transport_and_status_failures_keep_their_public_class() -> None:
     ):
         error = RuntimeError("provider said no")
         error.status_code = status  # pyright: ignore[reportAttributeAccessIssue]
-        result = classify_provider_failure(error, _profile(), latency_ms=1)
+        result = classify_provider_failure(error, _profile(), policy_digest=_DIGEST, latency_ms=1)
         assert type(result) is SemanticResultUnavailable
         assert result.provenance.failure_class is failure_class
 

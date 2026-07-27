@@ -196,6 +196,7 @@ def _provenance(
     profile: LocalModelEndpointProfile,
     status: SemanticStatus,
     *,
+    policy_digest: str,
     latency_ms: int,
     failure_class: SemanticFailureClass | None = None,
 ) -> ProviderAttemptProvenance:
@@ -207,8 +208,8 @@ def _provenance(
         sdk_version=profile.protocol_version,
         prompt_digest=profile.capability_evidence_digest,
         schema_digest=profile.capability_evidence_digest,
-        policy_digest=profile.release_resource_digest,
-        privacy_policy_digest=profile.release_resource_digest,
+        policy_digest=policy_digest,
+        privacy_policy_digest=policy_digest,
         sampling_params=SamplingParams(_MAX_LOCAL_OUTPUT_TOKENS),
         latency_ms=latency_ms,
         status=status,
@@ -261,6 +262,7 @@ def normalize_local_response(
     raw: bytes,
     profile: LocalModelEndpointProfile,
     *,
+    policy_digest: str,
     latency_ms: int,
 ) -> SemanticResult:
     """Parse and validate one bounded local-model response into a closed semantic result.
@@ -268,6 +270,10 @@ def normalize_local_response(
     Missing installed tuple/socket/resolver/evidence, peer or generation mismatch, unsupported
     schema/model, refusal, or invalid/truncated output all return bounded status with no raw
     response retention beyond this call.
+
+    ``policy_digest`` is the policy digest that authorized this disclosure, carried by the approved
+    case. The adapter never mints one of its own; the outbound gateway rebinds it authoritatively
+    after this returns.
     """
 
     if type(raw) is not bytes or not 0 < len(raw) <= _MAX_LOCAL_RESPONSE_BYTES:
@@ -275,6 +281,7 @@ def normalize_local_response(
             _provenance(
                 profile,
                 SemanticStatus.INVALID,
+                policy_digest=policy_digest,
                 latency_ms=latency_ms,
                 failure_class=SemanticFailureClass.RESPONSE_SCHEMA,
             ),
@@ -288,13 +295,20 @@ def normalize_local_response(
             _provenance(
                 profile,
                 SemanticStatus.INVALID,
+                policy_digest=policy_digest,
                 latency_ms=latency_ms,
                 failure_class=SemanticFailureClass.RESPONSE_SCHEMA,
             ),
             raw_size=len(raw),
         )
     return SemanticResultSuccess(
-        judgment, _provenance(profile, SemanticStatus.SUCCEEDED, latency_ms=latency_ms)
+        judgment,
+        _provenance(
+            profile,
+            SemanticStatus.SUCCEEDED,
+            policy_digest=policy_digest,
+            latency_ms=latency_ms,
+        ),
     )
 
 
@@ -339,7 +353,12 @@ class LocalModelEvaluator:
         now_monotonic = self._clock.monotonic_seconds()
         if deadline.expired(now_monotonic):
             return SemanticResultTimeout(
-                _provenance(self._profile, SemanticStatus.TIMEOUT, latency_ms=0)
+                _provenance(
+                    self._profile,
+                    SemanticStatus.TIMEOUT,
+                    policy_digest=case.policy_digest,
+                    latency_ms=0,
+                )
             )
 
         try:
@@ -351,10 +370,13 @@ class LocalModelEvaluator:
                 _provenance(
                     self._profile,
                     SemanticStatus.UNAVAILABLE,
+                    policy_digest=case.policy_digest,
                     latency_ms=elapsed_ms,
                     failure_class=SemanticFailureClass.TRANSPORT,
                 )
             )
 
         latency_ms = max(0, int((self._clock.monotonic_seconds() - now_monotonic) * 1_000))
-        return normalize_local_response(raw, self._profile, latency_ms=latency_ms)
+        return normalize_local_response(
+            raw, self._profile, policy_digest=case.policy_digest, latency_ms=latency_ms
+        )

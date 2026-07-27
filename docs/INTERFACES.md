@@ -407,6 +407,12 @@ commitment when applicable; and the validated terminal status/reason pair. The e
 and wire conversions are frozen in `domain/findings.md` and
 `semantic-provenance-1.0.0.schema.json`.
 
+`policy_digest` and `privacy_policy_digest` on `ProviderAttemptProvenance` and
+`SemanticProvenance` are bound by the outbound gateway to the effective policy digest that
+authorized the physical dispatch — the same value carried by `ApprovedOutboundCase.policy_digest`,
+`EgressAuthorization.policy_digest`, and `EgressReceipt.policy.policy_digest`. A provider adapter
+never asserts them. On a successful dispatch they are never placeholder or all-zero values.
+
 A deterministic candidate/finding forbids provenance. A semantic-model-derived candidate/finding
 requires receipt-finalized provenance whose status/reason is exactly
 `succeeded/semantic_completed`; failed, refused, stale, late, invalid, timeout, or unavailable
