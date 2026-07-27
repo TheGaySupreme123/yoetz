@@ -10,10 +10,12 @@ from enum import Enum
 from types import TracebackType
 from typing import Final, Protocol
 
+from yoetz.domain.privacy import LocalDisclosureSink
 from yoetz.domain.values import format_rfc3339_millis
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.keys import MacKeyHandle
+from yoetz.ports.publish_response_catalog import PublishResponseKey, StoredPublishResponse
 from yoetz.ports.runtime import StartCompletionEvidence, StartMilestone
 from yoetz.ports.start_catalog import (
     EXTERNAL_REF_DOMAIN,
@@ -125,6 +127,9 @@ class MemoryStartCatalogState:
     operations: dict[tuple[str, str], _OperationRecord] = field(default_factory=lambda: {})
     session_index: dict[str, str] = field(default_factory=lambda: {})
     attachment_index: dict[tuple[str, str], str] = field(default_factory=lambda: {})
+    publish_responses: dict[tuple[str, str, LocalDisclosureSink], StoredPublishResponse] = field(
+        default_factory=lambda: {}
+    )
 
     def __post_init__(self) -> None:
         if type(self.owner_generation) is not int or self.owner_generation <= 0:
@@ -351,6 +356,33 @@ class MemoryStartCatalogAdapter:
             if record is None or record.active_session_id != session:
                 raise _error(PublicErrorCode.STORAGE_CORRUPT)
         return _route_value(record)
+
+    async def lookup(self, key: PublishResponseKey) -> StoredPublishResponse | None:
+        if type(key) is not PublishResponseKey:
+            raise _error(PublicErrorCode.INVALID_REQUEST)
+        identity = (key.writer_id, key.request_id, key.sink)
+        async with self._lock:
+            existing = self._state.publish_responses.get(identity)
+            if existing is None:
+                return None
+            if type(existing) is not StoredPublishResponse or existing.key != key:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            return existing
+
+    async def put_if_absent(self, value: StoredPublishResponse) -> StoredPublishResponse:
+        if type(value) is not StoredPublishResponse:
+            raise _error(PublicErrorCode.INVALID_REQUEST)
+        key = value.key
+        identity = (key.writer_id, key.request_id, key.sink)
+        async with self._lock:
+            existing = self._state.publish_responses.get(identity)
+            if existing is None:
+                self._state.publish_responses[identity] = value
+                self._state.revision += 1
+                return value
+            if type(existing) is not StoredPublishResponse or existing.key != key:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            return existing
 
     async def reserve_or_resume(self, request: StartCommand) -> StartAllocation:
         if type(request) is not StartCommand:

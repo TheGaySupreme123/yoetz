@@ -48,6 +48,7 @@ from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.ledger import CheckPhase, OperationLease
 from yoetz.ports.objects import ObjectKind, ObjectRef
+from yoetz.ports.publish_response_catalog import PublishResponseCatalogPort
 from yoetz.ports.runtime import BundleRuntimePort, RouteCommand, TaskRuntime
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.models import (
@@ -220,6 +221,7 @@ async def test_full_workflow_uses_one_final_client_projection(
     runtime = _WorkflowRuntime(clock, ids)
     app = Application(
         start_catalog=catalog.delegate,
+        publish_responses=cast(PublishResponseCatalogPort, catalog.delegate),
         runtime=cast(BundleRuntimePort, runtime),
         clock=clock,
         ids=ids,

@@ -1761,6 +1761,7 @@ async def provide_service_ready_context(
         vault_generation=vault_generation,
         generation_is_current=generation_is_current,
         start_catalog=catalog,
+        publish_responses=catalog,
         runtime=runtime,
         clock=clock,
         ids=ids,

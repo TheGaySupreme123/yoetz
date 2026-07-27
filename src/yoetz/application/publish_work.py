@@ -159,6 +159,7 @@ class PublishWorkInternalResult:
     protocol_version: Literal["0.1"]
     schema_version: Literal["1.0.0"]
     request_id: str
+    request_digest: str
     ok: Literal[True]
     outcome: Literal["accepted", "replayed"]
     task_id: str
@@ -621,6 +622,7 @@ async def _internal_result(
     runtime: TaskRuntime,
     prepared: PreparedPublication,
     result: AppendResult,
+    digest: str,
 ) -> PublishWorkInternalResult:
     expected_ids = tuple(item.draft.event_id for item in prepared.drafts)
     if tuple(item.event_id for item in result.accepted) != expected_ids:
@@ -637,6 +639,7 @@ async def _internal_result(
         protocol_version="0.1",
         schema_version="1.0.0",
         request_id=request.request_id,
+        request_digest=digest,
         ok=True,
         outcome=result.outcome,
         task_id=runtime.task_id,
@@ -757,7 +760,7 @@ async def execute_publish_work(
         # truthfully. Only an unexpected failure is reshaped, so that assembling the response can
         # never present an accepted write as a non-retryable failure.
         try:
-            return await _internal_result(request, runtime, prepared, append_result)
+            return await _internal_result(request, runtime, prepared, append_result, digest)
         except PublicOperationError:
             raise
         except Exception as exc:

@@ -12,10 +12,12 @@ from typing import Final, Literal, cast
 
 import apsw
 
+from yoetz.domain.privacy import LocalDisclosureSink
 from yoetz.domain.values import format_rfc3339_millis, parse_rfc3339_millis
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.keys import MacKeyHandle
+from yoetz.ports.publish_response_catalog import PublishResponseKey, StoredPublishResponse
 from yoetz.ports.runtime import StartCompletionEvidence, StartMilestone
 from yoetz.ports.start_catalog import (
     EXTERNAL_REF_DOMAIN,
@@ -45,7 +47,7 @@ __all__ = [
     "workspace_ref_commitment",
 ]
 
-CATALOG_SCHEMA_VERSION: Final = 1
+CATALOG_SCHEMA_VERSION: Final = 2
 _LEASE_SECONDS: Final = 60
 _PHASE_SUCCESSOR: Final = {
     StartPhase.ROUTE_RESERVED: StartPhase.BUNDLE_READY,
@@ -174,6 +176,34 @@ def _optional_bytes(value: object) -> bytes | None:
     if type(value) is not bytes:
         raise _error(PublicErrorCode.STORAGE_CORRUPT)
     return value
+
+
+def _bytes(value: object) -> bytes:
+    result = _optional_bytes(value)
+    if result is None:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT)
+    return result
+
+
+def _publish_response_from_row(row: tuple[object, ...]) -> StoredPublishResponse:
+    if len(row) != 8:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT)
+    try:
+        key = PublishResponseKey(
+            task_id=_text(row[3]),
+            session_id=_text(row[4]),
+            writer_id=_text(row[0]),
+            request_id=_text(row[1]),
+            request_digest=_text(row[5]),
+            sink=LocalDisclosureSink(_text(row[2])),
+        )
+        return StoredPublishResponse(
+            key=key,
+            result_canonical=_bytes(row[6]),
+            result_digest=_text(row[7]),
+        )
+    except (TypeError, ValueError) as exc:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
 
 
 def _commitment(lookup: MacKeyHandle, domain: bytes, value: JsonValue) -> str:
@@ -391,6 +421,11 @@ owner_generation, lease_owner_id, lease_generation, lease_expires_at, response_o
 response_envelope_digest, terminal_result_canonical, terminal_result_digest, quarantine_code
 """
 
+_PUBLISH_RESPONSE_COLUMNS: Final = """
+writer_id, request_id, sink, task_id, session_id, request_digest,
+result_canonical, result_digest
+"""
+
 
 class SqliteStartCatalog:
     """Durable ``StartCatalogPort`` implementation using the frozen catalog schema."""
@@ -443,6 +478,40 @@ class SqliteStartCatalog:
         if len(rows) != 1:
             raise _error(PublicErrorCode.STORAGE_CORRUPT)
         return _route_value(_route_from_row(rows[0]))
+
+    async def lookup(self, key: PublishResponseKey) -> StoredPublishResponse | None:
+        if type(key) is not PublishResponseKey:
+            raise _error(PublicErrorCode.INVALID_REQUEST)
+        existing = self._publish_response_by_identity(key)
+        if existing is not None and existing.key != key:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        return existing
+
+    async def put_if_absent(self, value: StoredPublishResponse) -> StoredPublishResponse:
+        if type(value) is not StoredPublishResponse:
+            raise _error(PublicErrorCode.INVALID_REQUEST)
+        key = value.key
+        with self._transaction():
+            self._db.execute(
+                """INSERT OR IGNORE INTO publish_responses (
+                    writer_id, request_id, sink, task_id, session_id, request_digest,
+                    result_canonical, result_digest
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    key.writer_id,
+                    key.request_id,
+                    key.sink.value,
+                    key.task_id,
+                    key.session_id,
+                    key.request_digest,
+                    value.result_canonical,
+                    value.result_digest,
+                ),
+            )
+            winner = self._publish_response_by_identity(key)
+            if winner is None or winner.key != key:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            return winner
 
     async def reserve_or_resume(self, request: StartCommand) -> StartAllocation:
         if type(request) is not StartCommand:
@@ -752,6 +821,20 @@ class SqliteStartCatalog:
         if len(rows) != 1:
             raise _error(PublicErrorCode.STORAGE_CORRUPT)
         return _operation_from_row(rows[0])
+
+    def _publish_response_by_identity(
+        self, key: PublishResponseKey
+    ) -> StoredPublishResponse | None:
+        rows = self._rows(
+            f"""SELECT {_PUBLISH_RESPONSE_COLUMNS} FROM publish_responses
+               WHERE writer_id = ? AND request_id = ? AND sink = ? LIMIT 2""",
+            (key.writer_id, key.request_id, key.sink.value),
+        )
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        return _publish_response_from_row(rows[0])
 
     def _operation_for(self, allocation: StartAllocation) -> _OperationRow:
         rows = self._rows(

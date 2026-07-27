@@ -86,7 +86,12 @@ public-error JSON Schema remains a structural superset of this exact mapping-onl
 Allowlisted `safe_details` keys include structural recovery fields such as `reason_code`,
 `sequence`, and `head_digest` (for `FRONTIER_CONFLICT` current-head recovery). Protocol reason
 `response_projection_failed` marks an MCP post-commit shaping failure: the write may already be
-durable, so the public error is retryable and same-`request_id` resume is the recovery path.
+durable, so the public error is retryable and same-`request_id` resume is the recovery path. For
+`publish_work`, completed-operation replay is resolved before `expected_frontier`; it never
+re-appends the accepted events. If an exact validated response body was durably stored, replay to
+the same ordinary disclosure sink returns that body without running privacy projection again. If
+projection failed before a response body existed, replay resolves the stored operation and retries
+response projection instead.
 `read_projection_failed` is its read-only counterpart: nothing was appended, so the remedy is
 repeating the request rather than a same-`request_id` replay that has no operation record to load.
 When the committed frontier is known, `response_projection_failed` also carries `sequence`,
@@ -1006,6 +1011,16 @@ same-`request_id` replay remedy it uses for its own projection failures. Deliber
 failures raised in that window — `privacy_projection_blocked`, `privacy_projection_unavailable`,
 and any `PublicOperationError` — already state something true and pass through unchanged. An
 accepted write must never surface as an unqualified failure.
+
+`PublishResponseCatalogPort` is the publish-only durable control-boundary response store. Its key
+is `(task_id, session_id, writer_id, request_id, request_digest, sink)`, where `sink` is exactly
+`agent_context|local_human_view`; the authoritative publish handler has already matched the
+operation digest before the daemon consults it. A stored value is the exact canonical validated
+`PublishWorkResult` body and its SHA-256 digest. Accepted-event `summary` is forbidden in this
+structural store. Concurrent projections use atomic put-if-absent and return one durable winner;
+the daemon rebuilds `rpc_id`, service instance, and service generation in the outer control result.
+This stored-body guarantee applies only to `publish_work`; `start|check|respond|receipt` retain
+their existing durable internal-result replay and still run client projection on each call.
 
 `read_projection_failed` covers the same window for methods that append nothing
 (`_READ_ONLY_METHODS` in `service/daemon.py`: `status` plus the two privacy receipt reads). It is
@@ -2093,7 +2108,7 @@ facade and are never MCP tools.
 `version.py` exposes `VersionManifest`: package, protocol (`0.1`), local control protocol (`1.0`),
 privacy-policy schema (`1.0.0`), egress-receipt schema (`1.0.0`), engine (`0.1.0`), policy pack
 versions, projection (`yoetz/0.1.0`), object format (`yoetz-object/1`), storage schema
-(`user_version` 1, catalog 1), Python, APSW/SQLite source ID, MCP SDK, provider adapter versions.
+(`user_version` bundle 4, catalog 2), Python, APSW/SQLite source ID, MCP SDK, provider adapter versions.
 Its shared support values are frozen `ResourceIdentity(name, media_type, size_bytes,
 sha256_digest)` and `CapabilitySet(name, supported_versions, tested_versions, denied_versions)`.
 Every capability collection is an exact ASCII-sorted set: membership is literal, with no SemVer
