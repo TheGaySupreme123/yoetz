@@ -28,7 +28,7 @@ from yoetz.ports.control import (
     ServiceStopResult,
 )
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
-from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
+from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, SafeDetailValue
 from yoetz.protocol.models import (
     CheckRequest,
     CheckResult,
@@ -308,7 +308,13 @@ def _plain_wire_value(value: object) -> JsonValue:
     if isinstance(value, Enum):
         return cast(JsonValue, value.value)
     if isinstance(value, ControlError):
-        return {"code": value.reason, "retryable": value.retryable}
+        body: dict[str, JsonValue] = {"code": value.reason, "retryable": value.retryable}
+        if value.accepted_state:
+            body["accepted_state"] = {
+                key: cast(JsonValue, value.accepted_state[key])
+                for key in sorted(value.accepted_state)
+            }
+        return body
     if isinstance(value, BaseModel):
         # Match public_model_to_wire: keep explicit nulls required by closed schemas,
         # omit unset optional fields (optional_non_null must stay absent, not null).
@@ -599,8 +605,16 @@ def parse_control_result(frame: ControlFrame) -> ControlResult:
             if not isinstance(raw_body, Mapping):
                 _fail("frame_invalid")
             error = cast(Mapping[str, object], raw_body)
+            raw_accepted = error.get("accepted_state")
+            accepted_state = (
+                cast(Mapping[str, SafeDetailValue], raw_accepted)
+                if isinstance(raw_accepted, Mapping)
+                else None
+            )
             body: object = ControlError(
-                cast(str, error["code"]), retryable=cast(bool, error["retryable"])
+                cast(str, error["code"]),
+                retryable=cast(bool, error["retryable"]),
+                accepted_state=accepted_state,
             )
         elif method in {ControlMethod.SERVICE_STATUS, ControlMethod.SERVICE_LOCK}:
             body = _service_status_from_wire(raw_body)

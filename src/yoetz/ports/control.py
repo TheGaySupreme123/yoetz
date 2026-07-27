@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Literal, Protocol
+from types import MappingProxyType
+from typing import Final, Literal, Protocol, cast
 
 from yoetz.domain.values import JsonObject
 from yoetz.protocol.canonical import parse_canonical_integer_string
+from yoetz.protocol.errors import SafeDetailValue, normalize_safe_details
 from yoetz.protocol.ids import IdKind, validate_id
 from yoetz.protocol.models import (
     CheckRequest,
@@ -247,17 +250,36 @@ _CONTROL_ERROR_REASONS = frozenset(
         "service_generation_changed",
     }
 )
+_EMPTY_ACCEPTED_STATE: Final[Mapping[str, SafeDetailValue]] = MappingProxyType({})
+# The exact structural facts a caller needs to continue after a post-commit projection failure:
+# where the ledger landed, and how many events it accepted.
+ACCEPTED_STATE_KEYS: Final = ("count", "head_digest", "sequence")
 
 
 class ControlError(Exception):
-    """A bounded control failure with no free-form message or details."""
+    """A bounded control failure with no free-form message and only allowlisted details.
 
-    __slots__ = ("reason", "retryable")
+    ``accepted_state`` carries the structural facts of an operation that already committed, for
+    the one case where the caller cannot otherwise learn them: response projection failed after a
+    durable append, so no success body exists. Without it the caller knows only *that* the write
+    landed and must spend a second `status` call to learn *where*. Values pass through the same
+    ``SAFE_DETAIL_KEYS`` allowlist as public errors, so this stays structural — no user content,
+    no free text — and it is admitted only for ``response_projection_failed``.
+    """
+
+    __slots__ = ("accepted_state", "reason", "retryable")
 
     reason: str
     retryable: bool
+    accepted_state: Mapping[str, SafeDetailValue]
 
-    def __init__(self, reason: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        retryable: bool = False,
+        accepted_state: Mapping[str, SafeDetailValue] | None = None,
+    ) -> None:
         if type(reason) is not str or reason not in _CONTROL_ERROR_REASONS:
             raise TypeError("control_error_reason_invalid")
         if type(retryable) is not bool:
@@ -274,8 +296,19 @@ class ControlError(Exception):
         # same-request_id replay. It stays retryable because repeating the read is the fix.
         if reason == "read_projection_failed" and not retryable:
             raise ValueError("read_projection_error_must_be_retryable")
+        normalized = normalize_safe_details(accepted_state) if accepted_state is not None else None
+        if normalized:
+            # Only a post-commit write has accepted state to report. Attaching it elsewhere would
+            # assert durability that never happened.
+            if reason != "response_projection_failed":
+                raise ValueError("control_error_accepted_state_not_admitted")
+            if len(normalized) != len(cast(Mapping[str, object], accepted_state)):
+                # normalize_safe_details silently drops unknown or malformed keys. Silently
+                # shipping a subset would understate what committed, so refuse instead.
+                raise ValueError("control_error_accepted_state_invalid")
         self.reason = reason
         self.retryable = retryable
+        self.accepted_state = normalized or _EMPTY_ACCEPTED_STATE
         super().__init__(reason)
 
 

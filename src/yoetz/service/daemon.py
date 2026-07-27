@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final, Never, Protocol, cast
 
 import anyio
@@ -39,6 +40,8 @@ from yoetz.application.service import (
     ControlProjectionBinding,
     ProjectedControlBody,
     ProjectionBindingFacts,
+    UnprojectedControlBody,
+    internal_control_json,
 )
 from yoetz.config.load import load_config
 from yoetz.config.models import YoetzConfig
@@ -80,7 +83,7 @@ from yoetz.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
-from yoetz.protocol.errors import PublicOperationError
+from yoetz.protocol.errors import PublicOperationError, SafeDetailValue
 from yoetz.protocol.ids import IdKind, new_id, validate_id
 from yoetz.protocol.models import (
     CheckResult,
@@ -191,6 +194,30 @@ _WORKFLOW_RESULT_MODELS: Final[Mapping[ControlMethod, type[BaseModel]]] = {
     ControlMethod.STATUS: StatusResult,
     ControlMethod.RECEIPT: ReceiptResult,
 }
+
+
+def _accepted_state(internal: object) -> Mapping[str, SafeDetailValue] | None:
+    """Read where a committed operation landed, for an error that has no success body.
+
+    Structural only: the resulting frontier and how many events were accepted. Returns None
+    whenever any part is missing or malformed, because a partial answer about durability is worse
+    than none — the caller falls back to reading `status`, which is where they were before.
+    """
+
+    try:
+        source = internal_control_json(cast(UnprojectedControlBody, internal))
+        frontier = source["result_frontier"]
+        if not isinstance(frontier, Mapping):
+            return None
+        sequence = int(cast(str, frontier["sequence"]))
+        head_digest = frontier["head_digest"]
+        events = source.get("accepted_events")
+        count = len(cast("tuple[object, ...] | list[object]", events)) if events is not None else 0
+        if type(head_digest) is not str or sequence < 0:
+            return None
+        return MappingProxyType({"count": count, "head_digest": head_digest, "sequence": sequence})
+    except BaseException:
+        return None
 
 
 def _safe_body_request_id(request: ControlCallRequest) -> str | None:
@@ -783,7 +810,10 @@ class ServiceDaemon:
                 operation=f"{request.method.value}_{reason}",
                 request_id=_safe_body_request_id(request),
             )
-            raise ControlError(reason, retryable=True) from exc
+            accepted_state = (
+                None if reason == "read_projection_failed" else _accepted_state(internal)
+            )
+            raise ControlError(reason, retryable=True, accepted_state=accepted_state) from exc
 
     async def _accept_loop(
         self,

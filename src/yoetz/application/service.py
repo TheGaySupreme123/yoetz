@@ -82,6 +82,7 @@ __all__ = [
     "ServiceReadyContext",
     "UnprojectedControlBody",
     "VerificationPolicy",
+    "internal_control_json",
     "resolve_client_disclosure_sink",
 ]
 
@@ -385,6 +386,17 @@ def _internal_json(result: UnprojectedControlBody) -> dict[str, JsonValue]:
     if type(result) is JsonObject:
         return dict(result.items())
     raise TypeError("unprojected_control_body_invalid")
+
+
+def internal_control_json(result: UnprojectedControlBody) -> dict[str, JsonValue]:
+    """Public alias for reading an unprojected body's structural facts.
+
+    The daemon needs the committed frontier when response projection has failed and there is no
+    success body left to read it from. That is a legitimate structural read, not a projection, so
+    it does not go through the privacy path.
+    """
+
+    return _internal_json(result)
 
 
 def _escape_pointer(value: str) -> str:

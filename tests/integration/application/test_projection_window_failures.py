@@ -7,16 +7,18 @@ replay reproduced the failure instead of the stored success.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import cast
+from collections.abc import Callable, Mapping
+from types import MappingProxyType
+from typing import Final, cast
 
 import pytest
 
 import yoetz.application.service as service_module
+import yoetz.service.control_protocol as control_protocol_module
 import yoetz.service.daemon as daemon_module
-from yoetz.ports.control import ControlError, ControlMethod
+from yoetz.ports.control import ACCEPTED_STATE_KEYS, ControlError, ControlMethod
 from yoetz.protocol.canonical import JsonValue
-from yoetz.protocol.errors import PROTOCOL_REASON_CODES
+from yoetz.protocol.errors import PROTOCOL_REASON_CODES, SafeDetailValue
 
 # Deliberately reaching for module privates: these are the exact internals inside the post-commit
 # window, and the public surface cannot express "this internal never raises an unbounded error".
@@ -28,6 +30,9 @@ _segments = cast(Callable[[str], tuple[str, ...]], getattr(service_module, "_seg
 _READ_ONLY_METHODS = cast(frozenset[ControlMethod], getattr(daemon_module, "_READ_ONLY_METHODS"))
 _PROJECTION_EXEMPT_METHODS = cast(
     frozenset[ControlMethod], getattr(daemon_module, "_PROJECTION_EXEMPT_METHODS")
+)
+_plain_wire_value = cast(
+    Callable[[object], JsonValue], getattr(control_protocol_module, "_plain_wire_value")
 )
 
 
@@ -107,3 +112,69 @@ def test_read_projection_failure_must_be_retryable() -> None:
     # Repeating the read is the remedy, so a non-retryable variant would strand the caller.
     with pytest.raises(ValueError, match="read_projection_error_must_be_retryable"):
         ControlError("read_projection_failed")
+
+
+_ACCEPTED_STATE: Final[Mapping[str, SafeDetailValue]] = MappingProxyType(
+    {"count": 4, "head_digest": "sha256:" + "a" * 64, "sequence": 9}
+)
+
+
+def test_accepted_state_rides_the_post_commit_error() -> None:
+    error = ControlError(
+        "response_projection_failed", retryable=True, accepted_state=_ACCEPTED_STATE
+    )
+    assert dict(error.accepted_state) == dict(_ACCEPTED_STATE)
+    assert tuple(sorted(error.accepted_state)) == ACCEPTED_STATE_KEYS
+
+
+def test_accepted_state_defaults_to_empty() -> None:
+    assert ControlError("response_projection_failed", retryable=True).accepted_state == {}
+    assert ControlError("read_projection_failed", retryable=True).accepted_state == {}
+
+
+def test_accepted_state_is_admitted_only_where_something_committed() -> None:
+    # Attaching committed facts to a read, or to a failure that never appended, would assert a
+    # durability that did not happen.
+    with pytest.raises(ValueError, match="control_error_accepted_state_not_admitted"):
+        ControlError("read_projection_failed", retryable=True, accepted_state=_ACCEPTED_STATE)
+    with pytest.raises(ValueError, match="control_error_accepted_state_not_admitted"):
+        ControlError("internal_error", accepted_state=_ACCEPTED_STATE)
+
+
+def test_accepted_state_refuses_keys_the_allowlist_would_silently_drop() -> None:
+    # normalize_safe_details drops unknown keys. Accepting the survivors would understate what
+    # committed, so a rejected key fails loudly instead.
+    with pytest.raises(ValueError, match="control_error_accepted_state_invalid"):
+        ControlError(
+            "response_projection_failed",
+            retryable=True,
+            accepted_state=cast(
+                Mapping[str, SafeDetailValue],
+                {**_ACCEPTED_STATE, "task_title": "not structural"},
+            ),
+        )
+
+
+def test_accepted_state_survives_the_control_wire() -> None:
+    original = ControlError(
+        "response_projection_failed", retryable=True, accepted_state=_ACCEPTED_STATE
+    )
+    wire = _plain_wire_value(original)
+    assert isinstance(wire, dict)
+    assert wire["code"] == "response_projection_failed"
+    assert wire["retryable"] is True
+    assert wire["accepted_state"] == dict(_ACCEPTED_STATE)
+
+    # The frame must round-trip, or the facts never reach the agent that needs them.
+    restored = ControlError(
+        cast(str, wire["code"]),
+        retryable=cast(bool, wire["retryable"]),
+        accepted_state=cast(Mapping[str, SafeDetailValue], wire["accepted_state"]),
+    )
+    assert dict(restored.accepted_state) == dict(_ACCEPTED_STATE)
+
+
+def test_an_error_without_accepted_state_omits_the_field_entirely() -> None:
+    wire = _plain_wire_value(ControlError("read_projection_failed", retryable=True))
+    assert isinstance(wire, dict)
+    assert "accepted_state" not in wire
