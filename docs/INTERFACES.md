@@ -89,6 +89,15 @@ Allowlisted `safe_details` keys include structural recovery fields such as `reas
 durable, so the public error is retryable and same-`request_id` resume is the recovery path.
 `read_projection_failed` is its read-only counterpart: nothing was appended, so the remedy is
 repeating the request rather than a same-`request_id` replay that has no operation record to load.
+When the committed frontier is known, `response_projection_failed` also carries `sequence`,
+`head_digest`, and `count` in `safe_details`, so a caller can state what landed without a second
+`status` call.
+
+MCP resource discovery: `resources/list` serves the four `yoetz://guidance/*.md` entries and
+validates against the MCP `ListResourcesResult` schema (`tests/subprocess/test_mcp_resource_discovery.py`).
+`resources/templates/list` answers method-not-found because no templates are declared and the
+capability is not advertised — that pairing is conformant and is asserted, not "fixed". Guidance
+must not present template discovery as a recovery path.
 Internal-only value error: `ProtocolValueError(reason_code: str)` — bounded reason codes, never
 free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from codes in
 `cli/exits.py` only.

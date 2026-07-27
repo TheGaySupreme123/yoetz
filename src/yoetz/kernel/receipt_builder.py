@@ -698,6 +698,38 @@ def _count_phrase(count: int, singular: str, plural: str) -> str:
     return f"{count} {plural}"
 
 
+def _check_absence_sentence(
+    gap_codes: tuple[str, ...],
+    frontier: Frontier,
+    tested_subject_sequence: str | None,
+) -> str:
+    """State why no check contributes to this receipt's coverage, in the reader's terms."""
+
+    if "check_not_applicable" in gap_codes:
+        tested = (
+            "an earlier subject"
+            if tested_subject_sequence is None
+            else f"subject frontier {tested_subject_sequence}"
+        )
+        return (
+            f"A check is recorded, but it tested {tested} rather than frontier "
+            f"{frontier.sequence}, so it does not contribute to this receipt's coverage. Any "
+            "verdict it returned, including one backed by external review, stands only for what "
+            "it tested. Re-run check at this frontier to make it count."
+        )
+    if "check_not_recorded" in gap_codes:
+        return (
+            f"No check is recorded for frontier {frontier.sequence}, so no verdict contributes to "
+            "this receipt's coverage."
+        )
+    if "check_payload_unavailable" in gap_codes:
+        return (
+            f"A check is recorded at frontier {frontier.sequence}, but its payload could not be "
+            "read, so its verdict does not contribute to this receipt's coverage."
+        )
+    return ""
+
+
 def _sections(
     *,
     include: ReceiptInclude,
@@ -712,6 +744,7 @@ def _sections(
     evidence_refs: tuple[EvidenceId, ...],
     coverage: Coverage,
     redactions: tuple[ReceiptRedaction, ...],
+    tested_subject_sequence: str | None = None,
 ) -> tuple[ReceiptSection, ...]:
     open_obligations = tuple(
         obligation
@@ -784,7 +817,13 @@ def _sections(
             SEMANTIC_REVIEW_NOT_CONFIGURED_GAP in gap_codes
             or SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP in gap_codes
         )
-        if not_requested:
+        # A check that ran and succeeded still contributes nothing unless it tested this exact
+        # subject. Saying only `check_not_applicable` next to a fresh successful check reads as a
+        # contradiction; the 2026-07-27 dogfood could not tell which of four readings was meant.
+        check_absence = _check_absence_sentence(gap_codes, frontier, tested_subject_sequence)
+        if check_absence:
+            gap_body = f"{check_absence} Coverage is limited by: {', '.join(gap_codes)}."
+        elif not_requested:
             gap_body = (
                 "Semantic review was not requested (deterministic-only check). "
                 f"Coverage is limited by: {', '.join(gap_codes)}."
@@ -890,6 +929,11 @@ def build_receipt(
         evidence_refs=evidence_refs,
         coverage=context.coverage,
         redactions=redactions,
+        tested_subject_sequence=(
+            None
+            if context.projection.latest_tested_state is None
+            else str(context.projection.latest_tested_state.subject_frontier.sequence)
+        ),
     )
     suppressed_count = (
         0 if context.applicable_check is None else context.applicable_check.suppressed_count

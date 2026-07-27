@@ -65,6 +65,22 @@ released versions.
 
 ### Fixed
 
+- **A post-commit projection failure now says where the write landed.** `response_projection_failed`
+  carries the committed `sequence`, `head_digest`, and accepted event `count` in `safe_details`, so
+  a caller can state what became durable without spending a second `status` call. Values pass the
+  existing allowlist, so this stays structural.
+
+- **Invalid tool arguments name what is admitted.** The response listed field locations only; it
+  now also names the admitted enum members and the required identifier pattern for the rejected
+  top-level fields, and points at the tool's worked example — all from checked-in schema bytes.
+  `check`, `respond`, and `receipt` gained the worked examples they never had.
+
+- **A receipt explains why a check does or does not count.** `check_not_applicable` appearing right
+  after a successful externally-reviewed check read as a contradiction. The limitations section now
+  states that the recorded check tested a different subject frontier, that its verdict stands only
+  for what it tested, and that re-running `check` at this frontier is what makes it contribute.
+  `check_not_recorded` and `check_payload_unavailable` are explained the same way.
+
 - **A read is no longer told to replay a write.** A projection failure on `status` (or a privacy
   receipt read) advertised the same-`request_id` replay remedy as an accepted write, but a read
   appends nothing, so no operation record exists to replay against and the caller waited on a
