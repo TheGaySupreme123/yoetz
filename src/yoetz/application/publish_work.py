@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Final, Literal, Protocol, cast
@@ -860,7 +861,9 @@ async def execute_publish_work(
             return await _internal_result(request, runtime, prepared, append_result, digest)
         except PublicOperationError:
             raise
-        except Exception as exc:
+        except (asyncio.CancelledError, Exception) as exc:
+            # CancelledError is BaseException, not Exception. Cancellation after a durable append
+            # must not surface as request_cancelled — the write already landed.
             from yoetz.observability.logging import record_unexpected_exception_without_raising
 
             correlation_id = record_unexpected_exception_without_raising(
@@ -876,7 +879,7 @@ async def execute_publish_work(
                     append_result,
                     correlation_id=correlation_id,
                 )
-            except Exception as envelope_exc:
+            except (asyncio.CancelledError, Exception) as envelope_exc:
                 # Genuinely impossible for a committed AppendResult: every accepted summary already
                 # carries the three structural fields the reduced envelope needs. Keep the legacy
                 # retryable reason only if even that construction fails.

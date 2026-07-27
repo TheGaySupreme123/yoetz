@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 from typing import Final, cast
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX platforms do not host the service
+    fcntl = None  # type: ignore[assignment]
 
 from yoetz.config.paths import ensure_owner_only_dir, log_dir
 from yoetz.domain.values import format_rfc3339_millis
@@ -101,7 +105,7 @@ def lookup_diagnostic_records(
                 continue
             try:
                 parsed: object = json.loads(line.decode("ascii"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
+            except UnicodeDecodeError, json.JSONDecodeError:
                 continue
             if type(parsed) is not dict:
                 continue
@@ -181,49 +185,78 @@ def _prepare_parent(parent: Path) -> None:
 
 def _append_line(path: Path, line: bytes) -> None:
     _prepare_parent(path.parent)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    flags = os.O_RDWR | os.O_CREAT
     flags |= getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     with _lock:
         descriptor = os.open(path, flags, 0o600)
         try:
+            _lock_file(descriptor)
             os.fchmod(descriptor, 0o600)
+            os.lseek(descriptor, 0, os.SEEK_END)
             os.write(descriptor, line)
             try:
                 size = os.fstat(descriptor).st_size
             except OSError:
                 size = 0
+            if size > _MAX_FILE_BYTES:
+                # Same flocked descriptor: trim cannot race concurrent appends from other
+                # processes (daemon / MCP / CLI share this ring on POSIX via fcntl.flock).
+                _trim_descriptor(descriptor)
         finally:
             os.close(descriptor)
-        if size > _MAX_FILE_BYTES:
-            _trim_file(path)
+
+
+def _lock_file(descriptor: int) -> None:
+    """Exclusive advisory lock when fcntl is available (POSIX hosts of this service)."""
+
+    if fcntl is None:
+        return
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+    except OSError:
+        return
 
 
 def _trim_file(path: Path) -> None:
     """Keep a suffix of the ring so the file stays under the size cap."""
 
+    flags = os.O_RDWR | os.O_CREAT
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    with _lock:
+        try:
+            descriptor = os.open(path, flags, 0o600)
+        except OSError:
+            return
+        try:
+            _lock_file(descriptor)
+            _trim_descriptor(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def _trim_descriptor(descriptor: int) -> None:
+    """Rewrite the ring under an already-held exclusive lock on ``descriptor``."""
+
     try:
-        raw = path.read_bytes()
+        size = os.fstat(descriptor).st_size
     except OSError:
         return
+    if size <= _MAX_FILE_BYTES:
+        return
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    raw = os.read(descriptor, size)
     if len(raw) <= _MAX_FILE_BYTES:
         return
     # Drop whole lines from the front until under the cap.
     keep_from = len(raw) - _MAX_FILE_BYTES
     newline = raw.find(b"\n", keep_from)
     trimmed = raw[newline + 1 :] if newline != -1 else raw[-_MAX_FILE_BYTES:]
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    flags |= getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags, 0o600)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    os.ftruncate(descriptor, 0)
+    os.write(descriptor, trimmed)
     try:
         os.fchmod(descriptor, 0o600)
-        os.write(descriptor, trimmed)
-    finally:
-        os.close(descriptor)
-    try:
-        mode = path.stat().st_mode
-        if stat.S_IMODE(mode) != 0o600:
-            path.chmod(0o600)
     except OSError:
         return

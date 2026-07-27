@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
-import os
 import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from builders.clock import frozen_clock
+from yoetz.config.models import LoggingConfig
 from yoetz.observability.diagnostics import (
     append_diagnostic_record,
     diagnostic_log_path,
@@ -20,8 +21,6 @@ from yoetz.observability.logging import (
     configure_logging,
     record_unexpected_exception_without_raising,
 )
-from yoetz.config.models import LoggingConfig
-from builders.clock import frozen_clock
 
 _CORRELATION = "err_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 _REQUEST = "req_bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
@@ -71,9 +70,9 @@ def test_lookup_miss_returns_empty(tmp_path: Path) -> None:
         root=tmp_path,
         now=_NOW,
     )
-    assert lookup_diagnostic_records(
-        "err_00000000-0000-4000-8000-000000000099", root=tmp_path
-    ) == ()
+    assert (
+        lookup_diagnostic_records("err_00000000-0000-4000-8000-000000000099", root=tmp_path) == ()
+    )
 
 
 def test_size_cap_keeps_suffix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

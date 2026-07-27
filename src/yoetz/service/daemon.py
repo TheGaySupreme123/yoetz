@@ -234,22 +234,16 @@ def _accepted_state(internal: object) -> Mapping[str, SafeDetailValue] | None:
 def _publish_accepted_projection_unavailable(
     internal: object,
     *,
-    exc: BaseException,
+    correlation_id: str,
     request_id: str | None,
 ) -> PublishWorkResult | None:
     """Return the reduced total-acceptance envelope for a committed publish, or None.
 
-    Records the unexpected exception with a durable diagnostic correlation id first so the
-    envelope and the operator log share one id. Returns None only when the minimal envelope cannot
+    ``correlation_id`` is minted by the caller so the envelope, the diagnostic ring, and any
+    fallback ``ControlError`` path share one id. Returns None only when the minimal envelope cannot
     be built — which must be impossible for a valid ``PublishWorkInternalResult``.
     """
 
-    correlation_id = record_unexpected_exception_without_raising(
-        exc,
-        component="service.daemon",
-        operation="publish_work_response_projection_failed",
-        request_id=request_id,
-    )
     try:
         if type(internal) is PublishWorkInternalResult:
             return accepted_projection_unavailable_from_internal(
@@ -277,6 +271,8 @@ def _publish_accepted_projection_unavailable(
                 )
         return None
     except BaseException as envelope_exc:
+        # A second diagnostic for envelope construction only — reuses the same request_id but a
+        # distinct operation so operators can see the reduction itself failed after the first log.
         record_unexpected_exception_without_raising(
             envelope_exc,
             component="service.daemon",
@@ -914,24 +910,26 @@ class ServiceDaemon:
             # durable — reporting CANCELLED would say the work did not happen and would omit the
             # recovery facts. This changes only how an already-converted cancellation is described.
             request_id = _safe_body_request_id(request)
-            if request.method is ControlMethod.PUBLISH_WORK:
-                reduced = _publish_accepted_projection_unavailable(
-                    internal, exc=exc, request_id=request_id
-                )
-                if reduced is not None:
-                    self._validate_success_body(request, reduced)
-                    return reduced
             reason = (
                 "read_projection_failed"
                 if request.method in _READ_ONLY_METHODS
                 else "response_projection_failed"
             )
-            record_unexpected_exception_without_raising(
+            # One correlation id for the unexpected failure path: shared by the reduced publish
+            # envelope (when built) and the diagnostic ring; no second mint on ControlError fallback.
+            correlation_id = record_unexpected_exception_without_raising(
                 exc,
                 component="service.daemon",
                 operation=f"{request.method.value}_{reason}",
                 request_id=request_id,
             )
+            if request.method is ControlMethod.PUBLISH_WORK:
+                reduced = _publish_accepted_projection_unavailable(
+                    internal, correlation_id=correlation_id, request_id=request_id
+                )
+                if reduced is not None:
+                    self._validate_success_body(request, reduced)
+                    return reduced
             accepted_state = (
                 None if reason == "read_projection_failed" else _accepted_state(internal)
             )

@@ -624,7 +624,7 @@ def service_diagnostics(
         )
         _human_or_json(output, json_output=json_output)
         _finish(0 if records else 1)
-    except (OSError, TypeError, ValueError):
+    except OSError, TypeError, ValueError:
         _finish(_usage_failure())
 
 

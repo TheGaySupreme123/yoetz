@@ -11,10 +11,10 @@ from yoetz.application.publish_work import build_accepted_projection_unavailable
 from yoetz.domain.values import Frontier
 from yoetz.ports.ledger import AcceptedEventSummary
 from yoetz.protocol.models import (
-    PublishWorkAcceptedProjectionUnavailableModel,
-    PublishWorkResult,
     _PUBLISH_FIXED_SUMMARY,
     _PUBLISH_SUMMARY_CATEGORY,
+    PublishWorkAcceptedProjectionUnavailableModel,
+    PublishWorkResult,
 )
 
 _CORRELATION = "err_00000000-0000-4000-8000-000000000042"

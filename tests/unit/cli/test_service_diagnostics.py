@@ -15,9 +15,7 @@ _NOW = datetime(2026, 7, 27, 15, 30, 0, tzinfo=UTC)
 _RUNNER = CliRunner()
 
 
-def test_service_diagnostics_resolves_correlation_id(
-    tmp_path: Path, monkeypatch: object
-) -> None:
+def test_service_diagnostics_resolves_correlation_id(tmp_path: Path, monkeypatch: object) -> None:
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "yoetz.observability.diagnostics.log_dir",
         lambda: tmp_path,

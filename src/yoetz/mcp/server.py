@@ -307,16 +307,20 @@ def _control_error_result(
             },
         )
     if error.reason == "response_projection_failed":
-        # Accepted durable publish_work no longer reaches this path: the daemon returns the
-        # reduced total-acceptance envelope instead. This mapping remains for non-publish writes
-        # and for the genuinely impossible case where even the minimal publish envelope cannot
-        # be built (no accepted_state branch — an accepted write is not an INTERNAL_ERROR).
+        # Accepted durable publish_work usually returns the reduced total-acceptance envelope
+        # instead. This mapping remains for non-publish writes and for the genuinely impossible
+        # case where even the minimal publish envelope cannot be built. When the daemon attached
+        # accepted_state (sequence/head_digest/count), surface those structural facts so the
+        # agent does not need a second status call to learn where the write landed.
+        details: dict[str, object] = dict(_RESPONSE_PROJECTION_FAILED_DETAILS)
+        if error.accepted_state:
+            details.update(error.accepted_state)
         return structured_error_result(
             PublicErrorCode.INTERNAL_ERROR,
             _RESPONSE_PROJECTION_FAILED_MESSAGE,
             retryable=True,
             request_id=request_id,
-            safe_details=dict(_RESPONSE_PROJECTION_FAILED_DETAILS),
+            safe_details=details,
         )
     if error.reason == "read_projection_failed":
         return structured_error_result(
