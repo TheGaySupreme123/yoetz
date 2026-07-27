@@ -199,7 +199,7 @@ def test_fresh_catalog_and_bundle_initialize_at_current_schema_version(
     payload = _run_probe(installed, probe)
     assert payload == {
         "catalog_state": "current",
-        "catalog_version": 1,
+        "catalog_version": 2,
         "bundle_state": "current",
         "bundle_version": 4,
     }

@@ -56,6 +56,7 @@ from yoetz.protocol.models import (
     CheckResultModel,
     CheckSuccessModel,
     DataCategory,
+    OmittedContentModel,
     PublishWorkRequest,
     PublishWorkResult,
     PublishWorkResultModel,
@@ -573,21 +574,12 @@ class Application:
         try:
             if type(stored) is not StoredPublishResponse or stored.key != key:
                 raise ValueError("stored_publish_response_identity_invalid")
-            expected_digest = f"sha256:{hashlib.sha256(stored.result_canonical).hexdigest()}"
-            if stored.result_digest != expected_digest:
-                raise ValueError("stored_publish_response_digest_invalid")
             source = strict_json_parse(stored.result_canonical)
             if canonical_encode(source) != stored.result_canonical or not isinstance(
                 source, Mapping
             ):
                 raise ValueError("stored_publish_response_canonical_invalid")
             wire = cast(Mapping[str, JsonValue], source)
-            accepted = wire.get("accepted_events")
-            if type(accepted) not in {tuple, list} or any(
-                not isinstance(item, Mapping) or "summary" in item
-                for item in cast(tuple[JsonValue, ...] | list[JsonValue], accepted)
-            ):
-                raise ValueError("stored_publish_response_content_invalid")
             projected = PublishWorkResultModel.model_validate(wire)
             if type(projected.root) is not PublishWorkSuccessModel:
                 raise ValueError("stored_publish_response_result_invalid")
@@ -600,6 +592,33 @@ class Application:
                 or success.privacy_projection.sink != key.sink.value
             ):
                 raise ValueError("stored_publish_response_identity_invalid")
+            if any(
+                event.summary is not None and not isinstance(event.summary, OmittedContentModel)
+                for event in success.accepted_events
+            ):
+                raise ValueError("stored_publish_response_content_invalid")
+            expected = result.as_json()
+            actual = public_model_to_wire(projected)
+            expected_facts = {name: value for name, value in expected.items() if name != "outcome"}
+            actual_facts = {
+                name: value
+                for name, value in actual.items()
+                if name not in {"outcome", "privacy_projection"}
+            }
+            expected_events = cast(
+                tuple[Mapping[str, JsonValue], ...], expected_facts["accepted_events"]
+            )
+            actual_events = cast(list[Mapping[str, JsonValue]], actual_facts["accepted_events"])
+            expected_facts["accepted_events"] = tuple(
+                {name: value for name, value in event.items() if name != "summary"}
+                for event in expected_events
+            )
+            actual_facts["accepted_events"] = tuple(
+                {name: value for name, value in event.items() if name != "summary"}
+                for event in actual_events
+            )
+            if canonical_encode(actual_facts) != canonical_encode(expected_facts):
+                raise ValueError("stored_publish_response_facts_invalid")
             if canonical_encode(public_model_to_wire(projected)) != stored.result_canonical:
                 raise ValueError("stored_publish_response_canonical_invalid")
             return projected
@@ -627,13 +646,19 @@ class Application:
     ) -> PublishWorkResult:
         if type(projected) is not PublishWorkResultModel:
             raise TypeError("projected_publish_response_invalid")
+        if type(projected.root) is not PublishWorkSuccessModel:
+            raise TypeError("projected_publish_response_invalid")
+        success = projected.root
         key = self.publish_response_key(result, sink)
         wire = public_model_to_wire(projected)
         accepted = wire.get("accepted_events")
         if type(accepted) not in {tuple, list}:
             raise TypeError("projected_publish_response_invalid")
         accepted_items = cast(tuple[JsonValue, ...] | list[JsonValue], accepted)
-        if any(not isinstance(item, Mapping) or "summary" in item for item in accepted_items):
+        if any(not isinstance(item, Mapping) for item in accepted_items) or any(
+            event.summary is not None and not isinstance(event.summary, OmittedContentModel)
+            for event in success.accepted_events
+        ):
             raise TypeError("projected_publish_response_invalid")
         canonical = canonical_encode(wire)
         candidate = StoredPublishResponse(

@@ -421,6 +421,11 @@ owner_generation, lease_owner_id, lease_generation, lease_expires_at, response_o
 response_envelope_digest, terminal_result_canonical, terminal_result_digest, quarantine_code
 """
 
+_PUBLISH_RESPONSE_COLUMNS: Final = """
+writer_id, request_id, sink, task_id, session_id, request_digest,
+result_canonical, result_digest
+"""
+
 
 class SqliteStartCatalog:
     """Durable ``StartCatalogPort`` implementation using the frozen catalog schema."""
@@ -821,9 +826,7 @@ class SqliteStartCatalog:
         self, key: PublishResponseKey
     ) -> StoredPublishResponse | None:
         rows = self._rows(
-            """SELECT writer_id, request_id, sink, task_id, session_id, request_digest,
-                      result_canonical, result_digest
-               FROM publish_responses
+            f"""SELECT {_PUBLISH_RESPONSE_COLUMNS} FROM publish_responses
                WHERE writer_id = ? AND request_id = ? AND sink = ? LIMIT 2""",
             (key.writer_id, key.request_id, key.sink.value),
         )

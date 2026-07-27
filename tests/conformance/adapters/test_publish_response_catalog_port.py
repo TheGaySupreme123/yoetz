@@ -160,7 +160,12 @@ def test_stored_response_requires_canonical_bytes_and_matching_digest() -> None:
         request_digest="sha256:" + "3" * 64,
         sink=LocalDisclosureSink.AGENT_CONTEXT,
     )
+    noncanonical = b'{"outcome": "spaced"}'
     with pytest.raises(ValueError, match="invalid_publish_response_catalog_value"):
-        StoredPublishResponse(key, b'{"outcome": "spaced"}', "sha256:" + "0" * 64)
+        StoredPublishResponse(
+            key,
+            noncanonical,
+            f"sha256:{hashlib.sha256(noncanonical).hexdigest()}",
+        )
     with pytest.raises(ValueError, match="invalid_publish_response_catalog_value"):
         StoredPublishResponse(key, b'{"outcome":"valid"}', "sha256:" + "0" * 64)

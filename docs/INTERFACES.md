@@ -2108,7 +2108,7 @@ facade and are never MCP tools.
 `version.py` exposes `VersionManifest`: package, protocol (`0.1`), local control protocol (`1.0`),
 privacy-policy schema (`1.0.0`), egress-receipt schema (`1.0.0`), engine (`0.1.0`), policy pack
 versions, projection (`yoetz/0.1.0`), object format (`yoetz-object/1`), storage schema
-(`user_version` 1, catalog 1), Python, APSW/SQLite source ID, MCP SDK, provider adapter versions.
+(`user_version` bundle 4, catalog 2), Python, APSW/SQLite source ID, MCP SDK, provider adapter versions.
 Its shared support values are frozen `ResourceIdentity(name, media_type, size_bytes,
 sha256_digest)` and `CapabilitySet(name, supported_versions, tested_versions, denied_versions)`.
 Every capability collection is an exact ASCII-sorted set: membership is literal, with no SemVer

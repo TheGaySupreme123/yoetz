@@ -149,6 +149,7 @@ class _Application:
         self.publish_response_lookups = 0
         self.publish_response_stores = 0
         self.cached_publish_response: PublishWorkResult | None = None
+        self.publish_response_store_error: PublicOperationError | None = None
 
     async def start(self, request: object) -> StartResult:
         assert isinstance(request, StartRequest)
@@ -202,6 +203,8 @@ class _Application:
         assert sink is LocalDisclosureSink.AGENT_CONTEXT
         assert isinstance(projected, PublishWorkResult)
         self.publish_response_stores += 1
+        if self.publish_response_store_error is not None:
+            raise self.publish_response_store_error
         if self.cached_publish_response is None:
             self.cached_publish_response = projected
         return self.cached_publish_response
@@ -554,6 +557,32 @@ async def test_publish_replay_recovers_one_shot_projection_failure_and_then_uses
     assert len(application.projections) == 2
     assert application.publish_response_lookups == 3
     assert application.publish_response_stores == 1
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_publish_response_store_failure_does_not_degrade_valid_success() -> None:
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    body = _publish_work_body()
+    application.publish_work_internal = _publish_work_internal(body)
+    application.publish_response_store_error = PublicOperationError(
+        PublicErrorCode.STORAGE_CORRUPT,
+        "The stored publish response is invalid.",
+        False,
+    )
+
+    result = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.PUBLISH_WORK, body),
+    )
+
+    assert result.outcome == "ok"
+    assert isinstance(result.body, PublishWorkResult)
+    assert result.body.root.ok is True
+    assert application.append_count == 1
+    assert application.publish_response_stores == 1
+    assert application.cached_publish_response is None
     await daemon.close()
 
 

@@ -13,7 +13,7 @@ transcript, or one successful `check`, is never grounds for a blanket compatibil
 | Public protocol version (`PROTOCOL_VERSION = "0.1"`) and per-operation request/result schema version (`1.0.0`) | `version --json`, `schemas/operations/` |
 | Each durable event schema name and version (sixteen families, each `1.0.0`) | `schemas/events/`, `version --json` |
 | Canonical encoding / digest domain version | `docs/adr/ADR-002-canonical-protocol.md`, `fixtures/canonical/` |
-| Storage schema and its ordered migration set | `version --json` (`user_version` 1 for catalog and bundle), `migrations/` |
+| Storage schema and its ordered migration set | `version --json` (catalog 2, bundle 4), `migrations/` |
 | Object envelope / encryption / key / recovery artifact formats | `version --json` (object format `yoetz-object/1`) |
 | Projection engine/generation and deterministic policy/config digest | `version --json` (projection `yoetz/0.1.0`) |
 | Receipt schema and render version | `schemas/receipts/receipt-document-1.0.0.schema.json` |

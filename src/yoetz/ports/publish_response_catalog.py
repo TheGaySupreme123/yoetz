@@ -38,7 +38,7 @@ class PublishResponseKey:
             validate_id(IdKind.WRITER, self.writer_id)
             validate_id(IdKind.REQUEST, self.request_id)
             validate_sha256_digest(self.request_digest)
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             raise _invalid() from exc
         if self.sink not in {
             LocalDisclosureSink.AGENT_CONTEXT,

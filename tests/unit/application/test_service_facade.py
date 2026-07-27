@@ -32,6 +32,7 @@ from yoetz.protocol.models import (
     PublishWorkAcceptedEventModel,
     PublishWorkResult,
     PublishWorkVersionSliceModel,
+    public_model_to_wire,
 )
 
 _REQUEST = "req_00000000-0000-4000-8000-000000000001"
@@ -143,7 +144,11 @@ def _projected(internal: PublishWorkInternalResult) -> PublishWorkResult:
     wire = internal.as_json()
     accepted = cast(tuple[dict[str, object], ...], wire["accepted_events"])
     for event in accepted:
-        event.pop("summary", None)
+        event["summary"] = {
+            "omitted": True,
+            "category": "command_metadata",
+            "reason": "local_disclosure_not_authorized",
+        }
     return PublishWorkResult.model_validate(
         {
             **wire,
@@ -178,7 +183,9 @@ async def test_publish_response_round_trip_is_structural_and_returns_catalog_win
     assert loaded == projected
     assert responses.put_calls == 1
     assert responses.value is not None
-    assert b'"summary"' not in responses.value.result_canonical
+    assert b'"summary":{"category":"command_metadata","omitted":true' in (
+        responses.value.result_canonical
+    )
     assert responses.value.key.task_id == internal.task_id
     assert responses.value.key.session_id == internal.session_id
     assert "request_digest" not in internal.as_json()
@@ -207,6 +214,19 @@ async def test_publish_response_load_rejects_content_summary_and_identity_mismat
     with pytest.raises(PublicOperationError) as identity_failure:
         await app.load_publish_response(other, LocalDisclosureSink.AGENT_CONTEXT)
     assert identity_failure.value.code is PublicErrorCode.STORAGE_CORRUPT
+
+    altered_wire = public_model_to_wire(_projected(internal))
+    altered_frontier = cast(dict[str, JsonValue], altered_wire["result_frontier"])
+    altered_frontier["sequence"] = "2"
+    altered_canonical = canonical_encode(altered_wire)
+    responses.value = StoredPublishResponse(
+        key,
+        altered_canonical,
+        "sha256:" + hashlib.sha256(altered_canonical).hexdigest(),
+    )
+    with pytest.raises(PublicOperationError) as facts_failure:
+        await app.load_publish_response(internal, LocalDisclosureSink.AGENT_CONTEXT)
+    assert facts_failure.value.code is PublicErrorCode.STORAGE_CORRUPT
 
 
 @pytest.mark.parametrize(

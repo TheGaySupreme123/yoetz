@@ -785,22 +785,22 @@ class ServiceDaemon:
             if request.method in _PROJECTION_EXEMPT_METHODS:
                 self._validate_success_body(request, internal)
                 return internal
-            publish_result = internal if type(internal) is PublishWorkInternalResult else None
-            publish_sink = (
-                resolve_client_disclosure_sink(projection_context)
-                if publish_result is not None
-                else None
-            )
-            if publish_result is not None and publish_sink is not None:
-                stored = await application.load_publish_response(publish_result, publish_sink)
-                if stored is not None:
-                    self._validate_success_body(request, stored)
-                    return stored
             facts = await application.projection_binding_facts(
                 request.method,
                 request.body,
                 internal,
             )
+            publish_replay = (
+                (internal, resolve_client_disclosure_sink(projection_context))
+                if type(internal) is PublishWorkInternalResult
+                else None
+            )
+            if publish_replay is not None:
+                publish_result, publish_sink = publish_replay
+                stored = await application.load_publish_response(publish_result, publish_sink)
+                if stored is not None:
+                    self._validate_success_body(request, stored)
+                    return stored
             binding = ControlProjectionBinding(
                 rpc_id=request.rpc_id,
                 method=request.method,
@@ -816,12 +816,22 @@ class ServiceDaemon:
                 internal,
             )
             self._validate_success_body(request, projected)
-            if publish_result is not None and publish_sink is not None:
-                persisted = await application.store_publish_response(
-                    publish_result,
-                    publish_sink,
-                    projected,
-                )
+            if publish_replay is not None:
+                publish_result, publish_sink = publish_replay
+                try:
+                    persisted = await application.store_publish_response(
+                        publish_result,
+                        publish_sink,
+                        projected,
+                    )
+                except PublicOperationError as exc:
+                    record_unexpected_exception_without_raising(
+                        exc,
+                        component="service.daemon",
+                        operation=f"{request.method.value}_publish_response_store_failed",
+                        request_id=_safe_body_request_id(request),
+                    )
+                    return projected
                 self._validate_success_body(request, persisted)
                 return persisted
             return projected
