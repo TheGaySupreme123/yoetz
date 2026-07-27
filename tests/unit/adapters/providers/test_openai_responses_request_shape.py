@@ -184,3 +184,7 @@ async def test_evaluator_dispatches_the_audited_rendered_body_verbatim() -> None
 
     assert type(result) is SemanticResultSuccess
     assert capture.request_body == rendered.body
+    # The adapter reports the policy that authorized the dispatch, never a minted placeholder.
+    assert result.provenance.policy_digest == case.policy_digest
+    assert result.provenance.privacy_policy_digest == case.policy_digest
+    assert result.provenance.policy_digest != "sha256:" + "0" * 64

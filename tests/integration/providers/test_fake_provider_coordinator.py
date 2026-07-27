@@ -187,6 +187,16 @@ async def test_fake_success_refusal_timeout_invalid_and_late() -> None:
         SemanticResultLate,
     }
 
+    # Every scripted outcome reports the approved case's policy digest, not the script's
+    # placeholder, and finalization carries that real value through to the recorded provenance.
+    for result in (success, refusal, timeout, invalid, late):
+        assert result.provenance.policy_digest == case.policy_digest
+        assert result.provenance.privacy_policy_digest == case.policy_digest
+    finalized = _finalize(success.provenance, seed="9")
+    assert finalized.policy_digest == case.policy_digest
+    assert finalized.privacy_policy_digest == case.policy_digest
+    assert finalized.policy_digest != "sha256:" + "0" * 64
+
     with pytest.raises(RuntimeError, match="fake_semantic_script_exhausted"):
         await evaluator.evaluate(case, deadline)
 
