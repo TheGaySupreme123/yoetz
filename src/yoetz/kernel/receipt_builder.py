@@ -233,7 +233,7 @@ def _validate_applicable_check(context: ReceiptBuildContext) -> None:
         raise ValueError(_CONTEXT_INVALID)
     if (
         check.subject_frontier != latest.subject_frontier
-        or check.subject_frontier != context.subject_frontier
+        or check.subject_frontier.sequence > context.subject_frontier.sequence
         or check.verdict is not latest.verdict
         or check.returned_finding_ids != latest.returned_finding_ids
         or check.suppressed_count != latest.suppressed_count
@@ -707,15 +707,14 @@ def _check_absence_sentence(
 
     if "check_not_applicable" in gap_codes:
         tested = (
-            "an earlier subject"
+            "an earlier subject frontier"
             if tested_subject_sequence is None
             else f"subject frontier {tested_subject_sequence}"
         )
         return (
-            f"A check is recorded, but it tested {tested} rather than frontier "
-            f"{frontier.sequence}, so it does not contribute to this receipt's coverage. Any "
-            "verdict it returned, including one backed by external review, stands only for what "
-            "it tested. Re-run check at this frontier to make it count."
+            f"A check is recorded at {tested}, but material work was published after it, so "
+            f"its verdict no longer covers frontier {frontier.sequence}. Re-run check at this "
+            "frontier to restore coverage."
         )
     if "check_not_recorded" in gap_codes:
         return (
@@ -817,9 +816,9 @@ def _sections(
             SEMANTIC_REVIEW_NOT_CONFIGURED_GAP in gap_codes
             or SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP in gap_codes
         )
-        # A check that ran and succeeded still contributes nothing unless it tested this exact
-        # subject. Saying only `check_not_applicable` next to a fresh successful check reads as a
-        # contradiction; the 2026-07-27 dogfood could not tell which of four readings was meant.
+        # A check that ran and succeeded still contributes nothing once material work lands
+        # after it. Saying only `check_not_applicable` next to a fresh successful check reads as
+        # a contradiction; the 2026-07-27 dogfood could not tell which of four readings was meant.
         check_absence = _check_absence_sentence(gap_codes, frontier, tested_subject_sequence)
         if check_absence:
             gap_body = f"{check_absence} Coverage is limited by: {', '.join(gap_codes)}."

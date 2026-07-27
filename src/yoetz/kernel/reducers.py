@@ -67,6 +67,7 @@ __all__ = [
     "ReplayIndex",
     "empty_replay_index",
     "extend_replay_index",
+    "is_material_event_family",
     "reduce_event",
     "replay",
 ]
@@ -87,6 +88,11 @@ _MATERIAL_FAMILIES: Final = frozenset(
         "result_recorded",
     }
 )
+
+
+def is_material_event_family(name: str) -> bool:
+    """True when an event of this family invalidates a previously recorded check."""
+    return name in _MATERIAL_FAMILIES
 
 
 def _corrupt() -> ValueError:
