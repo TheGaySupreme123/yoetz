@@ -496,9 +496,162 @@ async def dispatch_start(
     )
 
 
+def _publish_envelope_fields(
+    arguments: Mapping[str, object],
+) -> tuple[str, str, str, Mapping[str, object], Mapping[str, object]] | None:
+    """Return ``(request_id, session_id, writer_id, actor, client)`` when the envelope is complete.
+
+    Recovery is keyed only on these fields. Event drafts are intentionally ignored so a body that
+    fails schema validation can still reach the operation-identity recovery path.
+    """
+
+    request_id = safe_request_id_from(arguments)
+    session_id = arguments.get("session_id")
+    writer_id = arguments.get("writer_id")
+    actor = arguments.get("actor")
+    client = arguments.get("client")
+    protocol_version = arguments.get("protocol_version")
+    schema_version = arguments.get("schema_version")
+    if (
+        type(request_id) is not str
+        or type(session_id) is not str
+        or type(writer_id) is not str
+        or not isinstance(actor, Mapping)
+        or not isinstance(client, Mapping)
+        or protocol_version != "0.1"
+        or schema_version != "1.0.0"
+    ):
+        return None
+    return (
+        request_id,
+        session_id,
+        writer_id,
+        cast(Mapping[str, object], actor),
+        cast(Mapping[str, object], client),
+    )
+
+
+async def _publish_recovery_from_envelope(
+    arguments: Mapping[str, object],
+    runtime: BridgeRuntime,
+    request_id: str | None,
+) -> types.CallToolResult | None:
+    """If the envelope names a known operation, surface recovery without body validation."""
+
+    envelope = _publish_envelope_fields(arguments)
+    if envelope is None:
+        return None
+    op_request_id, session_id, writer_id, actor, client = envelope
+    status_request_id = new_id(IdKind.REQUEST)
+    try:
+        status_request = StatusRequest.model_validate(
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": status_request_id,
+                "session_id": session_id,
+                "writer_id": writer_id,
+                "view": "operation",
+                "limit": "1",
+                "filter": {"operation_request_id": op_request_id},
+                "actor": dict(actor),
+                "client": dict(client),
+            }
+        )
+    except Exception:
+        return None
+    try:
+        await ensure_service_client(runtime)
+        status_result = await _invoke_with_reconnect(
+            runtime,
+            status_request,
+            lambda service, request: service.status(request),
+        )
+    except Exception:
+        return None
+    try:
+        wire = public_model_to_wire(status_result)
+        if wire.get("ok") is not True:
+            return None
+        page = wire.get("page")
+        if type(page) is not dict:
+            return None
+        page_map = cast(dict[str, object], page)
+        state = page_map.get("state")
+        if state == "absent":
+            return None
+        if state == "pending":
+            return structured_error_result(
+                PublicErrorCode.OPERATION_PENDING,
+                "The operation is still pending.",
+                retryable=True,
+                request_id=request_id if request_id is not None else op_request_id,
+            )
+        if state == "quarantined":
+            return structured_error_result(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "The stored operation is quarantined.",
+                request_id=request_id if request_id is not None else op_request_id,
+            )
+        if state != "complete":
+            return None
+        result_frontier = page_map.get("result_frontier")
+        accepted = page_map.get("accepted_events")
+        count = len(cast(Sequence[object], accepted)) if isinstance(accepted, Sequence) else 0
+        details: dict[str, object] = {"reason_code": "request_identity_conflict", "count": count}
+        if type(result_frontier) is dict:
+            frontier_map = cast(dict[str, object], result_frontier)
+            sequence = frontier_map.get("sequence")
+            head_digest = frontier_map.get("head_digest")
+            if type(sequence) is str and sequence.isdigit():
+                details["sequence"] = int(sequence)
+            if type(head_digest) is str:
+                details["head_digest"] = head_digest
+        return structured_error_result(
+            PublicErrorCode.REQUEST_IDENTITY_CONFLICT,
+            (
+                "The request ID was already used with a different request body. "
+                "Read status view=operation for the stored result of that request_id."
+            ),
+            request_id=request_id if request_id is not None else op_request_id,
+            safe_details=details,
+        )
+    except Exception:
+        return None
+
+
 async def dispatch_publish_work(
     arguments: Mapping[str, object], runtime: BridgeRuntime = BRIDGE_RUNTIME
 ) -> types.CallToolResult:
+    request_id = safe_request_id_from(arguments)
+    try:
+        PublishWorkRequest.model_validate(arguments)
+    except ValidationError as exc:
+        # Envelope-first recovery: when the body fails schema validation, still look up the
+        # request_id so run-3-style replays never die as bare INVALID_REQUEST.
+        recovery = await _publish_recovery_from_envelope(arguments, runtime, request_id)
+        if recovery is not None:
+            return recovery
+        locations = safe_validation_locations(exc)
+        return structured_error_result(
+            PublicErrorCode.INVALID_REQUEST,
+            "The tool arguments are invalid." + _authoring_hint_for("publish_work", locations),
+            request_id=request_id,
+            safe_details=locations if locations else None,
+        )
+    except Exception as exc:
+        correlation_id = record_unexpected_exception_without_raising(
+            exc,
+            component="mcp.bridge",
+            operation="publish_work_request_internal_error",
+            request_id=request_id,
+        )
+        return structured_error_result(
+            PublicErrorCode.INTERNAL_ERROR,
+            "The bridge could not complete the operation.",
+            request_id=request_id,
+            correlation_id=correlation_id,
+        )
     return await _dispatch(
         arguments,
         PublishWorkRequest,

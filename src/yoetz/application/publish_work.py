@@ -45,6 +45,7 @@ from yoetz.ports.ledger import (
     AppendResult,
     AppendWarning,
     OperationKind,
+    OperationRecord,
     OperationState,
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
@@ -542,25 +543,51 @@ def _decode_stored_append_result(data: bytes) -> AppendResult:
         ) from exc
 
 
-async def _preflight_replay(
+def _request_identity_conflict(result: AppendResult) -> PublicOperationError:
+    """Return a non-destructive conflict when a request_id is reused with a different body.
+
+    Carries the frontier and accepted-event count from the already-committed operation so the
+    caller can continue without reconstructing the original body. Full accepted-event identity
+    is available via ``status view=operation``.
+    """
+
+    return PublicOperationError(
+        PublicErrorCode.REQUEST_IDENTITY_CONFLICT,
+        (
+            "The request ID was already used with a different request body. "
+            "Read status view=operation for the stored result of that request_id."
+        ),
+        False,
+        safe_details={
+            "reason_code": "request_identity_conflict",
+            "sequence": result.result_frontier.sequence,
+            "head_digest": result.result_frontier.head_digest,
+            "count": len(result.accepted),
+        },
+    )
+
+
+async def _resolve_existing_operation(
     runtime: TaskRuntime,
     request: PublishWorkRequestModel,
-    digest: str,
-) -> AppendResult | None:
+) -> OperationRecord | None:
+    """Resolve a prior publish operation before any body validation or append.
+
+    Replay is keyed only on ``(writer_id, request_id)``. The body is not consulted here; digest
+    matching happens after the caller has prepared the submission, and a body that cannot be
+    prepared while an operation already exists becomes ``REQUEST_IDENTITY_CONFLICT``.
+    """
+
     operation = await runtime.ledger.lookup_operation(request.writer_id, request.request_id)
     if operation is None:
         return None
-    if (
-        operation.request_digest != digest
-        or operation.operation_kind is not OperationKind.PUBLISH_WORK
-    ):
+    if operation.operation_kind is not OperationKind.PUBLISH_WORK:
         raise _error(
             PublicErrorCode.IDEMPOTENCY_CONFLICT,
             "The request ID was already used.",
         )
     if operation.state is OperationState.COMPLETE:
-        assert operation.result_canonical is not None
-        return _decode_stored_append_result(operation.result_canonical)
+        return operation
     if operation.state is OperationState.QUARANTINED:
         raise _error(
             PublicErrorCode.STORAGE_CORRUPT,
@@ -571,6 +598,21 @@ async def _preflight_replay(
         "The operation is still pending.",
         retryable=True,
     )
+
+
+async def _commitments_and_digest(
+    runtime: TaskRuntime,
+    request: PublishWorkRequestModel,
+    prepared: PreparedPublication,
+) -> tuple[tuple[str, ...], str]:
+    commitments = tuple(
+        [
+            await runtime.objects.commitment_for(item.payload_bytes, ObjectKind.EVENT_PAYLOAD)
+            for item in prepared.drafts
+        ]
+    )
+    digest = request_digest(_request_identity(request, prepared, commitments))
+    return commitments, digest
 
 
 async def _load_accepted_records(
@@ -761,7 +803,14 @@ async def execute_publish_work(
     app: Application,
     request: PublishWorkRequestModel,
 ) -> PublishWorkInternalResult | PublishWorkResult:
-    """Publish one all-or-nothing batch behind the ready application facade."""
+    """Publish one all-or-nothing batch behind the ready application facade.
+
+    Operation identity is resolved before body preparation and before
+    ``expected_frontier`` evaluation. A completed operation with a matching body digest returns
+    the stored result without re-appending. A completed operation with a different body returns
+    ``REQUEST_IDENTITY_CONFLICT`` with the stored frontier — never ``INVALID_REQUEST`` and never
+    a second append.
+    """
 
     request_bytes = canonical_encode(
         cast(
@@ -784,74 +833,121 @@ async def execute_publish_work(
     try:
         if runtime.session_id != request.session_id or runtime.writer_id != request.writer_id:
             raise _error(PublicErrorCode.SESSION_CONFLICT, "The writer route is inconsistent.")
-        prepared = prepare_publication(request, channel=channel, app=app)
 
-        commitments = tuple(
-            [
-                await runtime.objects.commitment_for(item.payload_bytes, ObjectKind.EVENT_PAYLOAD)
-                for item in prepared.drafts
-            ]
-        )
-        digest = request_digest(_request_identity(request, prepared, commitments))
-        append_result = await _preflight_replay(runtime, request, digest)
-        if append_result is None:
-            refs: list[ObjectRef] = []
-            entries: list[AppendEntry] = []
-            for item, commitment in zip(prepared.drafts, commitments, strict=True):
-                metadata = ObjectMetadata(
-                    ObjectKind.EVENT_PAYLOAD,
-                    media_type_for(item.draft.schema.name),
-                    runtime.task_id,
-                    app.clock.now_utc(),
+        # Resolve replay before prepare_publication and before expected_frontier so recovery is
+        # never blocked by body validation or a stale pre-append frontier.
+        existing = await _resolve_existing_operation(runtime, request)
+        if existing is not None:
+            assert existing.result_canonical is not None
+            stored = _decode_stored_append_result(existing.result_canonical)
+            try:
+                prepared = prepare_publication(request, channel=channel, app=app)
+                commitments, digest = await _commitments_and_digest(runtime, request, prepared)
+            except PublicOperationError:
+                # Body cannot be prepared; the operation still stands. Surface the committed
+                # frontier rather than the body-validation failure that made recovery unreachable.
+                raise _request_identity_conflict(stored) from None
+            del commitments
+            if existing.request_digest != digest:
+                raise _request_identity_conflict(stored)
+            # Digest matches: return the stored result. expected_frontier is intentionally not
+            # re-evaluated — a correct replay carries the pre-append frontier by definition.
+            try:
+                return await _internal_result(request, runtime, prepared, stored, digest)
+            except PublicOperationError:
+                raise
+            except (asyncio.CancelledError, Exception) as exc:
+                from yoetz.observability.logging import record_unexpected_exception_without_raising
+
+                correlation_id = record_unexpected_exception_without_raising(
+                    exc,
+                    component="application.publish_work",
+                    operation="publish_work_internal_result_failed",
+                    request_id=request.request_id,
                 )
-                staged = await runtime.objects.stage(
-                    ObjectSource(data=item.payload_bytes, declared_size=len(item.payload_bytes)),
-                    metadata,
-                )
-                if staged.commitment != commitment:
+                try:
+                    return accepted_projection_unavailable_from_append(
+                        request,
+                        runtime,
+                        stored,
+                        correlation_id=correlation_id,
+                    )
+                except (asyncio.CancelledError, Exception) as envelope_exc:
+                    record_unexpected_exception_without_raising(
+                        envelope_exc,
+                        component="application.publish_work",
+                        operation="publish_work_accepted_envelope_failed",
+                        request_id=request.request_id,
+                    )
                     raise _error(
-                        PublicErrorCode.STORAGE_CORRUPT,
-                        "The staged object commitment is inconsistent.",
-                    )
-                ref = await runtime.objects.finalize(staged)
-                refs.append(ref)
-                entries.append(
-                    AppendEntry(
-                        item.draft,
-                        prepared.author,
-                        ref,
-                        commitment,
-                        metadata.media_type,
-                        ref.plaintext_size,
-                        prepared.channel,
-                        prepared.coverage,
-                        item.projection_status,
-                    )
-                )
-            expected_frontier = (
-                None
-                if request.expected_frontier is None
-                else int(request.expected_frontier.sequence)
-            )
-            command = AppendCommand(
+                        PublicErrorCode.OPERATION_PENDING,
+                        (
+                            "The event batch was accepted, but its response could not be "
+                            "assembled. Retry with the same request_id to load the stored "
+                            "result, or read status view=operation."
+                        ),
+                        retryable=True,
+                        reason_code="response_projection_failed",
+                    ) from envelope_exc
+
+        # No prior operation: ordinary publish path. Body validation and expected_frontier apply.
+        prepared = prepare_publication(request, channel=channel, app=app)
+        commitments, digest = await _commitments_and_digest(runtime, request, prepared)
+        refs: list[ObjectRef] = []
+        entries: list[AppendEntry] = []
+        for item, commitment in zip(prepared.drafts, commitments, strict=True):
+            metadata = ObjectMetadata(
+                ObjectKind.EVENT_PAYLOAD,
+                media_type_for(item.draft.schema.name),
                 runtime.task_id,
-                runtime.session_id,
-                cast(str, runtime.writer_id),
-                request.request_id,
-                OperationKind.PUBLISH_WORK,
-                digest,
-                expected_frontier,
-                tuple(entries),
+                app.clock.now_utc(),
             )
-            mutation = PreparedMutation(
-                command.writer_id,
-                command.operation_id,
-                command.request_digest,
-                command.expected_frontier,
-                tuple(refs),
-                command,
+            staged = await runtime.objects.stage(
+                ObjectSource(data=item.payload_bytes, declared_size=len(item.payload_bytes)),
+                metadata,
             )
-            append_result = await run_prepared_append(runtime.ledger, mutation)
+            if staged.commitment != commitment:
+                raise _error(
+                    PublicErrorCode.STORAGE_CORRUPT,
+                    "The staged object commitment is inconsistent.",
+                )
+            ref = await runtime.objects.finalize(staged)
+            refs.append(ref)
+            entries.append(
+                AppendEntry(
+                    item.draft,
+                    prepared.author,
+                    ref,
+                    commitment,
+                    metadata.media_type,
+                    ref.plaintext_size,
+                    prepared.channel,
+                    prepared.coverage,
+                    item.projection_status,
+                )
+            )
+        expected_frontier = (
+            None if request.expected_frontier is None else int(request.expected_frontier.sequence)
+        )
+        command = AppendCommand(
+            runtime.task_id,
+            runtime.session_id,
+            cast(str, runtime.writer_id),
+            request.request_id,
+            OperationKind.PUBLISH_WORK,
+            digest,
+            expected_frontier,
+            tuple(entries),
+        )
+        mutation = PreparedMutation(
+            command.writer_id,
+            command.operation_id,
+            command.request_digest,
+            command.expected_frontier,
+            tuple(refs),
+            command,
+        )
+        append_result = await run_prepared_append(runtime.ledger, mutation)
         # The batch is durable from here on. Bounded PublicOperationError values (STORAGE_CORRUPT
         # and friends) stay exactly as raised because they already describe the stored state
         # truthfully. Only an unexpected failure falls back to the reduced total-acceptance
@@ -893,7 +989,8 @@ async def execute_publish_work(
                     PublicErrorCode.OPERATION_PENDING,
                     (
                         "The event batch was accepted, but its response could not be assembled. "
-                        "Retry with the same request_id to load the stored result."
+                        "Retry with the same request_id to load the stored result, or read "
+                        "status view=operation."
                     ),
                     retryable=True,
                     reason_code="response_projection_failed",

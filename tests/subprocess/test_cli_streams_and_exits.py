@@ -11,6 +11,7 @@ _EXPECTED = {
     PublicErrorCode.SESSION_NOT_FOUND: 10,
     PublicErrorCode.SESSION_CONFLICT: 10,
     PublicErrorCode.IDEMPOTENCY_CONFLICT: 10,
+    PublicErrorCode.REQUEST_IDENTITY_CONFLICT: 10,
     PublicErrorCode.OPERATION_PENDING: 11,
     PublicErrorCode.FRONTIER_CONFLICT: 10,
     PublicErrorCode.EVENT_INVALID: 2,

@@ -20,7 +20,8 @@ yoetz status --input - --json          # read the request from stdin
 
 `--deadline-ms` bounds the call. Every operation is idempotent on its request identity: **a timeout
 has an unknown outcome, never a known failure.** Reuse the same `request_id` to retry, or call
-`status` to find out what actually happened.
+`status view=operation` with that `request_id` to load the stored result without reconstructing the
+original body.
 
 Field-level shapes live in [`docs/INTERFACES.md`](../INTERFACES.md); the JSON Schemas under
 [`schemas/`](../../schemas/) and the golden vectors under [`fixtures/`](../../fixtures/) are the
@@ -63,7 +64,9 @@ edit, evidence change, plan change, or response.
 Reads current state — use it after a resume, a compaction, a handoff, or any uncertainty about what
 is already done. `view=candidate_findings` is an advisory read: it creates no verdict, no IDs, no
 receipt, and no event. An empty candidate list means only that no rule fired in that read; it is not
-a check and cannot be cited as one.
+a check and cannot be cited as one. After any ambiguous write, prefer `view=operation` with
+`filter.operation_request_id` set to the write's `request_id`: it returns that operation's stored
+outcome, frontiers, and accepted event ids without requiring a byte-identical replay body.
 
 ### `receipt`
 Projects the honest summary of what was checked, at what coverage, and what remains open. Formats:
