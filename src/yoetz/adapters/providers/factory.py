@@ -84,6 +84,9 @@ CHAT_COMPLETIONS_ENDPOINT_PROFILES: Final[Mapping[str, ChatCompletionsEndpointFa
             "openrouter-openai-chat-completions": ChatCompletionsEndpointFacts(
                 "openrouter.ai", "/api/v1", "provider_enforced"
             ),
+            "xai-openai-chat-completions": ChatCompletionsEndpointFacts(
+                "api.x.ai", "/v1", "provider_enforced"
+            ),
         }
     )
 )

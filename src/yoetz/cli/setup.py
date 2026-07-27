@@ -907,14 +907,17 @@ def _emit_provider_setup_layer_report() -> None:
 async def run_provider_setup(
     *,
     fireworks: bool = False,
+    grok: bool = False,
     provider: str | None = None,
     model: str | None = None,
 ) -> int:
     """Run only the simple local provider setup path used by ``yoetz --set``."""
 
-    if fireworks and provider is not None:
-        return _usage_failure("--fireworks and --provider are mutually exclusive")
-    provider_choice = "fireworks" if fireworks else provider
+    if (fireworks or grok) and provider is not None:
+        return _usage_failure("provider shortcuts and --provider are mutually exclusive")
+    if fireworks and grok:
+        return _usage_failure("--fireworks and --grok are mutually exclusive")
+    provider_choice = "fireworks" if fireworks else ("grok" if grok else provider)
     if provider_choice is not None:
         from yoetz.config.models import ConfigError
         from yoetz.config.write import provider_preset

@@ -7,10 +7,11 @@ awkward ceremony. The two never mix.
 
 ```text
 yoetz provider endpoint --provider openai            # or: fireworks, anthropic, gemini,
-                        --model <model-id>           #     openrouter, vercel-ai-gateway
+                        --model <model-id>           #     openrouter, grok, vercel-ai-gateway
+                                                    #     grok aliases: xai, x-ai
 ```
 
-Shorthands: `--official` (Official OpenAI Responses) and `--fireworks`.
+Shorthands: `--official`, `--fireworks`, and `--grok` (Grok / xAI).
 
 Reviewed presets use each provider's documented compatible wire style where applicable. **Every
 reviewed preset resolves to a real runtime factory** — a preset you can select is a preset Yoetz can

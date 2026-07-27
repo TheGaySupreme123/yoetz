@@ -1048,6 +1048,10 @@ def provider_endpoint(
     official: Annotated[
         bool, typer.Option("--official", help="Bind the bundled Official OpenAI Responses profile.")
     ] = False,
+    grok: Annotated[
+        bool,
+        typer.Option("--grok", help="Bind the bundled Grok / xAI Chat Completions profile."),
+    ] = False,
     fireworks: Annotated[
         bool,
         typer.Option(
@@ -1060,7 +1064,7 @@ def provider_endpoint(
         typer.Option(
             "--provider",
             help=(
-                "Reviewed preset: openai, fireworks, anthropic, gemini, openrouter, "
+                "Reviewed preset: openai, fireworks, anthropic, gemini, openrouter, grok, "
                 "or vercel-ai-gateway."
             ),
         ),
@@ -1106,9 +1110,13 @@ def provider_endpoint(
             _finish(_usage_failure())
             return
         if (
-            (official and fireworks)
-            or (provider_name is not None and (official or fireworks or https_origin is not None))
-            or ((official or fireworks) and https_origin is not None)
+            (official and (fireworks or grok))
+            or (fireworks and grok)
+            or (
+                provider_name is not None
+                and (official or fireworks or grok or https_origin is not None)
+            )
+            or ((official or fireworks or grok) and https_origin is not None)
         ):
             _finish(_usage_failure())
             return
@@ -1125,6 +1133,9 @@ def provider_endpoint(
                 "google_gemini": "google_gemini",
                 "google-gemini": "google_gemini",
                 "openrouter": "openrouter",
+                "grok": "grok",
+                "xai": "grok",
+                "x-ai": "grok",
                 "vercel-ai-gateway": "vercel_ai_gateway",
                 "vercel_ai_gateway": "vercel_ai_gateway",
             }
@@ -1137,6 +1148,8 @@ def provider_endpoint(
             path, provider = apply_provider_endpoint_choice("official_openai", model=model)
         elif fireworks:
             path, provider = apply_provider_endpoint_choice("fireworks", model=model)
+        elif grok:
+            path, provider = apply_provider_endpoint_choice("grok", model=model)
         elif https_origin is not None:
             path, provider = apply_provider_endpoint_choice(
                 "owner_declared", model=model, https_origin=https_origin
@@ -1401,6 +1414,10 @@ def root(
         bool,
         typer.Option("--fireworks", help="Use the bundled Fireworks Responses profile."),
     ] = False,
+    grok: Annotated[
+        bool,
+        typer.Option("--grok", help="Use the bundled Grok / xAI Chat Completions profile."),
+    ] = False,
     provider_name: Annotated[
         str | None,
         typer.Option(
@@ -1419,8 +1436,10 @@ def root(
     if set_provider:
         if context.invoked_subcommand is not None:
             raise typer.BadParameter("--set cannot be combined with a subcommand")
-        if fireworks and provider_name is not None:
-            raise typer.BadParameter("--fireworks and --provider are mutually exclusive")
+        if (fireworks or grok) and provider_name is not None:
+            raise typer.BadParameter("provider shortcuts and --provider are mutually exclusive")
+        if fireworks and grok:
+            raise typer.BadParameter("--fireworks and --grok are mutually exclusive")
         operation = _setup_operation("run_provider_setup")
         arguments: dict[str, object] = {
             "fireworks": fireworks,
@@ -1428,10 +1447,12 @@ def root(
         }
         if provider_name is not None:
             arguments["provider"] = provider_name
+        if grok:
+            arguments["grok"] = True
         _finish(run_async(lambda: operation(**arguments)))
         return
-    if fireworks or provider_name is not None or model is not None:
-        raise typer.BadParameter("--fireworks, --provider, and --model require --set")
+    if grok or fireworks or provider_name is not None or model is not None:
+        raise typer.BadParameter("--fireworks, --grok, --provider, and --model require --set")
     if context.invoked_subcommand is not None:
         return
     # Bare invocation (ADR-013): an interactive terminal with no completion marker

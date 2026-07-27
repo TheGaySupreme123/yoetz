@@ -2088,9 +2088,10 @@ facade and are never MCP tools.
   `YoetzConfig`, `MinimalConfig`, `ConfigError`, `PathSafetyError`, `OwnerDeclaredEndpointConfig`,
   `parse_https_origin`, and the exact endpoint profile ids `openai-responses`,
   `owner-declared-openai-responses` (ADR-014), `anthropic-openai-chat-completions`,
-  `google-gemini-openai-chat-completions`, `openrouter-openai-chat-completions`, and
-  `vercel-ai-gateway-openai-responses`. Every one of the six resolves to exactly one runtime
-  factory in `adapters/providers/factory.py`; the last four carry unknown data-use records and are
+  `google-gemini-openai-chat-completions`, `openrouter-openai-chat-completions`,
+  `xai-openai-chat-completions`, and `vercel-ai-gateway-openai-responses`. Every one of the seven
+  resolves to exactly one runtime factory in `adapters/providers/factory.py`; the last five carry
+  unknown data-use records and are
   configured, not live-verified, until their E-007 capability evidence exists. Constrained
   `https_origin` is the only owner-supplied locator; free `base_url` remains forbidden. Its
   composition-only

@@ -26,6 +26,7 @@ __all__ = [
     "anthropic_provider",
     "default_capability_profile",
     "fireworks_provider",
+    "grok_provider",
     "gemini_provider",
     "google_gemini_provider",
     "official_openai_provider",
@@ -34,6 +35,7 @@ __all__ = [
     "provider_preset",
     "render_config_toml",
     "vercel_ai_gateway_provider",
+    "xai_provider",
     "write_config_toml",
     "write_provider_binding",
 ]
@@ -44,6 +46,7 @@ _FIREWORKS_CAPABILITY: Final = "fireworks-responses-structured-1"
 _ANTHROPIC_CAPABILITY: Final = "anthropic-openai-chat-completions-1"
 _GEMINI_CAPABILITY: Final = "google-gemini-openai-chat-completions-1"
 _OPENROUTER_CAPABILITY: Final = "openrouter-openai-chat-completions-1"
+_XAI_CAPABILITY: Final = "xai-openai-chat-completions-1"
 _VERCEL_AI_GATEWAY_CAPABILITY: Final = "vercel-ai-gateway-openai-responses-1"
 _PROVIDER_CHOICE_ALIASES: Final[Mapping[str, str]] = MappingProxyType(
     {
@@ -55,6 +58,8 @@ _PROVIDER_CHOICE_ALIASES: Final[Mapping[str, str]] = MappingProxyType(
         "google": "google_gemini",
         "google-gemini": "google_gemini",
         "vercel-ai-gateway": "vercel_ai_gateway",
+        "xai": "grok",
+        "x-ai": "grok",
     }
 )
 
@@ -129,6 +134,17 @@ PROVIDER_PRESETS: Final[Mapping[str, ProviderPreset]] = MappingProxyType(
             "openrouter.ai",
             "/api/v1",
             "openai/gpt-5.2",
+            "chat_completions",
+        ),
+        "grok": ProviderPreset(
+            "grok",
+            "xai",
+            "xai-openai-chat-completions",
+            "1.0.0",
+            _XAI_CAPABILITY,
+            "api.x.ai",
+            "/v1",
+            "grok-4.5",
             "chat_completions",
         ),
         "vercel_ai_gateway": ProviderPreset(
@@ -262,6 +278,22 @@ def openrouter_provider(
     return _bundled_provider(
         "openrouter", model=model, timeout_seconds=timeout_seconds, max_retries=max_retries
     )
+
+
+def grok_provider(
+    *,
+    model: str,
+    timeout_seconds: int = 60,
+    max_retries: int = 2,
+) -> ProviderProfileConfig:
+    """Build xAI's exact Grok OpenAI-compatible Chat Completions binding."""
+
+    return _bundled_provider(
+        "grok", model=model, timeout_seconds=timeout_seconds, max_retries=max_retries
+    )
+
+
+xai_provider = grok_provider
 
 
 def vercel_ai_gateway_provider(
