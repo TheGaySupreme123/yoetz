@@ -2,6 +2,10 @@
 
 Rolling timestamped observations. Structured report: `agent-quality-audit.md`.
 
+**Chronology note:** observer wall-clock headings after bootstrap are unreliable estimates: launcher
+metadata records the run from `16:43:34Z` to `16:57:47Z`, while the streamed item ordering has no
+authoritative observation timestamps. Use item sequence and launcher metadata for duration claims.
+
 ---
 
 ## 2026-07-27T16:48Z — Observer bootstrap
@@ -300,7 +304,7 @@ Rolling timestamped observations. Structured report: `agent-quality-audit.md`.
 - Yoetz cooperative loop already complete: start → plan → durable evidence → status recovery → semantic_required check → receipt
 - Observer preparing final synthesis; will refresh on exit or report file
 
-## 2026-07-27T~18:35Z — FINAL: report + turn.completed
+## Unreliable observer-time estimate (~18:35Z) — FINAL: report + turn.completed
 
 **Facts:**
 - item_74/76: wrote `docs/dogfood/2026-07-27-grok-easy-linking/codex-final-report.md`
@@ -317,4 +321,3 @@ Rolling timestamped observations. Structured report: `agent-quality-audit.md`.
 - Self-reports some over-attribution of design to Yoetz (observer discounts causality)
 
 **Observer status:** FINAL scores sealed in `agent-quality-audit.md`; copy to host run dir.
-

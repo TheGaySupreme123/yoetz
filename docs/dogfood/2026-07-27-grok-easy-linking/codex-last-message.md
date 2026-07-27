@@ -9,4 +9,4 @@ Implemented and verified Grok/xAI easy linking on the requested branch.
 - Receipt: `rcp_4b302cb2-a9f1-41a2-99fb-aa74b60372c6`
 - No commit, push, issue, or PR created.
 
-Detailed report: [codex-final-report.md](/Users/shayb/yoetz-core/docs/dogfood/2026-07-27-grok-easy-linking/codex-final-report.md:1)
+Detailed report: [codex-final-report.md](codex-final-report.md)

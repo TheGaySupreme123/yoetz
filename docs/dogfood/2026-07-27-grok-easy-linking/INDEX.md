@@ -47,4 +47,4 @@ Multi-event `publish_work` still hits `response_projection_failed` after durable
 | Codex thread | `019fa475-e0f9-7640-a742-6a0828962146` |
 | Yoetz task | `tsk_861ccfd3-2781-4d92-91c9-96e4215b28cb` |
 | Receipt | `rcp_4b302cb2-a9f1-41a2-99fb-aa74b60372c6` |
-| Host run | `/tmp/codex-grok-easy-linking-20260727T164241Z` |
+| Host run | `<host-run-dir>` |

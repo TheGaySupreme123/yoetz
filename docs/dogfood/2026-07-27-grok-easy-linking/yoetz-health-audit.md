@@ -1,14 +1,14 @@
 # Yoetz health audit: Grok easy-linking dogfood
 
-**Status:** FINAL (Yoetz six-ops path exercised through receipt; Codex still writing product final report at last poll; no meta-exit yet)  
+**Status:** FINAL (five MCP operation types exercised through receipt; `respond` was not exercised; Codex still writing product final report at last poll; no meta-exit yet)
 **Observer role:** Yoetz runtime/product health (not agent-quality)  
 **Branch:** `codex/grok-easy-linking-dogfood-20260727`  
 **Baseline:** `3da640a9d4999d38149b2e996dc84ae87edc0295`  
 **Started (UTC):** `20260727T164241Z`  
 **Codex thread_id:** `019fa475-e0f9-7640-a742-6a0828962146`  
 **Codex PID (launch):** `44786`  
-**Host run dir:** `/tmp/codex-grok-easy-linking-20260727T164241Z`  
-**Events:** `/tmp/codex-grok-easy-linking-20260727T164241Z/codex-events.jsonl`  
+**Host run dir:** `<host-run-dir>`
+**Events:** `<host-run-dir>/codex-events.jsonl`
 **Live rolling log:** [`yoetz-health-live.md`](yoetz-health-live.md)  
 **Method:** independent read-only observation of Yoetz MCP/CLI behavior during Codex run  
 **Limits:** No shell in this observer process — launch preflight + stream + durable FS inspection. Mutating MCP/CLI forbidden. CLI re-probes not re-run mid-stream; live binding confirmed via `config.toml` read after semantic check.
@@ -178,7 +178,7 @@
 
 ### Healthy
 
-1. MCP registration **and** activation (full six-ops except respond).
+1. MCP registration **and** activation (five of six operation types; `respond` not exercised).
 2. Fail-closed validation with field-level safe_details.
 3. Single-event publish durability without projection failure.
 4. Multi-event **write** durability + honest safe_details when projection fails.
@@ -207,4 +207,4 @@ Yoetz is **good enough to complete a cooperative integrity loop** (start → pla
 | --- | --- |
 | `docs/dogfood/2026-07-27-grok-easy-linking/yoetz-health-audit.md` | This structured report |
 | `docs/dogfood/2026-07-27-grok-easy-linking/yoetz-health-live.md` | Chronological rolling log |
-| `/tmp/codex-grok-easy-linking-20260727T164241Z/yoetz-health-audit.md` | Host run dir handoff copy (written on finalize) |
+| `<host-run-dir>/yoetz-health-audit.md` | Host run dir handoff copy (written on finalize) |

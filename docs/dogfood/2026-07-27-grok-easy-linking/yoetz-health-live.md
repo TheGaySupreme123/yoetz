@@ -3,11 +3,13 @@
 **Observer:** Observer 2 (Yoetz health auditor)  
 **Branch:** `codex/grok-easy-linking-dogfood-20260727`  
 **Baseline:** `3da640a9d4999d38149b2e996dc84ae87edc0295`  
-**Host run dir:** `/tmp/codex-grok-easy-linking-20260727T164241Z`  
+**Host run dir:** `<host-run-dir>`
 **Codex thread_id:** `019fa475-e0f9-7640-a742-6a0828962146`  
 **Codex PID:** `44786`  
 **Method:** read-only stream + preflight + durable task-store inspection; no mutating MCP/CLI  
 **Note:** This observer process has no shell; CLI re-probes use launch preflight + filesystem/service artifacts. Long JSONL lines truncate under grep (~1k chars); outcomes recovered via exact phrase probes + agent-quality cross-check where needed.
+**Chronology note:** use item sequence and launcher metadata for timing. Observer wall-clock estimates
+are not authoritative because they conflict with the launcher-recorded end time (`16:57:47Z`).
 
 ---
 
@@ -15,7 +17,7 @@
 
 | Surface | Observation |
 | --- | --- |
-| `yoetz` binary | `/Users/shayb/.local/bin/yoetz` `0.1.0` |
+| `yoetz` binary | `<redacted-home>/.local/bin/yoetz` `0.1.0` |
 | Service | `state=ready`, `state_reason=none`, `service_generation=26`, `service_instance_id=svc_4a6c4e24-f246-46f9-be22-380cc332be1b`, `vault_mode=passphrase`, `session_monitor=unavailable` |
 | Capabilities | `confidential_ingress`, `external_provider`, `import_review`, `maintenance`, `workflow` |
 | Provider status schema | `yoetz.provider-status/1` |

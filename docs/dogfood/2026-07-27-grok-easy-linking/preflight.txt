@@ -1,12 +1,12 @@
 ts_utc=20260727T164241Z
 branch=codex/grok-easy-linking-dogfood-20260727
 baseline=3da640a9d4999d38149b2e996dc84ae87edc0295
-cwd=/Users/shayb/yoetz-core
-/Users/shayb/.local/bin/yoetz
+cwd=<redacted-home>/yoetz-core
+<redacted-home>/.local/bin/yoetz
 0.1.0
 {"capabilities":["confidential_ingress","external_provider","import_review","maintenance","workflow"],"idle_relock_seconds":900,"protocol_version":"1.0","service_generation":"26","service_instance_id":"svc_4a6c4e24-f246-46f9-be22-380cc332be1b","service_version":"0.1.0","session_monitor":"unavailable","state":"ready","state_reason":"none","vault_mode":"passphrase"}
 {"blockers":[],"credential_connected":true,"endpoint":{"endpoint_profile_id":"fireworks-responses","endpoint_profile_version":"1.0.0","model":"accounts/fireworks/models/minimax-m3","provider_id":"fireworks"},"endpoint_bound":true,"llm_inference_enabled":true,"next_commands":[],"notes":["semantic_ready is structural readiness only; it does not prove live provider dispatch.","credential_connected reports the configured provider's credential, not any provider.","A credential for a different provider than the bound endpoint does not count.","unknown means the service could not be read, not that the step is incomplete."],"privacy_profile":"minimal_external","readiness_determinable":true,"schema":"yoetz.provider-status/1","semantic_enabled":true,"semantic_ready":true,"service_state":"ready","service_state_reason":"none","verification_semantic":"optional"}
-/Users/shayb/.local/bin/codex-testing
+<redacted-home>/.local/bin/codex-testing
 codex-cli 0.146.0-alpha.2
 Name   Command  Args       Env  Cwd  Status   Auth       
 yoetz  yoetz    mcp serve  -    -    enabled  Unsupported

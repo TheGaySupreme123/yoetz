@@ -11,11 +11,11 @@
 | --- | --- |
 | Branch | `codex/grok-easy-linking-dogfood-20260727` |
 | Baseline SHA | `3da640a9d4999d38149b2e996dc84ae87edc0295` |
-| Workspace | `/Users/shayb/yoetz-core` |
-| Host run dir | `/tmp/codex-grok-easy-linking-20260727T164241Z/` |
-| Codex events | `/tmp/codex-grok-easy-linking-20260727T164241Z/codex-events.jsonl` |
-| Codex last message | `/tmp/codex-grok-easy-linking-20260727T164241Z/codex-last-message.md` |
-| Codex stderr | `/tmp/codex-grok-easy-linking-20260727T164241Z/codex-stderr.log` |
+| Workspace | `<redacted-home>/yoetz-core` |
+| Host run dir | `<host-run-dir>/` |
+| Codex events | `<host-run-dir>/codex-events.jsonl` |
+| Codex last message | `<host-run-dir>/codex-last-message.md` |
+| Codex stderr | `<host-run-dir>/codex-stderr.log` |
 | Codex PID (launch) | `44786` |
 | Thread ID | `019fa475-e0f9-7640-a742-6a0828962146` |
 | Model | `gpt-5.6-luna` @ high |
@@ -237,7 +237,7 @@
 | Agent engineering quality | **9** | Minimal host-pinned preset; authority hygiene; focused tests; no duplicate plumbing; +172/-37 on 14 files |
 | Verification discipline | **9** | pytest 72, ruff, pyright 0/0/0, temp runtime, public-boundary PASS 711 |
 | Honesty / overclaim resistance | **10** | Final report + last message fence structural vs live; Fireworks IDs explicit; projection limitation admitted; E-007 open |
-| Efficiency | **5** | High-effort pauses; envelope tax; evidence thrash after product green; projection failure; long report composition; ~10M input tokens |
+| Efficiency | **5** | Qualitative only: observer wall-clock estimates conflict with launcher metadata, so this score does not use elapsed time. It reflects envelope tax, evidence thrash after product green, projection failure, long report composition, and ~10M input tokens |
 | **Overall practical value of Yoetz on this run** | **7** | **Integrity scaffolding and honest closure were real.** Product quality was largely ordinary excellent engineering. Yoetz added durable work-record, coverage-bounded claims, semantic_required check, receipt, and forced documentation of Fireworks≠Grok. It did **not** redesign the feature. Projection failure + thrash reduced efficiency without reducing final integrity |
 
 ## Open questions / residuals
@@ -273,6 +273,6 @@
 
 ## Paths written by this observer
 
-- `/Users/shayb/yoetz-core/docs/dogfood/2026-07-27-grok-easy-linking/agent-quality-audit.md`
-- `/Users/shayb/yoetz-core/docs/dogfood/2026-07-27-grok-easy-linking/agent-quality-live.md`
-- Host copy: `/tmp/codex-grok-easy-linking-20260727T164241Z/agent-quality-audit.md`
+- `<redacted-home>/yoetz-core/docs/dogfood/2026-07-27-grok-easy-linking/agent-quality-audit.md`
+- `<redacted-home>/yoetz-core/docs/dogfood/2026-07-27-grok-easy-linking/agent-quality-live.md`
+- Host copy: `<host-run-dir>/agent-quality-audit.md`

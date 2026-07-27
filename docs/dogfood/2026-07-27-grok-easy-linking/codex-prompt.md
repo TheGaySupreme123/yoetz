@@ -1,6 +1,6 @@
 # Codex-testing task: Grok / xAI easy linking
 
-Work autonomously in `/Users/shayb/yoetz-core` on the already-created branch
+Work autonomously in `<redacted-home>/yoetz-core` on the already-created branch
 `codex/grok-easy-linking-dogfood-20260727`.
 
 ## Explicit one-run authorization and process exemption
