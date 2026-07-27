@@ -65,10 +65,17 @@ released versions.
 
 ### Fixed
 
-- **A post-commit projection failure now says where the write landed.** `response_projection_failed`
-  carries the committed `sequence`, `head_digest`, and accepted event `count` in `safe_details`, so
-  a caller can state what became durable without spending a second `status` call. Values pass the
-  existing allowlist, so this stays structural.
+- **An accepted durable `publish_work` is never reported as a failure.** When full response
+  projection fails after the append succeeded, the daemon returns a reduced total-acceptance
+  success (`ok: true`, `response_completeness: "accepted_projection_unavailable"`) with frontiers,
+  accepted event ids/digests/sequences, and a `correlation_id` — not `INTERNAL_ERROR` /
+  `response_projection_failed`. The agent needs no second `status` call and no same-`request_id`
+  replay to learn what landed. Unexpected exceptions also write a durable owner-only diagnostic
+  ring under `log_dir()` (`yoetz service diagnostics --correlation-id err_…`).
+
+- **A post-commit projection failure now says where the write landed.** For non-publish writes (and
+  the impossible minimal-envelope path), `response_projection_failed` still carries the committed
+  `sequence`, `head_digest`, and accepted event `count` in `safe_details` / `accepted_state`.
 
 - **Invalid tool arguments name what is admitted.** The response listed field locations only; it
   now also names the admitted enum members and the required identifier pattern for the rejected

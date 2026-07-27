@@ -35,8 +35,10 @@ from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import (
     PublishWorkAcceptedEventModel,
+    PublishWorkAcceptedProjectionUnavailableModel,
     PublishWorkRequest,
     PublishWorkResult,
+    PublishWorkSuccessModel,
     PublishWorkVersionSliceModel,
     StartRequest,
     StartResult,
@@ -491,18 +493,18 @@ def _projected_publish_work_result(internal: PublishWorkInternalResult) -> Publi
 
 
 @pytest.mark.anyio
-async def test_post_commit_projection_failure_is_retryable_not_plain_internal_error() -> None:
-    """An accepted write must never be surfaced to the caller as an unqualified failure.
+async def test_post_commit_projection_failure_returns_total_acceptance_envelope() -> None:
+    """An accepted write must never be surfaced to the caller as a failure.
 
-    The handler returns (so a batch may already be durable) and only then does response shaping
-    fail. Reporting that as a bare non-retryable ``internal_error`` would tell the agent the
-    operation failed and steer it away from the same-``request_id`` replay that recovers it.
+    The handler returns (so a batch is durable) and only then does response shaping fail. The
+    caller receives a reduced ``ok: true`` envelope with frontiers and accepted event facts, not
+    ``response_projection_failed`` / ``INTERNAL_ERROR``.
     """
 
     daemon, application, _vault, _listener = _daemon()
     await daemon.start()
     body = _publish_work_body()
-    application.publish_work_result = _accepted_publish_work_result(body.request_id)
+    application.publish_work_internal = _publish_work_internal(body)
     application.projection_error = RuntimeError("post-commit-shape-failure")
 
     result = await daemon.dispatch(
@@ -510,10 +512,19 @@ async def test_post_commit_projection_failure_is_retryable_not_plain_internal_er
         _request(daemon, ControlMethod.PUBLISH_WORK, body),
     )
 
-    assert result.outcome == "error"
-    assert isinstance(result.body, ControlError)
-    assert result.body.reason == "response_projection_failed"
-    assert result.body.retryable is True
+    assert result.outcome == "ok"
+    assert isinstance(result.body, PublishWorkResult)
+    root = result.body.root
+    assert type(root) is PublishWorkAcceptedProjectionUnavailableModel
+    assert root.ok is True
+    assert root.response_completeness == "accepted_projection_unavailable"
+    assert root.reason_code == "response_projection_failed"
+    assert root.request_id == body.request_id
+    assert root.result_frontier.sequence == "1"
+    assert root.result_frontier.head_digest == "sha256:" + "4" * 64
+    assert len(root.accepted_events) == 1
+    assert root.accepted_events[0].event_id == "evt_00000000-0000-4000-8000-000000000013"
+    assert root.correlation_id.startswith("err_")
     # The operation itself ran exactly once and is not retried behind the caller's back.
     assert application.publish_work_calls == 1
     assert len(application.projections) == 1
@@ -521,7 +532,9 @@ async def test_post_commit_projection_failure_is_retryable_not_plain_internal_er
 
 
 @pytest.mark.anyio
-async def test_publish_replay_recovers_one_shot_projection_failure_and_then_uses_cache() -> None:
+async def test_publish_one_shot_projection_failure_is_accepted_without_replay() -> None:
+    """Projection failure after append still returns acceptance; replay is optional, not required."""
+
     daemon, application, _vault, _listener = _daemon()
     await daemon.start()
     body = _publish_work_body()
@@ -530,20 +543,23 @@ async def test_publish_replay_recovers_one_shot_projection_failure_and_then_uses
 
     first_request = _request(daemon, ControlMethod.PUBLISH_WORK, body)
     first = await daemon.dispatch(ControlClientKind.MCP_BRIDGE, first_request)
-    assert first.outcome == "error"
-    assert isinstance(first.body, ControlError)
-    assert first.body.reason == "response_projection_failed"
-    assert dict(first.body.accepted_state) == {
-        "count": 1,
-        "head_digest": "sha256:" + "4" * 64,
-        "sequence": 1,
-    }
+    assert first.outcome == "ok"
+    assert isinstance(first.body, PublishWorkResult)
+    first_root = first.body.root
+    assert type(first_root) is PublishWorkAcceptedProjectionUnavailableModel
+    assert first_root.result_frontier.sequence == "1"
+    assert first_root.result_frontier.head_digest == "sha256:" + "4" * 64
+    assert len(first_root.accepted_events) == 1
+    assert application.append_count == 1
+    # Reduced envelope is not stored as a full projected success body.
+    assert application.publish_response_stores == 0
 
-    # The byte-identical body still carries its now-stale genesis frontier. Operation replay wins
-    # before frontier handling, and the handler never appends a duplicate.
+    # A later identical call may still project fully and cache the complete success body.
     second_request = _request(daemon, ControlMethod.PUBLISH_WORK, body)
     second = await daemon.dispatch(ControlClientKind.MCP_BRIDGE, second_request)
     assert second.outcome == "ok"
+    assert isinstance(second.body, PublishWorkResult)
+    assert type(second.body.root) is PublishWorkSuccessModel
     assert application.append_count == 1
     assert len(application.projections) == 2
     assert application.publish_response_stores == 1

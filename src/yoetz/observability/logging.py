@@ -363,16 +363,32 @@ def record_unexpected_exception_without_raising(
     ``request_id`` is the caller's own already-public request identity. Passing it lets the
     service-side and bridge-side records for one failed call be joined exactly, instead of
     guessing from method and timestamp when two calls overlap.
+
+    In addition to stderr, a durable owner-only diagnostic line is written under ``log_dir()`` so
+    a public ``correlation_id`` remains resolvable when harnesses swallow process stderr.
     """
 
     correlation_id = _new_correlation()
+    reason = _exception_reason(exc)
     try:
         get_logger(component).error(
             operation,
             correlation_id=correlation_id,
             request_id=request_id,
             outcome="internal_error",
-            reason=_exception_reason(exc),
+            reason=reason,
+        )
+    except BaseException:
+        pass
+    try:
+        from yoetz.observability.diagnostics import append_diagnostic_record
+
+        append_diagnostic_record(
+            correlation_id=correlation_id,
+            component=component,
+            operation=operation,
+            reason=reason,
+            request_id=request_id,
         )
     except BaseException:
         pass
