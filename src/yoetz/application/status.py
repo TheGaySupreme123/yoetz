@@ -723,9 +723,7 @@ async def execute_status(app: Application, request: StatusRequest) -> StatusInte
                 request.writer_id, request.filter.operation_request_id
             )
             try:
-                page = _operation_page_from_record(
-                    request.filter.operation_request_id, operation
-                )
+                page = _operation_page_from_record(request.filter.operation_request_id, operation)
             except ValueError as exc:
                 raise _error(
                     PublicErrorCode.STORAGE_CORRUPT, "The stored operation result is invalid."

@@ -413,9 +413,7 @@ async def test_status_view_operation_absent_for_unknown_or_foreign_request_id() 
                 "writer_id": seed.writer_id,
                 "view": "operation",
                 "limit": "1",
-                "filter": {
-                    "operation_request_id": "req_00000000-0000-4000-8000-000000000599"
-                },
+                "filter": {"operation_request_id": "req_00000000-0000-4000-8000-000000000599"},
                 "actor": {"actor_id": "harness:test", "actor_type": "harness"},
                 "client": {
                     "kind": "test_client",

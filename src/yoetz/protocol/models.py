@@ -2277,9 +2277,7 @@ class StatusOperationPageModel(_ClosedModel):
     operation_request_id: RequestIdWire
     found: bool
     state: Literal["absent", "pending", "complete", "quarantined"]
-    operation_kind: (
-        Literal["start", "publish_work", "check", "respond", "receipt"] | None
-    ) = None
+    operation_kind: Literal["start", "publish_work", "check", "respond", "receipt"] | None = None
     outcome: Literal["accepted", "replayed"] | None = None
     subject_frontier: FrontierModel | None = None
     result_frontier: FrontierModel | None = None
