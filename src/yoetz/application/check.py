@@ -128,6 +128,22 @@ def _invalid(reason: str = "check_coordinator_invalid") -> ValueError:
     return ValueError(reason)
 
 
+def _projected_finding_json(finding: Finding) -> JsonValue:
+    """Adapt one encoded finding to the CHECK result's projected-finding shape.
+
+    ``findings/finding-1.0.0`` leaves ``provenance`` simply absent on a deterministic finding, and
+    ``finding_to_json`` honors that — it is the encoding events and receipt documents carry. The
+    CHECK result's ``projected_finding`` is stricter: ``provenance`` is *required* and nullable, so
+    a deterministic finding must present it as an explicit null. This mirrors the top-level
+    ``semantic_provenance`` immediately below, which the same result already emits that way.
+    """
+
+    encoded = finding_to_json(finding)
+    if "provenance" in encoded:
+        return encoded
+    return {**dict(encoded.items()), "provenance": None}
+
+
 def check_internal_json(result: CheckCommitResult) -> dict[str, JsonValue]:
     """Serialize sink-independent CHECK success without a privacy projection."""
 
@@ -142,7 +158,7 @@ def check_internal_json(result: CheckCommitResult) -> dict[str, JsonValue]:
         "subject_frontier": dict(result.subject_frontier.as_wire().items()),
         "result_frontier": dict(result.result_frontier.as_wire().items()),
         "verdict": result.verdict.value,
-        "findings": tuple(cast(JsonValue, finding_to_json(item)) for item in result.findings),
+        "findings": tuple(_projected_finding_json(item) for item in result.findings),
         "suppressed_count": str(result.suppressed_count),
         "policy_executions": tuple(
             {
