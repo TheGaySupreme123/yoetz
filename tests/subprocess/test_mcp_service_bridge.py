@@ -348,7 +348,14 @@ async def test_service_post_commit_projection_failure_maps_to_the_same_retryable
     retryable remedy rather than a bare "the bridge could not complete the operation".
     """
 
-    client = _FakeClient(ControlError("response_projection_failed", retryable=True))
+    service_correlation = "err_00000000-0000-4000-8000-000000000096"
+    client = _FakeClient(
+        ControlError(
+            "response_projection_failed",
+            retryable=True,
+            correlation_id=service_correlation,
+        )
+    )
     _install_clients(monkeypatch, [client])
     request_id = cast(str, _requests()["publish_work"]["request_id"])
     runtime = bridge.build_bridge_runtime()
@@ -360,6 +367,8 @@ async def test_service_post_commit_projection_failure_maps_to_the_same_retryable
     error = cast(dict[str, object], result.structuredContent["error"])
     assert error["code"] == "INTERNAL_ERROR"
     assert error["retryable"] is True
+    # Bridge reuses the service-minted id rather than generating a second one.
+    assert error["correlation_id"] == service_correlation
     assert result.structuredContent["request_id"] == request_id
     assert "same request_id" in cast(str, error["message"])
     assert error.get("safe_details") == {"reason_code": "response_projection_failed"}

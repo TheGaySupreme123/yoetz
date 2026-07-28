@@ -1059,22 +1059,27 @@ arbitrary-path, or policy-loosening field or method. `service_status` is availab
 task operations are not. MCP cannot invoke lifecycle, privacy-control, or observation-control
 methods.
 
-`ControlError` carries one bounded reason and a `retryable` flag. `response_projection_failed` is
-reserved for the window after a handler returns for non-`publish_work` writes (and the impossible
-minimal-envelope path), where a write may already be durable and only the response could not be
-shaped; it is always `retryable=True`, and the bridge answers it with the same-`request_id` replay
-remedy it uses for its own projection failures. For `publish_work` that same window returns the
-reduced total-acceptance success envelope instead of a `ControlError`. Deliberate bounded failures
-raised in that window — `privacy_projection_blocked`, `privacy_projection_unavailable`, and any
-`PublicOperationError` — already state something true and pass through unchanged. An accepted
-durable publish must never surface as a failure (`INTERNAL_ERROR` or otherwise).
+`ControlError` carries one bounded reason, a `retryable` flag, and an optional service-minted
+`correlation_id`. `response_projection_failed` is reserved for the window after a handler returns
+for non-`publish_work` writes (and the impossible minimal-envelope path), where a write may already
+be durable and only the response could not be shaped; it is always `retryable=True`, and the bridge
+answers it with the same-`request_id` replay remedy it uses for its own projection failures. For
+`publish_work` that same window returns the reduced total-acceptance success envelope instead of a
+`ControlError`. Deliberate bounded failures raised in that window —
+`privacy_projection_blocked`, `privacy_projection_unavailable`, and any `PublicOperationError` —
+already state something true and pass through unchanged. An accepted durable publish must never
+surface as a failure (`INTERNAL_ERROR` or otherwise).
 
 Unexpected exceptions recorded in that window (and at other process boundaries) emit the existing
 stderr structural line and also append one owner-only JSONL diagnostic record under `log_dir()`
 (`service.diagnostics.jsonl`, mode `0o600`, size-capped ring). Fields are limited to
 `timestamp`, `correlation_id`, `component`, `operation`, `reason`, and optional `request_id` — no
-exception text, payload, or paths. `yoetz service diagnostics --correlation-id err_…` reads that
-ring.
+exception text, payload, or paths. The same `correlation_id` is attached to the raised
+`ControlError` (and to the reduced publish acceptance envelope when that path is taken) so the
+agent-facing public error and the durable sink share one identity. The MCP bridge reuses a
+service-supplied id rather than minting a second one; only bridge-local failures without a
+service-side id mint and record under a fresh id. `yoetz service diagnostics --correlation-id
+err_…` reads that ring.
 
 `PublishResponseCatalogPort` is the publish-only durable control-boundary response store. Its key
 is `(task_id, session_id, writer_id, request_id, request_digest, sink)`, where `sink` is exactly

@@ -302,6 +302,10 @@ def _control_error_result(
     request_id: str | None,
     operation: str,
 ) -> types.CallToolResult:
+    # Prefer the service-minted diagnostic id when present so the agent-facing public error
+    # resolves the same durable sink record the daemon already wrote. Never mint a second id for
+    # a failure the service already correlated.
+    service_correlation_id = error.correlation_id
     if error.reason == "vault_locked":
         return structured_error_result(
             PublicErrorCode.VAULT_LOCKED,
@@ -312,12 +316,14 @@ def _control_error_result(
                 "`yoetz consent catalog` / `prepare` (ADR-015); never send secrets over MCP."
             ),
             request_id=request_id,
+            correlation_id=service_correlation_id,
         )
     if error.reason == "request_cancelled":
         return structured_error_result(
             PublicErrorCode.CANCELLED,
             "The operation was cancelled.",
             request_id=request_id,
+            correlation_id=service_correlation_id,
         )
     if error.reason == "privacy_projection_blocked":
         return structured_error_result(
@@ -329,6 +335,7 @@ def _control_error_result(
             ),
             retryable=False,
             request_id=request_id,
+            correlation_id=service_correlation_id,
             safe_details={
                 "reason_code": "receipt_json_projection_blocked",
                 "operation": "receipt",
@@ -349,6 +356,7 @@ def _control_error_result(
             _RESPONSE_PROJECTION_FAILED_MESSAGE,
             retryable=True,
             request_id=request_id,
+            correlation_id=service_correlation_id,
             safe_details=details,
         )
     if error.reason == "read_projection_failed":
@@ -357,6 +365,7 @@ def _control_error_result(
             _READ_PROJECTION_FAILED_MESSAGE,
             retryable=True,
             request_id=request_id,
+            correlation_id=service_correlation_id,
             safe_details=dict(_READ_PROJECTION_FAILED_DETAILS),
         )
     if error.reason == "privacy_projection_unavailable":
@@ -365,6 +374,7 @@ def _control_error_result(
             "Receipt projection is temporarily unavailable; retry after the local service is ready.",
             retryable=True,
             request_id=request_id,
+            correlation_id=service_correlation_id,
             safe_details={"reason_code": "privacy_projection_unavailable"},
         )
     if error.reason in {"service_unavailable", "service_draining", "request_timeout"}:
@@ -373,6 +383,14 @@ def _control_error_result(
             "The local service is unavailable; retry after it is ready.",
             retryable=True,
             request_id=request_id,
+            correlation_id=service_correlation_id,
+        )
+    if service_correlation_id is not None:
+        return structured_error_result(
+            PublicErrorCode.INTERNAL_ERROR,
+            "The bridge could not complete the operation.",
+            request_id=request_id,
+            correlation_id=service_correlation_id,
         )
     correlation_id = record_unexpected_exception_without_raising(
         error,

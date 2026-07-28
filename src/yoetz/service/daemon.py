@@ -697,13 +697,15 @@ class ServiceDaemon:
         except ControlProtocolError, TypeError, ValueError:
             return self._error_result(request, ControlError("frame_invalid"))
         except Exception as exc:
-            record_unexpected_exception_without_raising(
+            correlation_id = record_unexpected_exception_without_raising(
                 exc,
                 component="service.daemon",
                 operation=f"{request.method.value}_internal_error",
                 request_id=_safe_body_request_id(request),
             )
-            return self._error_result(request, ControlError("internal_error"))
+            return self._error_result(
+                request, ControlError("internal_error", correlation_id=correlation_id)
+            )
 
     async def lock(self, reason: str = "explicit_lock") -> None:
         """Drain the ready generation, close it, and remain structurally available."""
@@ -922,7 +924,8 @@ class ServiceDaemon:
                 else "response_projection_failed"
             )
             # One correlation id for the unexpected failure path: shared by the reduced publish
-            # envelope (when built) and the diagnostic ring; no second mint on ControlError fallback.
+            # envelope (when built), the diagnostic ring, and the ControlError raised to the
+            # bridge — no second mint when the agent-facing public error is shaped.
             correlation_id = record_unexpected_exception_without_raising(
                 exc,
                 component="service.daemon",
@@ -939,7 +942,12 @@ class ServiceDaemon:
             accepted_state = (
                 None if reason == "read_projection_failed" else _accepted_state(internal)
             )
-            raise ControlError(reason, retryable=True, accepted_state=accepted_state) from exc
+            raise ControlError(
+                reason,
+                retryable=True,
+                accepted_state=accepted_state,
+                correlation_id=correlation_id,
+            ) from exc
 
     async def _accept_loop(
         self,
@@ -1057,13 +1065,15 @@ class ServiceDaemon:
 
         result_type = _WORKFLOW_RESULT_MODELS.get(request.method)
         if result_type is None or type(error) is not PublicOperationError:
-            record_unexpected_exception_without_raising(
+            correlation_id = record_unexpected_exception_without_raising(
                 error,
                 component="service.daemon",
                 operation=f"{request.method.value}_public_error_internal_error",
                 request_id=_safe_body_request_id(request),
             )
-            return self._error_result(request, ControlError("internal_error"))
+            return self._error_result(
+                request, ControlError("internal_error", correlation_id=correlation_id)
+            )
         try:
             bound = (
                 error
@@ -1082,13 +1092,15 @@ class ServiceDaemon:
             body = result_type.model_validate(candidate)
             return self._result(request, body)
         except Exception as exc:
-            record_unexpected_exception_without_raising(
+            correlation_id = record_unexpected_exception_without_raising(
                 exc,
                 component="service.daemon",
                 operation=f"{request.method.value}_public_error_internal_error",
                 request_id=_safe_body_request_id(request),
             )
-            return self._error_result(request, ControlError("internal_error"))
+            return self._error_result(
+                request, ControlError("internal_error", correlation_id=correlation_id)
+            )
 
     def _validate_success_body(self, request: ControlCallRequest, body: object) -> None:
         self._result(request, body)

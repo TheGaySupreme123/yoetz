@@ -265,13 +265,21 @@ class ControlError(Exception):
     landed and must spend a second `status` call to learn *where*. Values pass through the same
     ``SAFE_DETAIL_KEYS`` allowlist as public errors, so this stays structural — no user content,
     no free text — and it is admitted only for ``response_projection_failed``.
+
+    ``correlation_id`` is the optional service-minted diagnostic identity for an unexpected failure
+    the daemon already recorded. It is a structural ``err_…`` token with no caller content; when
+    present the MCP bridge must surface this same id to the agent so
+    ``yoetz service diagnostics --correlation-id`` resolves the durable sink record. Absence means
+    the failure originated without a prior service-side record (deliberate control reasons, or a
+    bridge-local fault) and the bridge mints/records under its own id.
     """
 
-    __slots__ = ("accepted_state", "reason", "retryable")
+    __slots__ = ("accepted_state", "correlation_id", "reason", "retryable")
 
     reason: str
     retryable: bool
     accepted_state: Mapping[str, SafeDetailValue]
+    correlation_id: str | None
 
     def __init__(
         self,
@@ -279,6 +287,7 @@ class ControlError(Exception):
         *,
         retryable: bool = False,
         accepted_state: Mapping[str, SafeDetailValue] | None = None,
+        correlation_id: str | None = None,
     ) -> None:
         if type(reason) is not str or reason not in _CONTROL_ERROR_REASONS:
             raise TypeError("control_error_reason_invalid")
@@ -296,6 +305,11 @@ class ControlError(Exception):
         # same-request_id replay. It stays retryable because repeating the read is the fix.
         if reason == "read_projection_failed" and not retryable:
             raise ValueError("read_projection_error_must_be_retryable")
+        if correlation_id is not None:
+            try:
+                validate_id(IdKind.CORRELATION, correlation_id)
+            except Exception as exc:
+                raise ValueError("control_error_correlation_id_invalid") from exc
         normalized = normalize_safe_details(accepted_state) if accepted_state is not None else None
         if normalized:
             # Only a post-commit write has accepted state to report. Attaching it elsewhere would
@@ -309,6 +323,7 @@ class ControlError(Exception):
         self.reason = reason
         self.retryable = retryable
         self.accepted_state = normalized or _EMPTY_ACCEPTED_STATE
+        self.correlation_id = correlation_id
         super().__init__(reason)
 
 
