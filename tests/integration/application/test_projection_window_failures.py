@@ -178,3 +178,59 @@ def test_an_error_without_accepted_state_omits_the_field_entirely() -> None:
     wire = _plain_wire_value(ControlError("read_projection_failed", retryable=True))
     assert isinstance(wire, dict)
     assert "accepted_state" not in wire
+
+
+_CORRELATION: Final = "err_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+
+def test_correlation_id_defaults_to_none() -> None:
+    assert ControlError("response_projection_failed", retryable=True).correlation_id is None
+    assert ControlError("read_projection_failed", retryable=True).correlation_id is None
+    assert ControlError("internal_error").correlation_id is None
+
+
+def test_correlation_id_is_service_minted_structural_identity() -> None:
+    error = ControlError(
+        "response_projection_failed",
+        retryable=True,
+        accepted_state=_ACCEPTED_STATE,
+        correlation_id=_CORRELATION,
+    )
+    assert error.correlation_id == _CORRELATION
+
+
+def test_correlation_id_rejects_non_structural_values() -> None:
+    with pytest.raises(ValueError, match="control_error_correlation_id_invalid"):
+        ControlError("internal_error", correlation_id="not-an-err-id")
+    with pytest.raises(ValueError, match="control_error_correlation_id_invalid"):
+        ControlError(
+            "response_projection_failed",
+            retryable=True,
+            correlation_id="req_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        )
+
+
+def test_correlation_id_survives_the_control_wire() -> None:
+    original = ControlError(
+        "read_projection_failed",
+        retryable=True,
+        correlation_id=_CORRELATION,
+    )
+    wire = _plain_wire_value(original)
+    assert isinstance(wire, dict)
+    assert wire["code"] == "read_projection_failed"
+    assert wire["correlation_id"] == _CORRELATION
+    assert "accepted_state" not in wire
+
+    restored = ControlError(
+        cast(str, wire["code"]),
+        retryable=cast(bool, wire["retryable"]),
+        correlation_id=cast(str, wire["correlation_id"]),
+    )
+    assert restored.correlation_id == _CORRELATION
+
+
+def test_an_error_without_correlation_id_omits_the_field_entirely() -> None:
+    wire = _plain_wire_value(ControlError("response_projection_failed", retryable=True))
+    assert isinstance(wire, dict)
+    assert "correlation_id" not in wire

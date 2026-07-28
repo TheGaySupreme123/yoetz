@@ -21,6 +21,7 @@ from yoetz.application.service import (
 from yoetz.config.models import LoggingConfig, YoetzConfig
 from yoetz.domain.privacy import LocalDisclosureSink
 from yoetz.domain.values import Frontier, JsonObject
+from yoetz.observability.diagnostics import lookup_diagnostic_records
 from yoetz.observability.logging import LogMode
 from yoetz.ports.control import (
     ControlCallRequest,
@@ -34,6 +35,7 @@ from yoetz.protocol.coverage import PublicationChannel, coverage_for_channel
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import (
+    CheckRequest,
     PublishWorkAcceptedEventModel,
     PublishWorkAcceptedProjectionUnavailableModel,
     PublishWorkRequest,
@@ -42,6 +44,7 @@ from yoetz.protocol.models import (
     PublishWorkVersionSliceModel,
     StartRequest,
     StartResult,
+    StatusRequest,
 )
 from yoetz.service.confidential_protocol import (
     ClientOpenEnvelope,
@@ -172,6 +175,18 @@ class _Application:
             }
         )
 
+    async def check(self, request: object) -> JsonObject:
+        assert isinstance(request, CheckRequest)
+        await asyncio.sleep(0)
+        # Unprojected stand-in only. Projection is forced to fail in the dedicated correlation
+        # tests before any public CheckResult is required.
+        return JsonObject({"ok": True, "request_id": request.request_id})
+
+    async def status(self, request: object) -> JsonObject:
+        assert isinstance(request, StatusRequest)
+        await asyncio.sleep(0)
+        return JsonObject({"ok": True, "request_id": request.request_id, "view": request.view})
+
     async def publish_work(self, request: object) -> PublishWorkResult | PublishWorkInternalResult:
         assert isinstance(request, PublishWorkRequest)
         self.publish_work_calls += 1
@@ -232,7 +247,13 @@ class _Application:
         result: object,
     ) -> ProjectedControlBody:
         method = binding.method
-        assert method in {ControlMethod.START, ControlMethod.REVIEW, ControlMethod.PUBLISH_WORK}
+        assert method in {
+            ControlMethod.START,
+            ControlMethod.REVIEW,
+            ControlMethod.PUBLISH_WORK,
+            ControlMethod.CHECK,
+            ControlMethod.STATUS,
+        }
         self.projections.append(context)
         if self.projection_failures:
             self.projection_failures -= 1
@@ -493,14 +514,20 @@ def _projected_publish_work_result(internal: PublishWorkInternalResult) -> Publi
 
 
 @pytest.mark.anyio
-async def test_post_commit_projection_failure_returns_total_acceptance_envelope() -> None:
+async def test_post_commit_projection_failure_returns_total_acceptance_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """An accepted write must never be surfaced to the caller as a failure.
 
     The handler returns (so a batch is durable) and only then does response shaping fail. The
     caller receives a reduced ``ok: true`` envelope with frontiers and accepted event facts, not
-    ``response_projection_failed`` / ``INTERNAL_ERROR``.
+    ``response_projection_failed`` / ``INTERNAL_ERROR``. The envelope correlation id is the same
+    id filed in the durable diagnostic sink.
     """
 
+    import yoetz.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
     daemon, application, _vault, _listener = _daemon()
     await daemon.start()
     body = _publish_work_body()
@@ -525,9 +552,123 @@ async def test_post_commit_projection_failure_returns_total_acceptance_envelope(
     assert len(root.accepted_events) == 1
     assert root.accepted_events[0].event_id == "evt_00000000-0000-4000-8000-000000000013"
     assert root.correlation_id.startswith("err_")
+    found = lookup_diagnostic_records(root.correlation_id, root=tmp_path)
+    assert len(found) == 1
+    assert found[0]["operation"] == "publish_work_response_projection_failed"
+    assert found[0]["component"] == "service.daemon"
+    for forbidden in ("traceback", "exception", "payload", "path", "message"):
+        assert forbidden not in found[0]
     # The operation itself ran exactly once and is not retried behind the caller's back.
     assert application.publish_work_calls == 1
     assert len(application.projections) == 1
+    await daemon.close()
+
+
+def _check_body() -> CheckRequest:
+    return CheckRequest.model_validate(
+        {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "request_id": "req_00000000-0000-4000-8000-000000000030",
+            "session_id": "ses_00000000-0000-4000-8000-000000000031",
+            "writer_id": "wri_00000000-0000-4000-8000-000000000032",
+            "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
+            "mode": "deterministic_only",
+            "actor": {"actor_id": "harness:test", "actor_type": "harness"},
+            "client": {
+                "kind": "test_client",
+                "version": "0.1.0",
+                "integration": "cooperative_mcp",
+            },
+        }
+    )
+
+
+def _status_body() -> StatusRequest:
+    return StatusRequest.model_validate(
+        {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "request_id": "req_00000000-0000-4000-8000-000000000040",
+            "session_id": "ses_00000000-0000-4000-8000-000000000041",
+            "writer_id": "wri_00000000-0000-4000-8000-000000000042",
+            "view": "compact",
+            "limit": "10",
+            "actor": {"actor_id": "harness:test", "actor_type": "harness"},
+            "client": {
+                "kind": "test_client",
+                "version": "0.1.0",
+                "integration": "cooperative_mcp",
+            },
+        }
+    )
+
+
+@pytest.mark.anyio
+async def test_check_response_projection_failure_correlation_resolves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The correlation id on a check ControlError resolves to exactly one diagnostic record."""
+
+    import yoetz.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    application.projection_error = RuntimeError("check-shape-failure-must-not-leak")
+
+    result = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.CHECK, _check_body()),
+    )
+
+    assert result.outcome == "error"
+    assert isinstance(result.body, ControlError)
+    assert result.body.reason == "response_projection_failed"
+    assert result.body.retryable is True
+    assert result.body.correlation_id is not None
+    found = lookup_diagnostic_records(result.body.correlation_id, root=tmp_path)
+    assert len(found) == 1
+    assert found[0]["operation"] == "check_response_projection_failed"
+    assert found[0]["component"] == "service.daemon"
+    assert found[0]["request_id"] == "req_00000000-0000-4000-8000-000000000030"
+    for forbidden in ("traceback", "exception", "payload", "path", "message"):
+        assert forbidden not in found[0]
+    assert "must-not-leak" not in str(found[0])
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_status_read_projection_failure_correlation_resolves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The correlation id on a status ControlError resolves to exactly one diagnostic record."""
+
+    import yoetz.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    application.projection_error = RuntimeError("status-shape-failure-must-not-leak")
+
+    result = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.STATUS, _status_body()),
+    )
+
+    assert result.outcome == "error"
+    assert isinstance(result.body, ControlError)
+    assert result.body.reason == "read_projection_failed"
+    assert result.body.retryable is True
+    assert result.body.correlation_id is not None
+    found = lookup_diagnostic_records(result.body.correlation_id, root=tmp_path)
+    assert len(found) == 1
+    assert found[0]["operation"] == "status_read_projection_failed"
+    assert found[0]["component"] == "service.daemon"
+    assert found[0]["request_id"] == "req_00000000-0000-4000-8000-000000000040"
+    for forbidden in ("traceback", "exception", "payload", "path", "message"):
+        assert forbidden not in found[0]
+    assert "must-not-leak" not in str(found[0])
     await daemon.close()
 
 

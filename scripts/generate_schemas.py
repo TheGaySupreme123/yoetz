@@ -106,6 +106,10 @@ def _install_type_shims() -> None:
             {
                 "reason": core_schema.typed_dict_field(core_schema.str_schema()),
                 "retryable": core_schema.typed_dict_field(core_schema.bool_schema()),
+                # Optional; present when the service already minted a diagnostic identity.
+                "correlation_id": core_schema.typed_dict_field(
+                    core_schema.str_schema(), required=False
+                ),
             }
         )
 
