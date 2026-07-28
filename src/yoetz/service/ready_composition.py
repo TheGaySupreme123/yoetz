@@ -1421,7 +1421,18 @@ def _privacy_gated_semantic_evaluator(
         # Re-resolve against the live generation-fenced registry on every check: a binding
         # activated after composition must take effect without a service restart, and a revoked
         # binding must not remain usable from the stale readiness snapshot.
-        provider = await resolve_provider()
+        try:
+            provider = await resolve_provider()
+        except Exception as exc:
+            record_unexpected_exception_without_raising(
+                exc,
+                component="semantic_composition",
+                operation="semantic_evaluation_failed",
+                request_id=frozen.lease.operation_id,
+            )
+            return FinalSemanticEvaluation(
+                SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE
+            )
         if provider is None:
             record_bounded_event_without_raising(
                 component="semantic_composition",

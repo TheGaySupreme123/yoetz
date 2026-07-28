@@ -269,3 +269,34 @@ async def test_provider_binding_is_re_resolved_without_rebuilding_evaluator(
     assert [record["operation"] for record in _records(tmp_path)] == [
         "semantic_not_dispatched_credential_unavailable"
     ]
+
+
+@pytest.mark.anyio
+async def test_provider_resolution_failure_stays_inside_composition_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    privacy = _Privacy()
+
+    def resolve() -> ProviderBinding | None:
+        raise RuntimeError("resolver-detail-must-not-leak")
+
+    evaluator = _evaluator(privacy, resolve, _route())
+
+    result = await evaluator(_frozen(), ())
+
+    assert (result.status, result.reason) == (
+        SemanticStatus.FAILED,
+        SemanticReason.COORDINATOR_FAILURE,
+    )
+    assert semantic_coverage_gap_code(result.status, result.reason) == (
+        SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP
+    )
+    records = _records(tmp_path)
+    assert len(records) == 1
+    assert records[0]["component"] == "semantic_composition"
+    assert records[0]["operation"] == "semantic_evaluation_failed"
+    assert records[0]["reason"] == "exception_runtime_error"
+    assert records[0]["request_id"] == _REQUEST
+    raw = diagnostics_module.diagnostic_log_path(root=tmp_path).read_text(encoding="ascii")
+    assert "resolver-detail-must-not-leak" not in raw
