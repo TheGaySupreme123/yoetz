@@ -1079,7 +1079,10 @@ async def _preflight_dry_run_feasibility(
             provisional.append(record)
             previous_ledger = record.entry_digest
         replay((*existing_records, *provisional))
-    except ValueError, ProtocolValueError, TypeError, PublicOperationError:
+    except (
+        ValueError,
+        TypeError,
+    ):
         raise _event_invalid("invalid_event_value_type") from None
     return current
 
