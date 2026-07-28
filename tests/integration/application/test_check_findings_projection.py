@@ -45,7 +45,8 @@ from yoetz.domain.privacy import PrivacyPolicy
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import ControlClientKind, ControlMethod
 from yoetz.ports.ledger import CheckCommitResult
-from yoetz.protocol.canonical import JsonValue, canonical_encode
+from yoetz.protocol.canonical import MAX_JSON_DEPTH, JsonValue, canonical_encode
+from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.models import (
     MAX_FINDINGS_LIMIT,
     CheckRequest,
@@ -57,10 +58,14 @@ from yoetz.protocol.models import (
 pytestmark = pytest.mark.anyio
 
 # The projection boundary itself, exercised directly where a test needs a body the workflow cannot
-# produce — a deliberately malformed one.
+# produce — a deliberately malformed or pathologically nested one.
 _public_model = cast(
     "Callable[[ControlMethod, Mapping[str, JsonValue]], ProjectedControlBody]",
     getattr(service_module, "_public_model"),
+)
+_plain_nested_mappings = cast(
+    "Callable[[JsonValue], JsonValue]",
+    getattr(service_module, "_plain_nested_mappings"),
 )
 
 _MODES: tuple[tuple[Literal["disabled", "optional"], str], ...] = (
@@ -313,3 +318,60 @@ async def test_a_well_formed_body_in_the_internal_container_projects() -> None:
         ),
     }
     assert public_model_to_wire(_public_model(ControlMethod.CHECK, body))["ok"] is True
+
+
+def _nested(containers: int, *, terminal: str = "empty") -> JsonValue:
+    """A chain of exactly *containers* nested objects, outermost at depth zero.
+
+    ``terminal="empty"`` ends the chain with an empty object, so the deepest *container* sits at
+    ``containers - 1`` and nothing lives below it. That is the shape that separates the two
+    depth-counting conventions: a guard that only rejects a node *below* the limit never sees one
+    here, while a guard that rejects the container itself does. A scalar terminal hides the
+    difference — the leaf beneath the deepest container trips the looser guard by accident — so the
+    boundary case deliberately does not use one.
+    """
+
+    value: JsonValue = "leaf" if terminal == "scalar" else {}
+    for _ in range(containers - 1):
+        value = {"next": value}
+    return value
+
+
+def test_the_depth_bound_is_exactly_the_canonical_one() -> None:
+    """Normalization must not admit a structure canonicalization would reject.
+
+    The bound is not decorative: everything reaching this boundary was already built under
+    ``MAX_JSON_DEPTH``, so a looser guard here would let the projection window accept a shape the
+    rest of the protocol treats as too deep. Pinned against ``canonical_encode`` rather than a
+    hand-copied constant, so the two cannot drift apart again.
+    """
+
+    deepest = _nested(MAX_JSON_DEPTH)
+    too_deep = _nested(MAX_JSON_DEPTH + 1)
+
+    # The reference: what the protocol itself admits at each of the two depths.
+    canonical_encode(deepest)
+    with pytest.raises(ProtocolValueError, match="nesting_too_deep"):
+        canonical_encode(too_deep)
+
+    # The boundary agrees, in both directions.
+    assert _plain_nested_mappings(deepest) == deepest
+    with pytest.raises(ValueError, match="projection_value_too_deep"):
+        _plain_nested_mappings(too_deep)
+
+
+@pytest.mark.parametrize("container", [list, tuple])
+def test_the_depth_bound_counts_sequences_too(
+    container: Callable[[list[JsonValue]], JsonValue],
+) -> None:
+    """Arrays nest as readily as objects, and the canonical limit counts them the same way."""
+
+    def chain(depth: int) -> JsonValue:
+        value: JsonValue = container([])
+        for _ in range(depth - 1):
+            value = container([value])
+        return value
+
+    assert _plain_nested_mappings(chain(MAX_JSON_DEPTH)) == chain(MAX_JSON_DEPTH)
+    with pytest.raises(ValueError, match="projection_value_too_deep"):
+        _plain_nested_mappings(chain(MAX_JSON_DEPTH + 1))

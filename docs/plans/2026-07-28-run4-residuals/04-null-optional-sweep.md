@@ -61,8 +61,9 @@ summaries; apply the same discipline here.
 
 ### 2. Sweep every model that declares the constraint
 
-Fourteen models declare `optional_non_null_fields`. For each, determine whether any projection can
-emit `null` for a listed field, fix the ones that can, and pin every one with a test:
+Twenty models declare `optional_non_null_fields` — the table below is the full inventory, verified
+against the declarations in `src/yoetz/protocol/models.py`. For each, determine whether any
+projection can emit `null` for a listed field, fix the ones that can, and pin every one with a test:
 
 | Model | Fields |
 | --- | --- |

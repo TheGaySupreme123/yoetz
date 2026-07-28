@@ -485,20 +485,27 @@ def _plain_nested_mappings(value: JsonValue, depth: int = 0) -> JsonValue:
     The conversion is structural only: scalars are returned untouched, key order is preserved, no
     key is added or dropped, and sequence containers keep their own type so the closed models'
     established list-to-tuple adaptation still sees what it saw before. A genuinely invalid shape
-    therefore still fails validation, at the same pointer, with the same error. Depth is bounded by
-    the same ``MAX_JSON_DEPTH`` the internal results are already built under, so a pathological
-    structure degrades to a named rejection inside the projection window rather than recursing
-    without limit.
+    therefore still fails validation, at the same pointer, with the same error.
+
+    Depth is bounded exactly as ``yoetz.protocol.canonical`` bounds it: a *container* node at
+    ``MAX_JSON_DEPTH`` is rejected, counting the root container as depth zero. Anything the internal
+    results were legitimately built under therefore normalizes, and a structure this boundary would
+    admit but canonicalization would not cannot slip through — a pathological one degrades to a
+    named rejection inside the projection window rather than recursing without limit.
     """
 
-    if depth > MAX_JSON_DEPTH:
-        raise ValueError("projection_value_too_deep")
     if isinstance(value, Mapping):
+        if depth >= MAX_JSON_DEPTH:
+            raise ValueError("projection_value_too_deep")
         source = cast(Mapping[str, JsonValue], value)
         return {key: _plain_nested_mappings(item, depth + 1) for key, item in source.items()}
     if type(value) is tuple:
+        if depth >= MAX_JSON_DEPTH:
+            raise ValueError("projection_value_too_deep")
         return tuple(_plain_nested_mappings(item, depth + 1) for item in value)
     if type(value) is list:
+        if depth >= MAX_JSON_DEPTH:
+            raise ValueError("projection_value_too_deep")
         return [_plain_nested_mappings(item, depth + 1) for item in cast(list[JsonValue], value)]
     return value
 
