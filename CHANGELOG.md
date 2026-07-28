@@ -65,6 +65,15 @@ released versions.
 
 ### Fixed
 
+- **Publish recovery must not mask a known authoring error.** When MCP `publish_work` body
+  validation fails, envelope-first operation lookup still runs so a committed same-`request_id`
+  operation can be recovered. A failed recovery read (for example nested `read_projection_failed`)
+  no longer replaces the field-pointed `INVALID_REQUEST` with a false “no durable state changed /
+  use a new request_id” message. Lookup is a closed tri-state: found recovery results retain
+  precedence; authoritative absence returns the original authoring pointer; unavailable recovery
+  returns retryable `OPERATION_PENDING` / `operation_recovery_unavailable` with the original
+  publish `request_id` and the safe field that will apply once recovery can answer.
+
 - **`check` can return a finding.** A check that raised even one finding committed durably and then
   failed to project, so the caller received `INTERNAL_ERROR` / `response_projection_failed` and
   never learned the verdict, the finding, or the semantic outcome — in every mode. The public
