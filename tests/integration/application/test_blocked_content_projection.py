@@ -1,9 +1,13 @@
 """Blocked content must project to omission markers, never to a failed operation.
 
-The 2026-07-27 Codex dogfood ran with local disclosure unauthorized, so every content leaf was
-blocked. A four-event publication and a compact ``status`` read both returned
-``response_projection_failed`` while the ledger had already advanced. These cases pin the
-end-to-end projection of blocked content for the exact event families and views from that run.
+The 2026-07-27 Codex dogfood ran with local disclosure unauthorized for most categories. A
+four-event publication and a compact ``status`` read both returned ``response_projection_failed``
+while the ledger had already advanced. The publish half of that failure was not blocked content
+at all: the internal result materialized a phantom ``"summary": null`` leaf per accepted event,
+and the leaf the policy *included* (the claim's ``finding_summary``) crashed the closed wire
+model. Unpopulated summaries are now simply absent, so the publish cases here pin that no
+phantom leaf is ever offered to the policy; the compact ``status`` case still pins real blocked
+content projecting to omission markers for the exact view from that run.
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ from yoetz.domain.privacy import (
     AuthorizationScopeKind,
     CandidateContext,
     ConsentSource,
+    LocalDisclosureApproved,
     LocalDisclosureBlocked,
     LocalDisclosureOmission,
     LocalDisclosureReceipt,
@@ -113,12 +118,23 @@ class _BlockedRuntime(MemoryStartRuntime):
 
 
 class _BlockEverything:
-    """Refuse every content leaf, exactly as an unauthorized local disclosure does."""
+    """Refuse every content leaf, exactly as an unauthorized local disclosure does.
+
+    A candidate with no content items cannot be a blocked decision (``LocalDisclosureBlocked``
+    requires at least one omission), so — exactly like the real coordinator — an empty candidate
+    is simply approved with nothing to disclose.
+    """
 
     def __init__(self) -> None:
+        """Track every category presented for a blocked disclosure decision."""
+
         self.blocked_categories: set[str] = set()
 
-    async def prepare_local_disclosure(self, candidate: CandidateContext) -> LocalDisclosureBlocked:
+    async def prepare_local_disclosure(
+        self, candidate: CandidateContext
+    ) -> LocalDisclosureApproved | LocalDisclosureBlocked:
+        """Block actual content while approving candidates with no content leaves."""
+
         sink = candidate.local_sink
         assert sink is not None
         proposal_id = protocol_id("ppr_", 801)
@@ -160,6 +176,19 @@ class _BlockEverything:
             None,
             1,
         )
+        if not omissions:
+            return LocalDisclosureApproved(
+                proposal_id,
+                candidate.request_id,
+                sink,
+                candidate.purpose,
+                candidate.scope,
+                _DIGEST,
+                _WORKSPACE,
+                (),
+                (),
+                receipt,
+            )
         return LocalDisclosureBlocked(
             proposal_id,
             candidate.request_id,
@@ -291,6 +320,8 @@ def _omission_categories(projected: Mapping[str, JsonValue]) -> set[str]:
 
 
 async def test_blocked_content_projects_for_every_event_family_and_the_compact_view() -> None:
+    """Omit absent publish summaries while still blocking real status content."""
+
     app, privacy = _application()
     started = await app.start(start_request(910, title="Blocked projection"))
     obligation_id = protocol_id("obl_", 911)
@@ -336,12 +367,12 @@ async def test_blocked_content_projects_for_every_event_family_and_the_compact_v
     assert type(plan) is PublishWorkInternalResult
     projected_plan = await _project(app, ControlMethod.PUBLISH_WORK, plan_wire, plan, 920)
 
-    # Blocked summaries are replaced by omission markers rather than leaking or failing.
+    # No accepted-event summary was populated, so there is no content to disclose or withhold.
     events = cast(list[Mapping[str, JsonValue]], projected_plan["accepted_events"])
     assert len(events) == 2
     for event in events:
-        assert cast(Mapping[str, JsonValue], event["summary"])["omitted"] is True
-    assert _omission_categories(projected_plan) == {"task_description"}
+        assert "summary" not in event
+    assert _omission_categories(projected_plan) == set()
 
     action_id = protocol_id("act_", 930)
     work_wire: dict[str, JsonValue] = {
@@ -414,14 +445,11 @@ async def test_blocked_content_projects_for_every_event_family_and_the_compact_v
     assert type(work) is PublishWorkInternalResult
     projected_work = await _project(app, ControlMethod.PUBLISH_WORK, work_wire, work, 940)
 
-    # The exact four families of the run's second publication, spanning three data categories
-    # the first publication never exercised.
-    assert len(cast(list[JsonValue], projected_work["accepted_events"])) == 4
-    assert _omission_categories(projected_work) == {
-        "command_metadata",
-        "evidence_excerpt",
-        "finding_summary",
-    }
+    # The exact four families from the run carry no phantom summary leaves into disclosure.
+    work_events = cast(list[Mapping[str, JsonValue]], projected_work["accepted_events"])
+    assert len(work_events) == 4
+    assert all("summary" not in event for event in work_events)
+    assert _omission_categories(projected_work) == set()
 
     status_wire: dict[str, JsonValue] = {
         **_request_base(protocol_id("req_", 950)),
@@ -439,11 +467,5 @@ async def test_blocked_content_projects_for_every_event_family_and_the_compact_v
     assert cast(Mapping[str, JsonValue], item["task_title"])["omitted"] is True
     assert "obligation_text" in _omission_categories(projected_status)
 
-    # Together the three projections cover every category the run touched.
-    assert {
-        "task_description",
-        "obligation_text",
-        "command_metadata",
-        "evidence_excerpt",
-        "finding_summary",
-    } <= privacy.blocked_categories
+    # Only actual status content is blocked; absent publish summaries create no policy decision.
+    assert {"task_description", "obligation_text"} <= privacy.blocked_categories

@@ -474,6 +474,8 @@ def _frontier_for_projection(source: Mapping[str, JsonValue]) -> Frontier:
 
 
 def _public_model(method: ControlMethod, value: Mapping[str, JsonValue]) -> ProjectedControlBody:
+    """Validate and normalize one projected success body for its public result model."""
+
     model = {
         ControlMethod.START: (StartSuccessModel, StartResultModel),
         ControlMethod.PUBLISH_WORK: (PublishWorkSuccessModel, PublishWorkResultModel),
@@ -488,11 +490,13 @@ def _public_model(method: ControlMethod, value: Mapping[str, JsonValue]) -> Proj
     success = success_type.model_validate(value)
     # ``RespondResponseModel`` declares ``optional_non_null_fields`` (reason/waiver_scope/
     # waiver_expiry) that the frozen wire schema requires to be entirely omitted when absent,
-    # never present as an explicit null. A blanket ``exclude_none=False`` round trip here would
-    # reintroduce that null for an ordinary acknowledged response and crash the reflexive
-    # re-validation below, so respond alone excludes it; the other five operations have no
-    # ordinarily-absent ``optional_non_null_fields`` member and keep the established behavior.
-    exclude_none = method is ControlMethod.RESPOND
+    # never present as an explicit null. ``PublishWorkAcceptedEventModel.summary`` is the same
+    # shape one level down: it is ordinarily absent (nothing populates it today), so a blanket
+    # ``exclude_none=False`` round trip here would reintroduce that null and crash the reflexive
+    # re-validation below. Respond and publish therefore exclude nulls; the other four operations
+    # have no ordinarily-absent ``optional_non_null_fields`` member and keep the established
+    # behavior.
+    exclude_none = method in {ControlMethod.RESPOND, ControlMethod.PUBLISH_WORK}
     return result_type.model_validate(success.model_dump(mode="json", exclude_none=exclude_none))
 
 

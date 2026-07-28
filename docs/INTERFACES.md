@@ -104,6 +104,9 @@ different body (or a body that cannot be prepared), the public code is
 `sequence`, `head_digest`, and accepted-event `count` — never `INVALID_REQUEST` and never a second
 append. If an exact validated full success body was durably stored, replay to the same ordinary
 disclosure sink returns that body without running privacy projection again.
+An accepted event's optional `summary` is non-null when present. Until publication supplies an
+actual summary, the field is absent from both the internal projection document and the public
+success body; an absent summary is never materialized as JSON `null` or reported as policy-omitted.
 Optional `dry_run: true` on `PublishWorkRequest` validates the full batch and returns
 `outcome: "dry_run"` with `evidential: false` and a `would_accept` preview (event ids, schema
 identity, refs) plus coverage/gaps. It appends nothing, records no operation, does not consume
