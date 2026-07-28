@@ -172,4 +172,6 @@ def test_bridge_does_not_re_record_when_service_id_is_present(
     assert error["correlation_id"] == _CORRELATION
     assert recorded == []
     assert len(lookup_diagnostic_records(_CORRELATION, root=tmp_path)) == 1
-    assert lookup_diagnostic_records("err_cccccccc-cccc-4ccc-8ccc-cccccccccccc", root=tmp_path) == ()
+    assert (
+        lookup_diagnostic_records("err_cccccccc-cccc-4ccc-8ccc-cccccccccccc", root=tmp_path) == ()
+    )
