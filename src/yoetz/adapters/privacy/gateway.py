@@ -295,6 +295,19 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
             connected.add(registry.local_model[0].provider_id)
         return tuple(sorted(connected, key=str.encode))
 
+    def has_connected_provider_binding(self, binding: ProviderBinding) -> bool:
+        """Return whether the exact configured binding is live in the current registry."""
+
+        if type(binding) is not ProviderBinding:
+            raise TypeError("privacy_gateway_provider_binding_invalid")
+        registry = self._current_registry()
+        if registry is None:
+            return False
+        return (
+            registry.resolve_external(binding) is not None
+            or registry.resolve_local(binding) is not None
+        )
+
     # -- reconciliation -----------------------------------------------------------------------
 
     async def reconcile_policy(

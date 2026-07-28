@@ -23,6 +23,7 @@ and pin a complete response carrying the finding, in all three check modes.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from typing import Literal, cast
 
 import pytest
@@ -34,6 +35,7 @@ from builders.projection_workflow import (
     request_base,
 )
 from builders.start_application import protocol_id, start_request
+from yoetz.application.check import FinalSemanticEvaluation
 from yoetz.application.service import (
     Application,
     ClientProjectionContext,
@@ -41,17 +43,22 @@ from yoetz.application.service import (
     ProjectedControlBody,
     ProjectionRenderMode,
 )
+from yoetz.domain.findings import Finding, FindingKind, SemanticDispatchKind, SemanticProvenance
 from yoetz.domain.privacy import PrivacyPolicy
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import ControlClientKind, ControlMethod
-from yoetz.ports.ledger import CheckCommitResult
+from yoetz.ports.ledger import CheckCommitResult, FrozenCase
+from yoetz.ports.semantic import ReviewerChallenge, SamplingParams, SemanticJudgment
 from yoetz.protocol.canonical import MAX_JSON_DEPTH, JsonValue, canonical_encode
 from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.models import (
     MAX_FINDINGS_LIMIT,
+    CheckProjectedFindingModel,
     CheckRequest,
     DataCategory,
     PublishWorkRequest,
+    SemanticReason,
+    SemanticStatus,
     public_model_to_wire,
 )
 
@@ -73,6 +80,63 @@ _MODES: tuple[tuple[Literal["disabled", "optional"], str], ...] = (
     ("optional", "semantic_if_configured"),
     ("optional", "semantic_required"),
 )
+_DIGEST = "sha256:" + "7" * 64
+
+
+async def _semantic_challenge(
+    frozen: FrozenCase, findings: tuple[Finding, ...]
+) -> FinalSemanticEvaluation:
+    """Hermetic second reviewer that challenges one real deterministic finding."""
+
+    del frozen
+    assert findings
+    provenance = SemanticProvenance(
+        provider="fake",
+        endpoint_profile_id="fake",
+        endpoint_profile_version="1.0.0",
+        model="fake/model",
+        sdk_version="1.0.0",
+        prompt_digest=_DIGEST,
+        schema_digest=_DIGEST,
+        policy_digest=_DIGEST,
+        privacy_policy_digest=_DIGEST,
+        sampling_params=SamplingParams(128),
+        latency_ms=1,
+        semantic_attempt_id=protocol_id("att_", 1510),
+        dispatch_kind=SemanticDispatchKind.EXTERNAL,
+        privacy_receipt_id=protocol_id("egr_", 1511),
+        status=SemanticStatus.SUCCEEDED,
+        reason=SemanticReason.SEMANTIC_COMPLETED,
+        provider_request_id="fake-semantic-request-1",
+        egress_authorization_id=protocol_id("aut_", 1512),
+        request_commitment="hmac-sha256:" + "b" * 64,
+    )
+    challenge = ReviewerChallenge(
+        FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
+        "The completion claim overstates its evidence",
+        (str(findings[0].finding_id),),
+        "The cited material records an obligation but no admissible completion evidence.",
+        "The work may be complete, but the frozen case does not establish that conclusion.",
+        "Cite admissible evidence or narrow the completion claim.",
+        "provide_evidence",
+        "Additional evidence may exist outside the frozen case.",
+    )
+    return FinalSemanticEvaluation(
+        SemanticStatus.SUCCEEDED,
+        SemanticReason.SEMANTIC_COMPLETED,
+        judgment=SemanticJudgment("challenges_returned", (challenge,)),
+        provenance=provenance,
+    )
+
+
+async def _semantic_unavailable(
+    frozen: FrozenCase, findings: tuple[Finding, ...]
+) -> FinalSemanticEvaluation:
+    del frozen, findings
+    return FinalSemanticEvaluation(
+        SemanticStatus.UNAVAILABLE,
+        SemanticReason.CREDENTIAL_UNAVAILABLE,
+    )
 
 
 async def _binding(
@@ -207,6 +271,22 @@ async def _checked(
     return app, check_wire, checked, policy
 
 
+async def _semantic_projected(seed: int) -> Mapping[str, JsonValue]:
+    app, _policy = await build_projection_application("optional", seed=seed, max_findings=3)
+    app = replace(app, semantic_evaluator=_semantic_challenge)
+    session, writer, frontier = await _work_with_unsupported_claims(app, seed, 1)
+    check_wire: dict[str, JsonValue] = {
+        **request_base(protocol_id("req_", seed + 6)),
+        "session_id": session,
+        "writer_id": writer,
+        "expected_frontier": frontier,
+        "mode": "semantic_required",
+        "max_findings": "3",
+    }
+    checked = await app.check(CheckRequest.model_validate(check_wire))
+    return await _project(app, check_wire, checked, seed + 7)
+
+
 @pytest.mark.parametrize(("semantic", "mode"), _MODES)
 async def test_check_with_a_finding_projects_a_complete_success(
     semantic: Literal["disabled", "optional"], mode: str
@@ -248,6 +328,62 @@ async def test_check_with_a_finding_projects_a_complete_success(
     assert "provenance" in finding
     executions = cast(list[Mapping[str, JsonValue]], projected["policy_executions"])
     assert [item["policy_id"] for item in executions] == ["research-evidence", "work-integrity"]
+
+
+async def test_semantic_finding_projects_with_provenance_and_advice_text() -> None:
+    """A second reviewer's challenge reaches the agent with its explanation and provenance."""
+
+    projected = await _semantic_projected(1515)
+
+    assert projected["semantic_status"] == "succeeded"
+    assert projected["semantic_reason"] == "semantic_completed"
+    findings = cast(list[Mapping[str, JsonValue]], projected["findings"])
+    semantic = next(item for item in findings if item["origin"] == "semantic_model_derived")
+    assert semantic["summary"] == "The completion claim overstates its evidence"
+    assert semantic["detail"] == "Cite admissible evidence or narrow the completion claim."
+    provenance = cast(Mapping[str, JsonValue], semantic["provenance"])
+    assert provenance["provider_request_id"] == "fake-semantic-request-1"
+    assert provenance["status"] == "succeeded"
+    assert provenance["reason"] == "semantic_completed"
+
+
+async def test_projected_finding_origin_and_provenance_pairing_is_strict() -> None:
+    projected = await _semantic_projected(1545)
+    findings = cast(list[Mapping[str, JsonValue]], projected["findings"])
+    semantic = next(item for item in findings if item["origin"] == "semantic_model_derived")
+    deterministic = next(item for item in findings if item["origin"] == "deterministic")
+
+    with pytest.raises(ValueError, match="semantic_finding_provenance_missing"):
+        CheckProjectedFindingModel.model_validate({**semantic, "provenance": None})
+    with pytest.raises(ValueError, match="deterministic_finding_provenance_invalid"):
+        CheckProjectedFindingModel.model_validate(
+            {**deterministic, "provenance": semantic["provenance"]}
+        )
+
+
+async def test_semantic_required_non_dispatch_projects_the_exact_reason() -> None:
+    seed = 1575
+    app, _policy = await build_projection_application("optional", seed=seed, max_findings=3)
+    app = replace(app, semantic_evaluator=_semantic_unavailable)
+    session, writer, frontier = await _work_with_unsupported_claims(app, seed, 1)
+    check_wire: dict[str, JsonValue] = {
+        **request_base(protocol_id("req_", seed + 6)),
+        "session_id": session,
+        "writer_id": writer,
+        "expected_frontier": frontier,
+        "mode": "semantic_required",
+        "max_findings": "3",
+    }
+
+    checked = await app.check(CheckRequest.model_validate(check_wire))
+    projected = await _project(app, check_wire, checked, seed + 7)
+
+    assert projected["ok"] is True
+    assert projected["verdict"] == "incomplete_check"
+    assert projected["semantic_status"] == "unavailable"
+    assert projected["semantic_reason"] == "credential_unavailable"
+    coverage = cast(Mapping[str, JsonValue], projected["coverage"])
+    assert "semantic_relevance_review_not_run" in cast(list[str], coverage["known_gaps"])
 
 
 async def test_the_maximum_permitted_finding_count_projects() -> None:

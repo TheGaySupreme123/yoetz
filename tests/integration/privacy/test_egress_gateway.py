@@ -569,10 +569,18 @@ def test_reconcile_and_dispatch_external_semantic_succeeds() -> None:
     policy = _policy(external_enabled=True, local_enabled=False)
     effective = EffectivePrivacyPolicy(policy, 1, policy.policy_digest)
     human = _human_authority(available=True)
+    assert gateway.has_connected_provider_binding(_provider_binding()) is False
 
     async def run() -> tuple[SemanticResult, EgressAuthorization]:
         reconciliation = await gateway.reconcile_policy(effective, human)
         assert reconciliation == ProviderReconciliation(1, 1, 0, ())
+        assert gateway.has_connected_provider_binding(_provider_binding()) is True
+        assert (
+            gateway.has_connected_provider_binding(
+                replace(_provider_binding(), model_id="different-model-same-provider")
+            )
+            is False
+        )
 
         authorization = _authorization(
             authorization_id="aut_60000000-0000-4000-8000-000000000010",

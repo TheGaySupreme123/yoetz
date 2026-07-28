@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -92,7 +92,10 @@ from yoetz.kernel.policies.observation_advice import (
     ObservationAdviceCandidate,
     ObservationCompositionFact,
 )
-from yoetz.observability.logging import record_unexpected_exception_without_raising
+from yoetz.observability.logging import (
+    record_bounded_event_without_raising,
+    record_unexpected_exception_without_raising,
+)
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.control import ControlError
 from yoetz.ports.diagnostics import DiagnosticsPort, RuntimeCapability, StartupCheckResult
@@ -137,6 +140,7 @@ from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id, validate_id
 from yoetz.protocol.models import SemanticReason, SemanticStatus
+from yoetz.service.vault import ProviderCredentialBinding, provider_credential_profile_binding
 from yoetz.version import build_version_manifest, version_manifest_json
 
 __all__ = [
@@ -177,6 +181,8 @@ class _Vault(Protocol):
     async def provider_credential(
         self, binding: ProviderAttemptAuthBinding
     ) -> ProviderCredentialHandle: ...
+
+    async def has_provider_credential(self, binding: ProviderCredentialBinding) -> bool: ...
 
 
 class _Paths(Protocol):
@@ -1218,15 +1224,18 @@ async def _semantic_not_configured(
     )
 
 
-async def _semantic_credential_unavailable(
+async def _semantic_provider_unbound(
     frozen: FrozenCase, findings: tuple[object, ...]
 ) -> FinalSemanticEvaluation:
-    """Endpoint is bound but no provider credential is connected in this generation."""
+    """Semantic is enabled, but no external provider endpoint is configured."""
 
-    del frozen, findings
-    return FinalSemanticEvaluation(
-        SemanticStatus.UNAVAILABLE, SemanticReason.CREDENTIAL_UNAVAILABLE
+    record_bounded_event_without_raising(
+        component="semantic_composition",
+        operation="semantic_not_dispatched_provider_unbound",
+        reason=SemanticReason.PROVIDER_NOT_CONFIGURED.value,
+        request_id=frozen.lease.operation_id,
     )
+    return await _semantic_not_configured(frozen, findings)
 
 
 def _map_blocked(outcome: PrivacyOutcome, reason: object) -> FinalSemanticEvaluation:
@@ -1401,7 +1410,7 @@ def _privacy_gated_semantic_evaluator(
     privacy: PrivacyCoordinator,
     clock: ClockPort,
     installation_id: str,
-    provider: ProviderBinding | None,
+    resolve_provider: Callable[[], Awaitable[ProviderBinding | None]],
     catalog: StartCatalogPort,
     lookup: MacKeyHandle,
     ids: IdPort,
@@ -1409,11 +1418,40 @@ def _privacy_gated_semantic_evaluator(
     async def _evaluate(
         frozen: FrozenCase, findings: tuple[object, ...]
     ) -> FinalSemanticEvaluation:
+        # Re-resolve against the live generation-fenced registry on every check: a binding
+        # activated after composition must take effect without a service restart, and a revoked
+        # binding must not remain usable from the stale readiness snapshot.
+        try:
+            provider = await resolve_provider()
+        except Exception as exc:
+            record_unexpected_exception_without_raising(
+                exc,
+                component="semantic_composition",
+                operation="semantic_evaluation_failed",
+                request_id=frozen.lease.operation_id,
+            )
+            return FinalSemanticEvaluation(
+                SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE
+            )
         if provider is None:
-            return await _semantic_not_configured(frozen, findings)
+            record_bounded_event_without_raising(
+                component="semantic_composition",
+                operation="semantic_not_dispatched_credential_unavailable",
+                reason=SemanticReason.CREDENTIAL_UNAVAILABLE.value,
+                request_id=frozen.lease.operation_id,
+            )
+            return FinalSemanticEvaluation(
+                SemanticStatus.UNAVAILABLE, SemanticReason.CREDENTIAL_UNAVAILABLE
+            )
         try:
             route = await catalog.resolve_route(frozen.lease.session_id)
             if route is None or route.state is not TaskRouteState.ACTIVE:
+                record_bounded_event_without_raising(
+                    component="semantic_composition",
+                    operation="semantic_not_dispatched_route_inactive",
+                    reason=SemanticReason.PROVIDER_NOT_CONFIGURED.value,
+                    request_id=frozen.lease.operation_id,
+                )
                 return await _semantic_not_configured(frozen, findings)
             workspace = lookup.mac(
                 WORKSPACE_REF_DOMAIN,
@@ -1550,14 +1588,35 @@ async def provide_service_ready_context(
     )
     semantic_configured = config.verification.semantic != "disabled"
     provider_endpoint_bound = config.provider is not None
-    # Resolve the binding before readiness: a connected provider that is not the *configured* one
-    # leaves dispatch on the credential-unavailable path, so readiness must track the exact binding
-    # rather than "any provider connected".
-    provider_binding: ProviderBinding | None = None
+    # Preserve the composition-time snapshot for readiness/status, but resolve the configured
+    # binding again for every check so a later registry activation can take effect immediately.
+    candidate_binding: ProviderBinding | None = None
     if config.provider is not None:
         candidate_binding = provider_binding_from_config(config.provider)
-        if candidate_binding.provider_id in connected_provider_ids:
-            provider_binding = candidate_binding
+
+    def binding_not_connected(_binding: ProviderBinding) -> bool:
+        return False
+
+    async def resolve_provider_binding() -> ProviderBinding | None:
+        if candidate_binding is None:
+            return None
+        binding_connected = cast(
+            Callable[[ProviderBinding], bool],
+            getattr(gateway, "has_connected_provider_binding", binding_not_connected),
+        )
+        if binding_connected(candidate_binding) is not True:
+            return None
+        credential_binding = provider_credential_profile_binding(
+            candidate_binding.provider_id,
+            candidate_binding.model_id,
+            candidate_binding.endpoint_profile_id,
+            candidate_binding.endpoint_profile_version,
+        )
+        if not await vault.has_provider_credential(credential_binding):
+            return None
+        return candidate_binding
+
+    provider_binding = await resolve_provider_binding()
     provider_credential_connected = provider_binding is not None
     semantic_ready = (
         semantic_configured and provider_endpoint_bound and provider_credential_connected
@@ -1630,15 +1689,13 @@ async def provide_service_ready_context(
     if not semantic_configured:
         semantic_evaluator = _semantic_not_configured
     elif not provider_endpoint_bound:
-        semantic_evaluator = _semantic_not_configured
-    elif provider_binding is None:
-        semantic_evaluator = _semantic_credential_unavailable
+        semantic_evaluator = _semantic_provider_unbound
     else:
         semantic_evaluator = _privacy_gated_semantic_evaluator(
             cast(PrivacyCoordinator, privacy),
             clock,
             installation_id,
-            provider_binding,
+            resolve_provider_binding,
             catalog,
             lookup,
             ids,

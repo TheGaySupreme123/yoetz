@@ -568,6 +568,23 @@ review was not run; they must not reuse blocked-by-policy wording. The not-reque
 deterministic-only check and forces coverage incompleteness without changing the deterministic
 verdict.
 
+Ready check composition resolves the configured external provider against the live
+generation-fenced registry for every semantic check. A provider binding activated after ready
+composition can therefore serve a later check without a service restart; a binding removed after
+composition cannot be used from the stale readiness snapshot. Exact credential-record presence is
+checked structurally without reading the secret; minting secret material remains dispatch-time only.
+
+A semantic check also appends one bounded diagnostic record when no provider endpoint is bound, its
+task route is inactive, the exact configured binding is absent from the live registry, or the outer
+check coordinator catches an evaluator exception. A missing exact credential record shares the
+credential-unavailable path. These paths use exactly one operation token:
+`semantic_not_dispatched_provider_unbound`, `semantic_not_dispatched_route_inactive`,
+`semantic_not_dispatched_credential_unavailable`, or
+`semantic_not_dispatched_coordinator_failure`. The reason is a closed structural token; provider
+identity, exception text, payload, and paths remain forbidden from this sink. Exceptions contained
+inside the production composition evaluator retain the existing `semantic_evaluation_failed`
+operation.
+
 The check-applicability gap family follows the same material-state rule: `check_not_applicable`
 means material work was appended after the recorded check and superseded its verdict, never that
 the frontier merely advanced.
@@ -1216,6 +1233,8 @@ storage or handle minting. `ProviderAttemptAuthBinding` freezes those same field
 final request-body SHA-256 digest, service
 generation, and deadline. Minting a credential handle requires every shared field to match the
 stored credential binding; a scoped credential cannot authorize another model, scope, or purpose.
+`VaultService.has_provider_credential(binding)` reads only the exact structural record-generation
+index and returns presence; it neither decrypts the record nor creates a credential handle.
 `ProviderCredentialHandle.authorize_attempt(binding, inject_and_start)` is single-use: after exact
 binding/body/deadline validation it exposes a protected view only inside the injected custom HTTP
 transport callback for authentication-header injection and one request start, then releases it
@@ -1392,6 +1411,8 @@ external/local consume share one generation CAS: tightening-first means no I/O; 
 one admitted attempt may send, is best-effort closed/nonselectable, and receives its actual receipt.
 `OutboundGatewayPort.reconcile_policy(policy, human_authority: HumanAuthorityCapability)` binds both
 policy and human-authority generations; unavailable authority yields an empty external registry.
+`PolicyEnforcingOutboundGateway.has_connected_provider_binding(binding)` is the composition-only
+exact-binding liveness query over that registry; it never probes or mints a credential.
 `OutboundGatewayPort.close()` is an idempotent terminal operation: it installs a deny fence before
 awaiting transport closure, after which reconciliation/dispatch/revocation admit no new work, mint
 no credential, render no content-bearing request, and perform no new adapter I/O. Unconsumed work is
