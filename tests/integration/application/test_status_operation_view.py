@@ -8,8 +8,10 @@ operation. Plus compact-projection lag and cursor rejection so no path raises un
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -590,26 +592,21 @@ async def test_status_view_operation_reports_pending_for_in_flight_check() -> No
     assert page.accepted_events == ()
 
 
-async def test_status_view_operation_survives_compact_projection_lag() -> None:
-    """Compact enrichment must not fail recovery when the projection is temporarily unreadable."""
+def _complete_check_record(writer_id: str, operation_id: str) -> OperationRecord:
+    """A terminal, non-publish operation seeded directly, without paying for a real check."""
 
-    app, runtime, _catalog = await _workflow_app()
-    started = await app.start(start_request(830, title="Compact lag recovery"))
-    check_req_id = protocol_id("req_", 831)
-    # Seed a complete non-publish operation without going through check (ledger inject).
-    ledger, _objects = runtime.resources[started.task_id]
     canonical = canonical_encode(
         {
             "finding_ids": (),
-            "request_id": check_req_id,
+            "request_id": operation_id,
             "result_frontier": Frontier.genesis().as_wire(),
             "subject_frontier": Frontier.genesis().as_wire(),
             "verdict": "clean",
         }
     )
-    complete = OperationRecord(
-        started.writer_id,
-        check_req_id,
+    return OperationRecord(
+        writer_id,
+        operation_id,
         OperationKind.CHECK,
         "sha256:" + "d" * 64,
         OperationState.COMPLETE,
@@ -625,8 +622,18 @@ async def test_status_view_operation_survives_compact_projection_lag() -> None:
         None,
         datetime(2026, 1, 1, tzinfo=UTC),
     )
+
+
+async def test_status_view_operation_survives_compact_projection_lag() -> None:
+    """Compact enrichment must not fail recovery when the projection is temporarily unreadable."""
+
+    app, runtime, _catalog = await _workflow_app()
+    started = await app.start(start_request(830, title="Compact lag recovery"))
+    check_req_id = protocol_id("req_", 831)
+    # Seed a complete non-publish operation without going through check (ledger inject).
+    ledger, _objects = runtime.resources[started.task_id]
     ledger._state.operations[(started.writer_id, check_req_id)] = (  # pyright: ignore[reportPrivateUsage]
-        complete,
+        _complete_check_record(started.writer_id, check_req_id),
         None,
     )
 
@@ -648,6 +655,75 @@ async def test_status_view_operation_survives_compact_projection_lag() -> None:
     assert page.state == "complete"
     assert page.operation_kind == "check"
     assert status.rebuild_state == "rebuild_required"
+
+
+async def test_status_view_operation_records_invalid_compact_enrichment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A compact page of the wrong shape degrades recovery, but never silently.
+
+    Enrichment is secondary, so the operation page still resolves on structural defaults. The
+    discarded ``AttributeError`` is the only evidence that the projection returned something it
+    should not, so it must leave a bounded, resolvable record rather than vanish.
+    """
+
+    import yoetz.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    app, runtime, _catalog = await _workflow_app()
+    started = await app.start(start_request(870, title="Compact enrichment invalid"))
+    check_req_id = protocol_id("req_", 871)
+    ledger, _objects = runtime.resources[started.task_id]
+    ledger._state.operations[(started.writer_id, check_req_id)] = (  # pyright: ignore[reportPrivateUsage]
+        _complete_check_record(started.writer_id, check_req_id),
+        None,
+    )
+
+    class _ShapelessPage:
+        """A page missing every enrichment attribute the branch reads."""
+
+    async def shapeless(*_args: object, **_kwargs: object) -> object:
+        return _ShapelessPage()
+
+    ledger.query_projection = shapeless  # type: ignore[method-assign]
+
+    status = await app.status(
+        _status_operation_request(
+            session_id=started.session_id,
+            writer_id=started.writer_id,
+            operation_request_id=check_req_id,
+            request_tail=872,
+        )
+    )
+
+    page = cast(StatusOperationPageModel, status.page)
+    assert page.found is True
+    assert page.state == "complete"
+    assert page.operation_kind == "check"
+    assert status.rebuild_state == "rebuild_required"
+
+    raw = diagnostics.diagnostic_log_path(root=tmp_path).read_text(encoding="ascii")
+    records = tuple(
+        cast(Mapping[str, object], json.loads(line)) for line in raw.splitlines() if line
+    )
+    # Both enrichments read the same bad page: the operation branch's own coverage/frontier
+    # reads, and closure readiness, which runs on every view. Each degrades and each records.
+    assert [item["operation"] for item in records] == [
+        "status_operation_compact_enrichment_invalid",
+        "status_closure_readiness_page_invalid",
+    ]
+    for item in records:
+        assert item == {
+            "timestamp": item["timestamp"],
+            "correlation_id": item["correlation_id"],
+            "component": "application.status",
+            "operation": item["operation"],
+            "reason": "exception_attribute_error",
+            "request_id": "req_00000000-0000-4000-8000-000000000872",
+        }
+    assert "traceback" not in raw
+    assert "_ShapelessPage" not in raw
+    assert str(tmp_path) not in raw
 
 
 async def test_status_view_operation_rejects_cursor_with_bounded_error() -> None:

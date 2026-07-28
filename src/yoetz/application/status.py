@@ -20,6 +20,7 @@ from yoetz.kernel.deterministic_checks import (
     build_deterministic_case,
     finding_basis_to_status_json,
 )
+from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ledger import (
     AssignmentProjectionFilter,
@@ -714,15 +715,23 @@ async def _closure_readiness(
     runtime: TaskRuntime,
     frontier: Frontier,
     compact_page: ProjectionPage | None = None,
+    request_id: str | None = None,
 ) -> StatusClosureReadinessModel:
     """Derive what currently bounds a completion conclusion, from the compact projection.
 
     Computed on every view so an agent never has to switch views — or spend a check and a receipt
-    — to learn that the record cannot yet support a completion claim. This reads only; it records
-    nothing and changes no coverage.
+    — to learn that the record cannot yet support a completion claim. This reads only: it creates
+    no task-ledger consequence and changes no coverage. Its one write is the owner-only bounded
+    diagnostic below, emitted when the page it is handed has an unexpected shape.
 
     ``view=compact`` already loads exactly this page, so it passes it in rather than paying for a
     second identical query. Compact admits no filter or position, so the page is equivalent.
+
+    Because it runs on *every* view, it is also the one enrichment that can strand every view at
+    once. It is therefore total over the page it is handed: an unexpected page shape degrades to
+    ``readiness_unknown`` — the same honest answer a lagging projection already produces — and
+    leaves a bounded diagnostic, rather than raising into the daemon as an unbounded internal
+    error on a read that changed nothing.
     """
 
     if compact_page is not None:
@@ -744,14 +753,25 @@ async def _closure_readiness(
             # Secondary enrichment only: do not fail a structural status page because the
             # compact projection is lagging, rebuilding, or temporarily unreadable.
             return _readiness_unknown()
-    item = page.items[0] if page.items else None
-    if type(item) is not StatusCompactItemModel:
-        # Compact omits its singleton when the task title is unreadable. Counting that as zero
-        # open obligations would manufacture a clean record out of missing data.
+    try:
+        item = page.items[0] if page.items else None
+        if type(item) is not StatusCompactItemModel:
+            # Compact omits its singleton when the task title is unreadable. Counting that as
+            # zero open obligations would manufacture a clean record out of missing data.
+            return _readiness_unknown()
+        open_obligations = int(item.open_obligation_count)
+        unresolved_findings = int(item.unresolved_finding_count)
+        has_plan = item.current_plan_event_id is not None
+        stale = page.rebuild_state != "current" or bool(page.lag)
+        declared_gaps = bool(page.gaps)
+    except (AttributeError, IndexError, TypeError, ValueError) as exc:
+        record_unexpected_exception_without_raising(
+            exc,
+            component="application.status",
+            operation="status_closure_readiness_page_invalid",
+            request_id=request_id,
+        )
         return _readiness_unknown()
-    open_obligations = int(item.open_obligation_count)
-    unresolved_findings = int(item.unresolved_finding_count)
-    has_plan = item.current_plan_event_id is not None
     blocking: list[str] = []
     if open_obligations:
         blocking.append("obligations_open")
@@ -759,9 +779,9 @@ async def _closure_readiness(
         blocking.append("findings_unresolved")
     if not has_plan:
         blocking.append("no_plan_published")
-    if page.rebuild_state != "current" or page.lag:
+    if stale:
         blocking.append("projection_stale")
-    if page.gaps:
+    if declared_gaps:
         blocking.append("coverage_gaps_declared")
     return StatusClosureReadinessModel(
         open_obligation_count=str(open_obligations),
@@ -873,9 +893,18 @@ async def execute_status(app: Application, request: StatusRequest) -> StatusInte
                     next_lag = raw_page.lag
                     next_version = raw_page.projection_version
                     next_rebuild = raw_page.rebuild_state
-                except AttributeError:
-                    # Unexpected page shape: keep the structural defaults already bound above.
-                    pass
+                except AttributeError as exc:
+                    # Unexpected page shape. Recovery still succeeds on the structural defaults
+                    # already bound above — the operation page is authoritative and enrichment is
+                    # secondary — but degrading silently would discard the only signal that the
+                    # compact projection is returning something it should not. Record the bounded
+                    # reason so the next occurrence is diagnosable instead of invisible.
+                    record_unexpected_exception_without_raising(
+                        exc,
+                        component="application.status",
+                        operation="status_operation_compact_enrichment_invalid",
+                        request_id=request.request_id,
+                    )
                 else:
                     compact_page = raw_page
                     coverage = next_coverage
@@ -1019,7 +1048,9 @@ async def execute_status(app: Application, request: StatusRequest) -> StatusInte
             lag = raw_page.lag
             projection_version = raw_page.projection_version
             rebuild_state = raw_page.rebuild_state
-        closure_readiness = await _closure_readiness(runtime, frontier, compact_page)
+        closure_readiness = await _closure_readiness(
+            runtime, frontier, compact_page, request.request_id
+        )
         return StatusInternalResult(
             "0.1",
             "1.0.0",
