@@ -35,7 +35,7 @@ from yoetz.ports.semantic import (
     SemanticResultSuccess,
     SemanticResultTimeout,
 )
-from yoetz.protocol.canonical import canonical_digest, strict_json_parse
+from yoetz.protocol.canonical import JsonValue, canonical_digest, strict_json_parse
 from yoetz.protocol.models import ProviderJudgmentModel
 
 _NOW = datetime(2026, 7, 28, tzinfo=UTC)
@@ -53,11 +53,11 @@ def _challenge(
     kind: str = "claim_without_admissible_evidence",
     refs: list[str] | None = None,
     summary: str = "Evidence gap",
-) -> dict[str, object]:
+) -> dict[str, JsonValue]:
     return {
         "finding_kind": kind,
         "summary": summary,
-        "cited_refs": refs if refs is not None else [_REF_A],
+        "cited_refs": cast(list[JsonValue], refs if refs is not None else [_REF_A]),
         "discrepancy": "The claim lacks a recorded basis.",
         "alternative_interpretation": "The claim may remain unresolved.",
         "message_to_main_agent": "Main agent: provide evidence for the claim.",
@@ -68,11 +68,13 @@ def _challenge(
 
 def _judgment(
     conclusion: str = "no_material_discrepancy",
-    challenges: list[dict[str, object]] | None = None,
-) -> dict[str, object]:
+    challenges: list[dict[str, JsonValue]] | None = None,
+) -> dict[str, JsonValue]:
     return {
         "conclusion": conclusion,
-        "reviewer_challenges": [] if challenges is None else challenges,
+        "reviewer_challenges": cast(
+            list[JsonValue], [] if challenges is None else challenges
+        ),
     }
 
 
@@ -248,7 +250,7 @@ def test_empty_review_text_is_rejected() -> None:
 
 
 def test_provider_model_and_normalize_share_rejection_surface() -> None:
-    adapter = TypeAdapter(ProviderJudgmentModel)
+    adapter: TypeAdapter[ProviderJudgmentModel] = TypeAdapter(ProviderJudgmentModel)
     bad = _judgment("challenges_returned", [_challenge(kind="invented_kind")])
     with pytest.raises(ValidationError):
         adapter.validate_python(bad)
