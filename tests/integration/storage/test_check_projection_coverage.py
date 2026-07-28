@@ -370,9 +370,9 @@ async def test_redaction_of_latest_check_clears_durable_aggregate(tmp_path: Path
     assert _check_types(row["status_coverage_canonical"]) == ["none"]
     gaps = strict_json_parse(row["status_gap_codes_canonical"])
     assert type(gaps) is list
-    assert any(
-        type(marker) is str and marker.startswith("redacted_event:") for marker in gaps
-    ), gaps
+    assert any(type(marker) is str and marker.startswith("redacted_event:") for marker in gaps), (
+        gaps
+    )
     db.close()
 
     _reopened, reopened_db = file_sqlite_for(command, objects, path)
