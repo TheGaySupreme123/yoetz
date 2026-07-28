@@ -173,20 +173,24 @@ def test_generated_schema_matches_owning_model_and_frozen_artifact() -> None:
     assert frozen_body == cast(dict[str, object], JUDGMENT_JSON_SCHEMA)
     kinds = cast(
         list[str],
-        cast(dict[str, Any], cast(dict[str, Any], JUDGMENT_JSON_SCHEMA["$defs"])["FindingKindWire"])[
-            "enum"
-        ],
+        cast(
+            dict[str, Any], cast(dict[str, Any], JUDGMENT_JSON_SCHEMA["$defs"])["FindingKindWire"]
+        )["enum"],
     )
     assert set(kinds) == {kind.value for kind in FindingKind}
 
 
 def test_every_finding_kind_is_admitted_and_near_misses_are_rejected() -> None:
     for kind in FindingKind:
-        judgment = normalize_judgment(_judgment("challenges_returned", [_challenge(kind=kind.value)]))
+        judgment = normalize_judgment(
+            _judgment("challenges_returned", [_challenge(kind=kind.value)])
+        )
         assert judgment.challenges[0].finding_kind is kind
 
     with pytest.raises(ValueError, match="openai_judgment_shape_invalid"):
-        normalize_judgment(_judgment("challenges_returned", [_challenge(kind="claim_without_evidence")]))
+        normalize_judgment(
+            _judgment("challenges_returned", [_challenge(kind="claim_without_evidence")])
+        )
     with pytest.raises(ValueError, match="openai_judgment_shape_invalid"):
         normalize_judgment(_judgment("challenges_returned", [_challenge(kind="not_a_kind")]))
 
@@ -204,9 +208,7 @@ def test_challenge_refs_enforce_pattern_count_uniqueness_and_canonicalize_order(
     with pytest.raises(ValueError, match="openai_judgment_shape_invalid"):
         normalize_judgment(_judgment("challenges_returned", [_challenge(refs=[])]))
     with pytest.raises(ValueError, match="openai_judgment_shape_invalid"):
-        normalize_judgment(
-            _judgment("challenges_returned", [_challenge(refs=[_REF_A, _REF_A])])
-        )
+        normalize_judgment(_judgment("challenges_returned", [_challenge(refs=[_REF_A, _REF_A])]))
     with pytest.raises(ValueError, match="openai_judgment_shape_invalid"):
         normalize_judgment(
             _judgment("challenges_returned", [_challenge(refs=["task_not_a_subject_id"])])
@@ -259,9 +261,18 @@ def test_provider_model_and_normalize_share_rejection_surface() -> None:
     (
         ("", SemanticFailureClass.RESPONSE_SCHEMA),
         ("```json\n{}\n```", SemanticFailureClass.RESPONSE_SCHEMA),
-        ('prefix {"conclusion":"no_material_discrepancy","reviewer_challenges":[]}', SemanticFailureClass.RESPONSE_SCHEMA),
-        ('{"conclusion":"no_material_discrepancy","reviewer_challenges":[],"conclusion":"x"}', SemanticFailureClass.RESPONSE_SCHEMA),
-        ('{"conclusion":"no_material_discrepancy","reviewer_challenges":[],"x":1.5}', SemanticFailureClass.RESPONSE_SCHEMA),
+        (
+            'prefix {"conclusion":"no_material_discrepancy","reviewer_challenges":[]}',
+            SemanticFailureClass.RESPONSE_SCHEMA,
+        ),
+        (
+            '{"conclusion":"no_material_discrepancy","reviewer_challenges":[],"conclusion":"x"}',
+            SemanticFailureClass.RESPONSE_SCHEMA,
+        ),
+        (
+            '{"conclusion":"no_material_discrepancy","reviewer_challenges":[],"x":1.5}',
+            SemanticFailureClass.RESPONSE_SCHEMA,
+        ),
     ),
 )
 def test_malformed_output_keeps_schema_failure_class_without_plaintext(
@@ -362,6 +373,7 @@ def test_conforming_challenge_response_succeeds_on_first_parse() -> None:
     )
     assert type(result) is SemanticResultSuccess
     assert result.judgment.conclusion == "challenges_returned"
-    assert result.judgment.challenges[0].cited_refs == (_REF_B, _REF_A) or result.judgment.challenges[
-        0
-    ].cited_refs == tuple(sorted((_REF_A, _REF_B)))
+    assert result.judgment.challenges[0].cited_refs == (
+        _REF_B,
+        _REF_A,
+    ) or result.judgment.challenges[0].cited_refs == tuple(sorted((_REF_A, _REF_B)))

@@ -224,18 +224,18 @@ The schema catalog (`protocol/schemas.py`) has two orthogonal enums. `SchemaKind
 runtime category `request_result|event|config|version_manifest`.
 `SchemaArtifactRole` is the exact release/packaging role:
 `common-value`, `MCP input`, `MCP output`, `persisted-envelope`, `event-envelope`,
-`event-payload`, `configuration`, `finding`, `semantic-provenance`, `receipt-document`,
-`privacy-policy`, `outbound-case`, `privacy-audit`, `setup-contract`, `local-control`,
-`service-status`, or `version-report`. `SchemaDocument` contains both `schema_kind` and
-`artifact_role: SchemaArtifactRole`; neither value is inferred from the other. The reviewed
-`schemas/manifest.json` owns the closed path-to-artifact-role mapping, and catalog loading fails
-closed on an unknown or path-incompatible role.
+`event-payload`, `configuration`, `finding`, `provider-judgment`, `semantic-provenance`,
+`receipt-document`, `privacy-policy`, `outbound-case`, `privacy-audit`, `setup-contract`,
+`local-control`, `service-status`, or `version-report`. `SchemaDocument` contains both
+`schema_kind` and `artifact_role: SchemaArtifactRole`; neither value is inferred from the other.
+The reviewed `schemas/manifest.json` owns the closed path-to-artifact-role mapping, and catalog
+loading fails closed on an unknown or path-incompatible role.
 
 The independent exhaustive path-to-`SchemaKind` map is: `events/* -> event`,
 `config/* -> config`, `version/* -> version_manifest`, and
 `common/*|operations/*|findings/*|receipts/*|privacy/*|service/* -> request_result`. The manifest
 records both typed values and the catalog re-derives each from its own map. These prefixes exhaust
-the 52 v0.1 schema artifacts; no `support_manifest` kind or support-manifest schema exists.
+the 53 v0.1 schema artifacts; no `support_manifest` kind or support-manifest schema exists.
 
 ## 5. Coverage (`protocol/coverage.py`)
 

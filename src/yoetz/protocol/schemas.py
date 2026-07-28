@@ -52,7 +52,7 @@ __all__ = [
 SCHEMA_NAMESPACE: Final = "https://schemas.yoetz.dev/0.1/"
 SCHEMA_MANIFEST_SCHEMA: Final = "yoetz.schema-manifest/1.0.0"
 SCHEMA_MANIFEST_VERSION: Final = "1.0.0"
-SCHEMA_MEMBER_COUNT: Final = 52
+SCHEMA_MEMBER_COUNT: Final = 53
 
 _DRAFT_2020_12: Final = "https://json-schema.org/draft/2020-12/schema"
 _SCHEMA_MEDIA_TYPE: Final = "application/schema+json"
@@ -97,6 +97,7 @@ class SchemaArtifactRole(str, Enum):  # noqa: UP042 - the wire contract fixes th
     EVENT_PAYLOAD = "event-payload"
     CONFIGURATION = "configuration"
     FINDING = "finding"
+    PROVIDER_JUDGMENT = "provider-judgment"
     SEMANTIC_PROVENANCE = "semantic-provenance"
     RECEIPT_DOCUMENT = "receipt-document"
     PRIVACY_POLICY = "privacy-policy"
@@ -400,6 +401,8 @@ def _derive_role(path: str) -> SchemaArtifactRole:
     if directory == "findings":
         if filename.startswith("finding-"):
             return SchemaArtifactRole.FINDING
+        if filename.startswith("provider-judgment-"):
+            return SchemaArtifactRole.PROVIDER_JUDGMENT
         if filename.startswith("semantic-provenance-"):
             return SchemaArtifactRole.SEMANTIC_PROVENANCE
         _protocol_error("schema_artifact_role_mismatch")
@@ -615,7 +618,7 @@ def _load_catalog_state() -> _CatalogState:
             key=lambda item: item.schema_name.replace("-", "_").encode("ascii"),
         )
     }
-    if len(request_versions_dict) != 31 or len(event_versions_dict) != 16:
+    if len(request_versions_dict) != 32 or len(event_versions_dict) != 16:
         _protocol_error("schema_catalog_incomplete")
 
     catalog = SchemaCatalog(

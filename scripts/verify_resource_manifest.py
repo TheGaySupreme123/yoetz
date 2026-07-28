@@ -323,6 +323,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     ("schemas/findings/finding-1.0.0.schema.json", "json_schema", "application/schema+json", True),
     (
+        "schemas/findings/provider-judgment-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/findings/semantic-provenance-1.0.0.schema.json",
         "json_schema",
         "application/schema+json",

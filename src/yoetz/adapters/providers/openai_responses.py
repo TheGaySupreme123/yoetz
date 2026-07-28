@@ -200,9 +200,7 @@ def _strip_schema_titles(node: object) -> object:
 
     if type(node) is dict:
         source = cast(dict[str, object], node)
-        return {
-            key: _strip_schema_titles(value) for key, value in source.items() if key != "title"
-        }
+        return {key: _strip_schema_titles(value) for key, value in source.items() if key != "title"}
     if type(node) is list:
         return [_strip_schema_titles(item) for item in cast(list[object], node)]
     return node
