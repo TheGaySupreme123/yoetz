@@ -525,16 +525,18 @@ def _public_model(method: ControlMethod, value: Mapping[str, JsonValue]) -> Proj
         return JsonObject(value)
     success_type, result_type = model
     success = success_type.model_validate(_plain_nested_mappings(value))
-    # ``RespondResponseModel`` declares ``optional_non_null_fields`` (reason/waiver_scope/
-    # waiver_expiry) that the frozen wire schema requires to be entirely omitted when absent,
-    # never present as an explicit null. ``PublishWorkAcceptedEventModel.summary`` is the same
-    # shape one level down: it is ordinarily absent (nothing populates it today), so a blanket
-    # ``exclude_none=False`` round trip here would reintroduce that null and crash the reflexive
-    # re-validation below. Respond and publish therefore exclude nulls; the other four operations
-    # have no ordinarily-absent ``optional_non_null_fields`` member and keep the established
-    # behavior.
+    # Every closed result model that declares ``optional_non_null_fields`` requires those leaves
+    # to be entirely omitted when absent, never present as an explicit null. A dump that keeps
+    # defaulted Nones reintroduces the null after a clean internal body survived disclosure and
+    # crashes the reflexive re-validation below (publish ``summary``, respond reason/waiver
+    # fields, status obligation ``acceptance_criteria``, structural subject-state digests).
+    # ``exclude_unset`` drops only fields that were never populated, so required nullable keys
+    # that were set to null (status ``revision_event_id``) still project. Respond and publish
+    # also exclude any remaining nulls as belt-and-suspenders for their internal builders.
     exclude_none = method in {ControlMethod.RESPOND, ControlMethod.PUBLISH_WORK}
-    return result_type.model_validate(success.model_dump(mode="json", exclude_none=exclude_none))
+    return result_type.model_validate(
+        success.model_dump(mode="json", exclude_unset=True, exclude_none=exclude_none)
+    )
 
 
 @dataclass(frozen=True, slots=True)

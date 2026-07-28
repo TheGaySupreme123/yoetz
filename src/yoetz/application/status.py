@@ -5,8 +5,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, Literal, Protocol, cast
+
+from pydantic import BaseModel
 
 from yoetz.application.check import CheckScope, run_deterministic_policies
 from yoetz.domain.findings import FINDING_KIND_TRAITS, FindingOrigin
@@ -90,6 +93,63 @@ _PACKS = ("research-evidence/0.1.0", "work-integrity/0.1.0")
 _CURSOR_VERSION = "1"
 
 
+def _dump_closed_omitting_optional_nulls(model: BaseModel) -> dict[str, JsonValue]:
+    """Dump one closed model tree for the internal status body.
+
+    Required nullable leaves (for example ``revision_event_id`` and ``next_cursor``) stay present
+    as JSON null. Fields declared in ``optional_non_null_fields`` that are unset are omitted
+    entirely — never reintroduced as null — so the closed wire models accept the body.
+    """
+
+    dumped = cast(dict[str, JsonValue], model.model_dump(mode="json", exclude_none=False))
+    return _strip_optional_non_null_nulls(model, dumped)
+
+
+def _strip_optional_non_null_nulls(
+    model: BaseModel, dumped: Mapping[str, JsonValue]
+) -> dict[str, JsonValue]:
+    """Drop null leaves that ``optional_non_null_fields`` forbids, recursively."""
+
+    optional_fields: frozenset[str] = frozenset()
+    declared = getattr(type(model), "optional_non_null_fields", None)
+    if isinstance(declared, frozenset):
+        optional_fields = cast(frozenset[str], declared)
+    result: dict[str, JsonValue] = {}
+    for key, value in dumped.items():
+        if key in optional_fields and value is None:
+            continue
+        attr: object = getattr(model, key)
+        if isinstance(attr, BaseModel) and isinstance(value, Mapping):
+            result[key] = cast(
+                JsonValue,
+                _strip_optional_non_null_nulls(attr, cast(Mapping[str, JsonValue], value)),
+            )
+            continue
+        if (
+            isinstance(attr, Sequence)
+            and not isinstance(attr, (str, bytes))
+            and isinstance(value, list)
+        ):
+            children = cast(Sequence[object], attr)
+            items: list[JsonValue] = []
+            for child, child_dump in zip(children, cast(list[JsonValue], value), strict=True):
+                if isinstance(child, BaseModel) and isinstance(child_dump, Mapping):
+                    items.append(
+                        cast(
+                            JsonValue,
+                            _strip_optional_non_null_nulls(
+                                child, cast(Mapping[str, JsonValue], child_dump)
+                            ),
+                        )
+                    )
+                else:
+                    items.append(child_dump)
+            result[key] = items
+            continue
+        result[key] = value
+    return result
+
+
 class Application(Protocol):
     runtime: BundleRuntimePort
     status_cursor_key: bytes
@@ -119,6 +179,12 @@ class StatusInternalResult:
     closure_readiness: StatusClosureReadinessModel
 
     def as_json(self) -> dict[str, JsonValue]:
+        # Unset optional non-null leaves (today: obligation ``acceptance_criteria``, structural
+        # subject-state digests) must be entirely absent from the internal body, never present as
+        # explicit null. A blanket ``exclude_none`` would also drop required nullable keys such as
+        # ``revision_event_id`` and ``next_cursor``; a blanket ``exclude_unset`` drops defaults
+        # that the frozen schema still requires as null. The page dump therefore strips only the
+        # fields each closed model lists in ``optional_non_null_fields``.
         return {
             "protocol_version": self.protocol_version,
             "schema_version": self.schema_version,
@@ -135,7 +201,7 @@ class StatusInternalResult:
             "projection_lag": str(self.projection_lag),
             "projection_version": self.projection_version,
             "rebuild_state": self.rebuild_state,
-            "page": cast(JsonValue, self.page.model_dump(mode="json", exclude_none=False)),
+            "page": cast(JsonValue, _dump_closed_omitting_optional_nulls(self.page)),
             "coverage": coverage_to_json(self.coverage),
             "gaps": self.gaps,
             "import_status": cast(
