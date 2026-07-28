@@ -205,10 +205,10 @@ class StatusInternalResult:
             "coverage": coverage_to_json(self.coverage),
             "gaps": self.gaps,
             "import_status": cast(
-                JsonValue, self.import_status.model_dump(mode="json", exclude_none=False)
+                JsonValue, _dump_closed_omitting_optional_nulls(self.import_status)
             ),
             "closure_readiness": cast(
-                JsonValue, self.closure_readiness.model_dump(mode="json", exclude_none=False)
+                JsonValue, _dump_closed_omitting_optional_nulls(self.closure_readiness)
             ),
         }
 

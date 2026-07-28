@@ -538,9 +538,7 @@ async def test_respond_omits_unset_optional_response_fields() -> None:
         ("diff_digest", "tree_digest"),
     ),
 )
-async def test_status_evidence_omits_unset_structural_digest(
-    present: str, absent: str
-) -> None:
+async def test_status_evidence_omits_unset_structural_digest(present: str, absent: str) -> None:
     """StatusStructuralSubjectStateModel projects with only the set digest, never a null sibling."""
 
     seed = 2600 if present == "tree_digest" else 2650
