@@ -20,8 +20,9 @@ from datetime import UTC, datetime
 from typing import cast
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
+import yoetz.protocol.models as protocol_models
 from builders.projection_workflow import (
     ProjectionCase,
     build_projection_application,
@@ -64,11 +65,13 @@ from yoetz.protocol.models import (
     StatusObligationItemModel,
     StatusRequest,
     StatusStructuralSubjectStateModel,
-    _ClosedModel,
     public_model_to_wire,
 )
 
 pytestmark = pytest.mark.anyio
+
+# Private base is not re-exported; resolve by getattr like other protocol tests.
+_CLOSED_MODEL = cast(type[BaseModel], getattr(protocol_models, "_ClosedModel"))
 
 _DIGEST = "sha256:" + "a" * 64
 _WORKSPACE = "hmac-sha256:" + "8" * 64
@@ -76,7 +79,7 @@ _WORKSPACE = "hmac-sha256:" + "8" * 64
 # Every public *result* model that declares ``optional_non_null_fields``. Request and filter models
 # are caller-supplied and already reject null at parse time; they are intentionally absent here.
 # A new result model that joins the set without a row in this table fails the inventory test.
-_RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[_ClosedModel], frozenset[str]], ...] = (
+_RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = (
     (PublishWorkAcceptedEventModel, frozenset({"summary"})),
     (PublicErrorModel, frozenset({"safe_details"})),
     (RespondEvidenceSummaryModel, frozenset({"description"})),
@@ -656,7 +659,7 @@ async def test_public_error_omits_unset_safe_details() -> None:
     ),
 )
 def test_closed_model_still_rejects_explicit_null(
-    model_type: type[_ClosedModel], payload: Mapping[str, object]
+    model_type: type[BaseModel], payload: Mapping[str, object]
 ) -> None:
     """Producers omit unset optionals; the closed models still refuse an explicit null."""
 
@@ -667,17 +670,16 @@ def test_closed_model_still_rejects_explicit_null(
 def test_result_optional_non_null_inventory_is_complete() -> None:
     """Every result model declaring optional_non_null_fields is listed in the inventory table."""
 
-    import yoetz.protocol.models as models_module
-
+    empty_fields: frozenset[str] = frozenset()
     declared: dict[str, frozenset[str]] = {}
-    for name in dir(models_module):
-        obj = getattr(models_module, name)
-        if not isinstance(obj, type) or not issubclass(obj, _ClosedModel) or obj is _ClosedModel:
+    for name in dir(protocol_models):
+        obj = getattr(protocol_models, name)
+        if not isinstance(obj, type) or not issubclass(obj, _CLOSED_MODEL) or obj is _CLOSED_MODEL:
             continue
-        fields = getattr(obj, "optional_non_null_fields", frozenset())
+        fields = cast(frozenset[str], getattr(obj, "optional_non_null_fields", empty_fields))
         if not fields or name in _REQUEST_SIDE_OPTIONAL_NON_NULL:
             continue
-        declared[name] = frozenset(fields)
+        declared[name] = fields
 
     inventoried = {model_type.__name__: fields for model_type, fields in _RESULT_OPTIONAL_NON_NULL}
     assert inventoried == declared, (
