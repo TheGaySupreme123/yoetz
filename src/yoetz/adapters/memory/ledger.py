@@ -824,13 +824,20 @@ def _projection_items(
             if payload is None:
                 continue
             state = payload.subject_state
-            subject_state = (
-                None
-                if state is None or (state.tree_digest is None and state.diff_digest is None)
-                else StatusStructuralSubjectStateModel(
-                    tree_digest=state.tree_digest, diff_digest=state.diff_digest
+            subject_state = None
+            if state is not None and (
+                state.tree_digest is not None or state.diff_digest is not None
+            ):
+                # Optional non-null digests must be omitted when unset, never passed as null —
+                # ``StatusStructuralSubjectStateModel`` rejects explicit null leaves.
+                subject_state_values: dict[str, object] = {}
+                if state.tree_digest is not None:
+                    subject_state_values["tree_digest"] = state.tree_digest
+                if state.diff_digest is not None:
+                    subject_state_values["diff_digest"] = state.diff_digest
+                subject_state = StatusStructuralSubjectStateModel.model_validate(
+                    subject_state_values
                 )
-            )
             freshness = projection.freshness.value
             if not record.object_available and freshness == "current":
                 freshness = "redacted_gap"
