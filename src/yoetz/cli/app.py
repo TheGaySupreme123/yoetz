@@ -1121,8 +1121,10 @@ def provider_endpoint(
         ProviderEndpointChoice,
         apply_provider_endpoint_choice,
         prompt_provider_endpoint_binding,
+        prompt_provider_model,
     )
     from yoetz.config.models import ConfigError
+    from yoetz.config.write import provider_preset
 
     try:
         if (
@@ -1140,9 +1142,6 @@ def provider_endpoint(
             prompt_provider_endpoint_binding()
             _finish(0)
             return
-        if model is None:
-            _finish(_usage_failure())
-            return
         if (
             (official and (fireworks or grok))
             or (fireworks and grok)
@@ -1154,43 +1153,37 @@ def provider_endpoint(
         ):
             _finish(_usage_failure())
             return
+        choice: ProviderEndpointChoice
         if provider_name is not None:
-            choices: dict[str, ProviderEndpointChoice] = {
-                "openai": "official_openai",
-                "official_openai": "official_openai",
-                "fireworks": "fireworks",
-                "anthropic": "anthropic",
-                "claude": "anthropic",
-                "anthropic-claude": "anthropic",
-                "gemini": "google_gemini",
-                "google": "google_gemini",
-                "google_gemini": "google_gemini",
-                "google-gemini": "google_gemini",
-                "openrouter": "openrouter",
-                "grok": "grok",
-                "xai": "grok",
-                "x-ai": "grok",
-                "vercel-ai-gateway": "vercel_ai_gateway",
-                "vercel_ai_gateway": "vercel_ai_gateway",
-            }
-            choice = choices.get(provider_name.strip().lower())
-            if choice is None:
+            choice = cast(ProviderEndpointChoice, provider_preset(provider_name).choice)
+        elif official:
+            choice = "official_openai"
+        elif fireworks:
+            choice = "fireworks"
+        elif grok:
+            choice = "grok"
+        elif https_origin is not None:
+            choice = "owner_declared"
+        else:
+            _finish(_usage_failure())
+            return
+        if model is None:
+            if not interactive or not (sys.stdin.isatty() and sys.stdout.isatty()):
                 _finish(_usage_failure())
                 return
-            path, provider = apply_provider_endpoint_choice(choice, model=model)
-        elif official:
-            path, provider = apply_provider_endpoint_choice("official_openai", model=model)
-        elif fireworks:
-            path, provider = apply_provider_endpoint_choice("fireworks", model=model)
-        elif grok:
-            path, provider = apply_provider_endpoint_choice("grok", model=model)
-        elif https_origin is not None:
+            if choice == "owner_declared":
+                model = typer.prompt("Model id", show_default=False).strip()
+            else:
+                model = prompt_provider_model(choice)
+            if not model:
+                _finish(_usage_failure())
+                return
+        if choice == "owner_declared":
             path, provider = apply_provider_endpoint_choice(
                 "owner_declared", model=model, https_origin=https_origin
             )
         else:
-            _finish(_usage_failure())
-            return
+            path, provider = apply_provider_endpoint_choice(choice, model=model)
         payload = {
             "config_path": str(path),
             "endpoint_profile_id": provider.endpoint_profile_id,

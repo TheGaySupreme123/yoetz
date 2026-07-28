@@ -77,6 +77,20 @@ class ProviderPreset:
     base_path_prefix: str
     default_model: str
     api_style: str
+    suggested_models: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        """Keep the reviewed setup catalog deterministic, bounded, and default-first."""
+
+        suggestions = self.suggested_models
+        if (
+            not suggestions
+            or len(suggestions) > 10
+            or next(iter(suggestions), None) != self.default_model
+            or len(set(suggestions)) != len(suggestions)
+            or any(type(model) is not str or not model for model in suggestions)
+        ):
+            raise ValueError("provider_model_catalog_invalid")
 
 
 PROVIDER_PRESETS: Final[Mapping[str, ProviderPreset]] = MappingProxyType(
@@ -91,6 +105,15 @@ PROVIDER_PRESETS: Final[Mapping[str, ProviderPreset]] = MappingProxyType(
             "/v1",
             "gpt-4.1-mini",
             "responses",
+            (
+                "gpt-4.1-mini",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.5",
+                "gpt-5.4-mini",
+                "gpt-5.4-nano",
+            ),
         ),
         "fireworks": ProviderPreset(
             "fireworks",
@@ -102,6 +125,10 @@ PROVIDER_PRESETS: Final[Mapping[str, ProviderPreset]] = MappingProxyType(
             "/inference/v1",
             "accounts/fireworks/models/qwen3-235b-a22b",
             "responses",
+            (
+                "accounts/fireworks/models/qwen3-235b-a22b",
+                "accounts/fireworks/models/minimax-m3",
+            ),
         ),
         "anthropic": ProviderPreset(
             "anthropic",
@@ -113,6 +140,12 @@ PROVIDER_PRESETS: Final[Mapping[str, ProviderPreset]] = MappingProxyType(
             "/v1",
             "claude-sonnet-4-6",
             "chat_completions",
+            (
+                "claude-sonnet-4-6",
+                "claude-sonnet-5",
+                "claude-opus-4-8",
+                "claude-haiku-4-5-20251001",
+            ),
         ),
         "google_gemini": ProviderPreset(
             "google_gemini",
@@ -124,6 +157,11 @@ PROVIDER_PRESETS: Final[Mapping[str, ProviderPreset]] = MappingProxyType(
             "/v1beta/openai",
             "gemini-3.5-flash",
             "chat_completions",
+            (
+                "gemini-3.5-flash",
+                "gemini-3.6-flash",
+                "gemini-3.5-flash-lite",
+            ),
         ),
         "openrouter": ProviderPreset(
             "openrouter",
@@ -135,6 +173,13 @@ PROVIDER_PRESETS: Final[Mapping[str, ProviderPreset]] = MappingProxyType(
             "/api/v1",
             "openai/gpt-5.2",
             "chat_completions",
+            (
+                "openai/gpt-5.2",
+                "x-ai/grok-4.5",
+                "google/gemini-3.6-flash",
+                "anthropic/claude-sonnet-5",
+                "openai/gpt-5.6-terra",
+            ),
         ),
         "grok": ProviderPreset(
             "grok",
@@ -146,6 +191,12 @@ PROVIDER_PRESETS: Final[Mapping[str, ProviderPreset]] = MappingProxyType(
             "/v1",
             "grok-4.5",
             "chat_completions",
+            (
+                "grok-4.5",
+                "grok-4.3",
+                "grok-4.20-0309-reasoning",
+                "grok-4.20-0309-non-reasoning",
+            ),
         ),
         "vercel_ai_gateway": ProviderPreset(
             "vercel_ai_gateway",
@@ -157,6 +208,12 @@ PROVIDER_PRESETS: Final[Mapping[str, ProviderPreset]] = MappingProxyType(
             "/v1",
             "anthropic/claude-sonnet-4-6",
             "responses",
+            (
+                "anthropic/claude-sonnet-4-6",
+                "openai/gpt-5.4",
+                "xai/grok-4.5",
+                "google/gemini-3.6-flash",
+            ),
         ),
     }
 )

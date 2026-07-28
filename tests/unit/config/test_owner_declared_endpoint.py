@@ -242,6 +242,14 @@ def test_provider_preset_aliases_and_unknown_choices_are_bounded() -> None:
     assert caught.value.reason_code == "config_value_invalid"
 
 
+def test_provider_model_catalog_is_default_first_unique_and_capped() -> None:
+    assert len(PROVIDER_PRESETS) == 7
+    for preset in PROVIDER_PRESETS.values():
+        assert 1 <= len(preset.suggested_models) <= 10
+        assert preset.suggested_models[0] == preset.default_model
+        assert len(set(preset.suggested_models)) == len(preset.suggested_models)
+
+
 def test_owner_declared_data_use_never_assisted_eligible() -> None:
     profile = owner_declared_data_use_profile(
         reviewed_at=_NOW,
