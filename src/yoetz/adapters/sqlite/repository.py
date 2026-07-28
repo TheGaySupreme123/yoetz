@@ -15,6 +15,7 @@ from yoetz.adapters.memory.ledger import (
     MemoryLedgerAdapter,
     MemoryLedgerState,
     build_append_operation_record,
+    compact_status_coverage,
     load_frozen_case_from_resume,
 )
 from yoetz.adapters.sqlite.observation import SqliteObservationStore
@@ -969,6 +970,8 @@ class SqliteLedger:
             "WHERE projection_name='work'",
             (projection.frontier, projection_digest(projection)),
         )
+        # Status coverage is the applicable-check fold, not the last event's envelope
+        # (engine-derived check/receipt envelopes hardcode check_types=none).
         self._db.execute(
             "UPDATE p1_projection_state SET frontier_seq=?,head_digest=?,"
             "open_obligation_count=?,unresolved_finding_count=?,freshness=?,"
@@ -983,7 +986,9 @@ class SqliteLedger:
                 projection.freshness.value,
                 projection.unknown_event_count,
                 records[0].event_id,
-                canonical_encode(coverage_to_json(records[-1].coverage)),
+                canonical_encode(
+                    coverage_to_json(compact_status_coverage(self._state.records, projection))
+                ),
                 canonical_encode(projection.coverage_gaps),
             ),
         )
@@ -1087,22 +1092,62 @@ class SqliteLedger:
             "WHERE projection_name='work'",
             (projection.frontier, projection_digest(projection)),
         )
-        self._db.execute(
-            "UPDATE p1_projection_state SET frontier_seq=?,head_digest=?,"
-            "open_obligation_count=?,unresolved_finding_count=?,freshness=?,"
-            "unknown_event_count=?,status_coverage_canonical=?,status_gap_codes_canonical=? "
-            "WHERE projection_name='work'",
-            (
-                projection.frontier,
-                projection.head_digest,
-                len(projection.obligations),
-                len(projection.findings),
-                projection.freshness.value,
-                projection.unknown_event_count,
-                canonical_encode(coverage_to_json(records[-1].coverage)),
-                canonical_encode(projection.coverage_gaps),
-            ),
+        # Mirror the reducer's applicable-check coverage, never the last event envelope.
+        status_coverage = canonical_encode(
+            coverage_to_json(compact_status_coverage(self._state.records, projection))
         )
+        status_gaps = canonical_encode(projection.coverage_gaps)
+        has_check = any(record.schema.name == "check_recorded" for record in records)
+        if has_check:
+            latest = projection.latest_tested_state
+            if latest is None:
+                # check_recorded without a projected latest state would violate 0001.sql
+                # null/non-null consistency; fail closed rather than write a partial row.
+                raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
+            self._db.execute(
+                "UPDATE p1_projection_state SET frontier_seq=?,head_digest=?,"
+                "open_obligation_count=?,unresolved_finding_count=?,freshness=?,"
+                "unknown_event_count=?,status_coverage_canonical=?,status_gap_codes_canonical=?,"
+                "latest_check_event_id=?,latest_subject_frontier_seq=?,"
+                "latest_subject_frontier_digest=?,latest_verdict=?,"
+                "latest_returned_finding_ids=?,latest_suppressed_count=?,"
+                "latest_coverage_canonical=? "
+                "WHERE projection_name='work'",
+                (
+                    projection.frontier,
+                    projection.head_digest,
+                    len(projection.obligations),
+                    len(projection.findings),
+                    projection.freshness.value,
+                    projection.unknown_event_count,
+                    status_coverage,
+                    status_gaps,
+                    latest.source_check_event_id,
+                    latest.subject_frontier.sequence,
+                    latest.subject_frontier.head_digest,
+                    latest.verdict.value,
+                    canonical_encode(latest.returned_finding_ids),
+                    latest.suppressed_count,
+                    canonical_encode(coverage_to_json(latest.coverage)),
+                ),
+            )
+        else:
+            self._db.execute(
+                "UPDATE p1_projection_state SET frontier_seq=?,head_digest=?,"
+                "open_obligation_count=?,unresolved_finding_count=?,freshness=?,"
+                "unknown_event_count=?,status_coverage_canonical=?,status_gap_codes_canonical=? "
+                "WHERE projection_name='work'",
+                (
+                    projection.frontier,
+                    projection.head_digest,
+                    len(projection.obligations),
+                    len(projection.findings),
+                    projection.freshness.value,
+                    projection.unknown_event_count,
+                    status_coverage,
+                    status_gaps,
+                ),
+            )
 
     async def append_batch(self, command: AppendCommand) -> AppendResult:
         await self._ensure_recovered()
