@@ -23,7 +23,13 @@ from integration.storage.test_append_and_replay import (
     uuid_id,
 )
 from yoetz.adapters.sqlite.repository import SqliteLedger
-from yoetz.domain.events import EventDraft, EventPayload, LedgerRecord, encode_payload
+from yoetz.domain.events import (
+    EventDraft,
+    EventPayload,
+    LedgerRecord,
+    RedactionRecordedPayload,
+    encode_payload,
+)
 from yoetz.domain.findings import CheckVerdict, RankedFindings
 from yoetz.domain.values import Frontier, event_id, object_id, parse_rfc3339_millis
 from yoetz.ports.ledger import (
@@ -305,6 +311,78 @@ async def test_ordinary_publish_after_check_does_not_resurrect_none(tmp_path: Pa
 
 
 @pytest.mark.anyio
+async def test_redaction_of_latest_check_clears_durable_aggregate(tmp_path: Path) -> None:
+    """Redacting the current check must clear the durable latest-* columns.
+
+    The reducer sets ``latest_tested_state`` to None when ``redaction_recorded`` targets
+    that check. The ordinary append path used to refresh only status coverage/gaps and
+    leave the seven latest-check columns advertising the redacted verdict after restart.
+    """
+
+    seed = replay_records("projection-rebuild")[:1]
+    command, objects = command_from_records(seed)
+    path = tmp_path / "redact-check-aggregate.sqlite3"
+    ledger, db = file_sqlite_for(command, objects, path)
+    accepted = await ledger.append_batch(command)
+    check_coverage = _checked_coverage(command.entries[0].coverage, CheckType.DETERMINISTIC)
+    await _commit_check(
+        ledger,
+        command,
+        objects,
+        accepted.result_frontier,
+        request_number=94_001,
+        coverage=check_coverage,
+    )
+    after_check = _projection_row(db)
+    _assert_check_aggregate_consistent(after_check, has_check=True)
+    check_event_id = after_check["latest_check_event_id"]
+    assert type(check_event_id) is str
+
+    redaction_template = next(
+        record
+        for record in replay_records("all-event-families")
+        if record.schema.name == "redaction_recorded"
+    )
+    assert type(redaction_template.payload) is RedactionRecordedPayload
+    redaction_payload = replace(
+        redaction_template.payload,
+        target_event_ids=(event_id(check_event_id),),
+        target_object_ids=(),
+    )
+    redaction_command, objects = _append_follow_on(
+        seed[0],
+        redaction_template,
+        objects,
+        writer_id=command.writer_id,
+        session_id=command.session_id,
+        task_id=command.task_id,
+        expected_frontier=after_check["frontier_seq"],
+        request_number=94_010,
+        event_number=94_011,
+        object_number=94_012,
+        payload=redaction_payload,
+    )
+    await ledger.append_batch(redaction_command)
+
+    row = _projection_row(db)
+    _assert_check_aggregate_consistent(row, has_check=False)
+    # No applicable check remains; compact status falls back to the redaction envelope.
+    assert _check_types(row["status_coverage_canonical"]) == ["none"]
+    gaps = strict_json_parse(row["status_gap_codes_canonical"])
+    assert type(gaps) is list
+    assert any(
+        type(marker) is str and marker.startswith("redacted_event:") for marker in gaps
+    ), gaps
+    db.close()
+
+    _reopened, reopened_db = file_sqlite_for(command, objects, path)
+    durable = _projection_row(reopened_db)
+    _assert_check_aggregate_consistent(durable, has_check=False)
+    assert _check_types(durable["status_coverage_canonical"]) == ["none"]
+    reopened_db.close()
+
+
+@pytest.mark.anyio
 async def test_two_checks_update_aggregate_and_keep_constraints(tmp_path: Path) -> None:
     records = replay_records("projection-rebuild")[:1]
     command, objects = command_from_records(records)
@@ -385,9 +463,16 @@ def _append_follow_on(
     request_number: int,
     event_number: int,
     object_number: int,
+    payload: EventPayload | None = None,
 ) -> tuple[AppendCommand, MemoryObjects]:
-    assert template.payload is not None
-    payload = cast(EventPayload, template.payload)
+    assert template.payload is not None or payload is not None
+    typed_payload = cast(EventPayload, payload if payload is not None else template.payload)
+    # Redaction envelopes mirror target_object_ids in artifact_refs; rebuild when the
+    # payload is overridden so EventDraft ref-mirror validation stays honest.
+    if type(typed_payload) is RedactionRecordedPayload:
+        artifact_refs = typed_payload.target_object_ids
+    else:
+        artifact_refs = template.artifact_refs
     event = event_id(uuid_id("evt", event_number))
     payload_object = object_id(uuid_id("obj", object_number))
     draft = EventDraft(
@@ -395,8 +480,8 @@ def _append_follow_on(
         template.schema,
         template.occurred_at,
         (),
-        payload,
-        template.artifact_refs,
+        typed_payload,
+        artifact_refs,
         template.evidence_refs,
     )
     metadata = ObjectMetadata(
@@ -405,18 +490,17 @@ def _append_follow_on(
         task_id,
         parse_rfc3339_millis(template.ledger.accepted_at.wire),
     )
+    payload_bytes = canonical_encode(encode_payload(typed_payload))
     ref = ObjectRef(
         payload_object,
-        template.payload_ref.plaintext_size,
+        len(payload_bytes),
         template.payload_ref.commitment,
         "sha256:" + "c" * 64,
         "yoetz-object/1",
         "slot-1",
         metadata,
     )
-    objects._data[ref.object_id] = canonical_encode(  # pyright: ignore[reportPrivateUsage]
-        encode_payload(payload)
-    )
+    objects._data[ref.object_id] = payload_bytes  # pyright: ignore[reportPrivateUsage]
     operation_id = uuid_id("req", request_number)
     entry = AppendEntry(
         draft,
