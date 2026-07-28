@@ -223,8 +223,15 @@ class PublishWorkInternalResult:
             "writer_id": self.writer_id,
             "subject_frontier": dict(self.subject_frontier.as_wire().items()),
             "result_frontier": dict(self.result_frontier.as_wire().items()),
+            # An unpopulated optional field (today: every accepted event's ``summary``) must be
+            # absent from the internal body, never an explicit null. The wire contract requires
+            # total omission when unset (``optional_non_null_fields``); a materialized null leaf
+            # is classified as content, survives disclosure whenever the policy includes its
+            # category, and is then rejected by the closed success model — turning a durable
+            # publish into ``response_projection_failed``. Same precedent as respond's internal
+            # body, which already excludes nulls at this exact boundary.
             "accepted_events": tuple(
-                cast(JsonValue, event.model_dump(mode="json", exclude_none=False))
+                cast(JsonValue, event.model_dump(mode="json", exclude_none=True))
                 for event in self.accepted_events
             ),
             "warning_codes": self.warning_codes,
