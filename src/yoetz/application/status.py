@@ -409,7 +409,12 @@ def _operation_page_from_record(
     operation_request_id: str,
     operation: object | None,
 ) -> StatusOperationPageModel:
-    """Project one operation record into the recovery page, or a bounded not-found page."""
+    """Project one operation record into the recovery page, or a bounded not-found page.
+
+    Every exit is either a validated page or ``ValueError``. Attribute and type faults on a
+    stored record (corrupt shape, missing enum members) collapse to the same bounded error so
+    the operation status branch never raises an unbounded exception into the daemon.
+    """
 
     if operation is None:
         return StatusOperationPageModel.model_validate(
@@ -421,42 +426,42 @@ def _operation_page_from_record(
         )
     from yoetz.ports.ledger import OperationRecord as _OperationRecord
 
-    if type(operation) is not _OperationRecord:
-        raise ValueError("status_operation_result_invalid")
-    record = operation
-    kind = record.operation_kind.value
-    if record.state is OperationState.PENDING:
-        return StatusOperationPageModel.model_validate(
-            {
-                "operation_request_id": operation_request_id,
-                "found": True,
-                "state": "pending",
-                "operation_kind": kind,
-            }
-        )
-    if record.state is OperationState.QUARANTINED:
-        return StatusOperationPageModel.model_validate(
-            {
-                "operation_request_id": operation_request_id,
-                "found": True,
-                "state": "quarantined",
-                "operation_kind": kind,
-            }
-        )
-    if record.state is not OperationState.COMPLETE or record.result_canonical is None:
-        raise ValueError("status_operation_result_invalid")
-    # Only publish_work stores the AppendResult shape used here. Other complete kinds surface
-    # without accepted-event detail so recovery stays bounded and honest.
-    if record.operation_kind is not OperationKind.PUBLISH_WORK:
-        return StatusOperationPageModel.model_validate(
-            {
-                "operation_request_id": operation_request_id,
-                "found": True,
-                "state": "complete",
-                "operation_kind": kind,
-            }
-        )
     try:
+        if type(operation) is not _OperationRecord:
+            raise ValueError("status_operation_result_invalid")
+        record = operation
+        kind = record.operation_kind.value
+        if record.state is OperationState.PENDING:
+            return StatusOperationPageModel.model_validate(
+                {
+                    "operation_request_id": operation_request_id,
+                    "found": True,
+                    "state": "pending",
+                    "operation_kind": kind,
+                }
+            )
+        if record.state is OperationState.QUARANTINED:
+            return StatusOperationPageModel.model_validate(
+                {
+                    "operation_request_id": operation_request_id,
+                    "found": True,
+                    "state": "quarantined",
+                    "operation_kind": kind,
+                }
+            )
+        if record.state is not OperationState.COMPLETE or record.result_canonical is None:
+            raise ValueError("status_operation_result_invalid")
+        # Only publish_work stores the AppendResult shape used here. Other complete kinds surface
+        # without accepted-event detail so recovery stays bounded and honest.
+        if record.operation_kind is not OperationKind.PUBLISH_WORK:
+            return StatusOperationPageModel.model_validate(
+                {
+                    "operation_request_id": operation_request_id,
+                    "found": True,
+                    "state": "complete",
+                    "operation_kind": kind,
+                }
+            )
         source = _mapping(strict_json_parse(record.result_canonical))
         accepted_raw = source["accepted"]
         if type(accepted_raw) is not tuple and type(accepted_raw) is not list:
@@ -494,7 +499,7 @@ def _operation_page_from_record(
                 "accepted_events": accepted,
             }
         )
-    except (KeyError, TypeError, ValueError) as exc:
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("status_operation_result_invalid") from exc
 
 
@@ -821,13 +826,30 @@ async def execute_status(app: Application, request: StatusRequest) -> StatusInte
             )
             try:
                 page = _operation_page_from_record(request.filter.operation_request_id, operation)
-            except ValueError as exc:
+            except (AttributeError, TypeError, ValueError) as exc:
                 raise _error(
                     PublicErrorCode.STORAGE_CORRUPT, "The stored operation result is invalid."
                 ) from exc
             # Operation recovery is structural: the operation page is authoritative. Compact
             # projection only enriches coverage/closure/frontiers and must not fail recovery
             # when lagging, rebuilding, or missing.
+            #
+            # Totality: capture frontier/head-derived enrichment first, then optionally replace
+            # from a successful compact page. Every path that reaches StatusInternalResult has
+            # head, effective, lag, projection_version, and rebuild_state bound — the shape of
+            # the run-4 AttributeError was an unbound/stale local on a recovery path.
+            structural_head = head
+            structural_effective = frontier
+            structural_lag = structural_head.sequence - frontier.sequence
+            structural_version = runtime.projection_version
+            compact_page = None
+            coverage = _unknown_structural_coverage()
+            gaps: tuple[str, ...] = ()
+            head = structural_head
+            effective = structural_effective
+            lag = structural_lag
+            projection_version = structural_version
+            rebuild_state: Literal["current", "rebuild_required", "rebuilding"] = "rebuild_required"
             try:
                 raw_page = await runtime.ledger.query_projection(
                     ProjectionQuery(
@@ -841,22 +863,28 @@ async def execute_status(app: Application, request: StatusRequest) -> StatusInte
                     )
                 )
             except PublicOperationError:
-                compact_page = None
-                coverage = _unknown_structural_coverage()
-                gaps = ()
-                effective = frontier
-                lag = head.sequence - frontier.sequence
-                projection_version = runtime.projection_version
-                rebuild_state = "rebuild_required"
+                pass
             else:
-                compact_page = raw_page
-                coverage = raw_page.coverage
-                gaps = raw_page.gaps
-                head = raw_page.head_frontier
-                effective = raw_page.effective_frontier
-                lag = raw_page.lag
-                projection_version = raw_page.projection_version
-                rebuild_state = raw_page.rebuild_state
+                try:
+                    next_coverage = raw_page.coverage
+                    next_gaps = raw_page.gaps
+                    next_head = raw_page.head_frontier
+                    next_effective = raw_page.effective_frontier
+                    next_lag = raw_page.lag
+                    next_version = raw_page.projection_version
+                    next_rebuild = raw_page.rebuild_state
+                except AttributeError:
+                    # Unexpected page shape: keep the structural defaults already bound above.
+                    pass
+                else:
+                    compact_page = raw_page
+                    coverage = next_coverage
+                    gaps = next_gaps
+                    head = next_head
+                    effective = next_effective
+                    lag = next_lag
+                    projection_version = next_version
+                    rebuild_state = next_rebuild
         elif request.view == "advice":
             if position is not None:
                 raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")

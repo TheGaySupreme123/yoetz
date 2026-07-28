@@ -673,6 +673,48 @@ async def test_status_read_projection_failure_correlation_resolves(
 
 
 @pytest.mark.anyio
+async def test_status_handler_attribute_error_is_retryable_read_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unexpected failure during application.status is retryable, never terminal internal_error.
+
+    Run-4 item_40: AttributeError inside the operation branch escaped as status_internal_error
+    with retryable:false. A pure read that changed nothing must present as read_projection_failed.
+    """
+
+    import yoetz.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+
+    async def boom(request: object) -> object:
+        del request
+        raise AttributeError("'NoneType' object has no attribute 'sequence'")
+
+    application.status = boom  # type: ignore[method-assign]
+
+    result = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.STATUS, _status_body()),
+    )
+
+    assert result.outcome == "error"
+    assert isinstance(result.body, ControlError)
+    assert result.body.reason == "read_projection_failed"
+    assert result.body.retryable is True
+    assert result.body.correlation_id is not None
+    found = lookup_diagnostic_records(result.body.correlation_id, root=tmp_path)
+    assert len(found) == 1
+    assert found[0]["operation"] == "status_read_projection_failed"
+    assert found[0]["component"] == "service.daemon"
+    assert found[0]["request_id"] == "req_00000000-0000-4000-8000-000000000040"
+    for forbidden in ("traceback", "exception", "payload", "path", "message", "sequence"):
+        assert forbidden not in found[0]
+    await daemon.close()
+
+
+@pytest.mark.anyio
 async def test_publish_one_shot_projection_failure_is_accepted_without_replay() -> None:
     """Projection failure after append still returns acceptance; replay is optional, not required."""
 
