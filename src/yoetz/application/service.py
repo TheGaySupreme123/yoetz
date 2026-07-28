@@ -44,6 +44,7 @@ from yoetz.ports.publish_response_catalog import (
 from yoetz.ports.runtime import BundleRuntimePort, TaskRuntime
 from yoetz.ports.start_catalog import StartCatalogPort, TaskRouteState
 from yoetz.protocol.canonical import (
+    MAX_JSON_DEPTH,
     JsonValue,
     canonical_digest,
     canonical_encode,
@@ -473,6 +474,42 @@ def _frontier_for_projection(source: Mapping[str, JsonValue]) -> Frontier:
     return frontier_from_json(raw)
 
 
+def _plain_nested_mappings(value: JsonValue, depth: int = 0) -> JsonValue:
+    """Rebuild every nested mapping as a built-in ``dict``, changing nothing else.
+
+    The public result models are ``strict=True``. Strict pydantic accepts only a real ``dict`` (or
+    an instance of the target model) where a nested model is declared, and the internal results
+    carry nested entries as ``JsonObject`` — a genuine ``Mapping``, but not a ``dict``. Top-level
+    fields survived because they are scalars; every nested collection element was rejected.
+
+    The conversion is structural only: scalars are returned untouched, key order is preserved, no
+    key is added or dropped, and sequence containers keep their own type so the closed models'
+    established list-to-tuple adaptation still sees what it saw before. A genuinely invalid shape
+    therefore still fails validation, at the same pointer, with the same error.
+
+    Depth is bounded exactly as ``yoetz.protocol.canonical`` bounds it: a *container* node at
+    ``MAX_JSON_DEPTH`` is rejected, counting the root container as depth zero. Anything the internal
+    results were legitimately built under therefore normalizes, and a structure this boundary would
+    admit but canonicalization would not cannot slip through — a pathological one degrades to a
+    named rejection inside the projection window rather than recursing without limit.
+    """
+
+    if isinstance(value, Mapping):
+        if depth >= MAX_JSON_DEPTH:
+            raise ValueError("projection_value_too_deep")
+        source = cast(Mapping[str, JsonValue], value)
+        return {key: _plain_nested_mappings(item, depth + 1) for key, item in source.items()}
+    if type(value) is tuple:
+        if depth >= MAX_JSON_DEPTH:
+            raise ValueError("projection_value_too_deep")
+        return tuple(_plain_nested_mappings(item, depth + 1) for item in value)
+    if type(value) is list:
+        if depth >= MAX_JSON_DEPTH:
+            raise ValueError("projection_value_too_deep")
+        return [_plain_nested_mappings(item, depth + 1) for item in cast(list[JsonValue], value)]
+    return value
+
+
 def _public_model(method: ControlMethod, value: Mapping[str, JsonValue]) -> ProjectedControlBody:
     """Validate and normalize one projected success body for its public result model."""
 
@@ -487,7 +524,7 @@ def _public_model(method: ControlMethod, value: Mapping[str, JsonValue]) -> Proj
     if model is None:
         return JsonObject(value)
     success_type, result_type = model
-    success = success_type.model_validate(value)
+    success = success_type.model_validate(_plain_nested_mappings(value))
     # ``RespondResponseModel`` declares ``optional_non_null_fields`` (reason/waiver_scope/
     # waiver_expiry) that the frozen wire schema requires to be entirely omitted when absent,
     # never present as an explicit null. ``PublishWorkAcceptedEventModel.summary`` is the same

@@ -65,6 +65,15 @@ released versions.
 
 ### Fixed
 
+- **`check` can return a finding.** A check that raised even one finding committed durably and then
+  failed to project, so the caller received `INTERNAL_ERROR` / `response_projection_failed` and
+  never learned the verdict, the finding, or the semantic outcome — in every mode. The public
+  result models are strict, and the internal result carried each nested entry in an immutable
+  mapping type strict validation does not admit; the check result's projected finding additionally
+  requires `provenance` to be present as an explicit null on a deterministic finding. Nested
+  mappings are now normalized structurally at the one projection boundary — no coercion, no
+  reordering, no defaults, and a genuinely invalid shape is still rejected at the same field.
+
 - **An accepted durable `publish_work` is never reported as a failure.** When full response
   projection fails after the append succeeded, the daemon returns a reduced total-acceptance
   success (`ok: true`, `response_completeness: "accepted_projection_unavailable"`) with frontiers,
