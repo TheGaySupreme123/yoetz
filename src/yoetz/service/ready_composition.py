@@ -62,7 +62,7 @@ from yoetz.config.models import YoetzConfig
 from yoetz.config.paths import ensure_owner_only_dir, verify_private_local_bundle
 from yoetz.config.privacy import safe_privacy_bootstrap, seed_policy_if_absent
 from yoetz.domain.events import RuntimeProfile
-from yoetz.domain.findings import SemanticDispatchKind, SemanticProvenance
+from yoetz.domain.findings import SemanticDispatchKind, SemanticFailureClass, SemanticProvenance
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
@@ -1360,7 +1360,13 @@ def _map_provider_outcome(
     elif type(provider) is SemanticResultTimeout:
         status, reason = SemanticStatus.TIMEOUT, SemanticReason.PROVIDER_TIMEOUT
     elif type(provider) is SemanticResultInvalid:
-        status, reason = SemanticStatus.INVALID, SemanticReason.RESPONSE_SCHEMA_INVALID
+        status = SemanticStatus.INVALID
+        failure_class = provider.provenance.failure_class
+        if failure_class is SemanticFailureClass.RESPONSE_CONTENT:
+            reason = SemanticReason.RESPONSE_CONTENT_INVALID
+        else:
+            # Constrained-schema mismatch / non-JSON / empty output: structural schema stage.
+            reason = SemanticReason.RESPONSE_SCHEMA_INVALID
     elif type(provider) is SemanticResultLate:
         status, reason = SemanticStatus.LATE, SemanticReason.DEADLINE_AUTHORITY_LOST
     elif type(provider) is SemanticResultUnavailable:

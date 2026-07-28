@@ -13,11 +13,10 @@ material subject to the same strict post-validation as any external adapter.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Final, Literal, Protocol, cast
+from typing import Final, Protocol
 
-from yoetz.domain.findings import FindingKind, SamplingParams, SemanticFailureClass
+from yoetz.domain.findings import SamplingParams, SemanticFailureClass
 from yoetz.domain.privacy import (
     ApprovedLocalDisclosureCase,
     ApprovedProviderCase,
@@ -28,7 +27,6 @@ from yoetz.ports.clock import ClockPort
 from yoetz.ports.semantic import (
     Deadline,
     ProviderAttemptProvenance,
-    ReviewerChallenge,
     SemanticJudgment,
     SemanticResult,
     SemanticResultInvalid,
@@ -52,15 +50,6 @@ _IDENTITY_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$", re.ASCII)
 _MODEL_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$", re.ASCII)
 _MAX_LOCAL_RESPONSE_BYTES: Final = 1_048_576
 _MAX_LOCAL_OUTPUT_TOKENS: Final = 2_048
-
-type _Conclusion = Literal["no_material_discrepancy", "challenges_returned", "insufficient_packet"]
-type _NextStep = Literal[
-    "act",
-    "provide_evidence",
-    "revise_claim",
-    "dispute_with_evidence",
-    "state_unresolved_limitation",
-]
 
 
 def _identity(value: object) -> str:
@@ -217,45 +206,12 @@ def _provenance(
     )
 
 
-def _text(source: Mapping[str, JsonValue], key: str) -> str:
-    value = source.get(key)
-    if type(value) is not str:
-        raise ValueError("local_model_judgment_field_invalid")
-    return value
-
-
-def _challenge_from_json(raw: JsonValue) -> ReviewerChallenge:
-    if type(raw) is not dict:
-        raise TypeError("local_model_challenge_shape_invalid")
-    source = cast(Mapping[str, JsonValue], raw)
-    cited_raw = source.get("cited_refs")
-    if type(cited_raw) is not list:
-        raise ValueError("local_model_challenge_shape_invalid")
-    cited_items = cast(list[JsonValue], cited_raw)
-    if any(type(item) is not str for item in cited_items):
-        raise ValueError("local_model_challenge_shape_invalid")
-    return ReviewerChallenge(
-        FindingKind(_text(source, "finding_kind")),
-        _text(source, "summary"),
-        tuple(cast(list[str], cited_items)),
-        _text(source, "discrepancy"),
-        _text(source, "alternative_interpretation"),
-        _text(source, "message_to_main_agent"),
-        cast(_NextStep, _text(source, "requested_next_step")),
-        _text(source, "uncertainty"),
-    )
-
-
 def _judgment_from_json(parsed: JsonValue) -> SemanticJudgment:
-    if type(parsed) is not dict:
-        raise TypeError("local_model_judgment_shape_invalid")
-    source = cast(Mapping[str, JsonValue], parsed)
-    conclusion = cast(_Conclusion, _text(source, "conclusion"))
-    challenges_raw = source.get("reviewer_challenges", [])
-    if type(challenges_raw) is not list:
-        raise ValueError("local_model_judgment_shape_invalid")
-    challenges = tuple(_challenge_from_json(item) for item in cast(list[JsonValue], challenges_raw))
-    return SemanticJudgment(conclusion, challenges)
+    # Same provider judgment contract as the external adapters; local output never gets a
+    # second hidden schema.
+    from yoetz.adapters.providers.openai_responses import normalize_judgment
+
+    return normalize_judgment(parsed)
 
 
 def normalize_local_response(

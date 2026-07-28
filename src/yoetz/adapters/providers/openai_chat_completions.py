@@ -332,16 +332,20 @@ def normalize_response(
             )
         )
     if finish_reason == "length":
-        # Truncated output is the Chat Completions spelling of the Responses `incomplete` status.
-        return SemanticResultTimeout(
+        # Truncated output is the Chat Completions spelling of Responses `incomplete`: content
+        # invalidity from the output token cap, not a transport/deadline timeout.
+        truncated_text = getattr(message, "content", None)
+        truncated_size = len(truncated_text.encode("utf-8")) if type(truncated_text) is str else 0
+        return SemanticResultInvalid(
             _provenance(
                 profile,
-                SemanticStatus.TIMEOUT,
+                SemanticStatus.INVALID,
                 policy_digest=policy_digest,
                 latency_ms=latency_ms,
                 provider_request_id=provider_request_id,
-                failure_class=SemanticFailureClass.TIMEOUT,
-            )
+                failure_class=SemanticFailureClass.RESPONSE_CONTENT,
+            ),
+            raw_size=truncated_size,
         )
 
     raw_text = getattr(message, "content", None)
@@ -366,7 +370,7 @@ def normalize_response(
                 policy_digest=policy_digest,
                 latency_ms=latency_ms,
                 provider_request_id=provider_request_id,
-                failure_class=SemanticFailureClass.RESPONSE_SCHEMA,
+                failure_class=SemanticFailureClass.RESPONSE_CONTENT,
             ),
             raw_size=OPENAI_MAX_RESPONSE_BODY_BYTES + 1,
         )

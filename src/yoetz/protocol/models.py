@@ -98,6 +98,11 @@ __all__ = [
     "RespondRequestModel",
     "RespondResult",
     "RespondResultModel",
+    "ProviderChallengeModel",
+    "ProviderJudgmentChallengesModel",
+    "ProviderJudgmentInsufficientModel",
+    "ProviderJudgmentModel",
+    "ProviderJudgmentNoDiscrepancyModel",
     "SemanticReason",
     "SemanticStatus",
     "StartRequest",
@@ -1239,6 +1244,82 @@ class ReceiptRequestModel(PublicRequestModel):
 def _require_unique(values: tuple[object, ...], *, limit: int) -> None:
     if len(values) > limit or len(set(values)) != len(values):
         raise ValueError("array_not_unique_or_bounded")
+
+
+def _require_review_text_utf8_bytes(value: str) -> str:
+    """Bound review prose by UTF-8 byte length (matches domain ReviewerChallenge)."""
+
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError("provider_review_text_invalid") from exc
+    if not 1 <= len(encoded) <= MAX_REVIEW_TEXT_BYTES:
+        raise ValueError("provider_review_text_invalid")
+    return value
+
+
+type ReviewerNextStepWire = Literal[
+    "act",
+    "provide_evidence",
+    "revise_claim",
+    "dispute_with_evidence",
+    "state_unresolved_limitation",
+]
+
+
+class ProviderChallengeModel(_ClosedModel):
+    """One provider-facing reviewer challenge; owns the constrained-output shape."""
+
+    finding_kind: FindingKindWire
+    summary: String1To4096
+    cited_refs: Annotated[tuple[SubjectIdWire, ...], Field(min_length=1, max_length=16)]
+    discrepancy: String1To4096
+    alternative_interpretation: String1To4096
+    message_to_main_agent: String1To4096
+    requested_next_step: ReviewerNextStepWire
+    uncertainty: String1To4096
+
+    @model_validator(mode="after")
+    def _validate_challenge_invariants(self) -> ProviderChallengeModel:
+        _require_unique(self.cited_refs, limit=16)
+        for field_name in (
+            "summary",
+            "discrepancy",
+            "alternative_interpretation",
+            "message_to_main_agent",
+            "uncertainty",
+        ):
+            _require_review_text_utf8_bytes(getattr(self, field_name))
+        return self
+
+
+class ProviderJudgmentNoDiscrepancyModel(_ClosedModel):
+    conclusion: Literal["no_material_discrepancy"]
+    reviewer_challenges: Annotated[
+        tuple[ProviderChallengeModel, ...], Field(min_length=0, max_length=0)
+    ]
+
+
+class ProviderJudgmentChallengesModel(_ClosedModel):
+    conclusion: Literal["challenges_returned"]
+    reviewer_challenges: Annotated[
+        tuple[ProviderChallengeModel, ...],
+        Field(min_length=1, max_length=MAX_REVIEW_CHALLENGES),
+    ]
+
+
+class ProviderJudgmentInsufficientModel(_ClosedModel):
+    conclusion: Literal["insufficient_packet"]
+    reviewer_challenges: Annotated[
+        tuple[ProviderChallengeModel, ...], Field(min_length=0, max_length=0)
+    ]
+
+
+type ProviderJudgmentModel = (
+    ProviderJudgmentNoDiscrepancyModel
+    | ProviderJudgmentChallengesModel
+    | ProviderJudgmentInsufficientModel
+)
 
 
 class StartCompactViewModel(_ClosedModel):

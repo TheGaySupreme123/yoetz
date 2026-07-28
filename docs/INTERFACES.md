@@ -224,18 +224,18 @@ The schema catalog (`protocol/schemas.py`) has two orthogonal enums. `SchemaKind
 runtime category `request_result|event|config|version_manifest`.
 `SchemaArtifactRole` is the exact release/packaging role:
 `common-value`, `MCP input`, `MCP output`, `persisted-envelope`, `event-envelope`,
-`event-payload`, `configuration`, `finding`, `semantic-provenance`, `receipt-document`,
-`privacy-policy`, `outbound-case`, `privacy-audit`, `setup-contract`, `local-control`,
-`service-status`, or `version-report`. `SchemaDocument` contains both `schema_kind` and
-`artifact_role: SchemaArtifactRole`; neither value is inferred from the other. The reviewed
-`schemas/manifest.json` owns the closed path-to-artifact-role mapping, and catalog loading fails
-closed on an unknown or path-incompatible role.
+`event-payload`, `configuration`, `finding`, `provider-judgment`, `semantic-provenance`,
+`receipt-document`, `privacy-policy`, `outbound-case`, `privacy-audit`, `setup-contract`,
+`local-control`, `service-status`, or `version-report`. `SchemaDocument` contains both
+`schema_kind` and `artifact_role: SchemaArtifactRole`; neither value is inferred from the other.
+The reviewed `schemas/manifest.json` owns the closed path-to-artifact-role mapping, and catalog
+loading fails closed on an unknown or path-incompatible role.
 
 The independent exhaustive path-to-`SchemaKind` map is: `events/* -> event`,
 `config/* -> config`, `version/* -> version_manifest`, and
 `common/*|operations/*|findings/*|receipts/*|privacy/*|service/* -> request_result`. The manifest
 records both typed values and the catalog re-derives each from its own map. These prefixes exhaust
-the 52 v0.1 schema artifacts; no `support_manifest` kind or support-manifest schema exists.
+the 53 v0.1 schema artifacts; no `support_manifest` kind or support-manifest schema exists.
 
 ## 5. Coverage (`protocol/coverage.py`)
 
@@ -442,9 +442,12 @@ subject_frontier, coverage: Coverage, provenance: SemanticProvenance | None)`.
 `ResponseDisposition` is the nominal enum `acknowledged|rejected|waived`; both are owned here.
 `domain/findings.py` also solely owns the finalized, receipt-bound `SemanticProvenance` and its
 schema-shaped `SamplingParams`, `TokenUsage`, `CostFields`, `SemanticDispatchKind`, and
-`SemanticFailureClass` values. It imports the shared status/reason enums and validator from
-`protocol/models.py`. `ports/semantic.py` owns only provisional provider-attempt provenance and
-imports/re-exports the final type; it does not define another `SemanticProvenance`.
+`SemanticFailureClass` values
+(`authentication|authorization|provider_outage|quota_exhausted|rate_limited|response_content|
+response_schema|timeout|transport|unsupported_profile`). It imports the shared status/reason
+enums and validator from `protocol/models.py`. `ports/semantic.py` owns only provisional
+provider-attempt provenance and imports/re-exports the final type; it does not define another
+`SemanticProvenance`.
 
 The exact final provenance fields are provider/profile/version/model identities; prompt, schema,
 policy, and privacy-policy digests; sampling parameters; latency; optional provider request,
@@ -1576,9 +1579,33 @@ evidence/frontier-finding/local-check-finding ref to its canonical frozen event/
 roots; only those roots become public `Finding.subject_refs`. A local-check ID is never serialized
 as a dangling public subject. Accepted, ranked challenge prose maps into the existing semantic
 finding summary/detail; it does not add a public result field. The main agent
-replies through the existing `respond`/`publish_work` operations and rechecks. Shared types are
+replies through the existing `respond`/`publish_work` operations and rechecks.
+
+Provider generation and consumption share one owning wire model,
+`ProviderJudgmentModel` in `protocol/models.py` (with `ProviderChallengeModel`). The constrained-
+output JSON Schema sent to Responses/Chat Completions hosts is generated from that model
+(`JUDGMENT_JSON_SCHEMA` / `schemas/findings/provider-judgment-1.0.0.schema.json`);
+`normalize_judgment` validates through the same model before constructing domain
+`SemanticJudgment`/`ReviewerChallenge`. The schema expresses closed `FindingKind` and next-step
+enums, one-to-sixteen citable subject refs with prefix/pattern and uniqueness, non-empty
+byte-bounded prose, zero-to-three challenges, conclusion/challenge coupling via explicit union
+branches, and `additionalProperties: false`. Reference order has no semantic meaning: valid refs
+are ASCII-canonicalized on acceptance; invented enums, empty prose, duplicate refs, non-citable
+IDs, and conclusion contradictions are never normalized into acceptance. The generated schema
+proves what Yoetz requested, not that every host enforces it — a nonconforming host response
+degrades to an invalid semantic result, never a fabricated pass.
+
+Invalid-result reasons stay exact without retaining provider plaintext: empty/non-JSON or
+constrained-schema mismatch → `response_schema_invalid` (`failure_class=response_schema`);
+output truncation / provider `incomplete` / Chat Completions `finish_reason=length` →
+`response_content_invalid` (`failure_class=response_content`); case-bound post-validation
+rejection → `semantic_judgment_rejected`; real transport/deadline timeout → `provider_timeout`.
+`incomplete` caused by the output token cap must not be labeled a transport timeout.
+
+Shared types are
 `SemanticCase`, `ReviewPacket`, `ReviewAssessment`, `SemanticCaseItem`, `TargetedExcerptRef`, `ChangeObservation`,
-`SemanticJudgment`, `ReviewerChallenge`, adapter-returned `ProviderAttemptProvenance`,
+`SemanticJudgment`, `ReviewerChallenge`, `ProviderJudgmentModel`, adapter-returned
+`ProviderAttemptProvenance`,
 receipt-finalized `SemanticProvenance`, and the single `SemanticStatus`/`SemanticReason` enums
 registered in §7. Adapter provenance has no authorization/reservation/receipt IDs and cannot be
 published. Final provenance adds exact attempt, dispatch-authority, receipt, commitment, status,
