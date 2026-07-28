@@ -15,11 +15,11 @@ from __future__ import annotations
 import hashlib
 import importlib
 import re
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Final, Literal, Protocol, cast
+from typing import Any, Final, Protocol, cast
 
 import httpx
+from pydantic import TypeAdapter, ValidationError
 
 from yoetz.domain.findings import FindingKind, SamplingParams, SemanticFailureClass
 from yoetz.domain.privacy import ApprovedOutboundCase, ApprovedProviderCase, ProviderDataUseProfile
@@ -45,7 +45,11 @@ from yoetz.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
-from yoetz.protocol.models import MAX_REVIEW_CHALLENGES, SemanticStatus
+from yoetz.protocol.models import (
+    ProviderChallengeModel,
+    ProviderJudgmentModel,
+    SemanticStatus,
+)
 
 __all__ = [
     "JUDGMENT_JSON_SCHEMA",
@@ -103,15 +107,6 @@ _HOSTNAME_PATTERN: Final = re.compile(
     re.ASCII,
 )
 
-type _Conclusion = Literal["no_material_discrepancy", "challenges_returned", "insufficient_packet"]
-type _NextStep = Literal[
-    "act",
-    "provide_evidence",
-    "revise_claim",
-    "dispute_with_evidence",
-    "state_unresolved_limitation",
-]
-
 _SYSTEM_INSTRUCTION: Final = (
     "You are a bounded reviewer helping the main agent complete the user's stated goal. Review "
     "only the supplied packet. Distinguish agent claims, deterministic observations, and "
@@ -125,56 +120,113 @@ _SYSTEM_INSTRUCTION: Final = (
     "claim stronger coverage than the packet."
 )
 
-_CHALLENGE_JSON_SCHEMA: Final[dict[str, JsonValue]] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "finding_kind",
-        "summary",
-        "cited_refs",
-        "discrepancy",
-        "alternative_interpretation",
-        "message_to_main_agent",
-        "requested_next_step",
-        "uncertainty",
-    ],
-    "properties": {
-        "finding_kind": {"type": "string"},
-        "summary": {"type": "string"},
-        "cited_refs": {"type": "array", "items": {"type": "string"}},
-        "discrepancy": {"type": "string"},
-        "alternative_interpretation": {"type": "string"},
-        "message_to_main_agent": {"type": "string"},
-        "requested_next_step": {
-            "type": "string",
-            "enum": [
-                "act",
-                "provide_evidence",
-                "revise_claim",
-                "dispute_with_evidence",
-                "state_unresolved_limitation",
-            ],
-        },
-        "uncertainty": {"type": "string"},
-    },
-}
+_PROVIDER_JUDGMENT_ADAPTER: Final[TypeAdapter[ProviderJudgmentModel]] = TypeAdapter(
+    ProviderJudgmentModel
+)
 
-JUDGMENT_JSON_SCHEMA: Final[dict[str, JsonValue]] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["conclusion", "reviewer_challenges"],
-    "properties": {
-        "conclusion": {
-            "type": "string",
-            "enum": ["no_material_discrepancy", "challenges_returned", "insufficient_packet"],
-        },
-        "reviewer_challenges": {
-            "type": "array",
-            "maxItems": MAX_REVIEW_CHALLENGES,
-            "items": _CHALLENGE_JSON_SCHEMA,
-        },
-    },
-}
+
+def _rename_schema_defs(raw: dict[str, object]) -> dict[str, object]:
+    """Strip the pydantic ``Model`` suffix from ``$defs`` anchors (matches schema generator)."""
+
+    defs = raw.get("$defs")
+    if type(defs) is not dict:
+        return raw
+    rename: dict[str, str] = {}
+    for key in cast(dict[str, object], defs):
+        new_key = key[: -len("Model")] if key.endswith("Model") and len(key) > len("Model") else key
+        rename[f"#/$defs/{key}"] = f"#/$defs/{new_key}"
+
+    def _walk(node: object) -> object:
+        if type(node) is dict:
+            source = cast(dict[str, object], node)
+            result: dict[str, object] = {}
+            for key, value in source.items():
+                if key == "$ref" and type(value) is str and value in rename:
+                    result[key] = rename[value]
+                else:
+                    result[key] = _walk(value)
+            return result
+        if type(node) is list:
+            return [_walk(item) for item in cast(list[object], node)]
+        return node
+
+    renamed = cast(dict[str, object], _walk(raw))
+    new_defs: dict[str, object] = {}
+    for key, value in cast(dict[str, object], defs).items():
+        target = rename[f"#/$defs/{key}"].removeprefix("#/$defs/")
+        new_defs[target] = _walk(value)
+    renamed["$defs"] = new_defs
+    return renamed
+
+
+def _sort_schema_lists(node: object) -> object:
+    if type(node) is dict:
+        source = cast(dict[str, object], node)
+        result: dict[str, object] = {}
+        for key in tuple(source.keys()):
+            child: object = source[key]
+            handled = False
+            if key == "required" and type(child) is list:
+                result[key] = sorted(
+                    [str(item) for item in cast(list[object], child)],
+                    key=lambda item: item.encode("utf-8"),
+                )
+                handled = True
+            elif key == "enum" and type(child) is list:
+                enum_items = cast(list[object], child)
+                if all(type(item) is str for item in enum_items):
+                    result[key] = sorted(
+                        [str(item) for item in enum_items],
+                        key=lambda item: item.encode("utf-8"),
+                    )
+                    handled = True
+            if not handled:
+                # Re-bind through object so list-narrowing does not leak into recursion.
+                pass_through: object = source[key]
+                result[key] = _sort_schema_lists(pass_through)
+        return result
+    if type(node) is list:
+        list_items = cast(list[object], node)
+        sorted_items: list[object] = []
+        for index in range(len(list_items)):
+            element: object = list_items[index]
+            sorted_items.append(_sort_schema_lists(element))
+        return sorted_items
+    return node
+
+
+def _strip_schema_titles(node: object) -> object:
+    """Drop pydantic title metadata so the wire schema is stable and title-free."""
+
+    if type(node) is dict:
+        source = cast(dict[str, object], node)
+        return {
+            key: _strip_schema_titles(value) for key, value in source.items() if key != "title"
+        }
+    if type(node) is list:
+        return [_strip_schema_titles(item) for item in cast(list[object], node)]
+    return node
+
+
+def build_judgment_json_schema() -> dict[str, JsonValue]:
+    """Generate the constrained-output schema from the single owning provider judgment model.
+
+    The same :data:`ProviderJudgmentModel` validates provider responses in
+    :func:`normalize_judgment`. The generated document expresses closed enums, ref pattern and
+    counts, non-empty bounded text, challenge cardinality, conclusion/challenge coupling through
+    explicit union branches, and ``additionalProperties: false``. Normalization matches the frozen
+    catalog shape (def rename + enum/required sort) so runtime and
+    ``schemas/findings/provider-judgment-1.0.0.schema.json`` stay shape-equivalent.
+    """
+
+    raw = cast(dict[str, object], _PROVIDER_JUDGMENT_ADAPTER.json_schema())
+    cleaned = _strip_schema_titles(_sort_schema_lists(_rename_schema_defs(raw)))
+    if type(cleaned) is not dict:
+        raise RuntimeError("provider_judgment_schema_invalid")
+    return cast(dict[str, JsonValue], cleaned)
+
+
+JUDGMENT_JSON_SCHEMA: Final[dict[str, JsonValue]] = build_judgment_json_schema()
 
 
 def validate_openai_credential(view: memoryview) -> None:
@@ -410,53 +462,35 @@ def _provenance(
     )
 
 
-def _text(source: Mapping[str, JsonValue], key: str) -> str:
-    value = source.get(key)
-    if type(value) is not str:
-        raise ValueError("openai_judgment_field_invalid")
-    return value
-
-
-def _challenge_from_json(raw: JsonValue) -> ReviewerChallenge:
-    if type(raw) is not dict:
-        raise TypeError("openai_challenge_shape_invalid")
-    source = cast(Mapping[str, JsonValue], raw)
-    cited_raw = source.get("cited_refs")
-    if type(cited_raw) is not list:
-        raise ValueError("openai_challenge_shape_invalid")
-    cited_items = cast(list[JsonValue], cited_raw)
-    if any(type(item) is not str for item in cited_items):
-        raise ValueError("openai_challenge_shape_invalid")
+def _challenge_from_model(challenge: ProviderChallengeModel) -> ReviewerChallenge:
     return ReviewerChallenge(
-        FindingKind(_text(source, "finding_kind")),
-        _text(source, "summary"),
-        tuple(cast(list[str], cited_items)),
-        _text(source, "discrepancy"),
-        _text(source, "alternative_interpretation"),
-        _text(source, "message_to_main_agent"),
-        cast(_NextStep, _text(source, "requested_next_step")),
-        _text(source, "uncertainty"),
+        FindingKind(challenge.finding_kind),
+        challenge.summary,
+        challenge.cited_refs,
+        challenge.discrepancy,
+        challenge.alternative_interpretation,
+        challenge.message_to_main_agent,
+        challenge.requested_next_step,
+        challenge.uncertainty,
     )
 
 
 def normalize_judgment(parsed: JsonValue) -> SemanticJudgment:
-    """Validate a parsed judgment against Yoetz's closed judgment shape.
+    """Validate a parsed judgment against the single provider judgment contract.
 
-    Structural bounds (allowed finding kinds, bounded summaries/details, allowed cited-ID shape,
-    conservative coverage, no novel conclusion vocabulary, no overlong arrays) are enforced by the
-    :class:`SemanticJudgment`/:class:`ReviewerChallenge` constructors themselves; this function only
-    maps untrusted JSON into those constructors and never relaxes their checks.
+    Validation runs through :data:`ProviderJudgmentModel` — the same model that generates
+    :data:`JUDGMENT_JSON_SCHEMA` — so any output that satisfies the machine-enforced provider schema
+    can enter domain construction. Cited refs are then ASCII-canonicalized; invalid IDs, invented
+    enums, empty prose, duplicates, and conclusion/challenge contradictions are never normalized
+    into acceptance.
     """
 
-    if type(parsed) is not dict:
-        raise TypeError("openai_judgment_shape_invalid")
-    source = cast(Mapping[str, JsonValue], parsed)
-    conclusion = cast(_Conclusion, _text(source, "conclusion"))
-    challenges_raw = source.get("reviewer_challenges", [])
-    if type(challenges_raw) is not list:
-        raise ValueError("openai_judgment_shape_invalid")
-    challenges = tuple(_challenge_from_json(item) for item in cast(list[JsonValue], challenges_raw))
-    return SemanticJudgment(conclusion, challenges)
+    try:
+        model: ProviderJudgmentModel = _PROVIDER_JUDGMENT_ADAPTER.validate_python(parsed)
+    except ValidationError as exc:
+        raise ValueError("openai_judgment_shape_invalid") from exc
+    challenges = tuple(_challenge_from_model(item) for item in model.reviewer_challenges)
+    return SemanticJudgment(model.conclusion, challenges)
 
 
 def normalize_response(
@@ -494,16 +528,33 @@ def normalize_response(
         )
 
     status = getattr(response, "status", None)
-    if status in {"cancelled", "incomplete"}:
-        return SemanticResultTimeout(
+    if status == "cancelled":
+        # Provider/client cancellation is not a transport deadline timeout.
+        return SemanticResultRefused(
             _provenance(
                 profile,
-                SemanticStatus.TIMEOUT,
+                SemanticStatus.REFUSED,
                 policy_digest=policy_digest,
                 latency_ms=latency_ms,
                 provider_request_id=provider_request_id,
-                failure_class=SemanticFailureClass.TIMEOUT,
             )
+        )
+    if status == "incomplete":
+        # Output-limit truncation (hard max_output_tokens) is content invalidity, not timeout.
+        incomplete_text = getattr(response, "output_text", None)
+        incomplete_size = (
+            len(incomplete_text.encode("utf-8")) if type(incomplete_text) is str else 0
+        )
+        return SemanticResultInvalid(
+            _provenance(
+                profile,
+                SemanticStatus.INVALID,
+                policy_digest=policy_digest,
+                latency_ms=latency_ms,
+                provider_request_id=provider_request_id,
+                failure_class=SemanticFailureClass.RESPONSE_CONTENT,
+            ),
+            raw_size=incomplete_size,
         )
 
     raw_text = getattr(response, "output_text", None)
@@ -528,7 +579,7 @@ def normalize_response(
                 policy_digest=policy_digest,
                 latency_ms=latency_ms,
                 provider_request_id=provider_request_id,
-                failure_class=SemanticFailureClass.RESPONSE_SCHEMA,
+                failure_class=SemanticFailureClass.RESPONSE_CONTENT,
             ),
             raw_size=OPENAI_MAX_RESPONSE_BODY_BYTES + 1,
         )

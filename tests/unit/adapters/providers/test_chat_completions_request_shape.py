@@ -260,7 +260,7 @@ def test_prose_answer_degrades_to_invalid_rather_than_a_fabricated_pass() -> Non
         ),
         (
             _Response(_Choice(_Message(content='{"conclusion":'), finish_reason="length")),
-            SemanticResultTimeout,
+            SemanticResultInvalid,
         ),
         (_Response(_Choice(_Message(content=""))), SemanticResultInvalid),
         (_Response(), SemanticResultInvalid),

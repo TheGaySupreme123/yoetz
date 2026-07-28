@@ -1005,8 +1005,11 @@ def test_protocol_models_public_exports_are_closed() -> None:
         PublicEnvelopeModel PublicErrorModel PublicRequestModel PublicResultModel
         PublicationChannel PublishWorkAcceptedMinimalEventModel
         PublishWorkAcceptedProjectionUnavailableModel PublishWorkRequest
-        PublishWorkRequestModel PublishWorkResult PublishWorkResultModel ReceiptFormat
-        ReceiptInclude ReceiptRedactionProfile
+        PublishWorkRequestModel PublishWorkResult PublishWorkResultModel
+        ProviderChallengeModel ProviderJudgmentChallengesModel
+        ProviderJudgmentInsufficientModel ProviderJudgmentModel
+        ProviderJudgmentNoDiscrepancyModel
+        ReceiptFormat ReceiptInclude ReceiptRedactionProfile
         ReceiptRequest ReceiptRequestModel ReceiptResult ReceiptResultModel RespondRequest
         RespondRequestModel RespondResult RespondResultModel SemanticReason SemanticStatus
         StartRequest StartRequestModel StartResult StartResultModel StatusRequest

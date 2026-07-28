@@ -446,6 +446,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "findings/provider-judgment-1.0.0.schema.json",
+        "provider-judgment",
+        "1.0.0",
+        "request_result",
+        "provider-judgment",
+        lambda: (
+            __import__(
+                "yoetz.protocol.models", fromlist=["ProviderJudgmentModel"]
+            ).ProviderJudgmentModel
+        ),
+    ),
+    _RegistryEntry(
         "operations/check-request-1.0.0.schema.json",
         "check-request",
         "1.0.0",
