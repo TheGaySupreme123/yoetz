@@ -15,13 +15,12 @@ from yoetz.ports.secret_memory import (
     SecretMemoryError,
     SecretPurpose,
 )
-from yoetz.protocol.canonical import canonical_digest
 from yoetz.service.vault import (
-    ProviderCredentialBinding,
     VaultError,
     VaultMode,
     VaultService,
     VaultState,
+    provider_credential_profile_binding,
 )
 
 _INSTALLATION_ID = "ins_00000000-0000-4000-8000-000000000001"
@@ -130,16 +129,13 @@ async def test_provider_credential_is_exact_attempt_bound_and_one_use(tmp_path: 
     clock = _Clock()
     service = _service(tmp_path, memory, clock)
     await _initialize(service, memory)
-    purpose_digest = canonical_digest({"purpose": "semantic-review"})
-    binding = ProviderCredentialBinding(
+    binding = provider_credential_profile_binding(
         "openai",
         "gpt-5",
         "openai-responses",
         "1",
-        "semantic-review",
-        "sha256:" + "3" * 64,
-        purpose_digest,
     )
+    assert await service.has_provider_credential(binding) is False
     proof = HumanAuthorizationProof(
         "proof-test",
         "provider_credential_set",
@@ -154,6 +150,7 @@ async def test_provider_credential_is_exact_attempt_bound_and_one_use(tmp_path: 
         SecretPurpose.PROVIDER_CREDENTIAL, bytearray(b"sk-test-token-value")
     )
     await service.store_provider_credential("set", binding, credential, proof, 10.0)
+    assert await service.has_provider_credential(binding) is True
     replacement_proof = HumanAuthorizationProof(
         "proof-test-replacement",
         "provider_credential_set",

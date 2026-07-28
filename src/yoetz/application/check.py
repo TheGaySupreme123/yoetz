@@ -41,6 +41,7 @@ from yoetz.kernel.deterministic_checks import (
 from yoetz.kernel.policies.research_evidence import research_evidence_findings
 from yoetz.kernel.policies.work_integrity import work_integrity_findings
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
+from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
@@ -853,8 +854,14 @@ async def _semantic_evaluation(
         )
     try:
         return await app.evaluate_semantic_check(frozen, deterministic)
-    except Exception:
+    except Exception as exc:
         # Optional/required semantic evaluator crash must never fabricate a clean semantic pass.
+        record_unexpected_exception_without_raising(
+            exc,
+            component="check",
+            operation="semantic_not_dispatched_coordinator_failure",
+            request_id=request.request_id,
+        )
         return FinalSemanticEvaluation(
             SemanticStatus.FAILED,
             SemanticReason.COORDINATOR_FAILURE,
