@@ -6,6 +6,7 @@ import asyncio
 import os
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 from types import MappingProxyType
 from typing import Final, cast
 
@@ -118,6 +119,14 @@ _READ_PROJECTION_FAILED_MESSAGE: Final = (
     "the authoritative frontier."
 )
 _READ_PROJECTION_FAILED_DETAILS: Final = {"reason_code": "read_projection_failed"}
+# Envelope-first publish recovery could not learn whether request_id already names a write.
+# Never claim durability either way, and never hand the nested status request_id to the caller.
+_OPERATION_RECOVERY_UNAVAILABLE_MESSAGE: Final = (
+    "Operation recovery could not determine whether this request_id already names a committed "
+    "operation. Retry with the same request_id. If recovery later reports the operation absent, "
+    "correct the named authoring fields and resubmit with the intended request identity."
+)
+_OPERATION_RECOVERY_UNAVAILABLE_DETAILS: Final = {"reason_code": "operation_recovery_unavailable"}
 _PUBLICATION_GUIDANCE_URI: Final = "yoetz://guidance/publication-policy.md"
 _WORKFLOW_GUIDANCE_URI: Final = "yoetz://guidance/workflow.md"
 _GUIDANCE_BY_OPERATION: Final = MappingProxyType(
@@ -578,16 +587,70 @@ def _publish_envelope_fields(
     )
 
 
+class _PublishRecoveryKind(Enum):
+    """Closed tri-state for envelope-first publish recovery lookup."""
+
+    FOUND = "found"
+    ABSENT = "absent"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class _PublishRecoveryOutcome:
+    """Result of looking up a request_id after body validation failed.
+
+    Only FOUND replaces the authoring diagnostic. ABSENT yields the original field-pointed
+    validation result. UNAVAILABLE is ambiguity-safe: same request_id, no durability claim.
+    """
+
+    kind: _PublishRecoveryKind
+    result: types.CallToolResult | None = None
+
+
+def _publish_recovery_unavailable_result(
+    request_id: str | None,
+    locations: Sequence[Mapping[str, str]] = (),
+) -> types.CallToolResult:
+    """Retryable same-ID remedy when the recovery oracle cannot answer."""
+
+    details: dict[str, object] = dict(_OPERATION_RECOVERY_UNAVAILABLE_DETAILS)
+    # Surface the first safe authoring pointer so the caller knows what to fix if recovery is
+    # later authoritatively absent — never hostile payload text, only structural locations.
+    if locations:
+        first = locations[0]
+        field = first.get("field")
+        if type(field) is str:
+            details["field"] = field
+    message = _OPERATION_RECOVERY_UNAVAILABLE_MESSAGE
+    if locations:
+        hint = _authoring_hint_for("publish_work", locations)
+        if hint:
+            message = message + hint
+    return structured_error_result(
+        PublicErrorCode.OPERATION_PENDING,
+        message,
+        retryable=True,
+        request_id=request_id,
+        safe_details=details,
+    )
+
+
 async def _publish_recovery_from_envelope(
     arguments: Mapping[str, object],
     runtime: BridgeRuntime,
     request_id: str | None,
-) -> types.CallToolResult | None:
-    """If the envelope names a known operation, surface recovery without body validation."""
+) -> _PublishRecoveryOutcome:
+    """Look up the envelope request_id without body validation.
+
+    Returns a closed tri-state: FOUND (pending/complete/quarantined), ABSENT (lookup succeeded
+    and no operation exists), or UNAVAILABLE (connection, timeout, projection, or unexpected
+    recovery failure). Incomplete envelopes that cannot form a recovery read are ABSENT so the
+    original field-pointed validation result surfaces.
+    """
 
     envelope = _publish_envelope_fields(arguments)
     if envelope is None:
-        return None
+        return _PublishRecoveryOutcome(_PublishRecoveryKind.ABSENT)
     op_request_id, session_id, writer_id, actor, client = envelope
     recovery_request_id = request_id if request_id is not None else op_request_id
     status_request_id = new_id(IdKind.REQUEST)
@@ -608,20 +671,16 @@ async def _publish_recovery_from_envelope(
         )
     except ValidationError:
         # Envelope fields are not a valid status request; fall through to body validation error.
-        return None
+        return _PublishRecoveryOutcome(_PublishRecoveryKind.ABSENT)
     except Exception as exc:
-        correlation_id = record_unexpected_exception_without_raising(
+        record_unexpected_exception_without_raising(
             exc,
             component="mcp.bridge",
             operation="publish_work_recovery_request_internal_error",
             request_id=recovery_request_id,
         )
-        return structured_error_result(
-            PublicErrorCode.INTERNAL_ERROR,
-            "The bridge could not complete the operation.",
-            request_id=recovery_request_id,
-            correlation_id=correlation_id,
-        )
+        return _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
+
     try:
         await ensure_service_client(runtime)
         status_result = await _invoke_with_reconnect(
@@ -630,69 +689,57 @@ async def _publish_recovery_from_envelope(
             lambda service, request: service.status(request),
         )
     except PublicOperationError as exc:
-        # Writer ownership, session conflicts, and other public codes must not collapse into
-        # INVALID_REQUEST from the outer body-validation path.
-        try:
-            bound = (
-                exc
-                if exc.correlation_id is not None
-                else exc.bind_correlation_id(new_id(IdKind.CORRELATION))
-            )
-            return _result_from_wire(tool_error_envelope(bound, request_id=recovery_request_id))
-        except Exception as mapping_exc:
-            correlation_id = record_unexpected_exception_without_raising(
-                mapping_exc,
-                component="mcp.bridge",
-                operation="publish_work_recovery_public_error_internal_error",
-                request_id=recovery_request_id,
-            )
-            return structured_error_result(
-                PublicErrorCode.INTERNAL_ERROR,
-                "The bridge could not complete the operation.",
-                request_id=recovery_request_id,
-                correlation_id=correlation_id,
-            )
+        # A nested public failure (session conflict, projection, etc.) does not prove the
+        # operation is absent or found. Do not promote it over the outer authoring diagnostic,
+        # and do not forward nested "no durable state changed" remedies for a write path.
+        del exc
+        return _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
     except ControlError as exc:
-        return _control_error_result(exc, recovery_request_id, "publish_work_recovery")
+        # Including read_projection_failed: a failed recovery oracle must not become the outer
+        # publish result with a read-only durability claim and a new-request_id remedy.
+        del exc
+        return _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
     except Exception as exc:
-        correlation_id = record_unexpected_exception_without_raising(
+        record_unexpected_exception_without_raising(
             exc,
             component="mcp.bridge",
             operation="publish_work_recovery_status_internal_error",
             request_id=recovery_request_id,
         )
-        return structured_error_result(
-            PublicErrorCode.INTERNAL_ERROR,
-            "The bridge could not complete the operation.",
-            request_id=recovery_request_id,
-            correlation_id=correlation_id,
-        )
+        return _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
+
     try:
         wire = public_model_to_wire(status_result)
         if wire.get("ok") is not True:
-            return None
+            return _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
         page = wire.get("page")
         if type(page) is not dict:
-            return None
+            return _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
         page_map = cast(dict[str, object], page)
         state = page_map.get("state")
         if state == "absent":
-            return None
+            return _PublishRecoveryOutcome(_PublishRecoveryKind.ABSENT)
         if state == "pending":
-            return structured_error_result(
-                PublicErrorCode.OPERATION_PENDING,
-                "The operation is still pending.",
-                retryable=True,
-                request_id=recovery_request_id,
+            return _PublishRecoveryOutcome(
+                _PublishRecoveryKind.FOUND,
+                structured_error_result(
+                    PublicErrorCode.OPERATION_PENDING,
+                    "The operation is still pending.",
+                    retryable=True,
+                    request_id=recovery_request_id,
+                ),
             )
         if state == "quarantined":
-            return structured_error_result(
-                PublicErrorCode.STORAGE_CORRUPT,
-                "The stored operation is quarantined.",
-                request_id=recovery_request_id,
+            return _PublishRecoveryOutcome(
+                _PublishRecoveryKind.FOUND,
+                structured_error_result(
+                    PublicErrorCode.STORAGE_CORRUPT,
+                    "The stored operation is quarantined.",
+                    request_id=recovery_request_id,
+                ),
             )
         if state != "complete":
-            return None
+            return _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
         result_frontier = page_map.get("result_frontier")
         accepted = page_map.get("accepted_events")
         count = len(cast(Sequence[object], accepted)) if isinstance(accepted, Sequence) else 0
@@ -705,28 +752,26 @@ async def _publish_recovery_from_envelope(
                 details["sequence"] = int(sequence)
             if type(head_digest) is str:
                 details["head_digest"] = head_digest
-        return structured_error_result(
-            PublicErrorCode.REQUEST_IDENTITY_CONFLICT,
-            (
-                "The request ID was already used with a different request body. "
-                "Read status view=operation for the stored result of that request_id."
+        return _PublishRecoveryOutcome(
+            _PublishRecoveryKind.FOUND,
+            structured_error_result(
+                PublicErrorCode.REQUEST_IDENTITY_CONFLICT,
+                (
+                    "The request ID was already used with a different request body. "
+                    "Read status view=operation for the stored result of that request_id."
+                ),
+                request_id=recovery_request_id,
+                safe_details=details,
             ),
-            request_id=recovery_request_id,
-            safe_details=details,
         )
     except Exception as exc:
-        correlation_id = record_unexpected_exception_without_raising(
+        record_unexpected_exception_without_raising(
             exc,
             component="mcp.bridge",
             operation="publish_work_recovery_response_internal_error",
             request_id=recovery_request_id,
         )
-        return structured_error_result(
-            PublicErrorCode.INTERNAL_ERROR,
-            "The bridge could not complete the operation.",
-            request_id=recovery_request_id,
-            correlation_id=correlation_id,
-        )
+        return _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
 
 
 async def dispatch_publish_work(
@@ -737,11 +782,14 @@ async def dispatch_publish_work(
         PublishWorkRequest.model_validate(arguments)
     except ValidationError as exc:
         # Envelope-first recovery: when the body fails schema validation, still look up the
-        # request_id so run-3-style replays never die as bare INVALID_REQUEST.
-        recovery = await _publish_recovery_from_envelope(arguments, runtime, request_id)
-        if recovery is not None:
-            return recovery
+        # request_id so run-3-style replays never die as bare INVALID_REQUEST. Only an
+        # authoritative found operation replaces the authoring diagnostic.
         locations = safe_validation_locations(exc)
+        recovery = await _publish_recovery_from_envelope(arguments, runtime, request_id)
+        if recovery.kind is _PublishRecoveryKind.FOUND and recovery.result is not None:
+            return recovery.result
+        if recovery.kind is _PublishRecoveryKind.UNAVAILABLE:
+            return _publish_recovery_unavailable_result(request_id, locations)
         return structured_error_result(
             PublicErrorCode.INVALID_REQUEST,
             invalid_request_message("publish_work", locations),

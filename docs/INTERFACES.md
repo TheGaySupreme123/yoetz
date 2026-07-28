@@ -121,8 +121,26 @@ without requiring a reconstructed publish body. Stored result detail is state-co
 ids/digests; `pending`/`quarantined` report kind without those fields; `absent` reports none of
 them; non-publish completions report kind without append-shaped event detail. Lookups are scoped
 to the caller writer; another writer's `request_id` is reported as absent.
-`read_projection_failed` is the read-only counterpart: nothing was appended, so the remedy is
-repeating the request rather than a same-`request_id` replay that has no operation record to load.
+MCP `publish_work` performs the same envelope-first operation lookup when the supplied body fails
+schema validation (so a malformed retry body can still recover a committed operation). Recovery
+result selection is a closed tri-state:
+- **found** (`pending` / `complete` / `quarantined`) replaces the body-validation result with the
+  bounded recovery meaning for that state;
+- **authoritative absent** returns the original field-pointed `INVALID_REQUEST` (including for a
+  fresh `dry_run: true` with a malformed field — dry-run creates no operation record);
+- **lookup unavailable** (connection, timeout, projection, or unexpected recovery failure,
+  including a nested `read_projection_failed` on the internal status read) returns retryable
+  `OPERATION_PENDING` with `reason_code: operation_recovery_unavailable`, the original publish
+  `request_id`, and the safe authoring field pointer that will apply if the operation is later
+  authoritatively absent. The remedy is: (1) retry with the **same** `request_id`; (2) if recovery
+  reports absent, correct the named field and use the intended request identity; (3) if recovery
+  reports complete, recover the stored result. An unavailable recovery oracle must never claim
+  that durable state did or did not change, must never tell the caller to mint a new `request_id`,
+  and must never promote a nested status request id or nested read-only durability message as the
+  outer publish result.
+`read_projection_failed` is the read-only counterpart for direct status/receipt reads: nothing
+was appended, so the remedy is repeating the request rather than a same-`request_id` replay that
+has no operation record to load.
 When a non-publish write surfaces `response_projection_failed` and the committed frontier is known,
 the control error also carries `sequence`, `head_digest`, and `count` in `accepted_state` /
 `safe_details`.
