@@ -198,8 +198,13 @@ def test_rejected_event_draft_is_located_by_ordinal() -> None:
         PublishWorkRequest.model_validate({**base, "event_drafts": [good, bad]})
     locations = safe_validation_locations(captured.value)
 
-    assert any(item["field"] == "/event_drafts/1" for item in locations)
+    assert any(item["field"] == "/event_drafts/1/payload/action_kind" for item in locations)
     assert secret not in repr(locations)
+    from yoetz.mcp.errors import authoring_hint
+
+    hint = authoring_hint(descriptor_for("publish_work").input_schema, locations)
+    assert "action_kind admits" in hint
+    assert secret not in hint
 
 
 def test_unknown_tool_message_is_sanitized() -> None:
@@ -214,8 +219,10 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(item.name for item in TOOL_DESCRIPTORS) == _EXPECTED_TOOL_NAMES
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == _EXPECTED_TOOL_NAMES
     assert TOOL_DESCRIPTOR_SET_DIGEST == (
-        "sha256:c812b652374aa5c80677447055460e84ffacde437d7f7e69ca1a001548b10752"
+        "sha256:cf3271078408913ef919534030ddfa86564e08f2e31a63bea45b36896981a128"
     )
+    for name in _EXPECTED_TOOL_NAMES:
+        assert "yoetz://guidance/" in descriptor_for(name).description
     # The check descriptor carries the full mode decision rule, including semantic_required.
     check_description = descriptor_for("check").description
     assert "semantic_if_configured for most material implementation" in check_description

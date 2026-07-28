@@ -96,6 +96,7 @@ from yoetz.protocol.ids import IdKind, new_id, validate_id
 from yoetz.protocol.models import (
     CheckResult,
     PublishWorkAcceptedProjectionUnavailableModel,
+    PublishWorkDryRunModel,
     PublishWorkResult,
     PublishWorkResultModel,
     PublishWorkSuccessModel,
@@ -269,6 +270,9 @@ def _publish_accepted_projection_unavailable(
                     accepted=root.accepted_events,
                     correlation_id=correlation_id,
                 )
+            # Dry-run previews never append; there is nothing to reduce to an acceptance envelope.
+            if type(root) is PublishWorkDryRunModel:
+                return None
         return None
     except BaseException as envelope_exc:
         # A second diagnostic for envelope construction only — reuses the same request_id but a
@@ -847,8 +851,10 @@ class ServiceDaemon:
                 self._validate_success_body(request, internal)
                 return internal
             # Application-layer fallback already produced the reduced acceptance envelope.
-            if type(internal) is PublishWorkResultModel and type(internal.root) is (
-                PublishWorkAcceptedProjectionUnavailableModel
+            # Dry-run previews are already public and non-evidential — never project or store them.
+            if type(internal) is PublishWorkResultModel and type(internal.root) in (
+                PublishWorkAcceptedProjectionUnavailableModel,
+                PublishWorkDryRunModel,
             ):
                 self._validate_success_body(request, internal)
                 return internal

@@ -31,6 +31,7 @@ __all__ = [
 
 _SCHEMA_VERSION: Final = "1.0.0"
 _INSTRUCTIONS_URI: Final = "yoetz://guidance/agent-instructions.md"
+_GUIDANCE_URI: Final = re.compile(r"yoetz://guidance/[a-z0-9.-]+\.md", re.ASCII)
 _FORBIDDEN_CLAIMS: Final = re.compile(
     r"\b(?:authenticated|enforces?|gates?|observes?|proved|proves?|verified)\b",
     re.IGNORECASE | re.ASCII,
@@ -867,7 +868,7 @@ TOOL_DESCRIPTORS: Final = (
         "Call for material multi-step, delegated, resumable, or verification-heavy work before "
         "substantive work; skip trivial questions or edits. Records or resumes a cooperative work "
         "session and returns its compact record. It does not show that work outside the published "
-        "record occurred.",
+        "record occurred. Guidance: yoetz://guidance/workflow.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -875,9 +876,12 @@ TOOL_DESCRIPTORS: Final = (
         "publish_work",
         "Publish recorded work",
         "Records a bounded batch of agent-published work events and returns the accepted event "
-        "range and coverage. It has no information about work outside that batch. After publishing "
-        "the material claim and evidence, call check, disposition any findings with respond, then "
-        "call receipt before claiming completion.",
+        "range and coverage. It has no information about work outside that batch. Set dry_run true "
+        "to validate a batch and preview what would be accepted without appending; the preview is "
+        "not evidential and is not citable as a check, publication, or coverage source. After "
+        "publishing the material claim and evidence, call check, disposition any findings with "
+        "respond, then call receipt before claiming completion. Guidance: "
+        "yoetz://guidance/publication-policy.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -892,7 +896,8 @@ TOOL_DESCRIPTORS: Final = (
         "security or privacy reasoning, interoperability, or whether the code satisfies the ask; "
         "deterministic_only only for explicitly local or structural checks, a semantic-disabled "
         "policy, or a deliberate no-egress choice, and then disclose that limitation. Omitting "
-        "mode resolves through the configured verification policy.",
+        "mode resolves through the configured verification policy. Guidance: "
+        "yoetz://guidance/coverage-and-receipts.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -900,7 +905,8 @@ TOOL_DESCRIPTORS: Final = (
         "respond",
         "Respond to a finding",
         "Records an acknowledgement, rejection, or bounded waiver for one finding at its recorded "
-        "frontier. It does not resolve other findings or establish that underlying work changed.",
+        "frontier. It does not resolve other findings or establish that underlying work changed. "
+        "Guidance: yoetz://guidance/publication-policy.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -913,7 +919,7 @@ TOOL_DESCRIPTORS: Final = (
         "rather than reconstructing from memory. view=operation takes filter.operation_request_id "
         "and returns that operation's stored result for recovery without resending the body. "
         "view=findings reads recorded findings; view=candidate_findings returns unrecorded "
-        "deterministic candidates without verdicts or IDs.",
+        "deterministic candidates without verdicts or IDs. Guidance: yoetz://guidance/workflow.md.",
         read_only=True,
         idempotent=True,
     ),
@@ -923,7 +929,7 @@ TOOL_DESCRIPTORS: Final = (
         "Records and returns a receipt of the recorded conclusion and coverage limitations at one "
         "frontier. It does not establish correctness beyond that recorded coverage. Prefer format "
         "markdown or text; json is an owner-export format that stricter agent-context policies may "
-        "block.",
+        "block. Guidance: yoetz://guidance/coverage-and-receipts.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -953,16 +959,16 @@ def _digest_descriptor(descriptor: ToolDescriptor) -> str:
 # These are reviewed golden identities, not values supplied by a host or environment.
 TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[str, str]] = MappingProxyType(
     {
-        "start": "sha256:42509100525d5c866aa21c02cfa33942163967f79968ef1c7c7e00e15fb0e696",
-        "publish_work": "sha256:3ad928d63033c61adc1d49cf63d7dd9ccc6e4d0ade0932b4638b62f20d5d273e",
-        "check": "sha256:e382bf8897267b9ceb4a8833a43673f7cebcf052aef286848b3f209789399693",
-        "respond": "sha256:740e576f822636bdcdf4f246a86192a336e7d0284aae611bbc6421ee62ed469a",
-        "status": "sha256:813f99c86c78a99f2cdb3b469825f0427c9dad013c0b4910ef7fb598ef750f6f",
-        "receipt": "sha256:3d50456b00c2fa4e46fc167f97d3db2033d6f02d46a7a6e934b4f28797d69e19",
+        "start": "sha256:d87c67630fbf0d75c6bde24383e5a0d56b8b4e66cda214998b60e5106b401d1a",
+        "publish_work": "sha256:fc99e236b8654a50c6f89954f13c62034ca5258f96c0abd4b01a42a81ef13ee2",
+        "check": "sha256:1a36e5f8ef40acb1bb1ac024ceb69e9ffe29f67221646f98f5cfd48a7ddfb36b",
+        "respond": "sha256:4a05e83bfce79c5ca6c767c535070fe6011278b6fdbe38958725398928ec751e",
+        "status": "sha256:8e09a95631827a01cf28806a62c5ed2f9d42150bc03c6153f384d2bb9e660184",
+        "receipt": "sha256:ff32853f91572e04b00f2a61b37f9a1f4f838360aea332967776b5c364ff4291",
     }
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final = (
-    "sha256:c812b652374aa5c80677447055460e84ffacde437d7f7e69ca1a001548b10752"
+    "sha256:cf3271078408913ef919534030ddfa86564e08f2e31a63bea45b36896981a128"
 )
 
 
@@ -975,7 +981,11 @@ def _lint_descriptor_set() -> None:
     for descriptor in TOOL_DESCRIPTORS:
         if _FORBIDDEN_CLAIMS.search(descriptor.description) is not None:
             raise RuntimeError("descriptor_honesty_lint_failed")
-        if _BOUNDARY_TERMS.search(descriptor.description) is not None:
+        # Packaged guidance URIs are the one reviewed path exception; strip them before the
+        # boundary scan so tool text can name the covering resource without looking like a
+        # filesystem or host path.
+        without_guidance = _GUIDANCE_URI.sub("yoetz-guidance-resource", descriptor.description)
+        if _BOUNDARY_TERMS.search(without_guidance) is not None:
             raise RuntimeError("descriptor_boundary_lint_failed")
         if _digest_descriptor(descriptor) != TOOL_DESCRIPTOR_DIGESTS[descriptor.name]:
             raise RuntimeError("descriptor_digest_mismatch")
