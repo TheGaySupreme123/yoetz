@@ -159,7 +159,7 @@ from yoetz.protocol.models import (
     StatusVersionSliceModel,
 )
 
-__all__ = ["MemoryLedgerAdapter", "MemoryLedgerState"]
+__all__ = ["MemoryLedgerAdapter", "MemoryLedgerState", "compact_status_coverage"]
 
 _GENESIS: Final = Frontier.genesis()
 type _SummaryCode = Literal[
@@ -663,7 +663,7 @@ def _status_gap_codes(markers: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(sorted({marker.split(":", 1)[0] for marker in markers}, key=str.encode))
 
 
-def _compact_status_coverage(
+def compact_status_coverage(
     records: tuple[LedgerRecord, ...], projection: ProjectionState
 ) -> Coverage:
     """Fold the applicable check's coverage into the compact-status baseline.
@@ -672,6 +672,9 @@ def _compact_status_coverage(
     ``check_types=(none,)`` even immediately after a rich check; the check's real coverage
     lives in its payload. The receipt applicability rule decides whether the projected latest
     check still covers this state: it does unless material work was appended after it.
+
+    Shared by the memory status view and the durable SQLite ``p1_projection_state`` mirror so
+    a restart cannot disagree with the in-process projection about what was checked.
     """
 
     baseline = records[-1].coverage
@@ -954,7 +957,7 @@ def _projection_items(
                 unresolved_findings=unresolved_findings[:10],
                 freshness=projection.freshness.value,
                 coverage=CoverageModel.model_validate(
-                    coverage_to_json(_compact_status_coverage(records, projection))
+                    coverage_to_json(compact_status_coverage(records, projection))
                 ),
                 gaps=_status_gap_codes(projection.coverage_gaps),
             ),
