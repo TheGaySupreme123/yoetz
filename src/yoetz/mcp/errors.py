@@ -218,7 +218,7 @@ def authoring_hint(schema: object, locations: Sequence[Mapping[str, str]]) -> st
     if not isinstance(properties, Mapping):
         return ""
     parts: list[str] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     example_families: list[str] = []
     try:
         for location in locations:
@@ -226,9 +226,10 @@ def authoring_hint(schema: object, locations: Sequence[Mapping[str, str]]) -> st
             if type(pointer) is not str or not pointer.startswith("/"):
                 continue
             label, admitted, family = _hint_for_pointer(document, pointer)
-            if not admitted or label in seen:
+            key = (label, admitted)
+            if not admitted or key in seen:
                 continue
-            seen.add(label)
+            seen.add(key)
             parts.append(f"{label} admits {admitted}")
             if family is not None and family not in example_families:
                 example_families.append(family)
