@@ -72,9 +72,7 @@ def _judgment(
 ) -> dict[str, JsonValue]:
     return {
         "conclusion": conclusion,
-        "reviewer_challenges": cast(
-            list[JsonValue], [] if challenges is None else challenges
-        ),
+        "reviewer_challenges": cast(list[JsonValue], [] if challenges is None else challenges),
     }
 
 
