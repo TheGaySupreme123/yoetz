@@ -697,11 +697,29 @@ class ServiceDaemon:
         except ControlProtocolError, TypeError, ValueError:
             return self._error_result(request, ControlError("frame_invalid"))
         except Exception as exc:
+            # Unexpected failure outside the post-commit projection window. A read never committed
+            # anything, so the remedy is repeating the request with a fresh request_id — the same
+            # classification used when projection itself fails for STATUS. Surfacing non-retryable
+            # internal_error for a pure status/privacy read is what stranded run-4's
+            # status view=operation recovery (AttributeError → retryable: false).
+            request_id = _safe_body_request_id(request)
+            if request.method in _READ_ONLY_METHODS:
+                reason = "read_projection_failed"
+                correlation_id = record_unexpected_exception_without_raising(
+                    exc,
+                    component="service.daemon",
+                    operation=f"{request.method.value}_{reason}",
+                    request_id=request_id,
+                )
+                return self._error_result(
+                    request,
+                    ControlError(reason, retryable=True, correlation_id=correlation_id),
+                )
             correlation_id = record_unexpected_exception_without_raising(
                 exc,
                 component="service.daemon",
                 operation=f"{request.method.value}_internal_error",
-                request_id=_safe_body_request_id(request),
+                request_id=request_id,
             )
             return self._error_result(
                 request, ControlError("internal_error", correlation_id=correlation_id)
