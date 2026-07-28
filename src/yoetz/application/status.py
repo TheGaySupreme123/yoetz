@@ -720,8 +720,9 @@ async def _closure_readiness(
     """Derive what currently bounds a completion conclusion, from the compact projection.
 
     Computed on every view so an agent never has to switch views — or spend a check and a receipt
-    — to learn that the record cannot yet support a completion claim. This reads only; it records
-    nothing and changes no coverage.
+    — to learn that the record cannot yet support a completion claim. This reads only: it creates
+    no task-ledger consequence and changes no coverage. Its one write is the owner-only bounded
+    diagnostic below, emitted when the page it is handed has an unexpected shape.
 
     ``view=compact`` already loads exactly this page, so it passes it in rather than paying for a
     second identical query. Compact admits no filter or position, so the page is equivalent.
