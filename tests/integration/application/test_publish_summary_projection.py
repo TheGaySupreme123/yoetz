@@ -97,7 +97,11 @@ _NOW = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
 
 
 class _IdleImporter:
+    """Provide a stable idle importer status for projection tests."""
+
     async def status(self, session: str) -> ImportStatusSnapshot:
+        """Return an empty importer snapshot for the requested session."""
+
         from yoetz.domain.values import session_id
 
         return ImportStatusSnapshot(session_id(session), 0, 0, (), ())
@@ -116,6 +120,8 @@ class _ProjectionRuntime(MemoryStartRuntime):
     """Extend the START memory composition with ready writer routing."""
 
     async def route(self, command: RouteCommand) -> TaskRuntime:
+        """Resolve the sole seeded task when the requested writer owns it."""
+
         assert command.writer_id is not None
         assert command.required_capabilities <= _CAPABILITIES
         task_id, resources = next(iter(self.resources.items()))
@@ -138,11 +144,17 @@ class _ProjectionRuntime(MemoryStartRuntime):
 
 
 class _Gateway:
+    """Stand in for an unused outbound gateway."""
+
     async def close(self) -> None:
+        """Close the no-op gateway."""
+
         return None
 
 
 def _shipped_default_policy() -> PrivacyPolicy:
+    """Build the shipped default policy at stable test identities."""
+
     return _denied_policy(
         installation_id=_INSTALLATION,
         policy_id=protocol_id("pvy_", 1201),
@@ -152,6 +164,8 @@ def _shipped_default_policy() -> PrivacyPolicy:
 
 
 def _versions() -> ReceiptVersionSlice:
+    """Return a stable version slice for local disclosure receipts."""
+
     return ReceiptVersionSlice(
         package_name="yoetz",
         package_version="0.1.0",
@@ -171,6 +185,8 @@ def _versions() -> ReceiptVersionSlice:
 
 
 def _scope(_: ControlProjectionBinding, source: Mapping[str, JsonValue]) -> AuthorizationScope:
+    """Bind disclosure to the projected result's task identity."""
+
     return AuthorizationScope(
         AuthorizationScopeKind.TASK,
         _INSTALLATION,
@@ -180,11 +196,15 @@ def _scope(_: ControlProjectionBinding, source: Mapping[str, JsonValue]) -> Auth
 
 
 async def _semantic_disabled(frozen: object, findings: object) -> object:
+    """Fail if deterministic projection unexpectedly invokes semantic evaluation."""
+
     del frozen, findings
     raise AssertionError("semantic_evaluator_called_in_deterministic_mode")
 
 
 def _request_base(request_id: str) -> dict[str, JsonValue]:
+    """Build the common recorded MCP request envelope."""
+
     return {
         "protocol_version": "0.1",
         "schema_version": "1.0.0",
@@ -203,6 +223,8 @@ def _request_base(request_id: str) -> dict[str, JsonValue]:
 
 
 def _frontier(value: Frontier | FrontierModel) -> JsonValue:
+    """Normalize domain and wire frontiers to JSON."""
+
     if isinstance(value, Frontier):
         return cast(JsonValue, dict(value.as_wire().items()))
     return cast(JsonValue, value.model_dump(mode="json"))
@@ -396,6 +418,8 @@ async def _publish_recorded_session(
 
 
 async def test_recorded_four_event_batch_projects_to_a_complete_success() -> None:
+    """Project the exact failed dogfood batch as a complete success."""
+
     app, policy = await _application()
     # The pre-fix crash condition: the shipped default really does include the claim's summary
     # category for the agent context, so the phantom null leaf survived disclosure.
@@ -428,6 +452,8 @@ async def test_recorded_four_event_batch_projects_to_a_complete_success() -> Non
 
 
 async def test_recorded_batch_stored_response_replays_the_complete_success() -> None:
+    """Persist and replay the exact projected response without re-projecting it."""
+
     app, _policy = await _application()
     batch, batch_wire = await _publish_recorded_session(app)
 
@@ -462,6 +488,8 @@ async def _binding(
     internal: PublishWorkInternalResult,
     seed: int,
 ) -> ControlProjectionBinding:
+    """Build the daemon-equivalent projection binding for a recorded publish."""
+
     facts = await app.projection_binding_facts(ControlMethod.PUBLISH_WORK, request_body, internal)
     rpc_id = protocol_id("rpc_", seed)
     service_instance_id = protocol_id("svc_", seed + 1)

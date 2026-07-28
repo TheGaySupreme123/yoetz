@@ -2,6 +2,8 @@
 
 **Severity:** critical (cause), non-blocking (schedule) **PR boundary:** the specific projection defect + its regression test
 
+**Status:** completed by PR #50.
+
 **Pairs with:** [01 — safety net](01-accepted-write-safety-net.md). Plan 01 removes the harm. This
 plan removes the cause. It is scheduled last **only because its duration is unknown** — it is a
 research task, and it must never block the three bounded PRs. Start the reproduction early and let
@@ -38,22 +40,25 @@ is content- or shape-dependent, not a blanket publish failure.
   under both the request and the response limit.
 - All four event schemas are registered in `_PUBLISH_SUMMARY_CATEGORY`
   (`src/yoetz/protocol/models.py:1284-1297`), so `_publish_event_selector` should not reject them.
+- **Missing accepted-event summaries.** On this branch, `_publish_work_result_as_json` preserves
+  total omission for an unset accepted-event `summary`, `_public_model` keeps that omission through
+  the public-model round trip, and `_ACCEPTED_SUMMARY_DISCLOSURE_RULES` applies only when a summary
+  leaf actually exists. An absent summary is neither materialized as `null` nor reported as
+  policy-omitted, so `/accepted_events/*/summary` is no longer a live explanation. Any future
+  `projection_pointer_unresolved` failure must identify a different pointer or a distinct
+  failure-specific shape.
+- **Stored-response persistence.** The recorded response can be stored and replayed byte-for-byte
+  after successful projection; persistence was downstream of the failure.
 
-## Live hypotheses, in order
+## Confirmed cause
 
-1. **Disclosure pointer resolution.** `_replace_pointer`,
-   `src/yoetz/application/service.py:437-464`, raises `ValueError("projection_pointer_unresolved")`
-   when a static disclosure pointer does not resolve against the actual document — and its own
-   comment names this exact consequence: *"turns a durable success into an apparent failure the
-   caller cannot replay away."* The publish pointer set includes `/accepted_events/*/summary`
-   (`src/yoetz/protocol/models.py:2547-2551`) while `_accepted_model`
-   (`src/yoetz/application/publish_work.py:607-618`) never sets `summary`. Check how the wildcard
-   expands over a four-element array and whether an absent or null `summary` resolves.
-2. **Success-body validation.** `_validate_success_body` runs against the projected document; a
-   closed model rejecting an omission or a null in a position it does not admit would raise here.
-3. **Stored-response persistence.** `store_publish_response` / `load_publish_response` around
-   `daemon.py:797-836`. Note `store_publish_response` already has a `PublicOperationError` escape
-   hatch but nothing for an unexpected exception.
+The internal publish result materialized an unset accepted-event summary as explicit JSON `null`.
+For the recorded `claim_recorded` event, the shipped policy included the summary's
+`finding_summary` category, so projection preserved the phantom null. Success-body validation then
+rejected it because the closed wire model permits summary text, an omission marker, or total
+absence — never null. PR #50 omits unset summaries at internal serialization and preserves that
+omission through `_public_model`; the exact four-event batch now projects, stores, and replays as a
+complete success.
 
 ## Procedure
 

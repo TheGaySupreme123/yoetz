@@ -474,6 +474,8 @@ def _frontier_for_projection(source: Mapping[str, JsonValue]) -> Frontier:
 
 
 def _public_model(method: ControlMethod, value: Mapping[str, JsonValue]) -> ProjectedControlBody:
+    """Validate and normalize one projected success body for its public result model."""
+
     model = {
         ControlMethod.START: (StartSuccessModel, StartResultModel),
         ControlMethod.PUBLISH_WORK: (PublishWorkSuccessModel, PublishWorkResultModel),

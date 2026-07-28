@@ -1,6 +1,8 @@
-# 03 — Make the event batch authorable on the first attempt
+# 04 — Make the event batch authorable on the first attempt
 
 **Severity:** critical **PR boundary:** MCP authoring hints, schema examples, dry-run mode, guidance surfacing
+
+**Status:** completed by PR #49 (`d6be382`).
 
 ## The defect
 
@@ -91,7 +93,11 @@ This turns authoring from "guess, fail publicly, retry" into "validate, then pub
 - Each tool description names the guidance resource that covers it, by URI.
 - An `INVALID_REQUEST` on `publish_work` includes the `yoetz://guidance/publication-policy.md` URI;
   `start` and workflow-shaped errors point at `yoetz://guidance/workflow.md`.
-- Only the URI and packaged, manifest-verified content — no synthesized prose in the error path.
+- Guidance-document prose comes only from packaged, manifest-verified guidance resources. The
+  error path may also carry the bounded schema-derived authoring hints from section 1: they are
+  generated at runtime solely from checked-in presentation schemas, resolve only local
+  `#/$defs/` references, preserve the existing size/count caps, and contain no caller-controlled
+  text. No other synthesized prose is permitted in the error path.
 
 ## Files
 

@@ -1,6 +1,8 @@
-# 02 — Recovery must not require reconstructing the original request body
+# 03 — Recovery must not require reconstructing the original request body
 
 **Severity:** critical **PR boundary:** replay resolution order + a request-id-keyed read surface
+
+**Status:** completed by PR #47 (`ee44e9b`).
 
 ## The defect
 
@@ -36,11 +38,21 @@ It is not known to be broken; it is known to be unreachable.
 
 ### 1. Resolve the operation before the body
 
-Replay lookup keys on `(task_id, writer_id, request_id)`, which is fully determined by the request
-envelope. It must not sit behind validation of `event_drafts`.
+Replay lookup keys on `(task_id, writer_id, request_id)`. The caller supplies `session_id`,
+`writer_id`, and `request_id` in the ordinary authenticated request envelope; it does not supply or
+select `task_id`. The ready service routes `(session_id, writer_id)` through
+`BundleRuntimePort.route`, which resolves the authoritative task-scoped `TaskRuntime` and its
+`task_id`, and rejects a route whose returned session or writer differs. The operation lookup then
+runs against that task-scoped ledger with `(writer_id, request_id)`, completing the full identity
+tuple without a global request-id lookup. This identity resolution must not sit behind validation
+of `event_drafts`.
 
-- At the bridge, validate the envelope fields first. If `request_id` names a known operation for
-  this writer, route to recovery without validating the event payload.
+- At the bridge, validate the envelope fields first and carry the original `actor` and `client`
+  assertions into the recovery read. Route and authorize the resulting status request through the
+  ordinary service boundary. Only if that task-scoped, writer-scoped lookup finds the operation may
+  the bridge route to recovery without validating the event payload. A route conflict or other
+  bounded authorization error must remain that public error rather than collapsing into payload
+  validation.
 - In `execute_publish_work`, resolve the operation record before `prepare_publication`.
 
 Then three outcomes, all honest:
@@ -57,12 +69,17 @@ even when it has lost the original body.
 
 ### 2. A read surface keyed by request id
 
-Add `status view=operation`, taking a `request_id` and returning the stored result of that
-operation — outcome, frontiers, accepted event ids and digests, or "no such operation."
+Add `status view=operation`, taking the ordinary `session_id` and authenticated `writer_id`
+envelope plus `filter.operation_request_id`, and returning the stored result of that operation —
+outcome, frontiers, accepted event ids and digests, or "no such operation." Routing resolves the
+authoritative `task_id`; the read must never accept a caller-selected task identity or perform a
+global request-id lookup. A request under another writer must receive the same bounded absent
+result as an unknown request id, without disclosing that the operation exists.
 
-`status` is the right home: recovery is a read, it needs no writer semantics or write capability,
-and it keeps the six operations intact. Contract freedom is open pre-1.0, so this lands as a real
-view with schema, vectors, and `docs/INTERFACES.md` updated, not as an undocumented extra.
+`status` is the right home: recovery is a read and needs no write capability, while retaining the
+ordinary task-routing and writer-authorization semantics. It also keeps the six operations intact.
+Contract freedom is open pre-1.0, so this lands as a real view with schema, vectors, and
+`docs/INTERFACES.md` updated, not as an undocumented extra.
 
 This is the surface an agent should reach for after *any* ambiguous write, and it replaces "compose
 a duplicate write and hope" with a single safe read.
@@ -92,7 +109,8 @@ test — it is the kind of ordering that silently regresses.
   `REQUEST_IDENTITY_CONFLICT` carrying the frontier, no duplicate append, no `INVALID_REQUEST`.
 - Replay with a stale `expected_frontier`: recovery still resolves.
 - `status view=operation` returns the stored result for a completed operation, a bounded
-  not-found for an unknown `request_id`, and refuses a `request_id` belonging to another writer.
+  not-found for an unknown `request_id`, and the same absent result for a `request_id` belonging to
+  another writer.
 - An operation that is durably underway but not yet complete is reported as pending, not as absent.
 
 ## Done

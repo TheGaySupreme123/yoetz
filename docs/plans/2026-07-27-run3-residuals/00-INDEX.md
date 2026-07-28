@@ -9,7 +9,8 @@ Four defects, five PRs — the first defect splits into a bounded fix and an unb
 numbering is execution order.** Work them 1, 2, 3, 4, then 5. Each plan is self-contained: its own
 PR boundary, its own tests, and what it deliberately leaves alone.
 
-All five are open against `main` at `f3d1e62` (PR #40 merged, PR CI green).
+The plans were drafted against `main` at `f3d1e62` (PR #40 merged, PR CI green). They later landed
+as PRs #43, #45, #47, #49, and #50 respectively.
 
 | # | Plan | Defect | Why here in the order |
 | --- | --- | --- | --- |
@@ -19,7 +20,7 @@ All five are open against `main` at `f3d1e62` (PR #40 merged, PR CI green).
 | 04 | [Event authoring](04-event-authoring.md) | 9 of 17 MCP calls surfaced as failures | Largest measured friction reduction, and the cheapest of the three to rebase, so it goes last of the bounded work. |
 | 05 | [Accepted-write root cause](05-accepted-write-root-cause.md) | Why projection failed | Duration unknown. Start the reproduction early, land it whenever it resolves — it must never block 01-04. |
 
-### Ordering rationale
+## Ordering rationale
 
 Two things drive the sequence, and neither is severity.
 

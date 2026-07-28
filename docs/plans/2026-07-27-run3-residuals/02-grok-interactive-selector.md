@@ -1,48 +1,46 @@
-# 04 — `provider endpoint --grok` must not fall into the generic picker
+# 02 — `provider endpoint --grok` must not fall into the generic picker
 
 **Severity:** moderate **PR boundary:** CLI predicate and selector test coverage
 
+**Status:** completed by PR #45 (`5eeea3a`).
+
 ## The defect
 
-On an interactive TTY, `yoetz provider endpoint --grok` can enter the generic provider picker
+Before PR #45, on an interactive TTY, `yoetz provider endpoint --grok` could enter the generic
+provider picker
 instead of treating `--grok` as the chosen provider. The interactive-picker predicate excludes
-`official` and `fireworks` but not `grok`:
+`official`, `fireworks`, and `grok` on current `main`:
 
-`src/yoetz/cli/app.py:1095-1102`
+`src/yoetz/cli/app.py`
 
 ```python
 if (
     interactive
     and not official
     and not fireworks
+    and not grok
     and provider_name is None
     and https_origin is None
     and model is None
 ):
 ```
 
-Every other branch in the same function already handles `grok` correctly — the mutual-exclusion
-block at `app.py:1112-1120`, the alias map at `1125-1138`, and the dispatch at `1151-1152`. This one
-predicate was missed.
+The mutual-exclusion block, alias map, and dispatch in the same function also handle `grok`.
 
 Neither observer agent in run 3 found it, and the tested path (`--grok --model grok-4.5`) works, so
-it is invisible to the existing tests.
+the original defect was invisible to the existing tests.
 
 ## Scope note
 
-This is the only one of the four that is a product defect rather than a Yoetz runtime defect. It
-lives in code introduced by **PR #40**, which merged at `2026-07-27T17:39:36Z` as `f3d1e62`, with
-`a4eed0e "Repair Grok dogfood artifact boundaries"` resolving the committed-symlink CI failure. PR
-CI on `main` is green after that merge. So this is a standalone PR against `main`; there is no
-prerequisite left.
+This was the only one of the four that was a product defect rather than a Yoetz runtime defect. It
+lived in code introduced by **PR #40**, which merged at `2026-07-27T17:39:36Z` as `f3d1e62`, with
+`a4eed0e "Repair Grok dogfood artifact boundaries"` resolving the committed-symlink CI failure.
+PR #45 added the missing predicate and regression coverage; this plan is closed.
 
-Confirmed still present on `origin/main`: the predicate at `src/yoetz/cli/app.py:1095-1102` has no
-`and not grok`.
+## Implemented design
 
-## Design
-
-Add `and not grok` to the interactive-picker predicate, so `--grok` with no model on a TTY prompts
-for the Grok model rather than re-asking which provider the operator already named.
+PR #45 added `and not grok` to the interactive-picker predicate, so `--grok` with no model on a TTY
+prompts for the Grok model rather than re-asking which provider the operator already named.
 
 Confirm the resulting behaviour matches `--fireworks` exactly. The two selectors should be
 indistinguishable in shape; any difference is a second bug.

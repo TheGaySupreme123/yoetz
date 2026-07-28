@@ -212,6 +212,8 @@ class PublishWorkInternalResult:
     versions: PublishWorkVersionSliceModel
 
     def as_json(self) -> dict[str, JsonValue]:
+        """Serialize the closed internal result without materializing absent optional leaves."""
+
         return {
             "protocol_version": self.protocol_version,
             "schema_version": self.schema_version,

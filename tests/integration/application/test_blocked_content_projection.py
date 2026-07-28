@@ -126,11 +126,15 @@ class _BlockEverything:
     """
 
     def __init__(self) -> None:
+        """Track every category presented for a blocked disclosure decision."""
+
         self.blocked_categories: set[str] = set()
 
     async def prepare_local_disclosure(
         self, candidate: CandidateContext
     ) -> LocalDisclosureApproved | LocalDisclosureBlocked:
+        """Block actual content while approving candidates with no content leaves."""
+
         sink = candidate.local_sink
         assert sink is not None
         proposal_id = protocol_id("ppr_", 801)
@@ -316,6 +320,8 @@ def _omission_categories(projected: Mapping[str, JsonValue]) -> set[str]:
 
 
 async def test_blocked_content_projects_for_every_event_family_and_the_compact_view() -> None:
+    """Omit absent publish summaries while still blocking real status content."""
+
     app, privacy = _application()
     started = await app.start(start_request(910, title="Blocked projection"))
     obligation_id = protocol_id("obl_", 911)
