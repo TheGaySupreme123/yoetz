@@ -503,17 +503,13 @@ def build_semantic_case(
         items.append(item)
         decision_ids.append(item.item_id)
         if content_omitted:
-            omissions.append(
-                _omit(ref, DataCategory.DECISION_EXCERPT, "decision", "not_selected")
-            )
+            omissions.append(_omit(ref, DataCategory.DECISION_EXCERPT, "decision", "not_selected"))
 
     # --- Frozen accepted-event history ---
     if "timeline" in sections and frozen_case.history_availability == "available":
         detailed_history = bool({"goal", "obligations", "claims", "decisions"} & sections)
         reserve_window_item = bool(frozen_case.history_omitted_before_count)
-        history_limit = max(
-            0, selection.max_timeline_items - (1 if reserve_window_item else 0)
-        )
+        history_limit = max(0, selection.max_timeline_items - (1 if reserve_window_item else 0))
         history_rows = frozen_case.history[-history_limit:] if history_limit else ()
         omitted_rows = frozen_case.history[: len(frozen_case.history) - len(history_rows)]
         for history_item in omitted_rows:
@@ -575,9 +571,7 @@ def build_semantic_case(
                     )
                 )
             elif not detailed_history or content_omitted:
-                omissions.append(
-                    _omit(event_ref, content_category, source_kind, "not_selected")
-                )
+                omissions.append(_omit(event_ref, content_category, source_kind, "not_selected"))
 
     if (
         "timeline" in sections

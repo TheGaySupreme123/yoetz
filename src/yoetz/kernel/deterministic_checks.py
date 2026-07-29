@@ -553,9 +553,7 @@ class FrozenHistoryEvent:
     ingestion_sequence: int
     occurred_at: str
     payload_digest: str
-    content_visibility: Literal[
-        "available", "not_recorded", "not_selected", "redacted_never_send"
-    ]
+    content_visibility: Literal["available", "not_recorded", "not_selected", "redacted_never_send"]
     payload: JsonValue | None
 
     def __post_init__(self) -> None:

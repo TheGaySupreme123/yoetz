@@ -53,6 +53,7 @@
       "scope": {
         "operations": [
           "check",
+          "receipt",
           "status"
         ],
         "transports": [

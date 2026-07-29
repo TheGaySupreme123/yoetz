@@ -161,15 +161,16 @@ def test_route_profile_is_fixed_in_initialize_and_tools_list() -> None:
     policy, _ = _run_raw(*frames, semantic="on")
     strict, _ = _run_raw(*frames, semantic="off")
 
-    for responses, profile, open_world in (
-        (policy, "policy", True),
-        (strict, "strict", False),
+    for responses, profile, open_world, descriptors in (
+        (policy, "policy", True, TOOL_DESCRIPTORS["policy"]),
+        (strict, "strict", False, TOOL_DESCRIPTORS["strict"]),
     ):
         by_id = {frame.get("id"): frame for frame in responses}
         initialized = cast(dict[str, object], by_id[1]["result"])
         assert f"Route profile: {profile}." in cast(str, initialized["instructions"])
         listed = cast(dict[str, object], by_id[2]["result"])
         tools = cast(list[dict[str, object]], listed["tools"])
+        assert [tool["name"] for tool in tools] == [descriptor.name for descriptor in descriptors]
         check = next(tool for tool in tools if tool["name"] == "check")
         annotations = cast(dict[str, object], check["annotations"])
         assert annotations["openWorldHint"] is open_world

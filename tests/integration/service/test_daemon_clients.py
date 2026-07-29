@@ -28,6 +28,7 @@ from yoetz.ports.control import (
     ControlClientKind,
     ControlError,
     ControlMethod,
+    McpRouteProfile,
     ServiceState,
 )
 from yoetz.protocol.canonical import canonical_digest
@@ -337,6 +338,44 @@ def _request(daemon: ServiceDaemon, method: ControlMethod, body: object) -> Cont
         method=method,
         body=body,  # pyright: ignore[reportArgumentType]
     )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("route_profile", "expected"),
+    (
+        (None, "policy"),
+        ("strict", "strict"),
+    ),
+)
+async def test_ready_handler_preserves_check_route_default(
+    route_profile: McpRouteProfile | None,
+    expected: McpRouteProfile,
+) -> None:
+    seen: list[object] = []
+    marker = object()
+
+    async def handler(_request: object, *, route_profile: object = "policy") -> object:
+        seen.append(route_profile)
+        return marker
+
+    request = ControlCallRequest(
+        kind="call",
+        protocol_version="1.0",
+        rpc_id=new_id(IdKind.CONTROL_RPC),
+        service_instance_id=_INSTANCE_ID,
+        service_generation="7",
+        method=ControlMethod.CHECK,
+        body=_check_body(),
+        route_profile=route_profile,
+    )
+
+    result = await ServiceDaemon._invoke_ready_handler(  # pyright: ignore[reportPrivateUsage]
+        handler, request
+    )
+
+    assert result is marker
+    assert seen == [expected]
 
 
 def _daemon() -> tuple[ServiceDaemon, _Application, _Vault, _Listener]:

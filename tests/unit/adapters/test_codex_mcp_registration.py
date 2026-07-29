@@ -76,6 +76,9 @@ def test_status_foreign_on_different_or_unreadable_command() -> None:
     for payload in (
         {"command": "other-server"},
         {"command": "yoetz", "args": ["serve", "--http"]},
+        {"command": "wrapper", "args": ["yoetz", "mcp", "serve"]},
+        {"command": "yoetz", "args": ["mcp", "serve", "--extra"]},
+        {"command": ["wrapper", "yoetz", "mcp", "serve", "--semantic", "off"]},
         {"name": "yoetz"},
         {"command": 7},
         {

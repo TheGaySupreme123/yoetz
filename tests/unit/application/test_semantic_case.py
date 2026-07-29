@@ -172,8 +172,7 @@ def test_provider_packet_preserves_detailed_frozen_history_by_category() -> None
     timeline = [
         item
         for item in semantic.items
-        if item.item_id in semantic.packet.timeline_item_ids
-        and item.item_id.startswith("history-")
+        if item.item_id in semantic.packet.timeline_item_ids and item.item_id.startswith("history-")
     ]
     assert [item.occurred_order for item in timeline] == sorted(
         item.occurred_order for item in timeline
@@ -197,7 +196,9 @@ def test_provider_packet_preserves_detailed_frozen_history_by_category() -> None
     assert obligation["evidence_expectation"] == "A deterministic test-result snapshot"
     assert obligation["requested_items"] == [{"item_kind": "change", "value": "synthetic-replay"}]
     decision = payload_for("decision_recorded")
-    assert decision["rationale"] == "A deterministic command is the smallest complete public example."
+    assert (
+        decision["rationale"] == "A deterministic command is the smallest complete public example."
+    )
     action = payload_for("action_recorded")
     assert action["description"] == "Run the synthetic replay verification"
     assert action["attempted_items"] == ["synthetic-replay"]
@@ -207,7 +208,12 @@ def test_provider_packet_preserves_detailed_frozen_history_by_category() -> None
     evidence = payload_for("evidence_recorded")
     assert evidence["observed_at"] == "2026-03-02T00:00:08.000Z"
     assert evidence["strength"] == "immutable_snapshot"
-    assert {"check_recorded", "response_recorded", "plan_published", "plan_revised"} <= by_kind.keys()
+    assert {
+        "check_recorded",
+        "response_recorded",
+        "plan_published",
+        "plan_revised",
+    } <= by_kind.keys()
     categories = {(item.source_kind, item.category) for item in timeline}
     assert ("obligation", DataCategory.OBLIGATION_TEXT) in categories
     assert ("action", DataCategory.COMMAND_METADATA) in categories
@@ -252,13 +258,10 @@ def test_structural_history_has_no_recorded_prose_and_declares_omissions() -> No
     semantic = _build(case, ReviewContextProfile.STRUCTURAL)
     history = [item for item in semantic.items if item.item_id.startswith("history-")]
     assert history
-    assert {item.category for item in history} == {
-        DataCategory.BOUNDED_STRUCTURAL_METADATA
-    }
+    assert {item.category for item in history} == {DataCategory.BOUNDED_STRUCTURAL_METADATA}
     assert all(b'"payload"' not in item.content for item in history)
     assert any(
-        omission.reason == "not_selected"
-        and omission.category is DataCategory.OBLIGATION_TEXT
+        omission.reason == "not_selected" and omission.category is DataCategory.OBLIGATION_TEXT
         for omission in semantic.packet.omissions
     )
 

@@ -151,7 +151,9 @@ def test_idle_relock_command_is_confidential_only() -> None:
     method_values = {method.value for method in ControlMethod}
     assert "idle_relock_policy_change" not in method_values
     assert not any("idle_relock" in method.value for method in ControlMethod)
-    tool_names = {descriptor.name for descriptor in TOOL_DESCRIPTORS["policy"]}
+    tool_names = {
+        descriptor.name for descriptors in TOOL_DESCRIPTORS.values() for descriptor in descriptors
+    }
     assert not any("idle" in name or "relock" in name for name in tool_names)
 
     # No ``--yes`` or other unattended-approval flag exists on the trusted-foreground command.

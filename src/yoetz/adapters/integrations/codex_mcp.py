@@ -129,8 +129,8 @@ class CodexMcpAdapter:
         entry = cast(Mapping[str, object], parsed)
         tokens = _entry_command_tokens(entry)
         for command in (MCP_STRICT_SERVE_COMMAND, MCP_SERVE_COMMAND):
-            if tokens is not None and tokens[-len(command) :] == command:
-                return McpRegistrationState.YOETZ_OWNED, command
+            if tokens == command:
+                return McpRegistrationState.YOETZ_OWNED, tokens
         # An unreadable or different command is preserved, never replaced.
         return McpRegistrationState.FOREIGN_PRESENT, None
 

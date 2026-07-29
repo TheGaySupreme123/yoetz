@@ -846,7 +846,10 @@ class ServiceDaemon:
         request: ControlCallRequest,
     ) -> object:
         operation = cast(Callable[..., Awaitable[object]], handler)
-        if request.method in {ControlMethod.CHECK, ControlMethod.STATUS}:
+        if (
+            request.method in {ControlMethod.CHECK, ControlMethod.STATUS}
+            and request.route_profile is not None
+        ):
             return await operation(request.body, route_profile=request.route_profile)
         return await operation(request.body)
 

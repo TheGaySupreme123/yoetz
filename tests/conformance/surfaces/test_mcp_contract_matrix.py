@@ -267,7 +267,9 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     base_instructions = read_resource("yoetz://guidance/agent-instructions.md").decode("utf-8")
     assert server_instructions().startswith(base_instructions.rstrip())
     assert "Route profile: policy." in server_instructions()
-    assert "Route profile: strict." in server_instructions("strict")
+    strict_instructions = server_instructions("strict")
+    assert "Route profile: strict." in strict_instructions
+    assert "This route will not request external semantic review" in strict_instructions
 
     with pytest.raises(KeyError, match="unregistered_tool_descriptor") as captured:
         descriptor_for("secret-tool")
