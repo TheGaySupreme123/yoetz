@@ -38,13 +38,16 @@ _JUDGMENT = (
 def _profile(
     enforcement: StructuredOutputEnforcement = "provider_enforced",
     *,
+    provider_id: str = "openrouter",
+    model: str = "openai/gpt-5.2",
+    endpoint_profile_id: str = "openrouter-openai-chat-completions",
     host: str = "openrouter.ai",
     prefix: str = "/api/v1",
 ) -> ChatCompletionsProfile:
     return ChatCompletionsProfile(
-        provider_id="openrouter",
-        model="openai/gpt-5.2",
-        endpoint_profile_id="openrouter-openai-chat-completions",
+        provider_id=provider_id,
+        model=model,
+        endpoint_profile_id=endpoint_profile_id,
         endpoint_profile_version="1.0.0",
         timeout_seconds=60,
         structured_output_enforcement=enforcement,
@@ -56,7 +59,13 @@ def _profile(
     )
 
 
-def _case(payload: bytes | None = None) -> ApprovedOutboundCase:
+def _case(
+    payload: bytes | None = None,
+    *,
+    provider_id: str = "openrouter",
+    model: str = "openai/gpt-5.2",
+    endpoint_profile_id: str = "openrouter-openai-chat-completions",
+) -> ApprovedOutboundCase:
     body = (
         payload
         if payload is not None
@@ -76,9 +85,9 @@ def _case(payload: bytes | None = None) -> ApprovedOutboundCase:
         byte_count=len(body),
         token_count=16,
         provider_binding=ProviderBinding(
-            provider_id="openrouter",
-            model_id="openai/gpt-5.2",
-            endpoint_profile_id="openrouter-openai-chat-completions",
+            provider_id=provider_id,
+            model_id=model,
+            endpoint_profile_id=endpoint_profile_id,
             endpoint_profile_version="1.0.0",
             transport="external",
         ),
@@ -147,6 +156,32 @@ def test_response_format_follows_the_recorded_endpoint_capability() -> None:
     assert "reviewer_challenges" in instruction
 
 
+def test_grok_profile_renders_the_exact_xai_chat_completions_shape() -> None:
+    profile = _profile(
+        provider_id="xai",
+        model="grok-4.5",
+        endpoint_profile_id="xai-openai-chat-completions",
+        host="api.x.ai",
+        prefix="/v1",
+    )
+    case = _case(
+        provider_id="xai",
+        model="grok-4.5",
+        endpoint_profile_id="xai-openai-chat-completions",
+    )
+
+    body = cast(dict[str, JsonValue], strict_json_parse(render_case(case, profile).body))
+    response_format = cast(dict[str, JsonValue], body["response_format"])
+    json_schema = cast(dict[str, JsonValue], response_format["json_schema"])
+
+    assert body["model"] == "grok-4.5"
+    assert profile.base_url == "https://api.x.ai/v1"
+    assert profile.path == "/v1/chat/completions"
+    assert response_format["type"] == "json_schema"
+    assert json_schema["name"] == "yoetz_semantic_judgment"
+    assert json_schema["strict"] is True
+
+
 def test_rendered_body_is_deterministic_and_digest_bound() -> None:
     first = render_case(_case(), _profile())
     second = render_case(_case(), _profile())
@@ -191,11 +226,15 @@ def test_a_non_external_binding_cannot_reach_the_adapter_at_all() -> None:
 def test_exact_judgment_shape_succeeds() -> None:
     response = _Response(_Choice(_Message(content=_JUDGMENT)))
 
-    result = normalize_response(response, _profile(), latency_ms=12)
+    result = normalize_response(response, _profile(), policy_digest=_DIGEST, latency_ms=12)
 
     assert type(result) is SemanticResultSuccess
     assert result.judgment.conclusion == "no_material_discrepancy"
     assert result.provenance.provider_request_id == "chatcmpl-1"
+    # The adapter reports the policy that authorized the dispatch, never a minted placeholder.
+    assert result.provenance.policy_digest == _case().policy_digest
+    assert result.provenance.privacy_policy_digest == _case().policy_digest
+    assert result.provenance.policy_digest != "sha256:" + "0" * 64
 
 
 def test_prose_answer_degrades_to_invalid_rather_than_a_fabricated_pass() -> None:
@@ -203,7 +242,9 @@ def test_prose_answer_degrades_to_invalid_rather_than_a_fabricated_pass() -> Non
 
     response = _Response(_Choice(_Message(content="Looks good to me! No issues found.")))
 
-    result = normalize_response(response, _profile("prompt_only"), latency_ms=12)
+    result = normalize_response(
+        response, _profile("prompt_only"), policy_digest=_DIGEST, latency_ms=12
+    )
 
     assert type(result) is SemanticResultInvalid
     assert result.provenance.failure_class is SemanticFailureClass.RESPONSE_SCHEMA
@@ -219,7 +260,7 @@ def test_prose_answer_degrades_to_invalid_rather_than_a_fabricated_pass() -> Non
         ),
         (
             _Response(_Choice(_Message(content='{"conclusion":'), finish_reason="length")),
-            SemanticResultTimeout,
+            SemanticResultInvalid,
         ),
         (_Response(_Choice(_Message(content=""))), SemanticResultInvalid),
         (_Response(), SemanticResultInvalid),
@@ -228,14 +269,21 @@ def test_prose_answer_degrades_to_invalid_rather_than_a_fabricated_pass() -> Non
 def test_non_judgment_answers_map_to_their_exact_terminal(
     response: _Response, expected: type[object]
 ) -> None:
-    assert type(normalize_response(response, _profile(), latency_ms=5)) is expected
+    assert (
+        type(normalize_response(response, _profile(), policy_digest=_DIGEST, latency_ms=5))
+        is expected
+    )
 
 
 def test_transport_and_status_failures_keep_their_public_class() -> None:
     import httpx
 
-    timeout = classify_provider_failure(httpx.TimeoutException("x"), _profile(), latency_ms=1)
-    transport = classify_provider_failure(httpx.ConnectError("x"), _profile(), latency_ms=1)
+    timeout = classify_provider_failure(
+        httpx.TimeoutException("x"), _profile(), policy_digest=_DIGEST, latency_ms=1
+    )
+    transport = classify_provider_failure(
+        httpx.ConnectError("x"), _profile(), policy_digest=_DIGEST, latency_ms=1
+    )
 
     assert type(timeout) is SemanticResultTimeout
     assert type(transport) is SemanticResultUnavailable
@@ -250,7 +298,7 @@ def test_transport_and_status_failures_keep_their_public_class() -> None:
     ):
         error = RuntimeError("provider said no")
         error.status_code = status  # pyright: ignore[reportAttributeAccessIssue]
-        result = classify_provider_failure(error, _profile(), latency_ms=1)
+        result = classify_provider_failure(error, _profile(), policy_digest=_DIGEST, latency_ms=1)
         assert type(result) is SemanticResultUnavailable
         assert result.provenance.failure_class is failure_class
 

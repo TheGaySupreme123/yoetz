@@ -117,6 +117,8 @@ nul_byte_forbidden
 object_key_not_string
 obligation_change_invalid
 obligation_resolution_invalid
+obligation_resolution_mismatch
+operation_recovery_unavailable
 payload_redaction_mismatch
 plan_version_conflict
 privacy_projection_unavailable
@@ -125,12 +127,14 @@ provider_attempt_provenance_is_not_final
 public_error_invalid_correlation_id
 public_error_invalid_message
 public_error_missing_correlation_id
+read_projection_failed
 receipt_coverage_mismatch
 receipt_gap_not_in_coverage
 receipt_json_projection_blocked
 receipt_json_shape_invalid
 redaction_target_required
 ref_mirror_mismatch
+request_identity_conflict
 response_fields_invalid
 response_projection_failed
 schema_artifact_role_invalid
@@ -302,6 +306,7 @@ def test_public_error_code_membership() -> None:
         "SESSION_NOT_FOUND",
         "SESSION_CONFLICT",
         "IDEMPOTENCY_CONFLICT",
+        "REQUEST_IDENTITY_CONFLICT",
         "OPERATION_PENDING",
         "FRONTIER_CONFLICT",
         "EVENT_INVALID",
@@ -330,7 +335,7 @@ def test_public_error_code_membership() -> None:
 def test_protocol_reason_registry_is_exact_and_import_order_independent() -> None:
     source_values = cast(tuple[str, ...], getattr(errors_module, "_PROTOCOL_REASON_CODE_VALUES"))
     assert source_values == _EXPECTED_REASON_CODES
-    assert len(source_values) == 134
+    assert len(source_values) == 138
     assert source_values == tuple(sorted(source_values, key=str.encode))
     assert len(source_values) == len(set(source_values))
     assert PROTOCOL_REASON_CODES == frozenset(_EXPECTED_REASON_CODES)

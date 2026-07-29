@@ -19,7 +19,7 @@ fault/contention matrix on both advertised platforms.
    `synchronous=FULL` (verified), `foreign_keys=ON`, `trusted_schema=OFF`, `temp_store=MEMORY`,
    `busy_timeout=5000`, `wal_autocheckpoint=0` (owner-run bounded PASSIVE checkpoints),
    `mmap_size=0`, extension loading disabled. `PRAGMA application_id = 0x594F4554` ("YOET"),
-   `user_version = 1` for both catalog and bundle schemas.
+   current `user_version` from the ordered catalog and bundle migration registries.
 3. **Transactions:** `BEGIN IMMEDIATE` for every write path; the append transaction contains only
    bounded indexed reads/writes. All hashing, validation, encryption, object
    fsync, and network work happens outside. Acknowledge only after COMMIT returns.

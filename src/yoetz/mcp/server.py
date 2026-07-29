@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import Enum
+from types import MappingProxyType
 from typing import Final, cast
 
 import anyio
@@ -20,8 +22,14 @@ from yoetz import __version__
 from yoetz.adapters.mcp_stdio import bounded_stdio_server
 from yoetz.config.load import load_config
 from yoetz.config.models import LoggingConfig
-from yoetz.mcp.descriptors import TOOL_DESCRIPTORS, ToolDescriptor, server_instructions
+from yoetz.mcp.descriptors import (
+    TOOL_DESCRIPTORS,
+    ToolDescriptor,
+    descriptor_for,
+    server_instructions,
+)
 from yoetz.mcp.errors import (
+    authoring_hint,
     build_last_resort_internal_error_result,
     build_public_error_result,
     safe_validation_locations,
@@ -95,6 +103,69 @@ _REGISTERED_TOOL_NAMES: Final = frozenset(
 # answered by the live service and reconnecting around it drops the session for nothing, so both
 # projection reasons are handled in place and surfaced with their own remedy.
 _RECONNECT_REASONS: Final = frozenset({"service_unavailable", "service_generation_changed"})
+# One wording for both post-commit projection failures — the service's own (control reason
+# `response_projection_failed`) and the bridge's. In both the operation stands and the only safe
+# recovery is replaying the same request_id, so the caller must never see them differ.
+_RESPONSE_PROJECTION_FAILED_MESSAGE: Final = (
+    "The operation completed on the local service, but its response could not be shaped. "
+    "Retry with the same request_id to load the stored result."
+)
+_RESPONSE_PROJECTION_FAILED_DETAILS: Final = {"reason_code": "response_projection_failed"}
+# A read never appended, so there is no stored result and no operation record to replay against.
+# Telling the caller to reuse the request_id would send it after a recovery that cannot exist.
+_READ_PROJECTION_FAILED_MESSAGE: Final = (
+    "The read completed on the local service, but its response could not be shaped. No durable "
+    "state changed. Repeat the request with a new request_id, or read status view=versions for "
+    "the authoritative frontier."
+)
+_READ_PROJECTION_FAILED_DETAILS: Final = {"reason_code": "read_projection_failed"}
+# Envelope-first publish recovery could not learn whether request_id already names a write.
+# Never claim durability either way, and never hand the nested status request_id to the caller.
+_OPERATION_RECOVERY_UNAVAILABLE_MESSAGE: Final = (
+    "Operation recovery could not determine whether this request_id already names a committed "
+    "operation. Retry with the same request_id. If recovery later reports the operation absent, "
+    "correct the named authoring fields and resubmit with the intended request identity."
+)
+_OPERATION_RECOVERY_UNAVAILABLE_DETAILS: Final = {"reason_code": "operation_recovery_unavailable"}
+_PUBLICATION_GUIDANCE_URI: Final = "yoetz://guidance/publication-policy.md"
+_WORKFLOW_GUIDANCE_URI: Final = "yoetz://guidance/workflow.md"
+_GUIDANCE_BY_OPERATION: Final = MappingProxyType(
+    {
+        "start": _WORKFLOW_GUIDANCE_URI,
+        "publish_work": _PUBLICATION_GUIDANCE_URI,
+        "check": "yoetz://guidance/coverage-and-receipts.md",
+        "respond": _PUBLICATION_GUIDANCE_URI,
+        "status": _WORKFLOW_GUIDANCE_URI,
+        "receipt": "yoetz://guidance/coverage-and-receipts.md",
+    }
+)
+
+
+def _authoring_hint_for(operation: str, locations: Sequence[Mapping[str, str]]) -> str:
+    """Look up the frozen presentation schema for one tool and hint from it, or say nothing."""
+
+    try:
+        hint = authoring_hint(descriptor_for(operation).input_schema, locations)
+    except Exception:
+        # A hint is a convenience. Never let building one turn a clear validation error into an
+        # internal error.
+        hint = ""
+    guidance = _GUIDANCE_BY_OPERATION.get(operation)
+    if guidance is None:
+        return hint
+    # Only the registered URI — never synthesized prose. Manifest verification happens at read.
+    suffix = f" Guidance: {guidance}."
+    if hint.endswith("."):
+        return hint[:-1] + ";" + suffix
+    if hint:
+        return hint + suffix
+    return " Hint:" + suffix
+
+
+def invalid_request_message(operation: str, locations: Sequence[Mapping[str, str]]) -> str:
+    """Compose the public INVALID_REQUEST message (schema hint + guidance URI when known)."""
+
+    return "The tool arguments are invalid." + _authoring_hint_for(operation, locations)
 
 
 @dataclass(slots=True)
@@ -240,6 +311,10 @@ def _control_error_result(
     request_id: str | None,
     operation: str,
 ) -> types.CallToolResult:
+    # Prefer the service-minted diagnostic id when present so the agent-facing public error
+    # resolves the same durable sink record the daemon already wrote. Never mint a second id for
+    # a failure the service already correlated.
+    service_correlation_id = error.correlation_id
     if error.reason == "vault_locked":
         return structured_error_result(
             PublicErrorCode.VAULT_LOCKED,
@@ -250,12 +325,14 @@ def _control_error_result(
                 "`yoetz consent catalog` / `prepare` (ADR-015); never send secrets over MCP."
             ),
             request_id=request_id,
+            correlation_id=service_correlation_id,
         )
     if error.reason == "request_cancelled":
         return structured_error_result(
             PublicErrorCode.CANCELLED,
             "The operation was cancelled.",
             request_id=request_id,
+            correlation_id=service_correlation_id,
         )
     if error.reason == "privacy_projection_blocked":
         return structured_error_result(
@@ -267,11 +344,38 @@ def _control_error_result(
             ),
             retryable=False,
             request_id=request_id,
+            correlation_id=service_correlation_id,
             safe_details={
                 "reason_code": "receipt_json_projection_blocked",
                 "operation": "receipt",
                 "field": "format",
             },
+        )
+    if error.reason == "response_projection_failed":
+        # Accepted durable publish_work usually returns the reduced total-acceptance envelope
+        # instead. This mapping remains for non-publish writes and for the genuinely impossible
+        # case where even the minimal publish envelope cannot be built. When the daemon attached
+        # accepted_state (sequence/head_digest/count), surface those structural facts so the
+        # agent does not need a second status call to learn where the write landed.
+        details: dict[str, object] = dict(_RESPONSE_PROJECTION_FAILED_DETAILS)
+        if error.accepted_state:
+            details.update(error.accepted_state)
+        return structured_error_result(
+            PublicErrorCode.INTERNAL_ERROR,
+            _RESPONSE_PROJECTION_FAILED_MESSAGE,
+            retryable=True,
+            request_id=request_id,
+            correlation_id=service_correlation_id,
+            safe_details=details,
+        )
+    if error.reason == "read_projection_failed":
+        return structured_error_result(
+            PublicErrorCode.INTERNAL_ERROR,
+            _READ_PROJECTION_FAILED_MESSAGE,
+            retryable=True,
+            request_id=request_id,
+            correlation_id=service_correlation_id,
+            safe_details=dict(_READ_PROJECTION_FAILED_DETAILS),
         )
     if error.reason == "privacy_projection_unavailable":
         return structured_error_result(
@@ -279,6 +383,7 @@ def _control_error_result(
             "Receipt projection is temporarily unavailable; retry after the local service is ready.",
             retryable=True,
             request_id=request_id,
+            correlation_id=service_correlation_id,
             safe_details={"reason_code": "privacy_projection_unavailable"},
         )
     if error.reason in {"service_unavailable", "service_draining", "request_timeout"}:
@@ -287,6 +392,14 @@ def _control_error_result(
             "The local service is unavailable; retry after it is ready.",
             retryable=True,
             request_id=request_id,
+            correlation_id=service_correlation_id,
+        )
+    if service_correlation_id is not None:
+        return structured_error_result(
+            PublicErrorCode.INTERNAL_ERROR,
+            "The bridge could not complete the operation.",
+            request_id=request_id,
+            correlation_id=service_correlation_id,
         )
     correlation_id = record_unexpected_exception_without_raising(
         error,
@@ -343,7 +456,7 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
         locations = safe_validation_locations(exc)
         return structured_error_result(
             PublicErrorCode.INVALID_REQUEST,
-            "The tool arguments are invalid.",
+            invalid_request_message(operation, locations),
             request_id=request_id,
             safe_details=locations if locations else None,
         )
@@ -418,14 +531,11 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
         )
         return structured_error_result(
             PublicErrorCode.INTERNAL_ERROR,
-            (
-                "The operation completed on the local service, but the bridge could not shape "
-                "the response. Retry with the same request_id to load the stored result."
-            ),
+            _RESPONSE_PROJECTION_FAILED_MESSAGE,
             retryable=True,
             request_id=request_id,
             correlation_id=correlation_id,
-            safe_details={"reason_code": "response_projection_failed"},
+            safe_details=dict(_RESPONSE_PROJECTION_FAILED_DETAILS),
         )
 
 
@@ -442,9 +552,263 @@ async def dispatch_start(
     )
 
 
+def _publish_envelope_fields(
+    arguments: Mapping[str, object],
+) -> tuple[str, str, str, Mapping[str, object], Mapping[str, object]] | None:
+    """Return ``(request_id, session_id, writer_id, actor, client)`` when the envelope is complete.
+
+    Recovery is keyed only on these fields. Event drafts are intentionally ignored so a body that
+    fails schema validation can still reach the operation-identity recovery path.
+    """
+
+    request_id = safe_request_id_from(arguments)
+    session_id = arguments.get("session_id")
+    writer_id = arguments.get("writer_id")
+    actor = arguments.get("actor")
+    client = arguments.get("client")
+    protocol_version = arguments.get("protocol_version")
+    schema_version = arguments.get("schema_version")
+    if (
+        type(request_id) is not str
+        or type(session_id) is not str
+        or type(writer_id) is not str
+        or not isinstance(actor, Mapping)
+        or not isinstance(client, Mapping)
+        or protocol_version != "0.1"
+        or schema_version != "1.0.0"
+    ):
+        return None
+    return (
+        request_id,
+        session_id,
+        writer_id,
+        cast(Mapping[str, object], actor),
+        cast(Mapping[str, object], client),
+    )
+
+
+class _PublishRecoveryKind(Enum):
+    """Closed tri-state for envelope-first publish recovery lookup."""
+
+    FOUND = "found"
+    ABSENT = "absent"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class _PublishRecoveryOutcome:
+    """Result of looking up a request_id after body validation failed.
+
+    Only FOUND replaces the authoring diagnostic. ABSENT yields the original field-pointed
+    validation result. UNAVAILABLE is ambiguity-safe: same request_id, no durability claim.
+    """
+
+    kind: _PublishRecoveryKind
+    result: types.CallToolResult | None = None
+
+
+def _publish_recovery_unavailable_result(
+    request_id: str | None,
+    locations: Sequence[Mapping[str, str]] = (),
+) -> types.CallToolResult:
+    """Retryable same-ID remedy when the recovery oracle cannot answer."""
+
+    details: dict[str, object] = dict(_OPERATION_RECOVERY_UNAVAILABLE_DETAILS)
+    # Surface the first safe authoring pointer so the caller knows what to fix if recovery is
+    # later authoritatively absent — never hostile payload text, only structural locations.
+    if locations:
+        first = locations[0]
+        field = first.get("field")
+        if type(field) is str:
+            details["field"] = field
+    message = _OPERATION_RECOVERY_UNAVAILABLE_MESSAGE
+    if locations:
+        hint = _authoring_hint_for("publish_work", locations)
+        if hint:
+            message = message + hint
+    return structured_error_result(
+        PublicErrorCode.OPERATION_PENDING,
+        message,
+        retryable=True,
+        request_id=request_id,
+        safe_details=details,
+    )
+
+
+async def _publish_recovery_from_envelope(
+    arguments: Mapping[str, object],
+    runtime: BridgeRuntime,
+    request_id: str | None,
+) -> _PublishRecoveryOutcome:
+    """Look up the envelope request_id without body validation.
+
+    Returns a closed tri-state: FOUND (pending/complete/quarantined), ABSENT (lookup succeeded
+    and no operation exists), or UNAVAILABLE (connection, timeout, projection, or unexpected
+    recovery failure). Incomplete envelopes that cannot form a recovery read are ABSENT so the
+    original field-pointed validation result surfaces.
+    """
+
+    envelope = _publish_envelope_fields(arguments)
+    if envelope is None:
+        return _PublishRecoveryOutcome(_PublishRecoveryKind.ABSENT)
+    op_request_id, session_id, writer_id, actor, client = envelope
+    recovery_request_id = request_id if request_id is not None else op_request_id
+    status_request_id = new_id(IdKind.REQUEST)
+    try:
+        status_request = StatusRequest.model_validate(
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": status_request_id,
+                "session_id": session_id,
+                "writer_id": writer_id,
+                "view": "operation",
+                "limit": "1",
+                "filter": {"operation_request_id": op_request_id},
+                "actor": dict(actor),
+                "client": dict(client),
+            }
+        )
+    except ValidationError:
+        # Envelope fields are not a valid status request; fall through to body validation error.
+        return _PublishRecoveryOutcome(_PublishRecoveryKind.ABSENT)
+    except Exception as exc:
+        record_unexpected_exception_without_raising(
+            exc,
+            component="mcp.bridge",
+            operation="publish_work_recovery_request_internal_error",
+            request_id=recovery_request_id,
+        )
+        return _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
+
+    try:
+        await ensure_service_client(runtime)
+        status_result = await _invoke_with_reconnect(
+            runtime,
+            status_request,
+            lambda service, request: service.status(request),
+        )
+    except PublicOperationError as exc:
+        # A nested public failure (session conflict, projection, etc.) does not prove the
+        # operation is absent or found. Do not promote it over the outer authoring diagnostic,
+        # and do not forward nested "no durable state changed" remedies for a write path.
+        del exc
+        return _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
+    except ControlError as exc:
+        # Including read_projection_failed: a failed recovery oracle must not become the outer
+        # publish result with a read-only durability claim and a new-request_id remedy.
+        del exc
+        return _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
+    except Exception as exc:
+        record_unexpected_exception_without_raising(
+            exc,
+            component="mcp.bridge",
+            operation="publish_work_recovery_status_internal_error",
+            request_id=recovery_request_id,
+        )
+        return _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
+
+    try:
+        wire = public_model_to_wire(status_result)
+        if wire.get("ok") is not True:
+            return _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
+        page = wire.get("page")
+        if type(page) is not dict:
+            return _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
+        page_map = cast(dict[str, object], page)
+        state = page_map.get("state")
+        if state == "absent":
+            return _PublishRecoveryOutcome(_PublishRecoveryKind.ABSENT)
+        if state == "pending":
+            return _PublishRecoveryOutcome(
+                _PublishRecoveryKind.FOUND,
+                structured_error_result(
+                    PublicErrorCode.OPERATION_PENDING,
+                    "The operation is still pending.",
+                    retryable=True,
+                    request_id=recovery_request_id,
+                ),
+            )
+        if state == "quarantined":
+            return _PublishRecoveryOutcome(
+                _PublishRecoveryKind.FOUND,
+                structured_error_result(
+                    PublicErrorCode.STORAGE_CORRUPT,
+                    "The stored operation is quarantined.",
+                    request_id=recovery_request_id,
+                ),
+            )
+        if state != "complete":
+            return _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
+        result_frontier = page_map.get("result_frontier")
+        accepted = page_map.get("accepted_events")
+        count = len(cast(Sequence[object], accepted)) if isinstance(accepted, Sequence) else 0
+        details: dict[str, object] = {"reason_code": "request_identity_conflict", "count": count}
+        if type(result_frontier) is dict:
+            frontier_map = cast(dict[str, object], result_frontier)
+            sequence = frontier_map.get("sequence")
+            head_digest = frontier_map.get("head_digest")
+            if type(sequence) is str and sequence.isdigit():
+                details["sequence"] = int(sequence)
+            if type(head_digest) is str:
+                details["head_digest"] = head_digest
+        return _PublishRecoveryOutcome(
+            _PublishRecoveryKind.FOUND,
+            structured_error_result(
+                PublicErrorCode.REQUEST_IDENTITY_CONFLICT,
+                (
+                    "The request ID was already used with a different request body. "
+                    "Read status view=operation for the stored result of that request_id."
+                ),
+                request_id=recovery_request_id,
+                safe_details=details,
+            ),
+        )
+    except Exception as exc:
+        record_unexpected_exception_without_raising(
+            exc,
+            component="mcp.bridge",
+            operation="publish_work_recovery_response_internal_error",
+            request_id=recovery_request_id,
+        )
+        return _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
+
+
 async def dispatch_publish_work(
     arguments: Mapping[str, object], runtime: BridgeRuntime = BRIDGE_RUNTIME
 ) -> types.CallToolResult:
+    request_id = safe_request_id_from(arguments)
+    try:
+        PublishWorkRequest.model_validate(arguments)
+    except ValidationError as exc:
+        # Envelope-first recovery: when the body fails schema validation, still look up the
+        # request_id so run-3-style replays never die as bare INVALID_REQUEST. Only an
+        # authoritative found operation replaces the authoring diagnostic.
+        locations = safe_validation_locations(exc)
+        recovery = await _publish_recovery_from_envelope(arguments, runtime, request_id)
+        if recovery.kind is _PublishRecoveryKind.FOUND and recovery.result is not None:
+            return recovery.result
+        if recovery.kind is _PublishRecoveryKind.UNAVAILABLE:
+            return _publish_recovery_unavailable_result(request_id, locations)
+        return structured_error_result(
+            PublicErrorCode.INVALID_REQUEST,
+            invalid_request_message("publish_work", locations),
+            request_id=request_id,
+            safe_details=locations if locations else None,
+        )
+    except Exception as exc:
+        correlation_id = record_unexpected_exception_without_raising(
+            exc,
+            component="mcp.bridge",
+            operation="publish_work_request_internal_error",
+            request_id=request_id,
+        )
+        return structured_error_result(
+            PublicErrorCode.INTERNAL_ERROR,
+            "The bridge could not complete the operation.",
+            request_id=request_id,
+            correlation_id=correlation_id,
+        )
     return await _dispatch(
         arguments,
         PublishWorkRequest,

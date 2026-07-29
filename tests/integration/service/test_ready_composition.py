@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, cast
@@ -13,12 +14,15 @@ import pytest
 
 import yoetz.adapters.sqlite.connection as connection_module
 import yoetz.service.ready_composition as ready_composition_module
+from builders.privacy_policies import minimal_external_policy
 from yoetz.adapters.keys.encrypted_vault import EncryptedVaultStore
 from yoetz.adapters.keys.secret_memory import LocalSecretMemory
 from yoetz.adapters.sqlite.connection import open_catalog_writer
 from yoetz.adapters.sqlite.migrations import initialize_catalog
 from yoetz.application.service import ClientProjectionContext, ControlProjectionBinding
 from yoetz.config.models import YoetzConfig
+from yoetz.config.write import fireworks_provider
+from yoetz.domain.privacy import AuthorizationScope, AuthorizationScopeKind
 from yoetz.ports.control import (
     ControlCallRequest,
     ControlClientKind,
@@ -26,8 +30,13 @@ from yoetz.ports.control import (
     ServiceState,
 )
 from yoetz.ports.diagnostics import StartupCheckResult
-from yoetz.ports.secret_memory import SecretPurpose
-from yoetz.protocol.canonical import JsonValue, canonical_encode
+from yoetz.ports.privacy import (
+    EffectivePrivacyPolicy,
+    HumanAuthorityCapability,
+    OutboundGatewayPort,
+)
+from yoetz.ports.secret_memory import HumanAuthorizationProof, SecretPurpose
+from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import (
     CheckRequest,
@@ -44,7 +53,7 @@ from yoetz.service.ready_composition import (
     build_ready_application_factory,
     open_ready_catalog,
 )
-from yoetz.service.vault import VaultMode, VaultService
+from yoetz.service.vault import VaultMode, VaultService, provider_credential_profile_binding
 
 _INSTALLATION_ID = "ins_00000000-0000-4000-8000-000000000001"
 _INSTANCE_ID = "svc_00000000-0000-4000-8000-000000000002"
@@ -821,6 +830,168 @@ async def test_ready_factory_deterministic_check_records_semantic_not_requested_
         assert required.semantic_status.value == "not_configured"
         assert required.semantic_reason.value == "provider_not_configured"
         assert required.verdict.value == "incomplete_check"
+    finally:
+        if app is not None:
+            await app.close()
+        await vault.close()
+        memory.close()
+        await lifecycle.close()
+
+
+@pytest.mark.anyio
+async def test_ready_check_re_resolves_provider_activated_after_composition(
+    tmp_path: Path,
+) -> None:
+    """A live registry update revives semantic check dispatch without rebuilding the app."""
+
+    tmp_path.chmod(0o700)
+    clock = _Clock()
+    memory = LocalSecretMemory()
+    lifecycle = ServiceLifecycle(
+        clock,
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "d" * 64,
+        instance_id=_INSTANCE_ID,
+    )
+    await lifecycle.acquire_singleton()
+    await lifecycle.transition(ServiceState.LOCKED)
+    vault = VaultService(
+        installation_id=_INSTALLATION_ID,
+        service_generation=1,
+        mode=VaultMode.UNINITIALIZED,
+        secret_memory=memory,
+        clock=clock,
+        vault_store_factory=lambda: EncryptedVaultStore(tmp_path / "vault"),
+        pristine_state_digest="sha256:" + "e" * 64,
+    )
+    initialize = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"correct horse battery"))
+    await vault.initialize_passphrase(initialize, "sha256:" + "f" * 64)
+    provider = fireworks_provider(model="accounts/fireworks/models/minimax-m3")
+    config = YoetzConfig(profile="local-openai", provider=provider)
+    app = None
+    try:
+        factory = build_ready_application_factory(
+            lifecycle=lifecycle,
+            vault=vault,
+            config=config,
+            paths=_Paths(tmp_path),
+            clock=clock,
+            secret_memory=memory,
+            diagnostics=_Diagnostics(),
+        )
+        app = await factory(1, vault.generation)
+        common = {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "actor": {"actor_id": "harness:pytest", "actor_type": "harness"},
+            "client": {
+                "kind": "cooperative_agent",
+                "version": "0.1.0",
+                "integration": "cooperative_mcp",
+            },
+        }
+        started = await app.start(
+            StartRequest.model_validate(
+                {
+                    **common,
+                    "request_id": "req_00000000-0000-4000-8000-000000000401",
+                    "mode": "create",
+                    "task_title": "Resolve provider binding after ready composition",
+                    "requested_view": "compact",
+                }
+            )
+        )
+        first = await app.check(
+            CheckRequest.model_validate(
+                {
+                    **common,
+                    "request_id": "req_00000000-0000-4000-8000-000000000402",
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": {
+                        "sequence": str(started.frontier.sequence),
+                        "head_digest": started.frontier.head_digest,
+                    },
+                    "mode": "semantic_required",
+                    "max_findings": "3",
+                    "policy_packs": ["work-integrity/0.1.0"],
+                }
+            )
+        )
+        assert first.semantic_status.value == "unavailable"
+        assert first.semantic_reason.value == "credential_unavailable"
+
+        evaluator = app.semantic_evaluator
+        widened = replace(
+            minimal_external_policy(),
+            effective_scope=AuthorizationScope(AuthorizationScopeKind.MACHINE, _INSTALLATION_ID),
+            created_at=clock.now_utc(),
+        )
+        gateway = cast(OutboundGatewayPort, getattr(app.privacy, "_gateway"))
+        await gateway.reconcile_policy(
+            EffectivePrivacyPolicy(widened, 2, widened.policy_digest),
+            HumanAuthorityCapability(
+                "established_passphrase",
+                canonical_digest({"source": "test"}),
+                1,
+                str(getattr(vault.mode, "value", vault.mode)),
+                vault.generation,
+                True,
+            ),
+        )
+        assert "fireworks" in cast(
+            tuple[str, ...], tuple(getattr(gateway, "connected_provider_ids")())
+        )
+        credential_binding = provider_credential_profile_binding(
+            provider.provider_id,
+            provider.model,
+            provider.endpoint_profile_id,
+            provider.endpoint_profile_version,
+        )
+        assert await vault.has_provider_credential(credential_binding) is False
+        proof = HumanAuthorizationProof(
+            "provider-proof-after-composition",
+            "provider_credential_set",
+            credential_binding.target_digest("set"),
+            1,
+            vault.generation,
+            None,
+            1.0,
+            60.0,
+        )
+        credential = memory.capture(
+            SecretPurpose.PROVIDER_CREDENTIAL,
+            bytearray(b"test-provider-token-after-composition"),
+        )
+        await vault.store_provider_credential("set", credential_binding, credential, proof, 2.0)
+        assert await vault.has_provider_credential(credential_binding) is True
+
+        second = await app.check(
+            CheckRequest.model_validate(
+                {
+                    **common,
+                    "request_id": "req_00000000-0000-4000-8000-000000000403",
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": {
+                        "sequence": str(first.result_frontier.sequence),
+                        "head_digest": first.result_frontier.head_digest,
+                    },
+                    "mode": "semantic_required",
+                    "max_findings": "3",
+                    "policy_packs": ["work-integrity/0.1.0"],
+                }
+            )
+        )
+
+        assert app.semantic_evaluator is evaluator
+        # The unchanged durable LOCAL_ONLY policy now supplies the next fence. Reaching this exact
+        # pair proves the same ready application crossed the refreshed provider-binding gate and
+        # entered privacy evaluation rather than repeating the stale credential result.
+        assert (second.semantic_status.value, second.semantic_reason.value) == (
+            "blocked_by_policy",
+            "provider_binding_not_authorized",
+        )
     finally:
         if app is not None:
             await app.close()

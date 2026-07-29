@@ -13,11 +13,10 @@ material subject to the same strict post-validation as any external adapter.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Final, Literal, Protocol, cast
+from typing import Final, Protocol
 
-from yoetz.domain.findings import FindingKind, SamplingParams, SemanticFailureClass
+from yoetz.domain.findings import SamplingParams, SemanticFailureClass
 from yoetz.domain.privacy import (
     ApprovedLocalDisclosureCase,
     ApprovedProviderCase,
@@ -28,7 +27,6 @@ from yoetz.ports.clock import ClockPort
 from yoetz.ports.semantic import (
     Deadline,
     ProviderAttemptProvenance,
-    ReviewerChallenge,
     SemanticJudgment,
     SemanticResult,
     SemanticResultInvalid,
@@ -52,15 +50,6 @@ _IDENTITY_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$", re.ASCII)
 _MODEL_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$", re.ASCII)
 _MAX_LOCAL_RESPONSE_BYTES: Final = 1_048_576
 _MAX_LOCAL_OUTPUT_TOKENS: Final = 2_048
-
-type _Conclusion = Literal["no_material_discrepancy", "challenges_returned", "insufficient_packet"]
-type _NextStep = Literal[
-    "act",
-    "provide_evidence",
-    "revise_claim",
-    "dispute_with_evidence",
-    "state_unresolved_limitation",
-]
 
 
 def _identity(value: object) -> str:
@@ -196,6 +185,7 @@ def _provenance(
     profile: LocalModelEndpointProfile,
     status: SemanticStatus,
     *,
+    policy_digest: str,
     latency_ms: int,
     failure_class: SemanticFailureClass | None = None,
 ) -> ProviderAttemptProvenance:
@@ -207,8 +197,8 @@ def _provenance(
         sdk_version=profile.protocol_version,
         prompt_digest=profile.capability_evidence_digest,
         schema_digest=profile.capability_evidence_digest,
-        policy_digest=profile.release_resource_digest,
-        privacy_policy_digest=profile.release_resource_digest,
+        policy_digest=policy_digest,
+        privacy_policy_digest=policy_digest,
         sampling_params=SamplingParams(_MAX_LOCAL_OUTPUT_TOKENS),
         latency_ms=latency_ms,
         status=status,
@@ -216,51 +206,19 @@ def _provenance(
     )
 
 
-def _text(source: Mapping[str, JsonValue], key: str) -> str:
-    value = source.get(key)
-    if type(value) is not str:
-        raise ValueError("local_model_judgment_field_invalid")
-    return value
-
-
-def _challenge_from_json(raw: JsonValue) -> ReviewerChallenge:
-    if type(raw) is not dict:
-        raise TypeError("local_model_challenge_shape_invalid")
-    source = cast(Mapping[str, JsonValue], raw)
-    cited_raw = source.get("cited_refs")
-    if type(cited_raw) is not list:
-        raise ValueError("local_model_challenge_shape_invalid")
-    cited_items = cast(list[JsonValue], cited_raw)
-    if any(type(item) is not str for item in cited_items):
-        raise ValueError("local_model_challenge_shape_invalid")
-    return ReviewerChallenge(
-        FindingKind(_text(source, "finding_kind")),
-        _text(source, "summary"),
-        tuple(cast(list[str], cited_items)),
-        _text(source, "discrepancy"),
-        _text(source, "alternative_interpretation"),
-        _text(source, "message_to_main_agent"),
-        cast(_NextStep, _text(source, "requested_next_step")),
-        _text(source, "uncertainty"),
-    )
-
-
 def _judgment_from_json(parsed: JsonValue) -> SemanticJudgment:
-    if type(parsed) is not dict:
-        raise TypeError("local_model_judgment_shape_invalid")
-    source = cast(Mapping[str, JsonValue], parsed)
-    conclusion = cast(_Conclusion, _text(source, "conclusion"))
-    challenges_raw = source.get("reviewer_challenges", [])
-    if type(challenges_raw) is not list:
-        raise ValueError("local_model_judgment_shape_invalid")
-    challenges = tuple(_challenge_from_json(item) for item in cast(list[JsonValue], challenges_raw))
-    return SemanticJudgment(conclusion, challenges)
+    # Same provider judgment contract as the external adapters; local output never gets a
+    # second hidden schema.
+    from yoetz.adapters.providers.openai_responses import normalize_judgment
+
+    return normalize_judgment(parsed)
 
 
 def normalize_local_response(
     raw: bytes,
     profile: LocalModelEndpointProfile,
     *,
+    policy_digest: str,
     latency_ms: int,
 ) -> SemanticResult:
     """Parse and validate one bounded local-model response into a closed semantic result.
@@ -268,6 +226,10 @@ def normalize_local_response(
     Missing installed tuple/socket/resolver/evidence, peer or generation mismatch, unsupported
     schema/model, refusal, or invalid/truncated output all return bounded status with no raw
     response retention beyond this call.
+
+    ``policy_digest`` is the policy digest that authorized this disclosure, carried by the approved
+    case. The adapter never mints one of its own; the outbound gateway rebinds it authoritatively
+    after this returns.
     """
 
     if type(raw) is not bytes or not 0 < len(raw) <= _MAX_LOCAL_RESPONSE_BYTES:
@@ -275,6 +237,7 @@ def normalize_local_response(
             _provenance(
                 profile,
                 SemanticStatus.INVALID,
+                policy_digest=policy_digest,
                 latency_ms=latency_ms,
                 failure_class=SemanticFailureClass.RESPONSE_SCHEMA,
             ),
@@ -288,13 +251,20 @@ def normalize_local_response(
             _provenance(
                 profile,
                 SemanticStatus.INVALID,
+                policy_digest=policy_digest,
                 latency_ms=latency_ms,
                 failure_class=SemanticFailureClass.RESPONSE_SCHEMA,
             ),
             raw_size=len(raw),
         )
     return SemanticResultSuccess(
-        judgment, _provenance(profile, SemanticStatus.SUCCEEDED, latency_ms=latency_ms)
+        judgment,
+        _provenance(
+            profile,
+            SemanticStatus.SUCCEEDED,
+            policy_digest=policy_digest,
+            latency_ms=latency_ms,
+        ),
     )
 
 
@@ -339,7 +309,12 @@ class LocalModelEvaluator:
         now_monotonic = self._clock.monotonic_seconds()
         if deadline.expired(now_monotonic):
             return SemanticResultTimeout(
-                _provenance(self._profile, SemanticStatus.TIMEOUT, latency_ms=0)
+                _provenance(
+                    self._profile,
+                    SemanticStatus.TIMEOUT,
+                    policy_digest=case.policy_digest,
+                    latency_ms=0,
+                )
             )
 
         try:
@@ -351,10 +326,13 @@ class LocalModelEvaluator:
                 _provenance(
                     self._profile,
                     SemanticStatus.UNAVAILABLE,
+                    policy_digest=case.policy_digest,
                     latency_ms=elapsed_ms,
                     failure_class=SemanticFailureClass.TRANSPORT,
                 )
             )
 
         latency_ms = max(0, int((self._clock.monotonic_seconds() - now_monotonic) * 1_000))
-        return normalize_local_response(raw, self._profile, latency_ms=latency_ms)
+        return normalize_local_response(
+            raw, self._profile, policy_digest=case.policy_digest, latency_ms=latency_ms
+        )

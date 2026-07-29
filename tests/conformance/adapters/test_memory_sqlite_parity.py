@@ -50,7 +50,12 @@ from yoetz.protocol.coverage import (
     coverage_for_channel,
 )
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
-from yoetz.protocol.models import SemanticReason, SemanticStatus, StatusFindingItemModel
+from yoetz.protocol.models import (
+    SemanticReason,
+    SemanticStatus,
+    StatusFindingItemModel,
+    StatusHistoryItemModel,
+)
 
 
 @pytest.fixture
@@ -92,6 +97,48 @@ async def _query_all(
             expected_version = page.projection_version
         result[view] = tuple(pages)
     return result
+
+
+@pytest.mark.anyio
+async def test_publish_replay_precedes_stale_frontier_after_sqlite_reopen(
+    tmp_path: Path,
+) -> None:
+    records = replay_records("projection-rebuild")[:1]
+    command, objects = command_from_records(records, expected_frontier=0)
+    memory = memory_for(command, objects)
+    sqlite, db = file_sqlite_for(command, objects, tmp_path / "publish-replay.sqlite3")
+
+    first_memory = await memory.append_batch(command)
+    first_sqlite = await sqlite.append_batch(command)
+    assert first_sqlite == first_memory
+    db.close()
+
+    reopened, reopened_db = file_sqlite_for(command, objects, tmp_path / "publish-replay.sqlite3")
+    try:
+        assert (await memory.append_batch(command)).outcome == "replayed"
+        assert (await reopened.append_batch(command)).outcome == "replayed"
+
+        memory_events = tuple([event async for event in memory.load_events(command.session_id)])
+        sqlite_events = tuple([event async for event in reopened.load_events(command.session_id)])
+        assert sqlite_events == memory_events
+        assert tuple(event.event_id for event in sqlite_events) == tuple(
+            event.event_id for event in records
+        )
+
+        frontier = first_sqlite.result_frontier
+        memory_views = await _query_all(memory, command, frontier)
+        sqlite_views = await _query_all(reopened, command, frontier)
+        assert sqlite_views["compact"] == memory_views["compact"]
+        assert sqlite_views["history"] == memory_views["history"]
+        history_items = tuple(
+            cast(StatusHistoryItemModel, item)
+            for page in sqlite_views["history"]
+            for item in page.items
+        )
+        history_ids = tuple(item.event_id for item in history_items)
+        assert history_ids == tuple(event.event_id for event in records)
+    finally:
+        reopened_db.close()
 
 
 async def _local_result_ref(objects: MemoryObjects, command: AppendCommand) -> ObjectRef:

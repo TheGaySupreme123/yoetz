@@ -50,11 +50,22 @@ exactly those contracts and connects the steps without weakening any existing tr
    from Codex capability support (E-002/E-013 are untouched); "registered" never implies "Codex
    will successfully connect".
 
-The short `yoetz --set --fireworks --model MODEL` path is a provider-only entry into the same setup
-ceremonies. It derives internal provider bindings and always collects the API key through hidden TTY
+The short `yoetz --set --fireworks --model MODEL` and `yoetz --set --grok --model MODEL` paths are
+provider-only entries into the same setup ceremonies. They derive internal provider bindings and
+always collect the API key through hidden TTY
 input. Credential-valued command arguments are not accepted, so noninteractive setup cannot bypass
 the local confidential ceremony. Repeating the same command updates the exact stored profile
 credential through generation-CAS.
+
+**Amended 2026-07-28 — deterministic model suggestions.** Every reviewed provider preset carries a
+repository-owned, default-first model suggestion tuple capped at ten entries. Interactive
+`yoetz provider endpoint` selectors, the endpoint menu, and the provider-only `yoetz --set` paths
+use the same numbered picker and always show a custom model-ID entry. An explicit `--model` bypasses
+the picker unchanged. Owner-declared endpoints remain manual because the repository cannot know
+their model namespace. The picker performs no provider request: CLI/setup code owns no outbound
+provider channel or credential, and ADR-006/009 require actual dispatch to remain behind the
+service privacy gateway. Catalog entries are reviewed convenience metadata, not proof of account
+availability, structured-output interoperability, provider data use, or E-007 capability.
 
 4. **A sibling port, not an `IntegrationsPort` extension (amends ADR-010 by addition only).**
    `HarnessMcpPort` (`ports/harness_mcp.py`) owns registration with its own closed types

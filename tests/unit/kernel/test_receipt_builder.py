@@ -388,6 +388,38 @@ def test_context_requires_explicit_availability_and_applicable_check() -> None:
         )
 
 
+def test_applicable_check_at_earlier_subject_frontier_builds() -> None:
+    """Applicability follows the material state, not frontier equality: a check recorded at an
+    earlier subject frontier still applies to this context. The builder trusts the application's
+    applicability decision and never re-derives it."""
+
+    coverage = _coverage()
+    check = replace(
+        _check(CheckVerdict.NO_ISSUE_DETECTED, coverage),
+        subject_frontier=Frontier(1, _DIGEST),
+    )
+    receipt = _build(_context(check=check))
+    assert receipt.conclusion is ReceiptConclusion.NO_UNRESOLVED_DETERMINISTIC_FINDINGS
+    assert receipt.suppressed_finding_count == 0
+
+
+def test_applicable_check_ahead_of_context_is_rejected() -> None:
+    coverage = _coverage()
+    check = _check(CheckVerdict.NO_ISSUE_DETECTED, coverage)
+    projection = cast("ProjectionState", _projection(check=check))
+    ahead = replace(check, subject_frontier=Frontier(3, "sha256:" + "3" * 64))
+    with pytest.raises(ValueError, match="receipt_build_context_invalid"):
+        ReceiptBuildContext(
+            projection=projection,
+            subject_frontier=_FRONTIER,
+            availability=CaseAvailabilityFacts(),
+            coverage=coverage,
+            gaps=(),
+            finding_states=(),
+            applicable_check=ahead,
+        )
+
+
 def test_receipt_version_slice_is_exact() -> None:
     context = _context(check=_check(CheckVerdict.NO_ISSUE_DETECTED, _coverage()))
     receipt = _build(context)

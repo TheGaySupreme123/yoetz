@@ -7,9 +7,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Final, Literal, cast
+from typing import Annotated, Final, Literal, cast
 
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
 from yoetz.domain.findings import (
     CheckVerdict,
@@ -75,7 +75,7 @@ from yoetz.protocol.coverage import (
     coverage_from_json,
     coverage_to_json,
 )
-from yoetz.protocol.errors import ProtocolValueError
+from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import (
     CheckPolicyExecutionModel,
     CheckScopeModel,
@@ -111,6 +111,7 @@ __all__ = [
     "EventDraft",
     "EventPayload",
     "EventSchema",
+    "OCCURRED_AT_DRAFT_DESCRIPTION",
     "EvidenceKind",
     "EvidenceRecordedPayload",
     "FindingRecordedPayload",
@@ -120,7 +121,10 @@ __all__ = [
     "ObligationChange",
     "ObligationChangeKind",
     "ObligationPublishedPayload",
+    "ObligationResolutionMismatch",
     "ObligationStatus",
+    "obligation_meaning_field_diffs",
+    "public_error_for_obligation_resolution_mismatch",
     "PayloadRef",
     "PlanPublishedPayload",
     "PlanRevisedPayload",
@@ -711,6 +715,127 @@ class PlanPublishedPayload:
             "scope_exclusions",
             _text_tuple(self.scope_exclusions, MAX_ALTERNATIVES, MAX_LABEL_BYTES),
         )
+
+
+# Schema-owned obligation meaning fields that must repeat byte-for-byte on resolution.
+# status and resolution_evidence_refs are intentionally excluded: they are the transition.
+_OBLIGATION_MEANING_FIELD_NAMES: Final = (
+    "acceptance_criteria",
+    "description",
+    "evidence_expectation",
+    "obligation_id",
+    "requested_items",
+    "source_refs",
+)
+_OBLIGATION_RESOLUTION_INVARIANTS: Final = frozenset(
+    {
+        "meaning_fields_must_repeat",
+        "open_to_resolved_only",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ObligationResolutionMismatch(ValueError):
+    """Typed rejection when an obligation_published transition is not a valid resolution.
+
+    Carries only allowlisted schema field names and a fixed invariant code — never submitted
+    values — so dry-run and durable append can project the same bounded public error.
+    """
+
+    differing_fields: tuple[str, ...]
+    invariant: str
+    event_id: EventId | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.differing_fields) is not tuple:
+            raise ProtocolValueError("invalid_event_value_type")
+        ordered = tuple(sorted(self.differing_fields, key=str.encode))
+        if len(ordered) != len(set(ordered)):
+            raise ProtocolValueError("duplicate_set_member")
+        allowed = frozenset((*_OBLIGATION_MEANING_FIELD_NAMES, "status"))
+        if any(type(name) is not str or name not in allowed for name in ordered):
+            raise ProtocolValueError("invalid_event_value_type")
+        if (
+            type(self.invariant) is not str
+            or self.invariant not in _OBLIGATION_RESOLUTION_INVARIANTS
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        if self.event_id is not None:
+            object.__setattr__(self, "event_id", event_id(self.event_id))
+        object.__setattr__(self, "differing_fields", ordered)
+        ValueError.__init__(self, "obligation_resolution_mismatch")
+
+    @property
+    def reason_code(self) -> str:
+        return "obligation_resolution_mismatch"
+
+
+_MAX_EVENTS_PER_BATCH_FOR_POINTER: Final = 100
+
+
+def public_error_for_obligation_resolution_mismatch(
+    mismatch: ObligationResolutionMismatch,
+    *,
+    event_index: int | None = None,
+) -> PublicOperationError:
+    """Project one typed obligation-resolution rejection to the shared public error contract.
+
+    Dry-run, in-memory durable append, and SQLite durable append must use this helper so the
+    agent always sees the same reason, pointer, invariant, and allowlisted field names.
+    """
+
+    if type(mismatch) is not ObligationResolutionMismatch:
+        raise TypeError("obligation_resolution_mismatch_wrong_type")
+    fields = ", ".join(mismatch.differing_fields) if mismatch.differing_fields else "status"
+    message = (
+        "The event batch is invalid. Obligation resolution requires invariant "
+        f"{mismatch.invariant}; mismatched fields: {fields}. Repeat every meaning field "
+        "from the open obligation byte-for-byte; only status and resolution_evidence_refs "
+        "may change. See yoetz://guidance/publication-policy.md section obligation-resolution "
+        "and the publish_work examples entry for obligation_published resolution. "
+        "Correct the event payload before retrying."
+    )
+    details: dict[str, str] = {"reason_code": "obligation_resolution_mismatch"}
+    if type(event_index) is int and 0 <= event_index < _MAX_EVENTS_PER_BATCH_FOR_POINTER:
+        details["field"] = f"/event_drafts/{event_index}/payload"
+    return PublicOperationError(
+        PublicErrorCode.EVENT_INVALID,
+        message,
+        False,
+        safe_details=details,
+    )
+
+
+def obligation_meaning_field_diffs(
+    previous: ObligationPublishedPayload,
+    nxt: ObligationPublishedPayload,
+) -> tuple[str, ...]:
+    """Return allowlisted meaning-field names that differ between two obligation payloads.
+
+    Comparison normalizes away ``status`` and ``resolution_evidence_refs`` so callers can
+    decide whether a candidate is a pure open→resolved transition.
+    """
+
+    if (
+        type(previous) is not ObligationPublishedPayload
+        or type(nxt) is not ObligationPublishedPayload
+    ):
+        raise ProtocolValueError("invalid_event_value_type")
+    diffs: list[str] = []
+    if previous.obligation_id != nxt.obligation_id:
+        diffs.append("obligation_id")
+    if previous.description != nxt.description:
+        diffs.append("description")
+    if previous.evidence_expectation != nxt.evidence_expectation:
+        diffs.append("evidence_expectation")
+    if previous.acceptance_criteria != nxt.acceptance_criteria:
+        diffs.append("acceptance_criteria")
+    if previous.requested_items != nxt.requested_items:
+        diffs.append("requested_items")
+    if previous.source_refs != nxt.source_refs:
+        diffs.append("source_refs")
+    return tuple(sorted(diffs, key=str.encode))
 
 
 @dataclass(frozen=True, slots=True)
@@ -2162,11 +2287,22 @@ def _validate_envelope_ref_mirrors(
             raise ProtocolValueError("ref_mirror_mismatch")
 
 
+# Public draft-schema description for caller-asserted event time. Owned here so schema generation
+# and hand-reviewed draft envelopes stay aligned; receipt freshness is frontier-bound, not wall-clock.
+OCCURRED_AT_DRAFT_DESCRIPTION: Final = (
+    "Caller-asserted event time (RFC 3339 UTC, millisecond precision). Use the best real time "
+    "available; do not copy illustrative example timestamps. If the exact time is unknown, use an "
+    "honest bounded approximation and treat it as a claim. Ledger order uses ingestion sequence; "
+    "receipt freshness is frontier-bound. Service accepted_at is independent acceptance metadata, "
+    "not a sort, filter, or freshness key."
+)
+
+
 @dataclass(frozen=True, slots=True)
 class EventDraft:
     event_id: EventId
     schema: EventSchema
-    occurred_at: Timestamp
+    occurred_at: Annotated[Timestamp, Field(description=OCCURRED_AT_DRAFT_DESCRIPTION)]
     causal_parents: tuple[EventId, ...]
     payload: EventPayload | JsonValue
     artifact_refs: tuple[ObjectId, ...]

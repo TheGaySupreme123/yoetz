@@ -28,7 +28,7 @@ from yoetz.ports.control import (
     ServiceStopResult,
 )
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
-from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
+from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, SafeDetailValue
 from yoetz.protocol.models import (
     CheckRequest,
     CheckResult,
@@ -308,7 +308,15 @@ def _plain_wire_value(value: object) -> JsonValue:
     if isinstance(value, Enum):
         return cast(JsonValue, value.value)
     if isinstance(value, ControlError):
-        return {"code": value.reason, "retryable": value.retryable}
+        body: dict[str, JsonValue] = {"code": value.reason, "retryable": value.retryable}
+        if value.correlation_id is not None:
+            body["correlation_id"] = value.correlation_id
+        if value.accepted_state:
+            body["accepted_state"] = {
+                key: cast(JsonValue, value.accepted_state[key])
+                for key in sorted(value.accepted_state)
+            }
+        return body
     if isinstance(value, BaseModel):
         # Match public_model_to_wire: keep explicit nulls required by closed schemas,
         # omit unset optional fields (optional_non_null must stay absent, not null).
@@ -599,8 +607,19 @@ def parse_control_result(frame: ControlFrame) -> ControlResult:
             if not isinstance(raw_body, Mapping):
                 _fail("frame_invalid")
             error = cast(Mapping[str, object], raw_body)
+            raw_accepted = error.get("accepted_state")
+            accepted_state = (
+                cast(Mapping[str, SafeDetailValue], raw_accepted)
+                if isinstance(raw_accepted, Mapping)
+                else None
+            )
+            raw_correlation = error.get("correlation_id")
+            correlation_id = raw_correlation if type(raw_correlation) is str else None
             body: object = ControlError(
-                cast(str, error["code"]), retryable=cast(bool, error["retryable"])
+                cast(str, error["code"]),
+                retryable=cast(bool, error["retryable"]),
+                accepted_state=accepted_state,
+                correlation_id=correlation_id,
             )
         elif method in {ControlMethod.SERVICE_STATUS, ControlMethod.SERVICE_LOCK}:
             body = _service_status_from_wire(raw_body)
@@ -771,7 +790,9 @@ def public_error_code_for_control_reason(reason: str) -> PublicErrorCode:
         return PublicErrorCode.VAULT_LOCKED
     if reason == "request_cancelled":
         return PublicErrorCode.CANCELLED
-    if reason == "internal_error":
+    # The operation completed; only its response could not be shaped. The public code stays
+    # INTERNAL_ERROR, but the bridge pairs it with retryable=True and a same-request_id remedy.
+    if reason in {"internal_error", "response_projection_failed", "read_projection_failed"}:
         return PublicErrorCode.INTERNAL_ERROR
     if reason in {
         "frame_invalid",

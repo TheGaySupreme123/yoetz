@@ -86,6 +86,101 @@ released versions.
   unpublished (`"private": true`) until a separate release decision.
 - A README Getting started section documenting the install and first-run path.
 
+- `closure_readiness` on every `status` success (`open_obligation_count`,
+  `unresolved_finding_count`, `blocking_conditions`), so an agent can see what currently bounds a
+  completion conclusion before spending a `check` or `receipt` rather than learning it afterwards
+  from an insufficient receipt. Derived per request: it records nothing, creates no verdict or IDs,
+  and never strengthens coverage. When the compact singleton is unreadable both counts are `null`
+  and the only condition is `readiness_unknown` — unknown is reported as unknown, never as zero.
+
+- A worked `publish_work` example per ordinary publishable event family. Previously only
+  `plan_published` had one, and agents hand-derived action/result/evidence/claim shapes from a
+  large `oneOf`.
+
+### Fixed
+
+- **Publish recovery must not mask a known authoring error.** When MCP `publish_work` body
+  validation fails, envelope-first operation lookup still runs so a committed same-`request_id`
+  operation can be recovered. A failed recovery read (for example nested `read_projection_failed`)
+  no longer replaces the field-pointed `INVALID_REQUEST` with a false “no durable state changed /
+  use a new request_id” message. Lookup is a closed tri-state: found recovery results retain
+  precedence; authoritative absence returns the original authoring pointer; unavailable recovery
+  returns retryable `OPERATION_PENDING` / `operation_recovery_unavailable` with the original
+  publish `request_id` and the safe field that will apply once recovery can answer.
+
+- **`check` can return a finding.** A check that raised even one finding committed durably and then
+  failed to project, so the caller received `INTERNAL_ERROR` / `response_projection_failed` and
+  never learned the verdict, the finding, or the semantic outcome — in every mode. The public
+  result models are strict, and the internal result carried each nested entry in an immutable
+  mapping type strict validation does not admit; the check result's projected finding additionally
+  requires `provenance` to be present as an explicit null on a deterministic finding. Nested
+  mappings are now normalized structurally at the one projection boundary — no coercion, no
+  reordering, no defaults, and a genuinely invalid shape is still rejected at the same field.
+
+- **An accepted durable `publish_work` is never reported as a failure.** When full response
+  projection fails after the append succeeded, the daemon returns a reduced total-acceptance
+  success (`ok: true`, `response_completeness: "accepted_projection_unavailable"`) with frontiers,
+  accepted event ids/digests/sequences, and a `correlation_id` — not `INTERNAL_ERROR` /
+  `response_projection_failed`. The agent needs no second `status` call and no same-`request_id`
+  replay to learn what landed. Unexpected exceptions also write a durable owner-only diagnostic
+  ring under `log_dir()` (`yoetz service diagnostics --correlation-id err_…`).
+
+- **A post-commit projection failure now says where the write landed.** For non-publish writes (and
+  the impossible minimal-envelope path), `response_projection_failed` still carries the committed
+  `sequence`, `head_digest`, and accepted event `count` in `safe_details` / `accepted_state`.
+
+- **Invalid tool arguments name what is admitted.** The response listed field locations only; it
+  now also names the admitted enum members and the required identifier pattern for the rejected
+  top-level fields, and points at the tool's worked example — all from checked-in schema bytes.
+  `check`, `respond`, and `receipt` gained the worked examples they never had.
+
+- **A receipt explains why a check does or does not count.** `check_not_applicable` appearing right
+  after a successful externally-reviewed check read as a contradiction. The limitations section now
+  states that the recorded check tested a different subject frontier, that its verdict stands only
+  for what it tested, and that re-running `check` at this frontier is what makes it contribute.
+  `check_not_recorded` and `check_payload_unavailable` are explained the same way.
+
+- **A read is no longer told to replay a write.** A projection failure on `status` (or a privacy
+  receipt read) advertised the same-`request_id` replay remedy as an accepted write, but a read
+  appends nothing, so no operation record exists to replay against and the caller waited on a
+  recovery that could not arrive. Reads now surface the retryable `read_projection_failed`, whose
+  remedy is repeating the request. Observed in the 2026-07-27 Codex dogfood, where a compact
+  `status` call failed twice and its exact replay failed again.
+
+- **The post-commit projection window fails with bounded, named errors.** Rewriting a blocked leaf
+  raised a bare `KeyError` when the omission pointer did not resolve in the body — reachable via
+  the synthetic `/leaf-N` pointer produced when an origin pointer exceeds 256 bytes — and a bare
+  `ValueError`/`IndexError` for a malformed or out-of-range array segment. These now raise
+  `projection_pointer_unresolved`/`projection_pointer_invalid`. They are deliberately not remapped
+  to `privacy_projection_blocked`: no policy blocked them, and that reason is non-retryable, so it
+  would describe an already-durable append as a refusal. The projection stops before a response
+  exists either way, so blocked content is never disclosed.
+
+- **Installed guidance no longer points at files that were never packaged.** `skills/codex/yoetz/SKILL.md`
+  linked four `references/*.md` paths absent from both the repository skill directory and the
+  packaged resources; it now names the `yoetz://guidance/*.md` URIs the server already serves. A
+  packaging test resolves every reference the installed skill names, reading only the packaged
+  tree.
+
+- **An accepted write is never reported as an unqualified failure.** A handler returning is the
+  commit boundary; response shaping happens after it. An unexpected failure in that window now
+  surfaces as the retryable `response_projection_failed` naming same-`request_id` replay, instead
+  of a generic non-retryable `INTERNAL_ERROR` that both misdescribed the ledger and steered callers
+  away from the idempotent replay that recovers it (ADR-008). Deliberate bounded failures raised in
+  the same window pass through unchanged.
+
+- Validation failures inside `expected_frontier`/`at_frontier` now name the offending leaf
+  (`head_digest`, `sequence`) instead of projecting to the parent object, which reported only that
+  something in the frontier was wrong. Caller-supplied extra keys are still never echoed.
+
+- `EVENT_INVALID` now locates the rejected draft by ordinal and owning field (for example
+  `/event_drafts/2/schema`), so a multi-draft batch no longer has to be re-derived to find the one
+  bad member. The pointer is built only from frozen schema names and a bounded index.
+
+- `yoetz provider status` now states which lifecycle it probed (`user_service_no_autostart`) and
+  whether MCP-local composition starts on demand, so an absent service no longer reads as
+  contradicting a working MCP session.
+
 ### Changed
 
 - **Retired the spec-mirror tree.** Yoetz was built spec-first, with one Markdown owner per planned

@@ -12,7 +12,7 @@ Scope notes (documented, not silently narrowed):
 * A full "deterministic receipt" for the six-operation slice requires an unlocked vault. Unlocking
   a passphrase vault for real goes through ``yoetz/cli/unlock.py``'s ``_ForegroundTerminal``, which
   deliberately requires a genuine controlling TTY (opens ``/dev/tty``, checks
-  ``os.tcgetpgrp``/uid/isatty on fd 0 and 2) -- a real security control, not something to relax.
+  ``os.tcgetpgrp``/isatty plus matching stdin/stderr terminal endpoints) -- a real security control, not something to relax.
   This file proves the six operations against the real, freshly-installed, running-but-locked
   service: each one must produce a bounded, non-crashing, documented exit code (never a hidden
   runtime, never a Python traceback, never a leaked checkout path) rather than a fabricated

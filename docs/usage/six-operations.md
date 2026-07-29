@@ -20,7 +20,9 @@ yoetz status --input - --json          # read the request from stdin
 
 `--deadline-ms` bounds the call. Every operation is idempotent on its request identity: **a timeout
 has an unknown outcome, never a known failure.** Reuse the same `request_id` to retry, or call
-`status` to find out what actually happened.
+`status view=operation` with that `request_id` as a state lookup without reconstructing the
+original body. A `complete` publish returns stored frontiers and accepted event ids; other states
+report only what is honest for that state (`pending`/`quarantined`/`absent`/non-publish).
 
 Field-level shapes live in [`docs/INTERFACES.md`](../INTERFACES.md); the JSON Schemas under
 [`schemas/`](../../schemas/) and the golden vectors under [`fixtures/`](../../fixtures/) are the
@@ -38,7 +40,14 @@ actions, results, evidence. Publish material transitions — an assignment, a de
 attempt, an independently useful result, a completion, a revision. Skip routine reads, searches,
 formatting, and per-file mechanics.
 
+Set `dry_run: true` to validate a batch and preview what would be accepted without appending. The
+preview is not evidential and is not citable as a check, publication, or coverage source. Reuse the
+same `request_id` for the real publish after the preview succeeds.
+
 Yoetz does not watch your workspace. What is published is what exists.
+
+Authoring help for MCP: tool descriptions name `yoetz://guidance/publication-policy.md`; invalid
+requests include that URI and nested field hints from the presentation schema.
 
 ### `check`
 Runs the deterministic policy packs over the recorded state and returns findings with an exact
@@ -63,7 +72,11 @@ edit, evidence change, plan change, or response.
 Reads current state — use it after a resume, a compaction, a handoff, or any uncertainty about what
 is already done. `view=candidate_findings` is an advisory read: it creates no verdict, no IDs, no
 receipt, and no event. An empty candidate list means only that no rule fired in that read; it is not
-a check and cannot be cited as one.
+a check and cannot be cited as one. After any ambiguous write, prefer `view=operation` with
+`filter.operation_request_id` set to the write's `request_id`: it looks up that operation's state
+for the authenticated writer without requiring a byte-identical replay body. Stored outcome,
+frontiers, and accepted event ids are present only when the operation is a complete
+`publish_work`; other states omit them rather than invent detail.
 
 ### `receipt`
 Projects the honest summary of what was checked, at what coverage, and what remains open. Formats:

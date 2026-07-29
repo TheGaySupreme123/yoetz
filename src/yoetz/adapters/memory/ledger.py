@@ -26,6 +26,7 @@ from yoetz.domain.events import (
     LedgerChain,
     LedgerRecord,
     ObligationPublishedPayload,
+    ObligationResolutionMismatch,
     PayloadRef,
     PlanPublishedPayload,
     PlanRevisedPayload,
@@ -40,6 +41,7 @@ from yoetz.domain.events import (
     WriterChain,
     encode_payload,
     media_type_for,
+    public_error_for_obligation_resolution_mismatch,
 )
 from yoetz.domain.findings import (
     RankedFindings,
@@ -78,7 +80,7 @@ from yoetz.kernel.projections import (
     empty_projection_state,
     projection_digest,
 )
-from yoetz.kernel.reducers import replay
+from yoetz.kernel.reducers import is_material_event_family, replay
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
@@ -113,6 +115,7 @@ from yoetz.ports.ledger import (
     ProjectionView,
     SelectedAttempt,
     SemanticAttemptHandle,
+    SemanticAttemptRecord,
     SemanticJobRecord,
     StoredProjection,
 )
@@ -132,9 +135,11 @@ from yoetz.protocol.canonical import (
 )
 from yoetz.protocol.coverage import (
     AuthorshipAssurance,
+    Coverage,
     PublicationChannel,
     coverage_for_channel,
     coverage_to_json,
+    weakest,
 )
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
@@ -157,7 +162,7 @@ from yoetz.protocol.models import (
     StatusVersionSliceModel,
 )
 
-__all__ = ["MemoryLedgerAdapter", "MemoryLedgerState"]
+__all__ = ["MemoryLedgerAdapter", "MemoryLedgerState", "compact_status_coverage"]
 
 _GENESIS: Final = Frontier.genesis()
 type _SummaryCode = Literal[
@@ -661,6 +666,39 @@ def _status_gap_codes(markers: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(sorted({marker.split(":", 1)[0] for marker in markers}, key=str.encode))
 
 
+def compact_status_coverage(
+    records: tuple[LedgerRecord, ...], projection: ProjectionState
+) -> Coverage:
+    """Fold the applicable check's coverage into the compact-status baseline.
+
+    The newest record's envelope (often an engine-derived ``receipt_recorded``) hardcodes
+    ``check_types=(none,)`` even immediately after a rich check; the check's real coverage
+    lives in its payload. The receipt applicability rule decides whether the projected latest
+    check still covers this state: it does unless material work was appended after it.
+
+    Shared by the memory status view and the durable SQLite ``p1_projection_state`` mirror so
+    a restart cannot disagree with the in-process projection about what was checked.
+    """
+
+    baseline = records[-1].coverage
+    latest = projection.latest_tested_state
+    if latest is None:
+        return baseline
+    check_record = next(
+        (record for record in records if record.event_id == latest.source_check_event_id),
+        None,
+    )
+    if check_record is None or type(check_record.payload) is not CheckRecordedPayload:
+        return baseline
+    if any(
+        is_material_event_family(record.schema.name)
+        and record.ledger.ingestion_sequence > check_record.ledger.ingestion_sequence
+        for record in records
+    ):
+        return baseline
+    return weakest(baseline, check_record.payload.coverage)
+
+
 def _obligation_item(
     obligation: str,
     record: object,
@@ -722,6 +760,7 @@ def _projection_items(
                 publication_channel=row.publication_channel.value,
                 ingestion_sequence=str(row.ledger.ingestion_sequence),
                 occurred_at=row.occurred_at.wire,
+                accepted_at=row.ledger.accepted_at.wire,
                 projection_status=(
                     "unknown_unprojected" if type(row) is UnknownEvent else "projected"
                 ),
@@ -789,13 +828,20 @@ def _projection_items(
             if payload is None:
                 continue
             state = payload.subject_state
-            subject_state = (
-                None
-                if state is None or (state.tree_digest is None and state.diff_digest is None)
-                else StatusStructuralSubjectStateModel(
-                    tree_digest=state.tree_digest, diff_digest=state.diff_digest
+            subject_state = None
+            if state is not None and (
+                state.tree_digest is not None or state.diff_digest is not None
+            ):
+                # Optional non-null digests must be omitted when unset, never passed as null —
+                # ``StatusStructuralSubjectStateModel`` rejects explicit null leaves.
+                subject_state_values: dict[str, object] = {}
+                if state.tree_digest is not None:
+                    subject_state_values["tree_digest"] = state.tree_digest
+                if state.diff_digest is not None:
+                    subject_state_values["diff_digest"] = state.diff_digest
+                subject_state = StatusStructuralSubjectStateModel.model_validate(
+                    subject_state_values
                 )
-            )
             freshness = projection.freshness.value
             if not record.object_available and freshness == "current":
                 freshness = "redacted_gap"
@@ -921,7 +967,9 @@ def _projection_items(
                 open_obligations=open_obligations[:10],
                 unresolved_findings=unresolved_findings[:10],
                 freshness=projection.freshness.value,
-                coverage=CoverageModel.model_validate(coverage_to_json(records[-1].coverage)),
+                coverage=CoverageModel.model_validate(
+                    coverage_to_json(compact_status_coverage(records, projection))
+                ),
                 gaps=_status_gap_codes(projection.coverage_gaps),
             ),
         )
@@ -1173,6 +1221,16 @@ class MemoryLedgerAdapter:
         proposed = snapshot_records + tuple(new_records)
         try:
             projection = replay(proposed)
+        except ObligationResolutionMismatch as exc:
+            draft_index: int | None = None
+            if exc.event_id is not None:
+                for index, item in enumerate(command.entries):
+                    if item.draft.event_id == exc.event_id:
+                        draft_index = index
+                        break
+            raise public_error_for_obligation_resolution_mismatch(
+                exc, event_index=draft_index
+            ) from exc
         except ValueError as exc:
             raise _error(PublicErrorCode.EVENT_INVALID) from exc
         result_frontier = Frontier(projection.frontier, projection.head_digest)
@@ -1762,9 +1820,28 @@ class MemoryLedgerAdapter:
                 and job.lease_expires_at is not None
                 and job.lease_expires_at > now
             ):
+                # Same owner still holding a live lease: resume the active started attempt.
+                # Crash-before-authorization-consumption must not mint a new attempt identity.
+                if job.lease_owner_id == lease.lease_owner_id and job.active_attempt_id is not None:
+                    attempt = self._state.attempts.get(job.active_attempt_id)
+                    if attempt is not None and attempt.state == "started":
+                        return attempt.handle
                 raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
             if job.state not in {"queued", "leased"}:
                 raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+            # Expired or reclaimed lease: close the prior started attempt before a new ordinal.
+            if (
+                job.state == "leased"
+                and job.active_attempt_id is not None
+                and job.active_attempt_id in self._state.attempts
+            ):
+                prior = self._state.attempts[job.active_attempt_id]
+                if prior.state == "started":
+                    self._state.attempts[job.active_attempt_id] = replace(
+                        prior,
+                        state="expired",
+                        terminal_code=SemanticReason.LEASE_AUTHORITY_LOST,
+                    )
             ordinal = job.attempt_count + 1
             expiry = min(lease.lease_expires_at, now + timedelta(seconds=60))
             handle = SemanticAttemptHandle(
@@ -1845,6 +1922,39 @@ class MemoryLedgerAdapter:
                     lease_expires_at=None,
                 )
 
+    async def fail_semantic_job(
+        self,
+        lease: OperationLease,
+        job_id: str,
+        terminal_code: SemanticReason,
+    ) -> SemanticJobRecord:
+        """Terminally fail a queued job when no physical attempt is active."""
+
+        async with self._lock:
+            operation = self._require_lease(lease)
+            job = self._state.jobs.get(job_id)
+            if (
+                operation.phase is not CheckPhase.SEMANTIC_WAIT
+                or job is None
+                or job.writer_id != lease.writer_id
+                or job.operation_id != lease.operation_id
+                or job.state != "queued"
+                or job.active_attempt_id is not None
+                or terminal_code is SemanticReason.SEMANTIC_COMPLETED
+            ):
+                raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+            failed = replace(
+                job,
+                state="failed",
+                lease_owner_id=None,
+                lease_generation=None,
+                lease_expires_at=None,
+                terminal_code=terminal_code,
+                terminal_at=_now(self._clock),
+            )
+            self._state.jobs[job_id] = failed
+            return failed
+
     async def select_attempt(
         self,
         lease: OperationLease,
@@ -1889,6 +1999,51 @@ class MemoryLedgerAdapter:
                 lease.frontier,
                 lease.dependency_digest,
             )
+
+    async def load_semantic_job(
+        self, writer_id: str, operation_id: str
+    ) -> SemanticJobRecord | None:
+        async with self._lock:
+            matches = tuple(
+                job
+                for job in self._state.jobs.values()
+                if job.writer_id == writer_id and job.operation_id == operation_id
+            )
+            if not matches:
+                return None
+            # One operation binds at most one durable semantic job in practice; if multiple
+            # case digests exist (should not), return the most recently enqueued by attempt_count.
+            return max(matches, key=lambda item: (item.attempt_count, item.job_id))
+
+    async def list_semantic_attempts(self, job_id: str) -> tuple[SemanticAttemptRecord, ...]:
+        async with self._lock:
+            if job_id not in self._state.jobs:
+                return ()
+            rows = [
+                SemanticAttemptRecord(
+                    attempt.handle.job_id,
+                    attempt.handle.attempt_id,
+                    attempt.handle.attempt_ordinal,
+                    attempt.handle.provider_request_id,
+                    cast(
+                        Literal[
+                            "started",
+                            "response_durable",
+                            "selected",
+                            "failed",
+                            "expired",
+                            "late",
+                        ],
+                        attempt.state,
+                    ),
+                    attempt.terminal_code,
+                    attempt.result_object_ref,
+                )
+                for attempt in self._state.attempts.values()
+                if attempt.handle.job_id == job_id
+            ]
+            rows.sort(key=lambda item: item.attempt_ordinal)
+            return tuple(rows)
 
     async def renew_leases(self, lease: OperationLease) -> OperationLease:
         async with self._lock:

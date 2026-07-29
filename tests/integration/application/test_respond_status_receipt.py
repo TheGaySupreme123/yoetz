@@ -40,8 +40,10 @@ from yoetz.domain.values import Frontier, session_id
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.ledger import CheckCommitResult
+from yoetz.ports.publish_response_catalog import PublishResponseCatalogPort
 from yoetz.ports.runtime import BundleRuntimePort, RouteCommand, TaskRuntime
 from yoetz.protocol.canonical import JsonValue
+from yoetz.protocol.coverage import CheckType
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import (
     CheckRequest,
@@ -49,6 +51,7 @@ from yoetz.protocol.models import (
     PublishWorkRequest,
     ReceiptRequest,
     RespondRequest,
+    StatusCompactPageModel,
     StatusEvidencePageModel,
     StatusFindingsPageModel,
     StatusRequest,
@@ -221,6 +224,7 @@ def _build_app(
     runtime = _WorkflowRuntime(clock, ids)
     app = Application(
         start_catalog=catalog.delegate,
+        publish_responses=cast(PublishResponseCatalogPort, catalog.delegate),
         runtime=cast(BundleRuntimePort, runtime),
         clock=clock,
         ids=ids,
@@ -789,12 +793,26 @@ async def test_receipt_build_context_is_complete() -> None:
     versions = cast(Mapping[str, JsonValue], document["versions"])
     assert versions["package_version"] == "0.1.0"
     assert versions["resource_manifest_digest"] == _DIGEST
-    # The response advanced the frontier past the last check, so the frozen case honestly
-    # reports the check as no longer applicable at this exact frontier rather than silently
-    # reusing stale check facts.
+    # The response is material work published after the last check, so the frozen case honestly
+    # reports the check as superseded by that material change rather than silently reusing stale
+    # check facts. Frontier arithmetic alone (an immaterial advance) never produces this gap.
     assert receipt.coverage.known_gaps == ("check_not_applicable",)
     gaps = cast(tuple[Mapping[str, JsonValue], ...], document["gaps"])
     assert any(cast(str, gap["code"]) == "check_not_applicable" for gap in gaps)
+
+    # The bare code is honest but not interpretable: the 2026-07-27 dogfood saw
+    # `check_not_applicable` immediately after a check that succeeded with external provenance and
+    # could not tell which of four readings was meant. The limitations section must say which.
+    sections = cast(tuple[Mapping[str, JsonValue], ...], document["sections"])
+    limitations = next(
+        cast(str, section["body"])
+        for section in sections
+        if cast(str, section["key"]) == "limitations_and_coverage"
+    )
+    assert "A check is recorded at subject frontier" in limitations
+    assert "material work was published after it" in limitations
+    assert f"no longer covers frontier {receipt.subject_frontier.sequence}" in limitations
+    assert "Re-run check at this frontier to restore coverage." in limitations
 
     text_wire: dict[str, JsonValue] = {
         **receipt_wire,
@@ -809,3 +827,125 @@ async def test_receipt_build_context_is_complete() -> None:
     # the human wording rather than the wire enum spelling (spaces, not underscores).
     assert "unresolved findings remain" in text_receipt.human_text
     assert text_receipt.conclusion == receipt.conclusion
+
+
+async def test_successful_check_contributes_to_receipt_at_resulting_head() -> None:
+    """2026-07-27 run-2 regression: a check at subject frontier N appends its own events
+    (``check_recorded`` plus one ``finding_recorded`` per returned finding), landing past N.
+    A receipt taken at that head must still count the check: applicability follows the material
+    state, never frontier equality, which could never hold."""
+
+    app, _runtime, _ = _build_app(seed_offset=7)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=1000)
+    # The check's own events (one check_recorded plus one finding_recorded per returned finding)
+    # advance the frontier past the tested subject, so strict frontier equality could never hold.
+    assert checked.findings
+    assert checked.result_frontier.sequence > checked.subject_frontier.sequence
+
+    receipt_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 1010)),
+        "task_id": started.task_id,
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "expected_frontier": _frontier(checked.result_frontier),
+        "format": "json",
+        "include": "standard",
+        "redaction_profile": "full_local",
+    }
+    receipt = await app.receipt(ReceiptRequest.model_validate(receipt_wire))
+
+    assert "check_not_applicable" not in receipt.coverage.known_gaps
+    # The applicable check's coverage folds into the receipt, so its check types carry through.
+    assert CheckType.DETERMINISTIC in receipt.coverage.check_types
+    # The bootstrap finding is unresolved, so the conclusion still cannot be strong; what
+    # changes is that the check now contributes instead of being dropped by frontier arithmetic.
+    assert receipt.conclusion == "unresolved_findings_remain"
+    assert receipt.suppressed_finding_count == 0
+
+    # An immaterial advance never revokes the check: a receipt taken after the first receipt's
+    # own ``receipt_recorded`` event still applies the same check.
+    later_wire: dict[str, JsonValue] = {
+        **receipt_wire,
+        "request_id": protocol_id("req_", 1011),
+        "expected_frontier": _frontier(receipt.result_frontier),
+    }
+    later = await app.receipt(ReceiptRequest.model_validate(later_wire))
+    assert "check_not_applicable" not in later.coverage.known_gaps
+    assert CheckType.DETERMINISTIC in later.coverage.check_types
+
+    # Compact status reports the applicable check's coverage, not the newest envelope baseline:
+    # the head record is the receipt's own engine-derived event (check_types=(none,)), yet the
+    # check still shows through. This was the run-2 symptom (`check_types=["none"]` at head).
+    status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 1012)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "compact",
+                "limit": "10",
+            }
+        )
+    )
+    compact = cast(StatusCompactPageModel, status.page)
+    assert CheckType.DETERMINISTIC in compact.items[0].coverage.check_types
+
+
+async def test_material_work_after_check_produces_check_not_applicable() -> None:
+    """The gap still fires when it should: material work published after the check supersedes
+    its verdict, and the limitations wording says exactly that."""
+
+    app, _runtime, _ = _build_app(seed_offset=8)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=1100)
+
+    publish_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 1110)),
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "expected_frontier": _frontier(checked.result_frontier),
+        "event_drafts": (
+            {
+                "event_id": protocol_id("evt_", 1111),
+                "schema": {"name": "claim_recorded", "version": "1.0.0"},
+                "occurred_at": "2026-07-19T12:00:02.000Z",
+                "causal_parents": (),
+                "payload": {
+                    "claim_id": protocol_id("clm_", 1112),
+                    "claim_kind": "material",
+                    "statement": "New material work landed after the check.",
+                    "supporting_refs": (),
+                    "obligation_refs": (),
+                },
+                "artifact_refs": (),
+                "evidence_refs": (),
+            },
+        ),
+    }
+    published = await app.publish_work(PublishWorkRequest.model_validate(publish_wire))
+
+    receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 1113)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(published.result_frontier),
+                "format": "json",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+
+    assert "check_not_applicable" in receipt.coverage.known_gaps
+    assert receipt.document is not None
+    document = cast(Mapping[str, JsonValue], receipt.document)
+    sections = cast(tuple[Mapping[str, JsonValue], ...], document["sections"])
+    limitations = next(
+        cast(str, section["body"])
+        for section in sections
+        if cast(str, section["key"]) == "limitations_and_coverage"
+    )
+    assert "material work was published after it" in limitations
+    assert "Re-run check at this frontier to restore coverage." in limitations

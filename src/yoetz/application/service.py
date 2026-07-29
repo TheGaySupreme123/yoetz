@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -10,6 +11,7 @@ from typing import Literal, Protocol, cast
 
 from yoetz.application.egress import PrivacyCoordinator
 from yoetz.application.observation_verification import ObservationVerificationSupervisor
+from yoetz.application.unit_of_work import run_publish_response_commit
 from yoetz.domain.events import RuntimeProfile
 from yoetz.domain.privacy import (
     AuthorizationScope,
@@ -34,20 +36,28 @@ from yoetz.ports.clock import ClockPort
 from yoetz.ports.control import ControlClientKind, ControlError, ControlMethod
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import CheckCommitResult, FrozenCase
+from yoetz.ports.publish_response_catalog import (
+    PublishResponseCatalogPort,
+    PublishResponseKey,
+    StoredPublishResponse,
+)
 from yoetz.ports.runtime import BundleRuntimePort, TaskRuntime
 from yoetz.ports.start_catalog import StartCatalogPort, TaskRouteState
 from yoetz.protocol.canonical import (
+    MAX_JSON_DEPTH,
     JsonValue,
     canonical_digest,
     canonical_encode,
     strict_json_parse,
 )
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, validate_id
 from yoetz.protocol.models import (
     CheckResult,
     CheckResultModel,
     CheckSuccessModel,
     DataCategory,
+    OmittedContentModel,
     PublishWorkRequest,
     PublishWorkResult,
     PublishWorkResultModel,
@@ -69,6 +79,7 @@ from yoetz.protocol.models import (
     StatusResultModel,
     StatusSuccessModel,
     classify_result_leaf,
+    public_model_to_wire,
 )
 
 __all__ = [
@@ -82,6 +93,7 @@ __all__ = [
     "ServiceReadyContext",
     "UnprojectedControlBody",
     "VerificationPolicy",
+    "internal_control_json",
     "resolve_client_disclosure_sink",
 ]
 
@@ -387,6 +399,17 @@ def _internal_json(result: UnprojectedControlBody) -> dict[str, JsonValue]:
     raise TypeError("unprojected_control_body_invalid")
 
 
+def internal_control_json(result: UnprojectedControlBody) -> dict[str, JsonValue]:
+    """Public alias for reading an unprojected body's structural facts.
+
+    The daemon needs the committed frontier when response projection has failed and there is no
+    success body left to read it from. That is a legitimate structural read, not a projection, so
+    it does not go through the privacy path.
+    """
+
+    return _internal_json(result)
+
+
 def _escape_pointer(value: str) -> str:
     return value.replace("~", "~0").replace("/", "~1")
 
@@ -414,6 +437,10 @@ def _segments(pointer: str) -> tuple[str, ...]:
 
 
 def _replace_pointer(root: JsonValue, pointer: str, replacement: JsonValue) -> JsonValue:
+    # Every failure here is a bounded ValueError. This runs inside the post-commit projection
+    # window, where an unexpected exception (KeyError from a missing key, IndexError or
+    # ValueError from a non-numeric array segment) is reclassified as response_projection_failed
+    # and turns a durable success into an apparent failure the caller cannot replay away.
     parts = _segments(pointer)
 
     def replace_at(value: JsonValue, depth: int) -> JsonValue:
@@ -422,11 +449,17 @@ def _replace_pointer(root: JsonValue, pointer: str, replacement: JsonValue) -> J
         part = parts[depth]
         if isinstance(value, Mapping):
             source = dict(cast(Mapping[str, JsonValue], value))
+            if part not in source:
+                raise ValueError("projection_pointer_unresolved")
             source[part] = replace_at(source[part], depth + 1)
             return source
         if type(value) in {tuple, list}:
             source_list = list(cast(tuple[JsonValue, ...] | list[JsonValue], value))
+            if not part.isascii() or not part.isdecimal() or (part != "0" and part.startswith("0")):
+                raise ValueError("projection_pointer_unresolved")
             index = int(part)
+            if index >= len(source_list):
+                raise ValueError("projection_pointer_unresolved")
             source_list[index] = replace_at(source_list[index], depth + 1)
             return tuple(source_list)
         raise ValueError("projection_pointer_invalid")
@@ -441,7 +474,45 @@ def _frontier_for_projection(source: Mapping[str, JsonValue]) -> Frontier:
     return frontier_from_json(raw)
 
 
+def _plain_nested_mappings(value: JsonValue, depth: int = 0) -> JsonValue:
+    """Rebuild every nested mapping as a built-in ``dict``, changing nothing else.
+
+    The public result models are ``strict=True``. Strict pydantic accepts only a real ``dict`` (or
+    an instance of the target model) where a nested model is declared, and the internal results
+    carry nested entries as ``JsonObject`` — a genuine ``Mapping``, but not a ``dict``. Top-level
+    fields survived because they are scalars; every nested collection element was rejected.
+
+    The conversion is structural only: scalars are returned untouched, key order is preserved, no
+    key is added or dropped, and sequence containers keep their own type so the closed models'
+    established list-to-tuple adaptation still sees what it saw before. A genuinely invalid shape
+    therefore still fails validation, at the same pointer, with the same error.
+
+    Depth is bounded exactly as ``yoetz.protocol.canonical`` bounds it: a *container* node at
+    ``MAX_JSON_DEPTH`` is rejected, counting the root container as depth zero. Anything the internal
+    results were legitimately built under therefore normalizes, and a structure this boundary would
+    admit but canonicalization would not cannot slip through — a pathological one degrades to a
+    named rejection inside the projection window rather than recursing without limit.
+    """
+
+    if isinstance(value, Mapping):
+        if depth >= MAX_JSON_DEPTH:
+            raise ValueError("projection_value_too_deep")
+        source = cast(Mapping[str, JsonValue], value)
+        return {key: _plain_nested_mappings(item, depth + 1) for key, item in source.items()}
+    if type(value) is tuple:
+        if depth >= MAX_JSON_DEPTH:
+            raise ValueError("projection_value_too_deep")
+        return tuple(_plain_nested_mappings(item, depth + 1) for item in value)
+    if type(value) is list:
+        if depth >= MAX_JSON_DEPTH:
+            raise ValueError("projection_value_too_deep")
+        return [_plain_nested_mappings(item, depth + 1) for item in cast(list[JsonValue], value)]
+    return value
+
+
 def _public_model(method: ControlMethod, value: Mapping[str, JsonValue]) -> ProjectedControlBody:
+    """Validate and normalize one projected success body for its public result model."""
+
     model = {
         ControlMethod.START: (StartSuccessModel, StartResultModel),
         ControlMethod.PUBLISH_WORK: (PublishWorkSuccessModel, PublishWorkResultModel),
@@ -453,15 +524,19 @@ def _public_model(method: ControlMethod, value: Mapping[str, JsonValue]) -> Proj
     if model is None:
         return JsonObject(value)
     success_type, result_type = model
-    success = success_type.model_validate(value)
-    # ``RespondResponseModel`` declares ``optional_non_null_fields`` (reason/waiver_scope/
-    # waiver_expiry) that the frozen wire schema requires to be entirely omitted when absent,
-    # never present as an explicit null. A blanket ``exclude_none=False`` round trip here would
-    # reintroduce that null for an ordinary acknowledged response and crash the reflexive
-    # re-validation below, so respond alone excludes it; the other five operations have no
-    # ordinarily-absent ``optional_non_null_fields`` member and keep the established behavior.
-    exclude_none = method is ControlMethod.RESPOND
-    return result_type.model_validate(success.model_dump(mode="json", exclude_none=exclude_none))
+    success = success_type.model_validate(_plain_nested_mappings(value))
+    # Every closed result model that declares ``optional_non_null_fields`` requires those leaves
+    # to be entirely omitted when absent, never present as an explicit null. A dump that keeps
+    # defaulted Nones reintroduces the null after a clean internal body survived disclosure and
+    # crashes the reflexive re-validation below (publish ``summary``, respond reason/waiver
+    # fields, status obligation ``acceptance_criteria``, structural subject-state digests).
+    # ``exclude_unset`` drops only fields that were never populated, so required nullable keys
+    # that were set to null (status ``revision_event_id``) still project. Respond and publish
+    # also exclude any remaining nulls as belt-and-suspenders for their internal builders.
+    exclude_none = method in {ControlMethod.RESPOND, ControlMethod.PUBLISH_WORK}
+    return result_type.model_validate(
+        success.model_dump(mode="json", exclude_unset=True, exclude_none=exclude_none)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -469,6 +544,7 @@ class Application:
     """Ready-only facade with one sink-independent workflow and one disclosure boundary."""
 
     start_catalog: StartCatalogPort
+    publish_responses: PublishResponseCatalogPort
     runtime: BundleRuntimePort
     clock: ClockPort
     ids: IdPort
@@ -515,8 +591,129 @@ class Application:
     async def start(self, request: StartRequest) -> StartInternalResult:
         return await execute_start(self, request)  # pyright: ignore[reportArgumentType]
 
-    async def publish_work(self, request: PublishWorkRequest) -> PublishWorkInternalResult:
+    async def publish_work(
+        self, request: PublishWorkRequest
+    ) -> PublishWorkInternalResult | PublishWorkResult:
         return await execute_publish_work(self, request)  # pyright: ignore[reportArgumentType]
+
+    def publish_response_key(
+        self, result: PublishWorkInternalResult, sink: LocalDisclosureSink
+    ) -> PublishResponseKey:
+        if type(result) is not PublishWorkInternalResult or type(sink) is not LocalDisclosureSink:
+            raise TypeError("publish_response_identity_invalid")
+        return PublishResponseKey(
+            result.task_id,
+            result.session_id,
+            result.writer_id,
+            result.request_id,
+            result.request_digest,
+            sink,
+        )
+
+    def _decode_publish_response(
+        self,
+        result: PublishWorkInternalResult,
+        key: PublishResponseKey,
+        stored: StoredPublishResponse,
+    ) -> PublishWorkResult:
+        try:
+            if type(stored) is not StoredPublishResponse or stored.key != key:
+                raise ValueError("stored_publish_response_identity_invalid")
+            source = strict_json_parse(stored.result_canonical)
+            if canonical_encode(source) != stored.result_canonical or not isinstance(
+                source, Mapping
+            ):
+                raise ValueError("stored_publish_response_canonical_invalid")
+            wire = cast(Mapping[str, JsonValue], source)
+            projected = PublishWorkResultModel.model_validate(wire)
+            if type(projected.root) is not PublishWorkSuccessModel:
+                raise ValueError("stored_publish_response_result_invalid")
+            success = projected.root
+            if (
+                success.request_id != result.request_id
+                or success.task_id != result.task_id
+                or success.session_id != result.session_id
+                or success.writer_id != result.writer_id
+                or success.privacy_projection.sink != key.sink.value
+            ):
+                raise ValueError("stored_publish_response_identity_invalid")
+            if any(
+                event.summary is not None and not isinstance(event.summary, OmittedContentModel)
+                for event in success.accepted_events
+            ):
+                raise ValueError("stored_publish_response_content_invalid")
+            expected = result.as_json()
+            actual = public_model_to_wire(projected)
+            expected_facts = {name: value for name, value in expected.items() if name != "outcome"}
+            actual_facts = {
+                name: value
+                for name, value in actual.items()
+                if name not in {"outcome", "privacy_projection"}
+            }
+            expected_events = cast(
+                tuple[Mapping[str, JsonValue], ...], expected_facts["accepted_events"]
+            )
+            actual_events = cast(list[Mapping[str, JsonValue]], actual_facts["accepted_events"])
+            expected_facts["accepted_events"] = tuple(
+                {name: value for name, value in event.items() if name != "summary"}
+                for event in expected_events
+            )
+            actual_facts["accepted_events"] = tuple(
+                {name: value for name, value in event.items() if name != "summary"}
+                for event in actual_events
+            )
+            if canonical_encode(actual_facts) != canonical_encode(expected_facts):
+                raise ValueError("stored_publish_response_facts_invalid")
+            if canonical_encode(public_model_to_wire(projected)) != stored.result_canonical:
+                raise ValueError("stored_publish_response_canonical_invalid")
+            return projected
+        except (TypeError, ValueError) as exc:
+            raise PublicOperationError(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "The stored publish response is invalid.",
+                False,
+            ) from exc
+
+    async def load_publish_response(
+        self, result: PublishWorkInternalResult, sink: LocalDisclosureSink
+    ) -> PublishWorkResult | None:
+        key = self.publish_response_key(result, sink)
+        stored = await self.publish_responses.lookup(key)
+        if stored is None:
+            return None
+        return self._decode_publish_response(result, key, stored)
+
+    async def store_publish_response(
+        self,
+        result: PublishWorkInternalResult,
+        sink: LocalDisclosureSink,
+        projected: ProjectedControlBody,
+    ) -> PublishWorkResult:
+        if type(projected) is not PublishWorkResultModel:
+            raise TypeError("projected_publish_response_invalid")
+        if type(projected.root) is not PublishWorkSuccessModel:
+            raise TypeError("projected_publish_response_invalid")
+        success = projected.root
+        key = self.publish_response_key(result, sink)
+        wire = public_model_to_wire(projected)
+        accepted = wire.get("accepted_events")
+        if type(accepted) not in {tuple, list}:
+            raise TypeError("projected_publish_response_invalid")
+        accepted_items = cast(tuple[JsonValue, ...] | list[JsonValue], accepted)
+        if any(not isinstance(item, Mapping) for item in accepted_items) or any(
+            event.summary is not None and not isinstance(event.summary, OmittedContentModel)
+            for event in success.accepted_events
+        ):
+            raise TypeError("projected_publish_response_invalid")
+        canonical = canonical_encode(wire)
+        candidate = StoredPublishResponse(
+            key,
+            canonical,
+            f"sha256:{hashlib.sha256(canonical).hexdigest()}",
+        )
+        self._decode_publish_response(result, key, candidate)
+        winner = await run_publish_response_commit(self.publish_responses, candidate)
+        return self._decode_publish_response(result, key, winner)
 
     async def check(self, request: object) -> CheckCommitResult:
         from yoetz.application.check import execute_check
@@ -653,9 +850,18 @@ class Application:
         return self.receipt_version_resolver(runtime)
 
     async def evaluate_semantic_check(
-        self, frozen: FrozenCase, deterministic_findings: tuple[Finding, ...]
+        self,
+        frozen: FrozenCase,
+        deterministic_findings: tuple[Finding, ...],
+        runtime: object | None = None,
     ) -> object:
-        return await self.semantic_evaluator(frozen, deterministic_findings)
+        evaluator = self.semantic_evaluator
+        # Production evaluators accept the task runtime for durable job/attempt coordination.
+        # Test doubles may still be binary callables.
+        try:
+            return await evaluator(frozen, deterministic_findings, runtime)  # type: ignore[misc]
+        except TypeError:
+            return await evaluator(frozen, deterministic_findings)
 
     async def project_result_for_client(
         self,
@@ -679,6 +885,12 @@ class Application:
         sink = resolve_client_disclosure_sink(context)
         items: list[CandidateContextItem] = []
         for ordinal, (pointer, value) in enumerate(_leaves(source), start=1):
+            # A leaf that cannot be classified stops the projection before any response exists, so
+            # nothing is disclosed. The daemon reclassifies the escaping ProtocolValueError by
+            # method: a write keeps the same-request_id remedy, a read is told to repeat. Naming it
+            # privacy_projection_blocked here would be both wrong (no policy blocked it) and worse
+            # for a write, since that reason is non-retryable and would describe a durable append
+            # as a refusal.
             classification = (
                 classify_result_leaf(method.value, source, pointer)
                 if method in _WORKFLOW_METHODS
@@ -753,6 +965,10 @@ class Application:
             raise ControlError("privacy_projection_blocked", retryable=False)
         projected: JsonValue = source
         for omission in completed.omissions:
+            # An omission whose pointer does not resolve means the privacy decision and the body
+            # disagree. `_replace_pointer` raises a bounded, named ValueError rather than a bare
+            # KeyError or IndexError; either way the projection stops before a response exists, so
+            # the blocked content is never disclosed, and the daemon reclassifies by method.
             projected = _replace_pointer(
                 projected,
                 omission.json_pointer,
@@ -829,6 +1045,7 @@ class ServiceReadyContext:
     vault_generation: int
     generation_is_current: Callable[[int, int], bool]
     start_catalog: StartCatalogPort
+    publish_responses: PublishResponseCatalogPort
     runtime: BundleRuntimePort
     clock: ClockPort
     ids: IdPort
@@ -905,6 +1122,7 @@ class ReadyApplicationFactory:
         try:
             application = Application(
                 context.start_catalog,
+                context.publish_responses,
                 context.runtime,
                 context.clock,
                 context.ids,

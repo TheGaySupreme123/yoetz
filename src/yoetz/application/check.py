@@ -41,6 +41,7 @@ from yoetz.kernel.deterministic_checks import (
 from yoetz.kernel.policies.research_evidence import research_evidence_findings
 from yoetz.kernel.policies.work_integrity import work_integrity_findings
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
+from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
@@ -49,6 +50,7 @@ from yoetz.ports.ledger import (
     CheckPhase,
     CheckPolicyExecution,
     FrozenCase,
+    OperationLease,
     OperationRecord,
     OperationState,
 )
@@ -128,6 +130,22 @@ def _invalid(reason: str = "check_coordinator_invalid") -> ValueError:
     return ValueError(reason)
 
 
+def _projected_finding_json(finding: Finding) -> JsonValue:
+    """Adapt one encoded finding to the CHECK result's projected-finding shape.
+
+    ``findings/finding-1.0.0`` leaves ``provenance`` simply absent on a deterministic finding, and
+    ``finding_to_json`` honors that — it is the encoding events and receipt documents carry. The
+    CHECK result's ``projected_finding`` is stricter: ``provenance`` is *required* and nullable, so
+    a deterministic finding must present it as an explicit null. This mirrors the top-level
+    ``semantic_provenance`` immediately below, which the same result already emits that way.
+    """
+
+    encoded = finding_to_json(finding)
+    if "provenance" in encoded:
+        return encoded
+    return {**dict(encoded.items()), "provenance": None}
+
+
 def check_internal_json(result: CheckCommitResult) -> dict[str, JsonValue]:
     """Serialize sink-independent CHECK success without a privacy projection."""
 
@@ -142,7 +160,7 @@ def check_internal_json(result: CheckCommitResult) -> dict[str, JsonValue]:
         "subject_frontier": dict(result.subject_frontier.as_wire().items()),
         "result_frontier": dict(result.result_frontier.as_wire().items()),
         "verdict": result.verdict.value,
-        "findings": tuple(cast(JsonValue, finding_to_json(item)) for item in result.findings),
+        "findings": tuple(_projected_finding_json(item) for item in result.findings),
         "suppressed_count": str(result.suppressed_count),
         "policy_executions": tuple(
             {
@@ -158,7 +176,11 @@ def check_internal_json(result: CheckCommitResult) -> dict[str, JsonValue]:
         "semantic_provenance": (
             None
             if result.semantic_provenance is None
-            else semantic_provenance_to_json(result.semantic_provenance)
+            # Public Pydantic validation deliberately accepts a built-in dict here
+            # before inspecting the safe identity fields.  The domain encoder
+            # returns an immutable JsonObject, so thaw only its root container;
+            # nested values remain canonical JSON mappings.
+            else dict(semantic_provenance_to_json(result.semantic_provenance).items())
         ),
         "coverage": coverage_to_json(result.coverage),
         "versions": {
@@ -212,6 +234,12 @@ class FinalSemanticEvaluation:
     reason: SemanticReason
     judgment: SemanticJudgment | None = None
     provenance: SemanticProvenance | None = None
+    # Bounded structural attempt accounting reconstructed from durable rows when a job ran.
+    # Not part of the frozen public check-result wire; owner recovery reads the ledger.
+    attempt_accounting: object | None = None
+    # When the durable semantic phase renewed the check operation lease (lease TTL is 60s while
+    # timeout_seconds may be longer), later phase advance / commit must use this CAS fence.
+    operation_lease: OperationLease | None = None
 
     def __post_init__(self) -> None:
         validate_semantic_outcome(self.status, self.reason)
@@ -228,6 +256,8 @@ class FinalSemanticEvaluation:
                 raise _invalid("semantic_judgment_invalid")
         elif self.judgment is not None:
             raise _invalid("semantic_judgment_invalid")
+        if self.operation_lease is not None and type(self.operation_lease) is not OperationLease:
+            raise _invalid("operation_lease_invalid")
 
 
 def semantic_coverage_gap_code(status: SemanticStatus, reason: SemanticReason) -> str | None:
@@ -275,6 +305,7 @@ class Application(Protocol):
         self,
         frozen: FrozenCase,
         deterministic_findings: tuple[Finding, ...],
+        runtime: TaskRuntime | None = None,
     ) -> FinalSemanticEvaluation: ...
 
 
@@ -832,9 +863,15 @@ async def _semantic_evaluation(
             SemanticReason.PROVIDER_NOT_CONFIGURED,
         )
     try:
-        return await app.evaluate_semantic_check(frozen, deterministic)
-    except Exception:
+        return await app.evaluate_semantic_check(frozen, deterministic, runtime)
+    except Exception as exc:
         # Optional/required semantic evaluator crash must never fabricate a clean semantic pass.
+        record_unexpected_exception_without_raising(
+            exc,
+            component="check",
+            operation="semantic_not_dispatched_coordinator_failure",
+            request_id=request.request_id,
+        )
         return FinalSemanticEvaluation(
             SemanticStatus.FAILED,
             SemanticReason.COORDINATOR_FAILURE,
@@ -846,12 +883,23 @@ async def execute_check_commit(app: Application, request: CheckRequest) -> Check
 
     scope = normalize_check_scope(request)
     packs = _selected_packs(request)
+    required_capabilities = {
+        RuntimeCapability.WRITE,
+        RuntimeCapability.PAYLOAD_READ,
+    }
+    # A ready service grants SEMANTIC independently of the ordinary write route.  Preserve that
+    # admission on non-deterministic checks; otherwise the leased task runtime loses the
+    # capability and reports provider_not_configured before the configured evaluator can run.
+    # An explicitly semantic request while semantic verification is disabled retains the existing
+    # honest not-configured result instead of becoming a routing failure.
+    if request.mode != "deterministic_only" and app.verification_policy.semantic != "disabled":
+        required_capabilities.add(RuntimeCapability.SEMANTIC)
     runtime = await app.runtime.route(
         RouteCommand(
             request.session_id,
             request.writer_id,
             RouteAccess.WRITE,
-            frozenset({RuntimeCapability.WRITE, RuntimeCapability.PAYLOAD_READ}),
+            frozenset(required_capabilities),
         )
     )
     try:
@@ -909,6 +957,9 @@ async def execute_check_commit(app: Application, request: CheckRequest) -> Check
             )
             frozen = FrozenCase(frozen.case, lease)
         semantic_result = await _semantic_evaluation(app, request, runtime, frozen, deterministic)
+        # Durable semantic attempts may renew the check lease (TTL 60s vs timeout up to 300s).
+        if semantic_result.operation_lease is not None:
+            frozen = FrozenCase(frozen.case, semantic_result.operation_lease)
         semantic_candidates: tuple[CandidateFinding, ...] = ()
         if semantic_result.status is SemanticStatus.SUCCEEDED:
             assert semantic_result.judgment is not None

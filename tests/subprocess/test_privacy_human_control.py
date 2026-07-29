@@ -32,12 +32,14 @@ from yoetz.service.confidential_protocol import (
 )
 
 MODE = sys.argv[1]
+AUTO_SECRET = b"policy-secret-canary-2026"
 REAL_OPEN = os.open
 def OPEN_TTY(path, flags):
     assert path == "/dev/tty"
     return os.dup(0)
 unlock_helper.os.open = OPEN_TTY
-TARGET = PrivacyPendingTarget("policy" if MODE == "policy" else "disclosure", "pending-1")
+POLICY_MODE = MODE in {"policy", "auto_policy"}
+TARGET = PrivacyPendingTarget("policy" if POLICY_MODE else "disclosure", "pending-1")
 TARGET_DIGEST = canonical_digest({"decision_kind": TARGET.decision_kind, "kind": TARGET.kind, "pending_id": TARGET.pending_id})
 CEREMONY = "1" * 64
 INSTANCE = "svc_11111111-1111-4111-8111-111111111111"
@@ -65,7 +67,7 @@ class Session:
             1, CEREMONY, "3" * 64, kind, INSTANCE, 7, 3, 5, TARGET_DIGEST,
             int(time.monotonic() * 1000) + 60000,
         )
-        if MODE == "policy":
+        if POLICY_MODE:
             preview = PrivacyPolicyDecisionPreview(
                 "pending-1", "sha256:" + "4" * 64,
                 ("source-content",), ("workspace",),
@@ -86,7 +88,7 @@ class Session:
             self.stage = 2
         else: raise AssertionError(type(action).__name__)
     async def wait_phase_or_result(self):
-        if MODE != "policy":
+        if not POLICY_MODE:
             return PrivacyDecisionResult("committed", "sha256:" + "8" * 64)
         if self.stage == 1:
             return AuthorizationRequiredPhase(("secret_reauthentication",))
@@ -112,8 +114,14 @@ privacy_control.HumanControlClient = Client
 
 async def main():
     result = await (
-        privacy_control.decide_policy("pending-1")
-        if MODE == "policy"
+        (
+            privacy_control.decide_policy_with_local_reauthentication(
+                "pending-1", bytearray(AUTO_SECRET)
+            )
+            if MODE == "auto_policy"
+            else privacy_control.decide_policy("pending-1")
+        )
+        if POLICY_MODE
         else privacy_control.decide_disclosure("pending-1")
     )
     print(json.dumps({
@@ -260,6 +268,24 @@ def test_policy_approval_reauthenticates_without_echo_or_secret_output() -> None
         "result": "committed",
         "secret_lengths": [len(_SECRET_CANARY)],
     }
+    assert _SECRET_CANARY not in transcript
+    assert _SECRET_CANARY not in stdout
+
+
+@pytest.mark.skipif(not hasattr(termios, "TIOCSCTTY"), reason="requires a POSIX controlling TTY")
+def test_policy_approval_uses_provisioned_reauthentication_without_prompting() -> None:
+    process, master_fd, slave_fd = _spawn_tty_probe("auto_policy")
+    transcript = bytearray()
+    deadline = time.monotonic() + 10
+    _read_until(master_fd, transcript, b"Decision [approve/deny/edit]: ", deadline)
+    os.write(master_fd, b"approve\n")
+    observed, stdout = _finish_tty_probe(process, master_fd, slave_fd, transcript)
+    assert observed == {
+        "actions": ["approve", "secret_reauthentication"],
+        "result": "committed",
+        "secret_lengths": [len(_SECRET_CANARY)],
+    }
+    assert b"Passphrase: " not in transcript
     assert _SECRET_CANARY not in transcript
     assert _SECRET_CANARY not in stdout
 

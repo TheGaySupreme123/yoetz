@@ -31,6 +31,7 @@ __all__ = [
 
 _SCHEMA_VERSION: Final = "1.0.0"
 _INSTRUCTIONS_URI: Final = "yoetz://guidance/agent-instructions.md"
+_GUIDANCE_URI: Final = re.compile(r"yoetz://guidance/[a-z0-9.-]+\.md", re.ASCII)
 _FORBIDDEN_CLAIMS: Final = re.compile(
     r"\b(?:authenticated|enforces?|gates?|observes?|proved|proves?|verified)\b",
     re.IGNORECASE | re.ASCII,
@@ -135,8 +136,37 @@ def _example_id(kind: str, seed: int) -> str:
         "session": "ses",
         "writer": "wri",
         "event": "evt",
+        "action": "act",
+        "claim": "clm",
+        "evidence": "evd",
+        "finding": "fnd",
+        "obligation": "obl",
+        "result": "res",
+        "task": "tsk",
     }
     return f"{prefixes[kind]}_00000000-0000-4000-8000-{seed:012d}"
+
+
+# Illustrative only: do not copy into live drafts. Prefer the best real RFC 3339 ms UTC time.
+_EXAMPLE_OCCURRED_AT: Final = "2026-01-01T00:00:00.000Z"
+
+
+def _example_draft(seed: int, family: str, payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """One minimal valid draft envelope for a family, so agents copy shape rather than guess it.
+
+    ``occurred_at`` is intentionally a fixed illustrative placeholder. Live drafts must use the
+    best real caller-asserted event time; service acceptance time is stamped separately.
+    """
+
+    return {
+        "event_id": _example_id("event", seed),
+        "schema": {"name": family, "version": "1.0.0"},
+        "occurred_at": _EXAMPLE_OCCURRED_AT,
+        "causal_parents": [],
+        "payload": payload,
+        "artifact_refs": [],
+        "evidence_refs": [],
+    }
 
 
 _EXAMPLE_ACTOR: Final[dict[str, JsonValue]] = {
@@ -148,6 +178,8 @@ _EXAMPLE_CLIENT: Final[dict[str, JsonValue]] = {
     "version": "0.1.0",
     "integration": "cooperative_mcp",
 }
+# A syntactically valid non-genesis head. Read the real one from status; never reuse this value.
+_EXAMPLE_HEAD_DIGEST: Final = "sha256:" + "0" * 64
 
 _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = MappingProxyType(
     {
@@ -159,6 +191,54 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                 "mode": "create",
                 "task_title": "Example task",
                 "requested_view": "compact",
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+        ),
+        # check, respond, and receipt had no worked example at all. Every tool an agent must call
+        # to reach a completion claim now shows one, so authoring never depends on reading source.
+        "check-request": (
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 7),
+                "session_id": _example_id("session", 1),
+                "writer_id": _example_id("writer", 1),
+                "expected_frontier": {"sequence": "1", "head_digest": _EXAMPLE_HEAD_DIGEST},
+                "mode": "semantic_if_configured",
+                "max_findings": "3",
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+        ),
+        "respond-request": (
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 8),
+                "session_id": _example_id("session", 1),
+                "writer_id": _example_id("writer", 1),
+                "expected_frontier": {"sequence": "1", "head_digest": _EXAMPLE_HEAD_DIGEST},
+                "finding_id": _example_id("finding", 1),
+                "finding_frontier": {"sequence": "1", "head_digest": _EXAMPLE_HEAD_DIGEST},
+                "disposition": "acknowledged",
+                "reason": "The finding is accurate; the obligation stays open until it is fixed.",
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+        ),
+        "receipt-request": (
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 9),
+                "task_id": _example_id("task", 1),
+                "session_id": _example_id("session", 1),
+                "writer_id": _example_id("writer", 1),
+                "expected_frontier": {"sequence": "1", "head_digest": _EXAMPLE_HEAD_DIGEST},
+                "format": "markdown",
+                "include": "standard",
+                "redaction_profile": "default_local_export",
                 "actor": dict(_EXAMPLE_ACTOR),
                 "client": dict(_EXAMPLE_CLIENT),
             },
@@ -176,6 +256,9 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                 "client": dict(_EXAMPLE_CLIENT),
             },
         ),
+        # One worked draft per ordinary publishable family. The plan example alone left agents
+        # hand-deriving action/result/evidence/claim shapes from a large oneOf, which is where
+        # routine publication attempts actually fail.
         "publish-work-request": (
             {
                 "protocol_version": "0.1",
@@ -185,19 +268,191 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                 "writer_id": _example_id("writer", 1),
                 "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
                 "event_drafts": [
-                    {
-                        "event_id": _example_id("event", 1),
-                        "schema": {"name": "plan_published", "version": "1.0.0"},
-                        "occurred_at": "2026-01-01T00:00:00.000Z",
-                        "causal_parents": [],
-                        "payload": {
+                    _example_draft(
+                        1,
+                        "plan_published",
+                        {
                             "plan_version": 1,
                             "summary": "Initial plan",
                             "obligation_refs": [],
                         },
-                        "artifact_refs": [],
-                        "evidence_refs": [],
-                    }
+                    )
+                ],
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 4),
+                "session_id": _example_id("session", 1),
+                "writer_id": _example_id("writer", 1),
+                "expected_frontier": {"sequence": "1", "head_digest": _EXAMPLE_HEAD_DIGEST},
+                "event_drafts": [
+                    _example_draft(
+                        2,
+                        "obligation_published",
+                        {
+                            "obligation_id": _example_id("obligation", 1),
+                            "description": "State the outcome this work owes.",
+                            "evidence_expectation": "A named test run or reviewed diff.",
+                            "status": "open",
+                        },
+                    ),
+                    _example_draft(
+                        3,
+                        "assignment_recorded",
+                        {
+                            "assignee_actor_id": "harness:mcp-example",
+                            "obligation_ids": [_example_id("obligation", 1)],
+                            "scope_description": "One independently reviewable work package.",
+                        },
+                    ),
+                    _example_draft(
+                        4,
+                        "decision_recorded",
+                        {
+                            "statement": "Keep the existing adapter instead of adding one.",
+                            "rationale": "The current path already covers the requested case.",
+                            "authority": "harness:mcp-example",
+                        },
+                    ),
+                ],
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 5),
+                "session_id": _example_id("session", 1),
+                "writer_id": _example_id("writer", 1),
+                "expected_frontier": {"sequence": "4", "head_digest": _EXAMPLE_HEAD_DIGEST},
+                "event_drafts": [
+                    _example_draft(
+                        5,
+                        "action_recorded",
+                        {
+                            "action_id": _example_id("action", 1),
+                            "action_kind": "command",
+                            # action_kind "command" additionally requires command.
+                            "command": "pytest -q",
+                            "description": "Ran the focused test slice for the touched module.",
+                        },
+                    ),
+                    _example_draft(
+                        6,
+                        "result_recorded",
+                        {
+                            "result_id": _example_id("result", 1),
+                            "action_id": _example_id("action", 1),
+                            "outcome": "success",
+                            "summary": "The focused slice passed.",
+                        },
+                    ),
+                    _example_draft(
+                        7,
+                        "evidence_recorded",
+                        {
+                            "evidence_id": _example_id("evidence", 1),
+                            "evidence_kind": "test_result",
+                            # Each strength requires its own proof field; content_digest
+                            # requires content_digest.
+                            "strength": "content_digest",
+                            "content_digest": _EXAMPLE_HEAD_DIGEST,
+                            "observed_at": "2026-01-01T00:00:00.000Z",
+                            "description": "Focused test slice for the touched module.",
+                        },
+                    ),
+                    _example_draft(
+                        8,
+                        "claim_recorded",
+                        {
+                            "claim_id": _example_id("claim", 1),
+                            "claim_kind": "completion",
+                            "statement": "The requested change is implemented and covered.",
+                            "supporting_refs": [_example_id("evidence", 1)],
+                        },
+                    ),
+                ],
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 6),
+                "session_id": _example_id("session", 1),
+                "writer_id": _example_id("writer", 1),
+                "expected_frontier": {"sequence": "8", "head_digest": _EXAMPLE_HEAD_DIGEST},
+                "event_drafts": [
+                    _example_draft(
+                        9,
+                        "plan_revised",
+                        {
+                            "plan_version": 2,
+                            "supersedes_plan_version": 1,
+                            "reason": "The reviewed scope changed after inspecting the source.",
+                            "summary": "Revised plan",
+                            "obligation_changes": [
+                                {
+                                    "obligation_id": _example_id("obligation", 1),
+                                    "change": "carried",
+                                }
+                            ],
+                        },
+                    )
+                ],
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+            # Obligation resolution: repeat meaning fields byte-for-byte; only status and
+            # resolution_evidence_refs may change. See publication-policy.md#obligation-resolution.
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 10),
+                "session_id": _example_id("session", 1),
+                "writer_id": _example_id("writer", 1),
+                "expected_frontier": {"sequence": "2", "head_digest": _EXAMPLE_HEAD_DIGEST},
+                "event_drafts": [
+                    _example_draft(
+                        10,
+                        "obligation_published",
+                        {
+                            "obligation_id": _example_id("obligation", 2),
+                            "description": "State the outcome this work owes.",
+                            "acceptance_criteria": "A focused test slice passes at the claimed state.",
+                            "evidence_expectation": "A named test run or reviewed diff.",
+                            "status": "open",
+                            "requested_items": [{"item_kind": "command", "value": "pytest -q"}],
+                        },
+                    ),
+                    _example_draft(
+                        11,
+                        "evidence_recorded",
+                        {
+                            "evidence_id": _example_id("evidence", 2),
+                            "evidence_kind": "test_result",
+                            "strength": "content_digest",
+                            "content_digest": _EXAMPLE_HEAD_DIGEST,
+                            "observed_at": "2026-01-01T00:00:00.000Z",
+                            "description": "Focused test slice for the claimed outcome.",
+                        },
+                    ),
+                    _example_draft(
+                        12,
+                        "obligation_published",
+                        {
+                            "obligation_id": _example_id("obligation", 2),
+                            "description": "State the outcome this work owes.",
+                            "acceptance_criteria": "A focused test slice passes at the claimed state.",
+                            "evidence_expectation": "A named test run or reviewed diff.",
+                            "status": "resolved",
+                            "requested_items": [{"item_kind": "command", "value": "pytest -q"}],
+                            "resolution_evidence_refs": [_example_id("evidence", 2)],
+                        },
+                    ),
                 ],
                 "actor": dict(_EXAMPLE_ACTOR),
                 "client": dict(_EXAMPLE_CLIENT),
@@ -672,7 +927,7 @@ TOOL_DESCRIPTORS: Final = (
         "Call for material multi-step, delegated, resumable, or verification-heavy work before "
         "substantive work; skip trivial questions or edits. Records or resumes a cooperative work "
         "session and returns its compact record. It does not show that work outside the published "
-        "record occurred.",
+        "record occurred. Guidance: yoetz://guidance/workflow.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -680,9 +935,16 @@ TOOL_DESCRIPTORS: Final = (
         "publish_work",
         "Publish recorded work",
         "Records a bounded batch of agent-published work events and returns the accepted event "
-        "range and coverage. It has no information about work outside that batch. After publishing "
-        "the material claim and evidence, call check, disposition any findings with respond, then "
-        "call receipt before claiming completion.",
+        "range and coverage. It has no information about work outside that batch. Each draft "
+        "occurred_at is a caller-asserted RFC 3339 UTC time with millisecond precision: use the "
+        "best real time available and do not copy the illustrative example timestamp. Ledger order "
+        "follows ingestion sequence; receipt freshness is frontier-bound. Service accepted_at is "
+        "independent acceptance metadata, not a freshness or ordering key. Set dry_run true to "
+        "validate a batch and preview what would be accepted without appending; the preview is not "
+        "evidential and is not citable as a check, publication, or coverage source. After "
+        "publishing the material claim and evidence, call check, disposition any findings with "
+        "respond, then call receipt before claiming completion. Guidance: "
+        "yoetz://guidance/publication-policy.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -697,7 +959,8 @@ TOOL_DESCRIPTORS: Final = (
         "security or privacy reasoning, interoperability, or whether the code satisfies the ask; "
         "deterministic_only only for explicitly local or structural checks, a semantic-disabled "
         "policy, or a deliberate no-egress choice, and then disclose that limitation. Omitting "
-        "mode resolves through the configured verification policy.",
+        "mode resolves through the configured verification policy. Guidance: "
+        "yoetz://guidance/coverage-and-receipts.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -705,7 +968,8 @@ TOOL_DESCRIPTORS: Final = (
         "respond",
         "Respond to a finding",
         "Records an acknowledgement, rejection, or bounded waiver for one finding at its recorded "
-        "frontier. It does not resolve other findings or establish that underlying work changed.",
+        "frontier. It does not resolve other findings or establish that underlying work changed. "
+        "Guidance: yoetz://guidance/publication-policy.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -713,11 +977,14 @@ TOOL_DESCRIPTORS: Final = (
         "status",
         "Read recorded status",
         "Reads one bounded, paginated view: advice, assignment, candidate_findings, compact, "
-        "evidence, findings, history, obligations, or versions. Advice items carry a "
+        "evidence, findings, history, obligations, operation, or versions. Advice items carry a "
         "recommended_next_action. Call it when uncertain what you already did or committed to, "
-        "rather than reconstructing from memory. view=findings reads recorded findings; "
+        "rather than reconstructing from memory. view=history returns each event's caller-asserted "
+        "occurred_at beside the service-stamped accepted_at; order follows ingestion sequence. "
+        "view=operation takes filter.operation_request_id and returns that operation's stored "
+        "result for recovery without resending the body. view=findings reads recorded findings; "
         "view=candidate_findings returns unrecorded deterministic candidates without verdicts or "
-        "IDs.",
+        "IDs. Guidance: yoetz://guidance/workflow.md.",
         read_only=True,
         idempotent=True,
     ),
@@ -727,7 +994,7 @@ TOOL_DESCRIPTORS: Final = (
         "Records and returns a receipt of the recorded conclusion and coverage limitations at one "
         "frontier. It does not establish correctness beyond that recorded coverage. Prefer format "
         "markdown or text; json is an owner-export format that stricter agent-context policies may "
-        "block.",
+        "block. Guidance: yoetz://guidance/coverage-and-receipts.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -757,16 +1024,16 @@ def _digest_descriptor(descriptor: ToolDescriptor) -> str:
 # These are reviewed golden identities, not values supplied by a host or environment.
 TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[str, str]] = MappingProxyType(
     {
-        "start": "sha256:42509100525d5c866aa21c02cfa33942163967f79968ef1c7c7e00e15fb0e696",
-        "publish_work": "sha256:3ad928d63033c61adc1d49cf63d7dd9ccc6e4d0ade0932b4638b62f20d5d273e",
-        "check": "sha256:e382bf8897267b9ceb4a8833a43673f7cebcf052aef286848b3f209789399693",
-        "respond": "sha256:740e576f822636bdcdf4f246a86192a336e7d0284aae611bbc6421ee62ed469a",
-        "status": "sha256:99b92f8092623c90f9706f0427f4f81e1cc5f4532571e197344b088e1855351e",
-        "receipt": "sha256:3d50456b00c2fa4e46fc167f97d3db2033d6f02d46a7a6e934b4f28797d69e19",
+        "start": "sha256:d87c67630fbf0d75c6bde24383e5a0d56b8b4e66cda214998b60e5106b401d1a",
+        "publish_work": "sha256:384d539552ebc03b03892d4bfe05462b20fca734701198e46c3b143826535a56",
+        "check": "sha256:1a36e5f8ef40acb1bb1ac024ceb69e9ffe29f67221646f98f5cfd48a7ddfb36b",
+        "respond": "sha256:4a05e83bfce79c5ca6c767c535070fe6011278b6fdbe38958725398928ec751e",
+        "status": "sha256:6abdca221944fc026c915a01ea9cd9110074279532acac5fe285e0e07f3f6b77",
+        "receipt": "sha256:ff32853f91572e04b00f2a61b37f9a1f4f838360aea332967776b5c364ff4291",
     }
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final = (
-    "sha256:99dbb6ee49a24168f351c1a3b405dd001c7ee8c8add115b7ac79f4adfa0a7afe"
+    "sha256:6a3011090dfc416f37c9b5e04ee83b28bf9e861dae6dc451e40a7a945606c9ed"
 )
 
 
@@ -779,7 +1046,11 @@ def _lint_descriptor_set() -> None:
     for descriptor in TOOL_DESCRIPTORS:
         if _FORBIDDEN_CLAIMS.search(descriptor.description) is not None:
             raise RuntimeError("descriptor_honesty_lint_failed")
-        if _BOUNDARY_TERMS.search(descriptor.description) is not None:
+        # Packaged guidance URIs are the one reviewed path exception; strip them before the
+        # boundary scan so tool text can name the covering resource without looking like a
+        # filesystem or host path.
+        without_guidance = _GUIDANCE_URI.sub("yoetz-guidance-resource", descriptor.description)
+        if _BOUNDARY_TERMS.search(without_guidance) is not None:
             raise RuntimeError("descriptor_boundary_lint_failed")
         if _digest_descriptor(descriptor) != TOOL_DESCRIPTOR_DIGESTS[descriptor.name]:
             raise RuntimeError("descriptor_digest_mismatch")

@@ -24,6 +24,7 @@ from yoetz.domain.values import (
     Frontier,
     SubjectStateRelation,
     finding_id,
+    validate_commitment,
     validate_sha256_digest,
 )
 from yoetz.kernel.deterministic_checks import (
@@ -339,6 +340,7 @@ def _validated_ref_tuple(
     maximum: int,
     public_only: bool,
     error: ValueError,
+    canonicalize: bool = False,
 ) -> tuple[str, ...]:
     if type(value) is not tuple:
         raise error
@@ -346,7 +348,14 @@ def _validated_ref_tuple(
     if not minimum <= len(raw) <= maximum:
         raise error
     refs = tuple(_snapshot_subject_ref(item, public_only=public_only, error=error) for item in raw)
-    if refs != tuple(sorted(set(refs), key=_ascii)):
+    canonical = tuple(sorted(set(refs), key=_ascii))
+    if canonicalize:
+        # Reference order has no semantic meaning for provider challenges: accept any order,
+        # reject only duplicates / invalid IDs, then store ASCII-canonical form.
+        if len(refs) != len(canonical):
+            raise error
+        return canonical
+    if refs != canonical:
         raise error
     return refs
 
@@ -1121,6 +1130,7 @@ class ReviewerChallenge:
                 maximum=_MAX_SUBJECT_REFS,
                 public_only=False,
                 error=_invalid_judgment(),
+                canonicalize=True,
             ),
         )
         if type(self.requested_next_step) is not str or self.requested_next_step not in _NEXT_STEPS:
@@ -1174,6 +1184,7 @@ class ProviderAttemptProvenance:
     token_usage: TokenUsage | None = None
     cost_fields: CostFields | None = None
     failure_class: SemanticFailureClass | None = None
+    request_commitment: str | None = None
 
     def __post_init__(self) -> None:
         if not _valid_pattern(self.provider, _IDENTITY_PATTERN, 128):
@@ -1215,6 +1226,8 @@ class ProviderAttemptProvenance:
             raise ProtocolValueError("invalid_semantic_provenance")
         if self.failure_class is not None and type(self.failure_class) is not SemanticFailureClass:
             raise ProtocolValueError("invalid_semantic_failure_class")
+        if self.request_commitment is not None:
+            validate_commitment(self.request_commitment)
 
 
 def _validate_result_provenance(

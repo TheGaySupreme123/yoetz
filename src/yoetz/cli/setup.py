@@ -783,6 +783,7 @@ async def _interactive_provider_setup(
         ProviderEndpointChoice,
         apply_provider_endpoint_choice,
         prompt_provider_endpoint_binding,
+        prompt_provider_model,
     )
     from yoetz.cli.unlock import (
         HumanCeremonyCliError,
@@ -855,30 +856,17 @@ async def _interactive_provider_setup(
     except HumanCeremonyCliError as error:
         provider_report["credential_reason"] = error.reason
 
-    if provider_choice == "fireworks":
-        selected_model = model
-        if selected_model is None:
-            selected_model = typer.prompt("Fireworks model id").strip()
-        try:
-            written, _provider = apply_provider_endpoint_choice("fireworks", model=selected_model)
-        except (OSError, ValueError) as error:
-            provider_report["credential_reason"] = getattr(
-                error, "reason_code", "provider_binding_invalid"
-            )
-            wipe_auto_passphrase()
-            return service, provider_report
-        typer.echo(f"Fireworks model: {selected_model}")
-    elif provider_choice is not None:
+    if provider_choice is not None:
         selected_model = model
         try:
             preset = provider_preset(provider_choice)
             choice = cast(ProviderEndpointChoice, preset.choice)
             if selected_model is None:
-                selected_model = typer.prompt(
-                    f"{preset.provider_id} model id", default=preset.default_model
-                ).strip()
+                selected_model = prompt_provider_model(preset.choice)
             if not selected_model:
-                raise ConfigError("config_value_invalid")
+                provider_report["credential_reason"] = "model_selection_invalid"
+                wipe_auto_passphrase()
+                return service, provider_report
             written, _provider = apply_provider_endpoint_choice(choice, model=selected_model)
         except (ConfigError, OSError, ValueError) as error:
             provider_report["credential_reason"] = getattr(
@@ -899,6 +887,16 @@ async def _interactive_provider_setup(
         provider_report.setdefault("credential_reason", "service_not_ready")
         wipe_auto_passphrase()
         return service, provider_report
+
+    # A Keychain-provisioned passphrase vault is already ready without the
+    # human knowing its generated passphrase. Load that same scoped secret
+    # only for the one provider-reauthentication ceremony, so setup asks for
+    # the provider key but never unexpectedly asks the user for a passphrase.
+    if auto_passphrase is None and service.get("vault_mode") == "passphrase":
+        current_config = load_config({}, os.environ, None)
+        auto_passphrase = AutoUnlockPassphraseStore(
+            bundle_root(_data_dir=current_config.storage.data_dir)
+        ).load()
 
     storage = provider_credential_profile_binding(
         provider.provider_id,
@@ -967,14 +965,17 @@ def _emit_provider_setup_layer_report() -> None:
 async def run_provider_setup(
     *,
     fireworks: bool = False,
+    grok: bool = False,
     provider: str | None = None,
     model: str | None = None,
 ) -> int:
     """Run only the simple local provider setup path used by ``yoetz --set``."""
 
-    if fireworks and provider is not None:
-        return _usage_failure("--fireworks and --provider are mutually exclusive")
-    provider_choice = "fireworks" if fireworks else provider
+    if (fireworks or grok) and provider is not None:
+        return _usage_failure("provider shortcuts and --provider are mutually exclusive")
+    if fireworks and grok:
+        return _usage_failure("--fireworks and --grok are mutually exclusive")
+    provider_choice = "fireworks" if fireworks else ("grok" if grok else provider)
     if provider_choice is not None:
         from yoetz.config.models import ConfigError
         from yoetz.config.write import provider_preset

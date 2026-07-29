@@ -132,6 +132,16 @@ The ordinary control channel carries canonical, bounded workflow/support envelop
 service status. Its method registry contains no unlock method and its request models cannot carry
 secret bytes.
 
+Control failures are bounded reasons, not messages, and the reason must not misdescribe durable
+state. A handler returning is the commit boundary: everything after it — projection binding,
+client projection, and success-body validation — only shapes the response. An unexpected failure
+there is reported as the retryable `response_projection_failed`, which states that the operation
+stands and that the caller resolves it by replaying the same `request_id`. Reporting it as the
+generic non-retryable `internal_error` would assert something false about the ledger and steer a
+caller away from the idempotent replay that recovers it. Deliberate bounded failures raised in the
+same window — `privacy_projection_blocked`, `privacy_projection_unavailable`, and public
+application errors — already describe real conditions and pass through unchanged.
+
 The service exposes three fixed owner-only same-UID endpoints: ordinary control; YZS1 one-secret
 ingress; and YZH1 multi-phase human control. YZH1 is the sole challenge/binding creator, returns
 bounded structural previews, supports zero-secret keyring retry, coordinates provider credential
@@ -156,8 +166,12 @@ after the helper's local two-entry match; unlock is available only for an alread
 passphrase vault. Their handles are not interchangeable. The pure confidential protocol maps the
 wire purpose to one one-shot `SecretHandle(SecretPurpose.vault_unlock)` consumed by the trusted
 unlock coordinator; ordinary clients cannot construct it. The helper must prove a same-user,
-foreground controlling TTY; read directly from `/dev/tty` in no-echo mode; reject stdin,
-redirection, pipes, environment/config/argument input, and noninteractive execution; establish a
+foreground controlling TTY; read directly from `/dev/tty` in no-echo mode; require stdin and
+stderr to be TTYs for the same user-visible terminal, and require the process to be in the
+foreground process group of `/dev/tty`. Terminal-device ownership and device-number equality with
+`/dev/tty` are not user-identity evidence: macOS may expose a root-owned, device-distinct
+controlling-terminal alias. The helper still rejects stdin redirection, pipes,
+environment/config/argument input, and noninteractive execution; establish a
 separately typed peer-authenticated connection; and erase mutable buffers best-effort after the
 service consumes them. No MCP registry, `ServiceClient`, or public application method can reach
 this channel. **Amendment (ADR-015/016):** the founder-authorized `yoetz consent` /

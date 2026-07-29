@@ -27,6 +27,7 @@ __all__ = [
     "StructuredLogger",
     "configure_logging",
     "get_logger",
+    "record_bounded_event_without_raising",
     "record_fatal_exception_without_raising",
     "record_unexpected_exception_without_raising",
 ]
@@ -363,16 +364,75 @@ def record_unexpected_exception_without_raising(
     ``request_id`` is the caller's own already-public request identity. Passing it lets the
     service-side and bridge-side records for one failed call be joined exactly, instead of
     guessing from method and timestamp when two calls overlap.
+
+    In addition to stderr, a durable owner-only diagnostic line is written under ``log_dir()`` so
+    a public ``correlation_id`` remains resolvable when harnesses swallow process stderr.
     """
 
     correlation_id = _new_correlation()
+    reason = _exception_reason(exc)
     try:
         get_logger(component).error(
             operation,
             correlation_id=correlation_id,
             request_id=request_id,
             outcome="internal_error",
-            reason=_exception_reason(exc),
+            reason=reason,
+        )
+    except BaseException:
+        pass
+    try:
+        from yoetz.observability.diagnostics import append_diagnostic_record
+
+        append_diagnostic_record(
+            correlation_id=correlation_id,
+            component=component,
+            operation=operation,
+            reason=reason,
+            request_id=request_id,
+        )
+    except BaseException:
+        pass
+    return correlation_id
+
+
+def record_bounded_event_without_raising(
+    *,
+    component: str,
+    operation: str,
+    reason: str,
+    request_id: str | None = None,
+) -> str:
+    """Emit bounded structural identity for a reviewed non-exception event.
+
+    Semantic review declining to dispatch is an expected operating state, not an unexpected
+    exception, so it has no ``_exception_reason`` source; the caller passes the already-bounded
+    reason token it is simultaneously reporting on the operation's own result channel. Both
+    tokens are reviewed literals at the call site, and the sinks re-validate them against the
+    same field allowlists as an exception record. The durable owner-only line is what makes the
+    outcome resolvable when harnesses swallow process stderr.
+    """
+
+    correlation_id = _new_correlation()
+    try:
+        get_logger(component).warning(
+            operation,
+            correlation_id=correlation_id,
+            request_id=request_id,
+            outcome="not_dispatched",
+            reason=reason,
+        )
+    except BaseException:
+        pass
+    try:
+        from yoetz.observability.diagnostics import append_diagnostic_record
+
+        append_diagnostic_record(
+            correlation_id=correlation_id,
+            component=component,
+            operation=operation,
+            reason=reason,
+            request_id=request_id,
         )
     except BaseException:
         pass

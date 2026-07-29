@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Buffer, Mapping
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 import yoetz.service.daemon as daemon_module
+from yoetz.application.publish_work import PublishWorkInternalResult
 from yoetz.application.service import (
     ClientProjectionContext,
     ControlProjectionBinding,
@@ -17,7 +19,9 @@ from yoetz.application.service import (
     ProjectionRenderMode,
 )
 from yoetz.config.models import LoggingConfig, YoetzConfig
-from yoetz.domain.values import JsonObject
+from yoetz.domain.privacy import LocalDisclosureSink
+from yoetz.domain.values import Frontier, JsonObject
+from yoetz.observability.diagnostics import lookup_diagnostic_records
 from yoetz.observability.logging import LogMode
 from yoetz.ports.control import (
     ControlCallRequest,
@@ -26,9 +30,35 @@ from yoetz.ports.control import (
     ControlMethod,
     ServiceState,
 )
+from yoetz.protocol.canonical import canonical_digest
+from yoetz.protocol.coverage import PublicationChannel, coverage_for_channel
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id
-from yoetz.protocol.models import PublishWorkRequest, PublishWorkResult, StartRequest, StartResult
+from yoetz.protocol.models import (
+    CheckRequest,
+    PublishWorkAcceptedEventModel,
+    PublishWorkAcceptedProjectionUnavailableModel,
+    PublishWorkRequest,
+    PublishWorkResult,
+    PublishWorkSuccessModel,
+    PublishWorkVersionSliceModel,
+    StartRequest,
+    StartResult,
+    StatusRequest,
+)
+from yoetz.service.confidential_protocol import (
+    ClientOpenEnvelope,
+    EmptyVaultTarget,
+    HumanCeremonyBinding,
+    HumanCeremonyKind,
+    KeyringRetryPhase,
+    ServerCloseEnvelope,
+    ServerErrorEnvelope,
+    ServerOpenedEnvelope,
+    VaultUnlockPreview,
+    decode_human_frame,
+    encode_human_frame,
+)
 from yoetz.service.daemon import ServiceComposition, ServiceDaemon
 from yoetz.service.lifecycle import LifecycleError, ServiceLifecycle
 from yoetz.service.vault import VaultMode
@@ -114,6 +144,17 @@ class _Application:
         self.projections: list[ClientProjectionContext] = []
         self.close_count = 0
         self.publish_work_error: PublicOperationError | None = None
+        # Stands in for an accepted, durable batch so the post-commit response path can be
+        # exercised without a real ledger.
+        self.publish_work_result: PublishWorkResult | None = None
+        self.publish_work_internal: PublishWorkInternalResult | None = None
+        self.projection_error: BaseException | None = None
+        self.projection_failures = 0
+        self.append_count = 0
+        self.publish_response_lookups = 0
+        self.publish_response_stores = 0
+        self.cached_publish_response: PublishWorkResult | None = None
+        self.publish_response_store_error: PublicOperationError | None = None
 
     async def start(self, request: object) -> StartResult:
         assert isinstance(request, StartRequest)
@@ -134,13 +175,56 @@ class _Application:
             }
         )
 
-    async def publish_work(self, request: object) -> PublishWorkResult:
+    async def check(self, request: object) -> JsonObject:
+        assert isinstance(request, CheckRequest)
+        await asyncio.sleep(0)
+        # Unprojected stand-in only. Projection is forced to fail in the dedicated correlation
+        # tests before any public CheckResult is required.
+        return JsonObject({"ok": True, "request_id": request.request_id})
+
+    async def status(self, request: object) -> JsonObject:
+        assert isinstance(request, StatusRequest)
+        await asyncio.sleep(0)
+        return JsonObject({"ok": True, "request_id": request.request_id, "view": request.view})
+
+    async def publish_work(self, request: object) -> PublishWorkResult | PublishWorkInternalResult:
         assert isinstance(request, PublishWorkRequest)
         self.publish_work_calls += 1
         await asyncio.sleep(0)
         if self.publish_work_error is not None:
             raise self.publish_work_error
+        if self.publish_work_result is not None:
+            return self.publish_work_result
+        if self.publish_work_internal is not None:
+            outcome = "accepted" if self.append_count == 0 else "replayed"
+            if self.append_count == 0:
+                self.append_count += 1
+            return replace(self.publish_work_internal, outcome=outcome)
         raise AssertionError("publish_work_error_required")
+
+    async def load_publish_response(
+        self, result: PublishWorkInternalResult, sink: LocalDisclosureSink
+    ) -> PublishWorkResult | None:
+        del result
+        assert sink is LocalDisclosureSink.AGENT_CONTEXT
+        self.publish_response_lookups += 1
+        return self.cached_publish_response
+
+    async def store_publish_response(
+        self,
+        result: PublishWorkInternalResult,
+        sink: LocalDisclosureSink,
+        projected: ProjectedControlBody,
+    ) -> PublishWorkResult:
+        del result
+        assert sink is LocalDisclosureSink.AGENT_CONTEXT
+        assert isinstance(projected, PublishWorkResult)
+        self.publish_response_stores += 1
+        if self.publish_response_store_error is not None:
+            raise self.publish_response_store_error
+        if self.cached_publish_response is None:
+            self.cached_publish_response = projected
+        return self.cached_publish_response
 
     async def review(self, request: object) -> JsonObject:
         assert isinstance(request, JsonObject)
@@ -163,8 +247,21 @@ class _Application:
         result: object,
     ) -> ProjectedControlBody:
         method = binding.method
-        assert method in {ControlMethod.START, ControlMethod.REVIEW, ControlMethod.PUBLISH_WORK}
+        assert method in {
+            ControlMethod.START,
+            ControlMethod.REVIEW,
+            ControlMethod.PUBLISH_WORK,
+            ControlMethod.CHECK,
+            ControlMethod.STATUS,
+        }
         self.projections.append(context)
+        if self.projection_failures:
+            self.projection_failures -= 1
+            raise RuntimeError("one-shot-projection-failure")
+        if self.projection_error is not None:
+            raise self.projection_error
+        if type(result) is PublishWorkInternalResult:
+            return _projected_publish_work_result(result)
         assert isinstance(result, StartResult | PublishWorkResult | JsonObject)
         return result
 
@@ -332,6 +429,380 @@ async def test_public_operation_error_surfaces_as_ok_false_not_internal_error() 
     assert application.publish_work_calls == 1
     assert application.projections == []
     assert not isinstance(result.body, ControlError)
+    await daemon.close()
+
+
+def _accepted_publish_work_result(request_id: str) -> PublishWorkResult:
+    """An ok:false body is enough here: only the post-commit response path is under test."""
+
+    return PublishWorkResult.model_validate(
+        {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "request_id": request_id,
+            "ok": False,
+            "error": {
+                "code": "INVALID_REQUEST",
+                "message": "The request is invalid.",
+                "retryable": False,
+                "correlation_id": f"err_{_UUID}",
+            },
+        }
+    )
+
+
+def _publish_work_internal(request: PublishWorkRequest) -> PublishWorkInternalResult:
+    frontier = Frontier(1, "sha256:" + "4" * 64)
+    return PublishWorkInternalResult(
+        protocol_version="0.1",
+        schema_version="1.0.0",
+        request_id=request.request_id,
+        request_digest=canonical_digest({"request_id": request.request_id}),
+        ok=True,
+        outcome="accepted",
+        task_id="tsk_00000000-0000-4000-8000-000000000020",
+        session_id=request.session_id,
+        writer_id=request.writer_id,
+        subject_frontier=Frontier.genesis(),
+        result_frontier=frontier,
+        accepted_events=(
+            PublishWorkAcceptedEventModel(
+                event_id=cast(str, cast(Mapping[str, object], request.event_drafts[0])["event_id"]),
+                schema_name="plan_published",
+                schema_version="1.0.0",
+                writer_sequence="1",
+                ingestion_sequence="1",
+                accepted_at="2026-01-01T00:00:00.000Z",
+                predecessor_digest="genesis",
+                entry_digest=frontier.head_digest,
+                projection_status="projected",
+            ),
+        ),
+        warning_codes=(),
+        coverage=coverage_for_channel(PublicationChannel.LOCAL_CLI),
+        gaps=(),
+        versions=PublishWorkVersionSliceModel(
+            protocol_version="0.1",
+            engine_version="0.1.0",
+            projection_version="0.1.0",
+            policy_packs=("research-evidence/0.1.0", "work-integrity/0.1.0"),
+        ),
+    )
+
+
+def _projected_publish_work_result(internal: PublishWorkInternalResult) -> PublishWorkResult:
+    wire = internal.as_json()
+    accepted = cast(tuple[dict[str, object], ...], wire["accepted_events"])
+    for event in accepted:
+        event.pop("summary", None)
+    return PublishWorkResult.model_validate(
+        {
+            **wire,
+            "privacy_projection": {
+                "sink": "agent_context",
+                "local_disclosure_receipt_id": "egr_00000000-0000-4000-8000-000000000021",
+                "policy_id": "pvy_00000000-0000-4000-8000-000000000022",
+                "policy_version": "1",
+                "policy_digest": "sha256:" + "5" * 64,
+                "included_categories": (),
+                "blocked_categories": (),
+                "omitted_pointers": (),
+                "projection_commitment": "hmac-sha256:" + "6" * 64,
+            },
+        }
+    )
+
+
+@pytest.mark.anyio
+async def test_post_commit_projection_failure_returns_total_acceptance_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An accepted write must never be surfaced to the caller as a failure.
+
+    The handler returns (so a batch is durable) and only then does response shaping fail. The
+    caller receives a reduced ``ok: true`` envelope with frontiers and accepted event facts, not
+    ``response_projection_failed`` / ``INTERNAL_ERROR``. The envelope correlation id is the same
+    id filed in the durable diagnostic sink.
+    """
+
+    import yoetz.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    body = _publish_work_body()
+    application.publish_work_internal = _publish_work_internal(body)
+    application.projection_error = RuntimeError("post-commit-shape-failure")
+
+    result = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.PUBLISH_WORK, body),
+    )
+
+    assert result.outcome == "ok"
+    assert isinstance(result.body, PublishWorkResult)
+    root = result.body.root
+    assert type(root) is PublishWorkAcceptedProjectionUnavailableModel
+    assert root.ok is True
+    assert root.response_completeness == "accepted_projection_unavailable"
+    assert root.reason_code == "response_projection_failed"
+    assert root.request_id == body.request_id
+    assert root.result_frontier.sequence == "1"
+    assert root.result_frontier.head_digest == "sha256:" + "4" * 64
+    assert len(root.accepted_events) == 1
+    assert root.accepted_events[0].event_id == "evt_00000000-0000-4000-8000-000000000013"
+    assert root.correlation_id.startswith("err_")
+    found = lookup_diagnostic_records(root.correlation_id, root=tmp_path)
+    assert len(found) == 1
+    assert found[0]["operation"] == "publish_work_response_projection_failed"
+    assert found[0]["component"] == "service.daemon"
+    for forbidden in ("traceback", "exception", "payload", "path", "message"):
+        assert forbidden not in found[0]
+    # The operation itself ran exactly once and is not retried behind the caller's back.
+    assert application.publish_work_calls == 1
+    assert len(application.projections) == 1
+    await daemon.close()
+
+
+def _check_body() -> CheckRequest:
+    return CheckRequest.model_validate(
+        {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "request_id": "req_00000000-0000-4000-8000-000000000030",
+            "session_id": "ses_00000000-0000-4000-8000-000000000031",
+            "writer_id": "wri_00000000-0000-4000-8000-000000000032",
+            "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
+            "mode": "deterministic_only",
+            "actor": {"actor_id": "harness:test", "actor_type": "harness"},
+            "client": {
+                "kind": "test_client",
+                "version": "0.1.0",
+                "integration": "cooperative_mcp",
+            },
+        }
+    )
+
+
+def _status_body() -> StatusRequest:
+    return StatusRequest.model_validate(
+        {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "request_id": "req_00000000-0000-4000-8000-000000000040",
+            "session_id": "ses_00000000-0000-4000-8000-000000000041",
+            "writer_id": "wri_00000000-0000-4000-8000-000000000042",
+            "view": "compact",
+            "limit": "10",
+            "actor": {"actor_id": "harness:test", "actor_type": "harness"},
+            "client": {
+                "kind": "test_client",
+                "version": "0.1.0",
+                "integration": "cooperative_mcp",
+            },
+        }
+    )
+
+
+@pytest.mark.anyio
+async def test_check_response_projection_failure_correlation_resolves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The correlation id on a check ControlError resolves to exactly one diagnostic record."""
+
+    import yoetz.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    application.projection_error = RuntimeError("check-shape-failure-must-not-leak")
+
+    result = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.CHECK, _check_body()),
+    )
+
+    assert result.outcome == "error"
+    assert isinstance(result.body, ControlError)
+    assert result.body.reason == "response_projection_failed"
+    assert result.body.retryable is True
+    assert result.body.correlation_id is not None
+    found = lookup_diagnostic_records(result.body.correlation_id, root=tmp_path)
+    assert len(found) == 1
+    assert found[0]["operation"] == "check_response_projection_failed"
+    assert found[0]["component"] == "service.daemon"
+    assert found[0]["request_id"] == "req_00000000-0000-4000-8000-000000000030"
+    for forbidden in ("traceback", "exception", "payload", "path", "message"):
+        assert forbidden not in found[0]
+    assert "must-not-leak" not in str(found[0])
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_status_read_projection_failure_correlation_resolves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The correlation id on a status ControlError resolves to exactly one diagnostic record."""
+
+    import yoetz.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    application.projection_error = RuntimeError("status-shape-failure-must-not-leak")
+
+    result = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.STATUS, _status_body()),
+    )
+
+    assert result.outcome == "error"
+    assert isinstance(result.body, ControlError)
+    assert result.body.reason == "read_projection_failed"
+    assert result.body.retryable is True
+    assert result.body.correlation_id is not None
+    found = lookup_diagnostic_records(result.body.correlation_id, root=tmp_path)
+    assert len(found) == 1
+    assert found[0]["operation"] == "status_read_projection_failed"
+    assert found[0]["component"] == "service.daemon"
+    assert found[0]["request_id"] == "req_00000000-0000-4000-8000-000000000040"
+    for forbidden in ("traceback", "exception", "payload", "path", "message"):
+        assert forbidden not in found[0]
+    assert "must-not-leak" not in str(found[0])
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_status_handler_attribute_error_is_retryable_read_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unexpected failure during application.status is retryable, never terminal internal_error.
+
+    Run-4 item_40: AttributeError inside the operation branch escaped as status_internal_error
+    with retryable:false. A pure read that changed nothing must present as read_projection_failed.
+    """
+
+    import yoetz.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+
+    async def boom(request: object) -> object:
+        del request
+        raise AttributeError("'NoneType' object has no attribute 'sequence'")
+
+    application.status = boom  # type: ignore[method-assign]
+
+    result = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.STATUS, _status_body()),
+    )
+
+    assert result.outcome == "error"
+    assert isinstance(result.body, ControlError)
+    assert result.body.reason == "read_projection_failed"
+    assert result.body.retryable is True
+    assert result.body.correlation_id is not None
+    found = lookup_diagnostic_records(result.body.correlation_id, root=tmp_path)
+    assert len(found) == 1
+    assert found[0]["operation"] == "status_read_projection_failed"
+    assert found[0]["component"] == "service.daemon"
+    assert found[0]["request_id"] == "req_00000000-0000-4000-8000-000000000040"
+    for forbidden in ("traceback", "exception", "payload", "path", "message", "sequence"):
+        assert forbidden not in found[0]
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_publish_one_shot_projection_failure_is_accepted_without_replay() -> None:
+    """Projection failure after append still returns acceptance; replay is optional, not required."""
+
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    body = _publish_work_body()
+    application.publish_work_internal = _publish_work_internal(body)
+    application.projection_failures = 1
+
+    first_request = _request(daemon, ControlMethod.PUBLISH_WORK, body)
+    first = await daemon.dispatch(ControlClientKind.MCP_BRIDGE, first_request)
+    assert first.outcome == "ok"
+    assert isinstance(first.body, PublishWorkResult)
+    first_root = first.body.root
+    assert type(first_root) is PublishWorkAcceptedProjectionUnavailableModel
+    assert first_root.result_frontier.sequence == "1"
+    assert first_root.result_frontier.head_digest == "sha256:" + "4" * 64
+    assert len(first_root.accepted_events) == 1
+    assert application.append_count == 1
+    # Reduced envelope is not stored as a full projected success body.
+    assert application.publish_response_stores == 0
+
+    # A later identical call may still project fully and cache the complete success body.
+    second_request = _request(daemon, ControlMethod.PUBLISH_WORK, body)
+    second = await daemon.dispatch(ControlClientKind.MCP_BRIDGE, second_request)
+    assert second.outcome == "ok"
+    assert isinstance(second.body, PublishWorkResult)
+    assert type(second.body.root) is PublishWorkSuccessModel
+    assert application.append_count == 1
+    assert len(application.projections) == 2
+    assert application.publish_response_stores == 1
+
+    third_request = _request(daemon, ControlMethod.PUBLISH_WORK, body)
+    third = await daemon.dispatch(ControlClientKind.MCP_BRIDGE, third_request)
+    assert third.outcome == "ok"
+    assert third.body == second.body
+    assert third.rpc_id != second.rpc_id
+    assert application.append_count == 1
+    assert len(application.projections) == 2
+    assert application.publish_response_lookups == 3
+    assert application.publish_response_stores == 1
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_publish_response_store_failure_does_not_degrade_valid_success() -> None:
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    body = _publish_work_body()
+    application.publish_work_internal = _publish_work_internal(body)
+    application.publish_response_store_error = PublicOperationError(
+        PublicErrorCode.STORAGE_CORRUPT,
+        "The stored publish response is invalid.",
+        False,
+    )
+
+    result = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.PUBLISH_WORK, body),
+    )
+
+    assert result.outcome == "ok"
+    assert isinstance(result.body, PublishWorkResult)
+    assert result.body.root.ok is True
+    assert application.append_count == 1
+    assert application.publish_response_stores == 1
+    assert application.cached_publish_response is None
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_deliberate_post_commit_control_error_is_not_reclassified() -> None:
+    """Bounded projection failures already say something true and must survive unchanged."""
+
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    body = _publish_work_body()
+    application.publish_work_result = _accepted_publish_work_result(body.request_id)
+    application.projection_error = ControlError("privacy_projection_blocked")
+
+    result = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.PUBLISH_WORK, body),
+    )
+
+    assert result.outcome == "error"
+    assert isinstance(result.body, ControlError)
+    assert result.body.reason == "privacy_projection_blocked"
     await daemon.close()
 
 
@@ -638,3 +1109,83 @@ async def test_service_entry_point_installs_the_structural_log_sink(
         await daemon_module.run_service()
 
     assert installed == [LogMode.SERVICE]
+
+
+@pytest.mark.anyio
+async def test_human_connection_cancels_an_open_ceremony_when_terminal_disconnects() -> None:
+    """An interrupted foreground setup must not block every later ceremony."""
+
+    ceremony_id = "a" * 64
+
+    class _Stream:
+        def __init__(self) -> None:
+            self._incoming = bytearray(
+                encode_human_frame(
+                    ClientOpenEnvelope(
+                        "b" * 64,
+                        HumanCeremonyKind.VAULT_UNLOCK,
+                        EmptyVaultTarget(expected_mode="passphrase"),
+                    )
+                )
+            )
+            self.sent: list[bytes] = []
+            self.closed = False
+
+        @property
+        def peer_identity(self) -> object:
+            return object()
+
+        async def receive(self, max_bytes: int) -> bytes:
+            if not self._incoming:
+                return b""
+            size = min(max_bytes, len(self._incoming))
+            chunk = bytes(self._incoming[:size])
+            del self._incoming[:size]
+            return chunk
+
+        async def send_all(self, data: Buffer) -> None:
+            self.sent.append(bytes(data))
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    class _HumanService:
+        def __init__(self) -> None:
+            self.cancelled: list[str] = []
+
+        async def open_ceremony(self, request: ClientOpenEnvelope) -> ServerOpenedEnvelope:
+            return ServerOpenedEnvelope(
+                ceremony_id,
+                1,
+                HumanCeremonyBinding(
+                    binding_version=1,
+                    ceremony_id=ceremony_id,
+                    connection_nonce=request.connection_nonce,
+                    ceremony_kind=HumanCeremonyKind.VAULT_UNLOCK,
+                    service_instance_id=_INSTANCE_ID,
+                    service_generation=7,
+                    vault_generation=3,
+                    policy_generation=None,
+                    target_digest="sha256:" + "2" * 64,
+                    expires_at_monotonic_ms=1_000_000,
+                ),
+                VaultUnlockPreview(),
+                KeyringRetryPhase(),
+            )
+
+        async def cancel(self, received_ceremony_id: str) -> ServerCloseEnvelope:
+            self.cancelled.append(received_ceremony_id)
+            return ServerCloseEnvelope(received_ceremony_id, 3, "cancelled")
+
+    stream = _Stream()
+    service = _HumanService()
+    handler = daemon_module._HumanConnectionServer(service)  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+
+    await handler(stream)
+
+    assert service.cancelled == [ceremony_id]
+    assert stream.closed
+    assert [type(decode_human_frame(item)) for item in stream.sent] == [
+        ServerOpenedEnvelope,
+        ServerErrorEnvelope,
+    ]

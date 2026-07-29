@@ -7,18 +7,59 @@ awkward ceremony. The two never mix.
 
 ```text
 yoetz provider endpoint --provider openai            # or: fireworks, anthropic, gemini,
-                        --model <model-id>           #     openrouter, vercel-ai-gateway
+                        --model <model-id>           #     openrouter, grok, vercel-ai-gateway
+                                                    #     grok aliases: xai, x-ai
 ```
 
-Shorthands: `--official` (Official OpenAI Responses) and `--fireworks`.
+Shorthands: `--official`, `--fireworks`, and `--grok` (Grok / xAI).
 
 Reviewed presets use each provider's documented compatible wire style where applicable. **Every
 reviewed preset resolves to a real runtime factory** — a preset you can select is a preset Yoetz can
 dispatch.
 
-That is not the same as verified. None of the non-official presets has recorded live evidence yet,
-so Yoetz does not claim any of them as a confirmed working endpoint. That claim stays gated by the
-exact capability evidence described in [ADR-006](../adr/ADR-006-semantic-provider-profile.md).
+That is not the same as verified. Yoetz does not advertise any non-official preset as a confirmed
+working endpoint. A prior one-off Fireworks dogfood dispatch is useful provenance for that run but
+does not close the release capability gate. That claim stays gated by the exact evidence described
+in [ADR-006](../adr/ADR-006-semantic-provider-profile.md).
+
+## Interactive model choices
+
+On a local terminal, omit `--model` to choose from a short list or enter a custom ID:
+
+```text
+yoetz provider endpoint --provider anthropic
+yoetz --set --provider anthropic
+```
+
+The endpoint menu, explicit interactive provider selectors, and secure `--set` paths share the same
+picker for all seven reviewed presets. Choice 1 is the preset's existing default, preserving the
+previous Enter-to-accept behavior. The remaining entries are a repository-reviewed sample of
+recent provider-recommended/current model families, never more than ten total, followed by an
+explicit **Custom model ID** option. No popularity ranking is claimed.
+
+The catalog was reviewed on 2026-07-28 against provider-owned sources: OpenAI
+[model guidance](https://developers.openai.com/api/docs/guides/latest-model), Fireworks
+[Responses API documentation](https://docs.fireworks.ai/guides/response-api), Anthropic
+[models overview](https://platform.claude.com/docs/en/about-claude/models/overview), Google
+[latest Gemini models](https://ai.google.dev/gemini-api/docs/latest-model), OpenRouter's
+[model catalog contract](https://openrouter.ai/docs/guides/overview/models), xAI's
+[model list](https://docs.x.ai/developers/models), and Vercel's
+[AI Gateway model discovery documentation](https://vercel.com/docs/ai-gateway/models-and-providers).
+The Fireworks list also retains `accounts/fireworks/models/minimax-m3`, which has prior
+repository-recorded live semantic provenance. The lists are static so setup stays deterministic
+and opens no new network or credential channel; they can age, may not match account entitlements,
+and do not establish Yoetz's exact structured-output compatibility. Use the custom entry for any
+new, private, preview, region-specific, or omitted model.
+
+Scripts remain explicit and noninteractive:
+
+```text
+yoetz provider endpoint --provider anthropic --model claude-sonnet-5 --no-interactive
+yoetz --set --provider anthropic --model claude-sonnet-5
+```
+
+The first command writes only nonsecret configuration. The second still requires a local terminal
+because it continues into hidden credential input; `--model` itself is preserved exactly in both.
 
 ## Owner-declared endpoints
 

@@ -16,8 +16,10 @@ from pydantic import (
     BaseModel,
     BeforeValidator,
     ConfigDict,
+    Discriminator,
     Field,
     RootModel,
+    Tag,
     field_validator,
     model_validator,
 )
@@ -79,6 +81,8 @@ __all__ = [
     "PublicRequestModel",
     "PublicResultModel",
     "PublicationChannel",
+    "PublishWorkAcceptedMinimalEventModel",
+    "PublishWorkAcceptedProjectionUnavailableModel",
     "PublishWorkRequest",
     "PublishWorkRequestModel",
     "PublishWorkResult",
@@ -94,6 +98,11 @@ __all__ = [
     "RespondRequestModel",
     "RespondResult",
     "RespondResultModel",
+    "ProviderChallengeModel",
+    "ProviderJudgmentChallengesModel",
+    "ProviderJudgmentInsufficientModel",
+    "ProviderJudgmentModel",
+    "ProviderJudgmentNoDiscrepancyModel",
     "SemanticReason",
     "SemanticStatus",
     "StartRequest",
@@ -128,6 +137,11 @@ MAX_REVIEW_CHANGE_OBSERVATIONS: Final = 32
 MAX_REVIEW_EXCERPTS: Final = 16
 MAX_REVIEW_OMISSIONS: Final = 64
 MAX_REVIEW_CHALLENGES: Final = 3
+# JSON Schema ``maxLength`` counts Unicode code points, while the durable semantic contract
+# bounds review prose by UTF-8 bytes. Four bytes is the largest UTF-8 encoding of one valid
+# Unicode scalar value, so this conservative provider-facing limit guarantees that every string
+# admitted by the machine-enforced schema also fits the 4 KiB domain boundary.
+MAX_PROVIDER_REVIEW_TEXT_CHARS: Final = MAX_REVIEW_TEXT_BYTES // 4
 GENESIS_PREDECESSOR_DIGEST: Final = "genesis"
 MAX_PROJECTION_CONTENT_LEAVES: Final = 512
 MAX_PROJECTION_POINTER_BYTES: Final = 256
@@ -995,7 +1009,22 @@ def _validate_model_against_schema(model: BaseModel, schema_name: str) -> None:
     try:
         validate_schema_instance(schema_name, "1.0.0", cast(JsonValue, dumped))
     except SchemaInstanceInvalid as exc:
-        # Re-raise with the JSON Schema absolute path so MCP safe_details can name the field.
+        # Re-raise with JSON Schema path(s) so MCP safe_details can name corrective fields.
+        # Root-level object rules (dependentRequired, if/then) arrive as location_reasons with
+        # closed reason tokens; nested field failures use absolute_path.
+        if exc.location_reasons:
+            raise PydanticValidationError.from_exception_data(
+                type(model).__name__,
+                [
+                    {
+                        "type": "value_error",
+                        "loc": tuple(path),
+                        "input": None,
+                        "ctx": {"error": ValueError(reason)},
+                    }
+                    for path, reason in exc.location_reasons
+                ],
+            ) from None
         if exc.absolute_path:
             raise PydanticValidationError.from_exception_data(
                 type(model).__name__,
@@ -1028,10 +1057,14 @@ class StartRequestModel(PublicRequestModel):
 
 
 class PublishWorkRequestModel(PublicRequestModel):
+    optional_non_null_fields = frozenset({"dry_run"})
+
     session_id: SessionIdWire
     writer_id: WriterIdWire
     expected_frontier: FrontierModel | None
     event_drafts: tuple[JsonValue, ...]
+    # When true, validate the batch and return a non-evidential preview without appending.
+    dry_run: bool | None = None
 
     @model_validator(mode="after")
     def _validate_publish_work_request(self) -> PublishWorkRequestModel:
@@ -1139,6 +1172,12 @@ class StatusObligationsFilterModel(_ClosedModel):
     status: Literal["open", "resolved"] | None = None
 
 
+class StatusOperationFilterModel(_ClosedModel):
+    """Keys a status read at one prior operation identity for the authenticated writer."""
+
+    operation_request_id: RequestIdWire
+
+
 type StatusFilter = (
     StatusAssignmentFilterModel
     | StatusCandidateFindingsFilterModel
@@ -1146,6 +1185,7 @@ type StatusFilter = (
     | StatusFindingsFilterModel
     | StatusHistoryFilterModel
     | StatusObligationsFilterModel
+    | StatusOperationFilterModel
 )
 
 _STATUS_FILTER_BY_VIEW: Final[Mapping[str, type[_ClosedModel]]] = MappingProxyType(
@@ -1156,6 +1196,7 @@ _STATUS_FILTER_BY_VIEW: Final[Mapping[str, type[_ClosedModel]]] = MappingProxyTy
         "findings": StatusFindingsFilterModel,
         "history": StatusHistoryFilterModel,
         "obligations": StatusObligationsFilterModel,
+        "operation": StatusOperationFilterModel,
     }
 )
 
@@ -1174,6 +1215,7 @@ class StatusRequestModel(PublicRequestModel):
         "findings",
         "history",
         "obligations",
+        "operation",
         "versions",
     ]
     limit: CanonicalPageLimitWire
@@ -1222,6 +1264,90 @@ class ReceiptRequestModel(PublicRequestModel):
 def _require_unique(values: tuple[object, ...], *, limit: int) -> None:
     if len(values) > limit or len(set(values)) != len(values):
         raise ValueError("array_not_unique_or_bounded")
+
+
+def _require_review_text_utf8_bytes(value: str) -> str:
+    """Bound review prose by UTF-8 byte length (matches domain ReviewerChallenge)."""
+
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError("provider_review_text_invalid") from exc
+    if not 1 <= len(encoded) <= MAX_REVIEW_TEXT_BYTES:
+        raise ValueError("provider_review_text_invalid")
+    return value
+
+
+type ReviewerNextStepWire = Literal[
+    "act",
+    "provide_evidence",
+    "revise_claim",
+    "dispute_with_evidence",
+    "state_unresolved_limitation",
+]
+
+ProviderReviewTextWire = Annotated[
+    str,
+    Field(min_length=1, max_length=MAX_PROVIDER_REVIEW_TEXT_CHARS),
+]
+
+
+class ProviderChallengeModel(_ClosedModel):
+    """One provider-facing reviewer challenge; owns the constrained-output shape."""
+
+    finding_kind: FindingKindWire
+    summary: ProviderReviewTextWire
+    cited_refs: Annotated[
+        tuple[SubjectIdWire, ...],
+        Field(min_length=1, max_length=16, json_schema_extra={"uniqueItems": True}),
+    ]
+    discrepancy: ProviderReviewTextWire
+    alternative_interpretation: ProviderReviewTextWire
+    message_to_main_agent: ProviderReviewTextWire
+    requested_next_step: ReviewerNextStepWire
+    uncertainty: ProviderReviewTextWire
+
+    @model_validator(mode="after")
+    def _validate_challenge_invariants(self) -> ProviderChallengeModel:
+        _require_unique(self.cited_refs, limit=16)
+        for field_name in (
+            "summary",
+            "discrepancy",
+            "alternative_interpretation",
+            "message_to_main_agent",
+            "uncertainty",
+        ):
+            _require_review_text_utf8_bytes(getattr(self, field_name))
+        return self
+
+
+class ProviderJudgmentNoDiscrepancyModel(_ClosedModel):
+    conclusion: Literal["no_material_discrepancy"]
+    reviewer_challenges: Annotated[
+        tuple[ProviderChallengeModel, ...], Field(min_length=0, max_length=0)
+    ]
+
+
+class ProviderJudgmentChallengesModel(_ClosedModel):
+    conclusion: Literal["challenges_returned"]
+    reviewer_challenges: Annotated[
+        tuple[ProviderChallengeModel, ...],
+        Field(min_length=1, max_length=MAX_REVIEW_CHALLENGES),
+    ]
+
+
+class ProviderJudgmentInsufficientModel(_ClosedModel):
+    conclusion: Literal["insufficient_packet"]
+    reviewer_challenges: Annotated[
+        tuple[ProviderChallengeModel, ...], Field(min_length=0, max_length=0)
+    ]
+
+
+type ProviderJudgmentModel = (
+    ProviderJudgmentNoDiscrepancyModel
+    | ProviderJudgmentChallengesModel
+    | ProviderJudgmentInsufficientModel
+)
 
 
 class StartCompactViewModel(_ClosedModel):
@@ -1384,13 +1510,189 @@ class PublishWorkSuccessModel(_ClosedModel):
         return self
 
 
+class PublishWorkAcceptedMinimalEventModel(_ClosedModel):
+    """Structural acceptance facts available from the ledger append result alone."""
+
+    event_id: EventIdWire
+    entry_digest: Sha256Digest
+    ingestion_sequence: CanonicalUInt64Wire
+
+
+class PublishWorkAcceptedProjectionUnavailableModel(_ClosedModel):
+    """Total acceptance when privacy projection cannot shape the full success body.
+
+    Built only from committed ledger facts plus a correlation id for operator diagnostics. It is a
+    true success (`ok: true`), not an error bent into one: the write is durable and the caller does
+    not need a second `status` call or same-`request_id` replay to learn what landed.
+    """
+
+    protocol_version: Literal["0.1"]
+    schema_version: Literal["1.0.0"]
+    request_id: RequestIdWire
+    ok: Literal[True]
+    response_completeness: Literal["accepted_projection_unavailable"]
+    reason_code: Literal["response_projection_failed"]
+    correlation_id: CorrelationIdWire
+    outcome: Literal["accepted", "replayed"]
+    task_id: TaskIdWire
+    session_id: SessionIdWire
+    writer_id: WriterIdWire
+    subject_frontier: FrontierModel
+    result_frontier: FrontierModel
+    accepted_events: tuple[PublishWorkAcceptedMinimalEventModel, ...]
+
+    @model_validator(mode="after")
+    def _validate_publish_accepted_projection_unavailable(
+        self,
+    ) -> PublishWorkAcceptedProjectionUnavailableModel:
+        if not 1 <= len(self.accepted_events) <= MAX_EVENTS_PER_BATCH:
+            raise ValueError("accepted_event_count_invalid")
+        _validate_model_against_schema(self, "publish-work-result")
+        return self
+
+
+class PublishWorkDryRunPreviewEventModel(_ClosedModel):
+    """Structural preview of one draft that would be accepted on a real publish."""
+
+    event_id: EventIdWire
+    schema_name: SchemaNameWire
+    schema_version: SemverWire
+    causal_parents: tuple[EventIdWire, ...]
+    artifact_refs: tuple[ObjectIdWire, ...]
+    evidence_refs: tuple[EvidenceOrResultIdWire, ...]
+
+    @model_validator(mode="after")
+    def _validate_preview_refs(self) -> PublishWorkDryRunPreviewEventModel:
+        _require_unique(self.causal_parents, limit=32)
+        _require_unique(self.artifact_refs, limit=64)
+        _require_unique(self.evidence_refs, limit=64)
+        return self
+
+
+class PublishWorkDryRunModel(_ClosedModel):
+    """Non-evidential validation preview: nothing was appended and nothing is citable.
+
+    Same discipline as ``status view=candidate_findings``: the body is advisory. It is not a
+    check, publication, coverage source, or receipt input. ``evidential`` is always false.
+    """
+
+    protocol_version: Literal["0.1"]
+    schema_version: Literal["1.0.0"]
+    request_id: RequestIdWire
+    ok: Literal[True]
+    outcome: Literal["dry_run"]
+    evidential: Literal[False]
+    task_id: TaskIdWire
+    session_id: SessionIdWire
+    writer_id: WriterIdWire
+    subject_frontier: FrontierModel
+    result_frontier: FrontierModel
+    would_accept: tuple[PublishWorkDryRunPreviewEventModel, ...]
+    coverage: CoverageModel
+    gaps: tuple[CodeWire, ...]
+
+    @model_validator(mode="after")
+    def _validate_publish_dry_run(self) -> PublishWorkDryRunModel:
+        if not 1 <= len(self.would_accept) <= MAX_EVENTS_PER_BATCH:
+            raise ValueError("dry_run_preview_count_invalid")
+        if self.subject_frontier != self.result_frontier:
+            raise ValueError("dry_run_frontier_moved")
+        _require_unique(self.gaps, limit=64)
+        _validate_model_against_schema(self, "publish-work-result")
+        return self
+
+
+def _publish_work_result_kind(value: object) -> str:
+    """Discriminate the publish result shapes without overloading ``ok`` alone."""
+
+    if isinstance(value, Mapping):
+        source = cast(Mapping[object, object], value)
+        if source.get("ok") is False:
+            return "failure"
+        if source.get("response_completeness") == "accepted_projection_unavailable":
+            return "accepted_projection_unavailable"
+        if source.get("outcome") == "dry_run":
+            return "dry_run"
+        return "success"
+    if getattr(value, "ok", None) is False:
+        return "failure"
+    if getattr(value, "response_completeness", None) == "accepted_projection_unavailable":
+        return "accepted_projection_unavailable"
+    if getattr(value, "outcome", None) == "dry_run":
+        return "dry_run"
+    return "success"
+
+
 type PublishWorkResultBranch = Annotated[
-    PublishWorkSuccessModel | OperationFailureModel, Field(discriminator="ok")
+    Annotated[PublishWorkSuccessModel, Tag("success")]
+    | Annotated[
+        PublishWorkAcceptedProjectionUnavailableModel,
+        Tag("accepted_projection_unavailable"),
+    ]
+    | Annotated[PublishWorkDryRunModel, Tag("dry_run")]
+    | Annotated[OperationFailureModel, Tag("failure")],
+    Discriminator(_publish_work_result_kind),
 ]
 
 
 class PublishWorkResultModel(PublicResultModel[PublishWorkResultBranch]):
-    pass
+    """RootModel wrapper with typed success-field accessors for static checkers.
+
+    Pydantic RootModel delegates attributes to ``root`` at runtime, but pyright does not
+    synthesize those members. After the publish result discriminator, call sites that
+    hold ``PublishWorkInternalResult | PublishWorkResult`` need these fields to exist on both
+    arms. Failure roots raise ``AttributeError`` for success-only names (callers check ``ok``).
+    """
+
+    @property
+    def ok(self) -> bool:
+        return self.root.ok
+
+    @property
+    def outcome(self) -> Literal["accepted", "replayed", "dry_run"]:
+        root = self.root
+        if type(root) is PublishWorkSuccessModel:
+            return root.outcome
+        if type(root) is PublishWorkAcceptedProjectionUnavailableModel:
+            return root.outcome
+        if type(root) is PublishWorkDryRunModel:
+            return root.outcome
+        raise AttributeError("outcome")
+
+    @property
+    def subject_frontier(self) -> FrontierModel:
+        root = self.root
+        if type(root) is PublishWorkSuccessModel:
+            return root.subject_frontier
+        if type(root) is PublishWorkAcceptedProjectionUnavailableModel:
+            return root.subject_frontier
+        if type(root) is PublishWorkDryRunModel:
+            return root.subject_frontier
+        raise AttributeError("subject_frontier")
+
+    @property
+    def result_frontier(self) -> FrontierModel:
+        root = self.root
+        if type(root) is PublishWorkSuccessModel:
+            return root.result_frontier
+        if type(root) is PublishWorkAcceptedProjectionUnavailableModel:
+            return root.result_frontier
+        if type(root) is PublishWorkDryRunModel:
+            return root.result_frontier
+        raise AttributeError("result_frontier")
+
+    @property
+    def accepted_events(
+        self,
+    ) -> (
+        tuple[PublishWorkAcceptedEventModel, ...] | tuple[PublishWorkAcceptedMinimalEventModel, ...]
+    ):
+        root = self.root
+        if type(root) is PublishWorkSuccessModel:
+            return root.accepted_events
+        if type(root) is PublishWorkAcceptedProjectionUnavailableModel:
+            return root.accepted_events
+        raise AttributeError("accepted_events")
 
 
 class CheckPolicyExecutionModel(_ClosedModel):
@@ -1949,7 +2251,10 @@ class StatusHistoryItemModel(_ClosedModel):
         "local_cli",
     ]
     ingestion_sequence: CanonicalUInt64Wire
+    # Caller-asserted event time; not service acceptance time.
     occurred_at: TimestampWire
+    # Trusted-local service acceptance time bound into the entry digest.
+    accepted_at: TimestampWire
     projection_status: Literal["projected", "unknown_unprojected"]
     summary_code: Literal[
         "action_recorded",
@@ -1999,6 +2304,44 @@ class StatusImportStatusModel(_ClosedModel):
     )
     report_evidence_id: EvidenceIdWire | None
     source_identity_digest: Sha256Digest | None
+
+
+class StatusClosureReadinessModel(_ClosedModel):
+    """What currently bounds a completion conclusion, before a check or receipt is spent.
+
+    Advisory and derived: reading it records nothing, creates no verdict, and never strengthens
+    coverage. It exists so an agent can see that a check would come back coverage-bounded instead
+    of discovering it afterwards from the receipt.
+    """
+
+    open_obligation_count: CanonicalUInt64Wire | None
+    unresolved_finding_count: CanonicalUInt64Wire | None
+    blocking_conditions: tuple[
+        Literal[
+            "obligations_open",
+            "findings_unresolved",
+            "no_plan_published",
+            "projection_stale",
+            "coverage_gaps_declared",
+            "readiness_unknown",
+        ],
+        ...,
+    ]
+
+    @model_validator(mode="after")
+    def _validate_closure_readiness(self) -> StatusClosureReadinessModel:
+        _require_unique(self.blocking_conditions, limit=8)
+        # Absent counts mean the compact singleton could not be read (an unreadable task title
+        # omits it). Reporting zero there would assert "nothing is open" from missing data, so
+        # unknown must be null and must say so rather than look like a clean record.
+        unknown = self.open_obligation_count is None or self.unresolved_finding_count is None
+        if unknown != ("readiness_unknown" in self.blocking_conditions):
+            raise ValueError("closure_readiness_unknown_mismatch")
+        if unknown and self.open_obligation_count != self.unresolved_finding_count:
+            raise ValueError("closure_readiness_partial_unknown")
+        if unknown and set(self.blocking_conditions) != {"readiness_unknown"}:
+            raise ValueError("closure_readiness_unknown_not_exclusive")
+        return self
 
 
 class StatusObligationItemModel(_ClosedModel):
@@ -2098,6 +2441,73 @@ class StatusVersionsPageModel(_ClosedModel):
         return self
 
 
+class StatusOperationAcceptedEventModel(_ClosedModel):
+    event_id: EventIdWire
+    entry_digest: Sha256Digest
+    ingestion_sequence: CanonicalUInt64Wire
+    writer_sequence: CanonicalUInt64Wire
+    projection_status: Literal["projected", "unknown_unprojected"]
+
+
+class StatusOperationPageModel(_ClosedModel):
+    """One request-id-keyed operation recovery page for the authenticated writer."""
+
+    operation_request_id: RequestIdWire
+    found: bool
+    state: Literal["absent", "pending", "complete", "quarantined"]
+    operation_kind: Literal["start", "publish_work", "check", "respond", "receipt"] | None = None
+    outcome: Literal["accepted", "replayed"] | None = None
+    subject_frontier: FrontierModel | None = None
+    result_frontier: FrontierModel | None = None
+    accepted_events: tuple[StatusOperationAcceptedEventModel, ...] = ()
+    next_cursor: None = None
+
+    @model_validator(mode="after")
+    def _validate_operation_page(self) -> StatusOperationPageModel:
+        if self.state == "absent":
+            if (
+                self.found
+                or self.operation_kind is not None
+                or self.outcome is not None
+                or self.subject_frontier is not None
+                or self.result_frontier is not None
+                or self.accepted_events
+            ):
+                raise ValueError("status_operation_page_invalid")
+            return self
+        if not self.found or self.operation_kind is None:
+            raise ValueError("status_operation_page_invalid")
+        if self.state == "complete" and self.operation_kind == "publish_work":
+            if (
+                self.outcome is None
+                or self.subject_frontier is None
+                or self.result_frontier is None
+                or not self.accepted_events
+            ):
+                raise ValueError("status_operation_page_invalid")
+            if len(self.accepted_events) > MAX_EVENTS_PER_BATCH:
+                raise ValueError("status_page_limit")
+            return self
+        if self.state == "complete":
+            # Non-publish completions are reported without append-shaped event detail.
+            if (
+                self.outcome is not None
+                or self.subject_frontier is not None
+                or self.result_frontier is not None
+                or self.accepted_events
+            ):
+                raise ValueError("status_operation_page_invalid")
+            return self
+        if (
+            self.outcome is not None
+            or self.subject_frontier is not None
+            or self.result_frontier is not None
+            or self.accepted_events
+        ):
+            raise ValueError("status_operation_page_invalid")
+        return self
+
+
 type StatusPage = (
     StatusAdvicePageModel
     | StatusAssignmentPageModel
@@ -2107,6 +2517,7 @@ type StatusPage = (
     | StatusFindingsPageModel
     | StatusHistoryPageModel
     | StatusObligationsPageModel
+    | StatusOperationPageModel
     | StatusVersionsPageModel
 )
 
@@ -2120,6 +2531,7 @@ _STATUS_PAGE_BY_VIEW: Final[Mapping[str, type[_ClosedModel]]] = MappingProxyType
         "findings": StatusFindingsPageModel,
         "history": StatusHistoryPageModel,
         "obligations": StatusObligationsPageModel,
+        "operation": StatusOperationPageModel,
         "versions": StatusVersionsPageModel,
     }
 )
@@ -2142,6 +2554,7 @@ class StatusSuccessModel(_ClosedModel):
         "findings",
         "history",
         "obligations",
+        "operation",
         "versions",
     ]
     requested_frontier: FrontierModel
@@ -2155,6 +2568,7 @@ class StatusSuccessModel(_ClosedModel):
     coverage: CoverageModel
     gaps: tuple[CodeWire, ...]
     import_status: StatusImportStatusModel
+    closure_readiness: StatusClosureReadinessModel
     privacy_projection: PrivacyProjectionModel
 
     @model_validator(mode="before")
@@ -2375,7 +2789,7 @@ _COMMON_SUCCESS_LEAVES: Final = (
     "/session_id",
     "/task_id",
 )
-_FRONTIER_LEAVES: Final = ("head_digest", "sequence")
+FRONTIER_LEAVES: Final = ("head_digest", "sequence")
 _COVERAGE_LEAVES: Final = (
     "artifact_observation",
     "authorship_assurance",
@@ -2470,7 +2884,7 @@ _RECEIPT_DOCUMENT_VERSION_LEAVES: Final = (
 _START_STRUCTURAL_POINTERS: Final = (
     _COMMON_SUCCESS_LEAVES
     + ("/outcome", "/writer_id")
-    + _prefix_leaf_patterns("/frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/compact/coverage", _COVERAGE_LEAVES)
     + (
         "/compact/current_plan_event_id",
@@ -2485,9 +2899,18 @@ _START_STRUCTURAL_POINTERS: Final = (
 
 _PUBLISH_STRUCTURAL_POINTERS: Final = (
     _COMMON_SUCCESS_LEAVES
-    + ("/gaps/*", "/outcome", "/warning_codes/*", "/writer_id")
-    + _prefix_leaf_patterns("/subject_frontier", _FRONTIER_LEAVES)
-    + _prefix_leaf_patterns("/result_frontier", _FRONTIER_LEAVES)
+    + (
+        "/correlation_id",
+        "/evidential",
+        "/gaps/*",
+        "/outcome",
+        "/reason_code",
+        "/response_completeness",
+        "/warning_codes/*",
+        "/writer_id",
+    )
+    + _prefix_leaf_patterns("/subject_frontier", FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/result_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/coverage", _COVERAGE_LEAVES)
     + _prefix_leaf_patterns("/privacy_projection", _PRIVACY_PROJECTION_LEAVES)
     + _prefix_leaf_patterns("/versions", _BASIC_VERSION_LEAVES)
@@ -2509,6 +2932,17 @@ _PUBLISH_STRUCTURAL_POINTERS: Final = (
         "/accepted_events/*/summary",
         _OMITTED_CONTENT_LEAVES,
     )
+    + _prefix_leaf_patterns(
+        "/would_accept/*",
+        (
+            "artifact_refs/*",
+            "causal_parents/*",
+            "event_id",
+            "evidence_refs/*",
+            "schema_name",
+            "schema_version",
+        ),
+    )
 )
 
 _CHECK_STRUCTURAL_POINTERS: Final = (
@@ -2521,8 +2955,8 @@ _CHECK_STRUCTURAL_POINTERS: Final = (
         "/verdict",
         "/writer_id",
     )
-    + _prefix_leaf_patterns("/subject_frontier", _FRONTIER_LEAVES)
-    + _prefix_leaf_patterns("/result_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/subject_frontier", FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/result_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/coverage", _COVERAGE_LEAVES)
     + _prefix_leaf_patterns("/privacy_projection", _PRIVACY_PROJECTION_LEAVES)
     + _prefix_leaf_patterns("/versions", _BASIC_VERSION_LEAVES)
@@ -2544,7 +2978,7 @@ _CHECK_STRUCTURAL_POINTERS: Final = (
             "subject_refs/*",
         ),
     )
-    + _prefix_leaf_patterns("/findings/*/subject_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/findings/*/subject_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/findings/*/coverage", _COVERAGE_LEAVES)
     + _prefix_leaf_patterns("/findings/*/provenance", _SEMANTIC_PROVENANCE_LEAVES)
     + _prefix_leaf_patterns("/findings/*/summary", _OMITTED_CONTENT_LEAVES)
@@ -2554,8 +2988,8 @@ _CHECK_STRUCTURAL_POINTERS: Final = (
 _RESPOND_STRUCTURAL_POINTERS: Final = (
     _COMMON_SUCCESS_LEAVES
     + ("/warning_codes/*", "/writer_id")
-    + _prefix_leaf_patterns("/subject_frontier", _FRONTIER_LEAVES)
-    + _prefix_leaf_patterns("/result_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/subject_frontier", FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/result_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/coverage", _COVERAGE_LEAVES)
     + _prefix_leaf_patterns("/privacy_projection", _PRIVACY_PROJECTION_LEAVES)
     + _prefix_leaf_patterns("/versions", _BASIC_VERSION_LEAVES)
@@ -2567,7 +3001,7 @@ _RESPOND_STRUCTURAL_POINTERS: Final = (
         "/response",
         ("disposition", "finding_id", "response_event_id", "waiver_expiry", "waiver_scope"),
     )
-    + _prefix_leaf_patterns("/response/finding_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/response/finding_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/response/evidence/*", ("reference_id",))
     + _prefix_leaf_patterns("/response/reason", _OMITTED_CONTENT_LEAVES)
     + _prefix_leaf_patterns(
@@ -2586,10 +3020,10 @@ _STATUS_COMMON_STRUCTURAL_POINTERS: Final = (
         "/view",
         "/writer_id",
     )
-    + _prefix_leaf_patterns("/requested_frontier", _FRONTIER_LEAVES)
-    + _prefix_leaf_patterns("/head_frontier", _FRONTIER_LEAVES)
-    + _prefix_leaf_patterns("/subject_frontier", _FRONTIER_LEAVES)
-    + _prefix_leaf_patterns("/result_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/requested_frontier", FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/head_frontier", FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/subject_frontier", FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/result_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/coverage", _COVERAGE_LEAVES)
     + _prefix_leaf_patterns("/privacy_projection", _PRIVACY_PROJECTION_LEAVES)
     + _prefix_leaf_patterns(
@@ -2600,6 +3034,14 @@ _STATUS_COMMON_STRUCTURAL_POINTERS: Final = (
             "report_evidence_id",
             "source_identity_digest",
             "terminal_count",
+        ),
+    )
+    + _prefix_leaf_patterns(
+        "/closure_readiness",
+        (
+            "blocking_conditions/*",
+            "open_obligation_count",
+            "unresolved_finding_count",
         ),
     )
 )
@@ -2650,7 +3092,7 @@ _STATUS_CANDIDATE_FINDINGS_STRUCTURAL_POINTERS: Final = (
         ),
     )
     + _prefix_leaf_patterns("/page/items/*/coverage", _COVERAGE_LEAVES)
-    + _prefix_leaf_patterns("/page/items/*/subject_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/page/items/*/subject_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/detail", _OMITTED_CONTENT_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/summary", _OMITTED_CONTENT_LEAVES)
 )
@@ -2741,7 +3183,7 @@ _STATUS_FINDINGS_STRUCTURAL_POINTERS: Final = (
         ),
     )
     + _prefix_leaf_patterns("/page/items/*/coverage", _COVERAGE_LEAVES)
-    + _prefix_leaf_patterns("/page/items/*/subject_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/page/items/*/subject_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/provenance", _SEMANTIC_PROVENANCE_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/detail", _OMITTED_CONTENT_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/reason", _OMITTED_CONTENT_LEAVES)
@@ -2751,6 +3193,7 @@ _STATUS_FINDINGS_STRUCTURAL_POINTERS: Final = (
 _STATUS_HISTORY_STRUCTURAL_POINTERS: Final = ("/page/next_cursor",) + _prefix_leaf_patterns(
     "/page/items/*",
     (
+        "accepted_at",
         "actor_id",
         "event_id",
         "ingestion_sequence",
@@ -2779,6 +3222,27 @@ _STATUS_OBLIGATIONS_STRUCTURAL_POINTERS: Final = (
     + _prefix_leaf_patterns("/page/items/*/acceptance_criteria", _OMITTED_CONTENT_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/description", _OMITTED_CONTENT_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/evidence_expectation", _OMITTED_CONTENT_LEAVES)
+)
+
+_STATUS_OPERATION_STRUCTURAL_POINTERS: Final = (
+    (
+        "/page/accepted_events/*/entry_digest",
+        "/page/accepted_events/*/event_id",
+        "/page/accepted_events/*/ingestion_sequence",
+        "/page/accepted_events/*/projection_status",
+        "/page/accepted_events/*/writer_sequence",
+        "/page/found",
+        "/page/next_cursor",
+        "/page/operation_kind",
+        "/page/operation_request_id",
+        "/page/outcome",
+        # Nullable frontier objects are leaves when null and expand when present.
+        "/page/result_frontier",
+        "/page/state",
+        "/page/subject_frontier",
+    )
+    + _prefix_leaf_patterns("/page/subject_frontier", FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/page/result_frontier", FRONTIER_LEAVES)
 )
 
 _STATUS_VERSIONS_STRUCTURAL_POINTERS: Final = ("/page/next_cursor",) + _prefix_leaf_patterns(
@@ -2811,8 +3275,8 @@ _RECEIPT_STRUCTURAL_POINTERS: Final = (
         "/redaction_profile",
         "/suppressed_finding_count",
     )
-    + _prefix_leaf_patterns("/subject_frontier", _FRONTIER_LEAVES)
-    + _prefix_leaf_patterns("/result_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/subject_frontier", FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/result_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/coverage", _COVERAGE_LEAVES)
     + _prefix_leaf_patterns("/privacy_projection", _PRIVACY_PROJECTION_LEAVES)
     + _prefix_leaf_patterns("/versions", _RECEIPT_VERSION_LEAVES)
@@ -2832,7 +3296,7 @@ _RECEIPT_STRUCTURAL_POINTERS: Final = (
         ),
     )
     + _prefix_leaf_patterns("/document/coverage", _COVERAGE_LEAVES)
-    + _prefix_leaf_patterns("/document/subject_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/document/subject_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/document/versions", _RECEIPT_DOCUMENT_VERSION_LEAVES)
     + _prefix_leaf_patterns(
         "/document/findings/*",
@@ -2847,7 +3311,7 @@ _RECEIPT_STRUCTURAL_POINTERS: Final = (
         ),
     )
     + _prefix_leaf_patterns("/document/findings/*/coverage", _COVERAGE_LEAVES)
-    + _prefix_leaf_patterns("/document/findings/*/subject_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/document/findings/*/subject_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns(
         "/document/findings/*/provenance",
         _SEMANTIC_PROVENANCE_LEAVES,
@@ -2860,7 +3324,7 @@ _RECEIPT_STRUCTURAL_POINTERS: Final = (
         "/document/responses/*",
         ("disposition", "evidence_refs/*", "finding_id", "waiver_expiry", "waiver_scope"),
     )
-    + _prefix_leaf_patterns("/document/responses/*/finding_frontier", _FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/document/responses/*/finding_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/document/gaps/*", ("code", "subject_refs/*"))
     + _prefix_leaf_patterns("/document/redactions/*", ("category", "count", "reason"))
     + _prefix_leaf_patterns("/document/sections/*", ("key",))
@@ -2982,6 +3446,11 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
         _STATUS_OBLIGATIONS_STRUCTURAL_POINTERS,
         status_view="obligations",
     )
+    add_structural(
+        "status",
+        _STATUS_OPERATION_STRUCTURAL_POINTERS,
+        status_view="operation",
+    )
     add_structural("status", _STATUS_VERSIONS_STRUCTURAL_POINTERS, status_view="versions")
     add_structural("receipt", _RECEIPT_STRUCTURAL_POINTERS)
 
@@ -3062,7 +3531,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 697:
+    if len(result) != 728:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

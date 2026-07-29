@@ -111,6 +111,12 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    requesting writer, and never past `sensitive_confidential` or the never-send set, which remain
    absolute at every sink under every provenance. Serving static reviewed guidance documents is not a
    sink at all, because they carry no user content and are identical for every installation.
+   An exact same-request delivery retry may reuse a completed `publish_work` projection and its
+   original receipt only for the same writer, request digest, and local sink. This is continuation
+   of the already-audited disclosure, not a new projection: the cached body is restricted to public
+   structural fields and omission markers, while the current route is revalidated and the outer
+   control correlation is freshly stamped. Any plaintext event summary prevents caching and uses
+   the ordinary reserve/complete path again.
 4. **Data classes:** structural public data, ordinary task/user content, sensitive/confidential
    content, and secrets/cryptographic material are distinct. Classification combines source-owned
    structural labels, scope validation, and deterministic secret scanning. Unknown or conflicting

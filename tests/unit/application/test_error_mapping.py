@@ -45,6 +45,7 @@ _FRONTIER_CODES: frozenset[PublicErrorCode] = frozenset(
         PublicErrorCode.SESSION_NOT_FOUND,
         PublicErrorCode.SESSION_CONFLICT,
         PublicErrorCode.IDEMPOTENCY_CONFLICT,
+        PublicErrorCode.REQUEST_IDENTITY_CONFLICT,
         PublicErrorCode.OPERATION_PENDING,
         PublicErrorCode.FRONTIER_CONFLICT,
     }
@@ -77,6 +78,7 @@ _EXPECTED_EXIT_CODES: dict[PublicErrorCode, int] = {
     PublicErrorCode.SESSION_NOT_FOUND: 10,
     PublicErrorCode.SESSION_CONFLICT: 10,
     PublicErrorCode.IDEMPOTENCY_CONFLICT: 10,
+    PublicErrorCode.REQUEST_IDENTITY_CONFLICT: 10,
     PublicErrorCode.OPERATION_PENDING: 11,
     PublicErrorCode.FRONTIER_CONFLICT: 10,
     PublicErrorCode.EVENT_INVALID: 2,
@@ -103,10 +105,12 @@ _MODULE_CODE_INVENTORY: dict[str, frozenset[PublicErrorCode]] = {
     "publish_work.py": frozenset(
         {
             PublicErrorCode.EVENT_INVALID,
+            PublicErrorCode.FRONTIER_CONFLICT,
             PublicErrorCode.IDEMPOTENCY_CONFLICT,
             PublicErrorCode.INVALID_REQUEST,
             PublicErrorCode.LIMIT_EXCEEDED,
             PublicErrorCode.OPERATION_PENDING,
+            PublicErrorCode.REQUEST_IDENTITY_CONFLICT,
             PublicErrorCode.SESSION_CONFLICT,
             PublicErrorCode.STORAGE_CORRUPT,
         }

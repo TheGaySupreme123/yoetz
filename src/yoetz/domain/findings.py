@@ -142,6 +142,7 @@ class SemanticFailureClass(str, Enum):  # noqa: UP042 - exact wire enum base
     PROVIDER_OUTAGE = "provider_outage"
     QUOTA_EXHAUSTED = "quota_exhausted"
     RATE_LIMITED = "rate_limited"
+    RESPONSE_CONTENT = "response_content"
     RESPONSE_SCHEMA = "response_schema"
     TIMEOUT = "timeout"
     TRANSPORT = "transport"

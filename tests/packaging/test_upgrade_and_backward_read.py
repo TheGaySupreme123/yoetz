@@ -114,7 +114,10 @@ def test_compatibility_doc_names_only_the_current_release_axes() -> None:
 
 
 def test_root_and_installed_migration_trees_are_byte_identical() -> None:
-    for family, versions in (("catalog", ("0001",)), ("bundle", ("0001", "0002", "0003"))):
+    for family, versions in (
+        ("catalog", ("0001", "0002")),
+        ("bundle", ("0001", "0002", "0003")),
+    ):
         for version in versions:
             root_file = _REPO_ROOT / "migrations" / family / f"{version}.sql"
             installed_file = (
@@ -142,15 +145,15 @@ def test_each_migration_family_has_contiguous_versions(installed: _Installed) ->
         "}))\n"
     )
     payload = _run_probe(installed, probe)
-    assert payload["catalog_versions"] == ["0001"]
+    assert payload["catalog_versions"] == ["0001", "0002"]
     assert payload["bundle_versions"] == ["0001", "0002", "0003", "0004"]
-    assert payload["catalog_current"] == 1
+    assert payload["catalog_current"] == 2
     assert payload["bundle_current"] == 4
 
 
 def test_migration_ddl_contains_no_destructive_statement(installed: _Installed) -> None:
     for family, versions in (
-        ("catalog", ("0001",)),
+        ("catalog", ("0001", "0002")),
         ("bundle", ("0001", "0002", "0003", "0004")),
     ):
         for version in versions:
@@ -196,7 +199,7 @@ def test_fresh_catalog_and_bundle_initialize_at_current_schema_version(
     payload = _run_probe(installed, probe)
     assert payload == {
         "catalog_state": "current",
-        "catalog_version": 1,
+        "catalog_version": 2,
         "bundle_state": "current",
         "bundle_version": 4,
     }
@@ -218,7 +221,7 @@ def test_replaying_migrations_on_an_already_current_database_is_a_verified_noop(
         "}))\n"
     )
     payload = _run_probe(installed, probe)
-    assert payload == {"from_version": 1, "to_version": 1, "applied_versions": []}
+    assert payload == {"from_version": 2, "to_version": 2, "applied_versions": []}
 
 
 def test_uninitialized_database_reports_uninitialized_not_current(installed: _Installed) -> None:
@@ -243,7 +246,7 @@ def test_newer_than_candidate_schema_fails_migration_and_identity_checks_honestl
         "from yoetz.adapters.sqlite.connection import verify_schema_identity, StorageUnsafeError\n"
         "catalog = apsw.Connection(':memory:')\n"
         "initialize_catalog(catalog)\n"
-        "catalog.execute('PRAGMA user_version = 2')\n"
+        "catalog.execute('PRAGMA user_version = 3')\n"
         "identity_reason = None\n"
         "try:\n"
         "    verify_schema_identity(catalog)\n"

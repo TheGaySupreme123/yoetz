@@ -65,6 +65,7 @@ def _load_resource(family: str, version: str) -> bytes:
 
 CATALOG_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration("0001", _load_resource("catalog", "0001")),
+    Migration("0002", _load_resource("catalog", "0002")),
 )
 BUNDLE_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration("0001", _load_resource("bundle", "0001")),
@@ -146,7 +147,8 @@ def initialize_catalog(db: apsw.Connection) -> None:
     _configure_schema_connection(db)
     _require_fresh(db)
     with db:
-        _execute(db, CATALOG_MIGRATIONS[0])
+        for migration in CATALOG_MIGRATIONS:
+            _execute(db, migration)
     _verify_identity(db, current_schema_version(CATALOG_MIGRATIONS))
 
 

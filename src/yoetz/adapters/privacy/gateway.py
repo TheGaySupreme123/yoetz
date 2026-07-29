@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from types import MappingProxyType
 from typing import Protocol
@@ -46,6 +46,7 @@ from yoetz.domain.privacy import (
     PRIVACY_REQUEST_COMMITMENT_ALGORITHM,
     ApprovedLocalDisclosureCase,
     ApprovedOutboundCase,
+    ApprovedProviderCase,
     ConsentSource,
     EgressAuthorization,
     EgressChannel,
@@ -293,6 +294,19 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         if registry.local_model is not None:
             connected.add(registry.local_model[0].provider_id)
         return tuple(sorted(connected, key=str.encode))
+
+    def has_connected_provider_binding(self, binding: ProviderBinding) -> bool:
+        """Return whether the exact configured binding is live in the current registry."""
+
+        if type(binding) is not ProviderBinding:
+            raise TypeError("privacy_gateway_provider_binding_invalid")
+        registry = self._current_registry()
+        if registry is None:
+            return False
+        return (
+            registry.resolve_external(binding) is not None
+            or registry.resolve_local(binding) is not None
+        )
 
     # -- reconciliation -----------------------------------------------------------------------
 
@@ -542,6 +556,8 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         dispatch_started_at = self._clock.now_utc()
         try:
             result = await evaluator.evaluate(case, deadline)
+            result = _with_policy_digest(result, case)
+            result = _with_request_commitment(result, commitment)
             outcome, receipt_reason = _result_outcome(result)
         except Exception:  # noqa: BLE001 - an ambiguous transport failure never leaks native text
             result = _unknown_outcome_result(case, binding)
@@ -721,7 +737,12 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         except Exception:  # noqa: BLE001 - a lost consume race is bounded here
             return _local_unavailable_result(case)
 
-        return await evaluator.evaluate(case, deadline)
+        result = await evaluator.evaluate(case, deadline)
+        # Only the rebind is fenced here: an evaluator failure keeps propagating exactly as before.
+        try:
+            return _with_policy_digest(result, case)
+        except ValueError:
+            return _local_unavailable_result(case)
 
     # -- lifecycle ------------------------------------------------------------------------------
 
@@ -775,6 +796,42 @@ def _bounded_policy_binding(authorization: EgressAuthorization) -> ReceiptPolicy
         authorization.policy_digest,
         _scope_digest(authorization.scope),
     )
+
+
+def _with_request_commitment(result: SemanticResult, commitment: str) -> SemanticResult:
+    """Carry the gateway-bound request commitment into the receipt-bound semantic outcome."""
+
+    return replace(result, provenance=replace(result.provenance, request_commitment=commitment))
+
+
+def _with_policy_digest(result: SemanticResult, case: ApprovedProviderCase) -> SemanticResult:
+    """Bind provenance to the policy digest that actually authorized this physical dispatch.
+
+    The gateway, not the provider adapter, is the authority on which policy admitted an attempt: it
+    already refuses to dispatch unless ``case.policy_digest`` equals both the authorization's and
+    the current registry's policy digest (see :meth:`OutboundPrivacyGateway._predispatch_reason`),
+    and it stamps that same value onto :class:`EgressReceipt`. Rebinding here makes provenance and
+    the egress receipt agree by construction, and keeps a foreign adapter from ever asserting what
+    authorized it.
+
+    A dispatch that reached a provider and succeeded must carry a real digest. An all-zero
+    placeholder surviving the rebind means the authorizing policy digest was itself a placeholder,
+    so the attempt is refused rather than recorded as if a real policy had authorized it: external
+    dispatch degrades to the bounded ``outcome_unknown`` receipt and local dispatch to the bounded
+    unavailable result. Genuinely-blocked results that never reached a provider keep their
+    :attr:`SemanticStatus.UNAVAILABLE` zeros untouched.
+    """
+
+    provenance = replace(
+        result.provenance,
+        policy_digest=case.policy_digest,
+        privacy_policy_digest=case.policy_digest,
+    )
+    if provenance.status is SemanticStatus.SUCCEEDED and (
+        provenance.policy_digest == _ZERO_DIGEST or provenance.privacy_policy_digest == _ZERO_DIGEST
+    ):
+        raise ValueError("privacy_gateway_provenance_policy_digest_placeholder")
+    return replace(result, provenance=provenance)
 
 
 def _result_outcome(result: SemanticResult) -> tuple[PrivacyOutcome, PrivacyReason | None]:

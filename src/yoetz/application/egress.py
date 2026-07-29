@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
+from yoetz.domain.findings import SemanticDispatchKind
 from yoetz.domain.privacy import (
     ApprovedLocalDisclosureCase,
     ApprovedLocalItem,
@@ -42,6 +43,7 @@ from yoetz.domain.privacy import (
     ReceiptSecretScan,
     ReceiptTransformations,
 )
+from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.privacy import (
@@ -85,7 +87,9 @@ type LocalDisclosureResult = (
     LocalDisclosureApproved | LocalDisclosureBlocked | LocalDisclosureUnavailable
 )
 
-_SEMANTIC_PURPOSE = "semantic_check"
+# This value crosses the privacy-policy boundary, so it must match the
+# documented/recipe vocabulary and the stored provider-credential binding.
+_SEMANTIC_PURPOSE = "semantic-review"
 _MEDIA_TYPE = "application/json"
 _SCHEMA_ID = "yoetz-semantic-case-1.0.0"
 
@@ -96,10 +100,12 @@ class SemanticEgressSuccess:
 
     request_id: str
     privacy_proposal_id: str
-    authorization_id: str
+    authorization_id: str | None
+    dispatch_kind: SemanticDispatchKind
     result: SemanticResultSuccess
     case_digest: str
     privacy_receipt_id: str | None = None
+    request_commitment: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +136,7 @@ class SemanticEgressProviderOutcome:
     request_id: str
     privacy_proposal_id: str
     authorization_id: str | None
+    dispatch_kind: SemanticDispatchKind
     result: (
         SemanticResultRefused
         | SemanticResultTimeout
@@ -139,6 +146,7 @@ class SemanticEgressProviderOutcome:
     )
     case_digest: str
     privacy_receipt_id: str | None = None
+    request_commitment: str | None = None
 
 
 type SemanticEgressResult = (
@@ -147,6 +155,80 @@ type SemanticEgressResult = (
     | SemanticEgressBlocked
     | SemanticEgressProviderOutcome
 )
+
+
+def _semantic_result_outcome(
+    result: SemanticResult,
+) -> tuple[PrivacyOutcome, PrivacyReason | None]:
+    if type(result) is SemanticResultSuccess:
+        return PrivacyOutcome.COMPLETED, None
+    if type(result) is SemanticResultRefused:
+        return PrivacyOutcome.PROVIDER_REFUSED, PrivacyReason.PROVIDER_REFUSED
+    if type(result) is SemanticResultTimeout:
+        return PrivacyOutcome.TIMEOUT, PrivacyReason.PROVIDER_TIMEOUT
+    if type(result) is SemanticResultInvalid:
+        return PrivacyOutcome.INVALID_RESPONSE, PrivacyReason.PROVIDER_INVALID_RESPONSE
+    if type(result) is SemanticResultLate:
+        return PrivacyOutcome.LATE, PrivacyReason.LATE
+    if type(result) is SemanticResultUnavailable:
+        return PrivacyOutcome.TRANSPORT_FAILED, PrivacyReason.TRANSPORT_FAILED
+    raise TypeError("semantic_egress_result_invalid")
+
+
+def _semantic_local_receipt(
+    candidate: CandidateContext,
+    effective: EffectivePrivacyPolicy,
+    proposal: DisclosureProposal,
+    minimized: MinimizedDisclosure,
+    consent: ConsentSource,
+    outcome: PrivacyOutcome,
+    reason: PrivacyReason | None,
+    finished_at: datetime,
+    ids: IdPort,
+) -> LocalDisclosureReceipt:
+    included_count = len(minimized.included_item_ids)
+    candidate_count = len(minimized.source_item_digests)
+    omitted_count = max(0, candidate_count - included_count)
+    return LocalDisclosureReceipt(
+        "1.0.0",
+        ids.new(IdKind.EGRESS_RECEIPT),
+        candidate.request_id,
+        proposal.privacy_proposal_id,
+        LocalDisclosureSink.LOCAL_MODEL,
+        outcome,
+        finished_at,
+        candidate.scope,
+        candidate.purpose,
+        ReceiptPolicyBinding(
+            effective.policy.policy_id,
+            effective.policy.version,
+            effective.effective_digest,
+            _scope_digest(candidate.scope),
+        ),
+        consent,
+        minimized.approved_categories,
+        minimized.blocked_categories,
+        ReceiptCounts(
+            candidate_count,
+            included_count,
+            omitted_count,
+            included_count,
+            omitted_count,
+            minimized.byte_count,
+            minimized.byte_count,
+            minimized.token_count,
+            None,
+        ),
+        ReceiptTransformations(omitted_count, 0, omitted_count),
+        ReceiptSecretScan(
+            minimized.scanner_registry_version,
+            minimized.scanner_profile_digest,
+            len(minimized.forbidden_findings),
+            not minimized.forbidden_findings,
+        ),
+        reason,
+        1,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -681,7 +763,13 @@ class PrivacyCoordinator:
                     + timedelta(seconds=max(60, llm.authorization_ttl_seconds or 60)),
                 )
             )
-        except Exception:
+        except Exception as exc:
+            record_unexpected_exception_without_raising(
+                exc,
+                component="privacy_egress",
+                operation="audit_prepare_failed",
+                request_id=candidate.request_id,
+            )
             return SemanticEgressBlocked(
                 candidate.request_id,
                 PrivacyOutcome.AUDIT_FAILED,
@@ -796,7 +884,6 @@ class PrivacyCoordinator:
         subject_digest: str,
         authorization: object | None = None,
     ) -> SemanticEgressResult:
-        del consent
         binding = candidate.provider_binding
         assert binding is not None
         now = self._clock.now_utc()
@@ -807,22 +894,6 @@ class PrivacyCoordinator:
                 PrivacyReason.AUTHORIZATION_EXPIRED,
                 privacy_proposal_id=proposal.privacy_proposal_id,
             )
-        minted: EgressAuthorization
-        if type(authorization) is EgressAuthorization:
-            minted = authorization
-        else:
-            try:
-                minted = await self._audit.authorize(
-                    proposal.privacy_proposal_id, proposal.prepared_case_digest, now
-                )
-            except Exception:
-                return SemanticEgressBlocked(
-                    candidate.request_id,
-                    PrivacyOutcome.AUDIT_FAILED,
-                    PrivacyReason.AUDIT_FAILED,
-                    privacy_proposal_id=proposal.privacy_proposal_id,
-                )
-        authorization = minted
 
         if binding.transport == "local_af_unix":
             local_case = ApprovedLocalDisclosureCase(
@@ -851,15 +922,54 @@ class PrivacyCoordinator:
                     PrivacyReason.OUTCOME_UNKNOWN,
                     privacy_proposal_id=proposal.privacy_proposal_id,
                 )
+            outcome, reason = _semantic_result_outcome(result)
+            receipt = _semantic_local_receipt(
+                candidate,
+                effective,
+                proposal,
+                minimized,
+                consent,
+                outcome,
+                reason,
+                self._clock.now_utc(),
+                self._ids,
+            )
+            try:
+                await self._audit.complete_local_disclosure(proposal.privacy_proposal_id, receipt)
+            except Exception:
+                pass
             return await self._map_provider_result(
                 candidate.request_id,
                 proposal.privacy_proposal_id,
                 None,
+                SemanticDispatchKind.LOCAL_MODEL,
                 proposal.prepared_case_digest,
                 subject_digest,
                 result,
             )
 
+        minted: EgressAuthorization
+        if type(authorization) is EgressAuthorization:
+            minted = authorization
+        else:
+            try:
+                minted = await self._audit.authorize(
+                    proposal.privacy_proposal_id, proposal.prepared_case_digest, now
+                )
+            except Exception as exc:
+                record_unexpected_exception_without_raising(
+                    exc,
+                    component="privacy_egress",
+                    operation="audit_authorize_failed",
+                    request_id=candidate.request_id,
+                )
+                return SemanticEgressBlocked(
+                    candidate.request_id,
+                    PrivacyOutcome.AUDIT_FAILED,
+                    PrivacyReason.AUDIT_FAILED,
+                    privacy_proposal_id=proposal.privacy_proposal_id,
+                )
+        authorization = minted
         case = ApprovedOutboundCase(
             self._ids.new(IdKind.OUTBOUND_CASE),
             candidate.request_id,
@@ -890,6 +1000,7 @@ class PrivacyCoordinator:
             candidate.request_id,
             proposal.privacy_proposal_id,
             authorization.authorization_id,
+            SemanticDispatchKind.EXTERNAL,
             proposal.prepared_case_digest,
             subject_digest,
             result,
@@ -900,6 +1011,7 @@ class PrivacyCoordinator:
         request_id: str,
         privacy_proposal_id: str,
         authorization_id: str | None,
+        dispatch_kind: SemanticDispatchKind,
         case_digest: str,
         subject_digest: str,
         result: SemanticResult,
@@ -911,14 +1023,17 @@ class PrivacyCoordinator:
                 receipt_id = state.receipt_id
         except Exception:
             receipt_id = None
+        request_commitment = getattr(result.provenance, "request_commitment", None)
         if type(result) is SemanticResultSuccess:
             return SemanticEgressSuccess(
                 request_id,
                 privacy_proposal_id,
-                authorization_id or "",
+                authorization_id,
+                dispatch_kind,
                 result,
                 case_digest,
                 privacy_receipt_id=receipt_id,
+                request_commitment=request_commitment,
             )
         if type(result) in {
             SemanticResultRefused,
@@ -931,9 +1046,11 @@ class PrivacyCoordinator:
                 request_id,
                 privacy_proposal_id,
                 authorization_id,
+                dispatch_kind,
                 result,  # type: ignore[arg-type]
                 case_digest,
                 privacy_receipt_id=receipt_id,
+                request_commitment=request_commitment,
             )
         return SemanticEgressBlocked(
             request_id,
@@ -1030,6 +1147,14 @@ class PrivacyCoordinator:
                 "channel": EgressChannel.LLM_INFERENCE.value,
             }
         )
+        # Categories are a closed set of DataCategory values: unique and sorted for the
+        # PreDispatchAuditDecision contract. Multiple case items may share one category.
+        categories = tuple(
+            sorted(
+                {item.category for item in candidate.items},
+                key=lambda value: str(value.value).encode("ascii"),
+            )
+        )
         subject = PreDispatchAuditDecision(
             pid,
             candidate.request_id,
@@ -1041,7 +1166,7 @@ class PrivacyCoordinator:
             effective.policy.version,
             effective.effective_digest,
             None if destination is None else canonical_digest({"binding": destination.provider_id}),
-            tuple(item.category for item in candidate.items),
+            categories,
             len(candidate.items),
             len(candidate.items),
             (),

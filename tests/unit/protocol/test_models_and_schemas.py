@@ -298,23 +298,25 @@ _STATUS_PAGE_DEF_BY_VIEW_FOR_TEST: tuple[tuple[str, str], ...] = (
     ("findings", "findings_page"),
     ("history", "history_page"),
     ("obligations", "obligations_page"),
+    ("operation", "operation_page"),
     ("versions", "versions_page"),
 )
 _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
     ("check", None): 127,
-    ("publish_work", None): 47,
+    ("publish_work", None): 57,
     ("receipt", None): 155,
     ("respond", None): 53,
     ("start", None): 35,
-    ("status", None): 41,
+    ("status", None): 44,
     ("status", "advice"): 17,
     ("status", "assignment"): 6,
     ("status", "candidate_findings"): 32,
     ("status", "compact"): 43,
     ("status", "evidence"): 18,
     ("status", "findings"): 66,
-    ("status", "history"): 10,
+    ("status", "history"): 11,
     ("status", "obligations"): 19,
+    ("status", "operation"): 17,
     ("status", "versions"): 12,
 }
 
@@ -331,6 +333,16 @@ _RESULT_SUPPORT_MODEL_SPECS: tuple[tuple[str, str, str], ...] = (
         "PublishWorkAcceptedEventModel",
         "operations/publish-work-result-1.0.0.schema.json",
         "accepted_event",
+    ),
+    (
+        "PublishWorkAcceptedMinimalEventModel",
+        "operations/publish-work-result-1.0.0.schema.json",
+        "accepted_minimal_event",
+    ),
+    (
+        "PublishWorkAcceptedProjectionUnavailableModel",
+        "operations/publish-work-result-1.0.0.schema.json",
+        "accepted_projection_unavailable",
     ),
     (
         "PublishWorkVersionSliceModel",
@@ -409,6 +421,11 @@ _RESULT_SUPPORT_MODEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("StatusHistoryItemModel", "operations/status-result-1.0.0.schema.json", "history_item"),
     ("StatusHistoryPageModel", "operations/status-result-1.0.0.schema.json", "history_page"),
     ("StatusImportStatusModel", "operations/status-result-1.0.0.schema.json", "import_status"),
+    (
+        "StatusClosureReadinessModel",
+        "operations/status-result-1.0.0.schema.json",
+        "closure_readiness",
+    ),
     ("StatusObligationItemModel", "operations/status-result-1.0.0.schema.json", "obligation_item"),
     (
         "StatusObligationsPageModel",
@@ -662,6 +679,11 @@ def _status_result_wire() -> dict[str, JsonValue]:
             "phase": None,
             "report_evidence_id": None,
             "source_identity_digest": None,
+        },
+        "closure_readiness": {
+            "open_obligation_count": "0",
+            "unresolved_finding_count": "0",
+            "blocking_conditions": [],
         },
         "privacy_projection": _privacy_projection_wire(),
     }
@@ -981,8 +1003,13 @@ def test_protocol_models_public_exports_are_closed() -> None:
         ClientInfoModel ClientKind CoverageModel DataCategory FrontierModel IntegrationKind
         JsonValue OmittedContentModel OperationFailureModel PrivacyProjectionModel
         PublicEnvelopeModel PublicErrorModel PublicRequestModel PublicResultModel
-        PublicationChannel PublishWorkRequest PublishWorkRequestModel PublishWorkResult
-        PublishWorkResultModel ReceiptFormat ReceiptInclude ReceiptRedactionProfile
+        PublicationChannel PublishWorkAcceptedMinimalEventModel
+        PublishWorkAcceptedProjectionUnavailableModel PublishWorkRequest
+        PublishWorkRequestModel PublishWorkResult PublishWorkResultModel
+        ProviderChallengeModel ProviderJudgmentChallengesModel
+        ProviderJudgmentInsufficientModel ProviderJudgmentModel
+        ProviderJudgmentNoDiscrepancyModel
+        ReceiptFormat ReceiptInclude ReceiptRedactionProfile
         ReceiptRequest ReceiptRequestModel ReceiptResult ReceiptResultModel RespondRequest
         RespondRequestModel RespondResult RespondResultModel SemanticReason SemanticStatus
         StartRequest StartRequestModel StartResult StartResultModel StatusRequest
@@ -1081,6 +1108,65 @@ def test_all_result_roots_serialize_success_and_shared_failure_without_wrapper()
         dumped = models.public_model_to_wire(parsed)
         assert dumped == failure_wire
         assert "root" not in dumped
+
+
+def test_closure_readiness_never_reports_unknown_state_as_a_clean_record() -> None:
+    """Missing compact data must read as unknown, never as zero open obligations.
+
+    Compact omits its singleton when the task title is unreadable. Filling that with zeros would
+    manufacture "nothing is open" out of absent data — exactly the kind of unearned claim the
+    coverage rules forbid.
+    """
+
+    models = _models_module()
+    model = models.StatusClosureReadinessModel
+
+    unknown = model.model_validate(
+        {
+            "open_obligation_count": None,
+            "unresolved_finding_count": None,
+            "blocking_conditions": ["readiness_unknown"],
+        }
+    )
+    assert unknown.open_obligation_count is None
+    assert unknown.blocking_conditions == ("readiness_unknown",)
+
+    # Absent counts must declare themselves unknown...
+    with pytest.raises(ValidationError):
+        model.model_validate(
+            {
+                "open_obligation_count": None,
+                "unresolved_finding_count": None,
+                "blocking_conditions": [],
+            }
+        )
+    # ...known counts must not claim to be unknown...
+    with pytest.raises(ValidationError):
+        model.model_validate(
+            {
+                "open_obligation_count": "0",
+                "unresolved_finding_count": "0",
+                "blocking_conditions": ["readiness_unknown"],
+            }
+        )
+    # ...unknown is never partial...
+    with pytest.raises(ValidationError):
+        model.model_validate(
+            {
+                "open_obligation_count": "2",
+                "unresolved_finding_count": None,
+                "blocking_conditions": ["readiness_unknown"],
+            }
+        )
+    # ...and it is never mixed with conditions derived from data that could not be read.
+    with pytest.raises(ValidationError):
+        model.model_validate(
+            {
+                "open_obligation_count": None,
+                "unresolved_finding_count": None,
+                "blocking_conditions": ["readiness_unknown", "no_plan_published"],
+            }
+        )
 
 
 def test_unknown_fields_and_result_discriminator_are_strict() -> None:
@@ -1637,7 +1723,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     rules = cast(tuple[Any, ...], getattr(models, "_RESULT_LEAF_RULES"))
 
     derived_patterns = _derived_result_success_patterns(catalog)
-    assert len(derived_patterns) == 681
+    assert len(derived_patterns) == 712
 
     derived_counts = {
         context: sum(1 for method, view, _ in derived_patterns if (method, view) == context)
@@ -1646,7 +1732,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert derived_counts == _EXPECTED_RESULT_PATTERN_COUNTS
 
     assert type(rules) is tuple
-    assert len(rules) == 697
+    assert len(rules) == 728
     assert rules == tuple(sorted(rules, key=_test_rule_sort_key))
 
     rule_keys = {
@@ -1655,7 +1741,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert len(rule_keys) == len(rules)
 
     registry_patterns = {(rule.method, rule.status_view, rule.segments) for rule in rules}
-    assert len(registry_patterns) == 681
+    assert len(registry_patterns) == 712
     assert registry_patterns == derived_patterns
 
     content_rules = _expected_nonpublish_content_rules(models)
@@ -1940,6 +2026,25 @@ def _derived_result_success_patterns(
             _schema_success_definition(document),
         )
         derived.update((method, None, pattern) for pattern in patterns)
+        # publish_work also admits the reduced total-acceptance success branch; its leaves must
+        # appear in the registry so post-commit classification never gaps after a durable append.
+        definitions = _schema_mapping(document.json_schema.get("$defs"))
+        reduced = definitions.get("accepted_projection_unavailable")
+        if reduced is not None:
+            reduced_patterns = _walk_schema_leaf_patterns(
+                catalog,
+                document,
+                _schema_mapping(reduced),
+            )
+            derived.update((method, None, pattern) for pattern in reduced_patterns)
+        dry_run = definitions.get("dry_run")
+        if dry_run is not None:
+            dry_run_patterns = _walk_schema_leaf_patterns(
+                catalog,
+                document,
+                _schema_mapping(dry_run),
+            )
+            derived.update((method, None, pattern) for pattern in dry_run_patterns)
 
     status_document = catalog.by_name_version[("status-result", "1.0.0")]
     status_success = _schema_success_definition(status_document)
@@ -2183,7 +2288,7 @@ def test_schema_catalog_reports_complete_registry() -> None:
     assert SCHEMA_NAMESPACE == "https://schemas.yoetz.dev/0.1/"
     assert SCHEMA_MANIFEST_SCHEMA == "yoetz.schema-manifest/1.0.0"
     assert SCHEMA_MANIFEST_VERSION == "1.0.0"
-    assert SCHEMA_MEMBER_COUNT == 52
+    assert SCHEMA_MEMBER_COUNT == 53
     assert len(catalog.documents) == SCHEMA_MEMBER_COUNT
 
     paths = tuple(document.relative_path for document in catalog.documents)
@@ -2196,7 +2301,7 @@ def test_schema_catalog_reports_complete_registry() -> None:
         SchemaKind.CONFIG,
         SchemaKind.VERSION_MANIFEST,
     }
-    assert len(SchemaArtifactRole) == 17
+    assert len(SchemaArtifactRole) == 18
 
 
 def test_schema_uri_and_path_resolution_are_stable() -> None:
@@ -2267,7 +2372,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 1_299
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 1_356
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:
@@ -2276,7 +2381,7 @@ def test_schema_name_derivation_and_version_maps_are_exact() -> None:
     event_versions = event_schema_versions(catalog)
     assert request_versions is catalog.request_result_versions
     assert event_versions is catalog.event_schema_versions
-    assert len(request_versions) == 31
+    assert len(request_versions) == 32
     assert len(event_versions) == 16
     assert tuple(request_versions) == tuple(sorted(request_versions, key=str.encode))
     assert tuple(event_versions) == tuple(sorted(event_versions, key=str.encode))

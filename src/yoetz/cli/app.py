@@ -595,6 +595,39 @@ def service_run() -> None:
     daemon_main()
 
 
+@service_app.command("diagnostics")
+def service_diagnostics(
+    correlation_id: Annotated[
+        str,
+        typer.Option(
+            "--correlation-id",
+            help="Exact err_… correlation id from a public error or reduced accept envelope.",
+        ),
+    ],
+    json_output: _JSON = False,
+) -> None:
+    """Resolve one durable owner-only diagnostic record by correlation id."""
+
+    try:
+        from yoetz.observability.diagnostics import lookup_diagnostic_records
+        from yoetz.protocol.ids import IdKind, validate_id
+
+        validate_id(IdKind.CORRELATION, correlation_id)
+        records = lookup_diagnostic_records(correlation_id)
+        output = cast(
+            JsonValue,
+            {
+                "correlation_id": correlation_id,
+                "count": len(records),
+                "records": [dict(item) for item in records],
+            },
+        )
+        _human_or_json(output, json_output=json_output)
+        _finish(0 if records else 1)
+    except OSError, TypeError, ValueError:
+        _finish(_usage_failure())
+
+
 @mcp_app.command("serve")
 def mcp_serve() -> None:
     """Run the MCP stdio bridge."""
@@ -1048,6 +1081,10 @@ def provider_endpoint(
     official: Annotated[
         bool, typer.Option("--official", help="Bind the bundled Official OpenAI Responses profile.")
     ] = False,
+    grok: Annotated[
+        bool,
+        typer.Option("--grok", help="Bind the bundled Grok / xAI Chat Completions profile."),
+    ] = False,
     fireworks: Annotated[
         bool,
         typer.Option(
@@ -1060,7 +1097,7 @@ def provider_endpoint(
         typer.Option(
             "--provider",
             help=(
-                "Reviewed preset: openai, fireworks, anthropic, gemini, openrouter, "
+                "Reviewed preset: openai, fireworks, anthropic, gemini, openrouter, grok, "
                 "or vercel-ai-gateway."
             ),
         ),
@@ -1084,14 +1121,17 @@ def provider_endpoint(
         ProviderEndpointChoice,
         apply_provider_endpoint_choice,
         prompt_provider_endpoint_binding,
+        prompt_provider_model,
     )
     from yoetz.config.models import ConfigError
+    from yoetz.config.write import provider_preset
 
     try:
         if (
             interactive
             and not official
             and not fireworks
+            and not grok
             and provider_name is None
             and https_origin is None
             and model is None
@@ -1102,48 +1142,48 @@ def provider_endpoint(
             prompt_provider_endpoint_binding()
             _finish(0)
             return
-        if model is None:
-            _finish(_usage_failure())
-            return
         if (
-            (official and fireworks)
-            or (provider_name is not None and (official or fireworks or https_origin is not None))
-            or ((official or fireworks) and https_origin is not None)
+            (official and (fireworks or grok))
+            or (fireworks and grok)
+            or (
+                provider_name is not None
+                and (official or fireworks or grok or https_origin is not None)
+            )
+            or ((official or fireworks or grok) and https_origin is not None)
         ):
             _finish(_usage_failure())
             return
+        choice: ProviderEndpointChoice
         if provider_name is not None:
-            choices: dict[str, ProviderEndpointChoice] = {
-                "openai": "official_openai",
-                "official_openai": "official_openai",
-                "fireworks": "fireworks",
-                "anthropic": "anthropic",
-                "claude": "anthropic",
-                "anthropic-claude": "anthropic",
-                "gemini": "google_gemini",
-                "google": "google_gemini",
-                "google_gemini": "google_gemini",
-                "google-gemini": "google_gemini",
-                "openrouter": "openrouter",
-                "vercel-ai-gateway": "vercel_ai_gateway",
-                "vercel_ai_gateway": "vercel_ai_gateway",
-            }
-            choice = choices.get(provider_name.strip().lower())
-            if choice is None:
+            choice = cast(ProviderEndpointChoice, provider_preset(provider_name).choice)
+        elif official:
+            choice = "official_openai"
+        elif fireworks:
+            choice = "fireworks"
+        elif grok:
+            choice = "grok"
+        elif https_origin is not None:
+            choice = "owner_declared"
+        else:
+            _finish(_usage_failure())
+            return
+        if model is None:
+            if not interactive or not (sys.stdin.isatty() and sys.stdout.isatty()):
                 _finish(_usage_failure())
                 return
-            path, provider = apply_provider_endpoint_choice(choice, model=model)
-        elif official:
-            path, provider = apply_provider_endpoint_choice("official_openai", model=model)
-        elif fireworks:
-            path, provider = apply_provider_endpoint_choice("fireworks", model=model)
-        elif https_origin is not None:
+            if choice == "owner_declared":
+                model = typer.prompt("Model id", show_default=False).strip()
+            else:
+                model = prompt_provider_model(choice)
+            if not model:
+                _finish(_usage_failure())
+                return
+        if choice == "owner_declared":
             path, provider = apply_provider_endpoint_choice(
                 "owner_declared", model=model, https_origin=https_origin
             )
         else:
-            _finish(_usage_failure())
-            return
+            path, provider = apply_provider_endpoint_choice(choice, model=model)
         payload = {
             "config_path": str(path),
             "endpoint_profile_id": provider.endpoint_profile_id,
@@ -1273,7 +1313,20 @@ def _privacy_decision_command(kind: str) -> Callable[..., None]:
     ) -> None:
         module = importlib.import_module("yoetz.cli.privacy_control")
         operation = cast(Callable[[str], Awaitable[object]], getattr(module, f"decide_{kind}"))
-        _finish(run_async(lambda: _trusted_call(lambda: operation(pending_id), json_output)))
+
+        async def run_decision() -> object:
+            if kind != "policy":
+                return await operation(pending_id)
+            passphrase = _auto_unlock_store().load()
+            if passphrase is None:
+                return await operation(pending_id)
+            auto_operation = cast(
+                Callable[[str, bytearray], Awaitable[object]],
+                getattr(module, "decide_policy_with_local_reauthentication"),
+            )
+            return await auto_operation(pending_id, passphrase)
+
+        _finish(run_async(lambda: _trusted_call(run_decision, json_output)))
 
     return command
 
@@ -1390,6 +1443,10 @@ def root(
         bool,
         typer.Option("--fireworks", help="Use the bundled Fireworks Responses profile."),
     ] = False,
+    grok: Annotated[
+        bool,
+        typer.Option("--grok", help="Use the bundled Grok / xAI Chat Completions profile."),
+    ] = False,
     provider_name: Annotated[
         str | None,
         typer.Option(
@@ -1408,8 +1465,10 @@ def root(
     if set_provider:
         if context.invoked_subcommand is not None:
             raise typer.BadParameter("--set cannot be combined with a subcommand")
-        if fireworks and provider_name is not None:
-            raise typer.BadParameter("--fireworks and --provider are mutually exclusive")
+        if (fireworks or grok) and provider_name is not None:
+            raise typer.BadParameter("provider shortcuts and --provider are mutually exclusive")
+        if fireworks and grok:
+            raise typer.BadParameter("--fireworks and --grok are mutually exclusive")
         operation = _setup_operation("run_provider_setup")
         arguments: dict[str, object] = {
             "fireworks": fireworks,
@@ -1417,10 +1476,12 @@ def root(
         }
         if provider_name is not None:
             arguments["provider"] = provider_name
+        if grok:
+            arguments["grok"] = True
         _finish(run_async(lambda: operation(**arguments)))
         return
-    if fireworks or provider_name is not None or model is not None:
-        raise typer.BadParameter("--fireworks, --provider, and --model require --set")
+    if grok or fireworks or provider_name is not None or model is not None:
+        raise typer.BadParameter("--fireworks, --grok, --provider, and --model require --set")
     if context.invoked_subcommand is not None:
         return
     # Bare invocation (ADR-017, amending ADR-013): a human at a real terminal gets

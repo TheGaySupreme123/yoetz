@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import cast
 
 import pytest
 
+import yoetz.observability.diagnostics as diagnostics_module
 from builders.ledger_adapters import FixedClock, MemoryObjects
 from builders.policy_cases import FRONTIER, clm, make_case, record
 from yoetz.application.check import FinalSemanticEvaluation, execute_check, execute_check_commit
@@ -200,8 +203,10 @@ class _Runtime:
     def __init__(self, task: TaskRuntime) -> None:
         self.task = task
         self.release_count = 0
+        self.last_command: RouteCommand | None = None
 
-    async def route(self, _command: RouteCommand) -> TaskRuntime:
+    async def route(self, command: RouteCommand) -> TaskRuntime:
+        self.last_command = command
         return self.task
 
     async def release(self, runtime: TaskRuntime) -> None:
@@ -252,8 +257,9 @@ class _App:
         self,
         frozen: FrozenCase,
         deterministic_findings: tuple[Finding, ...],
+        runtime: object | None = None,
     ) -> FinalSemanticEvaluation:
-        _ = (frozen, deterministic_findings)
+        _ = (frozen, deterministic_findings, runtime)
         if self.crash_semantic:
             raise RuntimeError("semantic_evaluator_crashed")
         return self.semantic_result
@@ -313,10 +319,15 @@ async def test_semantic_required_unavailable_preserves_deterministic_truth() -> 
     assert result.semantic_status is SemanticStatus.NOT_CONFIGURED
     assert result.semantic_provenance is None
     assert result.coverage.known_gaps == ("semantic_review_not_configured",)
+    runtime = cast(_Runtime, app.runtime)
+    assert runtime.last_command is not None
+    assert RuntimeCapability.SEMANTIC in runtime.last_command.required_capabilities
 
 
 @pytest.mark.anyio
-async def test_semantic_evaluator_crash_degrades_to_not_run_without_false_clean() -> None:
+async def test_semantic_evaluator_crash_degrades_to_not_run_without_false_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Requirement: evaluator crash/timeout degrades to not-run disclosure, never false clean."""
 
     from yoetz.domain.receipts import (
@@ -324,6 +335,7 @@ async def test_semantic_evaluator_crash_degrades_to_not_run_without_false_clean(
         SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     )
 
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
     crashed = _App(semantic=True, crash_semantic=True)
     crash_result = await execute_check_commit(crashed, _request("semantic_if_configured"))
     assert crash_result.findings
@@ -332,6 +344,16 @@ async def test_semantic_evaluator_crash_degrades_to_not_run_without_false_clean(
     assert crash_result.verdict.value != "no_issue_detected"
     assert SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP in crash_result.coverage.known_gaps
     assert SEMANTIC_REVIEW_NOT_CONFIGURED_GAP not in crash_result.coverage.known_gaps
+    raw = diagnostics_module.diagnostic_log_path(root=tmp_path).read_text(encoding="ascii")
+    records = tuple(json.loads(line) for line in raw.splitlines() if line)
+    assert len(records) == 1
+    assert records[0]["component"] == "check"
+    assert records[0]["operation"] == "semantic_not_dispatched_coordinator_failure"
+    assert records[0]["reason"] == "exception_runtime_error"
+    assert records[0]["request_id"] == _REQUEST
+    assert "semantic_evaluator_crashed" not in raw
+    assert "payload" not in raw
+    assert str(tmp_path) not in raw
 
     timed_out = _App(semantic=True)
     timed_out.semantic_result = FinalSemanticEvaluation(

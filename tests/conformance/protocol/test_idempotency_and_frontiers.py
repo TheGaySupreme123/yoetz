@@ -62,7 +62,7 @@ def test_changed_identity_conflicts_under_same_request_id(
     assert new_key["request_id"] != conflict["request_id"]
     assert new_key["request_digest"] == changed_digest
     error = cast(dict[str, Any], expected["variants"])["changed_request_same_key"]["error"]
-    assert error == {"code": "IDEMPOTENCY_CONFLICT", "retryable": False}
+    assert error == {"code": "REQUEST_IDENTITY_CONFLICT", "retryable": False}
 
 
 def test_frontier_handling_matches_operation_contract(fixture_loader: FixtureLoader) -> None:

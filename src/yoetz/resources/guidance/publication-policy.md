@@ -29,6 +29,27 @@ For a large inventory, create obligations per coherent work package. Publish one
 
 An obligation names what must be satisfied. Evidence is a bounded, provenance-labeled reason to believe something about it. A claim states a conclusion. Link them explicitly; do not substitute a file list for an obligation or a claim for evidence.
 
+## Obligation resolution
+
+<a id="obligation-resolution"></a>
+
+Resolving an obligation is a one-way `open → resolved` state transition, not an edit. Publish a second
+`obligation_published` event for the **same** `obligation_id` that:
+
+1. repeats every meaning field from the open obligation **byte-for-byte**: `description`,
+   `acceptance_criteria`, `evidence_expectation`, `requested_items`, and `source_refs` (omit a field
+   only when the open event also omitted it);
+2. sets `status` to `resolved`;
+3. supplies the final bounded `resolution_evidence_refs` (one or more evidence or result ids).
+
+Only `status` and `resolution_evidence_refs` may differ. Changing meaning fields, republishing
+`status: open` for an existing id, mutating an already-resolved obligation, or reopening
+`resolved → open` is rejected with reason `obligation_resolution_mismatch` and invariant
+`meaning_fields_must_repeat` (or `open_to_resolved_only` for an invalid status transition). The
+public error names the mismatched schema field names only — never their values. A worked open +
+resolution pair lives in the `publish_work` tool input schema `examples` entry for
+`obligation_published`.
+
 ## Subject state and freshness
 
 Bind change-sensitive evidence to the exact subject state or frontier it concerns. If a material dependency changed or its state is unknown, mark the evidence stale or limited. Absence of visible source is not evidence that nothing changed.
@@ -36,6 +57,16 @@ Bind change-sensitive evidence to the exact subject state or frontier it concern
 ## Batching, sequencing, and retry
 
 Batch facts that belong to one material transition. Preserve writer sequence and expected frontier. On timeout, reuse the same request and operation IDs; never manufacture a replacement event merely because the response was lost.
+
+Before a material publish over MCP, set `dry_run: true` to validate the batch and preview accepted event ids and coverage without appending. The dry-run result is not evidential and must not be cited as a check, publication, or coverage source. When the preview is acceptable, publish with the same `request_id` and `dry_run` omitted or false.
+
+Worked examples for each ordinary publishable family — and a cross-linked action/result/evidence/claim batch — live in the `publish_work` tool input schema `examples` entry. Example `occurred_at` values are illustrative shape only; do not copy them into live drafts.
+
+## Event time claims
+
+`occurred_at` is a caller assertion of when the event happened. Use the best real RFC 3339 millisecond UTC time available. If the exact time is unknown, use an honest bounded approximation and understand that it remains a claim — the service does not check outside clocks and does not reject far-past, future, or out-of-order caller times.
+
+The service independently stamps `accepted_at` on acceptance. Both values are durable and bound into the entry digest. Ledger order, causality, supersession, optimistic concurrency, and receipt freshness use ingestion sequence and frontier, not caller time. `status` with `view=history` returns both clocks on each item so a reader never sees a caller claim alone as if it were service time.
 
 ## Multi-agent work
 

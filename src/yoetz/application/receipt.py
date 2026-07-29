@@ -43,7 +43,7 @@ from yoetz.kernel.receipt_builder import (
     ReceiptFindingState,
     build_receipt,
 )
-from yoetz.kernel.reducers import replay
+from yoetz.kernel.reducers import is_material_event_family, replay
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
@@ -301,24 +301,34 @@ def _context(
     applicable: CheckRecordedPayload | None = None
     gaps = list(case.gaps)
     latest = projection.latest_tested_state
-    if latest is not None and latest.subject_frontier == frontier:
+    check_record: LedgerRecord | None = None
+    if latest is not None:
         for record in records:
             if record.event_id == latest.source_check_event_id:
-                if type(record.payload) is CheckRecordedPayload:
-                    applicable = record.payload
-                else:
-                    gaps.append(
-                        CaseGap(
-                            f"check_payload_unavailable:{latest.source_check_event_id}",
-                            "check_payload_unavailable",
-                            (latest.source_check_event_id,),
-                        )
-                    )
+                check_record = record
                 break
-    elif latest is None:
+    if latest is None:
         gaps.append(CaseGap("check_not_recorded", "check_not_recorded", ()))
-    else:
+    elif check_record is not None and any(
+        is_material_event_family(record.schema.name)
+        and record.ledger.ingestion_sequence > check_record.ledger.ingestion_sequence
+        for record in records
+    ):
+        # Applicability follows the material state, not frontier equality: a check applies to
+        # this receipt when no material-family event was appended after the check itself. Its
+        # own events (returned findings plus check_recorded) land atomically right after the
+        # tested frontier, so anything later is genuinely newer work that supersedes it.
         gaps.append(CaseGap("check_not_applicable", "check_not_applicable", ()))
+    elif check_record is not None and type(check_record.payload) is CheckRecordedPayload:
+        applicable = check_record.payload
+    else:
+        gaps.append(
+            CaseGap(
+                f"check_payload_unavailable:{latest.source_check_event_id}",
+                "check_payload_unavailable",
+                (latest.source_check_event_id,),
+            )
+        )
     if applicable is None and not any(
         gap.code in {"check_not_recorded", "check_not_applicable", "check_payload_unavailable"}
         for gap in gaps

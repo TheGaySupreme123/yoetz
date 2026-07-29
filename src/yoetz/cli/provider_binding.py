@@ -18,6 +18,7 @@ from yoetz.config.write import (
     anthropic_provider,
     fireworks_provider,
     google_gemini_provider,
+    grok_provider,
     official_openai_provider,
     openrouter_provider,
     owner_declared_openai_provider,
@@ -31,6 +32,7 @@ __all__ = [
     "ProviderEndpointChoice",
     "apply_provider_endpoint_choice",
     "prompt_provider_endpoint_binding",
+    "prompt_provider_model",
 ]
 
 ProviderEndpointChoice = Literal[
@@ -39,6 +41,7 @@ ProviderEndpointChoice = Literal[
     "anthropic",
     "google_gemini",
     "openrouter",
+    "grok",
     "vercel_ai_gateway",
     "owner_declared",
 ]
@@ -81,6 +84,8 @@ def apply_provider_endpoint_choice(
         provider = google_gemini_provider(model=model)
     elif choice == "openrouter":
         provider = openrouter_provider(model=model)
+    elif choice == "grok":
+        provider = grok_provider(model=model)
     elif choice == "vercel_ai_gateway":
         provider = vercel_ai_gateway_provider(model=model)
     else:
@@ -89,6 +94,29 @@ def apply_provider_endpoint_choice(
         provider = owner_declared_openai_provider(model=model, https_origin=https_origin)
     written = write_provider_binding(provider, path=path, base=_load_base(path))
     return written, provider
+
+
+def prompt_provider_model(choice: str) -> str | None:
+    """Select a repository-reviewed suggestion or enter an explicit custom model ID."""
+
+    preset = provider_preset(choice)
+    typer.echo("")
+    typer.echo(f"  Suggested {preset.provider_id} models")
+    typer.echo("  Repository-reviewed convenience list; availability depends on your account.")
+    for index, model_id in enumerate(preset.suggested_models, start=1):
+        typer.echo(f"  {index}  {model_id}")
+    typer.echo("  c  Custom model ID")
+    raw = typer.prompt("Select model", default="1").strip().lower()
+    if raw in {"c", "custom", "manual"}:
+        custom = typer.prompt("  Custom model id", show_default=False).strip()
+        if not custom:
+            typer.echo("invalid_request: model_id_required", err=True)
+            return None
+        return custom
+    if raw.isdecimal() and 1 <= int(raw) <= len(preset.suggested_models):
+        return preset.suggested_models[int(raw) - 1]
+    typer.echo("invalid_request: choose a listed model number or c", err=True)
+    return None
 
 
 def prompt_provider_endpoint_binding(*, path: Path | None = None) -> Path | None:
@@ -101,14 +129,15 @@ def prompt_provider_endpoint_binding(*, path: Path | None = None) -> Path | None
     typer.echo("  3  Anthropic Claude (OpenAI-compatible Chat Completions)")
     typer.echo("  4  Google Gemini (OpenAI-compatible Chat Completions)")
     typer.echo("  5  OpenRouter (OpenAI-compatible Chat Completions)")
-    typer.echo("  6  Vercel AI Gateway (OpenAI-compatible Responses)")
-    typer.echo("  7  Custom OpenAI-compatible HTTPS origin")
+    typer.echo("  6  Grok / xAI (OpenAI-compatible Chat Completions)")
+    typer.echo("  7  Vercel AI Gateway (OpenAI-compatible Responses)")
+    typer.echo("  8  Custom OpenAI-compatible HTTPS origin")
     typer.echo("  s  Skip for now")
     raw = typer.prompt("Select", default="s").strip().lower()
     if raw in {"s", "skip", ""}:
         return None
-    if raw not in {"1", "2", "3", "4", "5", "6", "7"}:
-        typer.echo("invalid_request: choose 1, 2, 3, 4, 5, 6, 7, or s", err=True)
+    if raw not in {"1", "2", "3", "4", "5", "6", "7", "8"}:
+        typer.echo("invalid_request: choose 1, 2, 3, 4, 5, 6, 7, 8, or s", err=True)
         return None
 
     choices: dict[str, ProviderEndpointChoice] = {
@@ -117,16 +146,19 @@ def prompt_provider_endpoint_binding(*, path: Path | None = None) -> Path | None
         "3": "anthropic",
         "4": "google_gemini",
         "5": "openrouter",
-        "6": "vercel_ai_gateway",
-        "7": "owner_declared",
+        "6": "grok",
+        "7": "vercel_ai_gateway",
+        "8": "owner_declared",
     }
     choice = choices[raw]
     preset = None if choice == "owner_declared" else provider_preset(choice)
-    model = typer.prompt(
-        "  Model id",
-        default=None if preset is None else preset.default_model,
-        show_default=preset is not None,
-    ).strip()
+    if preset is None:
+        model = typer.prompt("  Model id", show_default=False).strip()
+    else:
+        selected = prompt_provider_model(preset.choice)
+        if selected is None:
+            return None
+        model = selected
     try:
         if choice == "owner_declared":
             origin = typer.prompt(

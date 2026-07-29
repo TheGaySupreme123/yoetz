@@ -15,6 +15,7 @@ from yoetz.adapters.memory.ledger import (
     MemoryLedgerAdapter,
     MemoryLedgerState,
     build_append_operation_record,
+    compact_status_coverage,
     load_frozen_case_from_resume,
 )
 from yoetz.adapters.sqlite.observation import SqliteObservationStore
@@ -77,6 +78,7 @@ from yoetz.ports.ledger import (
     ProjectionView,
     SelectedAttempt,
     SemanticAttemptHandle,
+    SemanticAttemptRecord,
     SemanticJobRecord,
     StoredProjection,
 )
@@ -184,6 +186,31 @@ def _operation_digest_row(
     if type(row[0]) is not str or type(row[1]) is not str:
         raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
     return row[0], row[1]
+
+
+def _latest_check_column_values(
+    projection: ProjectionState,
+) -> tuple[str | None, int | None, str | None, str | None, bytes | None, int | None, bytes | None]:
+    """Bind params for the seven ``p1_projection_state`` latest-check columns.
+
+    Always all-null or all-non-null so the ``0001.sql`` consistency CHECK holds. When the
+    reducer has cleared ``latest_tested_state`` (for example redaction of the current
+    check), the durable mirror must clear with it — leaving prior values would advertise a
+    redacted verdict after restart.
+    """
+
+    latest = projection.latest_tested_state
+    if latest is None:
+        return (None, None, None, None, None, None, None)
+    return (
+        latest.source_check_event_id,
+        latest.subject_frontier.sequence,
+        latest.subject_frontier.head_digest,
+        latest.verdict.value,
+        canonical_encode(latest.returned_finding_ids),
+        latest.suppressed_count,
+        canonical_encode(coverage_to_json(latest.coverage)),
+    )
 
 
 def _import_reservation(db: apsw.Connection, command: AppendCommand) -> _Reservation:
@@ -969,11 +996,18 @@ class SqliteLedger:
             "WHERE projection_name='work'",
             (projection.frontier, projection_digest(projection)),
         )
+        # Status coverage is the applicable-check fold, not the last event's envelope
+        # (engine-derived check/receipt envelopes hardcode check_types=none). Always mirror
+        # latest_tested_state too — including clearing it when redaction drops the check.
         self._db.execute(
             "UPDATE p1_projection_state SET frontier_seq=?,head_digest=?,"
             "open_obligation_count=?,unresolved_finding_count=?,freshness=?,"
             "unknown_event_count=?,task_title_source_event_id=?,"
-            "status_coverage_canonical=?,status_gap_codes_canonical=? "
+            "status_coverage_canonical=?,status_gap_codes_canonical=?,"
+            "latest_check_event_id=?,latest_subject_frontier_seq=?,"
+            "latest_subject_frontier_digest=?,latest_verdict=?,"
+            "latest_returned_finding_ids=?,latest_suppressed_count=?,"
+            "latest_coverage_canonical=? "
             "WHERE projection_name='work'",
             (
                 projection.frontier,
@@ -983,8 +1017,11 @@ class SqliteLedger:
                 projection.freshness.value,
                 projection.unknown_event_count,
                 records[0].event_id,
-                canonical_encode(coverage_to_json(records[-1].coverage)),
+                canonical_encode(
+                    coverage_to_json(compact_status_coverage(self._state.records, projection))
+                ),
                 canonical_encode(projection.coverage_gaps),
+                *_latest_check_column_values(projection),
             ),
         )
 
@@ -1087,10 +1124,17 @@ class SqliteLedger:
             "WHERE projection_name='work'",
             (projection.frontier, projection_digest(projection)),
         )
+        # Mirror the reducer's applicable-check coverage and latest-check aggregate, never
+        # the last event envelope. When latest_tested_state is absent, clear the seven
+        # latest_* columns atomically so a redacted check cannot survive restart.
         self._db.execute(
             "UPDATE p1_projection_state SET frontier_seq=?,head_digest=?,"
             "open_obligation_count=?,unresolved_finding_count=?,freshness=?,"
-            "unknown_event_count=?,status_coverage_canonical=?,status_gap_codes_canonical=? "
+            "unknown_event_count=?,status_coverage_canonical=?,status_gap_codes_canonical=?,"
+            "latest_check_event_id=?,latest_subject_frontier_seq=?,"
+            "latest_subject_frontier_digest=?,latest_verdict=?,"
+            "latest_returned_finding_ids=?,latest_suppressed_count=?,"
+            "latest_coverage_canonical=? "
             "WHERE projection_name='work'",
             (
                 projection.frontier,
@@ -1099,8 +1143,11 @@ class SqliteLedger:
                 len(projection.findings),
                 projection.freshness.value,
                 projection.unknown_event_count,
-                canonical_encode(coverage_to_json(records[-1].coverage)),
+                canonical_encode(
+                    coverage_to_json(compact_status_coverage(self._state.records, projection))
+                ),
                 canonical_encode(projection.coverage_gaps),
+                *_latest_check_column_values(projection),
             ),
         )
 
@@ -1328,6 +1375,17 @@ class SqliteLedger:
         )
         await self._sync_after_mutation()
 
+    async def fail_semantic_job(
+        self,
+        lease: OperationLease,
+        job_id: str,
+        terminal_code: SemanticReason,
+    ) -> SemanticJobRecord:
+        await self._ensure_recovered()
+        result = await self._oracle().fail_semantic_job(lease, job_id, terminal_code)
+        await self._sync_after_mutation()
+        return result
+
     async def select_attempt(
         self,
         lease: OperationLease,
@@ -1338,6 +1396,16 @@ class SqliteLedger:
         result = await self._oracle().select_attempt(lease, handle, selected_result_object_ref)
         await self._sync_after_mutation()
         return result
+
+    async def load_semantic_job(
+        self, writer_id: str, operation_id: str
+    ) -> SemanticJobRecord | None:
+        await self._ensure_recovered()
+        return await self._oracle().load_semantic_job(writer_id, operation_id)
+
+    async def list_semantic_attempts(self, job_id: str) -> tuple[SemanticAttemptRecord, ...]:
+        await self._ensure_recovered()
+        return await self._oracle().list_semantic_attempts(job_id)
 
     async def renew_leases(self, lease: OperationLease) -> OperationLease:
         await self._ensure_recovered()

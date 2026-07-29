@@ -15,6 +15,10 @@ from yoetz.ports.ledger import (
     OperationState,
 )
 from yoetz.ports.objects import ObjectRef
+from yoetz.ports.publish_response_catalog import (
+    PublishResponseCatalogPort,
+    StoredPublishResponse,
+)
 from yoetz.ports.runtime import StartCompletionEvidence
 from yoetz.ports.start_catalog import (
     EncryptedResultRef,
@@ -36,6 +40,7 @@ __all__ = [
     "resolve_ambiguous_start",
     "run_catalog_transition",
     "run_prepared_append",
+    "run_publish_response_commit",
 ]
 
 type CommitOutcome = Literal["committed", "not_committed", "pending", "quarantined", "unknown"]
@@ -248,6 +253,17 @@ async def run_prepared_append(ledger: LedgerPort, prepared: PreparedMutation) ->
         raise _invalid()
     _raise_if_cancelling()
     return await _await_definite(ledger.append_batch(prepared.command))
+
+
+async def run_publish_response_commit(
+    catalog: PublishResponseCatalogPort, response: StoredPublishResponse
+) -> StoredPublishResponse:
+    """Put one validated response under the same cancellation-shielded commit boundary."""
+
+    if type(response) is not StoredPublishResponse:
+        raise _invalid()
+    _raise_if_cancelling()
+    return await _await_definite(catalog.put_if_absent(response))
 
 
 def _idempotency_conflict() -> PublicOperationError:

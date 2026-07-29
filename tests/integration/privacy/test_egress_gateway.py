@@ -16,7 +16,12 @@ import hmac as hmac_module
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
-from yoetz.adapters.privacy.gateway import PolicyEnforcingOutboundGateway
+import pytest
+
+from yoetz.adapters.privacy.gateway import (
+    PolicyEnforcingOutboundGateway,
+    _with_policy_digest,  # pyright: ignore[reportPrivateUsage]
+)
 from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer
 from yoetz.adapters.providers.factory import external_factory_builders_from_config
 from yoetz.adapters.providers.fake import (
@@ -30,7 +35,7 @@ from yoetz.adapters.providers.local_model import (
 )
 from yoetz.adapters.providers.openai_responses_factory import provider_binding_from_config
 from yoetz.config.write import anthropic_provider
-from yoetz.domain.findings import SemanticFailureClass
+from yoetz.domain.findings import SamplingParams, SemanticFailureClass
 from yoetz.domain.privacy import (
     ApprovedLocalDisclosureCase,
     ApprovedOutboundCase,
@@ -63,6 +68,7 @@ from yoetz.ports.privacy import (
 from yoetz.ports.secret_memory import ProviderAttemptAuthBinding
 from yoetz.ports.semantic import (
     Deadline,
+    ProviderAttemptProvenance,
     SemanticJudgment,
     SemanticResult,
     SemanticResultSuccess,
@@ -70,6 +76,7 @@ from yoetz.ports.semantic import (
 )
 from yoetz.protocol.canonical import canonical_encode
 from yoetz.protocol.ids import IdKind
+from yoetz.protocol.models import SemanticStatus
 
 _INSTALLATION = "ins_60000000-0000-4000-8000-000000000001"
 _TASK = "tsk_60000000-0000-4000-8000-000000000002"
@@ -496,6 +503,29 @@ def _case(
     )
 
 
+def _provenance(
+    status: SemanticStatus,
+    *,
+    policy_digest: str,
+    failure_class: SemanticFailureClass | None = None,
+) -> ProviderAttemptProvenance:
+    return ProviderAttemptProvenance(
+        provider=_PROVIDER_ID,
+        endpoint_profile_id=_ENDPOINT_ID,
+        endpoint_profile_version=_ENDPOINT_VERSION,
+        model=_MODEL_ID,
+        sdk_version="0.0.0",
+        prompt_digest=_DIGEST_2,
+        schema_digest=_DIGEST_2,
+        policy_digest=policy_digest,
+        privacy_policy_digest=policy_digest,
+        sampling_params=SamplingParams(128),
+        latency_ms=1,
+        status=status,
+        failure_class=failure_class,
+    )
+
+
 def _deadline(clock: _Clock, *, remaining_seconds: float = 30.0) -> Deadline:
     return Deadline(_NOW + timedelta(minutes=5), clock.monotonic + remaining_seconds)
 
@@ -539,10 +569,18 @@ def test_reconcile_and_dispatch_external_semantic_succeeds() -> None:
     policy = _policy(external_enabled=True, local_enabled=False)
     effective = EffectivePrivacyPolicy(policy, 1, policy.policy_digest)
     human = _human_authority(available=True)
+    assert gateway.has_connected_provider_binding(_provider_binding()) is False
 
     async def run() -> tuple[SemanticResult, EgressAuthorization]:
         reconciliation = await gateway.reconcile_policy(effective, human)
         assert reconciliation == ProviderReconciliation(1, 1, 0, ())
+        assert gateway.has_connected_provider_binding(_provider_binding()) is True
+        assert (
+            gateway.has_connected_provider_binding(
+                replace(_provider_binding(), model_id="different-model-same-provider")
+            )
+            is False
+        )
 
         authorization = _authorization(
             authorization_id="aut_60000000-0000-4000-8000-000000000010",
@@ -581,6 +619,62 @@ def test_reconcile_and_dispatch_external_semantic_succeeds() -> None:
     assert receipt.request_commitment.commitment == expected_commitment
     assert receipt.request_commitment.algorithm == "hmac-sha256/yoetz-privacy-egress-request-v1"
     assert receipt.counts.request_body_bytes == len(rendered_body)
+    # Provenance and the egress receipt agree about which policy authorized this dispatch, and
+    # neither carries the placeholder the provider adapter would otherwise have minted.
+    assert result.provenance.policy_digest == receipt.policy.policy_digest
+    assert result.provenance.privacy_policy_digest == receipt.policy.policy_digest
+    assert receipt.policy.policy_digest == policy.policy_digest
+    assert result.provenance.policy_digest != "sha256:" + "0" * 64
+
+
+def test_a_placeholder_policy_digest_can_never_ride_a_successful_dispatch() -> None:
+    """The dispatch-boundary fence, exercised directly at the boundary that owns it.
+
+    Reaching this through the public dispatch path is impossible by construction -- the gateway
+    already refuses to dispatch unless the case, the authorization, and the live registry agree on
+    the policy digest, and a real policy digest is a canonical digest that is never all zeros. That
+    is precisely why the fence is worth pinning: it is the assertion that keeps the pre-fix
+    behaviour (an adapter-minted all-zero digest recorded as if a real policy had authorized it)
+    from silently returning.
+    """
+
+    authorization = _authorization(
+        authorization_id="aut_60000000-0000-4000-8000-000000000090",
+        policy_digest=_DIGEST,
+        service_generation=1,
+    )
+    case = _case(
+        case_id="cas_60000000-0000-4000-8000-000000000091",
+        authorization=authorization,
+        payload=canonical_encode({"note": "hello"}),
+    )
+    zero = "sha256:" + "0" * 64
+    judgment = SemanticJudgment("no_material_discrepancy", ())
+    provenance = _provenance(SemanticStatus.SUCCEEDED, policy_digest=zero)
+
+    # A real policy digest is bound through, replacing whatever the adapter asserted.
+    bound = _with_policy_digest(SemanticResultSuccess(judgment, provenance), case)
+    assert bound.provenance.policy_digest == _DIGEST
+    assert bound.provenance.privacy_policy_digest == _DIGEST
+
+    # A placeholder that survives the rebind is refused rather than recorded as audited.
+    with pytest.raises(ValueError, match="privacy_gateway_provenance_policy_digest_placeholder"):
+        _with_policy_digest(
+            SemanticResultSuccess(judgment, provenance), replace(case, policy_digest=zero)
+        )
+
+    # A genuinely-blocked attempt that never reached a provider keeps its honest zeros.
+    blocked = _with_policy_digest(
+        SemanticResultUnavailable(
+            _provenance(
+                SemanticStatus.UNAVAILABLE,
+                policy_digest=zero,
+                failure_class=SemanticFailureClass.TRANSPORT,
+            )
+        ),
+        replace(case, policy_digest=zero),
+    )
+    assert blocked.provenance.policy_digest == zero
 
 
 def test_dispatch_rejects_authorization_case_mismatch() -> None:

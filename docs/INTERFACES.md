@@ -65,9 +65,9 @@ lookup, or kind-from-ID public API.
 `PublicErrorCode` is declared exactly as `class PublicErrorCode(str, Enum)`, with explicit string
 values equal to the member spellings and this frozen order:
 `INVALID_REQUEST`, `PROTOCOL_VERSION_UNSUPPORTED`, `SESSION_NOT_FOUND`, `SESSION_CONFLICT`,
-`IDEMPOTENCY_CONFLICT`, `OPERATION_PENDING`, `FRONTIER_CONFLICT`, `EVENT_INVALID`,
-`LIMIT_EXCEEDED`, `BUNDLE_BUSY`, `STORAGE_UNSAFE`, `STORAGE_CORRUPT`, `MIGRATION_REQUIRED`,
-`SERVICE_UNAVAILABLE`, `VAULT_LOCKED`, `PRIVACY_AUTHORITY_REQUIRED`,
+`IDEMPOTENCY_CONFLICT`, `REQUEST_IDENTITY_CONFLICT`, `OPERATION_PENDING`, `FRONTIER_CONFLICT`,
+`EVENT_INVALID`, `LIMIT_EXCEEDED`, `BUNDLE_BUSY`, `STORAGE_UNSAFE`, `STORAGE_CORRUPT`,
+`MIGRATION_REQUIRED`, `SERVICE_UNAVAILABLE`, `VAULT_LOCKED`, `PRIVACY_AUTHORITY_REQUIRED`,
 `PROVIDER_UNAVAILABLE`, `PROVIDER_REFUSED`, `PROVIDER_TIMEOUT`, `SEMANTIC_RESULT_INVALID`,
 `CANCELLED`, `INTERNAL_ERROR`.
 
@@ -84,9 +84,96 @@ ordinary dictionary with exactly `code`, `message`, `retryable`, and bound `corr
 adds `safe_details` only when nonempty, as a new ordinary dictionary in ASCII key order. The frozen
 public-error JSON Schema remains a structural superset of this exact mapping-only runtime emitter.
 Allowlisted `safe_details` keys include structural recovery fields such as `reason_code`,
-`sequence`, and `head_digest` (for `FRONTIER_CONFLICT` current-head recovery). Protocol reason
-`response_projection_failed` marks an MCP post-commit shaping failure: the write may already be
-durable, so the public error is retryable and same-`request_id` resume is the recovery path.
+`sequence`, and `head_digest` (for `FRONTIER_CONFLICT` current-head recovery). For MCP
+`INVALID_REQUEST` validation failures, `safe_details` may also carry parallel `fields` and
+`reasons` arrays: each entry is an allowlisted JSON pointer and a closed reason token for that
+location (same index order; at most eight locations). Pointers use only trusted location segments;
+unknown or hostile property names are never echoed. Closed reason tokens are:
+
+- `missing` — a required property is absent;
+- `extra_forbidden` — an additional property is not admitted;
+- `invalid_type` / `invalid_value` — type or admitted-value failure at the named path;
+- `invalid_type_or_value` — residual validation failure when no more specific closed token applies;
+- `paired_field_required` — a schema `dependentRequired` pair is incomplete (for example `start`
+  with `workspace_ref` present and `external_ref` absent, or the inverse). Both the present field
+  and the required peer are named; the authoring hint states the schema peer rule (e.g.
+  `workspace_ref requires external_ref`) without echoing submitted values;
+- `conditional_field_required` — a root-level schema `if`/`then` (or equivalent closed object rule)
+  activated required alternatives (for example `start` with `mode` `attach` without `session_id`
+  or the paired external/workspace refs). Named fields are the safe required alternatives; the
+  authoring hint states the activating condition when it is a bounded schema const (e.g.
+  `mode attach requires …`).
+
+These object-rule tokens are projected only from checked-in schema metadata and validator kind —
+never from caller-controlled keys or free-form exception text. Unrecognized object rules degrade
+to a bounded generic `INVALID_REQUEST` without inventing field pointers.
+
+Protocol reason
+`response_projection_failed` marks a post-commit shaping failure for non-`publish_work` writes (and
+for the genuinely impossible case where even the minimal publish envelope cannot be built): the
+write may already be durable, so the public error is retryable and same-`request_id` resume is the
+recovery path. For `publish_work`, a post-commit projection failure after a successful append is
+not reported as an error at all. The daemon returns a reduced total-acceptance success branch
+with `ok: true`, `response_completeness: "accepted_projection_unavailable"`,
+`reason_code: "response_projection_failed"`, a `correlation_id` for operator diagnostics, the
+subject/result frontiers, and accepted event ids, entry digests, and ingestion sequences — built
+only from `AppendResult` / the closed internal result, never from privacy projection. The caller
+does not need a second `status` call or a same-`request_id` replay to learn what landed.
+For `publish_work`, completed-operation replay is resolved before body preparation and before
+`expected_frontier`; it never re-appends the accepted events. Replay keys only on
+`(task_id, writer_id, request_id)` from the request envelope. When the body matches the stored
+request digest, the stored result is returned. When the same `request_id` is reused with a
+different body (or a body that cannot be prepared), the public code is
+`REQUEST_IDENTITY_CONFLICT` with `reason_code: request_identity_conflict`, carrying the committed
+`sequence`, `head_digest`, and accepted-event `count` — never `INVALID_REQUEST` and never a second
+append. If an exact validated full success body was durably stored, replay to the same ordinary
+disclosure sink returns that body without running privacy projection again.
+An accepted event's optional `summary` is non-null when present. Until publication supplies an
+actual summary, the field is absent from both the internal projection document and the public
+success body; an absent summary is never materialized as JSON `null` or reported as policy-omitted.
+Optional `dry_run: true` on `PublishWorkRequest` validates the full batch and returns
+`outcome: "dry_run"` with `evidential: false` and a `would_accept` preview (event ids, schema
+identity, refs) plus coverage/gaps. It appends nothing, records no operation, does not consume
+`request_id`, and does not move the frontier — same non-citable discipline as
+`status view=candidate_findings`. A subsequent real publish may reuse the same `request_id`.
+`dry_run: null` is rejected; omit the field or pass a boolean.
+The preferred recovery read after any ambiguous write is `status view=operation` with
+`filter.operation_request_id` set to the write's `request_id`: it is a state lookup for that
+operation identity (`absent`/`pending`/`complete`/`quarantined`) for the authenticated writer,
+without requiring a reconstructed publish body. Stored result detail is state-conditional: only
+`complete` + `publish_work` carries outcome, subject/result frontiers, and accepted event
+ids/digests; `pending`/`quarantined` report kind without those fields; `absent` reports none of
+them; non-publish completions report kind without append-shaped event detail. Lookups are scoped
+to the caller writer; another writer's `request_id` is reported as absent.
+MCP `publish_work` performs the same envelope-first operation lookup when the supplied body fails
+schema validation (so a malformed retry body can still recover a committed operation). Recovery
+result selection is a closed tri-state:
+- **found** (`pending` / `complete` / `quarantined`) replaces the body-validation result with the
+  bounded recovery meaning for that state;
+- **authoritative absent** returns the original field-pointed `INVALID_REQUEST` (including for a
+  fresh `dry_run: true` with a malformed field — dry-run creates no operation record);
+- **lookup unavailable** (connection, timeout, projection, or unexpected recovery failure,
+  including a nested `read_projection_failed` on the internal status read) returns retryable
+  `OPERATION_PENDING` with `reason_code: operation_recovery_unavailable`, the original publish
+  `request_id`, and the safe authoring field pointer that will apply if the operation is later
+  authoritatively absent. The remedy is: (1) retry with the **same** `request_id`; (2) if recovery
+  reports absent, correct the named field and use the intended request identity; (3) if recovery
+  reports complete, recover the stored result. An unavailable recovery oracle must never claim
+  that durable state did or did not change, must never tell the caller to mint a new `request_id`,
+  and must never promote a nested status request id or nested read-only durability message as the
+  outer publish result.
+`read_projection_failed` is the read-only counterpart for direct status/receipt reads: nothing
+was appended, so the remedy is repeating the request rather than a same-`request_id` replay that
+has no operation record to load.
+When a non-publish write surfaces `response_projection_failed` and the committed frontier is known,
+the control error also carries `sequence`, `head_digest`, and `count` in `accepted_state` /
+`safe_details`.
+
+MCP resource discovery: `resources/list` serves the four `yoetz://guidance/*.md` entries and
+validates against the MCP `ListResourcesResult` schema (`tests/subprocess/test_mcp_resource_discovery.py`).
+`resources/templates/list` answers method-not-found because no templates are declared and the
+capability is not advertised — that pairing is conformant and is asserted, not "fixed". Guidance
+must not present template discovery as a recovery path.
 Internal-only value error: `ProtocolValueError(reason_code: str)` — bounded reason codes, never
 free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from codes in
 `cli/exits.py` only.
@@ -161,18 +248,18 @@ The schema catalog (`protocol/schemas.py`) has two orthogonal enums. `SchemaKind
 runtime category `request_result|event|config|version_manifest`.
 `SchemaArtifactRole` is the exact release/packaging role:
 `common-value`, `MCP input`, `MCP output`, `persisted-envelope`, `event-envelope`,
-`event-payload`, `configuration`, `finding`, `semantic-provenance`, `receipt-document`,
-`privacy-policy`, `outbound-case`, `privacy-audit`, `setup-contract`, `local-control`,
-`service-status`, or `version-report`. `SchemaDocument` contains both `schema_kind` and
-`artifact_role: SchemaArtifactRole`; neither value is inferred from the other. The reviewed
-`schemas/manifest.json` owns the closed path-to-artifact-role mapping, and catalog loading fails
-closed on an unknown or path-incompatible role.
+`event-payload`, `configuration`, `finding`, `provider-judgment`, `semantic-provenance`,
+`receipt-document`, `privacy-policy`, `outbound-case`, `privacy-audit`, `setup-contract`,
+`local-control`, `service-status`, or `version-report`. `SchemaDocument` contains both
+`schema_kind` and `artifact_role: SchemaArtifactRole`; neither value is inferred from the other.
+The reviewed `schemas/manifest.json` owns the closed path-to-artifact-role mapping, and catalog
+loading fails closed on an unknown or path-incompatible role.
 
 The independent exhaustive path-to-`SchemaKind` map is: `events/* -> event`,
 `config/* -> config`, `version/* -> version_manifest`, and
 `common/*|operations/*|findings/*|receipts/*|privacy/*|service/* -> request_result`. The manifest
 records both typed values and the catalog re-derives each from its own map. These prefixes exhaust
-the 52 v0.1 schema artifacts; no `support_manifest` kind or support-manifest schema exists.
+the 53 v0.1 schema artifacts; no `support_manifest` kind or support-manifest schema exists.
 
 ## 5. Coverage (`protocol/coverage.py`)
 
@@ -379,9 +466,12 @@ subject_frontier, coverage: Coverage, provenance: SemanticProvenance | None)`.
 `ResponseDisposition` is the nominal enum `acknowledged|rejected|waived`; both are owned here.
 `domain/findings.py` also solely owns the finalized, receipt-bound `SemanticProvenance` and its
 schema-shaped `SamplingParams`, `TokenUsage`, `CostFields`, `SemanticDispatchKind`, and
-`SemanticFailureClass` values. It imports the shared status/reason enums and validator from
-`protocol/models.py`. `ports/semantic.py` owns only provisional provider-attempt provenance and
-imports/re-exports the final type; it does not define another `SemanticProvenance`.
+`SemanticFailureClass` values
+(`authentication|authorization|provider_outage|quota_exhausted|rate_limited|response_content|
+response_schema|timeout|transport|unsupported_profile`). It imports the shared status/reason
+enums and validator from `protocol/models.py`. `ports/semantic.py` owns only provisional
+provider-attempt provenance and imports/re-exports the final type; it does not define another
+`SemanticProvenance`.
 
 The exact final provenance fields are provider/profile/version/model identities; prompt, schema,
 policy, and privacy-policy digests; sampling parameters; latency; optional provider request,
@@ -390,6 +480,12 @@ authorization or local-disclosure reservation; durable privacy-receipt ID; exter
 commitment when applicable; and the validated terminal status/reason pair. The exact Python fields
 and wire conversions are frozen in `domain/findings.md` and
 `semantic-provenance-1.0.0.schema.json`.
+
+`policy_digest` and `privacy_policy_digest` on `ProviderAttemptProvenance` and
+`SemanticProvenance` are bound by the outbound gateway to the effective policy digest that
+authorized the physical dispatch — the same value carried by `ApprovedOutboundCase.policy_digest`,
+`EgressAuthorization.policy_digest`, and `EgressReceipt.policy.policy_digest`. A provider adapter
+never asserts them. On a successful dispatch they are never placeholder or all-zero values.
 
 A deterministic candidate/finding forbids provenance. A semantic-model-derived candidate/finding
 requires receipt-finalized provenance whose status/reason is exactly
@@ -517,6 +613,27 @@ review was not run; they must not reuse blocked-by-policy wording. The not-reque
 deterministic-only check and forces coverage incompleteness without changing the deterministic
 verdict.
 
+Ready check composition resolves the configured external provider against the live
+generation-fenced registry for every semantic check. A provider binding activated after ready
+composition can therefore serve a later check without a service restart; a binding removed after
+composition cannot be used from the stale readiness snapshot. Exact credential-record presence is
+checked structurally without reading the secret; minting secret material remains dispatch-time only.
+
+A semantic check also appends one bounded diagnostic record when no provider endpoint is bound, its
+task route is inactive, the exact configured binding is absent from the live registry, or the outer
+check coordinator catches an evaluator exception. A missing exact credential record shares the
+credential-unavailable path. These paths use exactly one operation token:
+`semantic_not_dispatched_provider_unbound`, `semantic_not_dispatched_route_inactive`,
+`semantic_not_dispatched_credential_unavailable`, or
+`semantic_not_dispatched_coordinator_failure`. The reason is a closed structural token; provider
+identity, exception text, payload, and paths remain forbidden from this sink. Exceptions contained
+inside the production composition evaluator retain the existing `semantic_evaluation_failed`
+operation.
+
+The check-applicability gap family follows the same material-state rule: `check_not_applicable`
+means material work was appended after the recorded check and superseded its verdict, never that
+the frontier merely advanced.
+
 ## 9. Kernel (`kernel/`)
 
 - `ProjectionState` (frozen): `frontier`, `head_digest`, `plans`, `obligations`, `decisions`,
@@ -622,7 +739,12 @@ verdict.
   `availability` is the current `CaseAvailabilityFacts`, `coverage` is the weakest material fold,
   `gaps` is the exact sorted typed `CaseGap` tuple after check/semantic/availability accounting, and
   `applicable_check` is the exact readable `CheckRecordedPayload` that still applies to this
-  material state or `None`. The application constructs this context; the builder never imports a
+  material state or `None`. A check applies when no event of a material family has been appended
+  after the check's own record: the check's atomic result events — the `finding_recorded` records
+  it returned and its `check_recorded` — land with it and never revoke it, and an immaterial
+  advance — `receipt_recorded`, `session_opened`, `session_resumed` — never revokes it either.
+  Frontier equality is not the rule: a check necessarily advances the frontier past the subject
+  it tested. The application constructs this context; the builder never imports a
   port type or re-derives applicability.
 - `build_receipt(context, receipt_id, task_id, session_id, generated_at,
   versions: ReceiptVersionSlice, redaction_profile, include) -> ReceiptDocument`. Every
@@ -674,9 +796,17 @@ verdict.
   FrozenCase | CheckCommitResult`;
 - `advance_check_phase(lease, expected_phase, next_phase, durable_object_ref?) -> OperationLease`;
 - `enqueue_semantic_job(lease, case_digest, case_object_ref) -> SemanticJobRecord`;
-- `claim_semantic_job(lease, job_id) -> SemanticAttemptHandle`;
+- `claim_semantic_job(lease, job_id) -> SemanticAttemptHandle` (same-owner live lease resumes the
+  active started attempt; expired lease closes the prior attempt as `expired` then mints the next
+  ordinal — never reuses a consumed authorization identity);
 - `record_attempt_outcome(handle, outcome, result_object_ref?, terminal_code?) -> None`;
+- `fail_semantic_job(lease, job_id, terminal_code) -> SemanticJobRecord` (terminally closes a
+  queued job when the total deadline or retry budget expires before another physical attempt can
+  be claimed; it never fabricates an attempt row);
 - `select_attempt(lease, handle, selected_result_object_ref) -> SelectedAttempt`;
+- `load_semantic_job(writer_id, operation_id) -> SemanticJobRecord | None`;
+- `list_semantic_attempts(job_id) -> tuple[SemanticAttemptRecord, ...]` (ordinal-sorted bounded
+  audit rows; no raw provider text);
 - `renew_leases(lease) -> OperationLease`;
 - `reclaim_operation(writer_id, operation_id, request_digest) -> OperationLease | PendingVerdict`;
 - `commit_check_if_current(frozen, findings, policy_executions, semantic_status, semantic_reason,
@@ -721,10 +851,32 @@ The exact shared frozen records, also owned by `ports/ledger.py`, are:
   provider_request_id, writer_id, operation_id, owner_generation, lease_owner_id,
   lease_generation: positive int, lease_expires_at, frontier: Frontier, dependency_digest)`;
 - `SelectedAttempt(job_id, attempt_id, result_object_ref: ObjectRef, selected_at,
-  frontier: Frontier, dependency_digest)`; and
+  frontier: Frontier, dependency_digest)`;
+- `SemanticAttemptRecord(job_id, attempt_id, attempt_ordinal: positive int,
+  provider_request_id, state: started|response_durable|selected|failed|expired|late,
+  terminal_code: SemanticReason?, result_object_ref?)` — structural audit row for one physical
+  dispatch; and
 - `PendingVerdict(kind: PendingVerdictKind, operation: OperationRecord | None,
   retry_after_ms: int | None)`, where retry time is present only for `live` and is bounded by the
   remaining lease lifetime.
+
+Semantic attempt budget (ADR-006): `ProviderProfileConfig.timeout_seconds` is the total
+semantic-operation deadline; `max_retries` (0..2) is the maximum additional physical attempts
+(so physical budget is `1 + max_retries`, at most three). Yoetz owns the retry loop with SDK
+`max_retries=0`. Retries are admitted only for timeout / transport / rate-limited classes; policy
+blocks, human denial, secret detection, invalid case, stale frontier, refusal, and exhausted
+authority never retry. `confirm_every_request` requires a fresh foreground decision per physical
+attempt. Attempt accounting (`attempted_count`, `selected_attempt_id`, terminal reason counts,
+`exhausted`) is reconstructed from durable job/attempt rows via `load_semantic_job` +
+`list_semantic_attempts` — not from memory-only coordinator state. When
+`enqueue_semantic_job` recovers an already-terminal job (`succeeded` / `failed` /
+`quarantined`), the attempt loop must not call `claim_semantic_job`; it rebuilds the final
+status/reason (and selected judgment/provenance from the durable `SEMANTIC_RESPONSE` object on
+success) so crash-after-select or crash-after-final-failure remains reproducible. Because the
+check operation lease TTL is 60 seconds while `timeout_seconds` may be up to 300, the durable
+attempt coordinator renews the operation lease around claim/select and returns the renewed lease
+for later phase advance/commit — a valid provider result must not become `operation_pending`
+solely because the 60-second lease expired inside the semantic deadline.
 
 These field sets are closed: `OperationLease` and `SemanticAttemptHandle` carry the complete
 owner/lease/frontier/dependency compare-and-swap fence, while job, selected-attempt, and pending
@@ -769,8 +921,11 @@ commit, and `append_batch` does the same for a new
 nothing. SQLite uses the co-located importer rows; memory uses one shared task-state lock.
 
 `ProjectionView` is `compact`, `assignment`, `obligations`, `findings`, `candidate_findings`,
-`evidence`, `history`, or `versions`. The port-owned row-query view excludes
-`candidate_findings` and is exactly
+`evidence`, `history`, or `versions`. Application status also admits `view=operation` (operation
+recovery keyed by `filter.operation_request_id`); that view is not a projection row query — the
+operation record is authoritative, and compact projection is only secondary enrichment for
+coverage/closure and must not fail recovery on projection lag or rebuild. The port-owned
+row-query view excludes `candidate_findings` and `operation` and is exactly
 `compact|assignment|obligations|findings|evidence|history|versions`.
 `ProjectionQuery(session_id, view, filter, requested_frontier, limit, position,
 expected_projection_version)` uses the exact typed filter and repository-position variants frozen
@@ -778,7 +933,8 @@ in `ports/ledger.md`; `limit` is `1..100`, the expected version is absent on a f
 filter/position must match the view. `ProjectionPage(view, items, requested_frontier,
 head_frontier, effective_frontier, lag, projection_version, rebuild_state, coverage, gaps,
 next_position)` contains at most the requested count of pre-client-projection typed rows. It never
-contains opaque cursor bytes, a request envelope, import status, result frontier, or privacy
+contains opaque cursor bytes, a request envelope, import status, closure readiness, result
+frontier, or privacy
 projection. The application alone authenticates/decodes a versioned opaque `ProjectionCursor`
 into a typed position and encodes `next_position` back. Adapters filter and page at the
 storage/projection boundary; application code MUST NOT materialize an unbounded `ProjectionState`
@@ -793,7 +949,9 @@ republication/plan-change event. Finding-owned fields are exact; disposition is 
 or `none`, and recorded waiver expiry is never evaluated against wall clock for ordering,
 filtering, or resolution. Evidence strength is exact, availability concerns only declared captured
 content (never a path/URL probe), and freshness is the weaker source-envelope/projection freshness
-capped at `redacted_gap` for unavailable captured content. History is accepted-envelope metadata;
+capped at `redacted_gap` for unavailable captured content. History is accepted-envelope metadata
+including caller-asserted `occurred_at` and digest-bound service `accepted_at` (ordering remains
+ingestion sequence; caller time is never a sort or filter key);
 versions is one verified runtime manifest; compact uses exact structural counters and bounded
 summaries.
 
@@ -978,6 +1136,53 @@ arbitrary-path, or policy-loosening field or method. `service_status` is availab
 task operations are not. MCP cannot invoke lifecycle, privacy-control, or observation-control
 methods.
 
+`ControlError` carries one bounded reason, a `retryable` flag, and an optional service-minted
+`correlation_id`. `response_projection_failed` is reserved for the window after a handler returns
+for non-`publish_work` writes (and the impossible minimal-envelope path), where a write may already
+be durable and only the response could not be shaped; it is always `retryable=True`, and the bridge
+answers it with the same-`request_id` replay remedy it uses for its own projection failures. For
+`publish_work` that same window returns the reduced total-acceptance success envelope instead of a
+`ControlError`. Deliberate bounded failures raised in that window —
+`privacy_projection_blocked`, `privacy_projection_unavailable`, and any `PublicOperationError` —
+already state something true and pass through unchanged. An accepted durable publish must never
+surface as a failure (`INTERNAL_ERROR` or otherwise).
+
+Unexpected exceptions recorded in that window (and at other process boundaries) emit the existing
+stderr structural line and also append one owner-only JSONL diagnostic record under `log_dir()`
+(`service.diagnostics.jsonl`, mode `0o600`, size-capped ring). Fields are limited to
+`timestamp`, `correlation_id`, `component`, `operation`, `reason`, and optional `request_id` — no
+exception text, payload, or paths. The same `correlation_id` is attached to the raised
+`ControlError` (and to the reduced publish acceptance envelope when that path is taken) so the
+agent-facing public error and the durable sink share one identity. The MCP bridge reuses a
+service-supplied id rather than minting a second one; only bridge-local failures without a
+service-side id mint and record under a fresh id. `yoetz service diagnostics --correlation-id
+err_…` reads that ring.
+
+`PublishResponseCatalogPort` is the publish-only durable control-boundary response store. Its key
+is `(task_id, session_id, writer_id, request_id, request_digest, sink)`, where `sink` is exactly
+`agent_context|local_human_view`; the authoritative publish handler has already matched the
+operation digest before the daemon consults it. A stored value is the exact canonical validated
+`PublishWorkResult` body and its SHA-256 digest. Accepted-event `summary` is forbidden in this
+structural store. Concurrent projections use atomic put-if-absent and return one durable winner;
+the daemon rebuilds `rpc_id`, service instance, and service generation in the outer control result.
+This stored-body guarantee applies only to `publish_work`; `start|check|respond|receipt` retain
+their existing durable internal-result replay and still run client projection on each call.
+
+`read_projection_failed` covers the same window for methods that append nothing
+(`_READ_ONLY_METHODS` in `service/daemon.py`: `status` plus the two privacy receipt reads). It is
+also always `retryable=True`, but its remedy is a fresh request: advertising same-`request_id`
+replay for a read points the caller at an operation record that was never written. Only `status`
+can reach the reclassification, since both privacy reads are projection-exempt. `check` and
+`receipt` append their own events and are therefore writes, not reads.
+
+Inside that window the projection internals fail with bounded, named errors rather than bare
+`KeyError`/`IndexError`: `_replace_pointer` raises `projection_pointer_unresolved` for an omission
+pointer absent from the body and `projection_pointer_invalid` for a malformed one. These are not
+remapped to `privacy_projection_blocked` — no policy blocked them, and that reason is
+non-retryable, so it would describe an already-durable append as a refusal. They reach the daemon
+and are reclassified by method. Either way the projection stops before a response exists, so
+blocked content is never disclosed.
+
 `ports/privacy.py` owns the shared receipt-inspection values `PrivacyReceiptAudience`,
 `PrivacyReceiptQuery`, `PrivacyReceiptPage` (positive snapshot generation, bounded unique
 descending receipt tuple, and optional schema-bounded base64url authenticated next cursor), and the
@@ -1110,6 +1315,8 @@ storage or handle minting. `ProviderAttemptAuthBinding` freezes those same field
 final request-body SHA-256 digest, service
 generation, and deadline. Minting a credential handle requires every shared field to match the
 stored credential binding; a scoped credential cannot authorize another model, scope, or purpose.
+`VaultService.has_provider_credential(binding)` reads only the exact structural record-generation
+index and returns presence; it neither decrypts the record nor creates a credential handle.
 `ProviderCredentialHandle.authorize_attempt(binding, inject_and_start)` is single-use: after exact
 binding/body/deadline validation it exposes a protected view only inside the injected custom HTTP
 transport callback for authentication-header injection and one request start, then releases it
@@ -1286,6 +1493,8 @@ external/local consume share one generation CAS: tightening-first means no I/O; 
 one admitted attempt may send, is best-effort closed/nonselectable, and receives its actual receipt.
 `OutboundGatewayPort.reconcile_policy(policy, human_authority: HumanAuthorityCapability)` binds both
 policy and human-authority generations; unavailable authority yields an empty external registry.
+`PolicyEnforcingOutboundGateway.has_connected_provider_binding(binding)` is the composition-only
+exact-binding liveness query over that registry; it never probes or mints a credential.
 `OutboundGatewayPort.close()` is an idempotent terminal operation: it installs a deny fence before
 awaiting transport closure, after which reconciliation/dispatch/revocation admit no new work, mint
 no credential, render no content-bearing request, and perform no new adapter I/O. Unconsumed work is
@@ -1426,9 +1635,34 @@ evidence/frontier-finding/local-check-finding ref to its canonical frozen event/
 roots; only those roots become public `Finding.subject_refs`. A local-check ID is never serialized
 as a dangling public subject. Accepted, ranked challenge prose maps into the existing semantic
 finding summary/detail; it does not add a public result field. The main agent
-replies through the existing `respond`/`publish_work` operations and rechecks. Shared types are
+replies through the existing `respond`/`publish_work` operations and rechecks.
+
+Provider generation and consumption share one owning wire model,
+`ProviderJudgmentModel` in `protocol/models.py` (with `ProviderChallengeModel`). The constrained-
+output JSON Schema sent to Responses/Chat Completions hosts is generated from that model
+(`JUDGMENT_JSON_SCHEMA` / `schemas/findings/provider-judgment-1.0.0.schema.json`);
+`normalize_judgment` validates through the same model before constructing domain
+`SemanticJudgment`/`ReviewerChallenge`. The schema expresses closed `FindingKind` and next-step
+enums, one-to-sixteen citable subject refs with prefix/pattern and uniqueness, non-empty
+byte-bounded prose (the provider schema conservatively caps Unicode code points so every admitted
+string fits the 4 KiB UTF-8 domain boundary), zero-to-three challenges, conclusion/challenge
+coupling via explicit union branches, and `additionalProperties: false`. Reference order has no
+semantic meaning: valid refs are ASCII-canonicalized on acceptance; invented enums, empty prose,
+duplicate refs, non-citable IDs, and conclusion contradictions are never normalized into
+acceptance. The generated schema proves what Yoetz requested, not that every host enforces it — a
+nonconforming host response degrades to an invalid semantic result, never a fabricated pass.
+
+Invalid-result reasons stay exact without retaining provider plaintext: empty/non-JSON or
+constrained-schema mismatch → `response_schema_invalid` (`failure_class=response_schema`);
+output truncation / provider `incomplete` / Chat Completions `finish_reason=length` →
+`response_content_invalid` (`failure_class=response_content`); case-bound post-validation
+rejection → `semantic_judgment_rejected`; real transport/deadline timeout → `provider_timeout`.
+`incomplete` caused by the output token cap must not be labeled a transport timeout.
+
+Shared types are
 `SemanticCase`, `ReviewPacket`, `ReviewAssessment`, `SemanticCaseItem`, `TargetedExcerptRef`, `ChangeObservation`,
-`SemanticJudgment`, `ReviewerChallenge`, adapter-returned `ProviderAttemptProvenance`,
+`SemanticJudgment`, `ReviewerChallenge`, `ProviderJudgmentModel`, adapter-returned
+`ProviderAttemptProvenance`,
 receipt-finalized `SemanticProvenance`, and the single `SemanticStatus`/`SemanticReason` enums
 registered in §7. Adapter provenance has no authorization/reservation/receipt IDs and cannot be
 published. Final provenance adds exact attempt, dispatch-authority, receipt, commitment, status,
@@ -1864,7 +2098,22 @@ One public async method
 per operation: `start`, `publish_work`, `check`, `respond`, `status`, `receipt`, plus
 `import_codex_jsonl` and `review` (support). All accept/return Yoetz request/result dataclasses
 (`StartRequest/StartResult`, etc.), never SDK types. All expected failures leave as
-`PublicOperationError`. Only `ServiceDaemon` constructs and calls this facade after lifecycle/vault
+`PublicOperationError`.
+
+Every `status` success carries `closure_readiness(open_obligation_count,
+unresolved_finding_count, blocking_conditions)` beside `import_status`, on every view. Its
+`blocking_conditions` are exactly
+`obligations_open|findings_unresolved|no_plan_published|projection_stale|coverage_gaps_declared|
+readiness_unknown`. It is derived per request from the compact projection: reading it records
+nothing, creates no verdict or IDs, and never strengthens coverage. It exists so a check or receipt
+is not spent before the record can support a conclusion.
+
+Compact omits its singleton when the task title is unreadable. Readiness never fills that gap with
+zeros, which would assert a clean record from missing data: both counts are then `null` and
+`blocking_conditions` is exactly `("readiness_unknown",)`. Unknown is a bounded state, not a
+default.
+
+Only `ServiceDaemon` constructs and calls this facade after lifecycle/vault
 readiness and control admission; CLI, MCP, and UI call `ServiceClient` instead and cannot import
 runtime composition. Backup/restore/migrate and Codex skill lifecycle are composed through the
 separate `MaintenanceService` and `IntegrationService`; they are not methods on the six-operation
@@ -2008,9 +2257,10 @@ facade and are never MCP tools.
   `YoetzConfig`, `MinimalConfig`, `ConfigError`, `PathSafetyError`, `OwnerDeclaredEndpointConfig`,
   `parse_https_origin`, and the exact endpoint profile ids `openai-responses`,
   `owner-declared-openai-responses` (ADR-014), `anthropic-openai-chat-completions`,
-  `google-gemini-openai-chat-completions`, `openrouter-openai-chat-completions`, and
-  `vercel-ai-gateway-openai-responses`. Every one of the six resolves to exactly one runtime
-  factory in `adapters/providers/factory.py`; the last four carry unknown data-use records and are
+  `google-gemini-openai-chat-completions`, `openrouter-openai-chat-completions`,
+  `xai-openai-chat-completions`, and `vercel-ai-gateway-openai-responses`. Every one of the seven
+  resolves to exactly one runtime factory in `adapters/providers/factory.py`; the last five carry
+  unknown data-use records and are
   configured, not live-verified, until their E-007 capability evidence exists. Constrained
   `https_origin` is the only owner-supplied locator; free `base_url` remains forbidden. Its
   composition-only
@@ -2034,7 +2284,7 @@ facade and are never MCP tools.
 `version.py` exposes `VersionManifest`: package, protocol (`0.1`), local control protocol (`1.0`),
 privacy-policy schema (`1.0.0`), egress-receipt schema (`1.0.0`), engine (`0.1.0`), policy pack
 versions, projection (`yoetz/0.1.0`), object format (`yoetz-object/1`), storage schema
-(`user_version` 1, catalog 1), Python, APSW/SQLite source ID, MCP SDK, provider adapter versions.
+(`user_version` bundle 4, catalog 2), Python, APSW/SQLite source ID, MCP SDK, provider adapter versions.
 Its shared support values are frozen `ResourceIdentity(name, media_type, size_bytes,
 sha256_digest)` and `CapabilitySet(name, supported_versions, tested_versions, denied_versions)`.
 Every capability collection is an exact ASCII-sorted set: membership is literal, with no SemVer

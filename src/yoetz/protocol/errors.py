@@ -26,6 +26,7 @@ class PublicErrorCode(str, Enum):  # noqa: UP042 - the wire contract requires th
     SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
     SESSION_CONFLICT = "SESSION_CONFLICT"
     IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
+    REQUEST_IDENTITY_CONFLICT = "REQUEST_IDENTITY_CONFLICT"
     OPERATION_PENDING = "OPERATION_PENDING"
     FRONTIER_CONFLICT = "FRONTIER_CONFLICT"
     EVENT_INVALID = "EVENT_INVALID"
@@ -137,6 +138,8 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "object_key_not_string",
     "obligation_change_invalid",
     "obligation_resolution_invalid",
+    "obligation_resolution_mismatch",
+    "operation_recovery_unavailable",
     "payload_redaction_mismatch",
     "plan_version_conflict",
     "privacy_projection_unavailable",
@@ -145,12 +148,14 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "public_error_invalid_correlation_id",
     "public_error_invalid_message",
     "public_error_missing_correlation_id",
+    "read_projection_failed",
     "receipt_coverage_mismatch",
     "receipt_gap_not_in_coverage",
     "receipt_json_projection_blocked",
     "receipt_json_shape_invalid",
     "redaction_target_required",
     "ref_mirror_mismatch",
+    "request_identity_conflict",
     "response_fields_invalid",
     "response_projection_failed",
     "schema_artifact_role_invalid",
@@ -186,7 +191,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 134
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 138
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)

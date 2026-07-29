@@ -95,6 +95,7 @@ _INSTALLATION_DOMAINS: Final[Mapping[MacKeyPurpose, frozenset[bytes]]] = {
     MacKeyPurpose.LOG_CORRELATION: frozenset({b"yoetz/session-log-id/v1\x00"}),
     MacKeyPurpose.PRIVACY_AUDIT: frozenset(
         {
+            b"yoetz/privacy-audit/authorization/v1\x00",
             b"yoetz/privacy-audit/control-request/v1\x00",
             b"yoetz/privacy-audit/internal-result/v1\x00",
             b"yoetz/privacy-audit/local-approval/v1\x00",
@@ -600,6 +601,23 @@ class VaultService:
                 reason = "record_missing" if exc.reason == "record_missing" else "vault_tampered"
                 raise VaultError(reason) from exc
 
+    async def has_provider_credential(self, binding: ProviderCredentialBinding) -> bool:
+        """Return structural presence for one exact provider profile without reading its secret."""
+
+        if type(binding) is not ProviderCredentialBinding:
+            raise TypeError("provider_credential_binding_invalid")
+        async with self._mutex:
+            store, _generation = self._ready_store()
+            try:
+                return (
+                    store.record_generation(
+                        VaultRecordKind.PROVIDER_CREDENTIAL, binding.record_binding()
+                    )
+                    is not None
+                )
+            except EncryptedVaultError as exc:
+                raise VaultError("vault_tampered") from exc
+
     async def provider_credential(
         self, binding: ProviderAttemptAuthBinding
     ) -> ProviderCredentialHandle:
@@ -617,23 +635,9 @@ class VaultService:
                 record = store.load_record(
                     VaultRecordKind.PROVIDER_CREDENTIAL, stored.record_binding()
                 )
-            except EncryptedVaultError:
-                # Backward-read support for pre-profile-binding development vaults.
-                legacy = ProviderCredentialBinding(
-                    binding.provider_id,
-                    binding.model_id,
-                    binding.endpoint_profile_id,
-                    binding.endpoint_profile_version,
-                    binding.purpose,
-                    binding.authorization_scope_digest,
-                    binding.purpose_digest,
-                )
-                try:
-                    record = store.load_record(
-                        VaultRecordKind.PROVIDER_CREDENTIAL, legacy.record_binding()
-                    )
-                except EncryptedVaultError as exc:
-                    raise VaultError("record_missing") from exc
+            except EncryptedVaultError as exc:
+                reason = "record_missing" if exc.reason == "record_missing" else "vault_tampered"
+                raise VaultError(reason) from exc
             plaintext = record.consume(SecretConsumer.VAULT_ROOT, lambda view: bytearray(view))
             credential = self._secret_memory.capture(SecretPurpose.PROVIDER_CREDENTIAL, plaintext)
             handle = _ProviderHandle(self, generation, binding, credential, self._clock)

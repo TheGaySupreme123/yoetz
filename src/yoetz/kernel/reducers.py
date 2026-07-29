@@ -18,6 +18,7 @@ from yoetz.domain.events import (
     FindingRecordedPayload,
     LedgerRecord,
     ObligationPublishedPayload,
+    ObligationResolutionMismatch,
     ObligationStatus,
     PlanPublishedPayload,
     PlanRevisedPayload,
@@ -26,6 +27,7 @@ from yoetz.domain.events import (
     ResultRecordedPayload,
     UnknownEvent,
     encode_payload,
+    obligation_meaning_field_diffs,
 )
 from yoetz.domain.findings import Finding
 from yoetz.domain.values import (
@@ -67,6 +69,7 @@ __all__ = [
     "ReplayIndex",
     "empty_replay_index",
     "extend_replay_index",
+    "is_material_event_family",
     "reduce_event",
     "replay",
 ]
@@ -87,6 +90,11 @@ _MATERIAL_FAMILIES: Final = frozenset(
         "result_recorded",
     }
 )
+
+
+def is_material_event_family(name: str) -> bool:
+    """True when an event of this family invalidates a previously recorded check."""
+    return name in _MATERIAL_FAMILIES
 
 
 def _corrupt() -> ValueError:
@@ -406,22 +414,25 @@ def _apply_obligation(
     payload = cast(ObligationPublishedPayload, event.payload)
     if existing is not None and existing.payload is not None:
         previous = existing.payload
-        previous_meaning = replace(
-            previous,
-            status=ObligationStatus.OPEN,
-            resolution_evidence_refs=(),
+        # Resolution is open→resolved only. Meaning fields must repeat; only status and
+        # resolution_evidence_refs may change. The comparison deliberately clears evidence
+        # refs for meaning equality — that is not free mutation of resolved history.
+        meaning_diffs = obligation_meaning_field_diffs(previous, payload)
+        valid_transition = (
+            previous.status is ObligationStatus.OPEN and payload.status is ObligationStatus.RESOLVED
         )
-        next_meaning = replace(
-            payload,
-            status=ObligationStatus.OPEN,
-            resolution_evidence_refs=(),
-        )
-        if not (
-            previous.status is ObligationStatus.OPEN
-            and payload.status is ObligationStatus.RESOLVED
-            and previous_meaning == next_meaning
-        ):
-            raise _corrupt()
+        if not valid_transition or meaning_diffs:
+            if meaning_diffs:
+                raise ObligationResolutionMismatch(
+                    meaning_diffs,
+                    invariant="meaning_fields_must_repeat",
+                    event_id=event.event_id,
+                )
+            raise ObligationResolutionMismatch(
+                ("status",),
+                invariant="open_to_resolved_only",
+                event_id=event.event_id,
+            )
     obligations[key] = ObligationProjectionRecord(
         payload=payload,
         payload_digest=event.projection_locator.canonical_payload_digest,

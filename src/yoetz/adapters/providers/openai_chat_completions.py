@@ -250,6 +250,7 @@ def _provenance(
     profile: ChatCompletionsProfile,
     status: SemanticStatus,
     *,
+    policy_digest: str,
     latency_ms: int,
     provider_request_id: str | None = None,
     failure_class: SemanticFailureClass | None = None,
@@ -262,8 +263,8 @@ def _provenance(
         sdk_version="2.46.0",
         prompt_digest=_PROMPT_DIGEST,
         schema_digest=_SCHEMA_DIGEST,
-        policy_digest="sha256:" + "0" * 64,
-        privacy_policy_digest="sha256:" + "0" * 64,
+        policy_digest=policy_digest,
+        privacy_policy_digest=policy_digest,
         sampling_params=SamplingParams(OPENAI_MAX_OUTPUT_TOKENS),
         latency_ms=latency_ms,
         status=status,
@@ -284,6 +285,7 @@ def normalize_response(
     response: object,
     profile: ChatCompletionsProfile,
     *,
+    policy_digest: str,
     latency_ms: int,
     late: bool = False,
 ) -> SemanticResult:
@@ -293,6 +295,10 @@ def normalize_response(
     filtering next, parse/schema validity next, and late-arrival state last. A host that ignored
     the requested structure lands in the invalid branch, which is the honest outcome; there is no
     prose-to-judgment repair path.
+
+    ``policy_digest`` is the policy digest that authorized this dispatch, carried by the approved
+    case. The adapter never mints one of its own; the outbound gateway rebinds it authoritatively
+    after this returns.
     """
 
     provider_request_id = getattr(response, "id", None)
@@ -308,6 +314,7 @@ def normalize_response(
             _provenance(
                 profile,
                 SemanticStatus.REFUSED,
+                policy_digest=policy_digest,
                 latency_ms=latency_ms,
                 provider_request_id=provider_request_id,
             )
@@ -319,20 +326,26 @@ def normalize_response(
             _provenance(
                 profile,
                 SemanticStatus.REFUSED,
+                policy_digest=policy_digest,
                 latency_ms=latency_ms,
                 provider_request_id=provider_request_id,
             )
         )
     if finish_reason == "length":
-        # Truncated output is the Chat Completions spelling of the Responses `incomplete` status.
-        return SemanticResultTimeout(
+        # Truncated output is the Chat Completions spelling of Responses `incomplete`: content
+        # invalidity from the output token cap, not a transport/deadline timeout.
+        truncated_text = getattr(message, "content", None)
+        truncated_size = len(truncated_text.encode("utf-8")) if type(truncated_text) is str else 0
+        return SemanticResultInvalid(
             _provenance(
                 profile,
-                SemanticStatus.TIMEOUT,
+                SemanticStatus.INVALID,
+                policy_digest=policy_digest,
                 latency_ms=latency_ms,
                 provider_request_id=provider_request_id,
-                failure_class=SemanticFailureClass.TIMEOUT,
-            )
+                failure_class=SemanticFailureClass.RESPONSE_CONTENT,
+            ),
+            raw_size=truncated_size,
         )
 
     raw_text = getattr(message, "content", None)
@@ -341,6 +354,7 @@ def normalize_response(
             _provenance(
                 profile,
                 SemanticStatus.INVALID,
+                policy_digest=policy_digest,
                 latency_ms=latency_ms,
                 provider_request_id=provider_request_id,
                 failure_class=SemanticFailureClass.RESPONSE_SCHEMA,
@@ -353,9 +367,10 @@ def normalize_response(
             _provenance(
                 profile,
                 SemanticStatus.INVALID,
+                policy_digest=policy_digest,
                 latency_ms=latency_ms,
                 provider_request_id=provider_request_id,
-                failure_class=SemanticFailureClass.RESPONSE_SCHEMA,
+                failure_class=SemanticFailureClass.RESPONSE_CONTENT,
             ),
             raw_size=OPENAI_MAX_RESPONSE_BODY_BYTES + 1,
         )
@@ -366,6 +381,7 @@ def normalize_response(
             _provenance(
                 profile,
                 SemanticStatus.INVALID,
+                policy_digest=policy_digest,
                 latency_ms=latency_ms,
                 provider_request_id=provider_request_id,
                 failure_class=SemanticFailureClass.RESPONSE_SCHEMA,
@@ -378,6 +394,7 @@ def normalize_response(
             _provenance(
                 profile,
                 SemanticStatus.LATE,
+                policy_digest=policy_digest,
                 latency_ms=latency_ms,
                 provider_request_id=provider_request_id,
             )
@@ -387,6 +404,7 @@ def normalize_response(
         _provenance(
             profile,
             SemanticStatus.SUCCEEDED,
+            policy_digest=policy_digest,
             latency_ms=latency_ms,
             provider_request_id=provider_request_id,
         ),
@@ -394,7 +412,7 @@ def normalize_response(
 
 
 def classify_provider_failure(
-    error: BaseException, profile: ChatCompletionsProfile, *, latency_ms: int
+    error: BaseException, profile: ChatCompletionsProfile, *, policy_digest: str, latency_ms: int
 ) -> SemanticResult:
     """Map a native provider/transport failure to the public taxonomy without leaking its text."""
 
@@ -403,6 +421,7 @@ def classify_provider_failure(
             _provenance(
                 profile,
                 SemanticStatus.TIMEOUT,
+                policy_digest=policy_digest,
                 latency_ms=latency_ms,
                 failure_class=SemanticFailureClass.TIMEOUT,
             )
@@ -412,6 +431,7 @@ def classify_provider_failure(
             _provenance(
                 profile,
                 SemanticStatus.UNAVAILABLE,
+                policy_digest=policy_digest,
                 latency_ms=latency_ms,
                 failure_class=SemanticFailureClass.TRANSPORT,
             )
@@ -440,6 +460,7 @@ def classify_provider_failure(
         _provenance(
             profile,
             SemanticStatus.UNAVAILABLE,
+            policy_digest=policy_digest,
             latency_ms=latency_ms,
             failure_class=failure_class,
         )
@@ -489,6 +510,7 @@ class ChatCompletionsEvaluator:
                 _provenance(
                     self._profile,
                     SemanticStatus.TIMEOUT,
+                    policy_digest=case.policy_digest,
                     latency_ms=0,
                     failure_class=SemanticFailureClass.TIMEOUT,
                 )
@@ -503,6 +525,7 @@ class ChatCompletionsEvaluator:
                 _provenance(
                     self._profile,
                     SemanticStatus.UNAVAILABLE,
+                    policy_digest=case.policy_digest,
                     latency_ms=0,
                     failure_class=SemanticFailureClass.UNSUPPORTED_PROFILE,
                 )
@@ -523,9 +546,13 @@ class ChatCompletionsEvaluator:
                 await client.close()
         except Exception as exc:  # noqa: BLE001 - classified below, never re-raised raw
             elapsed_ms = max(0, int((self._clock.monotonic_seconds() - now_monotonic) * 1_000))
-            return classify_provider_failure(exc, self._profile, latency_ms=elapsed_ms)
+            return classify_provider_failure(
+                exc, self._profile, policy_digest=case.policy_digest, latency_ms=elapsed_ms
+            )
         finally:
             await http_client.aclose()
 
         elapsed_ms = max(0, int((self._clock.monotonic_seconds() - now_monotonic) * 1_000))
-        return normalize_response(response, self._profile, latency_ms=elapsed_ms)
+        return normalize_response(
+            response, self._profile, policy_digest=case.policy_digest, latency_ms=elapsed_ms
+        )

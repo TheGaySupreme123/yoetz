@@ -50,7 +50,7 @@ Default agent-context policy can project verification output (findings, obligati
 
 ## Receipt fields and wording
 
-Read the receipt's frontier, verdict, coverage vector, finding disposition, evidence provenance, freshness, suppressed counts, and limitations together. Derived Markdown is a human view of the same structured record. Only a current recorded check can bound final wording.
+Read the receipt's frontier, verdict, coverage vector, finding disposition, evidence provenance, freshness, suppressed counts, and limitations together. Derived Markdown is a human view of the same structured record. Only a current recorded check can bound final wording. Receipts are frontier-bound: they do not upgrade caller-asserted event timestamps into service-checked event time.
 
 Permitted: “Yoetz found no deterministic issue in the cooperatively published record at the stated frontier; artifact observation remained published-only.”
 

@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final, Never, Protocol, cast
 
 import anyio
@@ -34,11 +35,19 @@ from yoetz.adapters.keys.os_keyring import AutoUnlockPassphraseStore
 from yoetz.adapters.keys.secret_memory import LocalSecretMemory
 from yoetz.adapters.keys.vault_passphrase import VaultRootEnvelope
 from yoetz.adapters.session_events import SessionEventMonitor
+from yoetz.application.publish_work import (
+    PublishWorkInternalResult,
+    accepted_projection_unavailable_from_internal,
+    build_accepted_projection_unavailable_result,
+)
 from yoetz.application.service import (
     ClientProjectionContext,
     ControlProjectionBinding,
     ProjectedControlBody,
     ProjectionBindingFacts,
+    UnprojectedControlBody,
+    internal_control_json,
+    resolve_client_disclosure_sink,
 )
 from yoetz.config.load import load_config
 from yoetz.config.models import YoetzConfig
@@ -50,6 +59,8 @@ from yoetz.config.paths import (
     unlock_throttle_path,
     verify_private_local_bundle,
 )
+from yoetz.domain.privacy import LocalDisclosureSink
+from yoetz.domain.values import frontier_from_json
 from yoetz.observability.logging import (
     LogMode,
     configure_logging,
@@ -80,11 +91,15 @@ from yoetz.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
-from yoetz.protocol.errors import PublicOperationError
+from yoetz.protocol.errors import PublicOperationError, SafeDetailValue
 from yoetz.protocol.ids import IdKind, new_id, validate_id
 from yoetz.protocol.models import (
     CheckResult,
+    PublishWorkAcceptedProjectionUnavailableModel,
+    PublishWorkDryRunModel,
     PublishWorkResult,
+    PublishWorkResultModel,
+    PublishWorkSuccessModel,
     ReceiptResult,
     RespondResult,
     StartResult,
@@ -174,6 +189,15 @@ _PROJECTION_EXEMPT_METHODS = _STRUCTURAL_METHODS | {
     ControlMethod.PRIVACY_RECEIPTS_LIST,
     ControlMethod.PRIVACY_RECEIPTS_GET,
 }
+# Methods that never append to the ledger. A projection failure on one of these cannot have left
+# a durable write behind, so its remedy is repeating the request, not same-request_id replay.
+_READ_ONLY_METHODS: Final[frozenset[ControlMethod]] = frozenset(
+    {
+        ControlMethod.STATUS,
+        ControlMethod.PRIVACY_RECEIPTS_LIST,
+        ControlMethod.PRIVACY_RECEIPTS_GET,
+    }
+)
 _WORKFLOW_RESULT_MODELS: Final[Mapping[ControlMethod, type[BaseModel]]] = {
     ControlMethod.START: StartResult,
     ControlMethod.PUBLISH_WORK: PublishWorkResult,
@@ -182,6 +206,84 @@ _WORKFLOW_RESULT_MODELS: Final[Mapping[ControlMethod, type[BaseModel]]] = {
     ControlMethod.STATUS: StatusResult,
     ControlMethod.RECEIPT: ReceiptResult,
 }
+
+
+def _accepted_state(internal: object) -> Mapping[str, SafeDetailValue] | None:
+    """Read where a committed operation landed, for an error that has no success body.
+
+    Structural only: the resulting frontier and how many events were accepted. Returns None
+    whenever any part is missing or malformed, because a partial answer about durability is worse
+    than none — the caller falls back to reading `status`, which is where they were before.
+    """
+
+    try:
+        source = internal_control_json(cast(UnprojectedControlBody, internal))
+        frontier = source["result_frontier"]
+        if not isinstance(frontier, Mapping):
+            return None
+        sequence = int(cast(str, frontier["sequence"]))
+        head_digest = frontier["head_digest"]
+        events = source.get("accepted_events")
+        count = len(cast("tuple[object, ...] | list[object]", events)) if events is not None else 0
+        if type(head_digest) is not str or sequence < 0:
+            return None
+        return MappingProxyType({"count": count, "head_digest": head_digest, "sequence": sequence})
+    except BaseException:
+        return None
+
+
+def _publish_accepted_projection_unavailable(
+    internal: object,
+    *,
+    correlation_id: str,
+    request_id: str | None,
+) -> PublishWorkResult | None:
+    """Return the reduced total-acceptance envelope for a committed publish, or None.
+
+    ``correlation_id`` is minted by the caller so the envelope, the diagnostic ring, and any
+    fallback ``ControlError`` path share one id. Returns None only when the minimal envelope cannot
+    be built — which must be impossible for a valid ``PublishWorkInternalResult``.
+    """
+
+    try:
+        if type(internal) is PublishWorkInternalResult:
+            return accepted_projection_unavailable_from_internal(
+                internal, correlation_id=correlation_id
+            )
+        if type(internal) is PublishWorkResultModel:
+            root = internal.root
+            if type(root) is PublishWorkAcceptedProjectionUnavailableModel:
+                return internal
+            if type(root) is PublishWorkSuccessModel:
+                return build_accepted_projection_unavailable_result(
+                    request_id=root.request_id,
+                    outcome=root.outcome,
+                    task_id=root.task_id,
+                    session_id=root.session_id,
+                    writer_id=root.writer_id,
+                    subject_frontier=frontier_from_json(
+                        root.subject_frontier.model_dump(mode="json")
+                    ),
+                    result_frontier=frontier_from_json(
+                        root.result_frontier.model_dump(mode="json")
+                    ),
+                    accepted=root.accepted_events,
+                    correlation_id=correlation_id,
+                )
+            # Dry-run previews never append; there is nothing to reduce to an acceptance envelope.
+            if type(root) is PublishWorkDryRunModel:
+                return None
+        return None
+    except BaseException as envelope_exc:
+        # A second diagnostic for envelope construction only — reuses the same request_id but a
+        # distinct operation so operators can see the reduction itself failed after the first log.
+        record_unexpected_exception_without_raising(
+            envelope_exc,
+            component="service.daemon",
+            operation="publish_work_accepted_envelope_failed",
+            request_id=request_id,
+        )
+        return None
 
 
 def _safe_body_request_id(request: ControlCallRequest) -> str | None:
@@ -234,6 +336,17 @@ class _Vault(Protocol):
 
 
 class _ReadyApplication(Protocol):
+    async def load_publish_response(
+        self, result: PublishWorkInternalResult, sink: LocalDisclosureSink
+    ) -> PublishWorkResult | None: ...
+
+    async def store_publish_response(
+        self,
+        result: PublishWorkInternalResult,
+        sink: LocalDisclosureSink,
+        projected: ProjectedControlBody,
+    ) -> PublishWorkResult: ...
+
     async def projection_binding_facts(
         self,
         method: ControlMethod,
@@ -584,13 +697,33 @@ class ServiceDaemon:
         except ControlProtocolError, TypeError, ValueError:
             return self._error_result(request, ControlError("frame_invalid"))
         except Exception as exc:
-            record_unexpected_exception_without_raising(
+            # Unexpected failure outside the post-commit projection window. A read never committed
+            # anything, so the remedy is repeating the request with a fresh request_id — the same
+            # classification used when projection itself fails for STATUS. Surfacing non-retryable
+            # internal_error for a pure status/privacy read is what stranded run-4's
+            # status view=operation recovery (AttributeError → retryable: false).
+            request_id = _safe_body_request_id(request)
+            if request.method in _READ_ONLY_METHODS:
+                reason = "read_projection_failed"
+                correlation_id = record_unexpected_exception_without_raising(
+                    exc,
+                    component="service.daemon",
+                    operation=f"{request.method.value}_{reason}",
+                    request_id=request_id,
+                )
+                return self._error_result(
+                    request,
+                    ControlError(reason, retryable=True, correlation_id=correlation_id),
+                )
+            correlation_id = record_unexpected_exception_without_raising(
                 exc,
                 component="service.daemon",
                 operation=f"{request.method.value}_internal_error",
-                request_id=_safe_body_request_id(request),
+                request_id=request_id,
             )
-            return self._error_result(request, ControlError("internal_error"))
+            return self._error_result(
+                request, ControlError("internal_error", correlation_id=correlation_id)
+            )
 
     async def lock(self, reason: str = "explicit_lock") -> None:
         """Drain the ready generation, close it, and remain structurally available."""
@@ -699,7 +832,50 @@ class ServiceDaemon:
                         )
                 except TimeoutError as exc:
                     raise ControlError("request_timeout", retryable=True) from exc
+            # The handler has returned, so a write may already be durable. Everything below only
+            # shapes the response; an unexpected failure there must not be reported as a failed
+            # operation.
+            return await self._project_completed_response(
+                projection_context, request, application, internal
+            )
+        finally:
+            if admission is not None:
+                await self._composition.lifecycle.release(admission)
+
+    async def _project_completed_response(
+        self,
+        projection_context: ClientProjectionContext,
+        request: ControlCallRequest,
+        application: _ReadyApplication,
+        internal: object,
+    ) -> object:
+        """Shape one already-completed operation, never collapsing a commit into a plain failure.
+
+        Bounded failures raised deliberately here (``ControlError`` such as
+        ``privacy_projection_blocked``, ``LifecycleError``, ``PublicOperationError``) already carry
+        an accurate caller-safe meaning and pass through untouched. Only an unexpected exception is
+        reclassified, and the reclassification depends on what the method could have changed:
+
+        - a committed ``publish_work`` returns the reduced total-acceptance envelope
+          (``response_completeness: accepted_projection_unavailable``) so a durable write is never
+          reported as a failure;
+        - other writes become ``response_projection_failed`` with same-``request_id`` replay;
+        - a read changed nothing, so it becomes ``read_projection_failed`` and the caller is told
+          to repeat the request. Advertising same-``request_id`` replay for a read is false: no
+          operation record exists to replay against, and the caller waits on a recovery that
+          cannot arrive.
+        """
+
+        try:
             if request.method in _PROJECTION_EXEMPT_METHODS:
+                self._validate_success_body(request, internal)
+                return internal
+            # Application-layer fallback already produced the reduced acceptance envelope.
+            # Dry-run previews are already public and non-evidential — never project or store them.
+            if type(internal) is PublishWorkResultModel and type(internal.root) in (
+                PublishWorkAcceptedProjectionUnavailableModel,
+                PublishWorkDryRunModel,
+            ):
                 self._validate_success_body(request, internal)
                 return internal
             facts = await application.projection_binding_facts(
@@ -707,6 +883,17 @@ class ServiceDaemon:
                 request.body,
                 internal,
             )
+            publish_replay = (
+                (internal, resolve_client_disclosure_sink(projection_context))
+                if type(internal) is PublishWorkInternalResult
+                else None
+            )
+            if publish_replay is not None:
+                publish_result, publish_sink = publish_replay
+                stored = await application.load_publish_response(publish_result, publish_sink)
+                if stored is not None:
+                    self._validate_success_body(request, stored)
+                    return stored
             binding = ControlProjectionBinding(
                 rpc_id=request.rpc_id,
                 method=request.method,
@@ -722,10 +909,63 @@ class ServiceDaemon:
                 internal,
             )
             self._validate_success_body(request, projected)
+            if publish_replay is not None:
+                publish_result, publish_sink = publish_replay
+                try:
+                    persisted = await application.store_publish_response(
+                        publish_result,
+                        publish_sink,
+                        projected,
+                    )
+                except PublicOperationError as exc:
+                    record_unexpected_exception_without_raising(
+                        exc,
+                        component="service.daemon",
+                        operation=f"{request.method.value}_publish_response_store_failed",
+                        request_id=_safe_body_request_id(request),
+                    )
+                    return projected
+                self._validate_success_body(request, persisted)
+                return persisted
             return projected
-        finally:
-            if admission is not None:
-                await self._composition.lifecycle.release(admission)
+        except ControlError, LifecycleError, PublicOperationError:
+            raise
+        except (asyncio.CancelledError, Exception) as exc:
+            # Cancellation is reclassified here too. `dispatch` already converts a cancelled call
+            # into a result rather than propagating, and past this point the operation may be
+            # durable — reporting CANCELLED would say the work did not happen and would omit the
+            # recovery facts. This changes only how an already-converted cancellation is described.
+            request_id = _safe_body_request_id(request)
+            reason = (
+                "read_projection_failed"
+                if request.method in _READ_ONLY_METHODS
+                else "response_projection_failed"
+            )
+            # One correlation id for the unexpected failure path: shared by the reduced publish
+            # envelope (when built), the diagnostic ring, and the ControlError raised to the
+            # bridge — no second mint when the agent-facing public error is shaped.
+            correlation_id = record_unexpected_exception_without_raising(
+                exc,
+                component="service.daemon",
+                operation=f"{request.method.value}_{reason}",
+                request_id=request_id,
+            )
+            if request.method is ControlMethod.PUBLISH_WORK:
+                reduced = _publish_accepted_projection_unavailable(
+                    internal, correlation_id=correlation_id, request_id=request_id
+                )
+                if reduced is not None:
+                    self._validate_success_body(request, reduced)
+                    return reduced
+            accepted_state = (
+                None if reason == "read_projection_failed" else _accepted_state(internal)
+            )
+            raise ControlError(
+                reason,
+                retryable=True,
+                accepted_state=accepted_state,
+                correlation_id=correlation_id,
+            ) from exc
 
     async def _accept_loop(
         self,
@@ -843,13 +1083,15 @@ class ServiceDaemon:
 
         result_type = _WORKFLOW_RESULT_MODELS.get(request.method)
         if result_type is None or type(error) is not PublicOperationError:
-            record_unexpected_exception_without_raising(
+            correlation_id = record_unexpected_exception_without_raising(
                 error,
                 component="service.daemon",
                 operation=f"{request.method.value}_public_error_internal_error",
                 request_id=_safe_body_request_id(request),
             )
-            return self._error_result(request, ControlError("internal_error"))
+            return self._error_result(
+                request, ControlError("internal_error", correlation_id=correlation_id)
+            )
         try:
             bound = (
                 error
@@ -868,13 +1110,15 @@ class ServiceDaemon:
             body = result_type.model_validate(candidate)
             return self._result(request, body)
         except Exception as exc:
-            record_unexpected_exception_without_raising(
+            correlation_id = record_unexpected_exception_without_raising(
                 exc,
                 component="service.daemon",
                 operation=f"{request.method.value}_public_error_internal_error",
                 request_id=_safe_body_request_id(request),
             )
-            return self._error_result(request, ControlError("internal_error"))
+            return self._error_result(
+                request, ControlError("internal_error", correlation_id=correlation_id)
+            )
 
     def _validate_success_body(self, request: ControlCallRequest, body: object) -> None:
         self._result(request, body)
@@ -981,7 +1225,9 @@ class ServiceDaemon:
 
 def _is_ready_application(value: object) -> bool:
     return (
-        callable(getattr(value, "projection_binding_facts", None))
+        callable(getattr(value, "load_publish_response", None))
+        and callable(getattr(value, "store_publish_response", None))
+        and callable(getattr(value, "projection_binding_facts", None))
         and callable(getattr(value, "project_result_for_client", None))
         and callable(getattr(value, "close", None))
     )
@@ -1556,7 +1802,16 @@ class _HumanConnectionServer:
             raise
         except Exception as exc:
             code = _human_error_code(exc)
-            error = ServerErrorEnvelope(code, False, ceremony_id, error_step)
+            # Correlation starts only once the client sends an action or the
+            # daemon starts a secret ingress step.  A terminal can close just
+            # after ServerOpened; that has a ceremony id but no valid next step
+            # to put on a correlated error envelope.
+            error = ServerErrorEnvelope(
+                code,
+                False,
+                ceremony_id if error_step is not None else None,
+                error_step,
+            )
             try:
                 await _write_human_envelope(stream, error)
                 if ceremony_id is not None and error_step is not None:
@@ -1568,6 +1823,18 @@ class _HumanConnectionServer:
             except Exception:
                 pass
         finally:
+            # A foreground terminal can disappear between the opened preview and
+            # its next action (for example, Ctrl-C at a secret prompt).  The
+            # human-control service owns one ceremony globally, so leaving it
+            # active would make every later ceremony fail state_forbidden until
+            # the daemon is restarted.  A completed/cancelled ceremony has
+            # already cleared itself; in that case cancel simply reports replay
+            # and is deliberately ignored.
+            if ceremony_id is not None:
+                try:
+                    await self._service.cancel(ceremony_id)
+                except Exception:
+                    pass
             await stream.aclose()
 
 

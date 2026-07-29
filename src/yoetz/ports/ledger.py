@@ -82,6 +82,7 @@ __all__ = [
     "QueryableProjectionView",
     "SelectedAttempt",
     "SemanticAttemptHandle",
+    "SemanticAttemptRecord",
     "SemanticJobRecord",
     "StoredProjection",
 ]
@@ -830,6 +831,61 @@ class SelectedAttempt:
 
 
 @dataclass(frozen=True, slots=True)
+class SemanticAttemptRecord:
+    """Bounded durable facts for one physical semantic dispatch attempt.
+
+    No raw provider text, prompt, secret, path, or user-controlled diagnostic prose.
+    """
+
+    job_id: str
+    attempt_id: str
+    attempt_ordinal: int
+    provider_request_id: str
+    state: Literal["started", "response_durable", "selected", "failed", "expired", "late"]
+    terminal_code: SemanticReason | None
+    result_object_ref: ObjectRef | None
+
+    def __post_init__(self) -> None:
+        _id(IdKind.SEMANTIC_JOB, self.job_id)
+        _id(IdKind.SEMANTIC_ATTEMPT, self.attempt_id)
+        _uint(self.attempt_ordinal, positive=True)
+        _identity(self.provider_request_id)
+        if type(self.state) is not str or self.state not in {
+            "started",
+            "response_durable",
+            "selected",
+            "failed",
+            "expired",
+            "late",
+        }:
+            raise _invalid()
+        if self.terminal_code is not None and type(self.terminal_code) is not SemanticReason:
+            raise _invalid()
+        if self.result_object_ref is not None and (
+            type(self.result_object_ref) is not ObjectRef
+            or self.result_object_ref.metadata.kind is not ObjectKind.SEMANTIC_RESPONSE
+        ):
+            raise _invalid()
+        if self.state == "started":
+            if self.terminal_code is not None or self.result_object_ref is not None:
+                raise _invalid()
+        elif self.state == "response_durable":
+            if self.terminal_code is not None or self.result_object_ref is None:
+                raise _invalid()
+        elif self.state == "selected":
+            if self.terminal_code is None or self.result_object_ref is None:
+                raise _invalid()
+        elif self.state == "expired":
+            if self.terminal_code is None or self.result_object_ref is not None:
+                raise _invalid()
+        elif self.state == "late":
+            if self.terminal_code is None or self.result_object_ref is None:
+                raise _invalid()
+        elif self.terminal_code is None:
+            raise _invalid()
+
+
+@dataclass(frozen=True, slots=True)
 class PendingVerdict:
     kind: PendingVerdictKind
     operation: OperationRecord | None
@@ -1315,12 +1371,25 @@ class LedgerPort(Protocol):
         terminal_code: SemanticReason | None = None,
     ) -> None: ...
 
+    async def fail_semantic_job(
+        self,
+        lease: OperationLease,
+        job_id: str,
+        terminal_code: SemanticReason,
+    ) -> SemanticJobRecord: ...
+
     async def select_attempt(
         self,
         lease: OperationLease,
         handle: SemanticAttemptHandle,
         selected_result_object_ref: ObjectRef,
     ) -> SelectedAttempt: ...
+
+    async def load_semantic_job(
+        self, writer_id: str, operation_id: str
+    ) -> SemanticJobRecord | None: ...
+
+    async def list_semantic_attempts(self, job_id: str) -> tuple[SemanticAttemptRecord, ...]: ...
 
     async def renew_leases(self, lease: OperationLease) -> OperationLease: ...
 

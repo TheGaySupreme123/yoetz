@@ -14,14 +14,27 @@ from builders.ledger_adapters import (
     ownership_fence,
 )
 from yoetz.application.publish_work import Application, execute_publish_work
+from yoetz.application.status import Application as StatusApplication
+from yoetz.application.status import execute_status
+from yoetz.domain.values import Frontier, session_id
 from yoetz.ports.diagnostics import RuntimeCapability
-from yoetz.ports.importer import ImporterPort
+from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.objects import ObjectStorePort
 from yoetz.ports.runtime import RouteCommand, TaskRuntime
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
-from yoetz.protocol.models import PublishWorkRequestModel
+from yoetz.protocol.models import (
+    PublishWorkDryRunModel,
+    PublishWorkRequestModel,
+    StatusOperationPageModel,
+    StatusRequest,
+)
 
 pytestmark = pytest.mark.anyio
+
+
+class _IdleImporter:
+    async def status(self, session: str) -> ImportStatusSnapshot:
+        return ImportStatusSnapshot(session_id(session), 0, 0, (), ())
 
 
 class _Runtime:
@@ -43,6 +56,7 @@ class _Application:
     def __init__(self, runtime: _Runtime) -> None:
         self.runtime = runtime
         self.clock = FixedClock()
+        self.status_cursor_key = b"publish-work-status-cursor-key!!"
 
     def authorizes_import_publication(self, request: PublishWorkRequestModel) -> bool:
         del request
@@ -58,10 +72,16 @@ def _composition() -> tuple[_Application, MemoryObjects]:
         seed.task_id,
         seed.session_id,
         seed.writer_id,
-        frozenset({RuntimeCapability.WRITE}),
+        frozenset(
+            {
+                RuntimeCapability.WRITE,
+                RuntimeCapability.STRUCTURAL_READ,
+                RuntimeCapability.PAYLOAD_READ,
+            }
+        ),
         ledger,
         cast(ObjectStorePort, objects),
-        cast(ImporterPort, object()),
+        cast(ImporterPort, _IdleImporter()),
         "0.1.0",
         "0.1.0",
         "0.1",
@@ -72,6 +92,27 @@ def _composition() -> tuple[_Application, MemoryObjects]:
     return _Application(runtime), objects
 
 
+def _draft(
+    *,
+    event_tail: int,
+    action_tail: int,
+    action_kind: str = "other",
+) -> dict[str, object]:
+    return {
+        "event_id": f"evt_00000000-0000-4000-8000-{event_tail:012d}",
+        "schema": {"name": "action_recorded", "version": "1.0.0"},
+        "occurred_at": "2026-07-19T12:00:00.000Z",
+        "causal_parents": (),
+        "payload": {
+            "action_id": f"act_00000000-0000-4000-8000-{action_tail:012d}",
+            "action_kind": action_kind,
+            "description": "Materialized one coherent slice",
+        },
+        "artifact_refs": (),
+        "evidence_refs": (),
+    }
+
+
 def _request(
     *,
     family: str = "action_recorded",
@@ -80,6 +121,7 @@ def _request(
     event_tail: int = 202,
     action_tail: int = 203,
     expected_frontier: object = None,
+    event_drafts: tuple[dict[str, object], ...] | None = None,
 ) -> PublishWorkRequestModel:
     seed = append_command()
     payload: object
@@ -105,7 +147,8 @@ def _request(
             "session_id": seed.session_id,
             "writer_id": seed.writer_id,
             "expected_frontier": expected_frontier,
-            "event_drafts": (
+            "event_drafts": event_drafts
+            or (
                 {
                     "event_id": f"evt_00000000-0000-4000-8000-{event_tail:012d}",
                     "schema": {"name": family, "version": "1.0.0"},
@@ -124,6 +167,50 @@ def _request(
             },
         }
     )
+
+
+async def test_rejected_draft_is_located_by_ordinal_without_echoing_payload_content() -> None:
+    """A multi-draft batch must say which draft failed, using only frozen names and an ordinal.
+
+    The 2026-07-26 dogfood published a four-event batch whose only diagnostic was
+    ``reason_code: invalid_event_enum`` — enough to know something was wrong, not enough to know
+    which event or field to fix.
+    """
+
+    app, _objects = _composition()
+    secret = "never-echo-this-private-title"
+    forbidden: dict[str, object] = {
+        "event_id": "evt_00000000-0000-4000-8000-000000000305",
+        "schema": {"name": "session_opened", "version": "1.0.0"},
+        "occurred_at": "2026-07-19T12:00:00.000Z",
+        "causal_parents": (),
+        "payload": {
+            "task_title": secret,
+            "client_kind": "test_client",
+            "client_version": "0.1.0",
+            "integration": "local_cli",
+            "profile": "test-fake",
+        },
+        "artifact_refs": (),
+        "evidence_refs": (),
+    }
+    request = _request(
+        event_drafts=(
+            _draft(event_tail=301, action_tail=302),
+            _draft(event_tail=303, action_tail=304),
+            forbidden,
+        )
+    )
+
+    with pytest.raises(PublicOperationError) as caught:
+        await execute_publish_work(cast(Application, app), request)
+
+    details = caught.value.safe_details
+    # The ordinal is the failing draft, not merely the first one.
+    assert details["field"] == "/event_drafts/2/schema"
+    assert details["reason_code"] == "event_family_not_admitted"
+    assert secret not in repr(dict(details))
+    assert secret not in caught.value.message
 
 
 async def test_publish_is_object_first_atomic_and_same_id_replay_is_stable() -> None:
@@ -149,7 +236,12 @@ async def test_forbidden_family_rejects_before_object_publication() -> None:
         await execute_publish_work(cast(Application, app), _request(family="session_opened"))
 
     assert caught.value.code is PublicErrorCode.EVENT_INVALID
-    assert caught.value.safe_details == {"reason_code": "event_family_not_admitted"}
+    # The rejected draft is named by ordinal and owning field so a multi-draft batch does not
+    # have to be re-derived to find the one bad member.
+    assert caught.value.safe_details == {
+        "reason_code": "event_family_not_admitted",
+        "field": "/event_drafts/0/schema",
+    }
     assert len(objects._data) == before  # pyright: ignore[reportPrivateUsage]
     assert app.runtime.release_count == 1
 
@@ -163,10 +255,13 @@ async def test_same_request_id_replay_returns_the_stored_result_without_rewritin
     """
 
     app, objects = _composition()
-    first = await execute_publish_work(cast(Application, app), _request())
+    request = _request(expected_frontier={"sequence": "0", "head_digest": "genesis"})
+    first = await execute_publish_work(cast(Application, app), request)
     durable_after_first = len(objects._data)  # pyright: ignore[reportPrivateUsage]
 
-    second = await execute_publish_work(cast(Application, app), _request())
+    # This exact frontier is stale after the first append. Completed-operation replay must resolve
+    # before the ledger evaluates it, or this would incorrectly become FRONTIER_CONFLICT.
+    second = await execute_publish_work(cast(Application, app), request)
 
     assert first.outcome == "accepted"
     assert second.outcome == "replayed"
@@ -185,7 +280,7 @@ async def test_same_request_id_replay_returns_the_stored_result_without_rewritin
 
 async def test_same_id_changed_logical_request_conflicts_before_reencryption() -> None:
     app, objects = _composition()
-    await execute_publish_work(cast(Application, app), _request())
+    first = await execute_publish_work(cast(Application, app), _request())
     durable_after_first = len(objects._data)  # pyright: ignore[reportPrivateUsage]
 
     with pytest.raises(PublicOperationError) as caught:
@@ -193,7 +288,11 @@ async def test_same_id_changed_logical_request_conflicts_before_reencryption() -
             cast(Application, app), _request(description="Changed logical work")
         )
 
-    assert caught.value.code is PublicErrorCode.IDEMPOTENCY_CONFLICT
+    assert caught.value.code is PublicErrorCode.REQUEST_IDENTITY_CONFLICT
+    assert caught.value.safe_details.get("reason_code") == "request_identity_conflict"
+    assert caught.value.safe_details.get("sequence") == first.result_frontier.sequence
+    assert caught.value.safe_details.get("head_digest") == first.result_frontier.head_digest
+    assert caught.value.safe_details.get("count") == len(first.accepted_events)
     assert len(objects._data) == durable_after_first  # pyright: ignore[reportPrivateUsage]
 
 
@@ -218,3 +317,421 @@ async def test_stale_expected_frontier_sequence_conflicts() -> None:
     # The conflict must carry the *current* head so a caller can retry without a status round-trip.
     assert caught.value.safe_details.get("sequence") == first.result_frontier.sequence
     assert caught.value.safe_details.get("head_digest") == first.result_frontier.head_digest
+
+
+async def test_mutated_event_drafts_same_request_id_is_request_identity_conflict() -> None:
+    """Run-3 sequence: same request_id with a different body must not re-append or invalidate."""
+
+    app, objects = _composition()
+    original = _request(
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+        event_drafts=(
+            _draft(event_tail=401, action_tail=402),
+            _draft(event_tail=403, action_tail=404),
+        ),
+    )
+    first = await execute_publish_work(cast(Application, app), original)
+    durable_after_first = len(objects._data)  # pyright: ignore[reportPrivateUsage]
+
+    mutated = _request(
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+        event_drafts=(
+            _draft(event_tail=401, action_tail=402),
+            {
+                **_draft(event_tail=403, action_tail=404),
+                "payload": {
+                    "action_id": "act_00000000-0000-4000-8000-000000000404",
+                    "action_kind": "other",
+                    "description": "Mutated draft body that is no longer the original",
+                },
+            },
+        ),
+    )
+    with pytest.raises(PublicOperationError) as caught:
+        await execute_publish_work(cast(Application, app), mutated)
+
+    assert caught.value.code is PublicErrorCode.REQUEST_IDENTITY_CONFLICT
+    assert caught.value.safe_details.get("reason_code") == "request_identity_conflict"
+    assert caught.value.safe_details.get("sequence") == first.result_frontier.sequence
+    assert caught.value.safe_details.get("head_digest") == first.result_frontier.head_digest
+    assert caught.value.safe_details.get("count") == len(first.accepted_events)
+    assert len(objects._data) == durable_after_first  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_status_view_operation_returns_stored_publish_result() -> None:
+    app, _ = _composition()
+    request = _request(request_tail=501, event_tail=502, action_tail=503)
+    first = await execute_publish_work(cast(Application, app), request)
+    seed = append_command()
+
+    status = await execute_status(
+        cast(StatusApplication, app),
+        StatusRequest.model_validate(
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": "req_00000000-0000-4000-8000-000000000510",
+                "session_id": seed.session_id,
+                "writer_id": seed.writer_id,
+                "view": "operation",
+                "limit": "1",
+                "filter": {"operation_request_id": request.request_id},
+                "actor": {"actor_id": "harness:test", "actor_type": "harness"},
+                "client": {
+                    "kind": "test_client",
+                    "version": "0.1.0",
+                    "integration": "local_cli",
+                },
+            }
+        ),
+    )
+
+    assert status.view == "operation"
+    page = status.page
+    assert type(page) is StatusOperationPageModel
+    assert page.found is True
+    assert page.state == "complete"
+    assert page.operation_kind == "publish_work"
+    assert page.outcome == "accepted"
+    assert page.result_frontier is not None
+    assert page.result_frontier.sequence == str(first.result_frontier.sequence)
+    assert tuple(item.event_id for item in page.accepted_events) == tuple(
+        item.event_id for item in first.accepted_events
+    )
+    assert tuple(item.entry_digest for item in page.accepted_events) == tuple(
+        item.entry_digest for item in first.accepted_events
+    )
+
+
+async def test_status_view_operation_absent_for_unknown_request_id() -> None:
+    app, _ = _composition()
+    request = _request(request_tail=521)
+    await execute_publish_work(cast(Application, app), request)
+    seed = append_command()
+
+    unknown = await execute_status(
+        cast(StatusApplication, app),
+        StatusRequest.model_validate(
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": "req_00000000-0000-4000-8000-000000000522",
+                "session_id": seed.session_id,
+                "writer_id": seed.writer_id,
+                "view": "operation",
+                "limit": "1",
+                "filter": {"operation_request_id": "req_00000000-0000-4000-8000-000000000599"},
+                "actor": {"actor_id": "harness:test", "actor_type": "harness"},
+                "client": {
+                    "kind": "test_client",
+                    "version": "0.1.0",
+                    "integration": "local_cli",
+                },
+            }
+        ),
+    )
+    page = cast(StatusOperationPageModel, unknown.page)
+    assert page.found is False
+    assert page.state == "absent"
+    assert page.accepted_events == ()
+
+    # Cross-writer lookup: operations are keyed by (writer_id, request_id). A different writer
+    # identity for the same session reports absent rather than leaking another writer's result.
+    foreign_writer = "wri_00000000-0000-4000-8000-000000000599"
+    assert foreign_writer != seed.writer_id
+    # The memory harness routes a single TaskRuntime writer; foreign writer_id cannot be routed
+    # without SESSION_CONFLICT. Prove the ledger lookup keying instead (same contract the status
+    # application uses before projecting the recovery page).
+    assert (
+        await app.runtime.task.ledger.lookup_operation(foreign_writer, request.request_id)
+    ) is None
+    assert (
+        await app.runtime.task.ledger.lookup_operation(seed.writer_id, request.request_id)
+    ) is not None
+
+
+async def test_dry_run_appends_nothing_and_leaves_request_id_reusable() -> None:
+    """dry_run validates without durable effects; the same request_id still publishes later."""
+
+    app, objects = _composition()
+    frontier_before = await app.runtime.task.ledger.load_frontier()
+    durable_before = len(objects._data)  # pyright: ignore[reportPrivateUsage]
+    request = _request(
+        request_tail=601,
+        event_tail=602,
+        action_tail=603,
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    preview_payload = request.model_dump(mode="json", by_alias=True, exclude_none=True)
+    preview_payload["dry_run"] = True
+    preview_request = PublishWorkRequestModel.model_validate(preview_payload)
+
+    preview = await execute_publish_work(cast(Application, app), preview_request)
+
+    assert preview.ok is True
+    assert preview.outcome == "dry_run"
+    assert preview.subject_frontier.sequence == str(frontier_before.sequence)
+    assert preview.result_frontier == preview.subject_frontier
+    assert type(preview.root) is PublishWorkDryRunModel
+    assert preview.root.evidential is False
+    assert len(preview.root.would_accept) == 1
+    draft0 = cast(dict[str, object], request.event_drafts[0])
+    assert preview.root.would_accept[0].event_id == draft0["event_id"]
+
+    frontier_after_preview = await app.runtime.task.ledger.load_frontier()
+    assert frontier_after_preview.sequence == frontier_before.sequence
+    assert frontier_after_preview.head_digest == frontier_before.head_digest
+    assert len(objects._data) == durable_before  # pyright: ignore[reportPrivateUsage]
+    assert (
+        await app.runtime.task.ledger.lookup_operation(request.writer_id, request.request_id)
+    ) is None
+
+    accepted = await execute_publish_work(cast(Application, app), request)
+    assert accepted.ok is True
+    assert accepted.outcome == "accepted"
+    assert accepted.result_frontier.sequence != str(frontier_before.sequence)
+    assert (
+        await app.runtime.task.ledger.lookup_operation(request.writer_id, request.request_id)
+    ) is not None
+
+
+async def test_dry_run_rejects_duplicate_event_id_like_real_publish() -> None:
+    """would_accept must not be a false positive when the event id is already on the ledger."""
+
+    app, _objects = _composition()
+    first = _request(
+        request_tail=611,
+        event_tail=612,
+        action_tail=613,
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    accepted = await execute_publish_work(cast(Application, app), first)
+    assert accepted.outcome == "accepted"
+    frontier = await app.runtime.task.ledger.load_frontier()
+
+    reuse = _request(
+        request_tail=614,
+        event_tail=612,
+        action_tail=615,
+        expected_frontier={
+            "sequence": str(frontier.sequence),
+            "head_digest": frontier.head_digest,
+        },
+    )
+    preview_payload = reuse.model_dump(mode="json", by_alias=True, exclude_none=True)
+    preview_payload["dry_run"] = True
+    with pytest.raises(PublicOperationError) as caught:
+        await execute_publish_work(
+            cast(Application, app), PublishWorkRequestModel.model_validate(preview_payload)
+        )
+    assert caught.value.code is PublicErrorCode.EVENT_INVALID
+
+
+async def test_dry_run_rejects_missing_causal_parent_like_real_publish() -> None:
+    """A parent that is neither in the ledger nor earlier in the batch cannot would_accept."""
+
+    app, _objects = _composition()
+    draft = _draft(event_tail=622, action_tail=623)
+    draft["causal_parents"] = ("evt_00000000-0000-4000-8000-000000000999",)
+    request = _request(
+        request_tail=621,
+        event_drafts=(draft,),
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    preview_payload = request.model_dump(mode="json", by_alias=True, exclude_none=True)
+    preview_payload["dry_run"] = True
+    with pytest.raises(PublicOperationError) as caught:
+        await execute_publish_work(
+            cast(Application, app), PublishWorkRequestModel.model_validate(preview_payload)
+        )
+    assert caught.value.code is PublicErrorCode.EVENT_INVALID
+    # Real publish fails the same way.
+    with pytest.raises(PublicOperationError) as real:
+        await execute_publish_work(cast(Application, app), request)
+    assert real.value.code is PublicErrorCode.EVENT_INVALID
+
+
+async def test_dry_run_frontier_gate_matches_sequence_only_publish_predicate() -> None:
+    """Mismatched head_digest with matching sequence is accepted by both dry_run and publish."""
+
+    app, _objects = _composition()
+    first = _request(
+        request_tail=631,
+        event_tail=632,
+        action_tail=633,
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    accepted = await execute_publish_work(cast(Application, app), first)
+    assert accepted.outcome == "accepted"
+    frontier = await app.runtime.task.ledger.load_frontier()
+    # Sequence is correct; digest is deliberately wrong (not the acceptance gate for publish).
+    second = _request(
+        request_tail=634,
+        event_tail=635,
+        action_tail=636,
+        expected_frontier={
+            "sequence": str(frontier.sequence),
+            "head_digest": "sha256:" + ("ab" * 32),
+        },
+    )
+    preview_payload = second.model_dump(mode="json", by_alias=True, exclude_none=True)
+    preview_payload["dry_run"] = True
+    preview = await execute_publish_work(
+        cast(Application, app), PublishWorkRequestModel.model_validate(preview_payload)
+    )
+    assert preview.outcome == "dry_run"
+    published = await execute_publish_work(cast(Application, app), second)
+    assert published.outcome == "accepted"
+
+
+_OBLIGATION_ID = "obl_00000000-0000-4000-8000-000000000701"
+_EVIDENCE_ID = "evd_00000000-0000-4000-8000-000000000702"
+_OPEN_MEANING: dict[str, object] = {
+    "obligation_id": _OBLIGATION_ID,
+    "description": "Close the loop with exact evidence.",
+    "acceptance_criteria": "The focused slice is green.",
+    "evidence_expectation": "A named test run at the claimed state.",
+    "status": "open",
+    "requested_items": [{"item_kind": "command", "value": "pytest -q"}],
+}
+
+
+def _obligation_draft(event_tail: int, payload: dict[str, object]) -> dict[str, object]:
+    return {
+        "event_id": f"evt_00000000-0000-4000-8000-{event_tail:012d}",
+        "schema": {"name": "obligation_published", "version": "1.0.0"},
+        "occurred_at": "2026-07-19T12:00:00.000Z",
+        "causal_parents": (),
+        "payload": payload,
+        "artifact_refs": (),
+        "evidence_refs": (),
+    }
+
+
+def _evidence_draft(event_tail: int) -> dict[str, object]:
+    return {
+        "event_id": f"evt_00000000-0000-4000-8000-{event_tail:012d}",
+        "schema": {"name": "evidence_recorded", "version": "1.0.0"},
+        "occurred_at": "2026-07-19T12:00:00.000Z",
+        "causal_parents": (),
+        "payload": {
+            "evidence_id": _EVIDENCE_ID,
+            "evidence_kind": "test_result",
+            "strength": "content_digest",
+            "content_digest": "sha256:" + "11" * 32,
+            "observed_at": "2026-07-19T12:00:00.000Z",
+            "description": "Focused slice result.",
+        },
+        "artifact_refs": (),
+        "evidence_refs": (),
+    }
+
+
+async def _publish_open_obligation(app: _Application) -> Frontier:
+    request = _request(
+        request_tail=701,
+        event_drafts=(_obligation_draft(702, dict(_OPEN_MEANING)),),
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    result = await execute_publish_work(cast(Application, app), request)
+    assert result.outcome == "accepted"
+    return await app.runtime.task.ledger.load_frontier()
+
+
+async def test_obligation_resolution_exact_repeat_is_accepted_on_publish() -> None:
+    app, _objects = _composition()
+    frontier = await _publish_open_obligation(app)
+    resolved: dict[str, object] = {
+        **_OPEN_MEANING,
+        "status": "resolved",
+        "resolution_evidence_refs": [_EVIDENCE_ID],
+    }
+    request = _request(
+        request_tail=703,
+        event_drafts=(
+            _evidence_draft(704),
+            _obligation_draft(705, resolved),
+        ),
+        expected_frontier={
+            "sequence": str(frontier.sequence),
+            "head_digest": frontier.head_digest,
+        },
+    )
+    result = await execute_publish_work(cast(Application, app), request)
+    assert result.outcome == "accepted"
+
+
+async def test_obligation_resolution_mismatch_is_identical_on_dry_run_and_publish() -> None:
+    """Omitting a meaning field surfaces the same typed public error on both paths."""
+
+    app, _objects = _composition()
+    frontier = await _publish_open_obligation(app)
+    mismatched: dict[str, object] = {
+        "obligation_id": _OBLIGATION_ID,
+        "description": _OPEN_MEANING["description"],
+        "evidence_expectation": "Shortened expectation.",
+        "status": "resolved",
+        "resolution_evidence_refs": [_EVIDENCE_ID],
+    }
+    request = _request(
+        request_tail=706,
+        event_drafts=(
+            _evidence_draft(707),
+            _obligation_draft(708, mismatched),
+        ),
+        expected_frontier={
+            "sequence": str(frontier.sequence),
+            "head_digest": frontier.head_digest,
+        },
+    )
+    preview_payload = request.model_dump(mode="json", by_alias=True, exclude_none=True)
+    preview_payload["dry_run"] = True
+    with pytest.raises(PublicOperationError) as dry:
+        await execute_publish_work(
+            cast(Application, app), PublishWorkRequestModel.model_validate(preview_payload)
+        )
+    with pytest.raises(PublicOperationError) as durable:
+        await execute_publish_work(cast(Application, app), request)
+
+    for caught in (dry, durable):
+        error = caught.value
+        assert error.code is PublicErrorCode.EVENT_INVALID
+        assert error.safe_details["reason_code"] == "obligation_resolution_mismatch"
+        assert error.safe_details["field"] == "/event_drafts/1/payload"
+        assert "meaning_fields_must_repeat" in error.message
+        assert "acceptance_criteria" in error.message
+        assert "evidence_expectation" in error.message
+        assert "Shortened expectation" not in error.message
+        assert "Close the loop" not in error.message
+        assert "yoetz://guidance/publication-policy.md" in error.message
+
+    assert dict(dry.value.safe_details) == dict(durable.value.safe_details)
+    assert dry.value.message == durable.value.message
+
+
+async def test_obligation_resolution_omitting_only_acceptance_criteria_names_that_field() -> None:
+    app, _objects = _composition()
+    frontier = await _publish_open_obligation(app)
+    mismatched: dict[str, object] = {
+        "obligation_id": _OBLIGATION_ID,
+        "description": _OPEN_MEANING["description"],
+        "evidence_expectation": _OPEN_MEANING["evidence_expectation"],
+        "status": "resolved",
+        "requested_items": _OPEN_MEANING["requested_items"],
+        "resolution_evidence_refs": [_EVIDENCE_ID],
+    }
+    request = _request(
+        request_tail=709,
+        event_drafts=(
+            _evidence_draft(710),
+            _obligation_draft(711, mismatched),
+        ),
+        expected_frontier={
+            "sequence": str(frontier.sequence),
+            "head_digest": frontier.head_digest,
+        },
+    )
+    with pytest.raises(PublicOperationError) as caught:
+        await execute_publish_work(cast(Application, app), request)
+    assert caught.value.safe_details["reason_code"] == "obligation_resolution_mismatch"
+    assert "mismatched fields: acceptance_criteria" in caught.value.message
