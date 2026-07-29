@@ -999,9 +999,7 @@ def update_schema_manifest(documents: tuple[SchemaDocument, ...], root: Path) ->
     except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
         raise SchemaGenerationError("schema_manifest_unreadable") from exc
     by_path = {
-        cast(str, cast(dict[str, JsonValue], member)["path"]): cast(
-            dict[str, JsonValue], member
-        )
+        cast(str, cast(dict[str, JsonValue], member)["path"]): cast(dict[str, JsonValue], member)
         for member in members
     }
     for document in documents:

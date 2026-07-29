@@ -511,7 +511,5 @@ async def run_durable_semantic_attempts(
         max_retries=max_retries,
     )
     await ledger.fail_semantic_job(current_lease, job.job_id, reason)
-    accounting = await _accounting_for(
-        ledger, current_lease, job.job_id, max_retries=max_retries
-    )
+    accounting = await _accounting_for(ledger, current_lease, job.job_id, max_retries=max_retries)
     return build_final(status, reason, last, accounting)

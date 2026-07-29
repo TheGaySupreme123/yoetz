@@ -596,9 +596,7 @@ async def test_total_deadline_after_retriable_attempt_terminally_fails_queued_jo
     assert result[0] is SemanticStatus.TIMEOUT
     assert result[1] is SemanticReason.PROVIDER_TIMEOUT
     assert result[2].attempted_count == 1
-    assert ledger.outcomes == [
-        (_ATT1, AttemptOutcome.EXPIRED, SemanticReason.PROVIDER_TIMEOUT)
-    ]
+    assert ledger.outcomes == [(_ATT1, AttemptOutcome.EXPIRED, SemanticReason.PROVIDER_TIMEOUT)]
     assert ledger.job.state == "failed"
     assert ledger.job.terminal_code is SemanticReason.PROVIDER_TIMEOUT
 
