@@ -30,12 +30,19 @@ exactly those contracts and connects the steps without weakening any existing tr
    preview→confirm→execute, a service reachability check, and the existing privacy and
    provider-credential ceremonies. Founder-authorized amendment (2026-07-29): before registration,
    interactive first run chooses a complete `local_only` path or a semantic-review path. The latter
-   registers the policy route, configures the provider and credential, asks all thirteen privacy
-   questions, renders the exact bounded disclosure, proposes it, and hands widening to the
-   separately reauthenticated trusted decision ceremony. On a real local TTY it may invoke the
+   registers the policy route, configures the provider and credential, then renders one exact
+   recommended `metadata_only` policy. Accepting that exact draft skips the thirteen expert
+   questions; declining it opens the recipe choice and all settings one by one. Both paths propose
+   the reviewed exact disclosure and hand widening to the separately reauthenticated trusted
+   decision ceremony. On a real local TTY it may invoke the
    already-reviewed hidden-input vault initialize/unlock and credential ceremony; it adds no
    secret field to wizard arguments, configuration, reports, MCP, or agent context. Noninteractive
-   setup remains a report plus explicit follow-up commands and never chooses egress.
+   setup remains a report plus explicit follow-up commands and never chooses egress. The semantic
+   first-run recommendation permits only public structural metadata and declared file types at task
+   scope, with a foreground confirmation before every provider request. It is a starting draft,
+   not consent or a provider-data-use recommendation. `private` remains the fail-safe no-egress
+   choice, while assisted, expanded, and custom policies remain explicit. `yoetz --privacy` enters
+   the same short recommended-first ceremony at any later time.
 
 2. **Bounded bare-invocation change (amends ADR-007 decision 3).** The root Typer app drops
    `no_args_is_help=True`; the root callback reproduces the historical help output for every bare
@@ -111,6 +118,16 @@ availability, structured-output interoperability, provider data use, or E-007 ca
    ordinary stdin, environment, config, report, or MCP. A local interactive run may enter the
    existing confidential helper, which reads vault and provider secrets with hidden `/dev/tty`
    input and sends them only over YZS1. Noninteractive setup never provisions a credential.
+   Human setup and provider-status output renders only a constant `********` presence mask after the
+   trusted service confirms the configured profile has a credential; confirmed absence and
+   unreadable state remain distinct. The mask never reflects secret bytes or secret length. A
+   repeated setup run recomposes the service after binding and observes that exact profile. When
+   presence is confirmed, it asks whether to reuse the stored credential (default) or replace it
+   through the same hidden-input ceremony. If an initial credential write commits but its result
+   frame is lost, setup may recover only from the configured profile's trusted presence bit. A
+   replacement started with presence already true cannot use that bit as proof that the new value
+   committed; an ambiguous replacement remains failed instead of inheriting the old value's
+   presence as success.
 
 8. **Founder-authorized on-demand service start (2026-07-22 amendment).** A mutating interactive
    setup run and the MCP bridge may invoke the shared fixed-command service launcher when the

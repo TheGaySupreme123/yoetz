@@ -33,6 +33,13 @@ def _provider(provider_id: str = "openai") -> ProviderProfileConfig:
     )
 
 
+def test_credential_human_display_uses_one_constant_mask() -> None:
+    assert module.credential_human_display(True) == "********"
+    assert module.credential_human_display(False) == "not stored"
+    assert module.credential_human_display(None) == "unknown"
+    assert module.credential_human_display("a-real-key-must-never-be-reflected") == "unknown"
+
+
 def _policy(*, llm_inference_enabled: bool, profile: str = "local_only") -> dict[str, object]:
     return {
         "policy": {
@@ -163,7 +170,7 @@ async def test_llm_inference_channel_is_actually_read_from_canonical_policy(
     assert len(channel_blockers) == 1
     # "disabled" is a read answer; "unknown" would mean the policy was never inspected.
     assert channel_blockers[0]["state"] == "disabled"
-    assert channel_blockers[0]["next_command"] == "yoetz privacy setup"
+    assert channel_blockers[0]["next_command"] == "yoetz --privacy"
 
 
 async def test_credential_for_a_different_provider_is_not_counted(

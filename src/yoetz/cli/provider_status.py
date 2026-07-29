@@ -19,9 +19,15 @@ from yoetz.ports.control import ControlClientKind, ControlError
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.service.client import connect_service
 
-__all__ = ["machine_scope_request", "provider_status_report", "run_provider_status"]
+__all__ = [
+    "credential_human_display",
+    "machine_scope_request",
+    "provider_status_report",
+    "run_provider_status",
+]
 
 _SCHEMA: Final = "yoetz.provider-status/1"
+_CREDENTIAL_MASK: Final = "********"
 # This report probes the persistent user service over the fixed endpoint only. It never starts
 # one, unlike the MCP bridge's connect-on-demand path.
 _PROBED_LIFECYCLE: Final = "user_service_no_autostart"
@@ -47,7 +53,7 @@ def _emit(value: Mapping[str, JsonValue], *, json_output: bool) -> None:
             f"model={binding.get('model')} "
             f"profile={binding.get('endpoint_profile_id')}"
         )
-    print(f"credential_connected: {value.get('credential_connected')}")
+    print(f"credential: {credential_human_display(value.get('credential_connected'))}")
     print(f"llm_inference_enabled: {value.get('llm_inference_enabled')}")
     print(f"semantic_ready: {value.get('semantic_ready')}")
     blockers = value.get("blockers")
@@ -69,6 +75,16 @@ def _emit(value: Mapping[str, JsonValue], *, json_output: bool) -> None:
         print("next commands:")
         for step in next_steps:
             print(f"  - {step}")
+
+
+def credential_human_display(value: object) -> str:
+    """Render credential presence without reflecting any property of the stored secret."""
+
+    if value is True:
+        return _CREDENTIAL_MASK
+    if value is False:
+        return "not stored"
+    return "unknown"
 
 
 def _channel_enabled(policy: Mapping[str, object], channel: str) -> bool | None:
@@ -242,7 +258,7 @@ async def provider_status_report() -> dict[str, JsonValue]:
             {
                 "condition": "llm_inference_channel",
                 "state": "disabled",
-                "next_command": "yoetz privacy setup",
+                "next_command": "yoetz --privacy",
             }
         )
 
