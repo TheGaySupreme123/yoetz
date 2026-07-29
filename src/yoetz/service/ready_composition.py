@@ -52,6 +52,10 @@ from yoetz.application.observation_coordinator import ObservationCoordinator
 from yoetz.application.observation_verification import ObservationVerificationSupervisor
 from yoetz.application.privacy_control import build_privacy_support_handlers
 from yoetz.application.privacy_policy import PrivacyPolicyApplication
+from yoetz.application.semantic_case import (
+    build_semantic_case,
+    semantic_case_to_candidate_context,
+)
 from yoetz.application.service import (
     ControlProjectionBinding,
     ReadyApplicationFactory,
@@ -62,7 +66,12 @@ from yoetz.config.models import YoetzConfig
 from yoetz.config.paths import ensure_owner_only_dir, verify_private_local_bundle
 from yoetz.config.privacy import safe_privacy_bootstrap, seed_policy_if_absent
 from yoetz.domain.events import RuntimeProfile
-from yoetz.domain.findings import SemanticDispatchKind, SemanticFailureClass, SemanticProvenance
+from yoetz.domain.findings import (
+    Finding,
+    SemanticDispatchKind,
+    SemanticFailureClass,
+    SemanticProvenance,
+)
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
@@ -1469,54 +1478,37 @@ def _privacy_gated_semantic_evaluator(
                 workspace,
                 route.task_id,
             )
-            finding_ids: list[str] = []
-            for finding in findings:
-                finding_id = getattr(finding, "finding_id", None)
-                if type(finding_id) is str:
-                    finding_ids.append(finding_id)
-            case = frozen.case
-            payload = canonical_encode(
-                cast(
-                    CanonicalJsonValue,
-                    {
-                        "dependency_digest": frozen.lease.dependency_digest,
-                        "findings": finding_ids,
-                        "frontier": {
-                            "head_digest": case.frontier.head_digest,
-                            "sequence": case.frontier.sequence,
-                        },
-                        "schema": "yoetz.semantic-check-candidate/1",
-                    },
-                )
+            typed_findings = tuple(item for item in findings if type(item) is Finding)
+            # Live effective policy owns review selection; selection narrows candidates only.
+            # Composition test doubles may omit the policy application: fall back to structural.
+            policy_app = getattr(privacy, "policy_application", None)
+            if policy_app is not None:
+                effective = await policy_app.policy_store.effective_policy(scope)
+                policy = effective.policy
+                review_profile = policy.review_context_profile
+                review_selection = policy.review_selection
+                policy_id = policy.policy_id
+                policy_version = str(policy.version)
+            else:
+                review_profile = ReviewContextProfile.STRUCTURAL
+                review_selection = ReviewSelectionPolicy.for_profile(review_profile)
+                policy_id = ids.new(IdKind.PRIVACY_POLICY)
+                policy_version = "1"
+            semantic_case = build_semantic_case(
+                case_id=ids.new(IdKind.OUTBOUND_CASE),
+                frozen_case=frozen.case,
+                dependency_digest=frozen.lease.dependency_digest,
+                findings=typed_findings,
+                review_context_profile=review_profile,
+                review_selection=review_selection,
+                policy_id=policy_id,
+                policy_version=policy_version,
             )
-            candidate = CandidateContext(
+            candidate = semantic_case_to_candidate_context(
+                semantic_case,
                 request_id=frozen.lease.operation_id,
-                channel=EgressChannel.LLM_INFERENCE,
-                local_sink=None,
-                purpose="semantic-review",
                 scope=scope,
-                subject_digest=canonical_digest(
-                    cast(
-                        CanonicalJsonValue,
-                        {
-                            "frontier": {
-                                "head_digest": case.frontier.head_digest,
-                                "sequence": case.frontier.sequence,
-                            },
-                            "schema": "yoetz.semantic-check-subject/1",
-                        },
-                    )
-                ),
                 provider_binding=provider,
-                items=(
-                    CandidateContextItem(
-                        "case-packet",
-                        DataCategory.BOUNDED_STRUCTURAL_METADATA,
-                        scope,
-                        "/case",
-                        payload,
-                    ),
-                ),
             )
             deadline = Deadline(clock.now_utc(), clock.monotonic_seconds() + 60.0)
             result = await privacy.evaluate_semantic(candidate, deadline)

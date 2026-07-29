@@ -21,7 +21,7 @@ from yoetz.domain.privacy import (
 )
 from yoetz.observability.privacy import scan_for_sensitive_content
 from yoetz.ports.privacy import EffectivePrivacyPolicy, MinimizedDisclosure
-from yoetz.protocol.canonical import JsonValue, canonical_encode
+from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from yoetz.protocol.models import DataCategory
 
 __all__ = [
@@ -101,6 +101,156 @@ def scan_exact_bytes(data: bytes) -> tuple[ForbiddenDataKind, ...]:
         for finding in findings
     }
     return tuple(sorted(mapped, key=lambda value: value.value.encode()))
+
+
+_REVIEW_PACKET_ITEM_ID = "review-packet"
+_SEMANTIC_PACKET_SCHEMA = "yoetz.review-packet-case/1"
+
+
+def _assemble_semantic_review_payload(
+    classified: ClassifiedContext,
+    included: tuple[ClassifiedContextItem, ...],
+) -> bytes:
+    """Assemble the versioned review-packet document from privacy-approved case items.
+
+    The pre-egress builder supplies one structural ``review-packet`` envelope plus separate
+    categorized content items. This keeps classification/minimization item-identity exact while
+    still delivering a readable packet to the provider.
+    """
+
+    included_by_id = {item.candidate.item_id: item for item in included}
+    envelope_item = included_by_id.get(_REVIEW_PACKET_ITEM_ID)
+    if envelope_item is None:
+        # Structural envelope withheld or missing: fail closed to empty authorized payload shape
+        # recognized by the coordinator as insufficient approved context when ids are empty.
+        return canonical_encode(
+            cast(
+                JsonValue,
+                {
+                    "items": [],
+                    "omissions": [],
+                    "schema": _SEMANTIC_PACKET_SCHEMA,
+                },
+            )
+        )
+    try:
+        envelope = strict_json_parse(envelope_item.candidate.plaintext)
+    except Exception:
+        return canonical_encode(
+            cast(
+                JsonValue,
+                {
+                    "items": [],
+                    "omissions": [],
+                    "schema": _SEMANTIC_PACKET_SCHEMA,
+                },
+            )
+        )
+    if not isinstance(envelope, dict):
+        return canonical_encode(
+            cast(JsonValue, {"items": [], "omissions": [], "schema": _SEMANTIC_PACKET_SCHEMA})
+        )
+    document = cast(dict[str, JsonValue], dict(cast(dict[object, object], envelope)))
+    included_ids = set(included_by_id)
+    content_rows: list[dict[str, JsonValue]] = []
+    for item in classified.items:
+        candidate = item.candidate
+        if candidate.item_id == _REVIEW_PACKET_ITEM_ID:
+            continue
+        if candidate.item_id not in included_ids:
+            continue
+        try:
+            text = candidate.plaintext.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        # Section/source metadata is carried on the origin pointer when present.
+        origin = candidate.origin_ref
+        section = "timeline"
+        if origin.startswith("/case/"):
+            parts = origin.split("/")
+            if len(parts) >= 3 and parts[2]:
+                section = parts[2]
+        content_rows.append(
+            {
+                "category": candidate.category.value,
+                "content": text,
+                "content_bytes": len(candidate.plaintext),
+                "content_digest": f"sha256:{hashlib.sha256(candidate.plaintext).hexdigest()}",
+                "item_id": candidate.item_id,
+                "section": section,
+            }
+        )
+    content_rows.sort(key=lambda row: cast(str, row["item_id"]).encode("ascii"))
+
+    packet = document.get("review_packet")
+    if isinstance(packet, dict):
+        packet_obj = cast(dict[str, JsonValue], dict(cast(dict[object, object], packet)))
+        for key in (
+            "goal_item_ids",
+            "obligation_item_ids",
+            "claim_item_ids",
+            "decision_item_ids",
+            "timeline_item_ids",
+        ):
+            raw_ids = packet_obj.get(key)
+            if type(raw_ids) is list:
+                packet_obj[key] = [
+                    item_id
+                    for item_id in cast(list[object], raw_ids)
+                    if type(item_id) is str and item_id in included_ids
+                ]
+        excerpts = packet_obj.get("targeted_excerpts")
+        if type(excerpts) is list:
+            packet_obj["targeted_excerpts"] = [
+                row
+                for row in cast(list[object], excerpts)
+                if isinstance(row, dict)
+                and cast(dict[str, object], row).get("excerpt_item_id") in included_ids
+            ]
+        assessments = packet_obj.get("deterministic_assessments")
+        if type(assessments) is list:
+            filtered_assessments: list[JsonValue] = []
+            for raw in cast(list[object], assessments):
+                if not isinstance(raw, dict):
+                    continue
+                row = dict(cast(dict[str, JsonValue], cast(dict[object, object], raw)))
+                summary = row.get("summary_item_id")
+                detail = row.get("detail_item_id")
+                if type(summary) is str and type(detail) is str:
+                    if summary not in included_ids or detail not in included_ids:
+                        row.pop("summary_item_id", None)
+                        row.pop("detail_item_id", None)
+                filtered_assessments.append(row)
+            packet_obj["deterministic_assessments"] = filtered_assessments
+        omissions = packet_obj.get("omissions")
+        omission_rows: list[JsonValue] = (
+            list(cast(list[JsonValue], omissions)) if type(omissions) is list else []
+        )
+        for item in classified.items:
+            candidate = item.candidate
+            if candidate.item_id == _REVIEW_PACKET_ITEM_ID or candidate.item_id in included_ids:
+                continue
+            # Withheld content is represented exactly; subject identity stays structural.
+            origin = candidate.origin_ref
+            subject_ref = candidate.item_id
+            if origin.startswith("/case/") and len(origin.split("/")) >= 4:
+                subject_ref = origin.split("/", 3)[3]
+            omission_rows.append(
+                {
+                    "category": candidate.category.value,
+                    "reason": "withheld_by_policy",
+                    "source_kind": "finding"
+                    if candidate.category is DataCategory.FINDING_SUMMARY
+                    else "task",
+                    "subject_ref": subject_ref,
+                }
+            )
+        packet_obj["omissions"] = omission_rows
+        document["review_packet"] = packet_obj
+
+    document["items"] = cast(JsonValue, content_rows)
+    document["schema"] = _SEMANTIC_PACKET_SCHEMA
+    return canonical_encode(cast(JsonValue, document))
 
 
 class LocalPrivacyEnforcer:
@@ -191,17 +341,20 @@ class LocalPrivacyEnforcer:
             and not item.forbidden_findings
             and item.data_class is not DataClass.SECRET_OR_CRYPTOGRAPHIC
         )
-        rows = [
-            {
-                "category": item.candidate.category.value,
-                "content_base64": base64.b64encode(item.candidate.plaintext).decode("ascii"),
-                "item_id": item.candidate.item_id,
-            }
-            for item in included
-        ]
-        prepared = canonical_encode(
-            cast(JsonValue, {"items": rows, "schema": "yoetz.minimized-disclosure/1"})
-        )
+        if classified.candidate.purpose == "semantic-review":
+            prepared = _assemble_semantic_review_payload(classified, included)
+        else:
+            rows = [
+                {
+                    "category": item.candidate.category.value,
+                    "content_base64": base64.b64encode(item.candidate.plaintext).decode("ascii"),
+                    "item_id": item.candidate.item_id,
+                }
+                for item in included
+            ]
+            prepared = canonical_encode(
+                cast(JsonValue, {"items": rows, "schema": "yoetz.minimized-disclosure/1"})
+            )
         findings = scan_exact_bytes(prepared)
         source_digests = tuple(
             sorted(
