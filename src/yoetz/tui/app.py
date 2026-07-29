@@ -403,7 +403,8 @@ class YoetzTui(App[int]):
             self.exit(0)
             return
         if choice == "local":
-            await self._finish_setup(connected=False)
+            await self._choose_storage(detection)
+            await self._choose_initial_review(connected=False)
             return
 
         option = await self._choose_harness(detection.harnesses)
@@ -415,7 +416,63 @@ class YoetzTui(App[int]):
         if not await self._connect(option):
             return
         await self._choose_storage(detection)
-        await self._finish_setup(connected=True)
+        await self._choose_initial_review(connected=True)
+
+    async def _choose_initial_review(self, *, connected: bool) -> None:
+        choice = await self.ask(
+            SelectionView(
+                name="review-mode",
+                title="How should Yoetz review work?",
+                options=[
+                    Option(
+                        "local",
+                        "Local only",
+                        "Deterministic checks; nothing leaves this computer.",
+                    ),
+                    Option(
+                        "semantic",
+                        "Add semantic review",
+                        "Configure a provider, API key, and explicit privacy boundary.",
+                    ),
+                ],
+                hint="enter to choose",
+            )
+        )
+        if choice != "semantic":
+            await self._finish_setup(connected=connected)
+            return
+        await self.command_provider()
+        provider = await self.runtime.provider_posture()
+        if not provider.endpoint_bound or provider.credential_connected is not True:
+            self.say(
+                Level.BLOCKED,
+                "Semantic setup is not complete",
+                (
+                    "A provider binding and stored credential are required.",
+                    "You can choose Local only or rerun setup.",
+                ),
+            )
+            return
+        try:
+            report = await self.hand_over_terminal(lambda: self.runtime.run_privacy_setup("custom"))
+        except SuspendNotSupported:
+            self.say(
+                Level.UNPROVEN,
+                "This terminal cannot open the trusted privacy ceremony",
+                ("Run 'yoetz privacy setup' from your shell. Setup was not marked complete.",),
+            )
+            return
+        except RuntimeError_ as error:
+            self._report(error)
+            return
+        if getattr(report, "outcome", "failed") not in {"configured", "unchanged"}:
+            self.say(
+                Level.BLOCKED,
+                "Semantic privacy setup is not complete",
+                (f"Reason: {getattr(report, 'reason', 'privacy_setup_failed')}",),
+            )
+            return
+        await self._finish_setup(connected=connected)
 
     async def _choose_harness(self, options: Sequence[HarnessOption]) -> HarnessOption | None:
         if not options:
@@ -740,10 +797,20 @@ class YoetzTui(App[int]):
     async def _refresh_header(self) -> None:
         harnesses = self.runtime.discover_harnesses()
         state = "not connected"
-        if harnesses:
+        observed: list[str] = []
+        for harness in harnesses:
             try:
-                mcp = await self.runtime.mcp_state(harnesses[0])
+                observed.append(await self.runtime.mcp_state(harness))
             except RuntimeError_:
+                observed.append("unknown")
+        if observed:
+            if "yoetz_owned" in observed:
+                mcp = "yoetz_owned"
+            elif "foreign_present" in observed:
+                mcp = "foreign_present"
+            elif all(item == "absent" for item in observed):
+                mcp = "absent"
+            else:
                 mcp = "unknown"
             state = {
                 "yoetz_owned": "connected",
@@ -936,19 +1003,37 @@ class YoetzTui(App[int]):
         if answer != "approve":
             self.say(Level.OPTIONAL, "Privacy was left unchanged.")
             return
-        # Policy change itself remains a trusted ceremony on the real terminal.
+        recipe = {
+            PrivacyChoice.CONFIRM_EVERY_REQUEST: "metadata_only",
+            PrivacyChoice.MINIMAL_EXTERNAL: "custom",
+            PrivacyChoice.TRUSTED_PROVIDER: "expanded_review",
+        }[target]
+        try:
+            report = await self.hand_over_terminal(lambda: self.runtime.run_privacy_setup(recipe))
+        except SuspendNotSupported:
+            self.say(
+                Level.UNPROVEN,
+                "This terminal cannot open the trusted privacy ceremony",
+                (
+                    "Nothing has changed. Run this command from your shell:",
+                    "",
+                    "    yoetz privacy setup",
+                ),
+            )
+            return
+        outcome = getattr(report, "outcome", "failed")
+        if outcome in {"configured", "unchanged"}:
+            await self._refresh_header()
+            self.say(
+                Level.VERIFIED,
+                "Privacy setup complete",
+                (f"Effective profile: {getattr(report, 'profile', target.value)}",),
+            )
+            return
         self.say(
-            Level.UNPROVEN,
-            "One more step, on the secure prompt",
-            (
-                "Widening privacy is decided on the trusted local ceremony, not",
-                "in this window. Run:",
-                "",
-                "    yoetz privacy propose --profile " + target.value,
-                "    yoetz privacy decide",
-                "",
-                "Nothing has changed yet.",
-            ),
+            Level.BLOCKED,
+            "Privacy setup did not complete",
+            (f"Reason: {getattr(report, 'reason', 'privacy_setup_failed')}",),
         )
 
     async def command_provider(self) -> None:

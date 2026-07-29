@@ -68,11 +68,11 @@ data categories become eligible, the provider, model, endpoint profile, purpose,
 the never-send set and any unavailable or untested provider posture. The cursor starts on the
 declining option.
 
-Approving there does **not** widen policy. The interface hands off to `yoetz privacy propose` and
-`yoetz privacy decide`, because widening is a trusted-local decision with its own ceremony
-([ADR-009](../adr/ADR-009-data-egress-privacy.md)) and a friendlier path to it would be a weaker
-path to it. Tightening likewise stays on `yoetz privacy tighten`. `local_only` remains the default
-and the interface never moves off it on its own
+Approving there does **not itself** widen policy. The interface suspends and hands the controlling
+terminal to the same thirteen-answer `yoetz privacy setup` questionnaire, ordinary proposal, and
+separately reauthenticated trusted decision used by the CLI. If terminal handoff is unavailable it
+prints `yoetz privacy setup` and changes nothing. Tightening likewise stays on the existing policy
+gate. `local_only` remains the default and the interface never moves off it on its own
 ([ADR-017](../adr/ADR-017-full-screen-terminal-interface.md) decision 5).
 
 ## What semantic review actually sends

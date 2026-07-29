@@ -342,6 +342,8 @@ async def test_setup_finishes_with_an_honest_summary_and_records_the_marker(
         await pilot.pause()
         await pilot.press("escape")  # skip storage
         await pilot.pause()
+        await pilot.press("enter")  # local-only review
+        await pilot.pause()
         text = transcript(app)
         assert "Yoetz is ready" in text
         assert "Nothing is being sent to an external review model." in text
@@ -356,6 +358,10 @@ async def test_choosing_local_only_setup_never_touches_the_project(
     async with app.run_test(size=WIDE) as pilot:
         await pilot.pause()
         await pilot.press("down", "enter")  # "Set up Yoetz without Codex"
+        await pilot.pause()
+        await pilot.press("escape")  # skip storage
+        await pilot.pause()
+        await pilot.press("enter")  # local-only review
         await pilot.pause()
         assert runtime.applied == []
         assert app.markers_written == ["local_only"]  # type: ignore[attr-defined]

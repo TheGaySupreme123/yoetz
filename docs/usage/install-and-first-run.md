@@ -16,12 +16,12 @@ exact Python distribution, passes arguments through unchanged, inherits stdio so
 your real terminal, and propagates exit codes — including `128+n` for a signal. It installs
 nothing itself: when `uv` is missing it prints the install command and stops.
 
-Optional extras:
+Compatibility extras (the standard install already contains these exact dependencies):
 
 | Extra | Adds |
 |---|---|
-| `semantic-openai` | HTTP client and OpenAI SDK for provider dispatch |
-| `portable-recovery` | Argon2 support for portable key recovery |
+| `semantic-openai` | Existing install-command alias for the HTTP client and OpenAI SDK |
+| `portable-recovery` | Existing install-command alias for Argon2 recovery/passphrase support |
 
 ## First run
 
@@ -46,13 +46,17 @@ Setup is a linear path inside the interface, each finished step collapsing into 
    apply refuses as stale rather than proceeding.
 5. **Installation activity**, with each step reported only once its postcondition was checked.
 6. **Secure storage** — the system keyring, or a Yoetz passphrase.
-7. **Finish**, stating each readiness layer separately.
+7. **Review mode** — finish in complete local-only mode, or configure semantic review.
+8. **Semantic setup, when selected** — provider/model, hidden API-key entry, all thirteen privacy
+   answers, the exact disclosure preview, and the separately reauthenticated widening decision.
+9. **Finish**, stating each readiness layer separately.
 
 `codex mcp get` runs first; an existing foreign entry is always preserved, never replaced, and
 there is no force-replace option anywhere in the interface.
 
-Provider configuration is **not** part of recommended onboarding. You finish setup with local
-verification fully ready and no provider at all.
+Local-only remains the safe default and needs no provider. Semantic review is available from the
+same first-run flow when selected; setup is not marked complete if its provider credential or
+privacy decision is incomplete.
 
 The official Codex App exists on macOS and Windows. Linux setup uses the same flow for the
 standalone Codex CLI and does not fabricate an app installation that OpenAI does not publish.
@@ -61,19 +65,20 @@ Re-run any time with `yoetz setup run` (the prompt-driven wizard, unchanged) or 
 interface. Inspect posture read-only with `yoetz setup status`. Manage registration directly with
 `yoetz integrate mcp status|preview|install`.
 
-## What stays human-driven
+## Re-run or repair a ceremony
 
-The wizard deliberately stops short of these and prints the exact next commands:
+The wizard uses these same commands and trusted boundaries; each remains available directly:
 
 ```text
-yoetz service run                  # start the persistent local service under a supervisor you choose
-yoetz privacy setup                # review recipes, provider binding, and egress policy
+yoetz service run                  # foreground service under a supervisor you choose
+yoetz privacy setup                # all 13 answers, exact preview, trusted decision
 yoetz provider endpoint            # bind a reviewed preset or owner-declared HTTPS origin + model
 yoetz provider credential set      # provision the API credential through the terminal ceremony
 ```
 
-`yoetz service run` runs in the foreground on purpose — you choose the supervisor (launchd, systemd,
-a terminal). Related: `yoetz service status`, `lock`, `unlock`, `idle-relock`, `stop`.
+`yoetz service run` runs in the foreground on purpose when invoked directly — you choose the
+supervisor (launchd, systemd, a terminal). Interactive setup may use the bounded on-demand launcher.
+Related: `yoetz service status`, `lock`, `unlock`, `idle-relock`, `stop`.
 
 ## What a fresh installation does not do
 

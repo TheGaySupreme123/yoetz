@@ -245,7 +245,7 @@ async def test_widening_privacy_shows_an_exact_disclosure_before_confirming(
         assert view.selected.key == "decline"  # type: ignore[attr-defined]
 
 
-async def test_approving_a_widening_still_defers_to_the_trusted_ceremony(
+async def test_approving_a_widening_runs_the_trusted_ceremony(
     make_app: MakeApp,
 ) -> None:
     app = make_app()
@@ -257,8 +257,8 @@ async def test_approving_a_widening_still_defers_to_the_trusted_ceremony(
         await pilot.press("up", "enter")  # approve
         await pilot.pause()
         text = transcript(app)
-        assert "yoetz privacy propose --profile minimal_external" in text
-        assert "Nothing has changed yet." in text
+        assert "Privacy setup complete" in text
+        assert "Effective profile: minimal_external" in text
 
 
 async def test_escaping_the_privacy_picker_keeps_the_current_setting(

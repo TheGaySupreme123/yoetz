@@ -72,6 +72,63 @@ def test_exact_integration_and_confidential_command_shapes() -> None:
     assert runner.invoke(cli.app, ["privacy", "receipts", "list", "--help"]).exit_code == 0
 
 
+def test_bare_privacy_setup_is_guided_not_a_malformed_support_request() -> None:
+    result = CliRunner().invoke(cli.app, ["privacy", "setup"])
+
+    assert result.exit_code == 20
+    assert "privacy_setup_failed: local_terminal_required" in result.stderr
+    assert "invalid_request" not in result.output
+
+
+def test_empty_privacy_show_request_uses_the_machine_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yoetz.domain.values import JsonObject
+
+    observed: list[JsonObject] = []
+
+    class PrivacyClient:
+        async def privacy_get_effective(
+            self,
+            request: JsonObject,
+            *,
+            deadline_ms: int | None = None,
+        ) -> JsonObject:
+            assert deadline_ms is None
+            observed.append(request)
+            return JsonObject({"schema_version": "1.0.0"})
+
+        async def close(self) -> None:
+            return None
+
+    async def build() -> PrivacyClient:
+        return PrivacyClient()
+
+    scoped = JsonObject(
+        {
+            "schema_version": "1.0.0",
+            "scope": {
+                "kind": "machine",
+                "installation_id": "ins_00000000-0000-4000-8000-000000000001",
+            },
+        }
+    )
+    monkeypatch.setattr(cli, "build_service_client", build)
+
+    def machine_scope() -> JsonObject:
+        return scoped
+
+    monkeypatch.setattr(
+        "yoetz.cli.provider_status.machine_scope_request",
+        machine_scope,
+    )
+
+    result = CliRunner().invoke(cli.app, ["privacy", "show", "--request", "{}", "--json"])
+
+    assert result.exit_code == 0
+    assert observed == [scoped]
+
+
 def test_workflow_uses_service_client_and_preserves_failure_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -128,6 +128,24 @@ class FakeRuntime:
     async def mcp_state(self, option: HarnessOption) -> str:
         return self.mcp
 
+    async def run_privacy_setup(self, recipe_hint: str) -> object:
+        from yoetz.cli.privacy_setup import PrivacySetupReport
+
+        self.ceremonies.append(f"privacy:{recipe_hint}")
+        profile = {
+            "private": "local_only",
+            "metadata_only": "confirm_every_request",
+            "assisted_review": "minimal_external",
+            "expanded_review": "trusted_provider",
+            "custom": "minimal_external",
+        }[recipe_hint]
+        self.privacy = PrivacyPosture(
+            profile=profile,
+            llm_inference_enabled=recipe_hint != "private",
+            readable=True,
+        )
+        return PrivacySetupReport("configured", profile)
+
     async def integration_plan(self, option: HarnessOption) -> IntegrationPlan:
         if self.plan_error is not None:
             raise self.plan_error
@@ -201,6 +219,20 @@ class FakeRuntime:
         self.ceremonies.append("provider_credential")
         if self.credential_result is None:
             raise RuntimeError_("cancelled", "the credential ceremony did not complete")
+        if self.bindings:
+            choice, model = self.bindings[-1]
+            option = next(item for item in self.provider_options() if item.choice == choice)
+            self.provider = ProviderPosture(
+                endpoint_bound=True,
+                provider_id=option.provider_id,
+                model=model,
+                endpoint_profile_id=option.endpoint_profile_id,
+                credential_connected=True,
+                llm_inference_enabled=False,
+                semantic_enabled=True,
+                semantic_ready=False,
+                readiness_determinable=True,
+            )
         return self.credential_result
 
     async def initialize_passphrase_vault(self) -> None:

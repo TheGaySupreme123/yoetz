@@ -25,12 +25,16 @@ manifests, the packaging/capability suites, and the release workflows under `.gi
    (`macosx_11_0_arm64`) and glibc 2.28+ x86-64 (`manylinux_2_28_x86_64`). No musl, Windows, or
    macOS x86-64 claims. Primary install:
    `uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"`.
-6. **Keys and optional extras:** the certified standard install includes direct pinned
+6. **Keys, semantic readiness, and compatibility extras:** the certified standard install includes
+   direct pinned
    `cryptography` (AES-GCM, RFC 3394 AES Key Wrap, HKDF/HMAC) and `keyring` plus the approved
    macOS/Linux secure-backend dependencies because object/vault crypto and OS-keyring-first service
-   startup are v0.1 core behavior, not semantic extras. Optional extras are `semantic-openai` (openai) and
-   `portable-recovery` (argon2-cffi). Explicit passphrase-backed vault setup also requires the
-   reviewed Argon2id implementation; absence leaves the service locked rather than downgrading.
+   startup are v0.1 core behavior. Founder-authorized amendment (2026-07-29): `argon2-cffi`,
+   `httpx`, and `openai` are also standard direct dependencies because first run offers both
+   passphrase storage and semantic review and must not offer a path the installed artifact cannot
+   execute. `semantic-openai` and `portable-recovery` remain compatibility extras for existing
+   install commands, with the same exact pins; they add no dependency absent from the standard
+   install. A malformed or incomplete environment still fails closed rather than downgrading.
 7. **Type/lint stack and npm boundary:** Ruff `0.15.22` (format+lint, line length 100), official
    npm Pyright `1.1.411` via a development-only private `package.json`, strict mode. The locked
    contributor/CI toolchain is Node `26.5.0` with npm `12.0.1`; `npm ci --ignore-scripts` followed
@@ -66,11 +70,12 @@ The 2026-07-17 implementation lock freezes the direct dependency declarations be
 exact pins except the intentionally bounded build-backend requirement. The generated locks also
 freeze every transitive distribution, source, artifact hash, marker, and license.
 
-- Runtime: `anyio==4.14.2`, `apsw==3.53.3.1`, `cryptography==49.0.0`,
-  `jsonschema==4.26.0`, `keyring==25.7.0`, `mcp==1.28.1`, `platformdirs==4.10.0`,
-  `pydantic==2.13.4`, and `typer==0.27.0`.
-- `semantic-openai`: `httpx==0.28.1` and `openai==2.46.0`.
-- `portable-recovery`: `argon2-cffi==25.1.0`.
+- Runtime: `anyio==4.14.2`, `apsw==3.53.3.1`, `argon2-cffi==25.1.0`,
+  `cryptography==49.0.0`, `httpx==0.28.1`, `jsonschema==4.26.0`, `keyring==25.7.0`,
+  `mcp==1.28.1`, `openai==2.46.0`, `platformdirs==4.10.0`, `pydantic==2.13.4`,
+  and `typer==0.27.0`.
+- Compatibility extras: `semantic-openai` repeats `httpx==0.28.1` and `openai==2.46.0`;
+  `portable-recovery` repeats `argon2-cffi==25.1.0`.
 - Development/test: `hypothesis==6.156.6`, `pytest==9.1.1`,
   `pytest-timeout==2.4.0`, and `ruff==0.15.22`; Pyright remains npm-owned as above.
 - Runtime candidate: CPython `3.14.6`, APSW `3.53.3.1`, and SQLite `3.53.3` with exact source ID
