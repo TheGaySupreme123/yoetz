@@ -26,6 +26,7 @@ from yoetz.domain.events import (
     LedgerChain,
     LedgerRecord,
     ObligationPublishedPayload,
+    ObligationResolutionMismatch,
     PayloadRef,
     PlanPublishedPayload,
     PlanRevisedPayload,
@@ -40,6 +41,7 @@ from yoetz.domain.events import (
     WriterChain,
     encode_payload,
     media_type_for,
+    public_error_for_obligation_resolution_mismatch,
 )
 from yoetz.domain.findings import (
     RankedFindings,
@@ -1218,6 +1220,16 @@ class MemoryLedgerAdapter:
         proposed = snapshot_records + tuple(new_records)
         try:
             projection = replay(proposed)
+        except ObligationResolutionMismatch as exc:
+            draft_index: int | None = None
+            if exc.event_id is not None:
+                for index, item in enumerate(command.entries):
+                    if item.draft.event_id == exc.event_id:
+                        draft_index = index
+                        break
+            raise public_error_for_obligation_resolution_mismatch(
+                exc, event_index=draft_index
+            ) from exc
         except ValueError as exc:
             raise _error(PublicErrorCode.EVENT_INVALID) from exc
         result_frontier = Frontier(projection.frontier, projection.head_digest)

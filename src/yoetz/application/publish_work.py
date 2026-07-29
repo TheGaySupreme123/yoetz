@@ -25,6 +25,7 @@ from yoetz.domain.events import (
     LedgerChain,
     LedgerRecord,
     ObligationPublishedPayload,
+    ObligationResolutionMismatch,
     PayloadRef,
     PlanPublishedPayload,
     PlanRevisedPayload,
@@ -38,6 +39,7 @@ from yoetz.domain.events import (
     decode_payload,
     encode_payload,
     media_type_for,
+    public_error_for_obligation_resolution_mismatch,
 )
 from yoetz.domain.values import (
     Actor,
@@ -1088,6 +1090,16 @@ async def _preflight_dry_run_feasibility(
             provisional.append(record)
             previous_ledger = record.entry_digest
         replay((*existing_records, *provisional))
+    except ObligationResolutionMismatch as exc:
+        draft_index: int | None = None
+        if exc.event_id is not None:
+            for index, item in enumerate(prepared.drafts):
+                if item.draft.event_id == exc.event_id:
+                    draft_index = index
+                    break
+        raise public_error_for_obligation_resolution_mismatch(
+            exc, event_index=draft_index
+        ) from None
     except (
         ValueError,
         TypeError,

@@ -29,6 +29,27 @@ For a large inventory, create obligations per coherent work package. Publish one
 
 An obligation names what must be satisfied. Evidence is a bounded, provenance-labeled reason to believe something about it. A claim states a conclusion. Link them explicitly; do not substitute a file list for an obligation or a claim for evidence.
 
+## Obligation resolution
+
+<a id="obligation-resolution"></a>
+
+Resolving an obligation is a one-way `open → resolved` state transition, not an edit. Publish a second
+`obligation_published` event for the **same** `obligation_id` that:
+
+1. repeats every meaning field from the open obligation **byte-for-byte**: `description`,
+   `acceptance_criteria`, `evidence_expectation`, `requested_items`, and `source_refs` (omit a field
+   only when the open event also omitted it);
+2. sets `status` to `resolved`;
+3. supplies the final bounded `resolution_evidence_refs` (one or more evidence or result ids).
+
+Only `status` and `resolution_evidence_refs` may differ. Changing meaning fields, republishing
+`status: open` for an existing id, mutating an already-resolved obligation, or reopening
+`resolved → open` is rejected with reason `obligation_resolution_mismatch` and invariant
+`meaning_fields_must_repeat` (or `open_to_resolved_only` for an invalid status transition). The
+public error names the mismatched schema field names only — never their values. A worked open +
+resolution pair lives in the `publish_work` tool input schema `examples` entry for
+`obligation_published`.
+
 ## Subject state and freshness
 
 Bind change-sensitive evidence to the exact subject state or frontier it concerns. If a material dependency changed or its state is unknown, mark the evidence stale or limited. Absence of visible source is not evidence that nothing changed.

@@ -205,6 +205,51 @@ def test_publish_work_examples_cover_ordinary_families_and_cross_refs() -> None:
     assert set(supporting) & evidence_ids
 
 
+def test_publish_work_examples_include_obligation_resolution_pair() -> None:
+    """Agents must see an open obligation and its byte-identical resolution side by side."""
+
+    examples = cast(list[JsonValue], _PUBLISH_SCHEMA["examples"])
+    resolution_example = cast(Mapping[str, JsonValue], examples[-1])
+    drafts = cast(list[JsonValue], resolution_example["event_drafts"])
+    open_payload: Mapping[str, JsonValue] | None = None
+    resolved_payload: Mapping[str, JsonValue] | None = None
+    evidence_ids: set[str] = set()
+    for draft in drafts:
+        draft_map = cast(Mapping[str, JsonValue], draft)
+        schema_map = cast(Mapping[str, JsonValue], draft_map["schema"])
+        payload_map = cast(Mapping[str, JsonValue], draft_map["payload"])
+        if schema_map["name"] == "evidence_recorded":
+            evidence_value = payload_map["evidence_id"]
+            assert type(evidence_value) is str
+            evidence_ids.add(evidence_value)
+        if schema_map["name"] != "obligation_published":
+            continue
+        if payload_map.get("status") == "open":
+            open_payload = payload_map
+        elif payload_map.get("status") == "resolved":
+            resolved_payload = payload_map
+    assert open_payload is not None
+    assert resolved_payload is not None
+    for field in (
+        "obligation_id",
+        "description",
+        "acceptance_criteria",
+        "evidence_expectation",
+        "requested_items",
+    ):
+        assert open_payload[field] == resolved_payload[field]
+    refs = cast(list[JsonValue], resolved_payload["resolution_evidence_refs"])
+    assert evidence_ids
+    assert set(refs) <= evidence_ids
+
+
+def test_publication_policy_documents_obligation_resolution_rule() -> None:
+    text = read_resource("yoetz://guidance/publication-policy.md").decode("utf-8")
+    assert "obligation-resolution" in text or "Obligation resolution" in text
+    assert "meaning_fields_must_repeat" in text or "byte-for-byte" in text
+    assert "resolution_evidence_refs" in text
+
+
 def test_every_worked_example_validates_against_its_request_schema() -> None:
     from yoetz.protocol.models import (
         CheckRequestModel,

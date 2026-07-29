@@ -16,7 +16,7 @@ from builders.ledger_adapters import (
 from yoetz.application.publish_work import Application, execute_publish_work
 from yoetz.application.status import Application as StatusApplication
 from yoetz.application.status import execute_status
-from yoetz.domain.values import session_id
+from yoetz.domain.values import Frontier, session_id
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.objects import ObjectStorePort
@@ -582,3 +582,156 @@ async def test_dry_run_frontier_gate_matches_sequence_only_publish_predicate() -
     assert preview.outcome == "dry_run"
     published = await execute_publish_work(cast(Application, app), second)
     assert published.outcome == "accepted"
+
+
+_OBLIGATION_ID = "obl_00000000-0000-4000-8000-000000000701"
+_EVIDENCE_ID = "evd_00000000-0000-4000-8000-000000000702"
+_OPEN_MEANING: dict[str, object] = {
+    "obligation_id": _OBLIGATION_ID,
+    "description": "Close the loop with exact evidence.",
+    "acceptance_criteria": "The focused slice is green.",
+    "evidence_expectation": "A named test run at the claimed state.",
+    "status": "open",
+    "requested_items": [{"item_kind": "command", "value": "pytest -q"}],
+}
+
+
+def _obligation_draft(event_tail: int, payload: dict[str, object]) -> dict[str, object]:
+    return {
+        "event_id": f"evt_00000000-0000-4000-8000-{event_tail:012d}",
+        "schema": {"name": "obligation_published", "version": "1.0.0"},
+        "occurred_at": "2026-07-19T12:00:00.000Z",
+        "causal_parents": (),
+        "payload": payload,
+        "artifact_refs": (),
+        "evidence_refs": (),
+    }
+
+
+def _evidence_draft(event_tail: int) -> dict[str, object]:
+    return {
+        "event_id": f"evt_00000000-0000-4000-8000-{event_tail:012d}",
+        "schema": {"name": "evidence_recorded", "version": "1.0.0"},
+        "occurred_at": "2026-07-19T12:00:00.000Z",
+        "causal_parents": (),
+        "payload": {
+            "evidence_id": _EVIDENCE_ID,
+            "evidence_kind": "test_result",
+            "strength": "content_digest",
+            "content_digest": "sha256:" + "11" * 32,
+            "observed_at": "2026-07-19T12:00:00.000Z",
+            "description": "Focused slice result.",
+        },
+        "artifact_refs": (),
+        "evidence_refs": (),
+    }
+
+
+async def _publish_open_obligation(app: _Application) -> Frontier:
+    request = _request(
+        request_tail=701,
+        event_drafts=(_obligation_draft(702, dict(_OPEN_MEANING)),),
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    result = await execute_publish_work(cast(Application, app), request)
+    assert result.outcome == "accepted"
+    return await app.runtime.task.ledger.load_frontier()
+
+
+async def test_obligation_resolution_exact_repeat_is_accepted_on_publish() -> None:
+    app, _objects = _composition()
+    frontier = await _publish_open_obligation(app)
+    resolved: dict[str, object] = {
+        **_OPEN_MEANING,
+        "status": "resolved",
+        "resolution_evidence_refs": [_EVIDENCE_ID],
+    }
+    request = _request(
+        request_tail=703,
+        event_drafts=(
+            _evidence_draft(704),
+            _obligation_draft(705, resolved),
+        ),
+        expected_frontier={
+            "sequence": str(frontier.sequence),
+            "head_digest": frontier.head_digest,
+        },
+    )
+    result = await execute_publish_work(cast(Application, app), request)
+    assert result.outcome == "accepted"
+
+
+async def test_obligation_resolution_mismatch_is_identical_on_dry_run_and_publish() -> None:
+    """Omitting a meaning field surfaces the same typed public error on both paths."""
+
+    app, _objects = _composition()
+    frontier = await _publish_open_obligation(app)
+    mismatched: dict[str, object] = {
+        "obligation_id": _OBLIGATION_ID,
+        "description": _OPEN_MEANING["description"],
+        "evidence_expectation": "Shortened expectation.",
+        "status": "resolved",
+        "resolution_evidence_refs": [_EVIDENCE_ID],
+    }
+    request = _request(
+        request_tail=706,
+        event_drafts=(
+            _evidence_draft(707),
+            _obligation_draft(708, mismatched),
+        ),
+        expected_frontier={
+            "sequence": str(frontier.sequence),
+            "head_digest": frontier.head_digest,
+        },
+    )
+    preview_payload = request.model_dump(mode="json", by_alias=True, exclude_none=True)
+    preview_payload["dry_run"] = True
+    with pytest.raises(PublicOperationError) as dry:
+        await execute_publish_work(
+            cast(Application, app), PublishWorkRequestModel.model_validate(preview_payload)
+        )
+    with pytest.raises(PublicOperationError) as durable:
+        await execute_publish_work(cast(Application, app), request)
+
+    for caught in (dry, durable):
+        error = caught.value
+        assert error.code is PublicErrorCode.EVENT_INVALID
+        assert error.safe_details["reason_code"] == "obligation_resolution_mismatch"
+        assert error.safe_details["field"] == "/event_drafts/1/payload"
+        assert "meaning_fields_must_repeat" in error.message
+        assert "acceptance_criteria" in error.message
+        assert "evidence_expectation" in error.message
+        assert "Shortened expectation" not in error.message
+        assert "Close the loop" not in error.message
+        assert "yoetz://guidance/publication-policy.md" in error.message
+
+    assert dict(dry.value.safe_details) == dict(durable.value.safe_details)
+    assert dry.value.message == durable.value.message
+
+
+async def test_obligation_resolution_omitting_only_acceptance_criteria_names_that_field() -> None:
+    app, _objects = _composition()
+    frontier = await _publish_open_obligation(app)
+    mismatched: dict[str, object] = {
+        "obligation_id": _OBLIGATION_ID,
+        "description": _OPEN_MEANING["description"],
+        "evidence_expectation": _OPEN_MEANING["evidence_expectation"],
+        "status": "resolved",
+        "requested_items": _OPEN_MEANING["requested_items"],
+        "resolution_evidence_refs": [_EVIDENCE_ID],
+    }
+    request = _request(
+        request_tail=709,
+        event_drafts=(
+            _evidence_draft(710),
+            _obligation_draft(711, mismatched),
+        ),
+        expected_frontier={
+            "sequence": str(frontier.sequence),
+            "head_digest": frontier.head_digest,
+        },
+    )
+    with pytest.raises(PublicOperationError) as caught:
+        await execute_publish_work(cast(Application, app), request)
+    assert caught.value.safe_details["reason_code"] == "obligation_resolution_mismatch"
+    assert "mismatched fields: acceptance_criteria" in caught.value.message

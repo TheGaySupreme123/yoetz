@@ -398,6 +398,57 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                 "actor": dict(_EXAMPLE_ACTOR),
                 "client": dict(_EXAMPLE_CLIENT),
             },
+            # Obligation resolution: repeat meaning fields byte-for-byte; only status and
+            # resolution_evidence_refs may change. See publication-policy.md#obligation-resolution.
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 10),
+                "session_id": _example_id("session", 1),
+                "writer_id": _example_id("writer", 1),
+                "expected_frontier": {"sequence": "2", "head_digest": _EXAMPLE_HEAD_DIGEST},
+                "event_drafts": [
+                    _example_draft(
+                        10,
+                        "obligation_published",
+                        {
+                            "obligation_id": _example_id("obligation", 2),
+                            "description": "State the outcome this work owes.",
+                            "acceptance_criteria": "A focused test slice passes at the claimed state.",
+                            "evidence_expectation": "A named test run or reviewed diff.",
+                            "status": "open",
+                            "requested_items": [{"item_kind": "command", "value": "pytest -q"}],
+                        },
+                    ),
+                    _example_draft(
+                        11,
+                        "evidence_recorded",
+                        {
+                            "evidence_id": _example_id("evidence", 2),
+                            "evidence_kind": "test_result",
+                            "strength": "content_digest",
+                            "content_digest": _EXAMPLE_HEAD_DIGEST,
+                            "observed_at": "2026-01-01T00:00:00.000Z",
+                            "description": "Focused test slice for the claimed outcome.",
+                        },
+                    ),
+                    _example_draft(
+                        12,
+                        "obligation_published",
+                        {
+                            "obligation_id": _example_id("obligation", 2),
+                            "description": "State the outcome this work owes.",
+                            "acceptance_criteria": "A focused test slice passes at the claimed state.",
+                            "evidence_expectation": "A named test run or reviewed diff.",
+                            "status": "resolved",
+                            "requested_items": [{"item_kind": "command", "value": "pytest -q"}],
+                            "resolution_evidence_refs": [_example_id("evidence", 2)],
+                        },
+                    ),
+                ],
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
         ),
     }
 )
