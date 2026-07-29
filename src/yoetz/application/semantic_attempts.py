@@ -245,6 +245,13 @@ class _SemanticAttemptLedger(Protocol):
         terminal_code: SemanticReason | None = None,
     ) -> None: ...
 
+    async def fail_semantic_job(
+        self,
+        lease: OperationLease,
+        job_id: str,
+        terminal_code: SemanticReason,
+    ) -> SemanticJobRecord: ...
+
     async def select_attempt(
         self,
         lease: OperationLease,
@@ -395,10 +402,15 @@ async def run_durable_semantic_attempts(
 
     while attempts_completed < budget:
         if deadline.expired(now_monotonic()):
-            accounting = await _accounting_for(
-                ledger, current_lease, job.job_id, max_retries=max_retries
-            )
             if last is None:
+                await ledger.fail_semantic_job(
+                    current_lease,
+                    job.job_id,
+                    SemanticReason.PROVIDER_TIMEOUT,
+                )
+                accounting = await _accounting_for(
+                    ledger, current_lease, job.job_id, max_retries=max_retries
+                )
                 return build_final(
                     SemanticStatus.TIMEOUT,
                     SemanticReason.PROVIDER_TIMEOUT,
@@ -410,6 +422,10 @@ async def run_durable_semantic_attempts(
                 last.reason,
                 attempts_completed=attempts_completed,
                 max_retries=max_retries,
+            )
+            await ledger.fail_semantic_job(current_lease, job.job_id, reason)
+            accounting = await _accounting_for(
+                ledger, current_lease, job.job_id, max_retries=max_retries
             )
             return build_final(status, reason, last, accounting)
 
@@ -473,8 +489,15 @@ async def run_durable_semantic_attempts(
         )
         return build_final(terminal_status, terminal_reason, evaluation, accounting)
 
-    accounting = await _accounting_for(ledger, current_lease, job.job_id, max_retries=max_retries)
     if last is None:
+        await ledger.fail_semantic_job(
+            current_lease,
+            job.job_id,
+            SemanticReason.RETRY_BUDGET_EXHAUSTED,
+        )
+        accounting = await _accounting_for(
+            ledger, current_lease, job.job_id, max_retries=max_retries
+        )
         return build_final(
             SemanticStatus.UNAVAILABLE,
             SemanticReason.RETRY_BUDGET_EXHAUSTED,
@@ -487,4 +510,6 @@ async def run_durable_semantic_attempts(
         attempts_completed=attempts_completed,
         max_retries=max_retries,
     )
+    await ledger.fail_semantic_job(current_lease, job.job_id, reason)
+    accounting = await _accounting_for(ledger, current_lease, job.job_id, max_retries=max_retries)
     return build_final(status, reason, last, accounting)

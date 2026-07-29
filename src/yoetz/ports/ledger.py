@@ -1371,6 +1371,13 @@ class LedgerPort(Protocol):
         terminal_code: SemanticReason | None = None,
     ) -> None: ...
 
+    async def fail_semantic_job(
+        self,
+        lease: OperationLease,
+        job_id: str,
+        terminal_code: SemanticReason,
+    ) -> SemanticJobRecord: ...
+
     async def select_attempt(
         self,
         lease: OperationLease,

@@ -137,6 +137,11 @@ MAX_REVIEW_CHANGE_OBSERVATIONS: Final = 32
 MAX_REVIEW_EXCERPTS: Final = 16
 MAX_REVIEW_OMISSIONS: Final = 64
 MAX_REVIEW_CHALLENGES: Final = 3
+# JSON Schema ``maxLength`` counts Unicode code points, while the durable semantic contract
+# bounds review prose by UTF-8 bytes. Four bytes is the largest UTF-8 encoding of one valid
+# Unicode scalar value, so this conservative provider-facing limit guarantees that every string
+# admitted by the machine-enforced schema also fits the 4 KiB domain boundary.
+MAX_PROVIDER_REVIEW_TEXT_CHARS: Final = MAX_REVIEW_TEXT_BYTES // 4
 GENESIS_PREDECESSOR_DIGEST: Final = "genesis"
 MAX_PROJECTION_CONTENT_LEAVES: Final = 512
 MAX_PROJECTION_POINTER_BYTES: Final = 256
@@ -1281,18 +1286,26 @@ type ReviewerNextStepWire = Literal[
     "state_unresolved_limitation",
 ]
 
+ProviderReviewTextWire = Annotated[
+    str,
+    Field(min_length=1, max_length=MAX_PROVIDER_REVIEW_TEXT_CHARS),
+]
+
 
 class ProviderChallengeModel(_ClosedModel):
     """One provider-facing reviewer challenge; owns the constrained-output shape."""
 
     finding_kind: FindingKindWire
-    summary: String1To4096
-    cited_refs: Annotated[tuple[SubjectIdWire, ...], Field(min_length=1, max_length=16)]
-    discrepancy: String1To4096
-    alternative_interpretation: String1To4096
-    message_to_main_agent: String1To4096
+    summary: ProviderReviewTextWire
+    cited_refs: Annotated[
+        tuple[SubjectIdWire, ...],
+        Field(min_length=1, max_length=16, json_schema_extra={"uniqueItems": True}),
+    ]
+    discrepancy: ProviderReviewTextWire
+    alternative_interpretation: ProviderReviewTextWire
+    message_to_main_agent: ProviderReviewTextWire
     requested_next_step: ReviewerNextStepWire
-    uncertainty: String1To4096
+    uncertainty: ProviderReviewTextWire
 
     @model_validator(mode="after")
     def _validate_challenge_invariants(self) -> ProviderChallengeModel:

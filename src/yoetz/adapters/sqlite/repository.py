@@ -1375,6 +1375,17 @@ class SqliteLedger:
         )
         await self._sync_after_mutation()
 
+    async def fail_semantic_job(
+        self,
+        lease: OperationLease,
+        job_id: str,
+        terminal_code: SemanticReason,
+    ) -> SemanticJobRecord:
+        await self._ensure_recovered()
+        result = await self._oracle().fail_semantic_job(lease, job_id, terminal_code)
+        await self._sync_after_mutation()
+        return result
+
     async def select_attempt(
         self,
         lease: OperationLease,
