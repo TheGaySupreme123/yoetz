@@ -26,8 +26,11 @@ _BINARY = HarnessBinary(
 )
 
 
-def _yoetz_entry() -> bytes:
-    return json.dumps({"command": "yoetz", "args": ["mcp", "serve"]}).encode("utf-8")
+def _yoetz_entry(*, strict: bool = False) -> bytes:
+    args = ["mcp", "serve"]
+    if strict:
+        args.extend(["--semantic", "off"])
+    return json.dumps({"command": "yoetz", "args": args}).encode("utf-8")
 
 
 class _Runner:
@@ -73,6 +76,9 @@ def test_status_foreign_on_different_or_unreadable_command() -> None:
     for payload in (
         {"command": "other-server"},
         {"command": "yoetz", "args": ["serve", "--http"]},
+        {"command": "wrapper", "args": ["yoetz", "mcp", "serve"]},
+        {"command": "yoetz", "args": ["mcp", "serve", "--extra"]},
+        {"command": ["wrapper", "yoetz", "mcp", "serve", "--semantic", "off"]},
         {"name": "yoetz"},
         {"command": 7},
         {
@@ -115,6 +121,53 @@ def test_preview_foreign_carries_warning_and_noop() -> None:
     preview = anyio.run(lambda: CodexMcpAdapter(runner).preview_registration(_BINARY))
     assert preview.action is McpRegistrationAction.NOOP
     assert preview.warnings == ("foreign_entry_present",)
+
+
+def test_strict_preview_binds_exact_command_and_changes_digest() -> None:
+    policy = anyio.run(
+        lambda: CodexMcpAdapter(_Runner([CommandOutput(1, b"")])).preview_registration(_BINARY)
+    )
+    strict = anyio.run(
+        lambda: CodexMcpAdapter(
+            _Runner([CommandOutput(1, b"")]),
+            route_profile="strict",
+        ).preview_registration(_BINARY)
+    )
+
+    assert policy.serve_command == ("yoetz", "mcp", "serve")
+    assert policy.route_profile == "policy"
+    assert strict.serve_command == ("yoetz", "mcp", "serve", "--semantic", "off")
+    assert strict.route_profile == "strict"
+    assert strict.preview_digest != policy.preview_digest
+
+
+def test_explicit_preview_allows_reregistering_an_owned_route_profile() -> None:
+    planned = CodexMcpAdapter(
+        _Runner([CommandOutput(0, _yoetz_entry())]),
+        route_profile="strict",
+    )
+    preview = anyio.run(lambda: planned.preview_registration(_BINARY))
+    assert preview.action is McpRegistrationAction.REREGISTER
+
+    runner = _Runner(
+        [
+            CommandOutput(0, _yoetz_entry()),
+            CommandOutput(0, b""),
+            CommandOutput(0, _yoetz_entry(strict=True)),
+        ]
+    )
+    result = anyio.run(
+        lambda: CodexMcpAdapter(
+            runner,
+            route_profile="strict",
+        ).apply_registration(
+            _BINARY,
+            McpRegistrationCommand(preview.preview_digest, True),
+        )
+    )
+
+    assert result.action is McpRegistrationAction.REREGISTER
+    assert runner.calls[1][-5:] == ("yoetz", "mcp", "serve", "--semantic", "off")
 
 
 def test_apply_requires_explicit_acceptance_and_exact_digest() -> None:

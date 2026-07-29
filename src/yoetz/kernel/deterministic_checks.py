@@ -7,14 +7,17 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import Final, cast
+from typing import Final, Literal, cast
 
 from yoetz.domain.events import (
     MAX_REF_LIST,
     AcceptedEvent,
+    EventSchema,
     LedgerRecord,
     RedactionState,
     UnknownEvent,
+    decode_payload,
+    encode_payload,
 )
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
@@ -43,6 +46,8 @@ from yoetz.domain.values import (
     object_id,
     obligation_id,
     result_id,
+    timestamp_from_string,
+    validate_sha256_digest,
 )
 from yoetz.kernel.projections import (
     ProjectionRecord,
@@ -56,7 +61,7 @@ from yoetz.kernel.reducers import (
     extend_replay_index,
     replay,
 )
-from yoetz.protocol.canonical import JsonValue
+from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.coverage import (
     EVIDENCE_IMMUTABILITY_ORDER,
     LEDGER_FRESHNESS_ORDER,
@@ -82,7 +87,10 @@ __all__ = [
     "FindingBasis",
     "FindingBasisRef",
     "FindingFact",
+    "FrozenHistoryEvent",
     "FrozenSourceAvailability",
+    "MAX_FROZEN_HISTORY_BYTES",
+    "MAX_FROZEN_HISTORY_EVENTS",
     "PolicyPack",
     "UnavailableCapturedObject",
     "build_deterministic_case",
@@ -106,6 +114,23 @@ _POLICY_PATTERN: Final = re.compile(r"^[a-z][a-z0-9-]{0,127}$", re.ASCII)
 _VERSION_PATTERN: Final = re.compile(
     r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$",
     re.ASCII,
+)
+MAX_FROZEN_HISTORY_EVENTS: Final = 64
+MAX_FROZEN_HISTORY_BYTES: Final = 512 * 1024
+_SEMANTIC_HISTORY_FAMILIES: Final = frozenset(
+    {
+        "action_recorded",
+        "check_recorded",
+        "claim_recorded",
+        "decision_recorded",
+        "evidence_recorded",
+        "finding_recorded",
+        "obligation_published",
+        "plan_published",
+        "plan_revised",
+        "response_recorded",
+        "result_recorded",
+    }
 )
 
 
@@ -519,6 +544,50 @@ class CaseGap:
 
 
 @dataclass(frozen=True, slots=True)
+class FrozenHistoryEvent:
+    """One material accepted event retained in the bounded frozen history slice."""
+
+    event_id: EventId
+    schema_name: str
+    schema_version: str
+    ingestion_sequence: int
+    occurred_at: str
+    payload_digest: str
+    content_visibility: Literal["available", "not_recorded", "not_selected", "redacted_never_send"]
+    payload: JsonValue | None
+
+    def __post_init__(self) -> None:
+        try:
+            object.__setattr__(self, "event_id", event_id(self.event_id))
+            schema = EventSchema(self.schema_name, self.schema_version)
+            validate_sha256_digest(self.payload_digest)
+            timestamp_from_string(self.occurred_at)
+        except (TypeError, ValueError) as exc:
+            raise _invalid_case() from exc
+        if (
+            schema.name not in _SEMANTIC_HISTORY_FAMILIES
+            or type(self.ingestion_sequence) is not int
+            or not 1 <= self.ingestion_sequence <= _MAX_SAFE_INTEGER
+            or self.content_visibility
+            not in {"available", "not_recorded", "not_selected", "redacted_never_send"}
+        ):
+            raise _invalid_case()
+        if self.content_visibility == "available":
+            if self.payload is None:
+                raise _invalid_case()
+            try:
+                payload = freeze_json(self.payload)
+                decoded = decode_payload(schema, payload)
+            except (TypeError, ValueError) as exc:
+                raise _invalid_case() from exc
+            if canonical_digest(encode_payload(decoded)) != self.payload_digest:
+                raise _invalid_case()
+            object.__setattr__(self, "payload", payload)
+        elif self.payload is not None:
+            raise _invalid_case()
+
+
+@dataclass(frozen=True, slots=True)
 class DeterministicCase:
     projection: ProjectionState
     frontier: Frontier
@@ -526,6 +595,9 @@ class DeterministicCase:
     allowed_ids: frozenset[FindingBasisRef]
     coverage_by_ref: Mapping[FindingBasisRef, Coverage]
     gaps: tuple[CaseGap, ...]
+    history: tuple[FrozenHistoryEvent, ...] = ()
+    history_availability: Literal["available", "not_recorded"] = "not_recorded"
+    history_omitted_before_count: int = 0
 
     def __post_init__(self) -> None:
         if (
@@ -567,12 +639,42 @@ class DeterministicCase:
         )
         if self.gaps != ordered_gaps or len({gap.marker for gap in self.gaps}) != len(self.gaps):
             raise _invalid_case()
+        if (
+            type(self.history) is not tuple
+            or len(self.history) > MAX_FROZEN_HISTORY_EVENTS
+            or any(type(item) is not FrozenHistoryEvent for item in self.history)
+            or self.history_availability not in {"available", "not_recorded"}
+            or type(self.history_omitted_before_count) is not int
+            or not 0 <= self.history_omitted_before_count <= _MAX_SAFE_INTEGER
+            or (
+                self.history_availability == "not_recorded"
+                and (self.history or self.history_omitted_before_count)
+            )
+        ):
+            raise _invalid_case()
+        history_keys = tuple(
+            (item.ingestion_sequence, _ascii_key(item.event_id)) for item in self.history
+        )
+        history_bytes = sum(
+            len(canonical_encode(item.payload)) for item in self.history if item.payload is not None
+        )
+        if (
+            history_keys != tuple(sorted(history_keys))
+            or len({item.event_id for item in self.history}) != len(self.history)
+            or any(item.ingestion_sequence > self.frontier.sequence for item in self.history)
+            or any(item.event_id not in allowed for item in self.history)
+            or history_bytes > MAX_FROZEN_HISTORY_BYTES
+        ):
+            raise _invalid_case()
         object.__setattr__(self, "allowed_ids", allowed)
         object.__setattr__(self, "coverage_by_ref", MappingProxyType(coverage))
 
 
-_CASE_JSON_KEYS: Final = frozenset(
+_LEGACY_CASE_JSON_KEYS: Final = frozenset(
     {"projection", "frontier", "availability", "allowed_ids", "coverage_by_ref", "gaps"}
+)
+_CASE_JSON_KEYS: Final = _LEGACY_CASE_JSON_KEYS | frozenset(
+    {"history", "history_availability", "history_omitted_before_count"}
 )
 
 
@@ -738,6 +840,21 @@ def deterministic_case_to_json(case: DeterministicCase) -> dict[str, JsonValue]:
             }
             for gap in case.gaps
         ],
+        "history": [
+            {
+                "event_id": item.event_id,
+                "schema_name": item.schema_name,
+                "schema_version": item.schema_version,
+                "ingestion_sequence": item.ingestion_sequence,
+                "occurred_at": item.occurred_at,
+                "payload_digest": item.payload_digest,
+                "content_visibility": item.content_visibility,
+                "payload": item.payload,
+            }
+            for item in case.history
+        ],
+        "history_availability": case.history_availability,
+        "history_omitted_before_count": case.history_omitted_before_count,
     }
 
 
@@ -746,7 +863,10 @@ def deterministic_case_from_json(value: JsonValue) -> DeterministicCase:
 
     try:
         frozen = freeze_json(value)
-        source = _case_json_object(frozen, required=_CASE_JSON_KEYS)
+        source = _case_json_object(frozen)
+        source_keys = frozenset(source)
+        if source_keys not in {_CASE_JSON_KEYS, _LEGACY_CASE_JSON_KEYS}:
+            raise _invalid_case()
         availability_source = _case_json_object(
             source["availability"],
             required=frozenset({"unavailable_event_ids", "unavailable_captured_objects"}),
@@ -794,6 +914,50 @@ def deterministic_case_from_json(value: JsonValue) -> DeterministicCase:
                     ),
                 )
             )
+        history: list[FrozenHistoryEvent] = []
+        history_availability: Literal["available", "not_recorded"] = "not_recorded"
+        history_omitted_before_count = 0
+        if source_keys == _CASE_JSON_KEYS:
+            for raw_item in _case_json_array(source["history"]):
+                item = _case_json_object(
+                    raw_item,
+                    required=frozenset(
+                        {
+                            "event_id",
+                            "schema_name",
+                            "schema_version",
+                            "ingestion_sequence",
+                            "occurred_at",
+                            "payload_digest",
+                            "content_visibility",
+                            "payload",
+                        }
+                    ),
+                )
+                history.append(
+                    FrozenHistoryEvent(
+                        event_id=cast(EventId, item["event_id"]),
+                        schema_name=cast(str, item["schema_name"]),
+                        schema_version=cast(str, item["schema_version"]),
+                        ingestion_sequence=cast(int, item["ingestion_sequence"]),
+                        occurred_at=cast(str, item["occurred_at"]),
+                        payload_digest=cast(str, item["payload_digest"]),
+                        content_visibility=cast(
+                            Literal[
+                                "available",
+                                "not_recorded",
+                                "not_selected",
+                                "redacted_never_send",
+                            ],
+                            item["content_visibility"],
+                        ),
+                        payload=item["payload"],
+                    )
+                )
+            history_availability = cast(
+                Literal["available", "not_recorded"], source["history_availability"]
+            )
+            history_omitted_before_count = cast(int, source["history_omitted_before_count"])
         return DeterministicCase(
             projection=projection_from_snapshot(source["projection"]),
             frontier=frontier_from_json(source["frontier"]),
@@ -801,6 +965,9 @@ def deterministic_case_from_json(value: JsonValue) -> DeterministicCase:
             allowed_ids=frozenset(allowed_refs),
             coverage_by_ref=coverage,
             gaps=tuple(gaps),
+            history=tuple(history),
+            history_availability=history_availability,
+            history_omitted_before_count=history_omitted_before_count,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise _invalid_case() from exc
@@ -1128,6 +1295,46 @@ def build_deterministic_case(
             if known_gap not in gaps:
                 _add_gap(gaps, known_gap, known_gap, ())
 
+    material_records = tuple(
+        record
+        for record in accepted_prefix
+        if type(record) is AcceptedEvent and record.schema.name in _SEMANTIC_HISTORY_FAMILIES
+    )
+    history_omitted_before_count = max(0, len(material_records) - MAX_FROZEN_HISTORY_EVENTS)
+    retained_records = material_records[history_omitted_before_count:]
+    history_bytes_remaining = MAX_FROZEN_HISTORY_BYTES
+    newest_first: list[FrozenHistoryEvent] = []
+    for record in reversed(retained_records):
+        history_payload: JsonValue | None = None
+        if record.redaction is not RedactionState.PRESENT:
+            visibility: Literal[
+                "available", "not_recorded", "not_selected", "redacted_never_send"
+            ] = "redacted_never_send"
+        elif record.event_id in unavailable_events or record.payload is None:
+            visibility = "not_recorded"
+        else:
+            encoded_payload = encode_payload(record.payload)
+            payload_bytes = len(canonical_encode(encoded_payload))
+            if payload_bytes > history_bytes_remaining:
+                visibility = "not_selected"
+            else:
+                visibility = "available"
+                history_payload = encoded_payload
+                history_bytes_remaining -= payload_bytes
+        newest_first.append(
+            FrozenHistoryEvent(
+                event_id=record.event_id,
+                schema_name=record.schema.name,
+                schema_version=record.schema.version,
+                ingestion_sequence=record.ledger.ingestion_sequence,
+                occurred_at=record.occurred_at.wire,
+                payload_digest=record.projection_locator.canonical_payload_digest,
+                content_visibility=visibility,
+                payload=history_payload,
+            )
+        )
+    history = tuple(reversed(newest_first))
+
     source_by_ref = _logical_sources(projection)
 
     def add_event_ref(ref: EventId) -> None:
@@ -1137,6 +1344,8 @@ def build_deterministic_case(
 
     for record in _projection_records(projection):
         add_event_ref(record.source_event_id)
+    for item in history:
+        add_event_ref(item.event_id)
     if projection.latest_tested_state is not None:
         add_event_ref(projection.latest_tested_state.source_check_event_id)
     for contradiction in projection.contradictions.values():
@@ -1212,6 +1421,9 @@ def build_deterministic_case(
                 ),
             )
         ),
+        history=history,
+        history_availability="available",
+        history_omitted_before_count=history_omitted_before_count,
     )
 
 

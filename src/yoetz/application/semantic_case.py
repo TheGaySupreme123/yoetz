@@ -26,6 +26,7 @@ from yoetz.domain.events import (
     EvidenceRecordedPayload,
     ObligationPublishedPayload,
     ResultOutcome,
+    encode_payload,
 )
 from yoetz.domain.findings import Finding, FindingKind
 from yoetz.domain.privacy import (
@@ -38,7 +39,11 @@ from yoetz.domain.privacy import (
     ReviewSelectionPolicy,
 )
 from yoetz.domain.values import SubjectStateRelation
-from yoetz.kernel.deterministic_checks import DeterministicAssessment, DeterministicCase
+from yoetz.kernel.deterministic_checks import (
+    DeterministicAssessment,
+    DeterministicCase,
+    FrozenHistoryEvent,
+)
 from yoetz.ports.semantic import (
     ChangeObservation,
     ReviewAssessment,
@@ -116,6 +121,19 @@ _EVIDENCE_EXCERPT_KIND: Final[Mapping[EvidenceKind, _ExcerptKind]] = {
     EvidenceKind.IMPORT_REPORT: "evidence",
     EvidenceKind.OTHER: "evidence",
 }
+_HISTORY_KIND: Final[Mapping[str, tuple[_SourceKind, DataCategory]]] = {
+    "action_recorded": ("action", DataCategory.COMMAND_METADATA),
+    "check_recorded": ("finding", DataCategory.BOUNDED_STRUCTURAL_METADATA),
+    "claim_recorded": ("claim", DataCategory.CLAIM_TEXT),
+    "decision_recorded": ("decision", DataCategory.DECISION_EXCERPT),
+    "evidence_recorded": ("evidence", DataCategory.EVIDENCE_EXCERPT),
+    "finding_recorded": ("finding", DataCategory.FINDING_SUMMARY),
+    "obligation_published": ("obligation", DataCategory.OBLIGATION_TEXT),
+    "plan_published": ("task", DataCategory.TASK_DESCRIPTION),
+    "plan_revised": ("task", DataCategory.TASK_DESCRIPTION),
+    "response_recorded": ("finding", DataCategory.FINDING_SUMMARY),
+    "result_recorded": ("result", DataCategory.COMMAND_METADATA),
+}
 
 
 def review_selection_digest(selection: ReviewSelectionPolicy) -> str:
@@ -188,6 +206,41 @@ def _content_item(
 
 def _structural_json(value: Mapping[str, JsonValue]) -> str:
     return canonical_encode(cast(JsonValue, dict(value))).decode("ascii")
+
+
+def _bounded_json(value: Mapping[str, JsonValue]) -> tuple[str, bool]:
+    encoded = canonical_encode(cast(JsonValue, dict(value)))
+    if len(encoded) <= MAX_REVIEW_TEXT_BYTES:
+        return encoded.decode("ascii"), False
+    marker = {
+        "content_digest": canonical_digest(cast(JsonValue, dict(value))),
+        "original_bytes": len(encoded),
+        "reason": "not_selected",
+        "schema": "yoetz.bounded-content-omission/1",
+    }
+    return _structural_json(marker), True
+
+
+def _history_json(
+    item: FrozenHistoryEvent,
+    *,
+    include_content: bool,
+    include_exact_command_text: bool,
+) -> tuple[str, bool]:
+    body: dict[str, JsonValue] = {
+        "content_visibility": item.content_visibility,
+        "event_id": item.event_id,
+        "ingestion_sequence": item.ingestion_sequence,
+        "kind": item.schema_name,
+        "occurred_at": item.occurred_at,
+        "payload_digest": item.payload_digest,
+    }
+    if include_content and item.payload is not None:
+        payload = dict(cast(Mapping[str, JsonValue], item.payload))
+        if item.schema_name == "action_recorded" and not include_exact_command_text:
+            payload.pop("command", None)
+        body["payload"] = cast(JsonValue, payload)
+    return _bounded_json(body)
 
 
 def _omit(
@@ -282,7 +335,9 @@ def build_semantic_case(
         plan = projection.plans[latest_version]
         plan_ref = str(plan.source_event_id)
         if "goal" in sections and plan.payload is not None and not plan.redacted:
-            text = plan.payload.summary
+            text, content_omitted = _bounded_json(
+                cast(Mapping[str, JsonValue], encode_payload(plan.payload))
+            )
             item = _content_item(
                 item_id=f"goal-{latest_version}",
                 section="goal",
@@ -295,6 +350,10 @@ def build_semantic_case(
             )
             items.append(item)
             goal_ids.append(item.item_id)
+            if content_omitted:
+                omissions.append(
+                    _omit(plan_ref, DataCategory.TASK_DESCRIPTION, "task", "not_selected")
+                )
         elif "goal" not in sections:
             omissions.append(_omit(plan_ref, DataCategory.TASK_DESCRIPTION, "task", "not_selected"))
         elif plan.redacted:
@@ -338,6 +397,9 @@ def build_semantic_case(
                 key=str.encode,
             )
         )[:16]
+        text, content_omitted = _bounded_json(
+            cast(Mapping[str, JsonValue], encode_payload(payload))
+        )
         item = _content_item(
             item_id=f"obligation-{ref}",
             section="obligation",
@@ -346,10 +408,14 @@ def build_semantic_case(
             source_ref=source_ref,
             linked_subject_refs=linked if linked else (source_ref,),
             occurred_order=record.source_frontier,
-            text=payload.description,
+            text=text,
         )
         items.append(item)
         obligation_ids.append(item.item_id)
+        if content_omitted:
+            omissions.append(
+                _omit(source_ref, DataCategory.OBLIGATION_TEXT, "obligation", "not_selected")
+            )
 
     # --- Claims ---
     for claim_id, record in sorted(projection.claims.items(), key=lambda pair: str(pair[0])):
@@ -371,6 +437,9 @@ def build_semantic_case(
             )
             continue
         assert type(payload) is ClaimRecordedPayload
+        text, content_omitted = _bounded_json(
+            cast(Mapping[str, JsonValue], encode_payload(payload))
+        )
         item = _content_item(
             item_id=f"claim-{ref}",
             section="claim",
@@ -379,10 +448,12 @@ def build_semantic_case(
             source_ref=ref,
             linked_subject_refs=(ref,),
             occurred_order=record.source_frontier,
-            text=payload.statement,
+            text=text,
         )
         items.append(item)
         claim_ids.append(item.item_id)
+        if content_omitted:
+            omissions.append(_omit(ref, DataCategory.CLAIM_TEXT, "claim", "not_selected"))
 
         if "change_observations" in sections and payload.subject_state is not None:
             changes.append(
@@ -416,6 +487,9 @@ def build_semantic_case(
             )
             continue
         assert type(payload) is DecisionRecordedPayload
+        text, content_omitted = _bounded_json(
+            cast(Mapping[str, JsonValue], encode_payload(payload))
+        )
         item = _content_item(
             item_id=f"decision-{ref}",
             section="decision",
@@ -424,13 +498,98 @@ def build_semantic_case(
             source_ref=ref,
             linked_subject_refs=(ref,),
             occurred_order=record.source_frontier,
-            text=payload.statement,
+            text=text,
         )
         items.append(item)
         decision_ids.append(item.item_id)
+        if content_omitted:
+            omissions.append(_omit(ref, DataCategory.DECISION_EXCERPT, "decision", "not_selected"))
 
-    # --- Material timeline (structural facts; no user prose) ---
-    if "timeline" in sections:
+    # --- Frozen accepted-event history ---
+    if "timeline" in sections and frozen_case.history_availability == "available":
+        detailed_history = bool({"goal", "obligations", "claims", "decisions"} & sections)
+        reserve_window_item = bool(frozen_case.history_omitted_before_count)
+        history_limit = max(0, selection.max_timeline_items - (1 if reserve_window_item else 0))
+        history_rows = frozen_case.history[-history_limit:] if history_limit else ()
+        omitted_rows = frozen_case.history[: len(frozen_case.history) - len(history_rows)]
+        for history_item in omitted_rows:
+            source_kind, category = _HISTORY_KIND[history_item.schema_name]
+            omissions.append(
+                _omit(str(history_item.event_id), category, source_kind, "not_selected")
+            )
+        if reserve_window_item and selection.max_timeline_items:
+            first_sequence = history_rows[0].ingestion_sequence if history_rows else 1
+            item = _content_item(
+                item_id="history-window",
+                section="timeline",
+                category=DataCategory.BOUNDED_STRUCTURAL_METADATA,
+                source_kind="task",
+                source_ref="history-window",
+                linked_subject_refs=(),
+                occurred_order=max(0, first_sequence - 1),
+                text=_structural_json(
+                    {
+                        "kind": "history_window",
+                        "omitted_before_count": frozen_case.history_omitted_before_count,
+                        "reason": "not_selected",
+                    }
+                ),
+            )
+            items.append(item)
+            timeline_ids.append(item.item_id)
+        for history_item in history_rows:
+            source_kind, content_category = _HISTORY_KIND[history_item.schema_name]
+            include_content = detailed_history and history_item.content_visibility == "available"
+            category = (
+                content_category if include_content else DataCategory.BOUNDED_STRUCTURAL_METADATA
+            )
+            text, content_omitted = _history_json(
+                history_item,
+                include_content=include_content,
+                include_exact_command_text=selection.include_exact_command_text,
+            )
+            event_ref = str(history_item.event_id)
+            item = _content_item(
+                item_id=f"history-{event_ref}",
+                section="timeline",
+                category=category,
+                source_kind=source_kind,
+                source_ref=event_ref,
+                linked_subject_refs=(event_ref,) if event_ref in allowed else (),
+                occurred_order=history_item.ingestion_sequence,
+                text=text,
+            )
+            items.append(item)
+            timeline_ids.append(item.item_id)
+            if history_item.content_visibility != "available":
+                omissions.append(
+                    _omit(
+                        event_ref,
+                        content_category,
+                        source_kind,
+                        history_item.content_visibility,
+                    )
+                )
+            elif not detailed_history or content_omitted:
+                omissions.append(_omit(event_ref, content_category, source_kind, "not_selected"))
+
+    if (
+        "timeline" in sections
+        and frozen_case.history_availability == "not_recorded"
+        and projection.plans
+    ):
+        latest_plan = projection.plans[max(projection.plans)]
+        omissions.append(
+            _omit(
+                str(latest_plan.source_event_id),
+                DataCategory.BOUNDED_STRUCTURAL_METADATA,
+                "task",
+                "not_recorded",
+            )
+        )
+
+    # --- Projection fallback timeline for legacy/synthetic frozen cases ---
+    if "timeline" in sections and frozen_case.history_availability == "not_recorded":
         timeline_candidates: list[tuple[int, str, _SourceKind, str, Mapping[str, JsonValue]]] = []
         for obligation_id, record in projection.obligations.items():
             timeline_candidates.append(
@@ -879,7 +1038,6 @@ def build_semantic_case(
     review_assessments = review_assessments[: selection.max_assessments]
     changes = changes[: selection.max_change_observations]
     targeted = targeted[: selection.max_excerpts]
-    omissions = omissions[: selection.max_omissions]
 
     kind_order = {
         kind: ordinal
@@ -909,13 +1067,14 @@ def build_semantic_case(
         )
     )
     changes.sort(key=lambda item: tuple(ref.encode("ascii") for ref in item.subject_refs))
-    omissions.sort(
+    omissions = sorted(
+        set(omissions),
         key=lambda item: (
             item.subject_ref.encode("ascii"),
             item.category.value.encode("ascii"),
             item.reason.encode("ascii"),
-        )
-    )
+        ),
+    )[: selection.max_omissions]
 
     # Keep only items that remain referenced after caps.
     keep_ids = (

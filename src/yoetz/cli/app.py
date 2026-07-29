@@ -9,7 +9,7 @@ import sys
 from collections.abc import Awaitable, Callable, Mapping
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, BinaryIO, Final, cast
+from typing import Annotated, Any, BinaryIO, Final, Literal, cast
 
 import anyio
 import typer
@@ -629,12 +629,20 @@ def service_diagnostics(
 
 
 @mcp_app.command("serve")
-def mcp_serve() -> None:
+def mcp_serve(
+    semantic: Annotated[
+        Literal["on", "off"],
+        typer.Option(
+            "--semantic",
+            help="Semantic route posture: on follows policy; off fixes a process-lifetime ceiling.",
+        ),
+    ] = "on",
+) -> None:
     """Run the MCP stdio bridge."""
 
     module = importlib.import_module("yoetz.mcp.server")
-    mcp_main = cast(Callable[[], None], getattr(module, "main"))
-    mcp_main()
+    mcp_main = cast(Callable[..., None], getattr(module, "main"))
+    mcp_main(semantic=semantic)
 
 
 @state_app.command("capture")

@@ -22,8 +22,11 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-def _run_raw(*frames: Mapping[str, object]) -> tuple[list[dict[str, object]], bytes]:
-    child = "from yoetz.mcp.server import main; main()"
+def _run_raw(
+    *frames: Mapping[str, object],
+    semantic: str = "on",
+) -> tuple[list[dict[str, object]], bytes]:
+    child = f"from yoetz.mcp.server import main; main(semantic={semantic!r})"
     process = subprocess.Popen(
         [sys.executable, "-I", "-c", child],
         stdin=subprocess.PIPE,
@@ -96,9 +99,10 @@ async def test_static_inventory_is_exact_and_verified() -> None:
     tools = await list_tools()
     resources = await list_resources()
 
-    assert [tool.name for tool in tools] == [item.name for item in TOOL_DESCRIPTORS]
+    descriptors = TOOL_DESCRIPTORS["policy"]
+    assert [tool.name for tool in tools] == [item.name for item in descriptors]
     assert len(tools) == 6
-    for tool, descriptor in zip(tools, TOOL_DESCRIPTORS, strict=True):
+    for tool, descriptor in zip(tools, descriptors, strict=True):
         assert tool.inputSchema == _plain_json(descriptor.input_schema)
         assert tool.outputSchema == _plain_json(descriptor.output_schema)
         assert _external_schema_refs(tool.inputSchema) == ()
@@ -108,14 +112,15 @@ async def test_static_inventory_is_exact_and_verified() -> None:
             readOnlyHint=descriptor.annotations.read_only,
             destructiveHint=False,
             idempotentHint=descriptor.annotations.idempotent,
-            openWorldHint=False,
+            openWorldHint=descriptor.annotations.open_world,
         )
     assert [str(resource.uri) for resource in resources] == [
         item.uri for item in GUIDANCE_RESOURCES
     ]
-    assert BRIDGE_RUNTIME.instructions.encode("utf-8") == read_guidance_resource(
-        "yoetz://guidance/agent-instructions.md"
+    assert BRIDGE_RUNTIME.instructions.startswith(
+        read_guidance_resource("yoetz://guidance/agent-instructions.md").decode("utf-8").rstrip()
     )
+    assert "Route profile: policy." in BRIDGE_RUNTIME.instructions
 
 
 def test_raw_initialize_lists_exact_capabilities_tools_and_resources() -> None:
@@ -136,12 +141,39 @@ def test_raw_initialize_lists_exact_capabilities_tools_and_resources() -> None:
 
     tool_result = cast(dict[str, object], by_id[2]["result"])
     advertised = cast(list[dict[str, object]], tool_result["tools"])
-    assert [tool["name"] for tool in advertised] == [item.name for item in TOOL_DESCRIPTORS]
+    assert [tool["name"] for tool in advertised] == [
+        item.name for item in TOOL_DESCRIPTORS["policy"]
+    ]
     resource_result = cast(dict[str, object], by_id[3]["result"])
     advertised_resources = cast(list[dict[str, object]], resource_result["resources"])
     assert [resource["uri"] for resource in advertised_resources] == [
         item.uri for item in GUIDANCE_RESOURCES
     ]
+
+
+def test_route_profile_is_fixed_in_initialize_and_tools_list() -> None:
+    frames: tuple[dict[str, object], ...] = (
+        _initialize(types.LATEST_PROTOCOL_VERSION),
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+    )
+
+    policy, _ = _run_raw(*frames, semantic="on")
+    strict, _ = _run_raw(*frames, semantic="off")
+
+    for responses, profile, open_world, descriptors in (
+        (policy, "policy", True, TOOL_DESCRIPTORS["policy"]),
+        (strict, "strict", False, TOOL_DESCRIPTORS["strict"]),
+    ):
+        by_id = {frame.get("id"): frame for frame in responses}
+        initialized = cast(dict[str, object], by_id[1]["result"])
+        assert f"Route profile: {profile}." in cast(str, initialized["instructions"])
+        listed = cast(dict[str, object], by_id[2]["result"])
+        tools = cast(list[dict[str, object]], listed["tools"])
+        assert [tool["name"] for tool in tools] == [descriptor.name for descriptor in descriptors]
+        check = next(tool for tool in tools if tool["name"] == "check")
+        annotations = cast(dict[str, object], check["annotations"])
+        assert annotations["openWorldHint"] is open_world
 
 
 def test_unknown_protocol_falls_back_to_latest_supported() -> None:

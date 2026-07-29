@@ -232,6 +232,7 @@ class SemanticReason(str, Enum):  # noqa: UP042 - exact public wire enum base
     PROVIDER_NOT_CONFIGURED = "provider_not_configured"
     LOCAL_MODEL_NOT_CONFIGURED = "local_model_not_configured"
     NETWORK_EGRESS_DENIED = "network_egress_denied"
+    ROUTE_SEMANTIC_CEILING = "route_semantic_ceiling"
     CHANNEL_DISABLED = "channel_disabled"
     PROVIDER_BINDING_NOT_AUTHORIZED = "provider_binding_not_authorized"
     SCOPE_NOT_AUTHORIZED = "scope_not_authorized"
@@ -276,6 +277,7 @@ VALID_SEMANTIC_REASONS: Final[Mapping[SemanticStatus, frozenset[SemanticReason]]
             SemanticStatus.BLOCKED_BY_POLICY: frozenset(
                 {
                     SemanticReason.NETWORK_EGRESS_DENIED,
+                    SemanticReason.ROUTE_SEMANTIC_CEILING,
                     SemanticReason.CHANNEL_DISABLED,
                     SemanticReason.PROVIDER_BINDING_NOT_AUTHORIZED,
                     SemanticReason.SCOPE_NOT_AUTHORIZED,
@@ -2411,6 +2413,8 @@ class StatusAdvicePageModel(_ClosedModel):
 
 
 class StatusVersionSliceModel(_ClosedModel):
+    optional_non_null_fields = frozenset({"route_profile"})
+
     protocol_version: Literal["0.1"]
     engine_version: VersionWire
     projection_version: VersionWire
@@ -2422,6 +2426,7 @@ class StatusVersionSliceModel(_ClosedModel):
     sqlite_source_id: AsciiString1To160
     policy_packs: tuple[Literal["research-evidence/0.1.0", "work-integrity/0.1.0"], ...]
     provider_profiles: tuple[ProfileIdWire, ...]
+    route_profile: Literal["policy", "strict"] | None = None
 
     @model_validator(mode="after")
     def _validate_status_version_sets(self) -> StatusVersionSliceModel:
@@ -3256,6 +3261,7 @@ _STATUS_VERSIONS_STRUCTURAL_POINTERS: Final = ("/page/next_cursor",) + _prefix_l
         "protocol_version",
         "provider_profiles/*",
         "python_version",
+        "route_profile",
         "sqlite_source_id",
         "sqlite_version",
         "storage_schema",
@@ -3531,7 +3537,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 728:
+    if len(result) != 729:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

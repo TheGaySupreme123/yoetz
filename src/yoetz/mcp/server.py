@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Final, cast
+from typing import Final, Literal, cast
 
 import anyio
 from mcp import types
@@ -24,6 +24,7 @@ from yoetz.config.load import load_config
 from yoetz.config.models import LoggingConfig
 from yoetz.mcp.descriptors import (
     TOOL_DESCRIPTORS,
+    McpRouteProfile,
     ToolDescriptor,
     descriptor_for,
     server_instructions,
@@ -178,25 +179,29 @@ class _ClientSlot:
 class BridgeRuntime:
     """Verified static surface plus one private, initially empty ordinary-client slot."""
 
+    route_profile: McpRouteProfile
     descriptors: tuple[ToolDescriptor, ...]
     resources: tuple[GuidanceResource, ...]
     instructions: str
     _slot: _ClientSlot = field(default_factory=_ClientSlot, repr=False, compare=False)
 
 
-def build_bridge_runtime() -> BridgeRuntime:
+def build_bridge_runtime(route_profile: McpRouteProfile = "policy") -> BridgeRuntime:
     """Verify every agent-readable byte and construct an unconnected bridge runtime."""
 
+    if route_profile not in TOOL_DESCRIPTORS:
+        raise ValueError("mcp_route_profile_invalid")
     resources = list_guidance_resources()
-    instructions = server_instructions()
+    instructions = server_instructions(route_profile)
     if not instructions:
         raise RuntimeError("mcp_instructions_empty")
     # Accessing every schema verifies its checked-in public identity before serving.
-    for descriptor in TOOL_DESCRIPTORS:
+    descriptors = TOOL_DESCRIPTORS[route_profile]
+    for descriptor in descriptors:
         descriptor.input_schema
         descriptor.output_schema
     build_last_resort_internal_error_result()
-    return BridgeRuntime(TOOL_DESCRIPTORS, resources, instructions)
+    return BridgeRuntime(route_profile, descriptors, resources, instructions)
 
 
 BRIDGE_RUNTIME: Final = build_bridge_runtime()
@@ -826,7 +831,7 @@ async def dispatch_check(
         arguments,
         CheckRequest,
         CheckResult,
-        lambda client, request: client.check(request),
+        lambda client, request: client.check(request, route_profile=runtime.route_profile),
         runtime,
         "check",
     )
@@ -852,7 +857,7 @@ async def dispatch_status(
         arguments,
         StatusRequest,
         StatusResult,
-        lambda client, request: client.status(request),
+        lambda client, request: client.status(request, route_profile=runtime.route_profile),
         runtime,
         "status",
     )
@@ -871,7 +876,7 @@ async def dispatch_receipt(
     )
 
 
-async def list_tools() -> list[types.Tool]:
+async def list_tools(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> list[types.Tool]:
     """Return the exact reviewed six-tool inventory in stable order."""
 
     return [
@@ -889,11 +894,15 @@ async def list_tools() -> list[types.Tool]:
                 openWorldHint=descriptor.annotations.open_world,
             ),
         )
-        for descriptor in BRIDGE_RUNTIME.descriptors
+        for descriptor in runtime.descriptors
     ]
 
 
-async def call_tool(name: str, arguments: dict[str, object]) -> types.CallToolResult:
+async def call_tool(
+    name: str,
+    arguments: dict[str, object],
+    runtime: BridgeRuntime = BRIDGE_RUNTIME,
+) -> types.CallToolResult:
     """Dispatch one registered operation with bridge-owned strict validation.
 
     Unregistered names raise ``McpError`` so the low-level session answers with a JSON-RPC
@@ -913,10 +922,13 @@ async def call_tool(name: str, arguments: dict[str, object]) -> types.CallToolRe
         raise McpError(
             types.ErrorData(code=types.INVALID_PARAMS, message=sanitize_unknown_tool_name(name))
         )
-    return await dispatcher(arguments)
+    return await dispatcher(arguments, runtime)
 
 
-async def _handle_call_tool_request(req: types.CallToolRequest) -> types.ServerResult:
+async def _handle_call_tool_request(
+    req: types.CallToolRequest,
+    runtime: BridgeRuntime = BRIDGE_RUNTIME,
+) -> types.ServerResult:
     """Own CallToolRequest so unknown names never reach the SDK's name-echoing cache path."""
 
     name = req.params.name
@@ -926,11 +938,11 @@ async def _handle_call_tool_request(req: types.CallToolRequest) -> types.ServerR
             types.ErrorData(code=types.INVALID_PARAMS, message=sanitize_unknown_tool_name(name))
         )
     arguments = dict(req.params.arguments or {})
-    result = await call_tool(name, arguments)
+    result = await call_tool(name, arguments, runtime)
     return types.ServerResult(result)
 
 
-async def list_resources() -> list[types.Resource]:
+async def list_resources(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> list[types.Resource]:
     """List only static manifest-verified guidance; never touch the service slot."""
 
     return [
@@ -946,7 +958,7 @@ async def list_resources() -> list[types.Resource]:
                 priority=resource.annotations.priority,
             ),
         )
-        for resource in BRIDGE_RUNTIME.resources
+        for resource in runtime.resources
     ]
 
 
@@ -960,17 +972,39 @@ async def read_resource(uri: object) -> list[ReadResourceContents]:
     return [ReadResourceContents(content=payload, mime_type="text/markdown")]
 
 
-server: Final = Server(_SERVER_NAME, version=__version__, instructions=BRIDGE_RUNTIME.instructions)
-server.list_tools()(list_tools)
-# Register a Yoetz-owned CallToolRequest handler instead of Server.call_tool so an unregistered
-# name becomes a sanitized JSON-RPC error and never reaches the SDK path that logs the raw name.
-server.request_handlers[types.CallToolRequest] = _handle_call_tool_request
-server.list_resources()(list_resources)
-server.read_resource()(read_resource)
+def _build_server(runtime: BridgeRuntime) -> Server[object]:
+    active: Server[object] = Server(
+        _SERVER_NAME,
+        version=__version__,
+        instructions=runtime.instructions,
+    )
+
+    async def runtime_list_tools() -> list[types.Tool]:
+        return await list_tools(runtime)
+
+    async def runtime_call_tool(req: types.CallToolRequest) -> types.ServerResult:
+        return await _handle_call_tool_request(req, runtime)
+
+    async def runtime_list_resources() -> list[types.Resource]:
+        return await list_resources(runtime)
+
+    active.list_tools()(runtime_list_tools)
+    # Register a Yoetz-owned CallToolRequest handler instead of Server.call_tool so an unregistered
+    # name becomes a sanitized JSON-RPC error and never reaches the SDK path that logs the raw name.
+    active.request_handlers[types.CallToolRequest] = runtime_call_tool
+    active.list_resources()(runtime_list_resources)
+    active.read_resource()(read_resource)
+    return active
 
 
-def _initialization_options(runtime: BridgeRuntime) -> InitializationOptions:
-    capabilities = server.get_capabilities(NotificationOptions(), {}).model_copy(
+server: Final = _build_server(BRIDGE_RUNTIME)
+
+
+def _initialization_options(
+    runtime: BridgeRuntime,
+    active_server: Server[object] = server,
+) -> InitializationOptions:
+    capabilities = active_server.get_capabilities(NotificationOptions(), {}).model_copy(
         update={"experimental": None}
     )
     return InitializationOptions(
@@ -984,12 +1018,13 @@ def _initialization_options(runtime: BridgeRuntime) -> InitializationOptions:
 async def run_stdio(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> None:
     """Run bounded stdio and let the SDK negotiate protocol versions conformantly."""
 
+    active_server = server if runtime is BRIDGE_RUNTIME else _build_server(runtime)
     async with bounded_stdio_server(drain_pending_responses=True) as (read_stream, write_stream):
         try:
-            await server.run(
+            await active_server.run(
                 read_stream,
                 write_stream,
-                _initialization_options(runtime),
+                _initialization_options(runtime, active_server),
                 raise_exceptions=False,
             )
         finally:
@@ -1005,10 +1040,12 @@ def _bridge_logging_config() -> LoggingConfig:
         return LoggingConfig()
 
 
-def main() -> None:
+def main(*, semantic: Literal["on", "off"] = "on") -> None:
     """Run the MCP bridge on stdio using the SDK-supported latest protocol contract."""
 
+    if semantic not in {"on", "off"}:
+        raise ValueError("mcp_semantic_profile_invalid")
     if types.LATEST_PROTOCOL_VERSION not in SUPPORTED_PROTOCOL_VERSIONS:
         raise RuntimeError("mcp_sdk_protocol_registry_invalid")
     configure_logging(_bridge_logging_config(), LogMode.MCP_STDIO)
-    anyio.run(run_stdio)
+    anyio.run(run_stdio, build_bridge_runtime("strict" if semantic == "off" else "policy"))

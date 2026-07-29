@@ -195,14 +195,16 @@ async def test_installed_server_advertises_exactly_six_frozen_tools(tmp_path: Pa
             listed = await session.list_tools()
     names = tuple(tool.name for tool in listed.tools)
     assert names == _EXPECTED
-    assert tuple(item.name for item in TOOL_DESCRIPTORS) == _EXPECTED
-    for tool, descriptor in zip(listed.tools, TOOL_DESCRIPTORS, strict=True):
+    descriptors = TOOL_DESCRIPTORS["policy"]
+    descriptor_set_digest = TOOL_DESCRIPTOR_SET_DIGEST["policy"]
+    assert tuple(item.name for item in descriptors) == _EXPECTED
+    for tool, descriptor in zip(listed.tools, descriptors, strict=True):
         assert tool.inputSchema == _plain_json(descriptor.input_schema)
         assert tool.outputSchema == _plain_json(descriptor.output_schema)
     context = runtime_capability_context(
-        fixture_digest=bytes_digest(TOOL_DESCRIPTOR_SET_DIGEST.encode("ascii")),
+        fixture_digest=bytes_digest(descriptor_set_digest.encode("ascii")),
         test_revision=_TEST_REVISION,
-        config_profile_digest=canonical_digest({"descriptor_set": TOOL_DESCRIPTOR_SET_DIGEST}),
+        config_profile_digest=canonical_digest({"descriptor_set": descriptor_set_digest}),
         external_tool="codex",
         external_version=_VERSION,
         integration_channel="codex_mcp_stdio",
@@ -223,7 +225,7 @@ async def test_installed_server_advertises_exactly_six_frozen_tools(tmp_path: Pa
         ),
         context,
         (
-            Observation("descriptor_set_digest", digest_value=TOOL_DESCRIPTOR_SET_DIGEST),
+            Observation("descriptor_set_digest", digest_value=descriptor_set_digest),
             Observation("names_match", boolean_value=True),
             Observation("tool_count", integer_value=len(names)),
         ),

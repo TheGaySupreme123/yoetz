@@ -222,6 +222,7 @@ class _App:
         self.verification_policy = VerificationPolicy()
         self.ledger = _Ledger(_case())
         self.crash_semantic = crash_semantic
+        self.semantic_calls = 0
         capabilities = {
             RuntimeCapability.WRITE,
             RuntimeCapability.PAYLOAD_READ,
@@ -260,6 +261,7 @@ class _App:
         runtime: object | None = None,
     ) -> FinalSemanticEvaluation:
         _ = (frozen, deterministic_findings, runtime)
+        self.semantic_calls += 1
         if self.crash_semantic:
             raise RuntimeError("semantic_evaluator_crashed")
         return self.semantic_result
@@ -322,6 +324,26 @@ async def test_semantic_required_unavailable_preserves_deterministic_truth() -> 
     runtime = cast(_Runtime, app.runtime)
     assert runtime.last_command is not None
     assert RuntimeCapability.SEMANTIC in runtime.last_command.required_capabilities
+
+
+@pytest.mark.anyio
+async def test_strict_route_ceiling_never_requests_or_dispatches_semantic_capability() -> None:
+    app = _App(semantic=True)
+
+    result = await execute_check_commit(
+        app,
+        _request("semantic_required"),
+        route_profile="strict",
+    )
+
+    assert result.verdict.value == "incomplete_check"
+    assert result.semantic_status is SemanticStatus.BLOCKED_BY_POLICY
+    assert result.semantic_reason is SemanticReason.ROUTE_SEMANTIC_CEILING
+    assert result.coverage.known_gaps == ("optional_semantic_review_blocked_by_policy",)
+    assert app.semantic_calls == 0
+    runtime = cast(_Runtime, app.runtime)
+    assert runtime.last_command is not None
+    assert RuntimeCapability.SEMANTIC not in runtime.last_command.required_capabilities
 
 
 @pytest.mark.anyio

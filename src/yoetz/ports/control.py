@@ -37,6 +37,7 @@ __all__ = [
     "ControlMethod",
     "ControlRequest",
     "ControlResult",
+    "McpRouteProfile",
     "ServiceState",
     "ServiceStopResult",
     "ServiceStatus",
@@ -127,6 +128,7 @@ type ControlCallBody = (
     | ReceiptRequest
     | JsonObject
 )
+type McpRouteProfile = Literal["policy", "strict"]
 type ControlSuccessBody = (
     StartResult
     | PublishWorkResult
@@ -190,6 +192,7 @@ class ControlCallRequest:
     method: ControlMethod
     body: ControlCallBody
     deadline_ms: int | None = None
+    route_profile: McpRouteProfile | None = None
 
     def __post_init__(self) -> None:
         if self.kind != "call":
@@ -204,6 +207,11 @@ class ControlCallRequest:
         if type(self.body) is not expected_body_type:
             raise ValueError("control_method_body_mismatch")
         _validate_deadline(self.deadline_ms)
+        if self.route_profile is not None and (
+            self.route_profile not in {"policy", "strict"}
+            or self.method not in {ControlMethod.CHECK, ControlMethod.STATUS}
+        ):
+            raise ValueError("control_route_profile_invalid")
 
 
 @dataclass(frozen=True, slots=True)

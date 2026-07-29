@@ -11,6 +11,8 @@ the decisions behind it see [`docs/adr/`](../adr/).
   `receipt`, end to end.
 - [Privacy and semantic review](privacy-and-semantic-review.md) — the zero-egress default, the
   policy profiles, and what changes when you turn external review on.
+- [Auto-approving an MCP route](auto-approving-agents.md) — the host-declared strict route that
+  cannot request external semantic review.
 - [Providers and credentials](providers.md) — reviewed presets, owner-declared endpoints, and the
   credential ceremony.
 - [Receipts and coverage](receipts-and-coverage.md) — how to read a receipt and why the wording is

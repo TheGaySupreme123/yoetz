@@ -243,9 +243,12 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     approval remain resumable state rather than fake completed receipts.
 13. **Useful review context remains user-controlled:** a closed `ReviewContextProfile` is stored
     independently from the four LLM-disclosure profiles. `structural` selects only typed metadata;
-    `goal_aware` adds the goal/obligation/claim/decision/finding text needed to understand intent;
-    `assisted` adds bounded problem-local recorded evidence, test/failure, diff, and source excerpts;
-    `expanded` and `custom` admit broader explicitly allowed recorded material. Every selected item
+    `goal_aware` adds category-separated detail from the bounded accepted-event history frozen with
+    the check; `assisted` adds bounded problem-local recorded evidence, test/failure, diff, and
+    source excerpts; `expanded` and `custom` admit broader explicitly allowed recorded material.
+    The history is capped at 64 newest material events and 512 KiB of canonical payload, with exact
+    `not_recorded`, `not_selected`, and older-window accounting. Exact command text remains
+    independently selected and is not part of `goal_aware` or `assisted`. Every selected item
     still passes category/class/scope policy, minimization, redaction, never-send scanning, provider
     binding, caps, authorization, and receipt. The selection profile grants neither live filesystem
     access nor permission beyond the effective privacy policy.

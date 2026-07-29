@@ -161,7 +161,7 @@ def test_pinned_sdk_protocol_negotiation_and_validation_authority(tmp_path: Path
     assert initialize["protocolVersion"] == _PROTOCOL
     assert initialize["instructions"] == BRIDGE_RUNTIME.instructions
     tools = cast(list[dict[str, object]], cast(dict[str, object], by_id[2]["result"])["tools"])
-    assert [tool["name"] for tool in tools] == [item.name for item in TOOL_DESCRIPTORS]
+    assert [tool["name"] for tool in tools] == [item.name for item in TOOL_DESCRIPTORS["policy"]]
     assert len(tools) == 6
 
     fallback, _ = _run_raw(_initialize("1900-01-01"))
@@ -257,9 +257,9 @@ async def test_sdk_tool_annotations_match_frozen_descriptors() -> None:
 
     tools = await list_tools()
     assert len(tools) == 6
-    for tool, descriptor in zip(tools, TOOL_DESCRIPTORS, strict=True):
+    for tool, descriptor in zip(tools, TOOL_DESCRIPTORS["policy"], strict=True):
         assert tool.name == descriptor.name
         assert tool.outputSchema is not None
         assert tool.annotations is not None
-        assert tool.annotations.openWorldHint is False
+        assert tool.annotations.openWorldHint is (tool.name == "check")
         assert tool.annotations.destructiveHint is False

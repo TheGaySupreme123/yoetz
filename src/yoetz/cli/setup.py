@@ -15,7 +15,7 @@ import os
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Final, cast
+from typing import Final, Literal, cast
 
 import typer
 
@@ -26,6 +26,7 @@ from yoetz.adapters.integrations.codex_skill import load_packaged_skill_source
 from yoetz.application.codex_plugin import CodexPluginService
 from yoetz.application.harness_mcp import HarnessMcpService, McpRegistrationConfirmation
 from yoetz.application.observation_check_policy import load_observation_check_policy
+from yoetz.config.load import load_config
 from yoetz.config.paths import PathSafetyError, setup_marker_path
 from yoetz.ports.harness_mcp import (
     HarnessBinary,
@@ -367,13 +368,16 @@ def _activate_check_policy_trust(
 
 
 def _emit_registration_preview(
-    binary: HarnessBinary, policy_preview: dict[str, JsonValue] | None = None
+    binary: HarnessBinary,
+    mcp_preview: object,
+    policy_preview: dict[str, JsonValue] | None = None,
 ) -> None:
     typer.echo("Proposed change: complete Yoetz Codex project integration:")
     typer.echo("  1. Install plugin / guidance / hooks under .agents/plugins/yoetz")
     typer.echo("  2. Register the Yoetz MCP server with Codex")
     typer.echo("  MCP server name: yoetz")
-    typer.echo("  Command: yoetz mcp serve")
+    serve_command = getattr(mcp_preview, "serve_command", ())
+    typer.echo(f"  Command: {' '.join(serve_command)}")
     typer.echo(f"  Codex executable: {binary.executable_path}")
     if binary.reported_version is not None:
         typer.echo(f"  Codex version: {binary.reported_version}")
@@ -389,6 +393,22 @@ def _emit_registration_preview(
 
 def _plugin_verified(presence: str | None) -> bool:
     return presence == PluginHookPresence.INSTALLED.value
+
+
+def _configured_mcp_route_profile() -> Literal["policy", "strict"]:
+    """Choose the registration-time route posture from structural local configuration."""
+
+    try:
+        config = load_config({}, os.environ, None)
+    except Exception:
+        return "strict"
+    if config.verification.semantic == "disabled":
+        return "strict"
+    return "strict" if config.provider is None and config.local_model is None else "policy"
+
+
+def _mcp_adapter() -> CodexMcpAdapter:
+    return CodexMcpAdapter(route_profile=_configured_mcp_route_profile())
 
 
 def _installed_hooks_declare_workspace_binding(workspace: Path | None = None) -> bool:
@@ -515,7 +535,7 @@ async def _codex_integration_step(
     and only an explicitly echoed policy digest activates the policy trust.
     """
 
-    mcp_service = HarnessMcpService(CodexMcpAdapter())
+    mcp_service = HarnessMcpService(_mcp_adapter())
     plugin_service = CodexPluginService()
     project = IntegrationTarget(
         IntegrationScope.TRUSTED_PROJECT,
@@ -534,7 +554,7 @@ async def _codex_integration_step(
 
     plugin_preview = plugin_service.preview(project)
     check_policy = _check_policy_preview(workspace)
-    already_registered = mcp_preview.state_before is McpRegistrationState.YOETZ_OWNED
+    already_registered = mcp_preview.action is McpRegistrationAction.NOOP
     foreign = mcp_preview.state_before is McpRegistrationState.FOREIGN_PRESENT
 
     if foreign:
@@ -575,7 +595,7 @@ async def _codex_integration_step(
             and approved_policy_digest == shown
         )
     if interactive and not accepted:
-        _emit_registration_preview(binary, check_policy)
+        _emit_registration_preview(binary, mcp_preview, check_policy)
         typer.echo(
             f"  Plugin presence before apply: {plugin_preview.presence_before.value} "
             f"({plugin_preview.planned_file_count} managed files)"
@@ -635,7 +655,15 @@ async def _codex_integration_step(
         }
 
     # 2) Register and verify MCP (noop when already yoetz-owned).
-    mcp_outcome = "already_registered" if already_registered else "registered"
+    mcp_outcome = (
+        "already_registered"
+        if already_registered
+        else (
+            "reregistered"
+            if mcp_preview.action is McpRegistrationAction.REREGISTER
+            else "registered"
+        )
+    )
     mcp_state = mcp_preview.state_before
     if not already_registered:
         try:
@@ -656,7 +684,9 @@ async def _codex_integration_step(
                 "observation_consent": {"outcome": "absent", "workspace_commitment": None},
             }
         mcp_state = result.state_after
-        mcp_outcome = "registered"
+        mcp_outcome = (
+            "reregistered" if result.action is McpRegistrationAction.REREGISTER else "registered"
+        )
     else:
         try:
             mcp_state = await mcp_service.status(binary)
@@ -689,6 +719,8 @@ async def _codex_integration_step(
     return {
         "outcome": mcp_outcome,
         "reason": None,
+        "route_profile": mcp_preview.route_profile,
+        "serve_command": list(mcp_preview.serve_command),
         "state": mcp_state.value,
         "plugin": plugin_report,
         "observation_consent": observation,
@@ -1008,6 +1040,10 @@ async def run_provider_setup(
             typer.echo(f"Reason: {reason}")
         return 20
     _emit_provider_setup_layer_report()
+    typer.echo(
+        "Preview Codex MCP registration again to review the policy route command now that "
+        "semantic configuration changed."
+    )
     return 0
 
 
@@ -1072,6 +1108,15 @@ async def run_setup_wizard(
         next_steps.append(_NEXT_PROVIDER_TOML)
     if provider.get("credential") != "stored":
         next_steps.append(_NEXT_CREDENTIAL)
+    if (
+        chosen is not None
+        and provider.get("binding") == "configured"
+        and registration.get("route_profile") == "strict"
+    ):
+        next_steps.append(
+            "run 'yoetz integrate codex mcp preview' and explicitly accept re-registration "
+            "if you want the policy route to permit configured semantic review"
+        )
 
     mutating_run = interactive or accept
     marker_written = _write_setup_marker(str(registration["outcome"])) if mutating_run else False
@@ -1133,7 +1178,7 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
         outcome = registration.get("outcome")
         reason = registration.get("reason")
         # MCP registration alone is not product readiness or automatic activation.
-        if outcome in {"registered", "already_registered"}:
+        if outcome in {"registered", "reregistered", "already_registered"}:
             line = f"  MCP registration: {outcome}; automatic activation not tested"
         else:
             line = f"  MCP registration: {outcome}"
@@ -1218,7 +1263,7 @@ async def setup_status(*, json_output: bool) -> int:
     """Read-only setup posture: discovery, registration state, service, marker."""
 
     binaries = discover_codex_binaries()
-    service_port = CodexMcpAdapter()
+    service_port = _mcp_adapter()
     rows: list[JsonValue] = []
     for binary in binaries:
         row = _binary_row(binary)
@@ -1272,7 +1317,7 @@ async def integrate_mcp(
     if chosen is None:
         return _usage_failure("no codex executable was found on PATH")
 
-    service = HarnessMcpService(CodexMcpAdapter())
+    service = HarnessMcpService(_mcp_adapter())
     try:
         if action == "status":
             state = await service.status(chosen)
@@ -1285,6 +1330,8 @@ async def integrate_mcp(
                     "action": preview.action.value,
                     "harness": harness,
                     "preview_digest": preview.preview_digest,
+                    "route_profile": preview.route_profile,
+                    "serve_command": list(preview.serve_command),
                     "state_before": preview.state_before.value,
                     "warnings": list(preview.warnings),
                 },
@@ -1297,7 +1344,7 @@ async def integrate_mcp(
             return _mcp_error_exit("foreign_entry_present")
         accepted = accept
         if interactive and not accepted:
-            _emit_registration_preview(chosen)
+            _emit_registration_preview(chosen, preview)
             accepted = _confirm_registration()
         if not accepted:
             return _mcp_error_exit("confirmation_required")

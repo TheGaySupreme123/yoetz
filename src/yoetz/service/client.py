@@ -52,6 +52,7 @@ from yoetz.ports.control import (
     ControlError,
     ControlMethod,
     ControlResult,
+    McpRouteProfile,
     ServiceStatus,
     ServiceStopResult,
 )
@@ -758,6 +759,7 @@ class ServiceClient(ControlClientPort):
         body: ControlCallBody,
         *,
         deadline_ms: int | None = None,
+        route_profile: McpRouteProfile | None = None,
     ) -> object:
         request = ControlCallRequest(
             kind="call",
@@ -768,6 +770,7 @@ class ServiceClient(ControlClientPort):
             method=method,
             body=body,
             deadline_ms=deadline_ms,
+            route_profile=route_profile,
         )
         result = await self.call(request)
         if result.outcome == "error":
@@ -790,9 +793,21 @@ class ServiceClient(ControlClientPort):
             await self._invoke(ControlMethod.PUBLISH_WORK, request, deadline_ms=deadline_ms),
         )
 
-    async def check(self, request: CheckRequest, *, deadline_ms: int | None = None) -> CheckResult:
+    async def check(
+        self,
+        request: CheckRequest,
+        *,
+        deadline_ms: int | None = None,
+        route_profile: McpRouteProfile | None = None,
+    ) -> CheckResult:
         return cast(
-            CheckResult, await self._invoke(ControlMethod.CHECK, request, deadline_ms=deadline_ms)
+            CheckResult,
+            await self._invoke(
+                ControlMethod.CHECK,
+                request,
+                deadline_ms=deadline_ms,
+                route_profile=route_profile,
+            ),
         )
 
     async def respond(
@@ -804,10 +819,20 @@ class ServiceClient(ControlClientPort):
         )
 
     async def status(
-        self, request: StatusRequest, *, deadline_ms: int | None = None
+        self,
+        request: StatusRequest,
+        *,
+        deadline_ms: int | None = None,
+        route_profile: McpRouteProfile | None = None,
     ) -> StatusResult:
         return cast(
-            StatusResult, await self._invoke(ControlMethod.STATUS, request, deadline_ms=deadline_ms)
+            StatusResult,
+            await self._invoke(
+                ControlMethod.STATUS,
+                request,
+                deadline_ms=deadline_ms,
+                route_profile=route_profile,
+            ),
         )
 
     async def receipt(

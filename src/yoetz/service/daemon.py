@@ -823,13 +823,11 @@ class ServiceDaemon:
             if not callable(handler):
                 raise ControlError("method_forbidden")
             if request.deadline_ms is None:
-                internal = await cast(Callable[[object], Awaitable[object]], handler)(request.body)
+                internal = await self._invoke_ready_handler(handler, request)
             else:
                 try:
                     async with asyncio.timeout(request.deadline_ms / 1_000):
-                        internal = await cast(Callable[[object], Awaitable[object]], handler)(
-                            request.body
-                        )
+                        internal = await self._invoke_ready_handler(handler, request)
                 except TimeoutError as exc:
                     raise ControlError("request_timeout", retryable=True) from exc
             # The handler has returned, so a write may already be durable. Everything below only
@@ -841,6 +839,19 @@ class ServiceDaemon:
         finally:
             if admission is not None:
                 await self._composition.lifecycle.release(admission)
+
+    @staticmethod
+    async def _invoke_ready_handler(
+        handler: object,
+        request: ControlCallRequest,
+    ) -> object:
+        operation = cast(Callable[..., Awaitable[object]], handler)
+        if (
+            request.method in {ControlMethod.CHECK, ControlMethod.STATUS}
+            and request.route_profile is not None
+        ):
+            return await operation(request.body, route_profile=request.route_profile)
+        return await operation(request.body)
 
     async def _project_completed_response(
         self,

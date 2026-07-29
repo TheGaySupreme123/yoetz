@@ -8,7 +8,7 @@ import os
 import re
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 from typer.testing import CliRunner
@@ -49,8 +49,13 @@ class _ScriptedRunner:
         return self.outputs.pop(0)
 
 
-def _yoetz_entry() -> CommandOutput:
-    return CommandOutput(0, json.dumps({"command": "yoetz", "args": ["mcp", "serve"]}).encode())
+def _yoetz_entry(
+    route_profile: Literal["policy", "strict"] = "strict",
+) -> CommandOutput:
+    args = ["mcp", "serve"]
+    if route_profile == "strict":
+        args.extend(["--semantic", "off"])
+    return CommandOutput(0, json.dumps({"command": "yoetz", "args": args}).encode())
 
 
 @pytest.fixture
@@ -67,10 +72,13 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
     def fake_discover(*, _probe: object = None) -> tuple[HarnessBinary, ...]:
         return cast(tuple[HarnessBinary, ...], state["binaries"])
 
-    def fake_adapter() -> CodexMcpAdapter:
+    def fake_adapter(
+        *,
+        route_profile: Literal["policy", "strict"] = "policy",
+    ) -> CodexMcpAdapter:
         runner = _ScriptedRunner(cast(list[CommandOutput], state["outputs"]))
         cast(list[list[tuple[str, ...]]], state["calls"]).append(runner.calls)
-        return CodexMcpAdapter(runner)
+        return CodexMcpAdapter(runner, route_profile=route_profile)
 
     async def unreachable_client() -> object:
         raise ControlError("service_unavailable")
@@ -132,6 +140,7 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
 
     monkeypatch.setattr(setup_module, "discover_codex_binaries", fake_discover)
     monkeypatch.setattr(setup_module, "CodexMcpAdapter", fake_adapter)
+    monkeypatch.setattr(setup_module, "_configured_mcp_route_profile", lambda: "strict")
     monkeypatch.setattr(setup_module, "CodexPluginService", _FakePluginService)
     monkeypatch.setattr(setup_module, "setup_marker_path", lambda: marker)
     monkeypatch.setattr(
@@ -261,7 +270,7 @@ def test_interactive_wizard_selects_harness_then_installation_and_requires_y_or_
     assert "Select the Codex installation to configure" in result.stdout
     assert "complete Yoetz Codex project integration" in result.stdout
     assert "MCP server name: yoetz" in result.stdout
-    assert "Command: yoetz mcp serve" in result.stdout
+    assert "Command: yoetz mcp serve --semantic off" in result.stdout
     assert "Codex executable: /b/codex" in result.stdout
     assert "Confirm Codex project setup? [Y/N]" in result.stdout
     assert "Observation consent for this workspace" in result.stdout

@@ -53,6 +53,7 @@ from yoetz.protocol.canonical import (
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, validate_id
 from yoetz.protocol.models import (
+    CheckRequest,
     CheckResult,
     CheckResultModel,
     CheckSuccessModel,
@@ -715,22 +716,39 @@ class Application:
         winner = await run_publish_response_commit(self.publish_responses, candidate)
         return self._decode_publish_response(result, key, winner)
 
-    async def check(self, request: object) -> CheckCommitResult:
+    async def check(
+        self,
+        request: CheckRequest,
+        *,
+        route_profile: Literal["policy", "strict"] = "policy",
+    ) -> CheckCommitResult:
         from yoetz.application.check import execute_check
-        from yoetz.protocol.models import CheckRequestModel
 
         # Resolve omitted mode via policy so recorded check events carry the resolved value.
-        if isinstance(request, CheckRequestModel) and request.mode is None:
+        if request.mode is None:
             request = request.model_copy(
                 update={"mode": self.verification_policy.default_check_mode}
             )
-        return await execute_check(self, request)  # pyright: ignore[reportArgumentType]
+        return await execute_check(
+            self,  # pyright: ignore[reportArgumentType]
+            request,
+            route_profile=route_profile,
+        )
 
     async def respond(self, request: RespondRequest) -> RespondInternalResult:
         return await execute_respond(self, request)  # pyright: ignore[reportArgumentType]
 
-    async def status(self, request: StatusRequest) -> StatusInternalResult:
-        return await execute_status(self, request)  # pyright: ignore[reportArgumentType]
+    async def status(
+        self,
+        request: StatusRequest,
+        *,
+        route_profile: Literal["policy", "strict"] | None = None,
+    ) -> StatusInternalResult:
+        return await execute_status(
+            self,  # pyright: ignore[reportArgumentType]
+            request,
+            route_profile=route_profile,
+        )
 
     async def receipt(self, request: ReceiptRequest) -> ReceiptInternalResult:
         return await execute_receipt(self, request)  # pyright: ignore[reportArgumentType]
