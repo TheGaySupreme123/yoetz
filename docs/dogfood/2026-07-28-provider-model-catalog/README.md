@@ -1,12 +1,14 @@
 # 2026-07-28 provider model catalog dogfood
 
-This directory preserves the exact Codex assignment, raw event evidence, independent observer
-reports, Yoetz semantic/runtime evidence, and the final implementation report.
+This directory preserves public, privacy-safe materializations of the Codex assignment and event
+evidence, independent observer reports, Yoetz semantic/runtime evidence, and the final
+implementation report. Host-specific absolute paths are normalized to `<repository-root>` or a
+tool name in the public artifacts.
 
 | Artifact | Role |
 | --- | --- |
-| `codex-prompt.md` | Exact assignment given to `codex-testing` |
-| `codex-events.jsonl` | Materialized public JSONL event stream |
+| `codex-prompt.md` | Public assignment given to `codex-testing`, with its workspace path normalized |
+| `codex-events.jsonl` | Materialized public JSONL event stream with host paths normalized |
 | `codex-last-message.md` | Final response emitted by `codex-testing` |
 | `codex-final-report.md` | Agent-authored implementation and Yoetz report |
 | `agent-quality-live.md` | Observer 1 chronological practical-quality notes |

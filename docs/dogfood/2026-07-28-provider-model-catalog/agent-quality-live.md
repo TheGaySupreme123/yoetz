@@ -90,7 +90,7 @@ practical quality of the Codex implementation and how Yoetz guidance affects the
   discipline. No evidence yet shows whether it improves the actual product design or catches a
   defect; that requires later diff/finding evidence.
 
-## Finding updates
+## Startup-recovery finding update
 
 - **AQ-001 — mitigated, retain in final audit.** The agent read all relevant guidance and exact
   examples at `item_7`, then inspected publication examples before composing the next write
@@ -128,7 +128,7 @@ practical quality of the Codex implementation and how Yoetz guidance affects the
   knowingly synthetic time during a live run. The final audit must check whether the driver
   discloses or corrects this.
 
-## Finding updates
+## Plan-publication finding update
 
 | ID | Severity | Finding | Evidence | Current disposition |
 |---|---|---|---|---|
@@ -206,7 +206,7 @@ practical quality of the Codex implementation and how Yoetz guidance affects the
   occurrence timestamps cannot be rewritten and have not yet been explicitly corrected in the
   ledger or final report.
 
-## Finding updates
+## Projection-recovery finding update
 
 | ID | Severity | Finding | Evidence | Current disposition |
 |---|---|---|---|---|
@@ -251,7 +251,7 @@ practical quality of the Codex implementation and how Yoetz guidance affects the
   provenance and unsupported “current/recommended” claims before closure. If it does not, the agent
   should still catch the issue through source verification and review.
 
-## Finding updates
+## Catalog-provenance finding update
 
 | ID | Severity | Finding | Evidence | Current disposition |
 |---|---|---|---|---|
@@ -398,7 +398,7 @@ practical quality of the Codex implementation and how Yoetz guidance affects the
 - A `no_issue_detected` verdict is therefore not credible support for catalog correctness. It
   supports only that the visible, self-asserted record triggered no challenge.
 
-## Finding updates
+## Semantic-review finding update
 
 | ID | Severity | Finding | Evidence | Current disposition |
 |---|---|---|---|---|

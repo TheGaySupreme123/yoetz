@@ -19,7 +19,7 @@ Verification passed:
 - Pyright: `0 errors`
 - `git diff --check`: passed
 
-The detailed report is at [codex-final-report.md](/Users/shayb/yoetz-core/docs/dogfood/2026-07-28-provider-model-catalog/codex-final-report.md).
+The detailed report is at [codex-final-report.md](codex-final-report.md).
 
 Yoetz closure:
 

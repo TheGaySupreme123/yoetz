@@ -453,6 +453,11 @@ Codex handoff rather than recursively changing this file again.
    `compact` and `versions` succeeded. A smaller decision payload later previewed and appended.
    This narrowed the issue to response shaping/content size or projection behavior; it did not
    justify inventing a publication.
+   Separately, five accepted plan/obligation events asserted
+   `occurred_at=2026-07-28T09:00:00.000Z` even though Yoetz accepted them around `18:30Z`.
+   Those immutable stale occurrence assertions remain an unresolved evidence-integrity limitation;
+   accepted timestamps preserve ingestion chronology but do not validate the asserted occurrence
+   time.
 5. **Same-request/status recovery guidance — helped.** After ambiguous-looking writes, authoritative
    status/frontiers were read rather than inferred. Receipt replay reused the same body and request
    identity and returned the stored receipt.
@@ -464,10 +469,11 @@ Codex handoff rather than recursively changing this file again.
 7. **Coverage/receipt guidance — helped.** It kept candidate reads distinct from recorded checks,
    required a current check before receipt wording, and kept `published_only`/`self_asserted`
    limitations explicit.
-8. **Semantic-required guidance — helped materially.** It caused a real independently authorized
-   Fireworks semantic dispatch with complete provenance instead of treating MCP registration or
-   deterministic checks as semantic review. The model returned no findings, so semantics correctly
-   caused no implementation change.
+8. **Semantic-required guidance — helped technically, with no demonstrated product improvement.**
+   It caused a real independently authorized Fireworks semantic dispatch with complete provenance
+   and closure evidence instead of treating MCP registration or deterministic checks as semantic
+   review. All successful semantic checks returned no findings and produced no implementation
+   changes.
 
 ## Live proof versus structural/test-only proof
 

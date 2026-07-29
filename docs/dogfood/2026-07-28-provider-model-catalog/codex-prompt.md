@@ -1,6 +1,6 @@
 # Codex-testing task: provider model choices with custom entry
 
-Work autonomously in `/Users/shayb/yoetz-core` on the already-created branch
+Work autonomously from the repository root on the already-created branch
 `codex/provider-model-catalog-dogfood-20260728`, based on
 `eda66239210584486528e7de60d0715b0d8cc285`.
 

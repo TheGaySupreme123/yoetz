@@ -6,7 +6,7 @@
 | Completion observed UTC | `2026-07-28T19:01:10Z` |
 | Branch | `codex/provider-model-catalog-dogfood-20260728` |
 | Baseline | `eda66239210584486528e7de60d0715b0d8cc285` |
-| Launcher | `/Users/shayb/.local/bin/codex-testing` |
+| Launcher | `codex-testing` |
 | Launcher version | `codex-cli 0.146.0-alpha.2` |
 | Codex task | `019fa9fc-2111-7bb1-a52c-2e5339433c52` |
 | Model | `gpt-5.6-sol` |
@@ -19,6 +19,6 @@
 | Final frontier | sequence `37`, `sha256:bae78f0ca664e2e1cb9ddda4c4a90dd13148b9d7db5fd33540948bfd82019aa7` |
 | Final receipt | `rcp_4d427dd2-d53d-4cf9-a1b6-79724fbaee6a` |
 | Receipt digest | `sha256:0668927dc52e30d629617801907279b2de1757fe140cb3f9f77057e8da1c7465` |
-| Raw event trace digest | `sha256:fdeeae53169a7c871aa6bd6ed0c561ac5760ed4930b33f08904a571c48ab446d` |
+| Published normalized event trace digest | `sha256:10963e84835064c0e285b92e5ec63d27e896d02de0c914bc7b0264efe8fc0db7` |
 
 No issue, PR, commit, push, merge, or external publication was created.
