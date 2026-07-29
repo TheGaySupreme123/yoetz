@@ -264,7 +264,7 @@ def _render_recipe_options(*, recommended: PrivacyRecipe | None = None) -> None:
     typer.echo("You can change this any time by running 'yoetz --privacy'.")
 
 
-def _recipe_choice(hint: PrivacyRecipe | None) -> PrivacyRecipe | None:
+def _recipe_choice(hint: PrivacyRecipe | None) -> PrivacyRecipe:
     while True:
         raw = typer.prompt(
             "Choose a privacy option",
@@ -276,7 +276,7 @@ def _recipe_choice(hint: PrivacyRecipe | None) -> PrivacyRecipe | None:
         typer.echo("Please enter 1, 2, 3, 4, or 5.")
 
 
-def _recipe_prompt(hint: PrivacyRecipe | None) -> PrivacyRecipe | None:
+def _recipe_prompt(hint: PrivacyRecipe | None) -> PrivacyRecipe:
     _render_recipe_options()
     return _recipe_choice(hint)
 
@@ -701,8 +701,6 @@ async def run_privacy_setup(
             typer.echo("")
             typer.echo("Customize privacy one setting at a time.")
             recipe = _recipe_choice(recommended_recipe)
-            if recipe is None:
-                return PrivacySetupReport("failed", current.profile.value, reason="recipe_invalid")
             try:
                 answers = _ask_answers(recipe, current)
                 candidate = build_candidate_policy(current, answers, now=datetime.now(UTC))
@@ -713,8 +711,6 @@ async def run_privacy_setup(
                 return PrivacySetupReport("cancelled", current.profile.value)
     else:
         recipe = _recipe_prompt(recipe_hint)
-        if recipe is None:
-            return PrivacySetupReport("failed", current.profile.value, reason="recipe_invalid")
         try:
             answers = _ask_answers(recipe, current)
             candidate = build_candidate_policy(current, answers, now=datetime.now(UTC))

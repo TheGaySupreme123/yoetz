@@ -531,10 +531,10 @@ def test_root_privacy_shortcut_dispatches_guided_privacy_setup(
 
 
 def test_root_privacy_shortcut_rejects_provider_setup_options() -> None:
-    result = _RUNNER.invoke(cli.app, ["--privacy", "--set"])
+    result = _RUNNER.invoke(cli.app, ["--privacy", "--set"], env={"NO_COLOR": "1"})
 
     assert result.exit_code == 2
-    assert "--privacy cannot be combined" in result.output
+    assert "--privacy cannot be combined" in _plain(result.output)
 
 
 def test_root_set_fireworks_dispatches_simple_provider_setup(
@@ -1110,7 +1110,7 @@ def test_lost_credential_result_recovers_from_recomposed_presence(
     monkeypatch.setattr(write_module, "provider_preset", fake_preset)
 
     async def fake_restart() -> dict[str, object]:
-        return {"reachable": True, "state": "ready", "vault_mode": "passphrase"}
+        return {"reachable": True, "state": "ready", "vault_mode": "os_managed"}
 
     async def fake_status() -> dict[str, object]:
         return {"credential_connected": next(status_reads)}
@@ -1124,7 +1124,7 @@ def test_lost_credential_result_recovers_from_recomposed_presence(
 
     _service, report = asyncio.run(
         setup_module._interactive_provider_setup(  # pyright: ignore[reportPrivateUsage]
-            {"reachable": True, "state": "ready", "vault_mode": "passphrase"},
+            {"reachable": True, "state": "ready", "vault_mode": "os_managed"},
             provider_choice="fireworks",
             model="accounts/fireworks/models/minimax-m3",
         )
