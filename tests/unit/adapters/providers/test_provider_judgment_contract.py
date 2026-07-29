@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from jsonschema import Draft202012Validator
 from pydantic import TypeAdapter, ValidationError
 
 from yoetz.adapters.providers.openai_chat_completions import (
@@ -74,6 +75,11 @@ def _judgment(
         "conclusion": conclusion,
         "reviewer_challenges": cast(list[JsonValue], [] if challenges is None else challenges),
     }
+
+
+def _provider_schema_accepts(value: JsonValue) -> bool:
+    validator = cast(Any, Draft202012Validator(JUDGMENT_JSON_SCHEMA))
+    return cast(bool, validator.is_valid(value))
 
 
 def _responses_profile() -> OpenAIProfile:
@@ -227,6 +233,33 @@ def test_challenge_refs_enforce_pattern_count_uniqueness_and_canonicalize_order(
                 [_challenge(refs=["prose citation to the claim"])],
             )
         )
+
+
+def test_provider_schema_and_consumer_both_reject_duplicate_refs() -> None:
+    duplicate = _judgment(
+        "challenges_returned",
+        [_challenge(refs=[_REF_A, _REF_A])],
+    )
+    assert not _provider_schema_accepts(duplicate)
+    with pytest.raises(ValueError, match="openai_judgment_shape_invalid"):
+        normalize_judgment(duplicate)
+
+
+def test_provider_schema_text_bound_always_fits_consumer_utf8_limit() -> None:
+    admitted = _judgment(
+        "challenges_returned",
+        [_challenge(summary="😀" * 1024)],
+    )
+    assert _provider_schema_accepts(admitted)
+    normalize_judgment(admitted)
+
+    oversized = _judgment(
+        "challenges_returned",
+        [_challenge(summary="😀" * 1025)],
+    )
+    assert not _provider_schema_accepts(oversized)
+    with pytest.raises(ValueError, match="openai_judgment_shape_invalid"):
+        normalize_judgment(oversized)
 
 
 def test_conclusion_challenge_coupling_is_enforced() -> None:

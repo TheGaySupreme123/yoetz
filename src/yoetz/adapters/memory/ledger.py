@@ -1922,6 +1922,39 @@ class MemoryLedgerAdapter:
                     lease_expires_at=None,
                 )
 
+    async def fail_semantic_job(
+        self,
+        lease: OperationLease,
+        job_id: str,
+        terminal_code: SemanticReason,
+    ) -> SemanticJobRecord:
+        """Terminally fail a queued job when no physical attempt is active."""
+
+        async with self._lock:
+            operation = self._require_lease(lease)
+            job = self._state.jobs.get(job_id)
+            if (
+                operation.phase is not CheckPhase.SEMANTIC_WAIT
+                or job is None
+                or job.writer_id != lease.writer_id
+                or job.operation_id != lease.operation_id
+                or job.state != "queued"
+                or job.active_attempt_id is not None
+                or terminal_code is SemanticReason.SEMANTIC_COMPLETED
+            ):
+                raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+            failed = replace(
+                job,
+                state="failed",
+                lease_owner_id=None,
+                lease_generation=None,
+                lease_expires_at=None,
+                terminal_code=terminal_code,
+                terminal_at=_now(self._clock),
+            )
+            self._state.jobs[job_id] = failed
+            return failed
+
     async def select_attempt(
         self,
         lease: OperationLease,

@@ -800,6 +800,9 @@ the frontier merely advanced.
   active started attempt; expired lease closes the prior attempt as `expired` then mints the next
   ordinal — never reuses a consumed authorization identity);
 - `record_attempt_outcome(handle, outcome, result_object_ref?, terminal_code?) -> None`;
+- `fail_semantic_job(lease, job_id, terminal_code) -> SemanticJobRecord` (terminally closes a
+  queued job when the total deadline or retry budget expires before another physical attempt can
+  be claimed; it never fabricates an attempt row);
 - `select_attempt(lease, handle, selected_result_object_ref) -> SelectedAttempt`;
 - `load_semantic_job(writer_id, operation_id) -> SemanticJobRecord | None`;
 - `list_semantic_attempts(job_id) -> tuple[SemanticAttemptRecord, ...]` (ordinal-sorted bounded
@@ -1641,12 +1644,13 @@ output JSON Schema sent to Responses/Chat Completions hosts is generated from th
 `normalize_judgment` validates through the same model before constructing domain
 `SemanticJudgment`/`ReviewerChallenge`. The schema expresses closed `FindingKind` and next-step
 enums, one-to-sixteen citable subject refs with prefix/pattern and uniqueness, non-empty
-byte-bounded prose, zero-to-three challenges, conclusion/challenge coupling via explicit union
-branches, and `additionalProperties: false`. Reference order has no semantic meaning: valid refs
-are ASCII-canonicalized on acceptance; invented enums, empty prose, duplicate refs, non-citable
-IDs, and conclusion contradictions are never normalized into acceptance. The generated schema
-proves what Yoetz requested, not that every host enforces it — a nonconforming host response
-degrades to an invalid semantic result, never a fabricated pass.
+byte-bounded prose (the provider schema conservatively caps Unicode code points so every admitted
+string fits the 4 KiB UTF-8 domain boundary), zero-to-three challenges, conclusion/challenge
+coupling via explicit union branches, and `additionalProperties: false`. Reference order has no
+semantic meaning: valid refs are ASCII-canonicalized on acceptance; invented enums, empty prose,
+duplicate refs, non-citable IDs, and conclusion contradictions are never normalized into
+acceptance. The generated schema proves what Yoetz requested, not that every host enforces it — a
+nonconforming host response degrades to an invalid semantic result, never a fabricated pass.
 
 Invalid-result reasons stay exact without retaining provider plaintext: empty/non-JSON or
 constrained-schema mismatch → `response_schema_invalid` (`failure_class=response_schema`);

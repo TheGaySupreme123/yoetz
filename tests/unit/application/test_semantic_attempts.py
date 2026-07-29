@@ -363,6 +363,23 @@ class _FakeLedger:
                 terminal_at=datetime(2026, 1, 1, tzinfo=UTC),
             )
 
+    async def fail_semantic_job(
+        self,
+        lease: OperationLease,
+        job_id: str,
+        terminal_code: SemanticReason,
+    ) -> SemanticJobRecord:
+        assert lease == self.lease
+        assert job_id == self.job.job_id
+        assert self.job.state == "queued"
+        self.job = replace(
+            self.job,
+            state="failed",
+            terminal_code=terminal_code,
+            terminal_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        return self.job
+
     async def select_attempt(
         self,
         lease: OperationLease,
@@ -464,6 +481,126 @@ async def test_zero_retry_performs_exactly_one_attempt() -> None:
 
 async def _async_noop() -> None:
     return None
+
+
+@pytest.mark.anyio
+async def test_total_deadline_before_first_attempt_terminally_fails_job() -> None:
+    lease = _lease()
+    job = SemanticJobRecord(
+        _JOB,
+        _WRITER,
+        _OP,
+        _CASE,
+        _case_ref(),
+        "queued",
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    ledger = _FakeLedger(job, lease)
+
+    async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
+        raise AssertionError("dispatch_not_expected_after_total_deadline")
+
+    async def publish(handle: SemanticAttemptHandle, evaluation: object) -> ObjectRef:
+        raise AssertionError("publish_not_expected")
+
+    def build_final(
+        status: SemanticStatus,
+        reason: SemanticReason,
+        evaluation: object | None,
+        accounting: SemanticAttemptAccounting,
+    ) -> object:
+        return (status, reason, accounting)
+
+    result = cast(
+        tuple[SemanticStatus, SemanticReason, SemanticAttemptAccounting],
+        await run_durable_semantic_attempts(
+            ledger=ledger,
+            lease=lease,
+            job=job,
+            deadline=Deadline(datetime(2026, 1, 1, tzinfo=UTC), 0.0),
+            max_retries=2,
+            now_monotonic=lambda: 1.0,
+            dispatch=dispatch,
+            publish_success_response=publish,
+            build_final=build_final,
+        ),
+    )
+    assert result[0] is SemanticStatus.TIMEOUT
+    assert result[1] is SemanticReason.PROVIDER_TIMEOUT
+    assert result[2].attempted_count == 0
+    assert ledger.job.state == "failed"
+    assert ledger.job.terminal_code is SemanticReason.PROVIDER_TIMEOUT
+
+
+@pytest.mark.anyio
+async def test_total_deadline_after_retriable_attempt_terminally_fails_queued_job() -> None:
+    lease = _lease()
+    job = SemanticJobRecord(
+        _JOB,
+        _WRITER,
+        _OP,
+        _CASE,
+        _case_ref(),
+        "queued",
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    ledger = _FakeLedger(job, lease)
+    monotonic_values = iter((0.0, 0.0, 0.0, 0.0, 1.0, 1.0))
+
+    async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
+        assert ledger.dispatches is not None
+        ledger.dispatches.append(handle.attempt_id)
+        return _Eval(SemanticStatus.TIMEOUT, SemanticReason.PROVIDER_TIMEOUT)
+
+    async def publish(handle: SemanticAttemptHandle, evaluation: object) -> ObjectRef:
+        raise AssertionError("publish_not_expected")
+
+    def build_final(
+        status: SemanticStatus,
+        reason: SemanticReason,
+        evaluation: object | None,
+        accounting: SemanticAttemptAccounting,
+    ) -> object:
+        return (status, reason, accounting)
+
+    result = cast(
+        tuple[SemanticStatus, SemanticReason, SemanticAttemptAccounting],
+        await run_durable_semantic_attempts(
+            ledger=ledger,
+            lease=lease,
+            job=job,
+            deadline=Deadline(datetime(2026, 1, 1, tzinfo=UTC), 0.5),
+            max_retries=2,
+            now_monotonic=lambda: next(monotonic_values),
+            dispatch=dispatch,
+            publish_success_response=publish,
+            build_final=build_final,
+        ),
+    )
+    assert result[0] is SemanticStatus.TIMEOUT
+    assert result[1] is SemanticReason.PROVIDER_TIMEOUT
+    assert result[2].attempted_count == 1
+    assert ledger.outcomes == [
+        (_ATT1, AttemptOutcome.EXPIRED, SemanticReason.PROVIDER_TIMEOUT)
+    ]
+    assert ledger.job.state == "failed"
+    assert ledger.job.terminal_code is SemanticReason.PROVIDER_TIMEOUT
 
 
 @pytest.mark.anyio
