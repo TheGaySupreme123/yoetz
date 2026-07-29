@@ -1,0 +1,7 @@
+✓ Provider binding saved
+✓ API key stored securely
+! Live provider connection has not been tested
+! External semantic review is not yet proven ready
+
+Still required:
+    llm_inference_channel: disabled

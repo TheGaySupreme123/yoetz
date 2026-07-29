@@ -1,0 +1,23 @@
+Add rate limiting to the upload endpoint
+
+State                current
+Evidence             3
+Open findings        2
+Last check           deterministic only
+Frontier sequence    412
+Receipt              available
+
+Claims
+  Rate limiting rejects the 11th request in a minute
+
+Checks
+  work-integrity/0.1.0
+
+Coverage
+  no semantic review
+
+Findings
+  P2 unsupported_claim (deterministic): no evidence links the claim
+
+Limitations
+  semantic_review_unavailable

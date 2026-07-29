@@ -14,7 +14,7 @@ things.
 ## Trust topology
 
 ```
-  agent (via MCP)      human (via CLI)      future UI
+  agent (via MCP)   human (via CLI)   human (terminal UI)
          \                   |                  /
           \                  |                 /
            +--------- control protocol --------+
@@ -41,6 +41,11 @@ log, trace, transcript, or LLM context. Credentials are provisioned through a co
 ceremony ([ADR-015](adr/ADR-015-elevated-bootstrap-consent.md),
 [ADR-016](adr/ADR-016-human-review-non-default-actions.md)).
 
+The terminal interface sits on the human-CLI leg and is bound by the same rule. It has no
+credential path of its own: when a secret is needed it suspends itself and hands the controlling
+terminal to that same ceremony, so no secret byte enters the interface's widget state, transcript,
+or any snapshot of it ([ADR-017](adr/ADR-017-full-screen-terminal-interface.md) decision 7).
+
 ## Module map
 
 | Package | Role |
@@ -53,11 +58,18 @@ ceremony ([ADR-015](adr/ADR-015-elevated-bootstrap-consent.md),
 | `application/` | Use cases. One module per public operation (`start`, `publish_work`, `check`, `respond`, `status`, `receipt`), plus egress, privacy policy, maintenance, import review, harness integration, and the observation coordinator. |
 | `service/` | The persistent trusted process: lifecycle, vault, unlock, control protocol, composition. |
 | `cli/`, `mcp/` | Client surfaces. Thin — they translate, they do not decide. |
+| `tui/` | The full-screen terminal interface. Presentation only. `runtime.py` is the sole bridge to application services and originates no decision; `render.py` is pure text with no rendering-framework import, so safety-relevant wording is snapshot-tested; `widgets/` holds no security logic. |
 | `config/`, `observability/`, `version.py` | TOML settings, privacy-safe logging, resource manifest and identity. |
 
 `memory/` existing alongside `sqlite/` is deliberate: the conformance suite runs the same scenarios
 against both, so "the durable adapter behaves like the reference" is a test result rather than an
 assumption.
+
+`tui/` sitting beside `cli/` rather than inside it is also deliberate. It is a second presentation
+of the same operations, not a second authority over them: every gate — preview digests, foreign
+MCP entries, privacy widening, vault state, provider readiness — is enforced by the owning service
+and merely transcribed by the interface. The split makes that reviewable, because anything in
+`tui/` that reached past `runtime.py` would be visible as an import.
 
 ## The six operations
 

@@ -1,0 +1,5 @@
+Detected:
+✓ Codex Desktop 0.44 0.44
+✓ Git project: yoetz
+✓ System secure storage
+○ Yoetz is not connected yet

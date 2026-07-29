@@ -1,0 +1,15 @@
+Change what may leave this computer: local only → Minimal external review
+
+Data that may be sent
+  + Structural facts: counts, verdicts, coverage, and check names
+
+Provider            openai
+Model               gpt-4.1-mini
+Endpoint profile    openai-responses
+Purpose             verification review of recorded work
+Scope               this installation
+
+Never sent, under any choice
+  · API keys, passphrases, and anything else secret
+
+  ! This provider connection has never been tested.

@@ -11,7 +11,10 @@ yoetz
 
 `uvx yoetz` works for a one-off run. `npx yoetz` will delegate to the same `uvx` path once the
 prepared launcher in [`support/npm-launcher/`](../../support/npm-launcher/) is published; it is
-deliberately unpublished today, so npm is not currently an install route.
+deliberately unpublished today, so npm is not currently an install route. The launcher pins the
+exact Python distribution, passes arguments through unchanged, inherits stdio so the child sees
+your real terminal, and propagates exit codes — including `128+n` for a signal. It installs
+nothing itself: when `uv` is missing it prints the install command and stops.
 
 Optional extras:
 
@@ -20,29 +23,43 @@ Optional extras:
 | `semantic-openai` | HTTP client and OpenAI SDK for provider dispatch |
 | `portable-recovery` | Argon2 support for portable key recovery |
 
-## First run: the setup wizard
+## First run
 
-The first bare `yoetz` on an interactive terminal starts the setup wizard
-([ADR-012](../adr/ADR-012-first-run-setup-wizard.md)). Every non-interactive invocation — CI, pipes
-— prints help instead.
+The first bare `yoetz` on an interactive terminal opens the full-screen interface in first-run
+mode ([ADR-017](../adr/ADR-017-full-screen-terminal-interface.md), amending
+[ADR-012](../adr/ADR-012-first-run-setup-wizard.md)). Every non-interactive invocation — CI,
+pipes, redirected streams — prints help instead, exactly as before.
 
-The wizard:
+Setup is a linear path inside the interface, each finished step collapsing into a short line:
 
-1. Lists automatically detected supported harnesses (Codex in v0.1) and asks which one to connect.
-2. Asks which installation to use when several Codex CLI binaries are found on your `PATH`, in the
-   standard macOS Codex Desktop location, or in the Windows Store Codex App package.
-3. Previews the MCP registration and — only after an explicit `Y` — registers `yoetz mcp serve` with
-   the chosen Codex. It runs `codex mcp get` first; an existing foreign entry is always preserved,
-   never replaced.
-4. Checks whether the local service is reachable.
-5. Optionally collects a reviewed nonsecret provider preset or a custom HTTPS origin and model
-   binding. This writes `config.toml`. It never writes secrets.
+1. **Detection.** Supported harnesses (Codex in v0.1), your project and whether it is a Git
+   repository, whether system secure storage is available, and whether Yoetz is connected yet.
+2. **Which installation**, when several Codex binaries are found on your `PATH`, in the standard
+   macOS Codex Desktop location, or in the Windows Store Codex App package. Friendly names lead;
+   executable paths appear on selection and under `D`.
+3. **Project trust.** The repository root and what project-local guidance and hooks are permitted
+   to do. Starting in a subfolder is called out, with the root the trust applies to.
+4. **The exact proposed change** — managed guidance and hooks, the `yoetz mcp serve` MCP
+   registration, bounded structural event recording, and the approved-check policy digest — plus
+   what will *not* happen. Nothing is applied before an explicit approval, and the approval is
+   bound to the exact preview and policy digests that were displayed: if either has moved, the
+   apply refuses as stale rather than proceeding.
+5. **Installation activity**, with each step reported only once its postcondition was checked.
+6. **Secure storage** — the system keyring, or a Yoetz passphrase.
+7. **Finish**, stating each readiness layer separately.
 
-The official Codex App exists on macOS and Windows. Linux setup uses the same wizard for the
+`codex mcp get` runs first; an existing foreign entry is always preserved, never replaced, and
+there is no force-replace option anywhere in the interface.
+
+Provider configuration is **not** part of recommended onboarding. You finish setup with local
+verification fully ready and no provider at all.
+
+The official Codex App exists on macOS and Windows. Linux setup uses the same flow for the
 standalone Codex CLI and does not fabricate an app installation that OpenAI does not publish.
 
-Re-run any time with `yoetz setup run`. Inspect posture read-only with `yoetz setup status`. Manage
-registration directly with `yoetz integrate mcp status|preview|install`.
+Re-run any time with `yoetz setup run` (the prompt-driven wizard, unchanged) or `/connect` in the
+interface. Inspect posture read-only with `yoetz setup status`. Manage registration directly with
+`yoetz integrate mcp status|preview|install`.
 
 ## What stays human-driven
 
@@ -69,9 +86,16 @@ opt into external review deliberately, or never.
 
 ## After setup
 
-Bare `yoetz` opens the interactive menu ([ADR-013](../adr/ADR-013-interactive-control-menu.md)),
-including LLM endpoint binding under **LLM provider**. From here:
+Bare `yoetz` opens the interface. Type `/` for commands — `/status` for layered readiness,
+`/connect`, `/privacy`, `/provider`, `/service`, `/doctor`, `/work`, `/check`, `/receipt`.
 
+Set `YOETZ_TUI=0`, or run in an installation without the rendering dependency, to get the
+prompt-loop menu ([ADR-013](../adr/ADR-013-interactive-control-menu.md)) instead; it remains
+supported and covers the same operations.
+
+From here:
+
+- [The terminal interface](terminal-interface.md) — the interface in detail.
 - [The six operations](six-operations.md) — the actual workflow.
 - [Privacy and semantic review](privacy-and-semantic-review.md) — before you enable any egress.
 - [`docs/runbooks/codex-integration.md`](../runbooks/codex-integration.md) — integration detail and

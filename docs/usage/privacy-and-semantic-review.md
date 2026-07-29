@@ -17,6 +17,10 @@ installing, by binding a provider, or by having a credential.
 
 `local_only`, `confirm_every_request`, `minimal_external`, `trusted_provider`.
 
+The terminal interface names these in ordinary words — **Local only**, **Ask every time**,
+**Minimal external review**, **Trusted provider** — under `/privacy`. The words are a label for
+the same durable profile; nothing about the policy changes because the wording is friendlier.
+
 Trusted-provider permission always binds named categories, a purpose, a scope, a provider, a model,
 and an endpoint profile. It never means "send everything available."
 
@@ -51,6 +55,20 @@ yoetz privacy receipts          # inspect bounded structural egress receipts
 
 `export-desired` / `apply-desired` are the reviewable path for version-controlling policy. The
 asymmetry is the point: tightening can flow through gates, widening always requires a human.
+
+### `/privacy` in the terminal interface
+
+`/privacy` reads the current posture and, before any widening, renders the exact disclosure: which
+data categories become eligible, the provider, model, endpoint profile, purpose, and scope, plus
+the never-send set and any unavailable or untested provider posture. The cursor starts on the
+declining option.
+
+Approving there does **not** widen policy. The interface hands off to `yoetz privacy propose` and
+`yoetz privacy decide`, because widening is a trusted-local decision with its own ceremony
+([ADR-009](../adr/ADR-009-data-egress-privacy.md)) and a friendlier path to it would be a weaker
+path to it. Tightening likewise stays on `yoetz privacy tighten`. `local_only` remains the default
+and the interface never moves off it on its own
+([ADR-017](../adr/ADR-017-full-screen-terminal-interface.md) decision 5).
 
 ## What semantic review actually sends
 

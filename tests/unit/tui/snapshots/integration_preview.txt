@@ -1,0 +1,16 @@
+Would you like to connect Yoetz to this project?
+
+Codex installation
+  Codex Desktop 0.44
+
+Project changes
+  + Install managed Yoetz guidance and hooks
+  + Register MCP server: yoetz mcp serve
+  + Allow bounded structural event recording for this project
+  + Trust the exact approved-check policy digest: 7f8a92bd
+
+Safety
+  · No repository contents are uploaded during setup
+  · No API key is written to the project
+  · External LLM review remains off
+  · A foreign MCP entry will never be replaced

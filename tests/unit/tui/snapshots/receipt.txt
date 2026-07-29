@@ -1,0 +1,18 @@
+Verdict: unresolved_findings_remain
+
+Coverage
+  deterministic checks only
+
+Open findings: 2
+
+Limitations
+  semantic_review_unavailable
+
+Deeper review: not available for this receipt
+Freshness: current
+
+What was verified
+  Two deterministic policy packs ran against the recorded evidence
+
+What was not verified
+  No external model reviewed the claims in this task

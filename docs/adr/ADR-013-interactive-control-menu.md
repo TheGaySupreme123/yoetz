@@ -1,6 +1,13 @@
 # ADR-013 — Interactive control menu as the default terminal entry point
 
 **Status:** Working decision (2026-07-21), founder-authorized amendment of ADR-012 decision 2.
+**Amended by:** [ADR-017](ADR-017-full-screen-terminal-interface.md) (2026-07-26). Decisions 1
+and 2 below, and the "full-screen TUI framework" rejection under *Alternatives considered*, are
+superseded: bare `yoetz` and `yoetz menu` on a real terminal now open the full-screen interface,
+with first run folded into it. Decisions 3 and 4 — the surface adds no authority, and bounded
+failures stay bounded — are carried forward unchanged and still bind. The prompt-loop menu
+described here remains implemented and supported as the fallback when the rendering dependency
+is unavailable or `YOETZ_TUI=0` is set.
 **Implemented by:** `src/yoetz/cli/menu.py` (new), plus the amended
 `src/yoetz/cli/app.py`.
 **Relates to:** ADR-008 (local service/vault trust boundary), ADR-009 (privacy/egress),

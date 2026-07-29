@@ -19,11 +19,20 @@ yoetz
 ```
 
 The supported install path is Python via [`uv`](https://docs.astral.sh/uv/); `uvx yoetz` works for a
-one-off run. The first bare `yoetz` on an interactive terminal starts the setup wizard: it detects
-supported harnesses (Codex in v0.1), previews and — only after an explicit `Y` — registers
-`yoetz mcp serve`, and optionally records a nonsecret provider binding.
+one-off run.
 
-Full walkthrough: [Install and first run](docs/usage/install-and-first-run.md).
+`yoetz` at a terminal opens a full-screen interface, and the first run walks setup inside it:
+what was detected, whether you trust this project, the exact proposed change, and an explicit
+approval before anything is applied. You do not need to know what MCP, hooks, policy digests, or
+vaults are to finish it, and you are never asked to configure a provider — local verification is
+complete without one.
+
+Everything non-interactive is unchanged. Pipes, redirects, CI, `yoetz --help`, `--json` output,
+named subcommands, and `yoetz mcp serve` behave exactly as before; a bare `yoetz` with a
+redirected stream still prints help. Set `YOETZ_TUI=0` for the prompt-loop menu instead.
+
+Full walkthrough: [Install and first run](docs/usage/install-and-first-run.md) and
+[The terminal interface](docs/usage/terminal-interface.md).
 
 ## The six operations
 
@@ -60,15 +69,18 @@ See [Privacy and semantic review](docs/usage/privacy-and-semantic-review.md) and
 ## How it is put together
 
 One trusted persistent local service owns the encryption keys, decrypted state, storage writers,
-privacy authority, and provider access. CLI, MCP, and any future UI are clients — they hold none of
-those things. External disclosure is denied by default and must pass centralized classification,
+privacy authority, and provider access. CLI, MCP, and the terminal interface are clients — they
+hold none of those things. The interface in particular is presentation only: it dispatches through
+the same application services the commands do, and no secret ever enters it, because credential
+entry suspends the interface and hands the terminal to the existing confidential ceremony. External disclosure is denied by default and must pass centralized classification,
 policy, minimization, secret scanning, exact destination binding, and durable structural audit.
 
 See [Architecture](docs/architecture.md).
 
 ## Documentation
 
-- [Using Yoetz](docs/usage/) — install, operations, privacy, providers, receipts.
+- [Using Yoetz](docs/usage/) — install, the terminal interface, operations, privacy, providers,
+  receipts.
 - [Architecture](docs/architecture.md) — topology, module map, honesty rules.
 - [`docs/adr/`](docs/adr/) — architecture decisions; the top authority for public behavior.
 - [`docs/INTERFACES.md`](docs/INTERFACES.md) — shared names, types, ports, trust boundaries.

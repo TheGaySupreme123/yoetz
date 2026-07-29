@@ -1,0 +1,18 @@
+✓ Yoetz is ready
+
+Codex connection     verified
+Local service        ready
+Secure storage       ready
+Local checks         ready
+External review      off
+Privacy              local only
+
+Nothing is being sent to an external review model.
+
+To get started, ask Codex to use Yoetz on its next task or try one of
+these commands:
+/status
+/work
+/receipt
+/privacy
+/provider

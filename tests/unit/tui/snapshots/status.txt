@@ -1,0 +1,12 @@
+Project                 /srv/yoetz
+Codex                   connected
+Project integration     verified
+Local service           ready
+Secure storage          unlocked
+Local checks            ready
+External review         off
+Privacy                 local only
+Open work               1 task
+Open findings           2
+
+Nothing is leaving this computer.

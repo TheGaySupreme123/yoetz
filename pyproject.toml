@@ -19,6 +19,7 @@ dependencies = [
     "mcp==1.28.1",
     "platformdirs==4.10.0",
     "pydantic==2.13.4",
+    "textual==8.2.8",
     "typer==0.27.0",
 ]
 
