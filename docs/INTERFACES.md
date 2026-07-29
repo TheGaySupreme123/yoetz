@@ -84,7 +84,31 @@ ordinary dictionary with exactly `code`, `message`, `retryable`, and bound `corr
 adds `safe_details` only when nonempty, as a new ordinary dictionary in ASCII key order. The frozen
 public-error JSON Schema remains a structural superset of this exact mapping-only runtime emitter.
 Allowlisted `safe_details` keys include structural recovery fields such as `reason_code`,
-`sequence`, and `head_digest` (for `FRONTIER_CONFLICT` current-head recovery). Protocol reason
+`sequence`, and `head_digest` (for `FRONTIER_CONFLICT` current-head recovery). For MCP
+`INVALID_REQUEST` validation failures, `safe_details` may also carry parallel `fields` and
+`reasons` arrays: each entry is an allowlisted JSON pointer and a closed reason token for that
+location (same index order; at most eight locations). Pointers use only trusted location segments;
+unknown or hostile property names are never echoed. Closed reason tokens are:
+
+- `missing` — a required property is absent;
+- `extra_forbidden` — an additional property is not admitted;
+- `invalid_type` / `invalid_value` — type or admitted-value failure at the named path;
+- `invalid_type_or_value` — residual validation failure when no more specific closed token applies;
+- `paired_field_required` — a schema `dependentRequired` pair is incomplete (for example `start`
+  with `workspace_ref` present and `external_ref` absent, or the inverse). Both the present field
+  and the required peer are named; the authoring hint states the schema peer rule (e.g.
+  `workspace_ref requires external_ref`) without echoing submitted values;
+- `conditional_field_required` — a root-level schema `if`/`then` (or equivalent closed object rule)
+  activated required alternatives (for example `start` with `mode` `attach` without `session_id`
+  or the paired external/workspace refs). Named fields are the safe required alternatives; the
+  authoring hint states the activating condition when it is a bounded schema const (e.g.
+  `mode attach requires …`).
+
+These object-rule tokens are projected only from checked-in schema metadata and validator kind —
+never from caller-controlled keys or free-form exception text. Unrecognized object rules degrade
+to a bounded generic `INVALID_REQUEST` without inventing field pointers.
+
+Protocol reason
 `response_projection_failed` marks a post-commit shaping failure for non-`publish_work` writes (and
 for the genuinely impossible case where even the minimal publish envelope cannot be built): the
 write may already be durable, so the public error is retryable and same-`request_id` resume is the
