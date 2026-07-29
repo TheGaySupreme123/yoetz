@@ -831,6 +831,11 @@ async def _service_reachability(*, start_if_absent: bool = False) -> dict[str, J
     }
 
 
+# A draining service unlinks its endpoints and releases singleton authority before the
+# successor can bind, so a flat retry window reports an unreachable service that was only slow.
+_RESTART_BACKOFF_SECONDS: Final = (0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2)
+
+
 async def _restart_service_for_semantic_composition() -> dict[str, JsonValue]:
     """Restart after provider config changes, then verify the new singleton answered."""
 
@@ -846,8 +851,8 @@ async def _restart_service_for_semantic_composition() -> dict[str, JsonValue]:
             await client.close()
     except ControlError:
         return {"reachable": False, "state": None, "vault_mode": None}
-    for _attempt in range(4):
-        await anyio.sleep(0.05)
+    for delay in _RESTART_BACKOFF_SECONDS:
+        await anyio.sleep(delay)
         try:
             client = await connect_service_on_demand(ControlClientKind.CLI)
             try:
@@ -1167,9 +1172,11 @@ async def run_setup_wizard(
         "binding": "skipped",
         "credential": "skipped",
     }
+    # Choosing local-only review means no widening was requested; it does not observe what the
+    # durable policy already is, so the report never names a profile it did not read.
     privacy: dict[str, JsonValue] = {
-        "outcome": "deferred" if not interactive else "local_only",
-        "profile": "local_only" if interactive else "unknown",
+        "outcome": "deferred" if not interactive else "not_changed",
+        "profile": "unknown",
         "reason": None,
     }
     semantic_status: dict[str, JsonValue] | None = None
@@ -1185,14 +1192,11 @@ async def run_setup_wizard(
             from yoetz.ports.control import ControlError
 
             try:
-                privacy_result = await run_privacy_setup(
-                    first_run=True,
-                    recipe_hint="custom",
-                )
+                privacy_result = await run_privacy_setup(recipe_hint="custom")
             except (ControlError, HumanCeremonyCliError, OSError, ValueError) as error:
                 privacy = {
                     "outcome": "failed",
-                    "profile": "local_only",
+                    "profile": "unknown",
                     "reason": getattr(error, "reason", "privacy_setup_failed"),
                 }
             else:
@@ -1211,7 +1215,7 @@ async def run_setup_wizard(
         else:
             privacy = {
                 "outcome": "failed",
-                "profile": "local_only",
+                "profile": "unknown",
                 "reason": "provider_setup_incomplete",
             }
 
@@ -1224,7 +1228,7 @@ async def run_setup_wizard(
         semantic_status is None or semantic_status.get("semantic_ready") is not True
     ):
         next_steps.append(_NEXT_RESTART)
-    if privacy.get("outcome") not in {"configured", "unchanged", "local_only"}:
+    if privacy.get("outcome") not in {"configured", "unchanged", "not_changed"}:
         next_steps.append(_NEXT_PRIVACY)
     if review_mode != "local_only" and provider.get("binding") != "configured":
         next_steps.append(_NEXT_PROVIDER_TOML)

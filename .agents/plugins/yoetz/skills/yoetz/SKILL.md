@@ -17,7 +17,7 @@ Tell the user briefly that you are using Yoetz as a local work ledger and verifi
 
 ## Compatibility
 
-Use only the six registered Yoetz MCP tools and their current schemas. Every tool request's `client` is exactly `{kind, version, integration}`; do not send `client.id` or any other client field. Compatibility is exact and evidence-bound in the adjacent `manifest.json`; an empty profile set means this [REDACTED] skill advertises no tested Codex version or hook.
+Use only the six registered Yoetz MCP tools and their current schemas. Every tool request's `client` is exactly `{kind, version, integration}`; do not send `client.id` or any other client field. Compatibility is exact and evidence-bound in the adjacent `manifest.json`; an empty profile set means this Yoetz skill advertises no tested Codex version or hook.
 
 ## Shared guidance
 

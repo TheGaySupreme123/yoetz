@@ -570,11 +570,19 @@ def privacy_setup() -> None:
 
     async def _run() -> int:
         from yoetz.cli.privacy_setup import run_privacy_setup
+        from yoetz.cli.unlock import HumanCeremonyCliError
 
         try:
             report = await run_privacy_setup()
         except ControlError as error:
             return _control_failure(error)
+        except (HumanCeremonyCliError, OSError, ValueError) as error:
+            reason = getattr(error, "reason", None)
+            typer.echo(
+                f"privacy_setup_failed: {reason if type(reason) is str else 'privacy_setup_failed'}",
+                err=True,
+            )
+            return 20
         if report.outcome == "failed":
             typer.echo(f"privacy_setup_failed: {report.reason or 'invalid'}", err=True)
             return 20

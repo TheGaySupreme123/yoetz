@@ -1021,6 +1021,13 @@ class YoetzTui(App[int]):
                 ),
             )
             return
+        except RuntimeError_ as error:
+            self.say(
+                Level.BLOCKED,
+                "Privacy setup did not complete",
+                (f"Reason: {error.reason}",),
+            )
+            return
         outcome = getattr(report, "outcome", "failed")
         if outcome in {"configured", "unchanged"}:
             await self._refresh_header()

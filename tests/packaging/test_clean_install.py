@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tomllib
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -322,6 +323,48 @@ def test_standard_install_and_portable_recovery_alias_both_include_argon2(
     )
     assert base_probe.returncode == 0
     assert b"argon2-present" in base_probe.stdout
+
+
+def _declared_core_pin(name: str) -> str:
+    data = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    for entry in data["project"]["dependencies"]:
+        if entry.startswith(f"{name}=="):
+            return entry.split("==", 1)[1]
+    raise AssertionError(f"{name} is not a pinned core dependency")
+
+
+def test_standard_install_resolves_the_promoted_dependencies_at_their_exact_pins(
+    built_dist: _BuiltDist, tmp_path: Path
+) -> None:
+    """`version --json` reports adapters, never installed distributions.
+
+    Presence probes pass on any resolved version, so the promotion of `argon2-cffi`, `httpx`,
+    and `openai` to core dependencies is only evidence-bound if the installed versions are
+    compared against the declared pins.
+    """
+
+    root = tmp_path / "install"
+    home = root / "home"
+    home.mkdir(parents=True)
+    _, env = _tool_install(built_dist.directory, root, home)
+    tool_python = root / "tool" / "yoetz" / "bin" / "python"
+    names = ("argon2-cffi", "httpx", "openai")
+    probe = subprocess.run(
+        [
+            str(tool_python),
+            "-c",
+            "import json\n"
+            "from importlib.metadata import version\n"
+            f"print(json.dumps({{name: version(name) for name in {names!r}}}))",
+        ],
+        capture_output=True,
+        timeout=15,
+        env=env,
+        check=False,
+    )
+    assert probe.returncode == 0, probe.stderr
+    installed = json.loads(probe.stdout)
+    assert installed == {name: _declared_core_pin(name) for name in names}
 
 
 # ---------------------------------------------------------------------------

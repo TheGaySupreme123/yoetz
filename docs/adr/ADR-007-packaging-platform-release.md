@@ -73,7 +73,7 @@ freeze every transitive distribution, source, artifact hash, marker, and license
 - Runtime: `anyio==4.14.2`, `apsw==3.53.3.1`, `argon2-cffi==25.1.0`,
   `cryptography==49.0.0`, `httpx==0.28.1`, `jsonschema==4.26.0`, `keyring==25.7.0`,
   `mcp==1.28.1`, `openai==2.46.0`, `platformdirs==4.10.0`, `pydantic==2.13.4`,
-  and `typer==0.27.0`.
+  `textual==8.2.8`, and `typer==0.27.0`.
 - Compatibility extras: `semantic-openai` repeats `httpx==0.28.1` and `openai==2.46.0`;
   `portable-recovery` repeats `argon2-cffi==25.1.0`.
 - Development/test: `hypothesis==6.156.6`, `pytest==9.1.1`,

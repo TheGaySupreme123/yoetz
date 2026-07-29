@@ -200,6 +200,23 @@ def build_candidate_policy(
     return replace(placeholder, policy_digest=canonical_digest(cast(JsonValue, identity)))
 
 
+_IDENTITY_EXCLUDED_KEYS: Final = frozenset(
+    {"policy_digest", "version", "created_at", "supersedes_policy_digest"}
+)
+
+
+def _substantive_identity(policy: PrivacyPolicy) -> str:
+    """Digest only the disclosure boundary, ignoring lineage and issue time.
+
+    A candidate always carries a fresh version, ``created_at``, and supersedes link, so the
+    policy digest alone can never answer "did the human actually change anything?".
+    """
+
+    encoded = encode_privacy_policy_json(policy)
+    identity = {key: value for key, value in encoded.items() if key not in _IDENTITY_EXCLUDED_KEYS}
+    return canonical_digest(cast(JsonValue, identity))
+
+
 def _interactive_terminal() -> bool:
     try:
         return sys.stdin.isatty() and sys.stdout.isatty()
@@ -240,7 +257,7 @@ def _categories_prompt(
     default: tuple[DataCategory, ...],
 ) -> tuple[DataCategory, ...]:
     raw = typer.prompt(
-        f"{number}/13 {label} (comma separated)",
+        f"{number}/13a {label} (comma separated)",
         default=",".join(item.value for item in default),
     ).strip()
     if not raw:
@@ -265,7 +282,7 @@ def _data_classes_prompt(
         DataClass.SENSITIVE_CONFIDENTIAL,
     }
     raw = typer.prompt(
-        f"{number}/13 {label} data classes (comma separated)",
+        f"{number}/13b {label} data classes (comma separated)",
         default=",".join(item.value for item in default),
     ).strip()
     if not raw:
@@ -333,13 +350,13 @@ def _ask_answers(recipe: PrivacyRecipe, current: PrivacyPolicy) -> PrivacySetupA
         "none configured" if external is None else f"{external.provider_id}/{external.model_id}"
     )
     use_provider = typer.confirm(
-        f"3/13 Bind external semantic review to {provider_label}?",
+        f"3/13a Bind external semantic review to {provider_label}?",
         default=network and external is not None,
     )
     require_evidence = False
     if use_provider:
         require_evidence = typer.confirm(
-            "3/13 Require a current eligible provider data-use record?",
+            "3/13b Require a current eligible provider data-use record?",
             default=recipe == "assisted_review",
         )
     typer.echo("4/13 Review context: structural, goal_aware, assisted, or expanded")
@@ -531,7 +548,6 @@ async def _decide(proposal_id: str) -> object:
 
 async def run_privacy_setup(
     *,
-    first_run: bool = False,
     recipe_hint: PrivacyRecipe | None = None,
 ) -> PrivacySetupReport:
     """Run the trusted questionnaire and apply only an explicitly approved draft."""
@@ -557,11 +573,7 @@ async def run_privacy_setup(
         default=False,
     ):
         return PrivacySetupReport("cancelled", current.profile.value)
-    if (
-        current.profile is PrivacyProfile.LOCAL_ONLY
-        and candidate.profile is PrivacyProfile.LOCAL_ONLY
-        and all(not channel.enabled for channel in current.channel_policies)
-    ):
+    if _substantive_identity(candidate) == _substantive_identity(current):
         return PrivacySetupReport("unchanged", current.profile.value)
     proposal_id = await _propose(candidate, current.policy_digest)
     if proposal_id is None:
