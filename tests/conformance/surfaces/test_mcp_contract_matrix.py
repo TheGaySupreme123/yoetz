@@ -219,7 +219,7 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(item.name for item in TOOL_DESCRIPTORS) == _EXPECTED_TOOL_NAMES
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == _EXPECTED_TOOL_NAMES
     assert TOOL_DESCRIPTOR_SET_DIGEST == (
-        "sha256:cf3271078408913ef919534030ddfa86564e08f2e31a63bea45b36896981a128"
+        "sha256:00c0c36199068866a3f0cd7bb6127e0c6d194794ce48482b2908d5fc4be32584"
     )
     for name in _EXPECTED_TOOL_NAMES:
         assert "yoetz://guidance/" in descriptor_for(name).description
@@ -241,7 +241,14 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     )
     assert "uncertain what you already did or committed to" in descriptor_for("status").description
     assert "recommended_next_action" in descriptor_for("status").description
+    assert "caller-asserted occurred_at beside the service-stamped accepted_at" in (
+        descriptor_for("status").description
+    )
     assert "call receipt before claiming completion" in descriptor_for("publish_work").description
+    assert "do not copy the illustrative example timestamp" in (
+        descriptor_for("publish_work").description
+    )
+    assert "service accepted_at" in descriptor_for("publish_work").description
     assert server_instructions().encode("utf-8") == read_resource(
         "yoetz://guidance/agent-instructions.md"
     )

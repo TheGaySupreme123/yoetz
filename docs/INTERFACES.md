@@ -946,7 +946,9 @@ republication/plan-change event. Finding-owned fields are exact; disposition is 
 or `none`, and recorded waiver expiry is never evaluated against wall clock for ordering,
 filtering, or resolution. Evidence strength is exact, availability concerns only declared captured
 content (never a path/URL probe), and freshness is the weaker source-envelope/projection freshness
-capped at `redacted_gap` for unavailable captured content. History is accepted-envelope metadata;
+capped at `redacted_gap` for unavailable captured content. History is accepted-envelope metadata
+including caller-asserted `occurred_at` and digest-bound service `accepted_at` (ordering remains
+ingestion sequence; caller time is never a sort or filter key);
 versions is one verified runtime manifest; compact uses exact structural counters and bounded
 summaries.
 

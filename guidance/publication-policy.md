@@ -60,7 +60,13 @@ Batch facts that belong to one material transition. Preserve writer sequence and
 
 Before a material publish over MCP, set `dry_run: true` to validate the batch and preview accepted event ids and coverage without appending. The dry-run result is not evidential and must not be cited as a check, publication, or coverage source. When the preview is acceptable, publish with the same `request_id` and `dry_run` omitted or false.
 
-Worked examples for each ordinary publishable family — and a cross-linked action/result/evidence/claim batch — live in the `publish_work` tool input schema `examples` entry.
+Worked examples for each ordinary publishable family — and a cross-linked action/result/evidence/claim batch — live in the `publish_work` tool input schema `examples` entry. Example `occurred_at` values are illustrative shape only; do not copy them into live drafts.
+
+## Event time claims
+
+`occurred_at` is a caller assertion of when the event happened. Use the best real RFC 3339 millisecond UTC time available. If the exact time is unknown, use an honest bounded approximation and understand that it remains a claim — the service does not check outside clocks and does not reject far-past, future, or out-of-order caller times.
+
+The service independently stamps `accepted_at` on acceptance. Both values are durable and bound into the entry digest. Ledger order, causality, supersession, optimistic concurrency, and receipt freshness use ingestion sequence and frontier, not caller time. `status` with `view=history` returns both clocks on each item so a reader never sees a caller claim alone as if it were service time.
 
 ## Multi-agent work
 

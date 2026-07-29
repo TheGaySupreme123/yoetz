@@ -147,13 +147,21 @@ def _example_id(kind: str, seed: int) -> str:
     return f"{prefixes[kind]}_00000000-0000-4000-8000-{seed:012d}"
 
 
+# Illustrative only: do not copy into live drafts. Prefer the best real RFC 3339 ms UTC time.
+_EXAMPLE_OCCURRED_AT: Final = "2026-01-01T00:00:00.000Z"
+
+
 def _example_draft(seed: int, family: str, payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
-    """One minimal valid draft envelope for a family, so agents copy shape rather than guess it."""
+    """One minimal valid draft envelope for a family, so agents copy shape rather than guess it.
+
+    ``occurred_at`` is intentionally a fixed illustrative placeholder. Live drafts must use the
+    best real caller-asserted event time; service acceptance time is stamped separately.
+    """
 
     return {
         "event_id": _example_id("event", seed),
         "schema": {"name": family, "version": "1.0.0"},
-        "occurred_at": "2026-01-01T00:00:00.000Z",
+        "occurred_at": _EXAMPLE_OCCURRED_AT,
         "causal_parents": [],
         "payload": payload,
         "artifact_refs": [],
@@ -927,12 +935,15 @@ TOOL_DESCRIPTORS: Final = (
         "publish_work",
         "Publish recorded work",
         "Records a bounded batch of agent-published work events and returns the accepted event "
-        "range and coverage. It has no information about work outside that batch. Set dry_run true "
-        "to validate a batch and preview what would be accepted without appending; the preview is "
-        "not evidential and is not citable as a check, publication, or coverage source. After "
-        "publishing the material claim and evidence, call check, disposition any findings with "
-        "respond, then call receipt before claiming completion. Guidance: "
-        "yoetz://guidance/publication-policy.md.",
+        "range and coverage. It has no information about work outside that batch. Each draft "
+        "occurred_at is a caller-asserted RFC 3339 UTC time with millisecond precision: use the "
+        "best real time available and do not copy the illustrative example timestamp. Ledger order "
+        "and receipt freshness come from ingestion sequence and service accepted_at, not caller "
+        "time. Set dry_run true to validate a batch and preview what would be accepted without "
+        "appending; the preview is not evidential and is not citable as a check, publication, or "
+        "coverage source. After publishing the material claim and evidence, call check, "
+        "disposition any findings with respond, then call receipt before claiming completion. "
+        "Guidance: yoetz://guidance/publication-policy.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -967,10 +978,12 @@ TOOL_DESCRIPTORS: Final = (
         "Reads one bounded, paginated view: advice, assignment, candidate_findings, compact, "
         "evidence, findings, history, obligations, operation, or versions. Advice items carry a "
         "recommended_next_action. Call it when uncertain what you already did or committed to, "
-        "rather than reconstructing from memory. view=operation takes filter.operation_request_id "
-        "and returns that operation's stored result for recovery without resending the body. "
-        "view=findings reads recorded findings; view=candidate_findings returns unrecorded "
-        "deterministic candidates without verdicts or IDs. Guidance: yoetz://guidance/workflow.md.",
+        "rather than reconstructing from memory. view=history returns each event's caller-asserted "
+        "occurred_at beside the service-stamped accepted_at; order follows ingestion sequence. "
+        "view=operation takes filter.operation_request_id and returns that operation's stored "
+        "result for recovery without resending the body. view=findings reads recorded findings; "
+        "view=candidate_findings returns unrecorded deterministic candidates without verdicts or "
+        "IDs. Guidance: yoetz://guidance/workflow.md.",
         read_only=True,
         idempotent=True,
     ),
@@ -1011,15 +1024,15 @@ def _digest_descriptor(descriptor: ToolDescriptor) -> str:
 TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "start": "sha256:d87c67630fbf0d75c6bde24383e5a0d56b8b4e66cda214998b60e5106b401d1a",
-        "publish_work": "sha256:fc99e236b8654a50c6f89954f13c62034ca5258f96c0abd4b01a42a81ef13ee2",
+        "publish_work": "sha256:f98b010aad58b66e392c37a017eb1f1938a8a016fbf1c9656f227f615066bca4",
         "check": "sha256:1a36e5f8ef40acb1bb1ac024ceb69e9ffe29f67221646f98f5cfd48a7ddfb36b",
         "respond": "sha256:4a05e83bfce79c5ca6c767c535070fe6011278b6fdbe38958725398928ec751e",
-        "status": "sha256:8e09a95631827a01cf28806a62c5ed2f9d42150bc03c6153f384d2bb9e660184",
+        "status": "sha256:6abdca221944fc026c915a01ea9cd9110074279532acac5fe285e0e07f3f6b77",
         "receipt": "sha256:ff32853f91572e04b00f2a61b37f9a1f4f838360aea332967776b5c364ff4291",
     }
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final = (
-    "sha256:cf3271078408913ef919534030ddfa86564e08f2e31a63bea45b36896981a128"
+    "sha256:00c0c36199068866a3f0cd7bb6127e0c6d194794ce48482b2908d5fc4be32584"
 )
 
 
