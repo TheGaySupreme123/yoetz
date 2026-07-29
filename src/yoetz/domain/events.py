@@ -7,9 +7,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Final, Literal, cast
+from typing import Annotated, Final, Literal, cast
 
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
 from yoetz.domain.findings import (
     CheckVerdict,
@@ -111,6 +111,7 @@ __all__ = [
     "EventDraft",
     "EventPayload",
     "EventSchema",
+    "OCCURRED_AT_DRAFT_DESCRIPTION",
     "EvidenceKind",
     "EvidenceRecordedPayload",
     "FindingRecordedPayload",
@@ -2286,11 +2287,22 @@ def _validate_envelope_ref_mirrors(
             raise ProtocolValueError("ref_mirror_mismatch")
 
 
+# Public draft-schema description for caller-asserted event time. Owned here so schema generation
+# and hand-reviewed draft envelopes stay aligned; receipt freshness is frontier-bound, not wall-clock.
+OCCURRED_AT_DRAFT_DESCRIPTION: Final = (
+    "Caller-asserted event time (RFC 3339 UTC, millisecond precision). Use the best real time "
+    "available; do not copy illustrative example timestamps. If the exact time is unknown, use an "
+    "honest bounded approximation and treat it as a claim. Ledger order uses ingestion sequence; "
+    "receipt freshness is frontier-bound. Service accepted_at is independent acceptance metadata, "
+    "not a sort, filter, or freshness key."
+)
+
+
 @dataclass(frozen=True, slots=True)
 class EventDraft:
     event_id: EventId
     schema: EventSchema
-    occurred_at: Timestamp
+    occurred_at: Annotated[Timestamp, Field(description=OCCURRED_AT_DRAFT_DESCRIPTION)]
     causal_parents: tuple[EventId, ...]
     payload: EventPayload | JsonValue
     artifact_refs: tuple[ObjectId, ...]

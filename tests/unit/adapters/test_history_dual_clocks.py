@@ -191,15 +191,24 @@ def test_history_item_schema_requires_both_clocks() -> None:
 
 
 def test_event_draft_schema_describes_occurred_at_as_claim() -> None:
-    draft = json.loads(
-        Path("schemas/events/event-draft-1.0.0.schema.json").read_text(encoding="utf-8")
-    )
-    occurred = draft["properties"]["occurred_at"]
-    assert "description" in occurred
-    text = occurred["description"].lower()
-    assert "caller-asserted" in text
-    assert "do not copy" in text
-    assert "accepted_at" in text or "ingestion" in text
+    from yoetz.domain.events import OCCURRED_AT_DRAFT_DESCRIPTION
+
+    for relative in (
+        "schemas/events/event-draft-1.0.0.schema.json",
+        "schemas/events/opaque-unknown-event-draft-1.0.0.schema.json",
+    ):
+        draft = json.loads(Path(relative).read_text(encoding="utf-8"))
+        occurred = draft["properties"]["occurred_at"]
+        assert occurred["description"] == OCCURRED_AT_DRAFT_DESCRIPTION
+        text = occurred["description"].lower()
+        assert "caller-asserted" in text
+        assert "do not copy" in text
+        assert "ingestion sequence" in text
+        assert "frontier-bound" in text
+        assert "accepted_at" in text
+        # Freshness must not be described as accepted_at wall-clock age.
+        assert "freshness use" not in text
+        assert "freshness uses" not in text
 
 
 def test_publish_and_status_descriptors_distinguish_clocks() -> None:
@@ -208,9 +217,13 @@ def test_publish_and_status_descriptors_distinguish_clocks() -> None:
     assert "illustrative example timestamp" in publish
     assert "caller-asserted" in publish
     assert "accepted_at" in publish
+    assert "ingestion sequence" in publish
+    assert "frontier-bound" in publish
     assert "occurred_at" in status
     assert "accepted_at" in status
     assert "ingestion sequence" in status
     # Must not instruct agents that Yoetz checked outside event time.
     assert "verified" not in publish
     assert "verified" not in status
+    # Must not claim receipt freshness comes from accepted_at wall-clock.
+    assert "freshness come from ingestion sequence and service accepted_at" not in publish

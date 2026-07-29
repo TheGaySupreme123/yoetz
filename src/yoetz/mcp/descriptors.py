@@ -938,12 +938,13 @@ TOOL_DESCRIPTORS: Final = (
         "range and coverage. It has no information about work outside that batch. Each draft "
         "occurred_at is a caller-asserted RFC 3339 UTC time with millisecond precision: use the "
         "best real time available and do not copy the illustrative example timestamp. Ledger order "
-        "and receipt freshness come from ingestion sequence and service accepted_at, not caller "
-        "time. Set dry_run true to validate a batch and preview what would be accepted without "
-        "appending; the preview is not evidential and is not citable as a check, publication, or "
-        "coverage source. After publishing the material claim and evidence, call check, "
-        "disposition any findings with respond, then call receipt before claiming completion. "
-        "Guidance: yoetz://guidance/publication-policy.md.",
+        "follows ingestion sequence; receipt freshness is frontier-bound. Service accepted_at is "
+        "independent acceptance metadata, not a freshness or ordering key. Set dry_run true to "
+        "validate a batch and preview what would be accepted without appending; the preview is not "
+        "evidential and is not citable as a check, publication, or coverage source. After "
+        "publishing the material claim and evidence, call check, disposition any findings with "
+        "respond, then call receipt before claiming completion. Guidance: "
+        "yoetz://guidance/publication-policy.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -1024,7 +1025,7 @@ def _digest_descriptor(descriptor: ToolDescriptor) -> str:
 TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "start": "sha256:d87c67630fbf0d75c6bde24383e5a0d56b8b4e66cda214998b60e5106b401d1a",
-        "publish_work": "sha256:f98b010aad58b66e392c37a017eb1f1938a8a016fbf1c9656f227f615066bca4",
+        "publish_work": "sha256:384d539552ebc03b03892d4bfe05462b20fca734701198e46c3b143826535a56",
         "check": "sha256:1a36e5f8ef40acb1bb1ac024ceb69e9ffe29f67221646f98f5cfd48a7ddfb36b",
         "respond": "sha256:4a05e83bfce79c5ca6c767c535070fe6011278b6fdbe38958725398928ec751e",
         "status": "sha256:6abdca221944fc026c915a01ea9cd9110074279532acac5fe285e0e07f3f6b77",
@@ -1032,7 +1033,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[str, str]] = MappingProxyType(
     }
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final = (
-    "sha256:00c0c36199068866a3f0cd7bb6127e0c6d194794ce48482b2908d5fc4be32584"
+    "sha256:6a3011090dfc416f37c9b5e04ee83b28bf9e861dae6dc451e40a7a945606c9ed"
 )
 
 
