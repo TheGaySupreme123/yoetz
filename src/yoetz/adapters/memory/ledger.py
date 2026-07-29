@@ -760,6 +760,7 @@ def _projection_items(
                 publication_channel=row.publication_channel.value,
                 ingestion_sequence=str(row.ledger.ingestion_sequence),
                 occurred_at=row.occurred_at.wire,
+                accepted_at=row.ledger.accepted_at.wire,
                 projection_status=(
                     "unknown_unprojected" if type(row) is UnknownEvent else "projected"
                 ),

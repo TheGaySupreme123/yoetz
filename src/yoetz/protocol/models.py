@@ -2238,7 +2238,10 @@ class StatusHistoryItemModel(_ClosedModel):
         "local_cli",
     ]
     ingestion_sequence: CanonicalUInt64Wire
+    # Caller-asserted event time; not service acceptance time.
     occurred_at: TimestampWire
+    # Trusted-local service acceptance time bound into the entry digest.
+    accepted_at: TimestampWire
     projection_status: Literal["projected", "unknown_unprojected"]
     summary_code: Literal[
         "action_recorded",
@@ -3177,6 +3180,7 @@ _STATUS_FINDINGS_STRUCTURAL_POINTERS: Final = (
 _STATUS_HISTORY_STRUCTURAL_POINTERS: Final = ("/page/next_cursor",) + _prefix_leaf_patterns(
     "/page/items/*",
     (
+        "accepted_at",
         "actor_id",
         "event_id",
         "ingestion_sequence",
@@ -3514,7 +3518,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 727:
+    if len(result) != 728:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 
