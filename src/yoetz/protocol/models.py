@@ -3261,6 +3261,7 @@ _STATUS_VERSIONS_STRUCTURAL_POINTERS: Final = ("/page/next_cursor",) + _prefix_l
         "protocol_version",
         "provider_profiles/*",
         "python_version",
+        "route_profile",
         "sqlite_source_id",
         "sqlite_version",
         "storage_schema",
@@ -3536,7 +3537,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 728:
+    if len(result) != 729:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

@@ -65,6 +65,7 @@ from yoetz.protocol.models import (
     StatusObligationItemModel,
     StatusRequest,
     StatusStructuralSubjectStateModel,
+    StatusVersionSliceModel,
     public_model_to_wire,
 )
 
@@ -75,6 +76,23 @@ _CLOSED_MODEL = cast(type[BaseModel], getattr(protocol_models, "_ClosedModel"))
 
 _DIGEST = "sha256:" + "a" * 64
 _WORKSPACE = "hmac-sha256:" + "8" * 64
+
+
+def _version_slice_payload() -> dict[str, object]:
+    return {
+        "protocol_version": "0.1",
+        "engine_version": "0.1.0",
+        "projection_version": "yoetz/0.1.0",
+        "object_format": "yoetz-object/1",
+        "storage_schema": "1",
+        "python_version": "3.14.6",
+        "apsw_version": "3.53.3.1",
+        "sqlite_version": "3.53.3",
+        "sqlite_source_id": "sqlite-source",
+        "policy_packs": ("work-integrity/0.1.0",),
+        "provider_profiles": (),
+    }
+
 
 # Every public *result* model that declares ``optional_non_null_fields``. Request and filter models
 # are caller-supplied and already reject null at parse time; they are intentionally absent here.
@@ -87,6 +105,7 @@ _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = 
     (StatusCompactObligationModel, frozenset({"acceptance_criteria"})),
     (StatusObligationItemModel, frozenset({"acceptance_criteria"})),
     (StatusStructuralSubjectStateModel, frozenset({"tree_digest", "diff_digest"})),
+    (StatusVersionSliceModel, frozenset({"route_profile"})),
 )
 
 # Models that appear only on the request/filter surface — not projected result bodies.
@@ -656,6 +675,10 @@ async def test_public_error_omits_unset_safe_details() -> None:
                 "reason": None,
             },
         ),
+        (
+            StatusVersionSliceModel,
+            {**_version_slice_payload(), "route_profile": None},
+        ),
     ),
 )
 def test_closed_model_still_rejects_explicit_null(
@@ -665,6 +688,11 @@ def test_closed_model_still_rejects_explicit_null(
 
     with pytest.raises(ValidationError, match="optional_field_must_not_be_null"):
         model_type.model_validate(payload)
+
+
+def test_status_version_slice_omits_unset_route_profile() -> None:
+    parsed = StatusVersionSliceModel.model_validate(_version_slice_payload())
+    assert "route_profile" not in parsed.model_dump(mode="json", exclude_unset=True)
 
 
 def test_result_optional_non_null_inventory_is_complete() -> None:
@@ -730,6 +758,9 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
         ),
         ("StatusStructuralSubjectStateModel", "tree_digest"): (
             "test_status_evidence_omits_unset_structural_digest"
+        ),
+        ("StatusVersionSliceModel", "route_profile"): (
+            "test_status_version_slice_omits_unset_route_profile"
         ),
     }
     expected = {
