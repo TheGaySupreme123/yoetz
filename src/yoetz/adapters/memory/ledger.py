@@ -113,6 +113,7 @@ from yoetz.ports.ledger import (
     ProjectionView,
     SelectedAttempt,
     SemanticAttemptHandle,
+    SemanticAttemptRecord,
     SemanticJobRecord,
     StoredProjection,
 )
@@ -1801,14 +1802,32 @@ class MemoryLedgerAdapter:
             ):
                 raise _error(PublicErrorCode.INVALID_REQUEST)
             now = _now(self._clock)
-            if (
-                job.state == "leased"
-                and job.lease_expires_at is not None
-                and job.lease_expires_at > now
-            ):
+            if job.state == "leased" and job.lease_expires_at is not None and job.lease_expires_at > now:
+                # Same owner still holding a live lease: resume the active started attempt.
+                # Crash-before-authorization-consumption must not mint a new attempt identity.
+                if (
+                    job.lease_owner_id == lease.lease_owner_id
+                    and job.active_attempt_id is not None
+                ):
+                    attempt = self._state.attempts.get(job.active_attempt_id)
+                    if attempt is not None and attempt.state == "started":
+                        return attempt.handle
                 raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
             if job.state not in {"queued", "leased"}:
                 raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+            # Expired or reclaimed lease: close the prior started attempt before a new ordinal.
+            if (
+                job.state == "leased"
+                and job.active_attempt_id is not None
+                and job.active_attempt_id in self._state.attempts
+            ):
+                prior = self._state.attempts[job.active_attempt_id]
+                if prior.state == "started":
+                    self._state.attempts[job.active_attempt_id] = replace(
+                        prior,
+                        state="expired",
+                        terminal_code=SemanticReason.LEASE_AUTHORITY_LOST,
+                    )
             ordinal = job.attempt_count + 1
             expiry = min(lease.lease_expires_at, now + timedelta(seconds=60))
             handle = SemanticAttemptHandle(
@@ -1933,6 +1952,51 @@ class MemoryLedgerAdapter:
                 lease.frontier,
                 lease.dependency_digest,
             )
+
+    async def load_semantic_job(
+        self, writer_id: str, operation_id: str
+    ) -> SemanticJobRecord | None:
+        async with self._lock:
+            matches = tuple(
+                job
+                for job in self._state.jobs.values()
+                if job.writer_id == writer_id and job.operation_id == operation_id
+            )
+            if not matches:
+                return None
+            # One operation binds at most one durable semantic job in practice; if multiple
+            # case digests exist (should not), return the most recently enqueued by attempt_count.
+            return max(matches, key=lambda item: (item.attempt_count, item.job_id))
+
+    async def list_semantic_attempts(self, job_id: str) -> tuple[SemanticAttemptRecord, ...]:
+        async with self._lock:
+            if job_id not in self._state.jobs:
+                return ()
+            rows = [
+                SemanticAttemptRecord(
+                    attempt.handle.job_id,
+                    attempt.handle.attempt_id,
+                    attempt.handle.attempt_ordinal,
+                    attempt.handle.provider_request_id,
+                    cast(
+                        Literal[
+                            "started",
+                            "response_durable",
+                            "selected",
+                            "failed",
+                            "expired",
+                            "late",
+                        ],
+                        attempt.state,
+                    ),
+                    attempt.terminal_code,
+                    attempt.result_object_ref,
+                )
+                for attempt in self._state.attempts.values()
+                if attempt.handle.job_id == job_id
+            ]
+            rows.sort(key=lambda item: item.attempt_ordinal)
+            return tuple(rows)
 
     async def renew_leases(self, lease: OperationLease) -> OperationLease:
         async with self._lock:

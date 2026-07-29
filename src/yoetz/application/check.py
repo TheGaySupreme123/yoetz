@@ -233,6 +233,9 @@ class FinalSemanticEvaluation:
     reason: SemanticReason
     judgment: SemanticJudgment | None = None
     provenance: SemanticProvenance | None = None
+    # Bounded structural attempt accounting reconstructed from durable rows when a job ran.
+    # Not part of the frozen public check-result wire; owner recovery reads the ledger.
+    attempt_accounting: object | None = None
 
     def __post_init__(self) -> None:
         validate_semantic_outcome(self.status, self.reason)
@@ -296,6 +299,7 @@ class Application(Protocol):
         self,
         frozen: FrozenCase,
         deterministic_findings: tuple[Finding, ...],
+        runtime: TaskRuntime | None = None,
     ) -> FinalSemanticEvaluation: ...
 
 
@@ -853,7 +857,7 @@ async def _semantic_evaluation(
             SemanticReason.PROVIDER_NOT_CONFIGURED,
         )
     try:
-        return await app.evaluate_semantic_check(frozen, deterministic)
+        return await app.evaluate_semantic_check(frozen, deterministic, runtime)
     except Exception as exc:
         # Optional/required semantic evaluator crash must never fabricate a clean semantic pass.
         record_unexpected_exception_without_raising(

@@ -7,7 +7,7 @@ import hashlib
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Final, Protocol, cast
 
@@ -52,6 +52,10 @@ from yoetz.application.observation_coordinator import ObservationCoordinator
 from yoetz.application.observation_verification import ObservationVerificationSupervisor
 from yoetz.application.privacy_control import build_privacy_support_handlers
 from yoetz.application.privacy_policy import PrivacyPolicyApplication
+from yoetz.application.semantic_attempts import (
+    SemanticAttemptAccounting,
+    run_durable_semantic_attempts,
+)
 from yoetz.application.semantic_case import (
     build_semantic_case,
     semantic_case_to_candidate_context,
@@ -71,6 +75,7 @@ from yoetz.domain.findings import (
     SemanticDispatchKind,
     SemanticFailureClass,
     SemanticProvenance,
+    semantic_provenance_to_json,
 )
 from yoetz.domain.privacy import (
     AuthorizationScope,
@@ -112,6 +117,7 @@ from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.keys import BundleKeys, MacKeyHandle, MacKeyPurpose
 from yoetz.ports.ledger import FrozenCase, LedgerPort
 from yoetz.ports.objects import (
+    ObjectKind,
     ObjectMetadata,
     ObjectRef,
     ObjectRootSnapshot,
@@ -1310,7 +1316,7 @@ def _provider_provenance(
     *,
     status: SemanticStatus,
     reason: SemanticReason,
-    ids: IdPort,
+    attempt_id: str,
 ) -> SemanticProvenance | None:
     """Bind a completed attempt to its dispatch-specific durable privacy authority."""
 
@@ -1343,7 +1349,7 @@ def _provider_provenance(
         privacy_policy_digest=attempt.privacy_policy_digest,
         sampling_params=attempt.sampling_params,
         latency_ms=attempt.latency_ms,
-        semantic_attempt_id=ids.new(IdKind.SEMANTIC_ATTEMPT),
+        semantic_attempt_id=attempt_id,
         dispatch_kind=result.dispatch_kind,
         privacy_receipt_id=result.privacy_receipt_id,
         status=status,
@@ -1359,8 +1365,8 @@ def _provider_provenance(
 
 
 def _map_provider_outcome(
-    result: SemanticEgressProviderOutcome, ids: IdPort
-) -> FinalSemanticEvaluation:
+    result: SemanticEgressProviderOutcome, *, attempt_id: str
+) -> FinalSemanticEvaluation:  # attempt_id is the durable semantic_attempts row identity
     provider = result.result
     status: SemanticStatus
     reason: SemanticReason
@@ -1379,10 +1385,17 @@ def _map_provider_outcome(
     elif type(provider) is SemanticResultLate:
         status, reason = SemanticStatus.LATE, SemanticReason.DEADLINE_AUTHORITY_LOST
     elif type(provider) is SemanticResultUnavailable:
-        status, reason = SemanticStatus.UNAVAILABLE, SemanticReason.TRANSPORT_UNAVAILABLE
+        status = SemanticStatus.UNAVAILABLE
+        failure_class = provider.provenance.failure_class
+        if failure_class is SemanticFailureClass.RATE_LIMITED:
+            reason = SemanticReason.PROVIDER_RATE_LIMITED
+        elif failure_class is SemanticFailureClass.QUOTA_EXHAUSTED:
+            reason = SemanticReason.PROVIDER_QUOTA_EXHAUSTED
+        else:
+            reason = SemanticReason.TRANSPORT_UNAVAILABLE
     else:
         return FinalSemanticEvaluation(SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE)
-    provenance = _provider_provenance(result, status=status, reason=reason, ids=ids)
+    provenance = _provider_provenance(result, status=status, reason=reason, attempt_id=attempt_id)
     if provenance is None:
         return FinalSemanticEvaluation(
             SemanticStatus.UNAVAILABLE, SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN
@@ -1390,15 +1403,30 @@ def _map_provider_outcome(
     return FinalSemanticEvaluation(status, reason, provenance=provenance)
 
 
-def _map_egress_to_final(result: object, ids: IdPort) -> FinalSemanticEvaluation:
-    """Map privacy egress outcomes to check FinalSemanticEvaluation without inventing findings."""
+def _map_egress_to_final(
+    result: object,
+    ids: IdPort | None = None,
+    *,
+    attempt_id: str | None = None,
+) -> FinalSemanticEvaluation:
+    """Map privacy egress outcomes to check FinalSemanticEvaluation without inventing findings.
+
+    Production passes the durable ``attempt_id``. Tests may pass only an ``IdPort`` to mint a
+    provisional attempt identity for mapping assertions.
+    """
+
+    resolved_attempt = attempt_id
+    if resolved_attempt is None:
+        if ids is None:
+            raise TypeError("semantic_attempt_id_required")
+        resolved_attempt = ids.new(IdKind.SEMANTIC_ATTEMPT)
 
     if type(result) is SemanticEgressSuccess:
         provenance = _provider_provenance(
             result,
             status=SemanticStatus.SUCCEEDED,
             reason=SemanticReason.SEMANTIC_COMPLETED,
-            ids=ids,
+            attempt_id=resolved_attempt,
         )
         if provenance is None:
             return FinalSemanticEvaluation(
@@ -1417,8 +1445,78 @@ def _map_egress_to_final(result: object, ids: IdPort) -> FinalSemanticEvaluation
     if type(result) is SemanticEgressBlocked:
         return _map_blocked(result.outcome, result.reason)
     if type(result) is SemanticEgressProviderOutcome:
-        return _map_provider_outcome(result, ids)
+        return _map_provider_outcome(result, attempt_id=resolved_attempt)
     return FinalSemanticEvaluation(SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE)
+
+
+async def _publish_semantic_case_object(
+    runtime: TaskRuntime,
+    *,
+    case_digest: str,
+    case_id: str,
+    dependency_digest: str,
+    clock: ClockPort,
+) -> ObjectRef:
+    """Persist a structural SEMANTIC_CASE object bound into the durable job row."""
+
+    payload = canonical_encode(
+        cast(
+            CanonicalJsonValue,
+            {
+                "schema": "yoetz.semantic-case/1",
+                "case_id": case_id,
+                "case_digest": case_digest,
+                "dependency_digest": dependency_digest,
+            },
+        )
+    )
+    staged = await runtime.objects.stage(
+        ObjectSource(data=payload, declared_size=len(payload)),
+        ObjectMetadata(
+            ObjectKind.SEMANTIC_CASE,
+            "application/json",
+            runtime.task_id,
+            clock.now_utc(),
+        ),
+    )
+    return await runtime.objects.finalize(staged)
+
+
+async def _publish_semantic_response_object(
+    runtime: TaskRuntime,
+    *,
+    attempt_id: str,
+    evaluation: FinalSemanticEvaluation,
+    clock: ClockPort,
+) -> ObjectRef:
+    """Persist bounded SEMANTIC_RESPONSE facts (judgment/provenance only; no raw provider text)."""
+
+    body: dict[str, CanonicalJsonValue] = {
+        "schema": "yoetz.semantic-response/1",
+        "attempt_id": attempt_id,
+        "status": evaluation.status.value,
+        "reason": evaluation.reason.value,
+    }
+    if evaluation.judgment is not None:
+        body["judgment"] = {
+            "conclusion": evaluation.judgment.conclusion,
+            "challenge_count": len(evaluation.judgment.challenges),
+        }
+    if evaluation.provenance is not None:
+        body["provenance"] = cast(
+            CanonicalJsonValue, dict(semantic_provenance_to_json(evaluation.provenance).items())
+        )
+    payload = canonical_encode(cast(CanonicalJsonValue, body))
+    staged = await runtime.objects.stage(
+        ObjectSource(data=payload, declared_size=len(payload)),
+        ObjectMetadata(
+            ObjectKind.SEMANTIC_RESPONSE,
+            "application/json",
+            runtime.task_id,
+            clock.now_utc(),
+        ),
+    )
+    return await runtime.objects.finalize(staged)
 
 
 def _privacy_gated_semantic_evaluator(
@@ -1429,9 +1527,16 @@ def _privacy_gated_semantic_evaluator(
     catalog: StartCatalogPort,
     lookup: MacKeyHandle,
     ids: IdPort,
+    *,
+    timeout_seconds: int = 60,
+    max_retries: int = 2,
 ):
+    total_timeout = float(max(1, min(int(timeout_seconds), 300)))
+
     async def _evaluate(
-        frozen: FrozenCase, findings: tuple[object, ...]
+        frozen: FrozenCase,
+        findings: tuple[object, ...],
+        runtime: TaskRuntime | None = None,
     ) -> FinalSemanticEvaluation:
         # Re-resolve against the live generation-fenced registry on every check: a binding
         # activated after composition must take effect without a service restart, and a revoked
@@ -1507,15 +1612,104 @@ def _privacy_gated_semantic_evaluator(
                 policy_id=policy_id,
                 policy_version=policy_version,
             )
-            candidate = semantic_case_to_candidate_context(
-                semantic_case,
-                request_id=frozen.lease.operation_id,
-                scope=scope,
-                provider_binding=provider,
+            # Total semantic-operation deadline from configured timeout_seconds (not a hard-coded 60).
+            deadline = Deadline(
+                clock.now_utc() + timedelta(seconds=total_timeout),
+                clock.monotonic_seconds() + total_timeout,
             )
-            deadline = Deadline(clock.now_utc(), clock.monotonic_seconds() + 60.0)
-            result = await privacy.evaluate_semantic(candidate, deadline)
-            return _map_egress_to_final(result, ids)
+            # Without a task runtime there is no durable ledger/object store: perform one
+            # physical attempt only (tests and pre-dispatch probes). Production check always
+            # supplies the runtime so the durable multi-attempt path below is authoritative.
+            if runtime is None:
+                candidate = semantic_case_to_candidate_context(
+                    semantic_case,
+                    request_id=frozen.lease.operation_id,
+                    scope=scope,
+                    provider_binding=provider,
+                )
+                result = await privacy.evaluate_semantic(candidate, deadline)
+                return _map_egress_to_final(result, ids)
+
+            # One durable semantic job per check: create/recover after freeze, before dispatch.
+            case_ref = await _publish_semantic_case_object(
+                runtime,
+                case_digest=semantic_case.case_digest,
+                case_id=semantic_case.case_id,
+                dependency_digest=semantic_case.dependency_digest,
+                clock=clock,
+            )
+            job = await runtime.ledger.enqueue_semantic_job(
+                frozen.lease,
+                semantic_case.case_digest,
+                case_ref,
+            )
+
+            async def _dispatch(handle: object, attempt_deadline: Deadline) -> FinalSemanticEvaluation:
+                from yoetz.ports.ledger import SemanticAttemptHandle as _Handle
+
+                assert type(handle) is _Handle
+                # Fresh request identity per physical attempt so authorization cannot be reused.
+                candidate = semantic_case_to_candidate_context(
+                    semantic_case,
+                    request_id=handle.provider_request_id,
+                    scope=scope,
+                    provider_binding=provider,
+                )
+                result = await privacy.evaluate_semantic(candidate, attempt_deadline)
+                return _map_egress_to_final(result, ids, attempt_id=handle.attempt_id)
+
+            async def _publish_success(handle: object, evaluation: object) -> ObjectRef:
+                from yoetz.ports.ledger import SemanticAttemptHandle as _Handle
+
+                assert type(handle) is _Handle
+                assert type(evaluation) is FinalSemanticEvaluation
+                return await _publish_semantic_response_object(
+                    runtime,
+                    attempt_id=handle.attempt_id,
+                    evaluation=evaluation,
+                    clock=clock,
+                )
+
+            def _build_final(
+                status: SemanticStatus,
+                reason: SemanticReason,
+                evaluation: object | None,
+                accounting: SemanticAttemptAccounting,
+            ) -> FinalSemanticEvaluation:
+                judgment = None
+                provenance = None
+                if type(evaluation) is FinalSemanticEvaluation:
+                    if status is SemanticStatus.SUCCEEDED:
+                        judgment = evaluation.judgment
+                        provenance = evaluation.provenance
+                    elif (
+                        status is evaluation.status
+                        and reason is evaluation.reason
+                        and evaluation.provenance is not None
+                    ):
+                        provenance = evaluation.provenance
+                return FinalSemanticEvaluation(
+                    status,
+                    reason,
+                    judgment=judgment,
+                    provenance=provenance,
+                    attempt_accounting=accounting,
+                )
+
+            return cast(
+                FinalSemanticEvaluation,
+                await run_durable_semantic_attempts(
+                    ledger=runtime.ledger,
+                    lease=frozen.lease,
+                    job=job,
+                    deadline=deadline,
+                    max_retries=max_retries,
+                    now_monotonic=clock.monotonic_seconds,
+                    dispatch=_dispatch,
+                    publish_success_response=_publish_success,
+                    build_final=_build_final,
+                ),
+            )
         except Exception as exc:
             record_unexpected_exception_without_raising(
                 exc,
@@ -1692,6 +1886,7 @@ async def provide_service_ready_context(
     elif not provider_endpoint_bound:
         semantic_evaluator = _semantic_provider_unbound
     else:
+        provider_cfg = config.provider
         semantic_evaluator = _privacy_gated_semantic_evaluator(
             cast(PrivacyCoordinator, privacy),
             clock,
@@ -1700,6 +1895,8 @@ async def provide_service_ready_context(
             catalog,
             lookup,
             ids,
+            timeout_seconds=60 if provider_cfg is None else int(provider_cfg.timeout_seconds),
+            max_retries=2 if provider_cfg is None else int(provider_cfg.max_retries),
         )
 
     async def _semantic_review(

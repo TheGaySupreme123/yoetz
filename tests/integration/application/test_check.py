@@ -257,8 +257,9 @@ class _App:
         self,
         frozen: FrozenCase,
         deterministic_findings: tuple[Finding, ...],
+        runtime: object | None = None,
     ) -> FinalSemanticEvaluation:
-        _ = (frozen, deterministic_findings)
+        _ = (frozen, deterministic_findings, runtime)
         if self.crash_semantic:
             raise RuntimeError("semantic_evaluator_crashed")
         return self.semantic_result

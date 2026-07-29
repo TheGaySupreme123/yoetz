@@ -384,4 +384,46 @@ async def test_semantic_attempt_selection_contract() -> None:
         response_ref = await _object_ref(adapter, command, ObjectKind.SEMANTIC_RESPONSE)
         await adapter.record_attempt_outcome(handle, AttemptOutcome.RESPONSE_DURABLE, response_ref)
         selected.append(await adapter.select_attempt(lease, handle, response_ref))
+        loaded = await adapter.load_semantic_job(command.writer_id, frozen.lease.operation_id)
+        assert loaded is not None
+        assert loaded.selected_attempt_id == selected[-1].attempt_id
+        attempts = await adapter.list_semantic_attempts(loaded.job_id)
+        assert len(attempts) == 1
+        assert attempts[0].state == "selected"
+        assert attempts[0].attempt_id == selected[-1].attempt_id
     assert selected[0] == selected[1]
+
+
+@pytest.mark.anyio
+async def test_semantic_claim_resumes_same_started_attempt_for_owner() -> None:
+    """Crash before authorization consumption resumes the same attempt identity."""
+
+    command = ledger_command()
+    for adapter in (memory_ledger(command), sqlite_ledger(command)):
+        await adapter.append_batch(command)
+        frozen = await adapter.freeze_case(
+            command.session_id,
+            command.writer_id,
+            1,
+            "req_00000000-0000-4000-8000-000000000018",
+            "sha256:" + "8" * 64,
+        )
+        assert type(frozen) is FrozenCase
+        lease = await adapter.advance_check_phase(
+            frozen.lease,
+            CheckPhase.RESERVED,
+            CheckPhase.LOCAL_READY,
+            await _local_result_ref(adapter, command),
+        )
+        lease = await adapter.advance_check_phase(
+            lease,
+            CheckPhase.LOCAL_READY,
+            CheckPhase.SEMANTIC_WAIT,
+        )
+        case_ref = await _object_ref(adapter, command, ObjectKind.SEMANTIC_CASE)
+        job = await adapter.enqueue_semantic_job(lease, "sha256:" + "7" * 64, case_ref)
+        first = await adapter.claim_semantic_job(lease, job.job_id)
+        second = await adapter.claim_semantic_job(lease, job.job_id)
+        assert first.attempt_id == second.attempt_id
+        assert first.provider_request_id == second.provider_request_id
+        assert first.attempt_ordinal == 1

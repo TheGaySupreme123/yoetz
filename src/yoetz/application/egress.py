@@ -1147,6 +1147,14 @@ class PrivacyCoordinator:
                 "channel": EgressChannel.LLM_INFERENCE.value,
             }
         )
+        # Categories are a closed set of DataCategory values: unique and sorted for the
+        # PreDispatchAuditDecision contract. Multiple case items may share one category.
+        categories = tuple(
+            sorted(
+                {item.category for item in candidate.items},
+                key=lambda value: str(value.value).encode("ascii"),
+            )
+        )
         subject = PreDispatchAuditDecision(
             pid,
             candidate.request_id,
@@ -1158,7 +1166,7 @@ class PrivacyCoordinator:
             effective.policy.version,
             effective.effective_digest,
             None if destination is None else canonical_digest({"binding": destination.provider_id}),
-            tuple(item.category for item in candidate.items),
+            categories,
             len(candidate.items),
             len(candidate.items),
             (),
