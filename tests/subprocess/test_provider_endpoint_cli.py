@@ -21,7 +21,7 @@ from typer.testing import CliRunner
 import yoetz.cli.app as cli
 import yoetz.cli.provider_binding as provider_binding
 import yoetz.config.write as write_module
-from yoetz.config.write import grok_provider, provider_preset
+from yoetz.config.write import PROVIDER_PRESETS, grok_provider, provider_preset
 
 _RUNNER = CliRunner()
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -76,19 +76,29 @@ def tty_streams(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     yield
 
 
-def test_grok_without_model_on_tty_matches_fireworks_not_generic_picker(
+def test_explicit_provider_without_model_uses_model_picker_not_generic_picker(
     tty_streams: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``--grok`` alone must not re-open the provider menu (issue #44)."""
+    """Explicit selectors share the model picker without reopening the provider menu."""
 
-    prompt_calls: list[str] = []
+    provider_prompt_calls: list[str] = []
+    model_prompt_calls: list[str] = []
 
-    def fake_prompt(*, path: Path | None = None) -> Path | None:
+    def fake_provider_prompt(*, path: Path | None = None) -> Path | None:
         del path
-        prompt_calls.append("prompt")
+        provider_prompt_calls.append("prompt")
         return None
 
-    monkeypatch.setattr(provider_binding, "prompt_provider_endpoint_binding", fake_prompt)
+    def fake_model_prompt(choice: str) -> None:
+        model_prompt_calls.append(choice)
+        return None
+
+    monkeypatch.setattr(
+        provider_binding,
+        "prompt_provider_endpoint_binding",
+        fake_provider_prompt,
+    )
+    monkeypatch.setattr(provider_binding, "prompt_provider_model", fake_model_prompt)
 
     fireworks = _RUNNER.invoke(cli.app, ["provider", "endpoint", "--fireworks"])
     grok = _RUNNER.invoke(cli.app, ["provider", "endpoint", "--grok"])
@@ -97,7 +107,8 @@ def test_grok_without_model_on_tty_matches_fireworks_not_generic_picker(
     assert grok.exit_code == 2
     assert "invalid_request" in _plain(fireworks.output)
     assert "invalid_request" in _plain(grok.output)
-    assert prompt_calls == []
+    assert provider_prompt_calls == []
+    assert model_prompt_calls == ["fireworks", "grok"]
     assert "LLM endpoint" not in _plain(fireworks.output)
     assert "LLM endpoint" not in _plain(grok.output)
 
@@ -133,6 +144,26 @@ def test_non_tty_grok_without_model_is_usage_failure() -> None:
     result = _RUNNER.invoke(cli.app, ["provider", "endpoint", "--grok"])
     assert result.exit_code == 2
     assert "invalid_request" in _plain(result.output)
+
+
+def test_no_interactive_provider_without_model_is_usage_failure(
+    tty_streams: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prompted: list[str] = []
+
+    def fake_model_prompt(choice: str) -> None:
+        prompted.append(choice)
+
+    monkeypatch.setattr(provider_binding, "prompt_provider_model", fake_model_prompt)
+
+    result = _RUNNER.invoke(
+        cli.app,
+        ["provider", "endpoint", "--provider", "anthropic", "--no-interactive"],
+    )
+
+    assert result.exit_code == 2
+    assert "invalid_request" in _plain(result.output)
+    assert prompted == []
 
 
 @pytest.mark.parametrize(
@@ -206,6 +237,121 @@ def test_grok_shorthand_writes_same_preset_as_provider_alias(
     assert loaded["provider"]["model"] == "grok-4.5"
 
 
+@pytest.mark.parametrize(
+    "choice",
+    [
+        "openai",
+        "fireworks",
+        "anthropic",
+        "gemini",
+        "openrouter",
+        "grok",
+        "vercel-ai-gateway",
+    ],
+)
+def test_scripted_explicit_model_remains_exact_for_every_preset(
+    endpoint_config: Path,
+    choice: str,
+) -> None:
+    model = f"owner-supplied/{choice}"
+    result = _RUNNER.invoke(
+        cli.app,
+        [
+            "provider",
+            "endpoint",
+            "--provider",
+            choice,
+            "--model",
+            model,
+            "--no-interactive",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    loaded = tomllib.loads(endpoint_config.read_text(encoding="utf-8"))
+    assert loaded["provider"]["model"] == model
+
+
+def test_explicit_interactive_provider_uses_shared_model_picker(
+    endpoint_config: Path,
+    tty_streams: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompted: list[str] = []
+
+    def fake_model_prompt(choice: str) -> str:
+        prompted.append(choice)
+        return "claude-opus-4-8"
+
+    monkeypatch.setattr(provider_binding, "prompt_provider_model", fake_model_prompt)
+    result = _RUNNER.invoke(
+        cli.app,
+        ["provider", "endpoint", "--provider", "anthropic", "--json"],
+    )
+
+    assert result.exit_code == 0
+    assert prompted == ["anthropic"]
+    loaded = tomllib.loads(endpoint_config.read_text(encoding="utf-8"))
+    assert loaded["provider"]["model"] == "claude-opus-4-8"
+
+
+@pytest.mark.parametrize("choice", list(PROVIDER_PRESETS))
+def test_every_reviewed_provider_picker_has_suggestions_and_custom_entry(
+    choice: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    echoes: list[str] = []
+
+    def fake_echo(value: object = "", **_kwargs: object) -> None:
+        echoes.append(str(value))
+
+    def choose_default(*_args: object, **_kwargs: object) -> str:
+        return "1"
+
+    monkeypatch.setattr(provider_binding.typer, "echo", fake_echo)
+    monkeypatch.setattr(provider_binding.typer, "prompt", choose_default)
+
+    selected = provider_binding.prompt_provider_model(choice)
+
+    assert selected == provider_preset(choice).default_model
+    assert any("Custom model ID" in line for line in echoes)
+    assert any("availability depends on your account" in line for line in echoes)
+
+
+def test_model_picker_accepts_custom_model_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    answers = iter(("c", "future-model-id"))
+
+    def answer_prompt(*_args: object, **_kwargs: object) -> str:
+        return next(answers)
+
+    monkeypatch.setattr(provider_binding.typer, "prompt", answer_prompt)
+
+    assert provider_binding.prompt_provider_model("openai") == "future-model-id"
+
+
+@pytest.mark.parametrize("answers", [("c", ""), ("99",)])
+def test_model_picker_fails_closed_on_empty_or_invalid_selection(
+    answers: tuple[str, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supplied = iter(answers)
+    errors: list[str] = []
+
+    def answer_prompt(*_args: object, **_kwargs: object) -> str:
+        return next(supplied)
+
+    def capture_error(value: object = "", **kwargs: object) -> None:
+        if kwargs.get("err") is True:
+            errors.append(str(value))
+
+    monkeypatch.setattr(provider_binding.typer, "prompt", answer_prompt)
+    monkeypatch.setattr(provider_binding.typer, "echo", capture_error)
+
+    assert provider_binding.prompt_provider_model("openai") is None
+    assert errors and errors[-1].startswith("invalid_request:")
+
+
 def test_interactive_menu_choice_6_writes_grok_preset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -219,11 +365,8 @@ def test_interactive_menu_choice_6_writes_grok_preset(
         prompts.append(text)
         if text == "Select":
             return "6"
-        if "Model id" in text:
-            # Accept the bundled default when the menu offers one.
-            if default is not ... and default is not None:
-                return str(default)
-            return "grok-4.5"
+        if text == "Select model":
+            return "1"
         raise AssertionError(f"unexpected prompt: {text!r}")
 
     def fake_echo(msg: object = "", **_kwargs: object) -> None:
@@ -237,6 +380,7 @@ def test_interactive_menu_choice_6_writes_grok_preset(
     assert written == target
     assert target.is_file()
     assert any(p == "Select" for p in prompts)
+    assert any(p == "Select model" for p in prompts)
     loaded = tomllib.loads(target.read_text(encoding="utf-8"))
     assert loaded["provider"]["provider_id"] == "xai"
     assert loaded["provider"]["endpoint_profile_id"] == "xai-openai-chat-completions"
@@ -244,3 +388,4 @@ def test_interactive_menu_choice_6_writes_grok_preset(
     joined = "\n".join(echoes)
     assert "xai" in joined
     assert "xai-openai-chat-completions" in joined
+    assert "Custom model ID" in joined

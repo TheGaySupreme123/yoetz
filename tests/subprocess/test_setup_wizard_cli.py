@@ -541,6 +541,58 @@ def test_provider_setup_success_reports_layers_without_ready_overclaim(
     assert "not proof of live provider dispatch or semantic review" in plain
 
 
+@pytest.mark.parametrize(
+    "choice",
+    [
+        "official_openai",
+        "fireworks",
+        "anthropic",
+        "google_gemini",
+        "openrouter",
+        "grok",
+        "vercel_ai_gateway",
+    ],
+)
+def test_secure_set_paths_share_provider_model_picker(
+    choice: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import yoetz.cli.provider_binding as binding_module
+    import yoetz.cli.setup as setup_module
+    import yoetz.config.load as config_module
+
+    picked: list[str] = []
+    applied: list[tuple[str, str]] = []
+
+    def fake_pick(selected_choice: str) -> str:
+        picked.append(selected_choice)
+        return "selected-model"
+
+    def fake_apply(selected_choice: str, *, model: str) -> tuple[Path, object]:
+        applied.append((selected_choice, model))
+        return tmp_path / "config.toml", object()
+
+    def fake_load_config(*_args: object) -> SimpleNamespace:
+        return SimpleNamespace(provider=None)
+
+    monkeypatch.setattr(binding_module, "prompt_provider_model", fake_pick)
+    monkeypatch.setattr(binding_module, "apply_provider_endpoint_choice", fake_apply)
+    monkeypatch.setattr(config_module, "load_config", fake_load_config)
+
+    _service, report = asyncio.run(
+        setup_module._interactive_provider_setup(  # pyright: ignore[reportPrivateUsage]
+            {"reachable": True, "state": "unavailable"},
+            provider_choice=choice,
+        )
+    )
+
+    assert picked == [choice]
+    assert applied == [(choice, "selected-model")]
+    assert report["binding"] == "configured"
+    assert report["credential_reason"] == "service_not_ready"
+
+
 def test_uninitialized_provider_setup_provisions_auto_unlock(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -718,7 +770,7 @@ def test_ready_auto_unlock_vault_reuses_scoped_secret_for_provider_reauthenticat
         return {"reachable": True, "state": "ready", "vault_mode": "passphrase"}
 
     def fake_provider_preset(_provider: str) -> SimpleNamespace:
-        return SimpleNamespace(choice="fireworks")
+        return SimpleNamespace(choice="fireworks", provider_id="fireworks")
 
     monkeypatch.setattr(keyring_module.AutoUnlockPassphraseStore, "load", fake_load)
     monkeypatch.setattr(config_module, "load_config", fake_load_config)

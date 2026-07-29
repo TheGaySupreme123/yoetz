@@ -713,6 +713,7 @@ async def _interactive_provider_setup(
         ProviderEndpointChoice,
         apply_provider_endpoint_choice,
         prompt_provider_endpoint_binding,
+        prompt_provider_model,
     )
     from yoetz.cli.unlock import (
         HumanCeremonyCliError,
@@ -785,30 +786,17 @@ async def _interactive_provider_setup(
     except HumanCeremonyCliError as error:
         provider_report["credential_reason"] = error.reason
 
-    if provider_choice == "fireworks":
-        selected_model = model
-        if selected_model is None:
-            selected_model = typer.prompt("Fireworks model id").strip()
-        try:
-            written, _provider = apply_provider_endpoint_choice("fireworks", model=selected_model)
-        except (OSError, ValueError) as error:
-            provider_report["credential_reason"] = getattr(
-                error, "reason_code", "provider_binding_invalid"
-            )
-            wipe_auto_passphrase()
-            return service, provider_report
-        typer.echo(f"Fireworks model: {selected_model}")
-    elif provider_choice is not None:
+    if provider_choice is not None:
         selected_model = model
         try:
             preset = provider_preset(provider_choice)
             choice = cast(ProviderEndpointChoice, preset.choice)
             if selected_model is None:
-                selected_model = typer.prompt(
-                    f"{preset.provider_id} model id", default=preset.default_model
-                ).strip()
+                selected_model = prompt_provider_model(preset.choice)
             if not selected_model:
-                raise ConfigError("config_value_invalid")
+                provider_report["credential_reason"] = "model_selection_invalid"
+                wipe_auto_passphrase()
+                return service, provider_report
             written, _provider = apply_provider_endpoint_choice(choice, model=selected_model)
         except (ConfigError, OSError, ValueError) as error:
             provider_report["credential_reason"] = getattr(

@@ -32,6 +32,7 @@ __all__ = [
     "ProviderEndpointChoice",
     "apply_provider_endpoint_choice",
     "prompt_provider_endpoint_binding",
+    "prompt_provider_model",
 ]
 
 ProviderEndpointChoice = Literal[
@@ -95,6 +96,29 @@ def apply_provider_endpoint_choice(
     return written, provider
 
 
+def prompt_provider_model(choice: str) -> str | None:
+    """Select a repository-reviewed suggestion or enter an explicit custom model ID."""
+
+    preset = provider_preset(choice)
+    typer.echo("")
+    typer.echo(f"  Suggested {preset.provider_id} models")
+    typer.echo("  Repository-reviewed convenience list; availability depends on your account.")
+    for index, model_id in enumerate(preset.suggested_models, start=1):
+        typer.echo(f"  {index}  {model_id}")
+    typer.echo("  c  Custom model ID")
+    raw = typer.prompt("Select model", default="1").strip().lower()
+    if raw in {"c", "custom", "manual"}:
+        custom = typer.prompt("  Custom model id", show_default=False).strip()
+        if not custom:
+            typer.echo("invalid_request: model_id_required", err=True)
+            return None
+        return custom
+    if raw.isdecimal() and 1 <= int(raw) <= len(preset.suggested_models):
+        return preset.suggested_models[int(raw) - 1]
+    typer.echo("invalid_request: choose a listed model number or c", err=True)
+    return None
+
+
 def prompt_provider_endpoint_binding(*, path: Path | None = None) -> Path | None:
     """Prompt for a reviewed provider preset or custom origin; never asks for secrets."""
 
@@ -128,11 +152,13 @@ def prompt_provider_endpoint_binding(*, path: Path | None = None) -> Path | None
     }
     choice = choices[raw]
     preset = None if choice == "owner_declared" else provider_preset(choice)
-    model = typer.prompt(
-        "  Model id",
-        default=None if preset is None else preset.default_model,
-        show_default=preset is not None,
-    ).strip()
+    if preset is None:
+        model = typer.prompt("  Model id", show_default=False).strip()
+    else:
+        selected = prompt_provider_model(preset.choice)
+        if selected is None:
+            return None
+        model = selected
     try:
         if choice == "owner_declared":
             origin = typer.prompt(
