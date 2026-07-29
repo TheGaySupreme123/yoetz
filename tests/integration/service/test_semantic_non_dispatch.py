@@ -14,16 +14,28 @@ from builders.ledger_adapters import FixedClock
 from builders.policy_cases import FRONTIER, make_case
 from yoetz.application.check import FinalSemanticEvaluation, semantic_coverage_gap_code
 from yoetz.application.egress import PrivacyCoordinator, SemanticEgressAwaitingHuman
-from yoetz.domain.privacy import ProviderBinding
+from yoetz.domain.privacy import (
+    AuthorizationScope,
+    AuthorizationScopeKind,
+    ChannelPolicy,
+    DataClass,
+    EgressChannel,
+    PrivacyPolicy,
+    PrivacyProfile,
+    ProviderBinding,
+    ReviewContextProfile,
+    ReviewSelectionPolicy,
+)
 from yoetz.domain.receipts import (
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
 )
 from yoetz.ports.keys import MacKeyHandle
 from yoetz.ports.ledger import CheckPhase, FrozenCase, OperationLease
+from yoetz.ports.privacy import EffectivePrivacyPolicy
 from yoetz.ports.start_catalog import StartCatalogPort, TaskRoute, TaskRouteState
 from yoetz.protocol.canonical import canonical_digest
-from yoetz.protocol.models import SemanticReason, SemanticStatus
+from yoetz.protocol.models import DataCategory, SemanticReason, SemanticStatus
 
 _TASK = "tsk_53000000-0000-4000-8000-000000000001"
 _SESSION = "ses_53000000-0000-4000-8000-000000000001"
@@ -43,9 +55,77 @@ type _SemanticEvaluator = Callable[
 ]
 
 
+def _test_effective_policy() -> EffectivePrivacyPolicy:
+    scope = AuthorizationScope(
+        AuthorizationScopeKind.TASK,
+        _INSTALLATION,
+        "hmac-sha256:" + "b" * 64,
+        _TASK,
+    )
+
+    def _disabled(channel: EgressChannel) -> ChannelPolicy:
+        return ChannelPolicy(
+            channel,
+            False,
+            (),
+            (),
+            None,
+            (),
+            AuthorizationScopeKind.MACHINE,
+            False,
+            0,
+            0,
+            0,
+        )
+
+    policy = PrivacyPolicy(
+        policy_id="pvy_53000000-0000-4000-8000-000000000001",
+        version=1,
+        policy_digest="sha256:" + "c" * 64,
+        profile=PrivacyProfile.LOCAL_ONLY,
+        review_context_profile=ReviewContextProfile.STRUCTURAL,
+        review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.STRUCTURAL),
+        require_current_provider_data_use_evidence=False,
+        network_egress_permitted=False,
+        effective_scope=scope,
+        channel_policies=tuple(
+            _disabled(channel) for channel in sorted(EgressChannel, key=lambda c: c.value)
+        ),
+        local_model_enabled=False,
+        local_model_binding=None,
+        local_model_categories=(),
+        local_model_data_classes=(),
+        agent_context_categories=(DataCategory.FINDING_SUMMARY,),
+        agent_context_data_classes=(DataClass.ORDINARY_USER_CONTENT, DataClass.PUBLIC_STRUCTURAL),
+        trusted_human_control_categories=tuple(DataCategory),
+        trusted_human_control_data_classes=(
+            DataClass.ORDINARY_USER_CONTENT,
+            DataClass.PUBLIC_STRUCTURAL,
+        ),
+        created_at=datetime(2030, 1, 1, tzinfo=UTC),
+    )
+    return EffectivePrivacyPolicy(policy, 1, policy.policy_digest)
+
+
+class _PolicyStore:
+    def __init__(self, effective: EffectivePrivacyPolicy) -> None:
+        self._effective = effective
+
+    async def effective_policy(self, scope: AuthorizationScope) -> EffectivePrivacyPolicy:
+        del scope
+        return self._effective
+
+
+class _PolicyApplication:
+    def __init__(self, effective: EffectivePrivacyPolicy) -> None:
+        self.policy_store = _PolicyStore(effective)
+
+
 class _Privacy:
     def __init__(self) -> None:
         self.calls = 0
+        # Real policy path is required for dispatch; never mint synthetic policy identity.
+        self.policy_application = _PolicyApplication(_test_effective_policy())
 
     async def evaluate_semantic(self, candidate: object, deadline: object) -> object:
         del deadline
