@@ -100,9 +100,7 @@ def test_physical_attempt_budget_caps_at_adr_006() -> None:
 
 
 def test_retry_matrix_admits_only_approved_transient_classes() -> None:
-    assert is_retriable_semantic_outcome(
-        SemanticStatus.TIMEOUT, SemanticReason.PROVIDER_TIMEOUT
-    )
+    assert is_retriable_semantic_outcome(SemanticStatus.TIMEOUT, SemanticReason.PROVIDER_TIMEOUT)
     assert is_retriable_semantic_outcome(
         SemanticStatus.UNAVAILABLE, SemanticReason.TRANSPORT_UNAVAILABLE
     )
@@ -124,9 +122,7 @@ def test_retry_matrix_admits_only_approved_transient_classes() -> None:
     assert not is_retriable_semantic_outcome(
         SemanticStatus.UNAVAILABLE, SemanticReason.PROVIDER_QUOTA_EXHAUSTED
     )
-    assert not is_retriable_semantic_outcome(
-        SemanticStatus.STALE, SemanticReason.FRONTIER_CHANGED
-    )
+    assert not is_retriable_semantic_outcome(SemanticStatus.STALE, SemanticReason.FRONTIER_CHANGED)
 
 
 def test_should_retry_respects_budget_and_deadline() -> None:
@@ -260,9 +256,7 @@ class _FakeLedger:
         self.provider_ids = []
         self.attempts = {}
 
-    async def claim_semantic_job(
-        self, lease: OperationLease, job_id: str
-    ) -> SemanticAttemptHandle:
+    async def claim_semantic_job(self, lease: OperationLease, job_id: str) -> SemanticAttemptHandle:
         assert lease == self.lease
         assert job_id == self.job.job_id
         ordinal = self.job.attempt_count + 1
@@ -296,9 +290,7 @@ class _FakeLedger:
         assert self.attempts is not None
         self.attempt_ids.append(att)
         self.provider_ids.append(req)
-        self.attempts[att] = SemanticAttemptRecord(
-            job_id, att, ordinal, req, "started", None, None
-        )
+        self.attempts[att] = SemanticAttemptRecord(job_id, att, ordinal, req, "started", None, None)
         return handle
 
     async def record_attempt_outcome(
@@ -311,9 +303,7 @@ class _FakeLedger:
         assert self.attempts is not None
         assert self.outcomes is not None
         self.outcomes.append((handle.attempt_id, outcome, terminal_code))
-        state: Literal[
-            "started", "response_durable", "selected", "failed", "expired", "late"
-        ]
+        state: Literal["started", "response_durable", "selected", "failed", "expired", "late"]
         if outcome is AttemptOutcome.RESPONSE_DURABLE:
             state = "response_durable"
         elif outcome is AttemptOutcome.EXPIRED:
@@ -391,7 +381,21 @@ class _FakeLedger:
 async def test_zero_retry_performs_exactly_one_attempt() -> None:
     lease = _lease()
     job = SemanticJobRecord(
-        _JOB, _WRITER, _OP, _CASE, _case_ref(), "queued", 0, None, None, None, None, None, None, None, None
+        _JOB,
+        _WRITER,
+        _OP,
+        _CASE,
+        _case_ref(),
+        "queued",
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
     ledger = _FakeLedger(job, lease)
     script = [
@@ -444,7 +448,21 @@ async def _async_noop() -> None:
 async def test_two_retries_perform_at_most_three_physical_attempts() -> None:
     lease = _lease()
     job = SemanticJobRecord(
-        _JOB, _WRITER, _OP, _CASE, _case_ref(), "queued", 0, None, None, None, None, None, None, None, None
+        _JOB,
+        _WRITER,
+        _OP,
+        _CASE,
+        _case_ref(),
+        "queued",
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
     ledger = _FakeLedger(job, lease)
     script = [
@@ -502,7 +520,21 @@ async def test_two_retries_perform_at_most_three_physical_attempts() -> None:
 async def test_success_selects_first_valid_and_stops() -> None:
     lease = _lease()
     job = SemanticJobRecord(
-        _JOB, _WRITER, _OP, _CASE, _case_ref(), "queued", 0, None, None, None, None, None, None, None, None
+        _JOB,
+        _WRITER,
+        _OP,
+        _CASE,
+        _case_ref(),
+        "queued",
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
     ledger = _FakeLedger(job, lease)
     script = [
@@ -551,7 +583,21 @@ async def test_success_selects_first_valid_and_stops() -> None:
 async def test_policy_block_never_retries() -> None:
     lease = _lease()
     job = SemanticJobRecord(
-        _JOB, _WRITER, _OP, _CASE, _case_ref(), "queued", 0, None, None, None, None, None, None, None, None
+        _JOB,
+        _WRITER,
+        _OP,
+        _CASE,
+        _case_ref(),
+        "queued",
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
     ledger = _FakeLedger(job, lease)
 

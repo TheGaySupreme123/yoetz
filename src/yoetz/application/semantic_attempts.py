@@ -72,7 +72,8 @@ class SemanticAttemptAccounting:
         if type(self.attempted_count) is not int or self.attempted_count < 0:
             raise ValueError("semantic_attempt_accounting_invalid")
         if self.selected_attempt_id is not None and (
-            type(self.selected_attempt_id) is not str or not self.selected_attempt_id.startswith("att_")
+            type(self.selected_attempt_id) is not str
+            or not self.selected_attempt_id.startswith("att_")
         ):
             raise ValueError("semantic_attempt_accounting_invalid")
         if type(self.exhausted) is not bool:
@@ -149,10 +150,7 @@ def attempt_accounting_from_rows(
     exhausted = (
         job is not None
         and job.state in {"failed", "quarantined"}
-        and (
-            attempted >= budget
-            or (job.terminal_code is SemanticReason.RETRY_BUDGET_EXHAUSTED)
-        )
+        and (attempted >= budget or (job.terminal_code is SemanticReason.RETRY_BUDGET_EXHAUSTED))
     )
     return SemanticAttemptAccounting(
         attempted_count=attempted,
@@ -331,9 +329,7 @@ async def run_durable_semantic_attempts(
             rows = await ledger.list_semantic_attempts(job.job_id)
             job_final = await ledger.load_semantic_job(lease.writer_id, lease.operation_id)
             accounting = attempt_accounting_from_rows(job_final, rows, max_retries=max_retries)
-            return build_final(
-                evaluation.status, evaluation.reason, evaluation, accounting
-            )
+            return build_final(evaluation.status, evaluation.reason, evaluation, accounting)
 
         can_retry = should_retry_after(
             status=evaluation.status,

@@ -1644,7 +1644,9 @@ def _privacy_gated_semantic_evaluator(
                 case_ref,
             )
 
-            async def _dispatch(handle: object, attempt_deadline: Deadline) -> FinalSemanticEvaluation:
+            async def _dispatch(
+                handle: object, attempt_deadline: Deadline
+            ) -> FinalSemanticEvaluation:
                 from yoetz.ports.ledger import SemanticAttemptHandle as _Handle
 
                 assert type(handle) is _Handle

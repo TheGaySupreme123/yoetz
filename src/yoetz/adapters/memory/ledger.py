@@ -1802,13 +1802,14 @@ class MemoryLedgerAdapter:
             ):
                 raise _error(PublicErrorCode.INVALID_REQUEST)
             now = _now(self._clock)
-            if job.state == "leased" and job.lease_expires_at is not None and job.lease_expires_at > now:
+            if (
+                job.state == "leased"
+                and job.lease_expires_at is not None
+                and job.lease_expires_at > now
+            ):
                 # Same owner still holding a live lease: resume the active started attempt.
                 # Crash-before-authorization-consumption must not mint a new attempt identity.
-                if (
-                    job.lease_owner_id == lease.lease_owner_id
-                    and job.active_attempt_id is not None
-                ):
+                if job.lease_owner_id == lease.lease_owner_id and job.active_attempt_id is not None:
                     attempt = self._state.attempts.get(job.active_attempt_id)
                     if attempt is not None and attempt.state == "started":
                         return attempt.handle
