@@ -8,7 +8,7 @@ import pytest
 
 from builders.tui_runtime import CLI, DESKTOP, FakeRuntime
 from yoetz.tui.app import YoetzTui
-from yoetz.tui.models import IntegrationOutcome, LayerState, ReadinessLayer
+from yoetz.tui.models import IntegrationOutcome, LayerState, ReadinessLayer, VaultPosture
 from yoetz.tui.runtime import RuntimeError_
 from yoetz.tui.widgets.views import Option, SelectionView
 
@@ -82,12 +82,16 @@ async def test_the_layout_still_renders_on_a_small_or_narrow_terminal(
         app = make_app(first_run=True)
         async with app.run_test(size=size) as pilot:
             await pilot.pause()
-            assert app.open_view is not None
+            view = app.open_view
+            assert view is not None
+            assert isinstance(view, SelectionView)
             assert "Welcome to Yoetz" in transcript(app)
             # Nothing rendered may be wider than the terminal.
             for event in app.transcript.events:
                 for line in event.body:
                     assert len(line) <= size[0]
+            option_lines = view._option_lines().plain.splitlines()  # pyright: ignore[reportPrivateUsage]
+            assert all(len(line) <= size[0] for line in option_lines)
 
 
 async def test_multiple_installations_ask_which_one_before_previewing(
@@ -104,6 +108,27 @@ async def test_multiple_installations_ask_which_one_before_previewing(
         assert view.view_name == "harness"
         labels = [option.label for option in _options(view)]
         assert labels == ["Codex Desktop 0.44", "Codex CLI 0.44", "Choose another executable"]
+
+
+async def test_an_empty_manual_executable_path_is_rejected_in_place(
+    make_app: MakeApp,
+) -> None:
+    runtime = FakeRuntime(harnesses=(DESKTOP, CLI))
+    app = make_app(first_run=True, runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")  # connect
+        await pilot.pause()
+        await pilot.press("3")  # Choose another executable
+        await pilot.pause()
+        assert app.open_view is not None
+        assert app.open_view.view_name == "harness-path"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.open_view is not None
+        assert app.open_view.view_name == "harness-path"
+        assert "not an executable file" in transcript(app)
+        assert runtime.applied == []
 
 
 async def test_project_trust_precedes_any_integration_preview(make_app: MakeApp) -> None:
@@ -267,6 +292,29 @@ async def test_keychain_unavailable_disables_system_storage_but_offers_a_passphr
         assert options[0].disabled is True
         assert options[1].disabled is False
         assert _selected(view).key == "passphrase"
+
+
+async def test_system_storage_selection_initializes_keyring_not_passphrase(
+    make_app: MakeApp,
+) -> None:
+    runtime = FakeRuntime(
+        vault=VaultPosture(reachable=True, state="locked", vault_mode="uninitialized")
+    )
+    app = make_app(first_run=True, runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")  # connect
+        await pilot.pause()
+        await pilot.press("enter")  # trust
+        await pilot.pause()
+        await pilot.press("enter")  # approve
+        await pilot.pause()
+        await pilot.press("enter")  # system secure storage
+        await pilot.pause()
+        await pilot.press("enter")  # approve terminal handoff
+        await pilot.pause()
+        assert "initialize_keyring" in runtime.ceremonies
+        assert "initialize_vault" not in runtime.ceremonies
 
 
 async def test_setup_finishes_with_an_honest_summary_and_records_the_marker(

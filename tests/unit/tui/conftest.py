@@ -24,6 +24,8 @@ def assert_snapshot() -> Callable[[str, Sequence[str]], None]:
         path = _SNAPSHOTS / f"{name}.txt"
         rendered = "\n".join(lines) + "\n"
         if os.environ.get("YOETZ_UPDATE_SNAPSHOTS") == "1":
+            if os.environ.get("CI"):
+                pytest.fail("snapshot regeneration is disabled in CI")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(rendered, encoding="utf-8")
             return

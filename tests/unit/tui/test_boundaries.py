@@ -30,16 +30,29 @@ _INTERNAL_PREFIXES: Final = (
 )
 
 
+def _resolved_import_from(node: ast.ImportFrom, package: tuple[str, ...]) -> set[str]:
+    if node.level == 0:
+        return {node.module} if node.module else set()
+    ancestor_count = node.level - 1
+    if ancestor_count > len(package):
+        return set()
+    base = package[: len(package) - ancestor_count]
+    if node.module:
+        return {".".join((*base, *node.module.split(".")))}
+    return {".".join((*base, alias.name)) for alias in node.names}
+
+
 def _imported_modules(path: Path) -> set[str]:
     """Every module name this file imports, including inside functions."""
 
     tree = ast.parse(path.read_text(encoding="utf-8"))
+    package = path.relative_to(_TUI.parents[1]).with_suffix("").parts[:-1]
     names: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            names.add(node.module)
+        elif isinstance(node, ast.ImportFrom):
+            names.update(_resolved_import_from(node, package))
     return names
 
 
@@ -67,6 +80,17 @@ def _tui_sources() -> list[Path]:
 def test_the_source_tree_under_test_is_actually_present() -> None:
     modules = {path.name for path in _tui_sources()}
     assert {"runtime.py", "render.py", "app.py", "models.py"} <= modules
+
+
+def test_relative_imports_resolve_to_their_full_module_names() -> None:
+    source = _TUI / "widgets" / "_boundary_relative_import_probe.py"
+    tree = ast.parse("from ...application import service\nfrom . import style\n")
+    package = source.relative_to(_TUI.parents[1]).with_suffix("").parts[:-1]
+    resolved: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            resolved.update(_resolved_import_from(node, package))
+    assert resolved == {"yoetz.application", "yoetz.tui.widgets.style"}
 
 
 def test_rendering_stays_pure_text_with_no_rendering_framework() -> None:

@@ -25,6 +25,7 @@ __all__ = [
     "HarnessOption",
     "IntegrationOutcome",
     "IntegrationPlan",
+    "LayerState",
     "PrivacyChoice",
     "PrivacyPosture",
     "ProviderOption",

@@ -25,6 +25,7 @@ from typing import ClassVar
 from rich.text import Text
 from textual import events
 from textual.containers import Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Input, Static
@@ -78,6 +79,7 @@ class BaseView(Vertical):
     def __init__(self, *, name: str, title: str = "", hint: str = "") -> None:
         super().__init__()
         self.view_name = name
+        self.technical_details: tuple[str, ...] = ()
         self.title_text = title
         self.hint_text = hint
         self._dismissed = False
@@ -233,7 +235,7 @@ class SelectionView(BaseView):
     def _option_lines(self) -> Text:
         # Before the first layout the widget reports zero width; fall back to a
         # readable default rather than wrapping every label into a column.
-        width = max(self.size.width - 2, 60)
+        width = max(self.size.width - 2, 1) if self.size.width else 60
         text = Text()
         if not self._visible:
             return Text("no matching options", style="bright_black")
@@ -253,9 +255,9 @@ class SelectionView(BaseView):
             else:
                 text.append(label)
             if option.description:
-                for line in wrap(option.description, max(width - 5, 16)):
+                for line in wrap(option.description, max(width - 5, 1)):
                     text.append("\n")
-                    text.append(f"     {line}", style="bright_black")
+                    text.append(truncate(f"     {line}", width), style="bright_black")
         return text
 
     def compose(self):  # pyright: ignore[reportMissingParameterType]
@@ -283,10 +285,11 @@ class SelectionView(BaseView):
 
     def _refresh_options(self) -> None:
         try:
-            self.query_one("#option-list", Static).update(self._option_lines())
-        except Exception:
+            option_list = self.query_one("#option-list", Static)
+        except NoMatches:
             # Not mounted yet; compose will render the current state.
-            pass
+            return
+        option_list.update(self._option_lines())
 
     # -- input ----------------------------------------------------------
 
@@ -410,6 +413,7 @@ class TextEntryView(BaseView):
         initial: str = "",
         placeholder: str = "",
         password: bool = False,
+        empty_is_cancel: bool = True,
         hint: str = "enter to confirm · esc to cancel",
     ) -> None:
         super().__init__(name=name, title=title, hint=hint)
@@ -417,6 +421,7 @@ class TextEntryView(BaseView):
         self._initial = initial
         self._placeholder = placeholder
         self._password = password
+        self._empty_is_cancel = empty_is_cancel
         self.value: str = initial
 
     @property
@@ -443,7 +448,8 @@ class TextEntryView(BaseView):
         event.stop()
         event.prevent_default()
         self.value = event.value
-        self.dismiss("submit" if event.value.strip() else None)
+        submitted = bool(event.value.strip()) or not self._empty_is_cancel
+        self.dismiss("submit" if submitted else None)
 
     def on_key(self, event: events.Key) -> None:
         if event.key == "escape":

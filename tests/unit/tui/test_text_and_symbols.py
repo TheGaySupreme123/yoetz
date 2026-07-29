@@ -24,12 +24,13 @@ def test_truncate_marks_the_loss_and_never_exceeds_the_width() -> None:
 
 @pytest.mark.parametrize("width", [3, 8, 16, 30])
 def test_middle_truncate_keeps_head_and_tail_within_the_width(width: int) -> None:
-    path = "/Users/someone/Projects/yoetz/src/yoetz/cli/app.py"
+    path = "/srv/projects/yoetz/src/yoetz/cli/app.py"
     result = middle_truncate(path, width)
     assert len(result) == width
     assert ELLIPSIS in result
     # The final component is what identifies a path to a reader.
-    assert result.endswith(path[-1])
+    if width >= 16:
+        assert result.endswith("app.py")
     assert result.startswith(path[0])
 
 

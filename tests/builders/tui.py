@@ -39,14 +39,14 @@ CLI = HarnessOption(
 
 
 _DETECTION = Detection(
-    project_root="/Users/dev/Projects/yoetz",
+    project_root="/srv/yoetz",
     project_name="yoetz",
     is_git_repository=True,
     launched_from_subdirectory=False,
     harnesses=(DESKTOP,),
     secure_storage_available=True,
     already_connected=False,
-    cwd="/Users/dev/Projects/yoetz",
+    cwd="/srv/yoetz",
 )
 
 
@@ -58,13 +58,13 @@ _PLAN = IntegrationPlan(
     harness_label="Codex Desktop",
     executable_path="/Applications/Codex.app/Contents/MacOS/codex",
     reported_version="0.44",
-    project_root="/Users/dev/Projects/yoetz",
+    project_root="/srv/yoetz",
     mcp_command="yoetz mcp serve",
     mcp_server_name="yoetz",
     policy_digest="7f8a92bd",
     planned_check_ids=("lint", "unit-tests"),
     planned_file_count=6,
-    managed_paths=("/Users/dev/Projects/yoetz/.agents/plugins/yoetz",),
+    managed_paths=("/srv/yoetz/.agents/plugins/yoetz",),
     state_before="absent",
     already_registered=False,
     foreign_entry=False,
@@ -121,7 +121,7 @@ LOCAL_ONLY = PrivacyPosture(
 
 def snapshot(**overrides: Any) -> StatusSnapshot:
     base = StatusSnapshot(
-        project_root="/Users/dev/Projects/yoetz",
+        project_root="/srv/yoetz",
         layers=layers(),
         privacy=LOCAL_ONLY,
         open_work=1,

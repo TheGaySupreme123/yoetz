@@ -101,7 +101,7 @@ Type `/` to open the filtered command list.
 | Command | Does |
 |---|---|
 | `/status` | show setup, readiness, and current work |
-| `/work` | browse tasks, claims, evidence, and findings |
+| `/work` | open a task by title to view claims, evidence, and findings |
 | `/check` | run a verification check |
 | `/receipt` | view or export an honest receipt |
 | `/connect` | connect or repair an agent integration |

@@ -571,7 +571,7 @@ async def _codex_integration_step(
         shown = check_policy.get("policy_digest")
         policy_digest_confirmed = (
             approved_policy_digest is not None
-            and type(shown) is str
+            and isinstance(shown, str)
             and approved_policy_digest == shown
         )
     if interactive and not accepted:

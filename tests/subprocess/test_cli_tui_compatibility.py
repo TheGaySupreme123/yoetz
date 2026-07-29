@@ -171,7 +171,9 @@ def test_named_subcommands_never_open_the_interface(
         assert result.exit_code == 0, argv
 
 
-def test_setup_status_json_stays_canonical(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_setup_status_json_stays_canonical(
+    quiet_environment: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The wizard's machine output must not gain terminal-UI wording."""
 
     import json

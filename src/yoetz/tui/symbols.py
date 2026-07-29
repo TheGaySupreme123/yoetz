@@ -20,6 +20,7 @@ __all__ = [
     "STYLE_SUCCESS",
     "STYLE_WARNING",
     "Level",
+    "style_for",
     "symbol_for",
 ]
 
@@ -56,12 +57,12 @@ class Level(Enum):
 
 
 _SYMBOLS: Final[dict[Level, str]] = {
-    Level.SELECTED: "›",  # ›
-    Level.ACTIVE: "•",  # •
-    Level.VERIFIED: "✓",  # ✓
+    Level.SELECTED: "›",
+    Level.ACTIVE: "•",
+    Level.VERIFIED: "✓",
     Level.UNPROVEN: "!",
-    Level.BLOCKED: "■",  # ■
-    Level.OPTIONAL: "○",  # ○
+    Level.BLOCKED: "■",
+    Level.OPTIONAL: "○",
 }
 
 _STYLES: Final[dict[Level, str]] = {

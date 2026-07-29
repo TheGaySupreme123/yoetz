@@ -1,11 +1,11 @@
 Add rate limiting to the upload endpoint
 
-State            current
-Evidence         3
-Open findings    2
-Last check       deterministic only
-Updated          412
-Receipt          available
+State                current
+Evidence             3
+Open findings        2
+Last check           deterministic only
+Frontier sequence    412
+Receipt              available
 
 Claims
   Rate limiting rejects the 11th request in a minute

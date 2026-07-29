@@ -18,6 +18,7 @@ is true.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any, ClassVar, Final
@@ -258,7 +259,7 @@ class YoetzTui(App[int]):
     @on(DetailsRequested)
     async def _on_details_requested(self, message: DetailsRequested) -> None:
         message.stop()
-        lines = getattr(message.view, "technical_details", ())
+        lines = message.view.technical_details
         if not lines:
             event = self.transcript.latest_with_details()
             lines = event.details if event is not None else ("No technical details recorded.",)
@@ -275,7 +276,13 @@ class YoetzTui(App[int]):
                 DetailsView(name="shortcuts", title="Keyboard shortcuts", lines=_SHORTCUTS)
             )
             return
-        if event.key.lower() == "d" and view is None and not self.composer.text:
+        if event.key.lower() != "d" or view is not None:
+            return
+        try:
+            composer_text = self.composer.text
+        except NoMatches:
+            return
+        if not composer_text:
             latest = self.transcript.latest_with_details()
             if latest is not None:
                 event.stop()
@@ -431,21 +438,29 @@ class YoetzTui(App[int]):
         if chosen is None:
             return None
         if chosen == "other":
-            entry = TextEntryView(
-                name="harness-path",
-                title="Choose another executable",
-                label="Full path to the Codex executable",
-                placeholder="/usr/local/bin/codex",
-            )
-            if await self.ask(entry) is None:
-                return None
-            path = entry.value.strip()
-            return HarnessOption(
-                executable_path=path,
-                reported_version=None,
-                label="Codex",
-                description="Executable you selected",
-            )
+            while True:
+                entry = TextEntryView(
+                    name="harness-path",
+                    title="Choose another executable",
+                    label="Full path to the Codex executable",
+                    placeholder="/usr/local/bin/codex",
+                    empty_is_cancel=False,
+                )
+                if await self.ask(entry) is None:
+                    return None
+                path = entry.value.strip()
+                if path and Path(path).is_file() and os.access(path, os.X_OK):
+                    return HarnessOption(
+                        executable_path=path,
+                        reported_version=None,
+                        label="Codex",
+                        description="Executable you selected",
+                    )
+                self.say(
+                    Level.BLOCKED,
+                    "That path is not an executable file",
+                    ("Nothing was changed. Enter another path or press Esc to cancel.",),
+                )
         return options[int(chosen)]
 
     async def _confirm_project_trust(self, detection: Detection) -> bool:
@@ -487,9 +502,7 @@ class YoetzTui(App[int]):
             decline_label="No, keep this project unchanged",
         )
         # 'D' on this view must show the exact paths, digests, and command.
-        view.technical_details = render_integration_technical_details(  # type: ignore[attr-defined]
-            plan, self.body_width
-        )
+        view.technical_details = render_integration_technical_details(plan, self.body_width)
         return await self.ask(view) == "approve"
 
     async def _apply_plan(self, option: HarnessOption, plan: IntegrationPlan) -> bool:
@@ -500,7 +513,6 @@ class YoetzTui(App[int]):
             self.settle(Level.BLOCKED, error.message, (f"Reason: {error.reason}",))
             return False
         if outcome.foreign_entry:
-            await self.pop_view()
             await self._handle_foreign_entry(option)
             return False
         lines = render_layers(outcome.layers, self.body_width)
@@ -626,8 +638,8 @@ class YoetzTui(App[int]):
         else:
             await self._run_confidential(
                 "Set up system secure storage",
-                self.runtime.initialize_passphrase_vault,
-                fallback_command="yoetz service unlock --initialize",
+                self.runtime.initialize_system_keyring,
+                fallback_command=None,
             )
 
     async def hand_over_terminal(self, operation: Callable[[], Awaitable[Any]]) -> Any:
@@ -648,7 +660,7 @@ class YoetzTui(App[int]):
         title: str,
         operation: Callable[[], Awaitable[Any]],
         *,
-        fallback_command: str = "yoetz service unlock",
+        fallback_command: str | None = "yoetz service unlock",
     ) -> Any:
         """Ask for explicit consent, then hand the terminal to the ceremony."""
 
@@ -675,15 +687,21 @@ class YoetzTui(App[int]):
         except SuspendNotSupported:
             # Rather than take the secret through a widget, say so and name the
             # command that runs the same ceremony directly.
+            guidance = (
+                ("Run this from your shell instead:", "", f"    {fallback_command}", "")
+                if fallback_command is not None
+                else (
+                    "No equivalent shell command is exposed for this operation.",
+                    "Run Yoetz again in a terminal that supports secure handoff.",
+                    "",
+                )
+            )
             self.say(
                 Level.UNPROVEN,
                 "This terminal cannot hand over for secure entry",
                 (
                     "Yoetz will not accept a secret through this window.",
-                    "Run this from your shell instead:",
-                    "",
-                    f"    {fallback_command}",
-                    "",
+                    *guidance,
                     "Nothing was stored.",
                 ),
                 details=("app.suspend is unavailable in this environment",),

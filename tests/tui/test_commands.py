@@ -81,6 +81,32 @@ async def test_the_popup_narrows_as_the_command_is_typed(make_app: MakeApp) -> N
         assert popup.selected.name == "status"
 
 
+async def test_popup_selection_preserves_the_typed_argument_suffix(
+    make_app: MakeApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yoetz.tui.widgets.composer import CommandSubmitted
+
+    app = make_app()
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        captured: list[str] = []
+        post_message = app.composer.post_message
+
+        def record(message: object) -> bool:
+            if isinstance(message, CommandSubmitted):
+                captured.append(message.value)
+            return post_message(message)  # pyright: ignore[reportArgumentType]
+
+        monkeypatch.setattr(app.composer, "post_message", record)
+        app.composer.focus_input()
+        app.composer.text = "/receipt markdown"
+        await pilot.pause()
+        assert app.composer.popup.display is True
+        await pilot.press("enter")
+        await pilot.pause()
+        assert captured == ["/receipt markdown"]
+
+
 async def test_the_popup_closes_on_escape_without_running_anything(
     make_app: MakeApp,
 ) -> None:

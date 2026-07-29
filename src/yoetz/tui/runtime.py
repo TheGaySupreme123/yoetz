@@ -613,6 +613,14 @@ class YoetzRuntime:
         except HumanCeremonyCliError as error:
             raise RuntimeError_(error.reason, "the vault could not be initialized")
 
+    async def initialize_system_keyring(self) -> None:
+        from yoetz.cli.unlock import HumanCeremonyCliError, retry_keyring
+
+        try:
+            await retry_keyring(expected_mode="uninitialized")
+        except HumanCeremonyCliError as error:
+            raise RuntimeError_(error.reason, "system secure storage could not be initialized")
+
     async def unlock_vault(self) -> None:
         from yoetz.cli.unlock import HumanCeremonyCliError, retry_keyring, unlock_vault
 
@@ -775,6 +783,8 @@ class YoetzRuntime:
         privacy = await self.privacy_posture()
         layers.extend(self._provider_layers(provider, privacy))
 
+        # The control protocol has no task-listing operation. These values mean
+        # work is unreadable here; they are not a claim that the task list is empty.
         open_work, open_findings, readable = 0, 0, False
         return StatusSnapshot(
             project_root=str(root),

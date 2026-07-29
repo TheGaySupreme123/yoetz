@@ -62,7 +62,14 @@ def test_a_pipe_or_redirect_on_either_stream_keeps_the_historical_behaviour(
 
 @pytest.mark.parametrize(
     "marker",
-    ["CI", "CONTINUOUS_INTEGRATION", "BUILD_NUMBER", "GITHUB_ACTIONS", "GITLAB_CI"],
+    [
+        "CI",
+        "CONTINUOUS_INTEGRATION",
+        "BUILD_NUMBER",
+        "GITHUB_ACTIONS",
+        "GITLAB_CI",
+        "TEAMCITY_VERSION",
+    ],
 )
 def test_every_ci_marker_keeps_the_deterministic_output(
     monkeypatch: pytest.MonkeyPatch, marker: str

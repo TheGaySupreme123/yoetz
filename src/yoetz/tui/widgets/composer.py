@@ -135,7 +135,8 @@ class Composer(Vertical):
         value = event.value
         # A visible popup means the user is choosing from it, not typing free text.
         if self._popup.display and selected is not None:
-            value = selected.token
+            _, separator, arguments = value.strip().partition(" ")
+            value = selected.token + (f" {arguments}" if separator else "")
         self._popup.close()
         self._input.value = ""
         self.post_message(CommandSubmitted(value))

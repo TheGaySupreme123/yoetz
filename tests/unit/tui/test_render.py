@@ -81,7 +81,7 @@ def test_project_trust_names_the_repository_root_it_applies_to() -> None:
 
 def test_launching_from_a_subdirectory_explains_that_trust_covers_the_root() -> None:
     lines = render_project_trust(
-        build.detection(launched_from_subdirectory=True, cwd="/Users/dev/Projects/yoetz/src"),
+        build.detection(launched_from_subdirectory=True, cwd="/srv/yoetz/src"),
         WIDE,
     )
     joined = " ".join(lines)
@@ -112,11 +112,15 @@ def test_integration_preview_hides_paths_and_digests_behind_technical_details() 
     assert plan.executable_path not in friendly
     assert plan.preview_digest not in friendly
 
-    technical = "\n".join(render_integration_technical_details(plan, 120))
+    technical_lines = render_integration_technical_details(plan, 120)
+    technical = "\n".join(technical_lines)
     assert plan.executable_path in technical
     assert plan.preview_digest in technical
     assert plan.mcp_command in technical
-    assert "6" in technical  # planned file count
+    assert any(
+        line.startswith("Planned files") and line.endswith(str(plan.planned_file_count))
+        for line in technical_lines
+    )
 
 
 def test_a_foreign_entry_is_a_block_that_reports_nothing_was_changed() -> None:
@@ -125,7 +129,8 @@ def test_a_foreign_entry_is_a_block_that_reports_nothing_was_changed() -> None:
     assert lines[0].startswith("■")
     assert "Nothing was replaced or removed." in lines
     assert "force" not in joined.lower()
-    assert "replace" not in joined.lower().replace("was replaced", "")
+    other_lines = [line for line in lines if line != "Nothing was replaced or removed."]
+    assert "replace" not in "\n".join(other_lines).lower()
 
 
 def test_finish_reports_off_layers_as_off_and_never_as_verified(
@@ -346,6 +351,19 @@ def test_no_renderer_ever_overflows_the_width_it_was_given(width: int) -> None:
         render_status(build.snapshot(), width),
         render_finish(build.snapshot(), width),
         render_provider_stored(build.UNTESTED_PROVIDER, width),
+        render_privacy_disclosure(
+            build.LOCAL_ONLY,
+            PrivacyChoice.MINIMAL_EXTERNAL.label,
+            categories=("Structural facts: counts, verdicts, coverage, and check names",),
+            provider="openai",
+            model="gpt-4.1-mini",
+            endpoint="openai-responses",
+            purpose="verification review of recorded work",
+            scope="this installation",
+            never_send=("API keys, passphrases, and anything else secret",),
+            notes=("This provider connection has never been tested.",),
+            width=width,
+        ),
         render_receipt(build.receipt(), width),
         render_doctor(build.doctor(), width),
     )
@@ -357,7 +375,7 @@ def test_no_renderer_ever_overflows_the_width_it_was_given(width: int) -> None:
 def test_the_session_header_middle_truncates_a_long_project_path() -> None:
     lines = render_session_header(
         version="0.1.0",
-        project_root="/Users/dev/Projects/deeply/nested/workspace/yoetz",
+        project_root="/srv/projects/deeply/nested/workspace/yoetz",
         harness_state="connected",
         privacy_summary="local only",
         width=48,

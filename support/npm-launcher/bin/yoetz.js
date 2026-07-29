@@ -23,53 +23,60 @@ function uvAvailable() {
 
 function fail(lines) {
   process.stderr.write(lines.concat("").join("\n"));
-  process.exit(1);
+  process.exitCode = 1;
 }
 
-if (!uvAvailable()) {
-  // The packaging contract forbids bootstrapping a runtime from here, so the
-  // only useful thing this launcher can do is say exactly what is missing and
-  // exactly how to get it.
-  fail([
-    "yoetz: the 'uv' tool is required and was not found on PATH.",
-    "",
-    "Yoetz runs on Python 3.14 and this launcher only delegates to the",
-    `Python distribution 'yoetz==${version}'. It never installs anything itself,`,
-    "so uv has to be present first.",
-    "",
-    "  macOS / Linux:  curl -LsSf https://astral.sh/uv/install.sh | sh",
-    "  Windows:        powershell -c \"irm https://astral.sh/uv/install.ps1 | iex\"",
-    `  Other options:  ${INSTALL_DOCS}`,
-    "",
-    "Then re-run this command.",
-  ]);
+function main() {
+  if (!uvAvailable()) {
+    // The packaging contract forbids bootstrapping a runtime from here, so the
+    // only useful thing this launcher can do is say exactly what is missing and
+    // exactly how to get it.
+    fail([
+      "yoetz: the 'uv' tool is required and was not found on PATH.",
+      "",
+      "Yoetz runs on Python 3.14 and this launcher only delegates to the",
+      `Python distribution 'yoetz==${version}'. It never installs anything itself,`,
+      "so uv has to be present first.",
+      "",
+      "  macOS / Linux:  curl -LsSf https://astral.sh/uv/install.sh | sh",
+      "  Windows:        powershell -c \"irm https://astral.sh/uv/install.ps1 | iex\"",
+      `  Other options:  ${INSTALL_DOCS}`,
+      "",
+      "Then re-run this command.",
+    ]);
+    return;
+  }
+
+  const result = spawnSync(
+    "uvx",
+    [`yoetz==${version}`, ...process.argv.slice(2)],
+    { stdio: "inherit", shell: false },
+  );
+
+  if (result.error) {
+    fail([
+      "yoetz: found 'uv' but could not launch 'uvx'.",
+      "",
+      `Reported: ${result.error.message}`,
+      "",
+      "Check that your uv installation is complete and that 'uvx' is on PATH,",
+      `then re-run this command. See ${INSTALL_DOCS}`,
+    ]);
+    return;
+  }
+
+  // A child killed by a signal has no exit status. Reporting the conventional
+  // 128+n keeps `npx yoetz` interchangeable with the Python entry point in a
+  // script that inspects exit codes — including 130 for an interrupted session.
+  if (result.status === null) {
+    const SIGNAL_EXIT_BASE = 128;
+    const signals = { SIGINT: 2, SIGQUIT: 3, SIGKILL: 9, SIGTERM: 15, SIGHUP: 1 };
+    const offset = signals[result.signal];
+    process.exitCode = offset === undefined ? 1 : SIGNAL_EXIT_BASE + offset;
+    return;
+  }
+
+  process.exitCode = result.status;
 }
 
-const result = spawnSync(
-  "uvx",
-  [`yoetz==${version}`, ...process.argv.slice(2)],
-  { stdio: "inherit", shell: false },
-);
-
-if (result.error) {
-  fail([
-    "yoetz: found 'uv' but could not launch 'uvx'.",
-    "",
-    `Reported: ${result.error.message}`,
-    "",
-    "Check that your uv installation is complete and that 'uvx' is on PATH,",
-    `then re-run this command. See ${INSTALL_DOCS}`,
-  ]);
-}
-
-// A child killed by a signal has no exit status. Reporting the conventional
-// 128+n keeps `npx yoetz` interchangeable with the Python entry point in a
-// script that inspects exit codes — including 130 for an interrupted session.
-if (result.status === null) {
-  const SIGNAL_EXIT_BASE = 128;
-  const signals = { SIGINT: 2, SIGQUIT: 3, SIGKILL: 9, SIGTERM: 15, SIGHUP: 1 };
-  const offset = signals[result.signal];
-  process.exit(offset === undefined ? 1 : SIGNAL_EXIT_BASE + offset);
-}
-
-process.exit(result.status);
+main();

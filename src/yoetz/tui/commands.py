@@ -33,7 +33,7 @@ class SlashCommand:
 
 SLASH_COMMANDS: Final[tuple[SlashCommand, ...]] = (
     SlashCommand("status", "show setup, readiness, and current work"),
-    SlashCommand("work", "browse tasks, claims, evidence, and findings"),
+    SlashCommand("work", "open a task by title to view claims, evidence, and findings"),
     SlashCommand("check", "run a verification check"),
     SlashCommand("receipt", "view or export an honest receipt"),
     SlashCommand("connect", "connect or repair an agent integration"),

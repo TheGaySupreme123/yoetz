@@ -62,9 +62,9 @@ MIN_ASCII_WIDTH = 52
 _MARK = (
     "  _   _  ___  ___ _____ ____",
     " | | | |/ _ \\| __|_   _|_  /",
-    " | |_| | (_) | _|  | |  / / ",
+    " | |_| | (_) | _|  | |  / /",
     "  \\__, |\\___/|___| |_| /___|",
-    "  |___/                     ",
+    "  |___/",
 )
 
 
@@ -531,13 +531,18 @@ def render_privacy_disclosure(
 ) -> tuple[str, ...]:
     """The exact disclosure preview shown before privacy is ever widened."""
 
-    body = max(width - 2, 24)
-    lines = [
-        f"Change what may leave this computer: {current.summary} → {target_label}",
-        "",
-        "Data that may be sent",
-    ]
-    lines.extend(_indent(tuple(f"+ {item}" for item in categories) or ("+ nothing",), width=2))
+    body = max(width - 2, 1)
+    indented_body = max(body - 2, 1)
+    lines = list(
+        wrap(
+            f"Change what may leave this computer: {current.summary} → {target_label}",
+            body,
+        )
+    )
+    lines.extend(("", "Data that may be sent"))
+    disclosed = categories or ("nothing",)
+    for item in disclosed:
+        lines.extend(_indent(wrap(f"+ {item}", indented_body), width=2))
     lines.append("")
     lines.extend(
         _labelled(
@@ -554,11 +559,12 @@ def render_privacy_disclosure(
     )
     lines.append("")
     lines.append("Never sent, under any choice")
-    lines.extend(_indent(tuple(f"· {item}" for item in never_send), width=2))
+    for item in never_send:
+        lines.extend(_indent(wrap(f"· {item}", indented_body), width=2))
     for note in notes:
         lines.append("")
-        lines.extend(_indent(wrap(f"{symbol_for(Level.UNPROVEN)} {note}", body - 2), width=2))
-    return tuple(lines)
+        lines.extend(_indent(wrap(f"{symbol_for(Level.UNPROVEN)} {note}", indented_body), width=2))
+    return tuple(truncate(line, width) for line in lines)
 
 
 # ---------------------------------------------------------------------------
@@ -577,7 +583,7 @@ def render_work_detail(detail: WorkDetail, width: int) -> tuple[str, ...]:
                 ("Evidence", str(detail.evidence_count)),
                 ("Open findings", str(detail.item.open_findings)),
                 ("Last check", detail.item.last_check),
-                ("Updated", detail.item.updated),
+                ("Frontier sequence", detail.item.updated),
                 ("Receipt", "available" if detail.receipt_available else "not available yet"),
             ),
             width,
