@@ -1,0 +1,156 @@
+"""Root-level object rules must name safe corrective fields.
+
+Replays the second failed `start` from the 2026-07-27 dogfood: `workspace_ref` without
+`external_ref` previously collapsed to a generic invalid-arguments message because
+`dependentRequired` reports an empty instance path. Nested enum/pattern pointers and hostile
+extras must keep their existing bounded behavior.
+"""
+
+from __future__ import annotations
+
+from typing import cast
+
+import pytest
+from pydantic import ValidationError
+
+from yoetz.mcp.descriptors import descriptor_for
+from yoetz.mcp.errors import authoring_hint, safe_validation_locations
+from yoetz.mcp.server import invalid_request_message
+from yoetz.protocol.models import PublishWorkRequest, StartRequestModel
+
+_START_SCHEMA = descriptor_for("start").input_schema
+_PUBLISH_SCHEMA = descriptor_for("publish_work").input_schema
+
+_BASE_START: dict[str, object] = {
+    "protocol_version": "0.1",
+    "schema_version": "1.0.0",
+    "request_id": "req_00000000-0000-4000-8000-000000000001",
+    "mode": "create",
+    "task_title": "dogfood start",
+    "requested_view": "compact",
+    "actor": {"actor_id": "agent:logical-1", "actor_type": "logical_agent"},
+    "client": {
+        "kind": "cooperative_agent",
+        "version": "0.1.0",
+        "integration": "cooperative_mcp",
+    },
+}
+
+
+def _start_locations(**overrides: object) -> tuple[dict[str, str], ...]:
+    payload = {**_BASE_START, **overrides}
+    with pytest.raises(ValidationError) as captured:
+        StartRequestModel.model_validate(payload)
+    return safe_validation_locations(captured.value)
+
+
+def test_workspace_ref_without_external_ref_names_both_fields_and_pairing_rule() -> None:
+    locations = _start_locations(workspace_ref="workspace-A")
+    assert {"field": "/workspace_ref", "reason": "paired_field_required"} in locations
+    assert {"field": "/external_ref", "reason": "paired_field_required"} in locations
+
+    hint = authoring_hint(_START_SCHEMA, locations)
+    assert "workspace_ref requires external_ref" in hint
+    message = invalid_request_message("start", locations)
+    assert "workspace_ref requires external_ref" in message
+    assert "yoetz://guidance/workflow.md" in message
+
+
+def test_external_ref_without_workspace_ref_is_equally_actionable() -> None:
+    locations = _start_locations(external_ref="external-A")
+    assert {"field": "/external_ref", "reason": "paired_field_required"} in locations
+    assert {"field": "/workspace_ref", "reason": "paired_field_required"} in locations
+    hint = authoring_hint(_START_SCHEMA, locations)
+    assert "external_ref requires workspace_ref" in hint
+
+
+def test_logical_agent_without_refs_remains_valid() -> None:
+    # The dogfood's third-call actor_type change was a red herring; logical_agent is admitted.
+    StartRequestModel.model_validate(_BASE_START)
+
+
+def test_paired_refs_together_remain_valid() -> None:
+    StartRequestModel.model_validate(
+        {**_BASE_START, "external_ref": "external-A", "workspace_ref": "workspace-A"}
+    )
+
+
+def test_attach_if_then_names_safe_required_alternatives() -> None:
+    locations = _start_locations(mode="attach")
+    fields = {item["field"] for item in locations}
+    reasons = {item["reason"] for item in locations}
+    assert "/session_id" in fields
+    assert "/external_ref" in fields
+    assert "/workspace_ref" in fields
+    assert reasons == {"conditional_field_required"}
+
+    hint = authoring_hint(_START_SCHEMA, locations)
+    assert "mode attach requires" in hint
+    assert "session_id" in hint
+    assert "external_ref" in hint
+    assert "workspace_ref" in hint
+
+
+def test_nested_request_id_pattern_retains_existing_behavior() -> None:
+    locations = _start_locations(request_id="not-a-valid-request-id")
+    assert any(item["field"] == "/request_id" for item in locations)
+    hint = authoring_hint(_START_SCHEMA, locations)
+    assert "^req_" in hint
+
+
+def test_nested_event_draft_enum_retains_existing_behavior() -> None:
+    examples = cast(list[object], _PUBLISH_SCHEMA["examples"])
+    base = cast(dict[str, object], examples[0])
+    good = cast(dict[str, object], cast(list[object], base["event_drafts"])[0])
+    secret = "NOT-A-REAL-ENUM-never-echo-this"
+    bad: dict[str, object] = {
+        **good,
+        "event_id": "evt_00000000-0000-4000-8000-000000000099",
+        "schema": {"name": "action_recorded", "version": "1.0.0"},
+        "payload": {
+            "action_id": "act_00000000-0000-4000-8000-000000000098",
+            "action_kind": secret,
+            "description": "x",
+        },
+    }
+    with pytest.raises(ValidationError) as captured:
+        PublishWorkRequest.model_validate({**base, "event_drafts": [good, bad]})
+    locations = safe_validation_locations(captured.value)
+    assert any(item["field"] == "/event_drafts/1/payload/action_kind" for item in locations)
+    assert secret not in repr(locations)
+    hint = authoring_hint(_PUBLISH_SCHEMA, locations)
+    assert "action_kind admits" in hint
+    assert secret not in hint
+
+
+def test_hostile_unknown_property_never_reaches_message_or_details() -> None:
+    secret_key = "hostile_secret_prop"
+    secret_value = "never-echo-this-value-9f3a"
+    with pytest.raises(ValidationError) as captured:
+        StartRequestModel.model_validate({**_BASE_START, secret_key: secret_value})
+    locations = safe_validation_locations(captured.value)
+    assert secret_key not in repr(locations)
+    assert secret_value not in repr(locations)
+    message = invalid_request_message("start", locations)
+    assert secret_key not in message
+    assert secret_value not in message
+    # Unrecognized extras at the model boundary stay generic — no invented field pointers.
+    assert not any(secret_key in item.get("field", "") for item in locations)
+
+
+def test_unrecognized_root_rule_degrades_to_bounded_generic_error() -> None:
+    # Empty locations still produce a bounded public message (examples + guidance), never raise.
+    message = invalid_request_message("start", ())
+    assert message.startswith("The tool arguments are invalid.")
+    assert "yoetz://guidance/workflow.md" in message
+    assert authoring_hint(_START_SCHEMA, ()) != ""
+
+
+def test_object_rule_hint_never_echoes_submitted_values() -> None:
+    secret = "submitted-workspace-value-must-not-leak"
+    locations = _start_locations(workspace_ref=secret)
+    hint = authoring_hint(_START_SCHEMA, locations)
+    message = invalid_request_message("start", locations)
+    assert secret not in hint
+    assert secret not in message
+    assert secret not in repr(locations)

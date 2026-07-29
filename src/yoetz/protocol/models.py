@@ -1004,7 +1004,22 @@ def _validate_model_against_schema(model: BaseModel, schema_name: str) -> None:
     try:
         validate_schema_instance(schema_name, "1.0.0", cast(JsonValue, dumped))
     except SchemaInstanceInvalid as exc:
-        # Re-raise with the JSON Schema absolute path so MCP safe_details can name the field.
+        # Re-raise with JSON Schema path(s) so MCP safe_details can name corrective fields.
+        # Root-level object rules (dependentRequired, if/then) arrive as location_reasons with
+        # closed reason tokens; nested field failures use absolute_path.
+        if exc.location_reasons:
+            raise PydanticValidationError.from_exception_data(
+                type(model).__name__,
+                [
+                    {
+                        "type": "value_error",
+                        "loc": tuple(path),
+                        "input": None,
+                        "ctx": {"error": ValueError(reason)},
+                    }
+                    for path, reason in exc.location_reasons
+                ],
+            ) from None
         if exc.absolute_path:
             raise PydanticValidationError.from_exception_data(
                 type(model).__name__,

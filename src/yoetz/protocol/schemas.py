@@ -724,19 +724,50 @@ def event_schema_versions(catalog: SchemaCatalog) -> Mapping[str, str]:
     return catalog.event_schema_versions
 
 
-class SchemaInstanceInvalid(ProtocolValueError):
-    """Schema admission failure with an optional absolute JSON path for caller recovery."""
+# Closed reason tokens for root-level object rules (dependentRequired, if/then required).
+# These travel through Pydantic value_error ctx and MCP safe_details; never invent free-form text.
+_OBJECT_RULE_PAIRED: Final = "paired_field_required"
+_OBJECT_RULE_CONDITIONAL: Final = "conditional_field_required"
+_OBJECT_RULE_REASONS: Final = frozenset({_OBJECT_RULE_PAIRED, _OBJECT_RULE_CONDITIONAL})
+_MAX_PROJECTED_OBJECT_LOCATIONS: Final = 8
 
-    __slots__ = ("absolute_path",)
+
+class SchemaInstanceInvalid(ProtocolValueError):
+    """Schema admission failure with optional path(s) for caller recovery.
+
+    ``absolute_path`` names one nested field when jsonschema already points there.
+    ``location_reasons`` carries root-level object-rule projections (pairing / conditional
+    required) when the instance path is empty but the schema names safe corrective fields.
+    """
+
+    __slots__ = ("absolute_path", "location_reasons")
 
     absolute_path: tuple[str | int, ...]
+    location_reasons: tuple[tuple[tuple[str | int, ...], str], ...]
 
-    def __init__(self, absolute_path: tuple[str | int, ...] = ()) -> None:
+    def __init__(
+        self,
+        absolute_path: tuple[str | int, ...] = (),
+        location_reasons: tuple[tuple[tuple[str | int, ...], str], ...] = (),
+    ) -> None:
         if type(absolute_path) is not tuple:
             raise TypeError("schema_instance_path_invalid")
         if any(type(item) is not str and type(item) is not int for item in absolute_path):
             raise TypeError("schema_instance_path_invalid")
+        if type(location_reasons) is not tuple:
+            raise TypeError("schema_instance_locations_invalid")
+        for item in location_reasons:
+            if type(item) is not tuple or len(item) != 2:
+                raise TypeError("schema_instance_locations_invalid")
+            path, reason = item
+            if type(path) is not tuple:
+                raise TypeError("schema_instance_locations_invalid")
+            if any(type(segment) is not str and type(segment) is not int for segment in path):
+                raise TypeError("schema_instance_locations_invalid")
+            if type(reason) is not str or reason not in _OBJECT_RULE_REASONS:
+                raise TypeError("schema_instance_locations_invalid")
         self.absolute_path = absolute_path
+        self.location_reasons = location_reasons
         super().__init__("schema_instance_invalid")
 
 
@@ -756,7 +787,15 @@ def validate_schema_instance(name: str, version: str, value: JsonValue) -> None:
         validator_api = cast(_ValidatorProtocol, cast(object, validator))
         validator_api.validate(_plain_validation_value(value))
     except ValidationError as exc:
-        raise SchemaInstanceInvalid(_best_schema_instance_path(exc)) from None
+        path = _best_schema_instance_path(exc)
+        if path:
+            raise SchemaInstanceInvalid(path) from None
+        # Root-level object rules (dependentRequired, if/then anyOf required) report an empty
+        # instance path. Project only schema-named fields so MCP can name the corrective pair.
+        projected = _project_root_object_rule_locations(exc)
+        if projected:
+            raise SchemaInstanceInvalid((), projected) from None
+        raise SchemaInstanceInvalid() from None
     except BaseException:
         raise SchemaInstanceInvalid() from None
 
@@ -771,6 +810,151 @@ def _path_items_from(error: ValidationError) -> tuple[str | int, ...] | None:
         else:
             return None
     return tuple(path_items)
+
+
+def _schema_property_names(schema: object) -> frozenset[str] | None:
+    """Return checked-in property names from a schema object, or None when unusable."""
+
+    if not isinstance(schema, Mapping):
+        return None
+    properties = cast(Mapping[str, JsonValue], schema).get("properties")
+    if not isinstance(properties, Mapping):
+        return None
+    names = frozenset(key for key in cast(Mapping[object, object], properties) if type(key) is str)
+    return names or None
+
+
+def _safe_schema_field(name: object, property_names: frozenset[str] | None) -> str | None:
+    """Admit a field name only when it is a checked-in schema property."""
+
+    if type(name) is not str or property_names is None or name not in property_names:
+        return None
+    return name
+
+
+def _project_root_object_rule_locations(
+    exc: ValidationError,
+) -> tuple[tuple[tuple[str | int, ...], str], ...]:
+    """Project known root-level object rules into fixed safe (path, reason) pairs.
+
+    Inspects only validator kind and checked-in schema metadata. Never names a key that is not
+    declared on the schema. Failure to derive a safe projection returns empty so the caller
+    falls back to a generic invalid request.
+    """
+
+    try:
+        return _project_root_object_rule_locations_impl(exc)
+    except Exception:
+        return ()
+
+
+def _project_root_object_rule_locations_impl(
+    exc: ValidationError,
+) -> tuple[tuple[tuple[str | int, ...], str], ...]:
+    path = _path_items_from(exc)
+    if path is None or path != ():
+        return ()
+    validator = exc.validator
+    if validator == "dependentRequired":
+        return _project_dependent_required(exc)
+    if validator in {"anyOf", "oneOf"}:
+        return _project_conditional_required_alternatives(exc)
+    # allOf itself rarely fails at root; nested context may hold the object rule.
+    if validator == "allOf":
+        for nested in exc.context or ():
+            projected = _project_root_object_rule_locations_impl(nested)
+            if projected:
+                return projected
+    return ()
+
+
+def _project_dependent_required(
+    error: ValidationError,
+) -> tuple[tuple[tuple[str | int, ...], str], ...]:
+    """Name the present field and its required peer from schema ``dependentRequired`` only."""
+
+    deps = error.validator_value
+    instance = error.instance
+    if not isinstance(deps, Mapping) or not isinstance(instance, Mapping):
+        return ()
+    property_names = _schema_property_names(error.schema)
+    if property_names is None:
+        return ()
+    ordered: list[tuple[tuple[str | int, ...], str]] = []
+    seen: set[str] = set()
+    for prop, peers in cast(Mapping[object, object], deps).items():
+        present = _safe_schema_field(prop, property_names)
+        if present is None or present not in cast(Mapping[object, object], instance):
+            continue
+        if not isinstance(peers, list):
+            continue
+        for peer in cast(list[object], peers):
+            missing = _safe_schema_field(peer, property_names)
+            if missing is None or missing in cast(Mapping[object, object], instance):
+                continue
+            for name in (present, missing):
+                if name in seen:
+                    continue
+                seen.add(name)
+                ordered.append(((name,), _OBJECT_RULE_PAIRED))
+                if len(ordered) >= _MAX_PROJECTED_OBJECT_LOCATIONS:
+                    return tuple(ordered)
+    return tuple(ordered)
+
+
+def _project_conditional_required_alternatives(
+    error: ValidationError,
+) -> tuple[tuple[tuple[str | int, ...], str], ...]:
+    """Name safe required fields under a selected ``if/then`` anyOf|oneOf branch.
+
+    Only when the schema path includes ``then`` (conditional branch) and context errors are
+    ``required`` failures whose field names are checked-in properties.
+    """
+
+    schema_path = tuple(error.absolute_schema_path)
+    if "then" not in schema_path and "if" not in schema_path:
+        # Closed discriminated unions without if/then still admit required-field projection when
+        # every context error is a schema-named required property.
+        if error.validator not in {"anyOf", "oneOf"}:
+            return ()
+    property_names = _schema_property_names(error.schema)
+    # Error.schema for anyOf is often the anyOf node (list of branches), not the root object.
+    # Fall back to walking context validator_value lists and the parent schema when needed.
+    ordered: list[tuple[tuple[str | int, ...], str]] = []
+    seen: set[str] = set()
+    for nested in error.context or ():
+        if nested.validator != "required":
+            continue
+        required_list = nested.validator_value
+        instance = nested.instance
+        if not isinstance(required_list, list) or not isinstance(instance, Mapping):
+            continue
+        # Prefer property names from the enclosing object schema when available.
+        nested_props = _schema_property_names(nested.schema)
+        admitted = property_names if property_names is not None else nested_props
+        # When the branch schema is only {"required": [...]}, admit names from the required list
+        # only if each is a plain string — still never use instance keys as the source of names.
+        for item in cast(list[object], required_list):
+            if type(item) is not str:
+                continue
+            if admitted is not None and item not in admitted:
+                # Branch-only required list: allow schema-authored required names even when the
+                # branch node has no properties map (common for anyOf required alternatives).
+                if nested_props is not None:
+                    continue
+            if item in cast(Mapping[object, object], instance):
+                continue
+            if item in seen:
+                continue
+            # Final gate: only emit names that look like schema identifiers already used as
+            # locations elsewhere — still never take them from the instance.
+            if not item or not item.isascii() or not item.replace("_", "").isalnum():
+                continue
+            seen.add(item)
+            ordered.append(((item,), _OBJECT_RULE_CONDITIONAL))
+            if len(ordered) >= _MAX_PROJECTED_OBJECT_LOCATIONS:
+                return tuple(ordered)
+    return tuple(ordered)
 
 
 def _best_schema_instance_path(exc: ValidationError) -> tuple[str | int, ...]:

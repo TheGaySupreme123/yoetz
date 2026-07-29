@@ -125,7 +125,15 @@ _SAFE_VALIDATION_REASONS: Final[Mapping[str, str]] = MappingProxyType(
         "list_type": "invalid_type",
         "string_type": "invalid_type",
         "tuple_type": "invalid_type",
+        # Closed object-rule tokens projected from schema-side dependentRequired / if-then.
+        "paired_field_required": "paired_field_required",
+        "conditional_field_required": "conditional_field_required",
     }
+)
+# ValueError ctx tokens from `_validate_model_against_schema` object-rule projection. Only these
+# may replace the generic value_error reason; never trust free-form exception text.
+_SAFE_VALUE_ERROR_REASON_TOKENS: Final = frozenset(
+    {"paired_field_required", "conditional_field_required"}
 )
 _MAX_VALIDATION_LOCATIONS: Final = 8
 # Bounded so the hint stays a hint: a long enum dump would bury the field locations it explains.
@@ -167,6 +175,25 @@ def _pointer_for_location(
     return "/" + "/".join(segments)
 
 
+def _reason_from_validation_item(item: Mapping[str, object]) -> str:
+    """Map one Pydantic error item to a closed safe reason token."""
+
+    raw_reason = item.get("type")
+    if type(raw_reason) is not str:
+        return "invalid_type_or_value"
+    if raw_reason == "value_error":
+        # Object-rule projections stash a closed token on ValueError; do not trust other messages.
+        ctx = item.get("ctx")
+        if isinstance(ctx, Mapping):
+            error = cast(Mapping[object, object], ctx).get("error")
+            if isinstance(error, BaseException):
+                token = str(error)
+                if token in _SAFE_VALUE_ERROR_REASON_TOKENS:
+                    return token
+        return "invalid_type_or_value"
+    return _SAFE_VALIDATION_REASONS.get(raw_reason, "invalid_type_or_value")
+
+
 def safe_validation_locations(exc: object) -> tuple[dict[str, str], ...]:
     """Project Pydantic failures to allowlisted locations and bounded reason tokens."""
 
@@ -174,13 +201,11 @@ def safe_validation_locations(exc: object) -> tuple[dict[str, str], ...]:
         return ()
     projected: list[dict[str, str]] = []
     try:
-        errors = exc.errors(include_url=False, include_context=False, include_input=False)
+        # Context is required to recover closed object-rule reason tokens; inputs stay excluded.
+        errors = exc.errors(include_url=False, include_context=True, include_input=False)
     except BaseException:
         return ()
     for item in errors:
-        raw_reason = item.get("type")
-        if type(raw_reason) is not str:
-            continue
         pointer = _pointer_for_location(
             item.get("loc"),
             # Project to the nearest allowlisted parent so untrusted leaf keys (payload fields,
@@ -190,7 +215,7 @@ def safe_validation_locations(exc: object) -> tuple[dict[str, str], ...]:
         # Empty pointers (model-level failures with no path) are not actionable; omit them.
         if pointer is None or pointer == "":
             continue
-        reason = _SAFE_VALIDATION_REASONS.get(raw_reason, "invalid_type_or_value")
+        reason = _reason_from_validation_item(cast(Mapping[str, object], item))
         projected.append({"field": pointer, "reason": reason})
         if len(projected) == _MAX_VALIDATION_LOCATIONS:
             break
@@ -206,9 +231,12 @@ def authoring_hint(schema: object, locations: Sequence[Mapping[str, str]]) -> st
     the gap because they say where, not what. Nested `/event_drafts/N` failures need the same:
     walk local ``$defs`` so payload enums such as `action_kind` are named.
 
+    Root-level object rules (``dependentRequired``, attach ``if/then``) name the required peer or
+    safe alternative from schema metadata only — never from submitted values.
+
     Every character comes from the checked-in presentation schema — enum members, consts, bounded
-    patterns, and the worked example's own keys — so no caller-controlled text can reach the
-    message.
+    patterns, pairing maps, and the worked example's own keys — so no caller-controlled text can
+    reach the message.
     """
 
     if not isinstance(schema, Mapping):
@@ -221,20 +249,34 @@ def authoring_hint(schema: object, locations: Sequence[Mapping[str, str]]) -> st
     seen: set[tuple[str, str]] = set()
     example_families: list[str] = []
     try:
-        for location in locations:
-            pointer = location.get("field", "")
-            if type(pointer) is not str or not pointer.startswith("/"):
-                continue
-            label, admitted, family = _hint_for_pointer(document, pointer)
-            key = (label, admitted)
-            if not admitted or key in seen:
+        object_rule_parts = _object_rule_hint_parts(document, locations)
+        for text in object_rule_parts:
+            key = (text, "")
+            if key in seen:
                 continue
             seen.add(key)
-            parts.append(f"{label} admits {admitted}")
-            if family is not None and family not in example_families:
-                example_families.append(family)
+            parts.append(text)
             if len(parts) == _MAX_HINT_FIELDS:
                 break
+        if len(parts) < _MAX_HINT_FIELDS:
+            for location in locations:
+                pointer = location.get("field", "")
+                reason = location.get("reason", "")
+                if type(pointer) is not str or not pointer.startswith("/"):
+                    continue
+                # Object-rule locations already contributed schema-derived pairing text above.
+                if reason in _SAFE_VALUE_ERROR_REASON_TOKENS:
+                    continue
+                label, admitted, family = _hint_for_pointer(document, pointer)
+                key = (label, admitted)
+                if not admitted or key in seen:
+                    continue
+                seen.add(key)
+                parts.append(f"{label} admits {admitted}")
+                if family is not None and family not in example_families:
+                    example_families.append(family)
+                if len(parts) == _MAX_HINT_FIELDS:
+                    break
         if _has_example(document):
             if example_families:
                 named = ", ".join(example_families[:_MAX_HINT_FIELDS])
@@ -261,6 +303,179 @@ def authoring_hint(schema: object, locations: Sequence[Mapping[str, str]]) -> st
     if not parts:
         return ""
     return " Hint: " + "; ".join(parts) + "."
+
+
+def _object_rule_hint_parts(
+    document: Mapping[str, JsonValue], locations: Sequence[Mapping[str, str]]
+) -> list[str]:
+    """Build pairing / conditional hints from schema metadata for object-rule locations."""
+
+    paired_fields: list[str] = []
+    conditional_fields: list[str] = []
+    for location in locations:
+        pointer = location.get("field", "")
+        reason = location.get("reason", "")
+        if type(pointer) is not str or not pointer.startswith("/"):
+            continue
+        segments = pointer.removeprefix("/").split("/")
+        if len(segments) != 1 or not segments[0]:
+            continue
+        field = segments[0]
+        if field not in _SAFE_LOCATION_SEGMENTS:
+            continue
+        if reason == "paired_field_required":
+            if field not in paired_fields:
+                paired_fields.append(field)
+        elif reason == "conditional_field_required":
+            if field not in conditional_fields:
+                conditional_fields.append(field)
+    parts: list[str] = []
+    if paired_fields:
+        parts.extend(_paired_field_hint_parts(document, paired_fields))
+    if conditional_fields:
+        parts.extend(_conditional_field_hint_parts(document, conditional_fields))
+    return parts
+
+
+def _paired_field_hint_parts(document: Mapping[str, JsonValue], fields: Sequence[str]) -> list[str]:
+    """Name required peers from schema ``dependentRequired`` only."""
+
+    deps = document.get("dependentRequired")
+    if not isinstance(deps, Mapping):
+        return []
+    properties = document.get("properties")
+    if not isinstance(properties, Mapping):
+        return []
+    prop_names = cast(Mapping[str, JsonValue], properties)
+    field_set = set(fields)
+    parts: list[str] = []
+    seen: set[str] = set()
+    for key, peers in cast(Mapping[object, object], deps).items():
+        if type(key) is not str or key not in prop_names:
+            continue
+        if key not in field_set and not (
+            isinstance(peers, list)
+            and any(type(p) is str and p in field_set for p in cast(list[object], peers))
+        ):
+            continue
+        if not isinstance(peers, list):
+            continue
+        peer_names = [
+            peer for peer in cast(list[object], peers) if type(peer) is str and peer in prop_names
+        ]
+        if not peer_names:
+            continue
+        text = f"{key} requires {', '.join(peer_names)}"
+        if text in seen:
+            continue
+        seen.add(text)
+        parts.append(text)
+        if len(parts) == _MAX_HINT_FIELDS:
+            break
+    return parts
+
+
+def _conditional_field_hint_parts(
+    document: Mapping[str, JsonValue], fields: Sequence[str]
+) -> list[str]:
+    """Name safe required alternatives activated by a root-level ``if/then`` rule."""
+
+    del fields  # Field list confirms a conditional failure; alternatives come from the schema.
+    properties = document.get("properties")
+    if not isinstance(properties, Mapping):
+        return []
+    prop_names = cast(Mapping[str, JsonValue], properties)
+    all_of = document.get("allOf")
+    if not isinstance(all_of, list):
+        return []
+    for branch in cast(list[JsonValue], all_of):
+        if not isinstance(branch, Mapping):
+            continue
+        source = cast(Mapping[str, JsonValue], branch)
+        if_node = source.get("if")
+        then_node = source.get("then")
+        if not isinstance(if_node, Mapping) or not isinstance(then_node, Mapping):
+            continue
+        condition = _if_const_condition(cast(Mapping[str, JsonValue], if_node), prop_names)
+        alternatives = _required_alternatives(cast(Mapping[str, JsonValue], then_node), prop_names)
+        if not alternatives:
+            continue
+        alt_text = " or ".join(alternatives)
+        if condition is not None:
+            return [f"{condition} requires {alt_text}"]
+        return [f"requires {alt_text}"]
+    return []
+
+
+def _if_const_condition(
+    if_node: Mapping[str, JsonValue], prop_names: Mapping[str, JsonValue]
+) -> str | None:
+    """Return ``field value`` for a simple ``if.properties.X.const`` condition, else None."""
+
+    required = if_node.get("required")
+    props = if_node.get("properties")
+    if not isinstance(props, Mapping):
+        return None
+    if isinstance(required, list):
+        keys = [item for item in cast(list[object], required) if type(item) is str]
+    else:
+        keys = [key for key in cast(Mapping[object, object], props) if type(key) is str]
+    if len(keys) != 1:
+        return None
+    field = keys[0]
+    if field not in prop_names or field not in _SAFE_LOCATION_SEGMENTS:
+        return None
+    field_schema = cast(Mapping[str, JsonValue], props).get(field)
+    if not isinstance(field_schema, Mapping):
+        return None
+    const = cast(Mapping[str, JsonValue], field_schema).get("const")
+    if type(const) is not str or not const.isascii() or len(const) > 64:
+        return None
+    return f"{field} {const}"
+
+
+def _required_alternatives(
+    then_node: Mapping[str, JsonValue], prop_names: Mapping[str, JsonValue]
+) -> list[str]:
+    """Return human-readable required alternatives under then.anyOf|oneOf|required."""
+
+    options = then_node.get("anyOf")
+    if not isinstance(options, list):
+        options = then_node.get("oneOf")
+    if isinstance(options, list):
+        alts: list[str] = []
+        for branch in cast(list[JsonValue], options):
+            if not isinstance(branch, Mapping):
+                continue
+            required = cast(Mapping[str, JsonValue], branch).get("required")
+            text = _format_required_list(required, prop_names)
+            if text and text not in alts:
+                alts.append(text)
+            if len(alts) == _MAX_HINT_FIELDS:
+                break
+        return alts
+    return (
+        [_format_required_list(then_node.get("required"), prop_names)]
+        if then_node.get("required") is not None
+        else []
+    )
+
+
+def _format_required_list(required: object, prop_names: Mapping[str, JsonValue]) -> str:
+    if not isinstance(required, list):
+        return ""
+    names = [
+        item
+        for item in cast(list[object], required)
+        if type(item) is str and item in prop_names and item in _SAFE_LOCATION_SEGMENTS
+    ]
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]} and {names[1]}"
+    return ", ".join(names[:-1]) + f", and {names[-1]}"
 
 
 def _hint_for_pointer(
