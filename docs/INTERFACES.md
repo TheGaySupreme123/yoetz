@@ -1623,6 +1623,17 @@ timeout, invalid, late, and unavailable outcomes are values. `SemanticCase` rema
 pre-egress candidate and is never provider input. It contains a structured `ReviewPacket`: goal and
 obligations, claims and decisions, a material ordered timeline, deterministic findings plus
 `FindingBasis`, change observations, coverage, targeted recorded excerpts, and an omission manifest.
+The owning `DeterministicCase` freezes a canonical material-history tail before semantic selection:
+at most 64 accepted plan, obligation, decision, action, result, evidence, claim, finding, response,
+and check events, in ingestion order, with at most 512 KiB of canonical payload. Payload retention
+is newest-first; over-budget retained payload is `not_selected`, legacy history is `not_recorded`,
+source redaction is `redacted_never_send`, and an exact omitted-before count represents older
+events. `structural` emits only event identity/order/digest/visibility as
+`bounded_structural_metadata`. Goal-aware detail is emitted as separate `task_description`,
+`obligation_text`, `claim_text`, `decision_excerpt`, `command_metadata`, `evidence_excerpt`, or
+`finding_summary` items. Exact action command text is removed unless
+`include_exact_command_text` is independently true. Every item remains separately policy-selected,
+scanned, authorized, and receipted; the frozen slice grants no egress authority.
 Its reference allowlist is the union of `frontier_refs` (IDs present at frozen frontier F) and
 `local_check_refs` (new deterministic finding IDs already pinned in this check's durable local
 result); both sets and their union are case-digest inputs.

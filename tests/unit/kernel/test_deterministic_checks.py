@@ -13,6 +13,7 @@ from builders.replay import replay_records
 from yoetz.domain.events import AcceptedEvent
 from yoetz.domain.findings import FindingKind, FindingOrigin
 from yoetz.domain.values import claim_id, object_id, obligation_id
+from yoetz.kernel import deterministic_checks
 from yoetz.kernel.deterministic_checks import (
     DETERMINISTIC_FINDING_TEMPLATES,
     CaseAvailabilityFacts,
@@ -56,6 +57,39 @@ def test_deterministic_case_codec_round_trips_canonical_bytes() -> None:
     decoded = deterministic_case_from_json(encoded)
     assert decoded == case
     assert canonical_encode(deterministic_case_to_json(decoded)) == canonical_encode(encoded)
+
+
+def test_frozen_history_is_bounded_and_legacy_cases_remain_distinct(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records = replay_records("all-event-families")
+    projection = replay(records)
+    monkeypatch.setattr(deterministic_checks, "MAX_FROZEN_HISTORY_EVENTS", 2)
+    case = build_deterministic_case(projection, records, CaseAvailabilityFacts())
+    assert [item.schema_name for item in case.history] == [
+        "response_recorded",
+        "plan_revised",
+    ]
+    assert case.history_omitted_before_count == 9
+    encoded = deterministic_case_to_json(case)
+    legacy = dict(encoded)
+    legacy.pop("history")
+    legacy.pop("history_availability")
+    legacy.pop("history_omitted_before_count")
+    decoded = deterministic_case_from_json(legacy)
+    assert decoded.history == ()
+    assert decoded.history_availability == "not_recorded"
+
+
+def test_frozen_history_payload_budget_marks_content_not_selected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records = replay_records("all-event-families")
+    monkeypatch.setattr(deterministic_checks, "MAX_FROZEN_HISTORY_BYTES", 1)
+    case = build_deterministic_case(replay(records), records, CaseAvailabilityFacts())
+    assert case.history
+    assert all(item.payload is None for item in case.history)
+    assert {item.content_visibility for item in case.history} == {"not_selected"}
 
 
 def test_deterministic_case_decoder_rejects_extra_and_contradictory_state() -> None:

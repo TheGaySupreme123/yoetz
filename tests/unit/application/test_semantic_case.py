@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import cast
 
 from builders.policy_cases import (
     clm,
@@ -15,6 +16,7 @@ from builders.policy_cases import (
     plan_record,
     record,
 )
+from builders.replay import replay_records
 from yoetz.application.check import CheckScope, allocate_findings, run_deterministic_policies
 from yoetz.application.semantic_case import (
     REVIEW_PACKET_ITEM_ID,
@@ -41,10 +43,15 @@ from yoetz.domain.privacy import (
     ReviewSelectionPolicy,
 )
 from yoetz.domain.values import EvidenceId, timestamp_from_string
-from yoetz.kernel.deterministic_checks import DeterministicCase
+from yoetz.kernel.deterministic_checks import (
+    CaseAvailabilityFacts,
+    DeterministicCase,
+    build_deterministic_case,
+)
 from yoetz.kernel.projections import EvidenceProjectionRecord
+from yoetz.kernel.reducers import replay
 from yoetz.ports.semantic import SemanticCase
-from yoetz.protocol.canonical import strict_json_parse
+from yoetz.protocol.canonical import JsonValue, strict_json_parse
 from yoetz.protocol.coverage import EvidenceImmutability
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import DataCategory
@@ -156,6 +163,104 @@ def test_goal_aware_profile_includes_bounded_goal_obligation_claim_with_categori
     assert b"Ship the review packet" in goal.content
     # Goal-aware still excludes targeted excerpts.
     assert semantic.packet.targeted_excerpts == ()
+
+
+def test_provider_packet_preserves_detailed_frozen_history_by_category() -> None:
+    records = replay_records("all-event-families")
+    case = build_deterministic_case(replay(records), records, CaseAvailabilityFacts())
+    semantic = _build(case, ReviewContextProfile.GOAL_AWARE)
+    timeline = [
+        item
+        for item in semantic.items
+        if item.item_id in semantic.packet.timeline_item_ids
+        and item.item_id.startswith("history-")
+    ]
+    assert [item.occurred_order for item in timeline] == sorted(
+        item.occurred_order for item in timeline
+    )
+    by_kind: dict[str, Mapping[str, JsonValue]] = {}
+    for item in timeline:
+        document = strict_json_parse(item.content)
+        assert isinstance(document, Mapping)
+        typed = cast(Mapping[str, JsonValue], document)
+        kind = typed.get("kind")
+        assert type(kind) is str
+        by_kind[kind] = typed
+
+    def payload_for(kind: str) -> Mapping[str, JsonValue]:
+        payload = by_kind[kind]["payload"]
+        assert isinstance(payload, Mapping)
+        return cast(Mapping[str, JsonValue], payload)
+
+    obligation = payload_for("obligation_published")
+    assert obligation["acceptance_criteria"] == "All fixture assertions are reproducible offline."
+    assert obligation["evidence_expectation"] == "A deterministic test-result snapshot"
+    assert obligation["requested_items"] == [{"item_kind": "change", "value": "synthetic-replay"}]
+    decision = payload_for("decision_recorded")
+    assert decision["rationale"] == "A deterministic command is the smallest complete public example."
+    action = payload_for("action_recorded")
+    assert action["description"] == "Run the synthetic replay verification"
+    assert action["attempted_items"] == ["synthetic-replay"]
+    assert "command" not in action
+    result = payload_for("result_recorded")
+    assert result["summary"] == "Synthetic replay verification passed"
+    evidence = payload_for("evidence_recorded")
+    assert evidence["observed_at"] == "2026-03-02T00:00:08.000Z"
+    assert evidence["strength"] == "immutable_snapshot"
+    assert {"check_recorded", "response_recorded", "plan_published", "plan_revised"} <= by_kind.keys()
+    categories = {(item.source_kind, item.category) for item in timeline}
+    assert ("obligation", DataCategory.OBLIGATION_TEXT) in categories
+    assert ("action", DataCategory.COMMAND_METADATA) in categories
+    assert ("result", DataCategory.COMMAND_METADATA) in categories
+    assert ("evidence", DataCategory.EVIDENCE_EXCERPT) in categories
+
+    prepared = semantic_case_to_prepared_payload(
+        semantic, {item.item_id for item in semantic.items}
+    )
+    provider_document = strict_json_parse(prepared)
+    assert isinstance(provider_document, Mapping)
+    provider_items = cast(Mapping[str, JsonValue], provider_document)["items"]
+    assert isinstance(provider_items, list)
+    provider_kinds: set[str] = set()
+    for raw_item in provider_items:
+        if not isinstance(raw_item, Mapping):
+            continue
+        item = cast(Mapping[str, JsonValue], raw_item)
+        item_id = item.get("item_id")
+        content = item.get("content")
+        if type(item_id) is not str or not item_id.startswith("history-"):
+            continue
+        assert type(content) is str
+        rendered = strict_json_parse(content.encode("utf-8"))
+        assert isinstance(rendered, Mapping)
+        kind = cast(Mapping[str, JsonValue], rendered).get("kind")
+        assert type(kind) is str
+        provider_kinds.add(kind)
+    assert {
+        "action_recorded",
+        "check_recorded",
+        "obligation_published",
+        "plan_revised",
+        "response_recorded",
+        "result_recorded",
+    } <= provider_kinds
+
+
+def test_structural_history_has_no_recorded_prose_and_declares_omissions() -> None:
+    records = replay_records("all-event-families")
+    case = build_deterministic_case(replay(records), records, CaseAvailabilityFacts())
+    semantic = _build(case, ReviewContextProfile.STRUCTURAL)
+    history = [item for item in semantic.items if item.item_id.startswith("history-")]
+    assert history
+    assert {item.category for item in history} == {
+        DataCategory.BOUNDED_STRUCTURAL_METADATA
+    }
+    assert all(b'"payload"' not in item.content for item in history)
+    assert any(
+        omission.reason == "not_selected"
+        and omission.category is DataCategory.OBLIGATION_TEXT
+        for omission in semantic.packet.omissions
+    )
 
 
 def test_assisted_profile_includes_only_linked_recorded_capped_excerpts() -> None:

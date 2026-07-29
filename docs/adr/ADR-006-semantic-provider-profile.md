@@ -123,7 +123,11 @@ and semantic/privacy capability and conformance tests.
 12. **The recommended packet is rich but problem-local:** `assisted` contains the task goal,
     obligations, current completion/material claims, accepted decisions, a material ordered
     timeline, deterministic findings and their machine-readable bases, change-observation facts,
-    coverage gaps, and bounded linked test/failure/evidence/source excerpts. A source excerpt must
+    coverage gaps, and bounded linked test/failure/evidence/source excerpts. The frozen case retains
+    the newest 64 material accepted events in ingestion order with at most 512 KiB of canonical
+    payload. Newest payloads win that byte budget; retained over-budget events are `not_selected`,
+    older events are represented by an exact omitted-before count, and legacy cases state
+    `not_recorded`. A source excerpt must
     already be captured or agent-published in the frozen case and must be linked to the reviewed
     claim, obligation, finding, action, result, or evidence. The case builder has no live Git or
     filesystem browser and never upgrades missing content into observed content. `expanded` and
@@ -181,11 +185,13 @@ The stable provider instruction is equivalent to:
 > repository facts, or claim deterministic authority.
 
 The packet varies by `ReviewContextProfile`: `structural` contains only typed timeline/status/state/
-coverage facts; `goal_aware` adds goal, obligation, claim, decision, and finding prose; `assisted`
+coverage facts; `goal_aware` adds detailed, category-separated frozen plan, obligation, claim,
+decision, action, result, evidence, finding, response, and check history; `assisted` additionally
 adds problem-local recorded evidence, failure, test, diff, and repository excerpts; `expanded` or
-`custom` can include a broader explicitly approved recorded set. Every variant includes an
-`omissions` section that distinguishes `not_recorded`, `not_selected`, `withheld_by_policy`, and
-`redacted_never_send`.
+`custom` can include a broader explicitly approved recorded set. Exact command text remains
+excluded unless independently selected. Every variant distinguishes `not_recorded`, `not_selected`,
+`withheld_by_policy`, and `redacted_never_send`; a history-window item carries the exact older-event
+count.
 
 ## Deterministic fencing
 
