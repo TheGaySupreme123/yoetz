@@ -13,6 +13,11 @@ Deterministic checks, findings, and receipts all work in this state.
 Turning on external semantic review is a separate, explicit decision. It is not implied by
 installing, by binding a provider, or by having a credential.
 
+An MCP host can impose a stronger process-local ceiling with
+`yoetz mcp serve --semantic off`. That strict route cannot request external semantic review even if
+durable policy is widened later. It is separate from the policy profiles below; see
+[Auto-approving an MCP route](auto-approving-agents.md).
+
 ## The four LLM privacy profiles
 
 `local_only`, `confirm_every_request`, `minimal_external`, `trusted_provider`.

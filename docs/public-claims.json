@@ -48,6 +48,44 @@
       "release_status": "not_yet_evidenced"
     },
     {
+      "claim_id": "mcp.host_declared_semantic_egress_ceiling",
+      "statement": "An MCP process launched as `yoetz mcp serve --semantic off` has an immutable strict route profile: Yoetz never requests semantic runtime capability or dispatches a semantic evaluator for that process, semantic requests are reported as blocked_by_policy with route_semantic_ceiling, and the result and receipt retain the resulting coverage gap.",
+      "scope": {
+        "operations": [
+          "check",
+          "status"
+        ],
+        "transports": [
+          "cooperative_mcp",
+          "local_service_ipc"
+        ]
+      },
+      "limitations": [
+        "external_semantic_dispatch_only",
+        "not_a_general_network_sandbox",
+        "host_and_unrelated_processes_out_of_scope",
+        "registration_does_not_prove_activation"
+      ],
+      "surfaces": [
+        "SECURITY.md",
+        "docs/usage/auto-approving-agents.md"
+      ],
+      "requirements": [
+        "ADR-018",
+        "docs/INTERFACES.md"
+      ],
+      "tests": [
+        "tests/conformance/honesty/test_strict_local_zero_egress.py",
+        "tests/conformance/surfaces/test_mcp_contract_matrix.py",
+        "tests/subprocess/test_mcp_initialize_and_tools.py"
+      ],
+      "evidence_kinds": [
+        "conformance_test",
+        "subprocess_test"
+      ],
+      "release_status": "not_yet_evidenced"
+    },
+    {
       "claim_id": "ops.six_operation_parity",
       "statement": "Yoetz exposes exactly six workflow operations (start, publish_work, check, respond, status, receipt) with identical request/result contracts across the CLI and MCP surfaces; import, review, backup, restore, migrate, version, and harness integration are CLI support commands, never additional MCP tools.",
       "scope": {

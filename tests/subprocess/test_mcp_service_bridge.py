@@ -142,6 +142,7 @@ class _FakeClient:
     ) -> None:
         self.failure = failure
         self.calls: list[tuple[str, object]] = []
+        self.route_profiles: list[tuple[str, str | None]] = []
         self.closed = False
 
     async def connect(self) -> None:
@@ -162,13 +163,19 @@ class _FakeClient:
     async def publish_work(self, request: PublishWorkRequest) -> PublishWorkResult:
         return await self._call("publish_work", request, PublishWorkResult)
 
-    async def check(self, request: CheckRequest) -> CheckResult:
+    async def check(
+        self, request: CheckRequest, *, route_profile: str | None = None
+    ) -> CheckResult:
+        self.route_profiles.append(("check", route_profile))
         return await self._call("check", request, CheckResult)
 
     async def respond(self, request: RespondRequest) -> RespondResult:
         return await self._call("respond", request, RespondResult)
 
-    async def status(self, request: StatusRequest) -> StatusResult:
+    async def status(
+        self, request: StatusRequest, *, route_profile: str | None = None
+    ) -> StatusResult:
+        self.route_profiles.append(("status", route_profile))
         return await self._call("status", request, StatusResult)
 
     async def receipt(self, request: ReceiptRequest) -> ReceiptResult:
@@ -224,6 +231,34 @@ async def test_exact_six_dispatchers_use_one_ordinary_client(
     assert client.closed is False
     await bridge.close_bridge_runtime(runtime)
     assert client.closed is True
+
+
+@pytest.mark.anyio
+async def test_strict_bridge_attaches_private_route_profile_after_public_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient()
+    _install_clients(monkeypatch, [client])
+    runtime = bridge.build_bridge_runtime("strict")
+
+    result = await bridge.dispatch_check(_requests()["check"], runtime)
+
+    assert result.isError is True
+    assert client.route_profiles == [("check", "strict")]
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_agent_cannot_supply_or_clear_the_private_route_profile() -> None:
+    runtime = bridge.build_bridge_runtime("strict")
+    arguments = {**_requests()["check"], "route_profile": "policy"}
+
+    result = await bridge.dispatch_check(arguments, runtime)
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error"]["code"] == "INVALID_REQUEST"
+    assert runtime._slot.client is None  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.anyio

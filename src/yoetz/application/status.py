@@ -85,6 +85,7 @@ from yoetz.protocol.models import (
     StatusOperationPageModel,
     StatusPage,
     StatusRequest,
+    StatusVersionSliceModel,
     StatusVersionsPageModel,
 )
 
@@ -803,9 +804,16 @@ async def _closure_readiness(
     )
 
 
-async def execute_status(app: Application, request: StatusRequest) -> StatusInternalResult:
+async def execute_status(
+    app: Application,
+    request: StatusRequest,
+    *,
+    route_profile: Literal["policy", "strict"] | None = None,
+) -> StatusInternalResult:
     """Return one typed status page without creating a task-ledger consequence."""
 
+    if route_profile not in {None, "policy", "strict"}:
+        raise TypeError("status_route_profile_invalid")
     decoded = _decode_cursor(app, request)
     runtime = await app.runtime.route(
         RouteCommand(
@@ -1041,6 +1049,19 @@ async def execute_status(app: Application, request: StatusRequest) -> StatusInte
                 )
             )
             page = _page_model(raw_page, next_cursor)
+            if route_profile is not None and type(page) is StatusVersionsPageModel:
+                page = StatusVersionsPageModel(
+                    items=tuple(
+                        StatusVersionSliceModel.model_validate(
+                            {
+                                **item.model_dump(mode="json", exclude_none=True),
+                                "route_profile": route_profile,
+                            }
+                        )
+                        for item in page.items
+                    ),
+                    next_cursor=None,
+                )
             coverage = raw_page.coverage
             gaps = raw_page.gaps
             head = raw_page.head_frontier

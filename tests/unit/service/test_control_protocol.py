@@ -351,6 +351,54 @@ def test_workflow_start_request_round_trips_through_frozen_json_object() -> None
     assert parsed.body.mode == start.mode
 
 
+def test_private_mcp_route_profile_round_trips_only_for_check_and_status() -> None:
+    from yoetz.protocol.models import CheckRequest
+
+    check = CheckRequest.model_validate(
+        {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "request_id": _REQUEST_ID,
+            "session_id": _SESSION_ID,
+            "writer_id": _WRITER_ID,
+            "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
+            "mode": "semantic_required",
+            "actor": {"actor_id": "harness:pytest", "actor_type": "harness"},
+            "client": {
+                "kind": "cooperative_agent",
+                "version": "0.1.0",
+                "integration": "cooperative_mcp",
+            },
+        }
+    )
+    request = ControlCallRequest(
+        kind="call",
+        protocol_version="1.0",
+        rpc_id=_rpc_id(10),
+        service_instance_id=_SERVICE_ID,
+        service_generation="1",
+        method=ControlMethod.CHECK,
+        body=check,
+        route_profile="strict",
+    )
+
+    parsed = parse_control_request(decode_control_frame(encode_control_frame(request)))
+
+    assert isinstance(parsed, ControlCallRequest)
+    assert parsed.route_profile == "strict"
+    with pytest.raises(ValueError, match="control_route_profile_invalid"):
+        ControlCallRequest(
+            kind="call",
+            protocol_version="1.0",
+            rpc_id=_rpc_id(11),
+            service_instance_id=_SERVICE_ID,
+            service_generation="1",
+            method=ControlMethod.SERVICE_STATUS,
+            body=JsonObject({}),
+            route_profile="strict",
+        )
+
+
 class _MemoryStream:
     def __init__(self, peer_identity: object) -> None:
         self.peer_identity = peer_identity

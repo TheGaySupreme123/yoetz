@@ -15,6 +15,7 @@ from yoetz.protocol.errors import PROTOCOL_REASON_CODES, ProtocolValueError
 
 __all__ = [
     "MCP_SERVE_COMMAND",
+    "MCP_STRICT_SERVE_COMMAND",
     "MCP_SERVER_NAME",
     "HarnessBinary",
     "HarnessMcpPort",
@@ -29,6 +30,7 @@ __all__ = [
 
 MCP_SERVER_NAME: Final = "yoetz"
 MCP_SERVE_COMMAND: Final = ("yoetz", "mcp", "serve")
+MCP_STRICT_SERVE_COMMAND: Final = (*MCP_SERVE_COMMAND, "--semantic", "off")
 
 _MAX_PATH_CHARS: Final = 4_096
 _MAX_VERSION_CHARS: Final = 64
@@ -52,6 +54,7 @@ class McpRegistrationState(str, Enum):  # noqa: UP042 - exact wire-valued Enum i
 
 class McpRegistrationAction(str, Enum):  # noqa: UP042 - exact wire-valued Enum is required
     REGISTER = "register"
+    REREGISTER = "reregister"
     NOOP = "noop"
 
 
@@ -111,6 +114,8 @@ class McpRegistrationPreview:
     state_before: McpRegistrationState
     warnings: tuple[str, ...]
     preview_digest: str
+    serve_command: tuple[str, ...] = MCP_SERVE_COMMAND
+    route_profile: Literal["policy", "strict"] = "policy"
 
     def __post_init__(self) -> None:
         if type(self.harness_id) is not HarnessId:
@@ -129,6 +134,11 @@ class McpRegistrationPreview:
                 raise _port_error("integration_value_invalid")
             previous = warning
         validate_sha256_digest(self.preview_digest)
+        expected_command = (
+            MCP_STRICT_SERVE_COMMAND if self.route_profile == "strict" else MCP_SERVE_COMMAND
+        )
+        if self.route_profile not in {"policy", "strict"} or self.serve_command != expected_command:
+            raise _port_error("integration_value_invalid")
 
 
 @dataclass(frozen=True, slots=True)

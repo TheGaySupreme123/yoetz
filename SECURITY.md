@@ -42,6 +42,7 @@ repository. It does not cover unrelated third-party integrations you have config
 | Local service, storage, privacy/egress gateway | Yes — defects in Yoetz enforcement | Operator misconfiguration that widens policy after informed consent |
 | Provider / MCP destinations you enable | Defects in Yoetz classification, binding, or audit | Trustworthiness of an external provider or MCP server you chose |
 | Agent / harness integrations | Defects in Yoetz-owned bridges and guidance delivery | Host agent bugs outside Yoetz adapters |
+| Strict MCP route (`yoetz mcp serve --semantic off`) | Any Yoetz semantic capability request or evaluator dispatch from that process | Network activity by the host, OS, local-model process, or unrelated software |
 | Social engineering, physical access, compromised host OS | Only when Yoetz fails a stated boundary | General host compromise outside Yoetz’s control |
 
 Yoetz does not claim a general-purpose sandbox for untrusted code. Reports that only restate

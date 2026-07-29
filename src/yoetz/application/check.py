@@ -838,10 +838,17 @@ def validate_semantic_judgment(
     return tuple(candidates)
 
 
-def _request_digest(request: CheckRequest, scope: CheckScope, packs: tuple[str, ...]) -> str:
+def _request_digest(
+    request: CheckRequest,
+    scope: CheckScope,
+    packs: tuple[str, ...],
+    *,
+    route_profile: Literal["policy", "strict"],
+) -> str:
     source = cast(dict[str, JsonValue], request.model_dump(mode="json", by_alias=True))
     source["scope"] = {"claim_ids": scope.claim_ids, "obligation_ids": scope.obligation_ids}
     source["policy_packs"] = packs
+    source["route_profile"] = route_profile
     return canonical_digest(source)
 
 
@@ -851,11 +858,18 @@ async def _semantic_evaluation(
     runtime: TaskRuntime,
     frozen: FrozenCase,
     deterministic: tuple[Finding, ...],
+    *,
+    route_profile: Literal["policy", "strict"],
 ) -> FinalSemanticEvaluation:
     if request.mode == "deterministic_only":
         return FinalSemanticEvaluation(
             SemanticStatus.NOT_REQUESTED,
             SemanticReason.DETERMINISTIC_MODE,
+        )
+    if route_profile == "strict":
+        return FinalSemanticEvaluation(
+            SemanticStatus.BLOCKED_BY_POLICY,
+            SemanticReason.ROUTE_SEMANTIC_CEILING,
         )
     if RuntimeCapability.SEMANTIC not in runtime.capabilities:
         return FinalSemanticEvaluation(
@@ -878,9 +892,16 @@ async def _semantic_evaluation(
         )
 
 
-async def execute_check_commit(app: Application, request: CheckRequest) -> CheckCommitResult:
+async def execute_check_commit(
+    app: Application,
+    request: CheckRequest,
+    *,
+    route_profile: Literal["policy", "strict"] = "policy",
+) -> CheckCommitResult:
     """Freeze, evaluate, rank, and atomically commit one check operation."""
 
+    if route_profile not in {"policy", "strict"}:
+        raise TypeError("check_route_profile_invalid")
     scope = normalize_check_scope(request)
     packs = _selected_packs(request)
     required_capabilities = {
@@ -892,7 +913,11 @@ async def execute_check_commit(app: Application, request: CheckRequest) -> Check
     # capability and reports provider_not_configured before the configured evaluator can run.
     # An explicitly semantic request while semantic verification is disabled retains the existing
     # honest not-configured result instead of becoming a routing failure.
-    if request.mode != "deterministic_only" and app.verification_policy.semantic != "disabled":
+    if (
+        route_profile == "policy"
+        and request.mode != "deterministic_only"
+        and app.verification_policy.semantic != "disabled"
+    ):
         required_capabilities.add(RuntimeCapability.SEMANTIC)
     runtime = await app.runtime.route(
         RouteCommand(
@@ -909,7 +934,7 @@ async def execute_check_commit(app: Application, request: CheckRequest) -> Check
                 "The writer route is inconsistent.",
                 False,
             )
-        digest = _request_digest(request, scope, packs)
+        digest = _request_digest(request, scope, packs, route_profile=route_profile)
         frozen_or_replay = await runtime.ledger.freeze_case(
             request.session_id,
             request.writer_id,
@@ -956,7 +981,14 @@ async def execute_check_commit(app: Application, request: CheckRequest) -> Check
                 CheckPhase.SEMANTIC_WAIT,
             )
             frozen = FrozenCase(frozen.case, lease)
-        semantic_result = await _semantic_evaluation(app, request, runtime, frozen, deterministic)
+        semantic_result = await _semantic_evaluation(
+            app,
+            request,
+            runtime,
+            frozen,
+            deterministic,
+            route_profile=route_profile,
+        )
         # Durable semantic attempts may renew the check lease (TTL 60s vs timeout up to 300s).
         if semantic_result.operation_lease is not None:
             frozen = FrozenCase(frozen.case, semantic_result.operation_lease)
@@ -1036,10 +1068,15 @@ async def execute_check_commit(app: Application, request: CheckRequest) -> Check
         await app.runtime.release(runtime)
 
 
-async def execute_check(app: Application, request: CheckRequest) -> CheckCommitResult:
+async def execute_check(
+    app: Application,
+    request: CheckRequest,
+    *,
+    route_profile: Literal["policy", "strict"] = "policy",
+) -> CheckCommitResult:
     """Return the closed sink-independent result for the facade's sole projection step."""
 
     # Omitted mode resolves via policy so recorded check events always carry a concrete mode.
     if request.mode is None:
         request = request.model_copy(update={"mode": app.verification_policy.default_check_mode})
-    return await execute_check_commit(app, request)
+    return await execute_check_commit(app, request, route_profile=route_profile)

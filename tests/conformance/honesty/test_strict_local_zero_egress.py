@@ -25,6 +25,7 @@ from builders.start_application import (
     start_request,
 )
 from yoetz.application.egress import PrivacyCoordinator
+from yoetz.application.receipt import ReceiptInternalResult
 from yoetz.application.service import Application, VerificationPolicy
 from yoetz.config.models import (
     PROFILE_CAPABILITIES,
@@ -36,7 +37,12 @@ from yoetz.config.models import (
 from yoetz.domain.events import RuntimeProfile
 from yoetz.domain.findings import CheckVerdict
 from yoetz.domain.privacy import CandidateContext
-from yoetz.domain.receipts import PolicyVersionEntry, ReceiptVersionSlice, SchemaVersionEntry
+from yoetz.domain.receipts import (
+    OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
+    PolicyVersionEntry,
+    ReceiptVersionSlice,
+    SchemaVersionEntry,
+)
 from yoetz.domain.values import Frontier
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
@@ -44,7 +50,7 @@ from yoetz.ports.ledger import CheckCommitResult
 from yoetz.ports.publish_response_catalog import PublishResponseCatalogPort
 from yoetz.ports.runtime import BundleRuntimePort, RouteCommand, TaskRuntime
 from yoetz.protocol.canonical import JsonValue, canonical_encode
-from yoetz.protocol.models import CheckRequest, FrontierModel, PublishWorkRequest
+from yoetz.protocol.models import CheckRequest, FrontierModel, PublishWorkRequest, ReceiptRequest
 
 pytestmark = pytest.mark.anyio
 
@@ -226,6 +232,67 @@ async def _run_deterministic_check(app: Application, seed: int) -> CheckCommitRe
     return await app.check(CheckRequest.model_validate(check_wire))
 
 
+async def _run_route_ceiling_check(
+    app: Application, seed: int
+) -> tuple[CheckCommitResult, ReceiptInternalResult]:
+    started = await app.start(start_request(seed, title="Route ceiling exercise"))
+    published = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 1)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(started.frontier),
+                "event_drafts": (
+                    {
+                        "event_id": protocol_id("evt_", seed + 2),
+                        "schema": {"name": "claim_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-07-29T12:00:00.000Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "claim_id": protocol_id("clm_", seed + 3),
+                            "claim_kind": "material",
+                            "statement": "This claim requests semantic review.",
+                            "supporting_refs": (),
+                            "obligation_refs": (),
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                ),
+            }
+        )
+    )
+    checked = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 4)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(published.result_frontier),
+                "mode": "semantic_required",
+                "max_findings": "3",
+            }
+        ),
+        route_profile="strict",
+    )
+    receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 5)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(checked.result_frontier),
+                "format": "json",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+    return checked, receipt
+
+
 async def test_zero_egress_in_strict_local(monkeypatch: pytest.MonkeyPatch) -> None:
     """No AF_INET/AF_INET6 socket, DNS lookup, or connection is ever attempted under strict-local."""
 
@@ -255,6 +322,18 @@ async def test_strict_local_still_supports_deterministic_operations() -> None:
     finding = checked.findings[0]
     assert finding.summary
     assert finding.coverage.known_gaps == () or finding.coverage.known_gaps
+
+
+async def test_route_ceiling_blocks_required_semantics_and_carries_gap_into_receipt() -> None:
+    app, _runtime, _clock, _catalog = _build_strict_local_application()
+
+    checked, receipt = await _run_route_ceiling_check(app, seed=915)
+
+    assert checked.semantic_status.value == "blocked_by_policy"
+    assert checked.semantic_reason.value == "route_semantic_ceiling"
+    assert checked.verdict.value == "incomplete_check"
+    assert OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP in checked.coverage.known_gaps
+    assert OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP in receipt.coverage.known_gaps
 
 
 def test_strict_local_forbids_provider_attachment_structurally() -> None:

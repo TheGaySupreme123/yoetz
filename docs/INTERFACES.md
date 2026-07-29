@@ -431,7 +431,10 @@ Every status is paired with one required closed `SemanticReason`, never prose or
 `credential_unavailable`, `endpoint_profile_unavailable`, `transport_unavailable`,
 `provider_rate_limited`, `provider_quota_exhausted`, `retry_budget_exhausted`,
 `audit_reservation_unavailable`, `receipt_persistence_unknown`, `deadline_authority_lost`,
-`lease_authority_lost`, `frontier_changed`, `dependency_changed`, `coordinator_failure`.
+`lease_authority_lost`, `frontier_changed`, `dependency_changed`, `route_semantic_ceiling`,
+`coordinator_failure`. `route_semantic_ceiling` is paired with `blocked_by_policy` when a strict
+MCP process receives a semantic check request; it is a route-local ceiling, not a durable-policy
+decision.
 `protocol/models.py` owns both enum objects, the immutable exhaustive status/reason relation, and
 its pair and final-provenance-binding validators. `domain/events.py`, `domain/findings.py`, and `ports/semantic.py` import those same
 objects; the port owns only outcome conversion and may re-export them. `CheckRecordedPayload` and
@@ -1135,6 +1138,12 @@ It has no privacy decision, unlock, secret, credential, key-handle, decrypted-ob
 arbitrary-path, or policy-loosening field or method. `service_status` is available while locked;
 task operations are not. MCP cannot invoke lifecycle, privacy-control, or observation-control
 methods.
+
+The private `ControlCallRequest` envelope may carry `route_profile=policy|strict` only for `check`
+and `status`. It is set by the MCP bridge from its immutable process profile, is absent from public
+operation request models, and is rejected on every other control method. `strict` prevents
+`check` from requesting semantic runtime capability or dispatching an evaluator; an agent cannot
+weaken or select this field.
 
 `ControlError` carries one bounded reason, a `retryable` flag, and an optional service-minted
 `correlation_id`. `response_projection_failed` is reserved for the window after a handler returns
@@ -2049,15 +2058,20 @@ MCP server registration is a sibling port, never an `IntegrationsPort` overload 
 `apply_registration`, each taking a `HarnessBinary` (harness ID, redacted-repr executable path,
 optional reported version, `supported|untested` compatibility). Shared names are
 `MCP_SERVER_NAME` (exactly `yoetz`), `MCP_SERVE_COMMAND` (exactly `("yoetz", "mcp", "serve")`),
+`MCP_STRICT_SERVE_COMMAND` (exactly
+`("yoetz", "mcp", "serve", "--semantic", "off")`),
 `McpRegistrationState` (`absent|yoetz_owned|foreign_present`), `McpRegistrationAction`
-(`register|noop`), `McpRegistrationReason` (`confirmation_required|preview_stale|
+(`register|reregister|noop`), `McpRegistrationReason` (`confirmation_required|preview_stale|
 harness_unavailable|parse_failed|timeout|registration_failed|foreign_entry_present`),
 `McpRegistrationPreview`, `McpRegistrationCommand`, `McpRegistrationResult`, and
 `McpRegistrationError`. `HarnessMcpService` owns confirmation
 (`McpRegistrationConfirmation` with channel exactly `interactive|noninteractive_flag`) and
 diagnostics (`McpRegistrationDiagnostic`, `HarnessMcpDiagnosticSink`); every registration
 mutation is digest-bound to a freshly recomputed preview, a foreign same-name entry is
-preserved without any force path, and success is verified by re-reading state. The setup-wizard
+preserved without any force path, and success is verified by re-reading state. The preview binds
+the exact command and `policy|strict` route profile. A zero-egress setup selects strict; a
+Yoetz-owned registration with the other command requires explicit digest-bound re-registration.
+The setup-wizard
 schema tokens are `yoetz.setup-wizard-marker/1`, `yoetz.setup-wizard-report/1`,
 `yoetz.setup-status/1`, and `yoetz.mcp-registration-preview/1`; the marker lives at
 `state_dir()/setup-wizard.json` via `config.paths.setup_marker_path`. The CLI surfaces are
@@ -2225,14 +2239,19 @@ facade and are never MCP tools.
   names, descriptions, and annotations, plus the `instructions` text. All are loaded from the
   packaged `guidance/` resources and verified against the resource manifest before use; none is
   composed at runtime from user, task, provider, or environment values. Shared values are
-  `ToolDescriptor`, `TOOL_DESCRIPTORS` (frozen, in the same order `tools/list` returns),
+  `ToolDescriptor`, `TOOL_DESCRIPTORS` (frozen `policy|strict` sets, each in the same order
+  `tools/list` returns), `TOOL_DESCRIPTOR_DIGESTS`, `TOOL_DESCRIPTOR_SET_DIGEST`,
   `server_instructions()`, `ORDINARY_MCP_PUBLISH_EVENT_FAMILIES`, and
   `PRESENTATION_INPUT_SCHEMA_BUDGETS`. `ToolDescriptor.input_schema` is the tools/list presentation
   projection (inlined common shapes, ordinary publish event families, minimal examples);
   `catalog_input_schema` / full catalog request schemas remain admission authority via
   `*.model_validate`. `status` carries `readOnlyHint=true`; `receipt` carries
   `readOnlyHint=false` because it stages an object and appends a `receipt_recorded` event. Every
-  tool carries an explicit `idempotentHint=true`. No descriptor carries a
+  tool carries an explicit `idempotentHint=true`. Policy `check` carries `openWorldHint=true`;
+  strict `check` carries `openWorldHint=false` and names the external-semantic ceiling. The hint is
+  inspectable metadata, not enforcement; the route constraint above is authoritative. Initialize
+  instructions and MCP-originated `status(view=versions)` disclose the active profile. No
+  descriptor carries a
   `destructiveHint`, because no Yoetz operation deletes recorded evidence. Descriptor and
   instruction text is bound by the same honesty lint as the guidance references: it may not say
   "verified", "proved", "authenticated", or "complete" except where the surrounding sentence states

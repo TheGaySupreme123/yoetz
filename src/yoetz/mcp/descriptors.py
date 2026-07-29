@@ -6,10 +6,10 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cache
 from types import MappingProxyType
-from typing import Final, cast
+from typing import Final, Literal, cast
 
 from yoetz.mcp.resources import read_resource
 from yoetz.protocol.canonical import JsonValue
@@ -18,6 +18,7 @@ from yoetz.protocol.schemas import SCHEMA_NAMESPACE, load_schema_catalog, schema
 __all__ = [
     "ORDINARY_MCP_PUBLISH_EVENT_FAMILIES",
     "PRESENTATION_INPUT_SCHEMA_BUDGETS",
+    "McpRouteProfile",
     "TOOL_DESCRIPTOR_DIGESTS",
     "TOOL_DESCRIPTOR_SET_DIGEST",
     "TOOL_DESCRIPTORS",
@@ -28,6 +29,8 @@ __all__ = [
     "presentation_schema_metrics",
     "server_instructions",
 ]
+
+type McpRouteProfile = Literal["policy", "strict"]
 
 _SCHEMA_VERSION: Final = "1.0.0"
 _INSTRUCTIONS_URI: Final = "yoetz://guidance/agent-instructions.md"
@@ -904,6 +907,7 @@ def _descriptor(
     *,
     read_only: bool,
     idempotent: bool,
+    open_world: bool = False,
 ) -> ToolDescriptor:
     schema_name = name.replace("_", "-")
     return ToolDescriptor(
@@ -916,11 +920,15 @@ def _descriptor(
         output_schema_ref=(
             f"{SCHEMA_NAMESPACE}operations/{schema_name}-result-{_SCHEMA_VERSION}.schema.json"
         ),
-        annotations=ToolAnnotations(read_only=read_only, idempotent=idempotent),
+        annotations=ToolAnnotations(
+            read_only=read_only,
+            idempotent=idempotent,
+            open_world=open_world,
+        ),
     )
 
 
-TOOL_DESCRIPTORS: Final = (
+_POLICY_TOOL_DESCRIPTORS: Final = (
     _descriptor(
         "start",
         "Start or resume a work session",
@@ -963,6 +971,7 @@ TOOL_DESCRIPTORS: Final = (
         "yoetz://guidance/coverage-and-receipts.md.",
         read_only=False,
         idempotent=True,
+        open_world=True,
     ),
     _descriptor(
         "respond",
@@ -1000,6 +1009,26 @@ TOOL_DESCRIPTORS: Final = (
     ),
 )
 
+_STRICT_CHECK_DESCRIPTION_SUFFIX: Final = (
+    " Under the strict route profile, this route will not request external semantic review."
+)
+_STRICT_TOOL_DESCRIPTORS: Final = tuple(
+    replace(
+        descriptor,
+        description=descriptor.description + _STRICT_CHECK_DESCRIPTION_SUFFIX,
+        annotations=replace(descriptor.annotations, open_world=False),
+    )
+    if descriptor.name == "check"
+    else descriptor
+    for descriptor in _POLICY_TOOL_DESCRIPTORS
+)
+TOOL_DESCRIPTORS: Final[Mapping[McpRouteProfile, tuple[ToolDescriptor, ...]]] = MappingProxyType(
+    {
+        "policy": _POLICY_TOOL_DESCRIPTORS,
+        "strict": _STRICT_TOOL_DESCRIPTORS,
+    }
+)
+
 
 def _canonical_descriptor_bytes(descriptor: ToolDescriptor) -> bytes:
     return json.dumps(
@@ -1022,67 +1051,104 @@ def _digest_descriptor(descriptor: ToolDescriptor) -> str:
 
 
 # These are reviewed golden identities, not values supplied by a host or environment.
-TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[str, str]] = MappingProxyType(
+TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = MappingProxyType(
     {
-        "start": "sha256:d87c67630fbf0d75c6bde24383e5a0d56b8b4e66cda214998b60e5106b401d1a",
-        "publish_work": "sha256:384d539552ebc03b03892d4bfe05462b20fca734701198e46c3b143826535a56",
-        "check": "sha256:1a36e5f8ef40acb1bb1ac024ceb69e9ffe29f67221646f98f5cfd48a7ddfb36b",
-        "respond": "sha256:4a05e83bfce79c5ca6c767c535070fe6011278b6fdbe38958725398928ec751e",
-        "status": "sha256:6abdca221944fc026c915a01ea9cd9110074279532acac5fe285e0e07f3f6b77",
-        "receipt": "sha256:ff32853f91572e04b00f2a61b37f9a1f4f838360aea332967776b5c364ff4291",
+        "policy": MappingProxyType(
+            {
+                "start": "sha256:d87c67630fbf0d75c6bde24383e5a0d56b8b4e66cda214998b60e5106b401d1a",
+                "publish_work": "sha256:384d539552ebc03b03892d4bfe05462b20fca734701198e46c3b143826535a56",
+                "check": "sha256:7779e486e6790b9d26b698566eafcc7b48792c32dade57f53869ee75b29a9018",
+                "respond": "sha256:4a05e83bfce79c5ca6c767c535070fe6011278b6fdbe38958725398928ec751e",
+                "status": "sha256:6abdca221944fc026c915a01ea9cd9110074279532acac5fe285e0e07f3f6b77",
+                "receipt": "sha256:ff32853f91572e04b00f2a61b37f9a1f4f838360aea332967776b5c364ff4291",
+            }
+        ),
+        "strict": MappingProxyType(
+            {
+                "start": "sha256:d87c67630fbf0d75c6bde24383e5a0d56b8b4e66cda214998b60e5106b401d1a",
+                "publish_work": "sha256:384d539552ebc03b03892d4bfe05462b20fca734701198e46c3b143826535a56",
+                "check": "sha256:692ddaf55f6845a8e5a78d54590f61b55f92e30405d5591ee6a138b61dd5d111",
+                "respond": "sha256:4a05e83bfce79c5ca6c767c535070fe6011278b6fdbe38958725398928ec751e",
+                "status": "sha256:6abdca221944fc026c915a01ea9cd9110074279532acac5fe285e0e07f3f6b77",
+                "receipt": "sha256:ff32853f91572e04b00f2a61b37f9a1f4f838360aea332967776b5c364ff4291",
+            }
+        ),
     }
 )
-TOOL_DESCRIPTOR_SET_DIGEST: Final = (
-    "sha256:6a3011090dfc416f37c9b5e04ee83b28bf9e861dae6dc451e40a7a945606c9ed"
+TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
+    {
+        "policy": "sha256:5884d2597909ec877135672ba869cc210249c2ff08fa76e6039600d0de1949d7",
+        "strict": "sha256:b2df0892bc3dd9d52e0ad463bebfbda8aa48d3519f6e2d6c84f6d3cd5b5a29bb",
+    }
 )
 
 
-def _lint_descriptor_set() -> None:
-    names = tuple(descriptor.name for descriptor in TOOL_DESCRIPTORS)
-    if names != ("start", "publish_work", "check", "respond", "status", "receipt"):
-        raise RuntimeError("descriptor_registry_invalid")
-    if len(set(names)) != len(names):
-        raise RuntimeError("descriptor_registry_invalid")
-    for descriptor in TOOL_DESCRIPTORS:
-        if _FORBIDDEN_CLAIMS.search(descriptor.description) is not None:
-            raise RuntimeError("descriptor_honesty_lint_failed")
-        # Packaged guidance URIs are the one reviewed path exception; strip them before the
-        # boundary scan so tool text can name the covering resource without looking like a
-        # filesystem or host path.
-        without_guidance = _GUIDANCE_URI.sub("yoetz-guidance-resource", descriptor.description)
-        if _BOUNDARY_TERMS.search(without_guidance) is not None:
-            raise RuntimeError("descriptor_boundary_lint_failed")
-        if _digest_descriptor(descriptor) != TOOL_DESCRIPTOR_DIGESTS[descriptor.name]:
-            raise RuntimeError("descriptor_digest_mismatch")
-    set_bytes = b"\n".join(_canonical_descriptor_bytes(item) for item in TOOL_DESCRIPTORS)
-    if "sha256:" + hashlib.sha256(set_bytes).hexdigest() != TOOL_DESCRIPTOR_SET_DIGEST:
-        raise RuntimeError("descriptor_set_digest_mismatch")
+def _lint_descriptor_sets() -> None:
+    for profile, descriptors in TOOL_DESCRIPTORS.items():
+        names = tuple(descriptor.name for descriptor in descriptors)
+        if names != ("start", "publish_work", "check", "respond", "status", "receipt"):
+            raise RuntimeError("descriptor_registry_invalid")
+        if len(set(names)) != len(names):
+            raise RuntimeError("descriptor_registry_invalid")
+        for descriptor in descriptors:
+            if _FORBIDDEN_CLAIMS.search(descriptor.description) is not None:
+                raise RuntimeError("descriptor_honesty_lint_failed")
+            # Packaged guidance URIs are the one reviewed path exception; strip them before the
+            # boundary scan so tool text can name the covering resource without looking like a
+            # filesystem or host path.
+            without_guidance = _GUIDANCE_URI.sub("yoetz-guidance-resource", descriptor.description)
+            if _BOUNDARY_TERMS.search(without_guidance) is not None:
+                raise RuntimeError("descriptor_boundary_lint_failed")
+            if _digest_descriptor(descriptor) != TOOL_DESCRIPTOR_DIGESTS[profile][descriptor.name]:
+                raise RuntimeError("descriptor_digest_mismatch")
+        set_bytes = b"\n".join(_canonical_descriptor_bytes(item) for item in descriptors)
+        if "sha256:" + hashlib.sha256(set_bytes).hexdigest() != TOOL_DESCRIPTOR_SET_DIGEST[profile]:
+            raise RuntimeError("descriptor_set_digest_mismatch")
 
 
-_DESCRIPTOR_BY_NAME: Final[Mapping[str, ToolDescriptor]] = MappingProxyType(
-    {descriptor.name: descriptor for descriptor in TOOL_DESCRIPTORS}
+_DESCRIPTOR_BY_NAME: Final[Mapping[McpRouteProfile, Mapping[str, ToolDescriptor]]] = (
+    MappingProxyType(
+        {
+            profile: MappingProxyType({descriptor.name: descriptor for descriptor in descriptors})
+            for profile, descriptors in TOOL_DESCRIPTORS.items()
+        }
+    )
 )
 
 
-def descriptor_for(name: str) -> ToolDescriptor:
+def descriptor_for(name: str, profile: McpRouteProfile = "policy") -> ToolDescriptor:
     """Return one exact registered descriptor or fail without echoing its input."""
 
     if type(name) is not str:
         raise TypeError("tool_descriptor_name_wrong_type")
+    if profile not in TOOL_DESCRIPTORS:
+        raise ValueError("mcp_route_profile_invalid")
     try:
-        return _DESCRIPTOR_BY_NAME[name]
+        return _DESCRIPTOR_BY_NAME[profile][name]
     except KeyError:
         raise KeyError("unregistered_tool_descriptor") from None
 
 
-def server_instructions() -> str:
+def server_instructions(profile: McpRouteProfile = "policy") -> str:
     """Return the manifest-verified initialize instructions as strict UTF-8 text."""
 
-    return read_resource(_INSTRUCTIONS_URI).decode("utf-8", errors="strict")
+    if profile not in TOOL_DESCRIPTORS:
+        raise ValueError("mcp_route_profile_invalid")
+    base = read_resource(_INSTRUCTIONS_URI).decode("utf-8", errors="strict").rstrip()
+    return (
+        f"{base}\n\nRoute profile: {profile}. "
+        + (
+            "External semantic review follows the configured policy."
+            if profile == "policy"
+            else "This route will not request external semantic review for this process lifetime."
+        )
+        + "\n"
+    )
 
 
-_lint_descriptor_set()
+_lint_descriptor_sets()
 
 # Eagerly build presentation schemas so import fails closed on projection errors.
-for item in TOOL_DESCRIPTORS:
-    _ = item.input_schema
+for descriptor_set in TOOL_DESCRIPTORS.values():
+    for item in descriptor_set:
+        _ = item.input_schema

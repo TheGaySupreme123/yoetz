@@ -56,7 +56,7 @@ _DEGRADED_CODES = frozenset(
     }
 )
 
-_TOOL_NAMES = tuple(item.name for item in TOOL_DESCRIPTORS)
+_TOOL_NAMES = tuple(item.name for item in TOOL_DESCRIPTORS["policy"])
 
 
 def _id(kind: str, seed: int) -> str:
@@ -393,7 +393,7 @@ async def test_mcp_tools_list_exact_six(tmp_path: Path) -> None:
         listed = await session.list_tools()
         assert [tool.name for tool in listed.tools] == list(_TOOL_NAMES)
         assert len(listed.tools) == 6
-        for tool, descriptor in zip(listed.tools, TOOL_DESCRIPTORS, strict=True):
+        for tool, descriptor in zip(listed.tools, TOOL_DESCRIPTORS["policy"], strict=True):
             assert tool.description == descriptor.description
             assert tool.inputSchema == _plain_json(descriptor.input_schema)
             assert tool.outputSchema == _plain_json(descriptor.output_schema)
@@ -402,7 +402,7 @@ async def test_mcp_tools_list_exact_six(tmp_path: Path) -> None:
             assert tool.annotations.readOnlyHint is descriptor.annotations.read_only
             assert tool.annotations.destructiveHint is False
             assert tool.annotations.idempotentHint is descriptor.annotations.idempotent
-            assert tool.annotations.openWorldHint is False
+            assert tool.annotations.openWorldHint is (tool.name == "check")
     _record_pass(
         tmp_path,
         case_id="MCP-G1-TOOLS-LIST",

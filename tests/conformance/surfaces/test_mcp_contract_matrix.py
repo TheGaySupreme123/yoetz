@@ -216,11 +216,15 @@ def test_unknown_tool_message_is_sanitized() -> None:
 
 
 def test_descriptor_text_is_frozen_and_honest() -> None:
-    assert tuple(item.name for item in TOOL_DESCRIPTORS) == _EXPECTED_TOOL_NAMES
-    assert tuple(TOOL_DESCRIPTOR_DIGESTS) == _EXPECTED_TOOL_NAMES
-    assert TOOL_DESCRIPTOR_SET_DIGEST == (
-        "sha256:6a3011090dfc416f37c9b5e04ee83b28bf9e861dae6dc451e40a7a945606c9ed"
-    )
+    assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
+    assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
+    assert TOOL_DESCRIPTOR_SET_DIGEST == {
+        "policy": "sha256:5884d2597909ec877135672ba869cc210249c2ff08fa76e6039600d0de1949d7",
+        "strict": "sha256:b2df0892bc3dd9d52e0ad463bebfbda8aa48d3519f6e2d6c84f6d3cd5b5a29bb",
+    }
+    for profile, descriptors in TOOL_DESCRIPTORS.items():
+        assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
+        assert tuple(TOOL_DESCRIPTOR_DIGESTS[profile]) == _EXPECTED_TOOL_NAMES
     for name in _EXPECTED_TOOL_NAMES:
         assert "yoetz://guidance/" in descriptor_for(name).description
     # The check descriptor carries the full mode decision rule, including semantic_required.
@@ -233,12 +237,21 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert descriptor_for("start").description.startswith(
         "Call for material multi-step, delegated, resumable, or verification-heavy work"
     )
-    assert {item.name for item in TOOL_DESCRIPTORS if item.annotations.read_only} == {"status"}
-    assert all(not item.annotations.destructive for item in TOOL_DESCRIPTORS)
-    assert all(item.annotations.idempotent for item in TOOL_DESCRIPTORS)
-    assert all(
-        _FORBIDDEN_DESCRIPTOR_CLAIMS.search(item.description) is None for item in TOOL_DESCRIPTORS
+    for descriptors in TOOL_DESCRIPTORS.values():
+        assert {item.name for item in descriptors if item.annotations.read_only} == {"status"}
+        assert all(not item.annotations.destructive for item in descriptors)
+        assert all(item.annotations.idempotent for item in descriptors)
+        assert all(
+            _FORBIDDEN_DESCRIPTOR_CLAIMS.search(item.description) is None for item in descriptors
+        )
+    assert descriptor_for("check", "policy").annotations.open_world is True
+    assert descriptor_for("check", "strict").annotations.open_world is False
+    assert (
+        "this route will not request external semantic review"
+        in descriptor_for("check", "strict").description
     )
+    for name in set(_EXPECTED_TOOL_NAMES) - {"check"}:
+        assert descriptor_for(name, "policy") == descriptor_for(name, "strict")
     assert "uncertain what you already did or committed to" in descriptor_for("status").description
     assert "recommended_next_action" in descriptor_for("status").description
     assert "caller-asserted occurred_at beside the service-stamped accepted_at" in (
@@ -251,9 +264,10 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert "Service accepted_at" in descriptor_for("publish_work").description
     assert "frontier-bound" in descriptor_for("publish_work").description
     assert "ingestion sequence" in descriptor_for("publish_work").description
-    assert server_instructions().encode("utf-8") == read_resource(
-        "yoetz://guidance/agent-instructions.md"
-    )
+    base_instructions = read_resource("yoetz://guidance/agent-instructions.md").decode("utf-8")
+    assert server_instructions().startswith(base_instructions.rstrip())
+    assert "Route profile: policy." in server_instructions()
+    assert "Route profile: strict." in server_instructions("strict")
 
     with pytest.raises(KeyError, match="unregistered_tool_descriptor") as captured:
         descriptor_for("secret-tool")
@@ -299,7 +313,7 @@ def test_resource_uri_is_a_key_not_a_path(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_advertised_input_schemas_honor_presentation_keyword_budgets() -> None:
-    for descriptor in TOOL_DESCRIPTORS:
+    for descriptor in TOOL_DESCRIPTORS["policy"]:
         schema_name = f"{descriptor.name.replace('_', '-')}-request"
         metrics = presentation_schema_metrics(descriptor.input_schema)
         budget = PRESENTATION_INPUT_SCHEMA_BUDGETS[schema_name]
@@ -365,7 +379,7 @@ def test_presentation_examples_admit_under_catalog_models() -> None:
 
 
 def test_presentation_input_schema_is_projection_of_catalog_shape() -> None:
-    for descriptor in TOOL_DESCRIPTORS:
+    for descriptor in TOOL_DESCRIPTORS["policy"]:
         presented = descriptor.input_schema
         catalog = descriptor.catalog_input_schema
         assert presented["type"] == catalog["type"]

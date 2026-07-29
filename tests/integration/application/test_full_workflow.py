@@ -59,6 +59,7 @@ from yoetz.protocol.models import (
     ReceiptResultModel,
     RespondRequest,
     StatusRequest,
+    StatusVersionsPageModel,
 )
 
 pytestmark = pytest.mark.anyio
@@ -378,10 +379,13 @@ async def test_full_workflow_uses_one_final_client_projection(
                 "limit": "10",
                 "at_frontier": str(rechecked.result_frontier.sequence),
             }
-        )
+        ),
+        route_profile="strict",
     )
     assert status.subject_frontier == rechecked.result_frontier
     assert status.view == "versions"
+    assert type(status.page) is StatusVersionsPageModel
+    assert status.page.items[0].route_profile == "strict"
 
     receipt_wire = {
         **_request_base(protocol_id("req_", 817)),
