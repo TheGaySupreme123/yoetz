@@ -13,10 +13,13 @@ license-files = ["LICENSE"]
 dependencies = [
     "anyio==4.14.2",
     "apsw==3.53.3.1",
+    "argon2-cffi==25.1.0",
     "cryptography==49.0.0",
+    "httpx==0.28.1",
     "jsonschema==4.26.0",
     "keyring==25.7.0",
     "mcp==1.28.1",
+    "openai==2.46.0",
     "platformdirs==4.10.0",
     "pydantic==2.13.4",
     "textual==8.2.8",
@@ -24,8 +27,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Compatibility extra retained for existing install commands. Argon2 is also a
+# base dependency because the first-run wizard can select a passphrase vault.
 portable-recovery = ["argon2-cffi==25.1.0"]
 semantic-openai = [
+    # Compatibility extra retained for existing install commands. The standard
+    # install now supports the first-run semantic-review choice.
     "httpx==0.28.1",
     "openai==2.46.0",
 ]

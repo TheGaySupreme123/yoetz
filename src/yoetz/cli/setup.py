@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, Literal, cast
 
+import anyio
 import typer
 
 from yoetz.adapters.integrations.codex_discovery import discover_codex_binaries
@@ -71,6 +72,7 @@ _NEXT_CREDENTIAL: Final = (
     "run 'yoetz provider credential set' from a local terminal to provision the "
     "provider credential through the confidential ceremony"
 )
+_NEXT_RESTART: Final = "restart the Yoetz service so the configured semantic evaluator is composed"
 
 
 def _stdout_json(value: JsonValue) -> None:
@@ -174,6 +176,22 @@ def _is_interactive_terminal() -> bool:
         return sys.stdin.isatty() and sys.stdout.isatty()
     except OSError, ValueError:
         return False
+
+
+def _choose_review_mode() -> Literal["local_only", "semantic"]:
+    """Let first run choose its complete privacy posture before registration."""
+
+    typer.echo("")
+    typer.echo("Choose how Yoetz should review work:")
+    typer.echo("  1. Local only — deterministic checks; nothing leaves this computer")
+    typer.echo("  2. Semantic review — configure a provider, API key, and privacy policy")
+    while True:
+        raw = typer.prompt("Review mode", default="1").strip()
+        if raw == "1":
+            return "local_only"
+        if raw == "2":
+            return "semantic"
+        typer.echo("Please enter 1 or 2.")
 
 
 def _write_setup_marker(outcome: str) -> bool:
@@ -407,8 +425,12 @@ def _configured_mcp_route_profile() -> Literal["policy", "strict"]:
     return "strict" if config.provider is None and config.local_model is None else "policy"
 
 
-def _mcp_adapter() -> CodexMcpAdapter:
-    return CodexMcpAdapter(route_profile=_configured_mcp_route_profile())
+def _mcp_adapter(
+    route_profile: Literal["policy", "strict"] | None = None,
+) -> CodexMcpAdapter:
+    return CodexMcpAdapter(
+        route_profile=_configured_mcp_route_profile() if route_profile is None else route_profile
+    )
 
 
 def _installed_hooks_declare_workspace_binding(workspace: Path | None = None) -> bool:
@@ -522,6 +544,7 @@ async def _codex_integration_step(
     *,
     interactive: bool,
     accept: bool,
+    route_profile: Literal["policy", "strict"] | None = None,
     workspace: Path | None = None,
     approved_preview_digest: str | None = None,
     approved_policy_digest: str | None = None,
@@ -535,7 +558,7 @@ async def _codex_integration_step(
     and only an explicitly echoed policy digest activates the policy trust.
     """
 
-    mcp_service = HarnessMcpService(_mcp_adapter())
+    mcp_service = HarnessMcpService(_mcp_adapter(route_profile))
     plugin_service = CodexPluginService()
     project = IntegrationTarget(
         IntegrationScope.TRUSTED_PROJECT,
@@ -733,10 +756,16 @@ async def _register_step(
     *,
     interactive: bool,
     accept: bool,
+    route_profile: Literal["policy", "strict"] | None = None,
 ) -> dict[str, JsonValue]:
     """Backward-compatible name for the complete Codex integration step."""
 
-    return await _codex_integration_step(binary, interactive=interactive, accept=accept)
+    return await _codex_integration_step(
+        binary,
+        interactive=interactive,
+        accept=accept,
+        route_profile=route_profile,
+    )
 
 
 async def apply_codex_integration(
@@ -800,6 +829,46 @@ async def _service_reachability(*, start_if_absent: bool = False) -> dict[str, J
         "state": state if type(state) is str else None,
         "vault_mode": vault_mode if type(vault_mode) is str else None,
     }
+
+
+# A draining service unlinks its endpoints and releases singleton authority before the
+# successor can bind, so a flat retry window reports an unreachable service that was only slow.
+_RESTART_BACKOFF_SECONDS: Final = (0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2)
+
+
+async def _restart_service_for_semantic_composition() -> dict[str, JsonValue]:
+    """Restart after provider config changes, then verify the new singleton answered."""
+
+    from yoetz.cli.app import build_service_client
+    from yoetz.ports.control import ControlClientKind, ControlError
+    from yoetz.service.client import connect_service_on_demand
+
+    try:
+        client = await build_service_client()
+        try:
+            await client.stop()
+        finally:
+            await client.close()
+    except ControlError:
+        return {"reachable": False, "state": None, "vault_mode": None}
+    for delay in _RESTART_BACKOFF_SECONDS:
+        await anyio.sleep(delay)
+        try:
+            client = await connect_service_on_demand(ControlClientKind.CLI)
+            try:
+                status = await client.service_status()
+            finally:
+                await client.close()
+        except ControlError:
+            continue
+        state = getattr(getattr(status, "state", None), "value", getattr(status, "state", None))
+        vault_mode = getattr(status, "vault_mode", None)
+        return {
+            "reachable": True,
+            "state": state if type(state) is str else None,
+            "vault_mode": vault_mode if type(vault_mode) is str else None,
+        }
+    return {"reachable": False, "state": None, "vault_mode": None}
 
 
 async def _interactive_provider_setup(
@@ -1085,28 +1154,85 @@ async def run_setup_wizard(
     except _UsageExit as failure:
         return failure.code
 
+    review_mode: Literal["local_only", "semantic", "deferred"] = (
+        _choose_review_mode() if interactive else "deferred"
+    )
     if chosen is None:
         registration = _registration_report(None, outcome="skipped", reason="codex_not_found")
     else:
-        registration = await _register_step(chosen, interactive=interactive, accept=accept)
+        registration = await _register_step(
+            chosen,
+            interactive=interactive,
+            accept=accept,
+            route_profile="policy" if review_mode == "semantic" else "strict",
+        )
 
     service = await _service_reachability(start_if_absent=interactive)
     provider: dict[str, JsonValue] = {
         "binding": "skipped",
         "credential": "skipped",
     }
-    if interactive:
+    # Choosing local-only review means no widening was requested; it does not observe what the
+    # durable policy already is, so the report never names a profile it did not read.
+    privacy: dict[str, JsonValue] = {
+        "outcome": "deferred" if not interactive else "not_changed",
+        "profile": "unknown",
+        "reason": None,
+    }
+    semantic_status: dict[str, JsonValue] | None = None
+    if interactive and review_mode == "semantic":
         service, provider = await _interactive_provider_setup(service)
+        if (
+            service.get("state") == "ready"
+            and provider.get("binding") == "configured"
+            and provider.get("credential") == "stored"
+        ):
+            from yoetz.cli.privacy_setup import run_privacy_setup
+            from yoetz.cli.unlock import HumanCeremonyCliError
+            from yoetz.ports.control import ControlError
+
+            try:
+                privacy_result = await run_privacy_setup(recipe_hint="custom")
+            except (ControlError, HumanCeremonyCliError, OSError, ValueError) as error:
+                privacy = {
+                    "outcome": "failed",
+                    "profile": "unknown",
+                    "reason": getattr(error, "reason", "privacy_setup_failed"),
+                }
+            else:
+                privacy = {
+                    "outcome": privacy_result.outcome,
+                    "profile": privacy_result.profile,
+                    "proposal_id": privacy_result.proposal_id,
+                    "reason": privacy_result.reason,
+                }
+                if privacy_result.outcome in {"configured", "unchanged"}:
+                    service = await _restart_service_for_semantic_composition()
+                    if service.get("state") == "ready":
+                        from yoetz.cli.provider_status import provider_status_report
+
+                        semantic_status = await provider_status_report()
+        else:
+            privacy = {
+                "outcome": "failed",
+                "profile": "unknown",
+                "reason": "provider_setup_incomplete",
+            }
 
     next_steps: list[JsonValue] = []
     if not service["reachable"]:
         next_steps.append(_NEXT_SERVICE)
     if service.get("state") != "ready":
         next_steps.append(_NEXT_UNLOCK)
-    next_steps.append(_NEXT_PRIVACY)
-    if provider.get("binding") != "configured":
+    if review_mode == "semantic" and (
+        semantic_status is None or semantic_status.get("semantic_ready") is not True
+    ):
+        next_steps.append(_NEXT_RESTART)
+    if privacy.get("outcome") not in {"configured", "unchanged", "not_changed"}:
+        next_steps.append(_NEXT_PRIVACY)
+    if review_mode != "local_only" and provider.get("binding") != "configured":
         next_steps.append(_NEXT_PROVIDER_TOML)
-    if provider.get("credential") != "stored":
+    if review_mode != "local_only" and provider.get("credential") != "stored":
         next_steps.append(_NEXT_CREDENTIAL)
     if (
         chosen is not None
@@ -1119,7 +1245,16 @@ async def run_setup_wizard(
         )
 
     mutating_run = interactive or accept
-    marker_written = _write_setup_marker(str(registration["outcome"])) if mutating_run else False
+    setup_complete = (
+        not interactive
+        or review_mode == "local_only"
+        or (semantic_status is not None and semantic_status.get("semantic_ready") is True)
+    )
+    marker_written = (
+        _write_setup_marker(str(registration["outcome"]))
+        if mutating_run and setup_complete
+        else False
+    )
     integration = _integration_layers()
     consent: str | None = None
     observation = registration.get("observation_consent")
@@ -1147,18 +1282,29 @@ async def run_setup_wizard(
         service=service,
         workspace=Path.cwd(),
     )
+    if semantic_status is not None:
+        semantic_ready = semantic_status.get("semantic_ready") is True
+        readiness["semantic_advice_ready"] = semantic_ready
+        readiness["semantic_advice_note"] = (
+            "configured_and_composed; live_provider_dispatch_not_tested"
+            if semantic_ready
+            else "semantic_configuration_incomplete"
+        )
 
     report: dict[str, JsonValue] = {
         "discovered": [_binary_row(binary) for binary in binaries],
         "integration": integration,
         "marker_written": marker_written,
         "next_steps": next_steps,
+        "privacy": privacy,
         "provider": provider,
         "readiness": readiness,
         "registration": registration,
         "schema": _REPORT_SCHEMA,
         "selected": None if chosen is None else _binary_row(chosen),
+        "semantic_status": semantic_status,
         "service": service,
+        "review_mode": review_mode,
     }
     if interactive:
         _emit_human_report(report)
@@ -1171,6 +1317,7 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
     registration = report["registration"]
     service = report["service"]
     provider = report["provider"]
+    privacy = report.get("privacy")
     integration = report["integration"]
     readiness = report.get("readiness")
     typer.echo("Setup summary:")
@@ -1252,6 +1399,11 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
     if isinstance(provider, dict):
         typer.echo(f"  Provider binding: {provider.get('binding')}")
         typer.echo(f"  Provider credential: {provider.get('credential')}")
+    if isinstance(privacy, dict):
+        line = f"  Privacy: {privacy.get('outcome')} ({privacy.get('profile')})"
+        if privacy.get("reason"):
+            line += f" — {privacy.get('reason')}"
+        typer.echo(line)
     steps = report["next_steps"]
     if isinstance(steps, list) and steps:
         typer.echo("Next steps:")

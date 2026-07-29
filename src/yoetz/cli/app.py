@@ -520,6 +520,10 @@ async def _call_support(
             request = machine_scope_request()
         else:
             request = _json_object(input_path, inline)
+            if method == "privacy_get_effective" and len(request) == 0:
+                from yoetz.cli.provider_status import machine_scope_request
+
+                request = machine_scope_request()
         client = await build_service_client()
         try:
             result = await getattr(client, method)(request, deadline_ms=deadline_ms)
@@ -555,10 +559,37 @@ restore_app.command("preview")(_support_command("restore_preview"))
 restore_app.command("execute")(_support_command("restore_execute"))
 migrate_app.command("preview")(_support_command("migrate_preview"))
 migrate_app.command("execute")(_support_command("migrate_execute"))
-privacy_app.command("setup")(_support_command("privacy_get_setup"))
 privacy_app.command("show")(_support_command("privacy_get_effective"))
 privacy_app.command("propose")(_support_command("privacy_propose_policy"))
 privacy_app.command("tighten")(_support_command("privacy_tighten_policy"))
+
+
+@privacy_app.command("setup")
+def privacy_setup() -> None:
+    """Review all privacy choices and apply them through the trusted local ceremony."""
+
+    async def _run() -> int:
+        from yoetz.cli.privacy_setup import run_privacy_setup
+        from yoetz.cli.unlock import HumanCeremonyCliError
+
+        try:
+            report = await run_privacy_setup()
+        except ControlError as error:
+            return _control_failure(error)
+        except (HumanCeremonyCliError, OSError, ValueError) as error:
+            reason = getattr(error, "reason", None)
+            typer.echo(
+                f"privacy_setup_failed: {reason if type(reason) is str else 'privacy_setup_failed'}",
+                err=True,
+            )
+            return 20
+        if report.outcome == "failed":
+            typer.echo(f"privacy_setup_failed: {report.reason or 'invalid'}", err=True)
+            return 20
+        _human_or_json(report, json_output=False)
+        return 0
+
+    _finish(run_async(_run))
 
 
 async def _service_call(method: str, json_output: bool) -> int:

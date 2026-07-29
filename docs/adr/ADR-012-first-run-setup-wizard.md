@@ -27,10 +27,15 @@ exactly those contracts and connects the steps without weakening any existing tr
 1. **`yoetz setup` is a new top-level support sub-app** with `run` (the wizard) and `status`
    (read-only posture). The wizard orchestrates only operations a local human could already run by
    hand: Codex discovery, the runbook's check-then-add MCP registration behind
-   preview→confirm→execute, a service reachability check, and printed instructions for the
-   privacy setup and the existing provider-credential ceremony. On a real local TTY it may invoke
-   the already-reviewed hidden-input vault initialize/unlock and credential ceremony; it adds no
-   secret field to wizard arguments, configuration, reports, MCP, or agent context.
+   preview→confirm→execute, a service reachability check, and the existing privacy and
+   provider-credential ceremonies. Founder-authorized amendment (2026-07-29): before registration,
+   interactive first run chooses a complete `local_only` path or a semantic-review path. The latter
+   registers the policy route, configures the provider and credential, asks all thirteen privacy
+   questions, renders the exact bounded disclosure, proposes it, and hands widening to the
+   separately reauthenticated trusted decision ceremony. On a real local TTY it may invoke the
+   already-reviewed hidden-input vault initialize/unlock and credential ceremony; it adds no
+   secret field to wizard arguments, configuration, reports, MCP, or agent context. Noninteractive
+   setup remains a report plus explicit follow-up commands and never chooses egress.
 
 2. **Bounded bare-invocation change (amends ADR-007 decision 3).** The root Typer app drops
    `no_args_is_help=True`; the root callback reproduces the historical help output for every bare
@@ -120,7 +125,9 @@ availability, structured-output interoperability, provider data use, or E-007 ca
 
 A new user's path is now: `npx yoetz` or `uvx yoetz` → interactive wizard → detected-harness
 selection (Codex in v0.1) → installation selection when needed → explicit `Y`/`N` confirmation →
-Codex MCP registration → on-demand local service → local vault/provider ceremonies → privacy policy.
+local-only or semantic-review choice → route-matched Codex MCP registration → on-demand local
+service → local vault/provider ceremonies when semantic was chosen → thirteen-answer privacy
+review → separately reauthenticated privacy decision.
 Each mutating step is previewed, digest-bound, and individually declinable; `yoetz setup status`
 reports the same posture read-only at any time. The CLI support-command matrix grows by one
 (`setup`), recorded in the conformance contract test in the same change.

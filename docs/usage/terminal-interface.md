@@ -85,10 +85,14 @@ line above the active one:
 5. **Installation activity**, step by step. A step is only reported as done once its postcondition
    was checked.
 6. **Secure storage** — system keyring, or a Yoetz passphrase.
-7. **Finish**, with each readiness layer stated separately.
+7. **Review mode** — Local only, or Add semantic review.
+8. **Semantic setup, when selected** — provider/model, secure API-key handoff, and the trusted
+   thirteen-answer privacy ceremony.
+9. **Finish**, with each readiness layer stated separately.
 
-You are never asked to configure a provider to finish setup. Local verification is complete
-without one.
+You are never required to configure a provider: Local only is complete and useful. If you choose
+semantic review, setup does not claim completion until provider credentials and privacy approval
+finish.
 
 If an MCP entry named `yoetz` already exists and Yoetz does not own it, setup stops there. You can
 inspect it, continue locally, or read manual resolution steps. **There is no force-replace option

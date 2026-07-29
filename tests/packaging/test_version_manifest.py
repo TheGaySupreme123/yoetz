@@ -248,12 +248,16 @@ def test_mcp_sdk_version_matches_the_installed_distribution(
     assert manifest["mcp_sdk_version"] == {"status": "present", "version": installed_mcp_version}
 
 
-def test_optional_semantic_provider_is_honestly_absent_without_the_extra(
+def test_standard_install_contains_the_semantic_provider_adapter(
     installed_candidate: InstalledCandidate,
 ) -> None:
     completed = _run(installed_candidate, ["version", "--json"])
     manifest = json.loads(completed.stdout)
-    assert manifest["provider_adapters"] == [{"name": "openai", "status": "absent"}]
+    adapter = manifest["provider_adapters"][0]
+    assert adapter["name"] == "openai"
+    assert adapter["status"] == "present"
+    assert adapter["sdk_distribution"] == "openai"
+    assert adapter["sdk_version"] == "2.46.0"
 
 
 def test_console_and_module_json_version_are_byte_identical(

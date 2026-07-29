@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tomllib
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -249,7 +250,7 @@ def test_no_ambient_config_or_global_module_contaminates_the_probe(
 # ---------------------------------------------------------------------------
 
 
-def test_semantic_openai_extra_only_changes_the_provider_adapter_cell(
+def test_semantic_openai_compatibility_extra_matches_the_standard_install(
     built_dist: _BuiltDist, tmp_path: Path
 ) -> None:
     base_root = tmp_path / "base"
@@ -282,19 +283,17 @@ def test_semantic_openai_extra_only_changes_the_provider_adapter_cell(
         ).stdout
     )
 
-    assert base_manifest["provider_adapters"] == [{"name": "openai", "status": "absent"}]
+    base_adapter = next(a for a in base_manifest["provider_adapters"] if a["name"] == "openai")
+    assert base_adapter["status"] == "present"
     extra_adapter = next(a for a in extra_manifest["provider_adapters"] if a["name"] == "openai")
     assert extra_adapter["status"] == "present"
 
-    # Everything else about the base install is unchanged by the extra.
-    ignored = {"provider_adapters"}
-    for key in base_manifest:
-        if key in ignored:
-            continue
-        assert base_manifest[key] == extra_manifest[key], key
+    assert base_manifest == extra_manifest
 
 
-def test_portable_recovery_extra_only_adds_argon2(built_dist: _BuiltDist, tmp_path: Path) -> None:
+def test_standard_install_and_portable_recovery_alias_both_include_argon2(
+    built_dist: _BuiltDist, tmp_path: Path
+) -> None:
     root = tmp_path / "install"
     home = root / "home"
     home.mkdir(parents=True)
@@ -309,6 +308,63 @@ def test_portable_recovery_extra_only_adds_argon2(built_dist: _BuiltDist, tmp_pa
     )
     assert probe.returncode == 0
     assert b"argon2-present" in probe.stdout
+
+    base_root = tmp_path / "base-install"
+    base_home = base_root / "home"
+    base_home.mkdir(parents=True)
+    _, base_env = _tool_install(built_dist.directory, base_root, base_home)
+    base_python = base_root / "tool" / "yoetz" / "bin" / "python"
+    base_probe = subprocess.run(
+        [str(base_python), "-c", "import argon2; print('argon2-present')"],
+        capture_output=True,
+        timeout=15,
+        env=base_env,
+        check=False,
+    )
+    assert base_probe.returncode == 0
+    assert b"argon2-present" in base_probe.stdout
+
+
+def _declared_core_pin(name: str) -> str:
+    data = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    for entry in data["project"]["dependencies"]:
+        if entry.startswith(f"{name}=="):
+            return entry.split("==", 1)[1]
+    raise AssertionError(f"{name} is not a pinned core dependency")
+
+
+def test_standard_install_resolves_the_promoted_dependencies_at_their_exact_pins(
+    built_dist: _BuiltDist, tmp_path: Path
+) -> None:
+    """`version --json` reports adapters, never installed distributions.
+
+    Presence probes pass on any resolved version, so the promotion of `argon2-cffi`, `httpx`,
+    and `openai` to core dependencies is only evidence-bound if the installed versions are
+    compared against the declared pins.
+    """
+
+    root = tmp_path / "install"
+    home = root / "home"
+    home.mkdir(parents=True)
+    _, env = _tool_install(built_dist.directory, root, home)
+    tool_python = root / "tool" / "yoetz" / "bin" / "python"
+    names = ("argon2-cffi", "httpx", "openai")
+    probe = subprocess.run(
+        [
+            str(tool_python),
+            "-c",
+            "import json\n"
+            "from importlib.metadata import version\n"
+            f"print(json.dumps({{name: version(name) for name in {names!r}}}))",
+        ],
+        capture_output=True,
+        timeout=15,
+        env=env,
+        check=False,
+    )
+    assert probe.returncode == 0, probe.stderr
+    installed = json.loads(probe.stdout)
+    assert installed == {name: _declared_core_pin(name) for name in names}
 
 
 # ---------------------------------------------------------------------------

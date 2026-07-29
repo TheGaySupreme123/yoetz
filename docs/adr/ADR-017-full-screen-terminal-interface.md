@@ -52,6 +52,10 @@ authority at all.
    preview, approval, activity, and finish are the opening steps of the same surface; completed
    steps collapse into concise lines in the transcript above the active one. There is no
    "step N of M" chrome, because the number of steps genuinely depends on what was found.
+   Founder-authorized amendment (2026-07-29): the opening flow ends with an explicit Local only
+   versus Add semantic review choice. Semantic review reuses the existing provider credential and
+   privacy ceremonies through terminal suspension; the completion marker is not written when
+   either ceremony is incomplete.
 
 3. **`yoetz menu` opens the same interface (amends ADR-013 decision 2).** The command name is
    kept for compatibility. On a non-TTY it still fails closed with a usage error (exit 2) and
@@ -67,10 +71,15 @@ authority at all.
    originates no decision. MCP registration keeps preview → digest-bound confirm → verify;
    plugin installation keeps its own verification; observation consent is still granted only
    after both are verified; privacy policy mutation stays in the explicit
-   `privacy setup|propose|tighten` ceremonies, which the interface links to rather than
-   performs; service lifecycle uses the same client calls and the interface never spawns a
+   `privacy setup|propose|tighten` ceremonies. The interface may suspend and hand the controlling
+   terminal to those existing ceremonies, but never reimplements or bypasses them; service
+   lifecycle uses the same client calls and the interface never spawns a
    service. A foreign MCP entry is a terminal block with no force-replace path anywhere in the
    surface.
+
+   Connection display is true when any discovered installation is Yoetz-owned. Discovery order
+   has no authority: a different first binary cannot make an owned `codex-testing` registration
+   render as disconnected.
 
 6. **A digest-bound apply replaces, and is stricter than, the `--accept` shortcut.**
    `setup.apply_codex_integration` requires the caller to echo back both the preview digest and

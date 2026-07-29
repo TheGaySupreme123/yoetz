@@ -23,7 +23,7 @@ from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 from yoetz.tui.models import (
     CheckMode,
@@ -218,11 +218,13 @@ class YoetzRuntime:
 
         harnesses = self.discover_harnesses()
         connected = False
-        if harnesses:
+        for harness in harnesses:
             try:
-                connected = await self.mcp_state(harnesses[0]) == "yoetz_owned"
+                if await self.mcp_state(harness) == "yoetz_owned":
+                    connected = True
+                    break
             except RuntimeError_:
-                connected = False
+                continue
         return project_detection(
             self._cwd,
             harnesses=harnesses,
@@ -252,6 +254,40 @@ class YoetzRuntime:
         except McpRegistrationError as error:
             raise RuntimeError_(error.reason.value, "the Codex registration could not be read")
         return str(state.value)
+
+    async def run_privacy_setup(self, recipe_hint: str) -> object:
+        """Hand the trusted questionnaire to the CLI implementation."""
+
+        from yoetz.cli.privacy_setup import run_privacy_setup
+        from yoetz.cli.unlock import HumanCeremonyCliError
+        from yoetz.ports.control import ControlError
+
+        if recipe_hint not in {
+            "private",
+            "metadata_only",
+            "assisted_review",
+            "expanded_review",
+            "custom",
+        }:
+            raise RuntimeError_("privacy_recipe_invalid", "the privacy recipe is invalid")
+        try:
+            return await run_privacy_setup(
+                recipe_hint=cast(
+                    Literal[
+                        "private",
+                        "metadata_only",
+                        "assisted_review",
+                        "expanded_review",
+                        "custom",
+                    ],
+                    recipe_hint,
+                )
+            )
+        except (ControlError, HumanCeremonyCliError, OSError, ValueError) as error:
+            raise RuntimeError_(
+                getattr(error, "reason", "privacy_setup_failed"),
+                "the trusted privacy ceremony could not be completed",
+            ) from error
 
     # -- integration ----------------------------------------------------
 

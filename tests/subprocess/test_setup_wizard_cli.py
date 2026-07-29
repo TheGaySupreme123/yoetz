@@ -142,6 +142,24 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
     monkeypatch.setattr(setup_module, "CodexMcpAdapter", fake_adapter)
     monkeypatch.setattr(setup_module, "_configured_mcp_route_profile", lambda: "strict")
     monkeypatch.setattr(setup_module, "CodexPluginService", _FakePluginService)
+    from yoetz.adapters.integrations.codex_plugin import (
+        PluginHookPresence,
+        PluginInspection,
+    )
+
+    def absent_plugin(_target: object) -> PluginInspection:
+        return PluginInspection(
+            PluginHookPresence.ABSENT,
+            False,
+            None,
+            ("codex_hook_trust_not_observable_from_installation_state",),
+        )
+
+    monkeypatch.setattr(
+        setup_module,
+        "inspect_plugin",
+        absent_plugin,
+    )
     monkeypatch.setattr(setup_module, "setup_marker_path", lambda: marker)
     monkeypatch.setattr(
         setup_module,
@@ -260,7 +278,7 @@ def test_interactive_wizard_selects_harness_then_installation_and_requires_y_or_
     monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)
     monkeypatch.setattr(provider_binding, "prompt_provider_endpoint_binding", lambda: None)
 
-    result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\n2\nmaybe\nY\n")
+    result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\n2\n1\nmaybe\nY\n")
 
     assert result.exit_code == 0
     assert "Automatically detected harnesses:" in result.stdout
@@ -268,6 +286,7 @@ def test_interactive_wizard_selects_harness_then_installation_and_requires_y_or_
     assert "Select a harness to connect to Yoetz" in result.stdout
     assert "Detected Codex installations:" in result.stdout
     assert "Select the Codex installation to configure" in result.stdout
+    assert "Choose how Yoetz should review work:" in result.stdout
     assert "complete Yoetz Codex project integration" in result.stdout
     assert "MCP server name: yoetz" in result.stdout
     assert "Command: yoetz mcp serve --semantic off" in result.stdout
@@ -294,7 +313,7 @@ def test_interactive_registration_n_declines_without_mutation(
     monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)
     monkeypatch.setattr(provider_binding, "prompt_provider_endpoint_binding", lambda: None)
 
-    result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\nN\n")
+    result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\n1\nN\n")
 
     assert result.exit_code == 0
     assert "Confirm Codex project setup? [Y/N]" in result.stdout
