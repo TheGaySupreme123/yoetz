@@ -564,32 +564,36 @@ privacy_app.command("propose")(_support_command("privacy_propose_policy"))
 privacy_app.command("tighten")(_support_command("privacy_tighten_policy"))
 
 
+async def _run_privacy_setup_command() -> int:
+    from yoetz.cli.privacy_setup import run_privacy_setup
+    from yoetz.cli.unlock import HumanCeremonyCliError
+
+    try:
+        report = await run_privacy_setup(
+            recipe_hint="metadata_only",
+            offer_recommended=True,
+        )
+    except ControlError as error:
+        return _control_failure(error)
+    except (HumanCeremonyCliError, OSError, ValueError) as error:
+        reason = getattr(error, "reason", None)
+        typer.echo(
+            f"privacy_setup_failed: {reason if type(reason) is str else 'privacy_setup_failed'}",
+            err=True,
+        )
+        return 20
+    if report.outcome == "failed":
+        typer.echo(f"privacy_setup_failed: {report.reason or 'invalid'}", err=True)
+        return 20
+    _human_or_json(report, json_output=False)
+    return 0
+
+
 @privacy_app.command("setup")
 def privacy_setup() -> None:
-    """Review all privacy choices and apply them through the trusted local ceremony."""
+    """Review privacy choices and apply them through the trusted local ceremony."""
 
-    async def _run() -> int:
-        from yoetz.cli.privacy_setup import run_privacy_setup
-        from yoetz.cli.unlock import HumanCeremonyCliError
-
-        try:
-            report = await run_privacy_setup()
-        except ControlError as error:
-            return _control_failure(error)
-        except (HumanCeremonyCliError, OSError, ValueError) as error:
-            reason = getattr(error, "reason", None)
-            typer.echo(
-                f"privacy_setup_failed: {reason if type(reason) is str else 'privacy_setup_failed'}",
-                err=True,
-            )
-            return 20
-        if report.outcome == "failed":
-            typer.echo(f"privacy_setup_failed: {report.reason or 'invalid'}", err=True)
-            return 20
-        _human_or_json(report, json_output=False)
-        return 0
-
-    _finish(run_async(_run))
+    _finish(run_async(_run_privacy_setup_command))
 
 
 async def _service_call(method: str, json_output: bool) -> int:
@@ -1478,6 +1482,13 @@ def root(
             help="Set up the LLM model and API key through the secure local wizard.",
         ),
     ] = False,
+    privacy: Annotated[
+        bool,
+        typer.Option(
+            "--privacy",
+            help="Review or change the privacy policy through the trusted local wizard.",
+        ),
+    ] = False,
     fireworks: Annotated[
         bool,
         typer.Option("--fireworks", help="Use the bundled Fireworks Responses profile."),
@@ -1501,6 +1512,13 @@ def root(
     if version:
         typer.echo(__version__)
         raise typer.Exit(0)
+    if privacy:
+        if context.invoked_subcommand is not None:
+            raise typer.BadParameter("--privacy cannot be combined with a subcommand")
+        if set_provider or grok or fireworks or provider_name is not None or model is not None:
+            raise typer.BadParameter("--privacy cannot be combined with provider setup options")
+        _finish(run_async(_run_privacy_setup_command))
+        return
     if set_provider:
         if context.invoked_subcommand is not None:
             raise typer.BadParameter("--set cannot be combined with a subcommand")

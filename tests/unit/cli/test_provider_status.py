@@ -170,7 +170,7 @@ async def test_llm_inference_channel_is_actually_read_from_canonical_policy(
     assert len(channel_blockers) == 1
     # "disabled" is a read answer; "unknown" would mean the policy was never inspected.
     assert channel_blockers[0]["state"] == "disabled"
-    assert channel_blockers[0]["next_command"] == "yoetz privacy setup"
+    assert channel_blockers[0]["next_command"] == "yoetz --privacy"
 
 
 async def test_credential_for_a_different_provider_is_not_counted(

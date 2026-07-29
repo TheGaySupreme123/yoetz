@@ -63,7 +63,7 @@ _HARNESS_DISPLAY_NAMES: Final[dict[HarnessId, str]] = {HarnessId.CODEX: "Codex"}
 
 _NEXT_SERVICE: Final = "run 'yoetz service run' under your selected user supervisor"
 _NEXT_UNLOCK: Final = "run 'yoetz service unlock' from a local terminal if the vault is locked"
-_NEXT_PRIVACY: Final = "run 'yoetz privacy setup' to review recipes and provider binding"
+_NEXT_PRIVACY: Final = "run 'yoetz --privacy' to review or change the privacy policy"
 _NEXT_PROVIDER_TOML: Final = (
     "run 'yoetz provider endpoint' (or edit config.toml) to choose a reviewed provider "
     "or an owner-declared HTTPS origin+model — never put API keys in TOML"
@@ -905,6 +905,7 @@ async def _interactive_provider_setup(
         "credential": "skipped",
     }
     auto_passphrase: bytearray | None = None
+    replacing_stored_credential = False
 
     def wipe_auto_passphrase() -> None:
         nonlocal auto_passphrase
@@ -1008,11 +1009,14 @@ async def _interactive_provider_setup(
     if credential_before is True:
         from yoetz.cli.provider_status import credential_human_display
 
-        provider_report["credential"] = "stored"
-        provider_report["credential_display"] = credential_human_display(True)
         typer.echo(f"  Credential: {credential_human_display(True)} (already stored)")
-        wipe_auto_passphrase()
-        return service, provider_report
+        if typer.confirm("Use the stored credential for this provider and model?", default=True):
+            provider_report["credential"] = "stored"
+            provider_report["credential_display"] = credential_human_display(True)
+            wipe_auto_passphrase()
+            return service, provider_report
+        replacing_stored_credential = True
+        typer.echo("Enter a new credential to replace the stored value.")
 
     # A Keychain-provisioned passphrase vault is already ready without the
     # human knowing its generated passphrase. Load that same scoped secret
@@ -1052,9 +1056,15 @@ async def _interactive_provider_setup(
         provider_report["credential"] = "failed"
         provider_report["credential_reason"] = error.reason
     except ConfidentialClientError as error:
-        # The vault write may have committed before the result/close frame was lost. Recompose
-        # and inspect only the exact configured profile's presence bit; never retry with a wiped
-        # buffer and never turn an unreadable state into a success claim.
+        # An initial vault write may have committed before the result/close frame was lost.
+        # Recompose and inspect only the exact configured profile's presence bit; never retry with
+        # a wiped buffer and never turn an unreadable state into a success claim.
+        if replacing_stored_credential:
+            # Presence was already true before the write, so it cannot distinguish the old value
+            # from a committed replacement. Preserve that uncertainty instead of claiming success.
+            provider_report["credential"] = "failed"
+            provider_report["credential_reason"] = f"credential_{error.reason}"
+            return await _service_reachability(), provider_report
         service = await _restart_service_for_semantic_composition()
         credential_after: bool | None = None
         if service.get("state") == "ready":
@@ -1251,14 +1261,11 @@ async def run_setup_wizard(
             from yoetz.cli.unlock import HumanCeremonyCliError
             from yoetz.ports.control import ControlError
 
-            typer.echo("")
-            typer.echo("Choose what semantic review may send:")
-            typer.echo(
-                "  Suggested first-run default: Metadata only — structural context, "
-                "with confirmation before every provider request"
-            )
             try:
-                privacy_result = await run_privacy_setup(recipe_hint="metadata_only")
+                privacy_result = await run_privacy_setup(
+                    recipe_hint="metadata_only",
+                    offer_recommended=True,
+                )
             except (ControlError, HumanCeremonyCliError, OSError, ValueError) as error:
                 reason = getattr(error, "reason", None)
                 if type(error) is ValueError:

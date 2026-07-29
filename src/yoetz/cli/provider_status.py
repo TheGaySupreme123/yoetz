@@ -258,7 +258,7 @@ async def provider_status_report() -> dict[str, JsonValue]:
             {
                 "condition": "llm_inference_channel",
                 "state": "disabled",
-                "next_command": "yoetz privacy setup",
+                "next_command": "yoetz --privacy",
             }
         )
 

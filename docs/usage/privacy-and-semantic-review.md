@@ -49,7 +49,8 @@ Only a reauthenticated local human can loosen effective policy, and loosening is
 ## Commands
 
 ```text
-yoetz privacy setup             # guided policy review
+yoetz --privacy                 # recommended policy first; customize only when declined
+yoetz privacy setup             # equivalent guided policy review
 yoetz privacy show              # current effective policy
 yoetz privacy tighten           # tighten (proceeds through gates)
 yoetz privacy propose           # propose a change for decision
@@ -60,6 +61,14 @@ yoetz privacy receipts          # inspect bounded structural egress receipts
 
 `export-desired` / `apply-desired` are the reviewable path for version-controlling policy. The
 asymmetry is the point: tightening can flow through gates, widening always requires a human.
+
+The CLI recommends **Metadata only** as the privacy-first semantic starting point: public
+structural metadata and declared file types, task scope, and a foreground approval before every
+provider request. Its advantage is minimal disclosure; its tradeoff is less problem-specific
+feedback. Accepting the displayed exact policy skips the thirteen expert questions. Declining it
+opens Private, Assisted review, Expanded review, Custom, and every underlying setting one by one.
+When no external provider is configured, the shortcut recommends Private instead. The final
+trusted widening decision is never skipped.
 
 ### `/privacy` in the terminal interface
 

@@ -47,18 +47,19 @@ Setup is a linear path inside the interface, each finished step collapsing into 
 5. **Installation activity**, with each step reported only once its postcondition was checked.
 6. **Secure storage** — the system keyring, or a Yoetz passphrase.
 7. **Review mode** — finish in complete local-only mode, or configure semantic review.
-8. **Semantic setup, when selected** — provider/model, hidden API-key entry, all thirteen privacy
-   answers, the exact disclosure preview, and the separately reauthenticated widening decision.
-   The suggested first-run draft is **Metadata only**: structural context only, with a foreground
-   confirmation before every provider request. This is a privacy-minimizing usable starting point,
-   not consent; **Private** remains available for no network egress, and broader recipes remain
-   explicit choices.
+8. **Semantic setup, when selected** — provider/model, hidden API-key entry, then one exact
+   recommended privacy policy. **Metadata only** sends public structural metadata and declared file
+   types, asks before every provider request, and uses task scope. Accepting it skips the thirteen
+   expert questions; declining it opens those settings one by one. The exact disclosure and
+   separately reauthenticated widening decision remain mandatory.
 9. **Finish**, stating each readiness layer separately.
 
 Credential status is presence-only. Human output shows the fixed mask `********` when the trusted
 service confirms that the configured provider has a stored credential, `not stored` when absence
 is confirmed, and `unknown` when the service or vault cannot answer. The mask is constant: it never
 contains or encodes any character, length, prefix, suffix, or fingerprint of the API key.
+When a credential is already stored for the exact provider/model, setup asks whether to reuse it
+(the default) or replace it through a new hidden-input ceremony.
 
 `codex mcp get` runs first; an existing foreign entry is always preserved, never replaced, and
 there is no force-replace option anywhere in the interface.
@@ -71,8 +72,9 @@ The official Codex App exists on macOS and Windows. Linux setup uses the same fl
 standalone Codex CLI and does not fabricate an app installation that OpenAI does not publish.
 
 Re-run any time with `yoetz setup run` (the prompt-driven wizard, unchanged) or `/connect` in the
-interface. Inspect posture read-only with `yoetz setup status`. Manage registration directly with
-`yoetz integrate mcp status|preview|install`.
+interface. Change privacy any time with `yoetz --privacy`. Inspect posture read-only with
+`yoetz setup status`. Manage registration directly with `yoetz integrate mcp
+status|preview|install`.
 
 ## Re-run or repair a ceremony
 
@@ -80,7 +82,8 @@ The wizard uses these same commands and trusted boundaries; each remains availab
 
 ```text
 yoetz service run                  # foreground service under a supervisor you choose
-yoetz privacy setup                # all 13 answers, exact preview, trusted decision
+yoetz --privacy                    # recommended policy first; customize only when declined
+yoetz privacy setup                # equivalent long-form command
 yoetz provider endpoint            # bind a reviewed preset or owner-declared HTTPS origin + model
 yoetz provider credential set      # provision the API credential through the terminal ceremony
 ```

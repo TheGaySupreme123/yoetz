@@ -186,7 +186,7 @@ def test_non_interactive_without_accept_is_a_dry_run(wizard_env: dict[str, objec
     assert not cast(Path, wizard_env["marker"]).exists()
     # Honest next steps always include the confidential ceremonies it cannot run.
     steps = " ".join(report["next_steps"])
-    assert "yoetz privacy setup" in steps
+    assert "yoetz --privacy" in steps
     assert "yoetz provider credential set" in steps
     assert "yoetz service run" in steps
 
@@ -339,7 +339,7 @@ def test_semantic_first_run_suggests_and_selects_metadata_only_privacy_draft(
         CommandOutput(0, b""),  # add
         _yoetz_entry("policy"),  # verify get
     ]
-    recipe_hints: list[str | None] = []
+    privacy_calls: list[tuple[str | None, bool]] = []
 
     async def ready(*, start_if_absent: bool = False) -> dict[str, object]:
         del start_if_absent
@@ -354,8 +354,12 @@ def test_semantic_first_run_suggests_and_selects_metadata_only_privacy_draft(
         del provider_choice, model
         return service, {"binding": "configured", "credential": "stored"}
 
-    async def privacy_setup(*, recipe_hint: str | None = None) -> SimpleNamespace:
-        recipe_hints.append(recipe_hint)
+    async def privacy_setup(
+        *,
+        recipe_hint: str | None = None,
+        offer_recommended: bool = False,
+    ) -> SimpleNamespace:
+        privacy_calls.append((recipe_hint, offer_recommended))
         return SimpleNamespace(
             outcome="configured",
             profile="confirm_every_request",
@@ -376,9 +380,7 @@ def test_semantic_first_run_suggests_and_selects_metadata_only_privacy_draft(
     result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\n2\nY\n")
 
     assert result.exit_code == 0
-    assert recipe_hints == ["metadata_only"]
-    assert "Choose what semantic review may send:" in result.stdout
-    assert "Suggested first-run default: Metadata only" in result.stdout
+    assert privacy_calls == [("metadata_only", True)]
     assert "Privacy: configured (confirm_every_request)" in result.stdout
 
 
@@ -509,6 +511,30 @@ def test_bare_invocation_without_tty_prints_help() -> None:
     result = _RUNNER.invoke(cli.app, [])
     assert result.exit_code == 0
     assert "Usage" in result.stdout
+
+
+def test_root_privacy_shortcut_dispatches_guided_privacy_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def privacy_setup() -> int:
+        calls.append("privacy")
+        return 0
+
+    monkeypatch.setattr(cli, "_run_privacy_setup_command", privacy_setup)
+
+    result = _RUNNER.invoke(cli.app, ["--privacy"])
+
+    assert result.exit_code == 0
+    assert calls == ["privacy"]
+
+
+def test_root_privacy_shortcut_rejects_provider_setup_options() -> None:
+    result = _RUNNER.invoke(cli.app, ["--privacy", "--set"])
+
+    assert result.exit_code == 2
+    assert "--privacy cannot be combined" in result.output
 
 
 def test_root_set_fireworks_dispatches_simple_provider_setup(
@@ -894,7 +920,7 @@ def test_ready_auto_unlock_vault_reuses_scoped_secret_for_provider_reauthenticat
     assert report["credential_display"] == "********"
 
 
-def test_existing_bound_credential_is_masked_and_not_requested_again(
+def test_existing_bound_credential_can_be_reused_without_requesting_it_again(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import yoetz.cli.provider_binding as binding_module
@@ -945,6 +971,11 @@ def test_existing_bound_credential_is_masked_and_not_requested_again(
     monkeypatch.setattr(provider_status_module, "provider_status_report", fake_status)
     monkeypatch.setattr(unlock_module, "set_provider_credential", forbidden_set)
 
+    def reuse(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(setup_module.typer, "confirm", reuse)
+
     _service, report = asyncio.run(
         setup_module._interactive_provider_setup(  # pyright: ignore[reportPrivateUsage]
             {"reachable": True, "state": "ready", "vault_mode": "passphrase"},
@@ -955,6 +986,87 @@ def test_existing_bound_credential_is_masked_and_not_requested_again(
 
     assert report["credential"] == "stored"
     assert report["credential_display"] == "********"
+
+
+@pytest.mark.parametrize(
+    ("result_lost", "expected_credential"),
+    [(False, "stored"), (True, "failed")],
+)
+def test_existing_bound_credential_replacement_does_not_inherit_old_presence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    result_lost: bool,
+    expected_credential: str,
+) -> None:
+    import yoetz.cli.provider_binding as binding_module
+    import yoetz.cli.provider_status as provider_status_module
+    import yoetz.cli.setup as setup_module
+    import yoetz.cli.unlock as unlock_module
+    import yoetz.config.load as config_module
+    import yoetz.config.write as write_module
+    from yoetz.service.confidential_client import ConfidentialClientError
+
+    provider = SimpleNamespace(
+        provider_id="fireworks",
+        model="accounts/fireworks/models/minimax-m3",
+        endpoint_profile_id="fireworks-responses",
+        endpoint_profile_version="1.0.0",
+    )
+    replacements: list[object] = []
+
+    def fake_load_config(*_args: object) -> SimpleNamespace:
+        return SimpleNamespace(storage=SimpleNamespace(data_dir=tmp_path), provider=provider)
+
+    def fake_write(*_args: object, **_kwargs: object) -> tuple[Path, object]:
+        return tmp_path / "config.toml", object()
+
+    def fake_preset(_provider: object) -> SimpleNamespace:
+        return SimpleNamespace(choice="fireworks", provider_id="fireworks")
+
+    async def fake_restart() -> dict[str, object]:
+        return {"reachable": True, "state": "ready", "vault_mode": "os_managed"}
+
+    async def fake_status() -> dict[str, object]:
+        return {"credential_connected": True}
+
+    async def replace(target: object, *_args: object, **_kwargs: object) -> SimpleNamespace:
+        replacements.append(target)
+        if result_lost:
+            raise ConfidentialClientError("ambiguous")
+        return SimpleNamespace(activation_status="stored")
+
+    async def fake_reachability(*, start_if_absent: bool = False) -> dict[str, object]:
+        del start_if_absent
+        return {"reachable": True, "state": "ready", "vault_mode": "os_managed"}
+
+    monkeypatch.setattr(config_module, "load_config", fake_load_config)
+    monkeypatch.setattr(binding_module, "apply_provider_endpoint_choice", fake_write)
+    monkeypatch.setattr(write_module, "provider_preset", fake_preset)
+    monkeypatch.setattr(setup_module, "_restart_service_for_semantic_composition", fake_restart)
+    monkeypatch.setattr(provider_status_module, "provider_status_report", fake_status)
+    monkeypatch.setattr(unlock_module, "set_provider_credential", replace)
+    monkeypatch.setattr(setup_module, "_service_reachability", fake_reachability)
+
+    def replace_stored(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(setup_module.typer, "confirm", replace_stored)
+
+    _service, report = asyncio.run(
+        setup_module._interactive_provider_setup(  # pyright: ignore[reportPrivateUsage]
+            {"reachable": True, "state": "ready", "vault_mode": "os_managed"},
+            provider_choice="fireworks",
+            model="accounts/fireworks/models/minimax-m3",
+        )
+    )
+
+    assert len(replacements) == 1
+    assert report["credential"] == expected_credential
+    if result_lost:
+        assert report["credential_reason"] == "credential_ambiguous"
+        assert "credential_display" not in report
+    else:
+        assert report["credential_display"] == "********"
 
 
 def test_lost_credential_result_recovers_from_recomposed_presence(

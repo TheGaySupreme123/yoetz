@@ -48,6 +48,14 @@ and the user may edit; the label is echoed only while the answers still exactly 
 and reverts to `custom` after any edit. **Selecting a recipe never commits a widening, provisions a
 credential, or skips the review/decision step.**
 
+The first-run CLI and `yoetz --privacy` add a bounded convenience path above that contract. They
+materialize and render the exact `metadata_only` draft first: public structural metadata and
+declared file types, task scope, and per-request confirmation. Accepting that rendered draft sends
+the same typed answers directly to proposal; declining it opens the recipe selector and the
+thirteen questions one by one. Neither branch skips exact review or the separately reauthenticated
+widening decision. The convenience recommendation is privacy-first UI guidance, not the conditional
+provider-data-use recommendation attached to `assisted_review`.
+
 ### The fail-safe default draft
 
 With no answers, the draft is `local_only`, `review_context=structural`, `network_egress=false`, all
