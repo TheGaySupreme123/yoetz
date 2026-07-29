@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Final, Literal, cast
@@ -501,7 +502,7 @@ async def _effective_policy() -> PrivacyPolicy:
         await client.close()
     plain = cast(dict[str, JsonValue], dict(raw))
     policy = plain.get("policy")
-    if type(policy) is not dict:
+    if not isinstance(policy, Mapping):
         raise ValueError("privacy_setup_effective_unavailable")
     return decode_privacy_policy_canonical(canonical_encode(cast(JsonValue, policy)))
 

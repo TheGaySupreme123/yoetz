@@ -325,6 +325,63 @@ def test_interactive_registration_n_declines_without_mutation(
         assert all(call[1:3] == ("mcp", "get") for call in calls)
 
 
+def test_semantic_first_run_suggests_and_selects_metadata_only_privacy_draft(
+    wizard_env: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.cli.privacy_setup as privacy_setup_module
+    import yoetz.cli.provider_status as provider_status_module
+    import yoetz.cli.setup as setup_module
+
+    wizard_env["outputs"] = [
+        CommandOutput(1, b""),  # preview get: absent
+        CommandOutput(1, b""),  # apply re-preview get: absent
+        CommandOutput(0, b""),  # add
+        _yoetz_entry("policy"),  # verify get
+    ]
+    recipe_hints: list[str | None] = []
+
+    async def ready(*, start_if_absent: bool = False) -> dict[str, object]:
+        del start_if_absent
+        return {"reachable": True, "state": "ready", "vault_mode": "passphrase"}
+
+    async def provider_setup(
+        service: dict[str, object],
+        *,
+        provider_choice: str | None = None,
+        model: str | None = None,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        del provider_choice, model
+        return service, {"binding": "configured", "credential": "stored"}
+
+    async def privacy_setup(*, recipe_hint: str | None = None) -> SimpleNamespace:
+        recipe_hints.append(recipe_hint)
+        return SimpleNamespace(
+            outcome="configured",
+            profile="confirm_every_request",
+            proposal_id="pvp_1",
+            reason=None,
+        )
+
+    async def provider_status() -> dict[str, object]:
+        return {"semantic_ready": True}
+
+    monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(setup_module, "_service_reachability", ready)
+    monkeypatch.setattr(setup_module, "_interactive_provider_setup", provider_setup)
+    monkeypatch.setattr(setup_module, "_restart_service_for_semantic_composition", ready)
+    monkeypatch.setattr(privacy_setup_module, "run_privacy_setup", privacy_setup)
+    monkeypatch.setattr(provider_status_module, "provider_status_report", provider_status)
+
+    result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\n2\nY\n")
+
+    assert result.exit_code == 0
+    assert recipe_hints == ["metadata_only"]
+    assert "Choose what semantic review may send:" in result.stdout
+    assert "Suggested first-run default: Metadata only" in result.stdout
+    assert "Privacy: configured (confirm_every_request)" in result.stdout
+
+
 def test_no_codex_found_still_completes_with_guidance(wizard_env: dict[str, object]) -> None:
     wizard_env["binaries"] = ()
     result = _RUNNER.invoke(cli.app, ["setup", "run", "--non-interactive", "--json"])
@@ -797,6 +854,12 @@ def test_ready_auto_unlock_vault_reuses_scoped_secret_for_provider_reauthenticat
         del start_if_absent
         return {"reachable": True, "state": "ready", "vault_mode": "passphrase"}
 
+    async def fake_restart() -> dict[str, object]:
+        return {"reachable": True, "state": "ready", "vault_mode": "passphrase"}
+
+    async def fake_provider_status() -> dict[str, object]:
+        return {"credential_connected": False}
+
     def fake_provider_preset(_provider: str) -> SimpleNamespace:
         return SimpleNamespace(choice="fireworks", provider_id="fireworks")
 
@@ -806,6 +869,10 @@ def test_ready_auto_unlock_vault_reuses_scoped_secret_for_provider_reauthenticat
     monkeypatch.setattr(binding_module, "apply_provider_endpoint_choice", fake_write)
     monkeypatch.setattr(unlock_module, "set_provider_credential", fake_set)
     monkeypatch.setattr(setup_module, "_service_reachability", fake_reachability)
+    monkeypatch.setattr(setup_module, "_restart_service_for_semantic_composition", fake_restart)
+    import yoetz.cli.provider_status as provider_status_module
+
+    monkeypatch.setattr(provider_status_module, "provider_status_report", fake_provider_status)
     monkeypatch.setattr(
         write_module,
         "provider_preset",
@@ -824,3 +891,133 @@ def test_ready_auto_unlock_vault_reuses_scoped_secret_for_provider_reauthenticat
     assert supplied_reauthentication == [b"a" * 48]
     assert report["binding"] == "configured"
     assert report["credential"] == "stored"
+    assert report["credential_display"] == "********"
+
+
+def test_existing_bound_credential_is_masked_and_not_requested_again(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import yoetz.cli.provider_binding as binding_module
+    import yoetz.cli.provider_status as provider_status_module
+    import yoetz.cli.setup as setup_module
+    import yoetz.cli.unlock as unlock_module
+    import yoetz.config.load as config_module
+    import yoetz.config.write as write_module
+
+    provider = SimpleNamespace(
+        provider_id="fireworks",
+        model="accounts/fireworks/models/minimax-m3",
+        endpoint_profile_id="fireworks-responses",
+        endpoint_profile_version="1.0.0",
+    )
+
+    def fake_load_config(*_args: object) -> SimpleNamespace:
+        return SimpleNamespace(storage=SimpleNamespace(data_dir=tmp_path), provider=provider)
+
+    def fake_write(*_args: object, **_kwargs: object) -> tuple[Path, object]:
+        return tmp_path / "config.toml", object()
+
+    def fake_preset(_provider: object) -> SimpleNamespace:
+        return SimpleNamespace(choice="fireworks", provider_id="fireworks")
+
+    monkeypatch.setattr(
+        config_module,
+        "load_config",
+        fake_load_config,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        "apply_provider_endpoint_choice",
+        fake_write,
+    )
+    monkeypatch.setattr(write_module, "provider_preset", fake_preset)
+
+    async def fake_restart() -> dict[str, object]:
+        return {"reachable": True, "state": "ready", "vault_mode": "passphrase"}
+
+    async def fake_status() -> dict[str, object]:
+        return {"credential_connected": True}
+
+    async def forbidden_set(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("stored credential must not be requested again")
+
+    monkeypatch.setattr(setup_module, "_restart_service_for_semantic_composition", fake_restart)
+    monkeypatch.setattr(provider_status_module, "provider_status_report", fake_status)
+    monkeypatch.setattr(unlock_module, "set_provider_credential", forbidden_set)
+
+    _service, report = asyncio.run(
+        setup_module._interactive_provider_setup(  # pyright: ignore[reportPrivateUsage]
+            {"reachable": True, "state": "ready", "vault_mode": "passphrase"},
+            provider_choice="fireworks",
+            model="accounts/fireworks/models/minimax-m3",
+        )
+    )
+
+    assert report["credential"] == "stored"
+    assert report["credential_display"] == "********"
+
+
+def test_lost_credential_result_recovers_from_recomposed_presence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import yoetz.cli.provider_binding as binding_module
+    import yoetz.cli.provider_status as provider_status_module
+    import yoetz.cli.setup as setup_module
+    import yoetz.cli.unlock as unlock_module
+    import yoetz.config.load as config_module
+    import yoetz.config.write as write_module
+    from yoetz.service.confidential_client import ConfidentialClientError
+
+    provider = SimpleNamespace(
+        provider_id="fireworks",
+        model="accounts/fireworks/models/minimax-m3",
+        endpoint_profile_id="fireworks-responses",
+        endpoint_profile_version="1.0.0",
+    )
+    status_reads = iter((False, True))
+
+    def fake_load_config(*_args: object) -> SimpleNamespace:
+        return SimpleNamespace(storage=SimpleNamespace(data_dir=tmp_path), provider=provider)
+
+    def fake_write(*_args: object, **_kwargs: object) -> tuple[Path, object]:
+        return tmp_path / "config.toml", object()
+
+    def fake_preset(_provider: object) -> SimpleNamespace:
+        return SimpleNamespace(choice="fireworks", provider_id="fireworks")
+
+    monkeypatch.setattr(
+        config_module,
+        "load_config",
+        fake_load_config,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        "apply_provider_endpoint_choice",
+        fake_write,
+    )
+    monkeypatch.setattr(write_module, "provider_preset", fake_preset)
+
+    async def fake_restart() -> dict[str, object]:
+        return {"reachable": True, "state": "ready", "vault_mode": "passphrase"}
+
+    async def fake_status() -> dict[str, object]:
+        return {"credential_connected": next(status_reads)}
+
+    async def lost_result(*_args: object, **_kwargs: object) -> object:
+        raise ConfidentialClientError("ambiguous")
+
+    monkeypatch.setattr(setup_module, "_restart_service_for_semantic_composition", fake_restart)
+    monkeypatch.setattr(provider_status_module, "provider_status_report", fake_status)
+    monkeypatch.setattr(unlock_module, "set_provider_credential", lost_result)
+
+    _service, report = asyncio.run(
+        setup_module._interactive_provider_setup(  # pyright: ignore[reportPrivateUsage]
+            {"reachable": True, "state": "ready", "vault_mode": "passphrase"},
+            provider_choice="fireworks",
+            model="accounts/fireworks/models/minimax-m3",
+        )
+    )
+
+    assert report["credential"] == "stored"
+    assert report["credential_display"] == "********"
+    assert report["credential_reason"] == "stored_result_recovered"

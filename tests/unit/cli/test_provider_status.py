@@ -33,6 +33,13 @@ def _provider(provider_id: str = "openai") -> ProviderProfileConfig:
     )
 
 
+def test_credential_human_display_uses_one_constant_mask() -> None:
+    assert module.credential_human_display(True) == "********"
+    assert module.credential_human_display(False) == "not stored"
+    assert module.credential_human_display(None) == "unknown"
+    assert module.credential_human_display("a-real-key-must-never-be-reflected") == "unknown"
+
+
 def _policy(*, llm_inference_enabled: bool, profile: str = "local_only") -> dict[str, object]:
     return {
         "policy": {

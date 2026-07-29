@@ -896,6 +896,7 @@ async def _interactive_provider_setup(
     from yoetz.config.models import ConfigError
     from yoetz.config.paths import bundle_root
     from yoetz.config.write import provider_preset
+    from yoetz.service.confidential_client import ConfidentialClientError
     from yoetz.service.confidential_protocol import ProviderCredentialTarget
     from yoetz.service.vault import provider_credential_profile_binding
 
@@ -989,6 +990,30 @@ async def _interactive_provider_setup(
         wipe_auto_passphrase()
         return service, provider_report
 
+    # The service snapshots its configured provider and credential capability at composition
+    # time. Refresh it after writing the binding before deciding whether this exact profile
+    # already has a credential. This also makes a repeated setup run idempotent: an existing
+    # credential is shown as present and is never requested again.
+    service = await _restart_service_for_semantic_composition()
+    credential_before: bool | None = None
+    if service.get("state") == "ready":
+        from yoetz.cli.provider_status import provider_status_report
+
+        try:
+            status_before = await provider_status_report()
+        except OSError, ValueError:
+            status_before = {}
+        observed_before = status_before.get("credential_connected")
+        credential_before = observed_before if type(observed_before) is bool else None
+    if credential_before is True:
+        from yoetz.cli.provider_status import credential_human_display
+
+        provider_report["credential"] = "stored"
+        provider_report["credential_display"] = credential_human_display(True)
+        typer.echo(f"  Credential: {credential_human_display(True)} (already stored)")
+        wipe_auto_passphrase()
+        return service, provider_report
+
     # A Keychain-provisioned passphrase vault is already ready without the
     # human knowing its generated passphrase. Load that same scoped secret
     # only for the one provider-reauthentication ceremony, so setup asks for
@@ -1026,8 +1051,36 @@ async def _interactive_provider_setup(
     except HumanCeremonyCliError as error:
         provider_report["credential"] = "failed"
         provider_report["credential_reason"] = error.reason
+    except ConfidentialClientError as error:
+        # The vault write may have committed before the result/close frame was lost. Recompose
+        # and inspect only the exact configured profile's presence bit; never retry with a wiped
+        # buffer and never turn an unreadable state into a success claim.
+        service = await _restart_service_for_semantic_composition()
+        credential_after: bool | None = None
+        if service.get("state") == "ready":
+            from yoetz.cli.provider_status import provider_status_report
+
+            try:
+                status_after = await provider_status_report()
+            except OSError, ValueError:
+                status_after = {}
+            observed_after = status_after.get("credential_connected")
+            credential_after = observed_after if type(observed_after) is bool else None
+        if credential_after is True:
+            from yoetz.cli.provider_status import credential_human_display
+
+            provider_report["credential"] = "stored"
+            provider_report["credential_display"] = credential_human_display(True)
+            provider_report["credential_reason"] = "stored_result_recovered"
+        else:
+            provider_report["credential"] = "failed"
+            provider_report["credential_reason"] = f"credential_{error.reason}"
     else:
         provider_report["credential"] = result.activation_status
+        if result.activation_status == "stored":
+            from yoetz.cli.provider_status import credential_human_display
+
+            provider_report["credential_display"] = credential_human_display(True)
     finally:
         wipe_auto_passphrase()
     return await _service_reachability(), provider_report
@@ -1102,7 +1155,14 @@ async def run_provider_setup(
     credential = provider_report.get("credential")
     typer.echo("")
     typer.echo(f"Provider binding: {binding}")
-    typer.echo(f"API key: {credential}")
+    from yoetz.cli.provider_status import credential_human_display
+
+    typer.echo(
+        "Credential: "
+        + credential_human_display(
+            True if credential == "stored" else (False if credential == "failed" else None)
+        )
+    )
     if binding != "configured" or credential != "stored":
         reason = provider_report.get("credential_reason")
         if type(reason) is str:
@@ -1191,13 +1251,27 @@ async def run_setup_wizard(
             from yoetz.cli.unlock import HumanCeremonyCliError
             from yoetz.ports.control import ControlError
 
+            typer.echo("")
+            typer.echo("Choose what semantic review may send:")
+            typer.echo(
+                "  Suggested first-run default: Metadata only — structural context, "
+                "with confirmation before every provider request"
+            )
             try:
-                privacy_result = await run_privacy_setup(recipe_hint="custom")
+                privacy_result = await run_privacy_setup(recipe_hint="metadata_only")
             except (ControlError, HumanCeremonyCliError, OSError, ValueError) as error:
+                reason = getattr(error, "reason", None)
+                if type(error) is ValueError:
+                    value_error_reason = str(error)
+                    reason = (
+                        value_error_reason
+                        if value_error_reason.startswith("privacy_setup_")
+                        else "privacy_setup_failed"
+                    )
                 privacy = {
                     "outcome": "failed",
                     "profile": "unknown",
-                    "reason": getattr(error, "reason", "privacy_setup_failed"),
+                    "reason": reason if type(reason) is str else "privacy_setup_failed",
                 }
             else:
                 privacy = {
@@ -1398,7 +1472,15 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
         )
     if isinstance(provider, dict):
         typer.echo(f"  Provider binding: {provider.get('binding')}")
-        typer.echo(f"  Provider credential: {provider.get('credential')}")
+        from yoetz.cli.provider_status import credential_human_display
+
+        credential = provider.get("credential")
+        typer.echo(
+            "  Credential: "
+            + credential_human_display(
+                True if credential == "stored" else (False if credential == "failed" else None)
+            )
+        )
     if isinstance(privacy, dict):
         line = f"  Privacy: {privacy.get('outcome')} ({privacy.get('profile')})"
         if privacy.get("reason"):

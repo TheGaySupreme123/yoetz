@@ -49,7 +49,16 @@ Setup is a linear path inside the interface, each finished step collapsing into 
 7. **Review mode** — finish in complete local-only mode, or configure semantic review.
 8. **Semantic setup, when selected** — provider/model, hidden API-key entry, all thirteen privacy
    answers, the exact disclosure preview, and the separately reauthenticated widening decision.
+   The suggested first-run draft is **Metadata only**: structural context only, with a foreground
+   confirmation before every provider request. This is a privacy-minimizing usable starting point,
+   not consent; **Private** remains available for no network egress, and broader recipes remain
+   explicit choices.
 9. **Finish**, stating each readiness layer separately.
+
+Credential status is presence-only. Human output shows the fixed mask `********` when the trusted
+service confirms that the configured provider has a stored credential, `not stored` when absence
+is confirmed, and `unknown` when the service or vault cannot answer. The mask is constant: it never
+contains or encodes any character, length, prefix, suffix, or fingerprint of the API key.
 
 `codex mcp get` runs first; an existing foreign entry is always preserved, never replaced, and
 there is no force-replace option anywhere in the interface.
