@@ -8,7 +8,7 @@ a Codex installation, a running service, or a vault.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from yoetz.tui.models import (
@@ -131,7 +131,12 @@ class FakeRuntime:
     async def integration_plan(self, option: HarnessOption) -> IntegrationPlan:
         if self.plan_error is not None:
             raise self.plan_error
-        return self.plan
+        return replace(
+            self.plan,
+            harness_label=option.label,
+            executable_path=option.executable_path,
+            reported_version=option.reported_version,
+        )
 
     async def apply_integration(
         self, option: HarnessOption, plan: IntegrationPlan

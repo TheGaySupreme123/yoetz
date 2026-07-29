@@ -88,8 +88,34 @@ def test_launcher_fails_with_guidance_when_uv_is_absent(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is a contributor-only tool")
+def test_launcher_does_not_call_a_broken_uv_installation_missing(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    assert node is not None
+    shim_dir = tmp_path / "shims"
+    shim_dir.mkdir()
+    (shim_dir / "uv").write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
+    os.chmod(shim_dir / "uv", 0o755)
+
+    completed = subprocess.run(
+        (node, str(_LAUNCHER_DIR / "bin" / "yoetz.js")),
+        env={**os.environ, "PATH": str(shim_dir)},
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 1
+    stderr = completed.stderr.decode("utf-8")
+    assert "could not run 'uv --version'" in stderr
+    assert "status 7" in stderr
+    assert "not found on PATH" not in stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is a contributor-only tool")
+@pytest.mark.parametrize(("signal", "expected"), [("INT", 130), ("PIPE", 141)])
 def test_launcher_reports_signal_termination_as_the_conventional_exit_code(
     tmp_path: Path,
+    signal: str,
+    expected: int,
 ) -> None:
     """A script that checks exit codes must see the same value either entry point gives.
 
@@ -102,8 +128,10 @@ def test_launcher_reports_signal_termination_as_the_conventional_exit_code(
     shim_dir = tmp_path / "shims"
     shim_dir.mkdir()
     (shim_dir / "uv").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    # Kill the child with SIGINT, exactly as Ctrl-C at a terminal would.
-    (shim_dir / "uvx").write_text("#!/bin/sh\nkill -INT $$\n", encoding="utf-8")
+    (shim_dir / "uvx").write_text(
+        f"#!/bin/sh\nkill -{signal} $$\n",
+        encoding="utf-8",
+    )
     os.chmod(shim_dir / "uv", 0o755)
     os.chmod(shim_dir / "uvx", 0o755)
 
@@ -114,7 +142,7 @@ def test_launcher_reports_signal_termination_as_the_conventional_exit_code(
         timeout=30,
         check=False,
     )
-    assert completed.returncode == 130
+    assert completed.returncode == expected
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is a contributor-only tool")

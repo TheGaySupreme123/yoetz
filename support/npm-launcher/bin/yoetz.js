@@ -12,13 +12,13 @@
 // that captured or replaced these streams here would silently downgrade both.
 
 const { spawnSync } = require("node:child_process");
+const { constants } = require("node:os");
 const { version } = require("../package.json");
 
 const INSTALL_DOCS = "https://docs.astral.sh/uv/getting-started/installation/";
 
-function uvAvailable() {
-  const probe = spawnSync("uv", ["--version"], { stdio: "ignore", shell: false });
-  return probe.status === 0;
+function probeUv() {
+  return spawnSync("uv", ["--version"], { stdio: "ignore", shell: false });
 }
 
 function fail(lines) {
@@ -27,7 +27,8 @@ function fail(lines) {
 }
 
 function main() {
-  if (!uvAvailable()) {
+  const uvProbe = probeUv();
+  if (uvProbe.error?.code === "ENOENT") {
     // The packaging contract forbids bootstrapping a runtime from here, so the
     // only useful thing this launcher can do is say exactly what is missing and
     // exactly how to get it.
@@ -43,6 +44,20 @@ function main() {
       `  Other options:  ${INSTALL_DOCS}`,
       "",
       "Then re-run this command.",
+    ]);
+    return;
+  }
+  if (uvProbe.error || uvProbe.status !== 0) {
+    const reported = uvProbe.error
+      ? uvProbe.error.message
+      : `'uv --version' exited with status ${uvProbe.status}`;
+    fail([
+      "yoetz: could not run 'uv --version'.",
+      "",
+      `Reported: ${reported}`,
+      "",
+      "Check that your uv installation is executable and complete,",
+      `then re-run this command. See ${INSTALL_DOCS}`,
     ]);
     return;
   }
@@ -70,8 +85,10 @@ function main() {
   // script that inspects exit codes — including 130 for an interrupted session.
   if (result.status === null) {
     const SIGNAL_EXIT_BASE = 128;
-    const signals = { SIGINT: 2, SIGQUIT: 3, SIGKILL: 9, SIGTERM: 15, SIGHUP: 1 };
-    const offset = signals[result.signal];
+    const offset =
+      typeof result.signal === "number"
+        ? result.signal
+        : constants.signals[result.signal];
     process.exitCode = offset === undefined ? 1 : SIGNAL_EXIT_BASE + offset;
     return;
   }

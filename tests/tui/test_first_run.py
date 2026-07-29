@@ -108,6 +108,16 @@ async def test_multiple_installations_ask_which_one_before_previewing(
         assert view.view_name == "harness"
         labels = [option.label for option in _options(view)]
         assert labels == ["Codex Desktop 0.44", "Codex CLI 0.44", "Choose another executable"]
+        await pilot.press("2")  # Codex CLI
+        await pilot.pause()
+        await pilot.press("enter")  # trust
+        await pilot.pause()
+        view = app.open_view
+        assert view is not None
+        assert view.view_name == "integration"
+        technical = "\n".join(view.technical_details)
+        assert CLI.executable_path in technical
+        assert DESKTOP.executable_path not in technical
 
 
 async def test_an_empty_manual_executable_path_is_rejected_in_place(
