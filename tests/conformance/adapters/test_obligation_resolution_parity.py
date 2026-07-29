@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import cast
 
 import pytest
 
@@ -26,8 +27,8 @@ from yoetz.domain.values import (
     obligation_id,
     timestamp_from_string,
 )
-from yoetz.ports.ledger import AppendCommand, AppendEntry, OperationKind
-from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectSource
+from yoetz.ports.ledger import AppendCommand, AppendEntry, LedgerPort, OperationKind
+from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectSource, ObjectStorePort
 from yoetz.protocol.canonical import canonical_encode
 from yoetz.protocol.coverage import AuthorshipAssurance, PublicationChannel, coverage_for_channel
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
@@ -61,7 +62,7 @@ def _bad_resolution() -> ObligationPublishedPayload:
 
 
 async def _append_payload(
-    ledger: object,
+    ledger: LedgerPort,
     payload: ObligationPublishedPayload,
     *,
     request_tail: int,
@@ -81,7 +82,7 @@ async def _append_payload(
         (),
         (),
     )
-    objects = ledger._objects  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+    objects = cast(ObjectStorePort, getattr(ledger, "_objects"))
     seed = append_command()
     media = media_type_for("obligation_published")
     payload_bytes = canonical_encode(encode_payload(payload))
@@ -101,7 +102,7 @@ async def _append_payload(
         coverage_for_channel(PublicationChannel.LOCAL_CLI),
         "projected",
     )
-    frontier = await ledger.load_frontier()  # pyright: ignore[reportAttributeAccessIssue]
+    frontier = await ledger.load_frontier()
     digest_hex = f"{request_tail:064x}"[-64:]
     command = AppendCommand(
         seed.task_id,
@@ -113,7 +114,7 @@ async def _append_payload(
         frontier.sequence,
         (entry,),
     )
-    await ledger.append_batch(command)  # pyright: ignore[reportAttributeAccessIssue]
+    await ledger.append_batch(command)
 
 
 @pytest.mark.parametrize("adapter_name", ("memory", "sqlite"))

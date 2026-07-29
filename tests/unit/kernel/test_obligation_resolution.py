@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import cast
+from typing import Any
 
 import pytest
 
@@ -68,34 +68,32 @@ _MEANING_FIELDS = (
 )
 
 
-def _open_payload(**overrides: object) -> ObligationPublishedPayload:
-    base: dict[str, object] = {
-        "obligation_id": _OBL_ID,
-        "description": "Close the loop with exact evidence.",
-        "evidence_expectation": "A named test run at the claimed state.",
-        "status": ObligationStatus.OPEN,
-        "acceptance_criteria": "The focused slice is green.",
-        "requested_items": (RequestedItem(RequestedItemKind.COMMAND, "pytest -q"),),
-        "source_refs": (_SOURCE_EVT,),
-        "resolution_evidence_refs": (),
-    }
-    base.update(overrides)
-    return ObligationPublishedPayload(**cast(dict[str, object], base))
+def _open_payload(**overrides: Any) -> ObligationPublishedPayload:
+    base = ObligationPublishedPayload(
+        obligation_id=_OBL_ID,
+        description="Close the loop with exact evidence.",
+        evidence_expectation="A named test run at the claimed state.",
+        status=ObligationStatus.OPEN,
+        acceptance_criteria="The focused slice is green.",
+        requested_items=(RequestedItem(RequestedItemKind.COMMAND, "pytest -q"),),
+        source_refs=(_SOURCE_EVT,),
+        resolution_evidence_refs=(),
+    )
+    return replace(base, **overrides) if overrides else base
 
 
-def _resolved_payload(**overrides: object) -> ObligationPublishedPayload:
-    base: dict[str, object] = {
-        "obligation_id": _OBL_ID,
-        "description": "Close the loop with exact evidence.",
-        "evidence_expectation": "A named test run at the claimed state.",
-        "status": ObligationStatus.RESOLVED,
-        "acceptance_criteria": "The focused slice is green.",
-        "requested_items": (RequestedItem(RequestedItemKind.COMMAND, "pytest -q"),),
-        "source_refs": (_SOURCE_EVT,),
-        "resolution_evidence_refs": (_EVD_ID,),
-    }
-    base.update(overrides)
-    return ObligationPublishedPayload(**cast(dict[str, object], base))
+def _resolved_payload(**overrides: Any) -> ObligationPublishedPayload:
+    base = ObligationPublishedPayload(
+        obligation_id=_OBL_ID,
+        description="Close the loop with exact evidence.",
+        evidence_expectation="A named test run at the claimed state.",
+        status=ObligationStatus.RESOLVED,
+        acceptance_criteria="The focused slice is green.",
+        requested_items=(RequestedItem(RequestedItemKind.COMMAND, "pytest -q"),),
+        source_refs=(_SOURCE_EVT,),
+        resolution_evidence_refs=(_EVD_ID,),
+    )
+    return replace(base, **overrides) if overrides else base
 
 
 def _accepted(
@@ -249,8 +247,9 @@ def test_changing_only_status_and_resolution_evidence_refs_is_accepted() -> None
         resolution_evidence_refs=(_EVD_ID,),
     )
     state = replay(_chain(open_payload, resolved))
-    assert state.obligations[_OBL_ID].payload is not None
-    assert state.obligations[_OBL_ID].payload.status is ObligationStatus.RESOLVED
+    record = state.obligations[_OBL_ID]
+    assert record.payload is not None
+    assert record.payload.status is ObligationStatus.RESOLVED
 
 
 def test_open_to_open_duplicate_is_rejected() -> None:

@@ -586,7 +586,7 @@ async def test_dry_run_frontier_gate_matches_sequence_only_publish_predicate() -
 
 _OBLIGATION_ID = "obl_00000000-0000-4000-8000-000000000701"
 _EVIDENCE_ID = "evd_00000000-0000-4000-8000-000000000702"
-_OPEN_MEANING = {
+_OPEN_MEANING: dict[str, object] = {
     "obligation_id": _OBLIGATION_ID,
     "description": "Close the loop with exact evidence.",
     "acceptance_criteria": "The focused slice is green.",
@@ -641,7 +641,7 @@ async def _publish_open_obligation(app: _Application) -> Frontier:
 async def test_obligation_resolution_exact_repeat_is_accepted_on_publish() -> None:
     app, _objects = _composition()
     frontier = await _publish_open_obligation(app)
-    resolved = {
+    resolved: dict[str, object] = {
         **_OPEN_MEANING,
         "status": "resolved",
         "resolution_evidence_refs": [_EVIDENCE_ID],
@@ -666,7 +666,7 @@ async def test_obligation_resolution_mismatch_is_identical_on_dry_run_and_publis
 
     app, _objects = _composition()
     frontier = await _publish_open_obligation(app)
-    mismatched = {
+    mismatched: dict[str, object] = {
         "obligation_id": _OBLIGATION_ID,
         "description": _OPEN_MEANING["description"],
         "evidence_expectation": "Shortened expectation.",
@@ -712,7 +712,7 @@ async def test_obligation_resolution_mismatch_is_identical_on_dry_run_and_publis
 async def test_obligation_resolution_omitting_only_acceptance_criteria_names_that_field() -> None:
     app, _objects = _composition()
     frontier = await _publish_open_obligation(app)
-    mismatched = {
+    mismatched: dict[str, object] = {
         "obligation_id": _OBLIGATION_ID,
         "description": _OPEN_MEANING["description"],
         "evidence_expectation": _OPEN_MEANING["evidence_expectation"],
