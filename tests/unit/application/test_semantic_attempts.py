@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, cast
 
 import pytest
 
@@ -408,7 +408,7 @@ async def test_zero_retry_performs_exactly_one_attempt() -> None:
         assert not deadline.expired(0.0)
         return script.pop(0)
 
-    async def publish(handle: SemanticAttemptHandle, evaluation: _Eval) -> ObjectRef:
+    async def publish(handle: SemanticAttemptHandle, evaluation: object) -> ObjectRef:
         raise AssertionError("publish_not_expected")
 
     finals: list[tuple[SemanticStatus, SemanticReason, int]] = []
@@ -422,17 +422,20 @@ async def test_zero_retry_performs_exactly_one_attempt() -> None:
         finals.append((status, reason, accounting.attempted_count))
         return (status, reason, accounting)
 
-    result = await run_durable_semantic_attempts(
-        ledger=ledger,
-        lease=lease,
-        job=job,
-        deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
-        max_retries=0,
-        now_monotonic=lambda: 0.0,
-        dispatch=dispatch,
-        publish_success_response=publish,
-        sleep=lambda _: _async_noop(),
-        build_final=build_final,
+    result = cast(
+        tuple[SemanticStatus, SemanticReason, SemanticAttemptAccounting],
+        await run_durable_semantic_attempts(
+            ledger=ledger,
+            lease=lease,
+            job=job,
+            deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
+            max_retries=0,
+            now_monotonic=lambda: 0.0,
+            dispatch=dispatch,
+            publish_success_response=publish,
+            sleep=lambda _: _async_noop(),
+            build_final=build_final,
+        ),
     )
     assert ledger.dispatches is not None and len(ledger.dispatches) == 1
     assert ledger.outcomes is not None and ledger.outcomes[0][1] is AttemptOutcome.FAILED
@@ -477,7 +480,7 @@ async def test_two_retries_perform_at_most_three_physical_attempts() -> None:
         ledger.dispatches.append(handle.provider_request_id)
         return script.pop(0)
 
-    async def publish(handle: SemanticAttemptHandle, evaluation: _Eval) -> ObjectRef:
+    async def publish(handle: SemanticAttemptHandle, evaluation: object) -> ObjectRef:
         raise AssertionError("publish_not_expected")
 
     def build_final(
@@ -488,17 +491,20 @@ async def test_two_retries_perform_at_most_three_physical_attempts() -> None:
     ) -> object:
         return (status, reason, accounting)
 
-    result = await run_durable_semantic_attempts(
-        ledger=ledger,
-        lease=lease,
-        job=job,
-        deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
-        max_retries=2,
-        now_monotonic=lambda: 0.0,
-        dispatch=dispatch,
-        publish_success_response=publish,
-        sleep=lambda _: _async_noop(),
-        build_final=build_final,
+    result = cast(
+        tuple[SemanticStatus, SemanticReason, SemanticAttemptAccounting],
+        await run_durable_semantic_attempts(
+            ledger=ledger,
+            lease=lease,
+            job=job,
+            deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
+            max_retries=2,
+            now_monotonic=lambda: 0.0,
+            dispatch=dispatch,
+            publish_success_response=publish,
+            sleep=lambda _: _async_noop(),
+            build_final=build_final,
+        ),
     )
     assert ledger.dispatches is not None and len(ledger.dispatches) == 3
     assert len(set(ledger.dispatches)) == 3  # unique provider request ids
@@ -548,7 +554,7 @@ async def test_success_selects_first_valid_and_stops() -> None:
         ledger.dispatches.append(handle.attempt_id)
         return script.pop(0)
 
-    async def publish(handle: SemanticAttemptHandle, evaluation: _Eval) -> ObjectRef:
+    async def publish(handle: SemanticAttemptHandle, evaluation: object) -> ObjectRef:
         return _response_ref()
 
     def build_final(
@@ -559,17 +565,20 @@ async def test_success_selects_first_valid_and_stops() -> None:
     ) -> object:
         return (status, reason, accounting)
 
-    result = await run_durable_semantic_attempts(
-        ledger=ledger,
-        lease=lease,
-        job=job,
-        deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
-        max_retries=2,
-        now_monotonic=lambda: 0.0,
-        dispatch=dispatch,
-        publish_success_response=publish,
-        sleep=lambda _: _async_noop(),
-        build_final=build_final,
+    result = cast(
+        tuple[SemanticStatus, SemanticReason, SemanticAttemptAccounting],
+        await run_durable_semantic_attempts(
+            ledger=ledger,
+            lease=lease,
+            job=job,
+            deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
+            max_retries=2,
+            now_monotonic=lambda: 0.0,
+            dispatch=dispatch,
+            publish_success_response=publish,
+            sleep=lambda _: _async_noop(),
+            build_final=build_final,
+        ),
     )
     assert ledger.dispatches is not None
     assert len(ledger.dispatches) == 2
@@ -606,7 +615,7 @@ async def test_policy_block_never_retries() -> None:
         ledger.dispatches.append(handle.attempt_id)
         return _Eval(SemanticStatus.BLOCKED_BY_POLICY, SemanticReason.NETWORK_EGRESS_DENIED)
 
-    async def publish(handle: SemanticAttemptHandle, evaluation: _Eval) -> ObjectRef:
+    async def publish(handle: SemanticAttemptHandle, evaluation: object) -> ObjectRef:
         raise AssertionError("publish_not_expected")
 
     def build_final(
@@ -617,17 +626,20 @@ async def test_policy_block_never_retries() -> None:
     ) -> object:
         return (status, reason, accounting)
 
-    result = await run_durable_semantic_attempts(
-        ledger=ledger,
-        lease=lease,
-        job=job,
-        deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
-        max_retries=2,
-        now_monotonic=lambda: 0.0,
-        dispatch=dispatch,
-        publish_success_response=publish,
-        sleep=lambda _: _async_noop(),
-        build_final=build_final,
+    result = cast(
+        tuple[SemanticStatus, SemanticReason, SemanticAttemptAccounting],
+        await run_durable_semantic_attempts(
+            ledger=ledger,
+            lease=lease,
+            job=job,
+            deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
+            max_retries=2,
+            now_monotonic=lambda: 0.0,
+            dispatch=dispatch,
+            publish_success_response=publish,
+            sleep=lambda _: _async_noop(),
+            build_final=build_final,
+        ),
     )
     assert ledger.dispatches is not None and len(ledger.dispatches) == 1
     assert result[0] is SemanticStatus.BLOCKED_BY_POLICY
