@@ -23,7 +23,7 @@ from yoetz.ports.ledger import (
 from yoetz.ports.objects import ObjectRef
 from yoetz.ports.semantic import Deadline
 from yoetz.protocol.canonical import JsonValue
-from yoetz.protocol.models import SemanticReason, SemanticStatus
+from yoetz.protocol.models import VALID_SEMANTIC_REASONS, SemanticReason, SemanticStatus
 
 __all__ = [
     "SemanticAttemptAccounting",
@@ -37,6 +37,7 @@ __all__ = [
     "physical_attempt_budget",
     "run_durable_semantic_attempts",
     "should_retry_after",
+    "status_for_semantic_reason",
 ]
 
 # ADR-006 approved transient classes only. Contract-invalid is not automatically retried.
@@ -55,8 +56,16 @@ _RETRIABLE_STATUSES: Final[frozenset[SemanticStatus]] = frozenset(
     }
 )
 
+# Terminal job states that must not re-enter claim_semantic_job (recovery authority).
+_TERMINAL_JOB_STATES: Final[frozenset[str]] = frozenset({"succeeded", "failed", "quarantined"})
+
 # ADR-006: at most two retries → at most three physical attempts.
 _ADR_MAX_RETRIES: Final = 2
+
+# Reverse map: each closed SemanticReason belongs to exactly one SemanticStatus.
+_STATUS_BY_REASON: Final[dict[SemanticReason, SemanticStatus]] = {
+    reason: status for status, reasons in VALID_SEMANTIC_REASONS.items() for reason in reasons
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +208,15 @@ def final_status_after_exhaustion(
     return last_status, last_reason
 
 
+def status_for_semantic_reason(reason: SemanticReason) -> SemanticStatus:
+    """Map a closed SemanticReason to its unique SemanticStatus (no coercion of unknown pairs)."""
+
+    status = _STATUS_BY_REASON.get(reason)
+    if status is None:
+        raise ValueError("semantic_reason_unmapped")
+    return status
+
+
 BackoffKind = Literal["none", "transient"]
 
 
@@ -240,6 +258,8 @@ class _SemanticAttemptLedger(Protocol):
 
     async def list_semantic_attempts(self, job_id: str) -> tuple[SemanticAttemptRecord, ...]: ...
 
+    async def renew_leases(self, lease: OperationLease) -> OperationLease: ...
+
 
 class _AttemptEvaluation(Protocol):
     @property
@@ -261,6 +281,57 @@ SemanticAttemptDispatch = Callable[
 ]
 
 
+async def _accounting_for(
+    ledger: _SemanticAttemptLedger,
+    lease: OperationLease,
+    job_id: str,
+    *,
+    max_retries: int,
+) -> SemanticAttemptAccounting:
+    rows = await ledger.list_semantic_attempts(job_id)
+    job_final = await ledger.load_semantic_job(lease.writer_id, lease.operation_id)
+    return attempt_accounting_from_rows(job_final, rows, max_retries=max_retries)
+
+
+async def _recover_terminal_job(
+    *,
+    ledger: _SemanticAttemptLedger,
+    lease: OperationLease,
+    job: SemanticJobRecord,
+    max_retries: int,
+    recover_selected: Callable[[SemanticJobRecord], Awaitable[_AttemptEvaluation | None]] | None,
+    build_final: Callable[
+        [SemanticStatus, SemanticReason, _AttemptEvaluation | None, SemanticAttemptAccounting],
+        object,
+    ],
+) -> object:
+    """Rebuild the final evaluation from a durable terminal job without re-claiming."""
+
+    accounting = await _accounting_for(ledger, lease, job.job_id, max_retries=max_retries)
+    if job.state == "succeeded":
+        evaluation: _AttemptEvaluation | None = None
+        if recover_selected is not None:
+            evaluation = await recover_selected(job)
+        reason = (
+            job.terminal_code
+            if type(job.terminal_code) is SemanticReason
+            else SemanticReason.SEMANTIC_COMPLETED
+        )
+        return build_final(SemanticStatus.SUCCEEDED, reason, evaluation, accounting)
+
+    reason = (
+        job.terminal_code
+        if type(job.terminal_code) is SemanticReason
+        else SemanticReason.COORDINATOR_FAILURE
+    )
+    try:
+        status = status_for_semantic_reason(reason)
+    except ValueError:
+        status = SemanticStatus.FAILED
+        reason = SemanticReason.COORDINATOR_FAILURE
+    return build_final(status, reason, None, accounting)
+
+
 async def run_durable_semantic_attempts(
     *,
     ledger: _SemanticAttemptLedger,
@@ -278,13 +349,45 @@ async def run_durable_semantic_attempts(
         [SemanticStatus, SemanticReason, _AttemptEvaluation | None, SemanticAttemptAccounting],
         object,
     ],
+    recover_selected: (
+        Callable[[SemanticJobRecord], Awaitable[_AttemptEvaluation | None]] | None
+    ) = None,
+    on_lease_renewed: Callable[[OperationLease], None] | None = None,
 ) -> object:
     """Run the physical attempt loop for one durable semantic job.
 
     Each iteration claims (or resumes) one attempt, dispatches once, and records a durable
     outcome. Retries only the ADR-006 transient classes within the total deadline and
     ``max_retries`` budget. Exactly one selected attempt or one terminal failed job results.
+
+    Crash/replay after a terminal job row already exists recovers from durable state without
+    re-claiming. The check operation lease is renewed around each claim/select so a configured
+    ``timeout_seconds`` longer than the 60s lease TTL cannot expire mid-operation.
     """
+
+    current_lease = lease
+
+    async def _renew() -> OperationLease:
+        nonlocal current_lease
+        current_lease = await ledger.renew_leases(current_lease)
+        if on_lease_renewed is not None:
+            on_lease_renewed(current_lease)
+        return current_lease
+
+    # Always refresh the check lease before recovery or the first claim so a long semantic
+    # deadline is not truncated by the 60-second operation-lease TTL.
+    await _renew()
+
+    # Recover previously terminal jobs (crash after select_attempt / final FAILED before commit).
+    if job.state in _TERMINAL_JOB_STATES:
+        return await _recover_terminal_job(
+            ledger=ledger,
+            lease=current_lease,
+            job=job,
+            max_retries=max_retries,
+            recover_selected=recover_selected,
+            build_final=build_final,
+        )
 
     budget = physical_attempt_budget(max_retries)
     last: _AttemptEvaluation | None = None
@@ -292,9 +395,9 @@ async def run_durable_semantic_attempts(
 
     while attempts_completed < budget:
         if deadline.expired(now_monotonic()):
-            rows = await ledger.list_semantic_attempts(job.job_id)
-            job_final = await ledger.load_semantic_job(lease.writer_id, lease.operation_id)
-            accounting = attempt_accounting_from_rows(job_final, rows, max_retries=max_retries)
+            accounting = await _accounting_for(
+                ledger, current_lease, job.job_id, max_retries=max_retries
+            )
             if last is None:
                 return build_final(
                     SemanticStatus.TIMEOUT,
@@ -310,7 +413,9 @@ async def run_durable_semantic_attempts(
             )
             return build_final(status, reason, last, accounting)
 
-        handle = await ledger.claim_semantic_job(lease, job.job_id)
+        # Keep the operation lease alive across provider latency and backoff.
+        await _renew()
+        handle = await ledger.claim_semantic_job(current_lease, job.job_id)
         remaining = deadline.remaining_seconds(now_monotonic())
         attempt_deadline = Deadline(
             deadline.expires_at_utc,
@@ -320,15 +425,18 @@ async def run_durable_semantic_attempts(
         attempts_completed = handle.attempt_ordinal
         last = evaluation
 
+        # Provider dispatch may consume most of a lease TTL; renew before ledger mutations.
+        await _renew()
+
         if evaluation.status is SemanticStatus.SUCCEEDED:
             response_ref = await publish_success_response(handle, evaluation)
             await ledger.record_attempt_outcome(
                 handle, AttemptOutcome.RESPONSE_DURABLE, response_ref
             )
-            await ledger.select_attempt(lease, handle, response_ref)
-            rows = await ledger.list_semantic_attempts(job.job_id)
-            job_final = await ledger.load_semantic_job(lease.writer_id, lease.operation_id)
-            accounting = attempt_accounting_from_rows(job_final, rows, max_retries=max_retries)
+            await ledger.select_attempt(current_lease, handle, response_ref)
+            accounting = await _accounting_for(
+                ledger, current_lease, job.job_id, max_retries=max_retries
+            )
             return build_final(evaluation.status, evaluation.reason, evaluation, accounting)
 
         can_retry = should_retry_after(
@@ -360,14 +468,12 @@ async def run_durable_semantic_attempts(
             AttemptOutcome.FAILED,
             terminal_code=terminal_reason,
         )
-        rows = await ledger.list_semantic_attempts(job.job_id)
-        job_final = await ledger.load_semantic_job(lease.writer_id, lease.operation_id)
-        accounting = attempt_accounting_from_rows(job_final, rows, max_retries=max_retries)
+        accounting = await _accounting_for(
+            ledger, current_lease, job.job_id, max_retries=max_retries
+        )
         return build_final(terminal_status, terminal_reason, evaluation, accounting)
 
-    rows = await ledger.list_semantic_attempts(job.job_id)
-    job_final = await ledger.load_semantic_job(lease.writer_id, lease.operation_id)
-    accounting = attempt_accounting_from_rows(job_final, rows, max_retries=max_retries)
+    accounting = await _accounting_for(ledger, current_lease, job.job_id, max_retries=max_retries)
     if last is None:
         return build_final(
             SemanticStatus.UNAVAILABLE,

@@ -50,6 +50,7 @@ from yoetz.ports.ledger import (
     CheckPhase,
     CheckPolicyExecution,
     FrozenCase,
+    OperationLease,
     OperationRecord,
     OperationState,
 )
@@ -236,6 +237,9 @@ class FinalSemanticEvaluation:
     # Bounded structural attempt accounting reconstructed from durable rows when a job ran.
     # Not part of the frozen public check-result wire; owner recovery reads the ledger.
     attempt_accounting: object | None = None
+    # When the durable semantic phase renewed the check operation lease (lease TTL is 60s while
+    # timeout_seconds may be longer), later phase advance / commit must use this CAS fence.
+    operation_lease: OperationLease | None = None
 
     def __post_init__(self) -> None:
         validate_semantic_outcome(self.status, self.reason)
@@ -252,6 +256,8 @@ class FinalSemanticEvaluation:
                 raise _invalid("semantic_judgment_invalid")
         elif self.judgment is not None:
             raise _invalid("semantic_judgment_invalid")
+        if self.operation_lease is not None and type(self.operation_lease) is not OperationLease:
+            raise _invalid("operation_lease_invalid")
 
 
 def semantic_coverage_gap_code(status: SemanticStatus, reason: SemanticReason) -> str | None:
@@ -951,6 +957,9 @@ async def execute_check_commit(app: Application, request: CheckRequest) -> Check
             )
             frozen = FrozenCase(frozen.case, lease)
         semantic_result = await _semantic_evaluation(app, request, runtime, frozen, deterministic)
+        # Durable semantic attempts may renew the check lease (TTL 60s vs timeout up to 300s).
+        if semantic_result.operation_lease is not None:
+            frozen = FrozenCase(frozen.case, semantic_result.operation_lease)
         semantic_candidates: tuple[CandidateFinding, ...] = ()
         if semantic_result.status is SemanticStatus.SUCCEEDED:
             assert semantic_result.judgment is not None

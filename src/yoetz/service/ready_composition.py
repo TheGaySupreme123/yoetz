@@ -1482,6 +1482,92 @@ async def _publish_semantic_case_object(
     return await runtime.objects.finalize(staged)
 
 
+def _judgment_to_response_json(judgment: object) -> dict[str, CanonicalJsonValue]:
+    """Encode a SemanticJudgment into the durable SEMANTIC_RESPONSE wire object."""
+
+    from yoetz.ports.semantic import ReviewerChallenge, SemanticJudgment
+
+    if type(judgment) is not SemanticJudgment:
+        raise TypeError("semantic_judgment_required")
+    challenges: list[CanonicalJsonValue] = []
+    for item in judgment.challenges:
+        if type(item) is not ReviewerChallenge:
+            raise TypeError("semantic_judgment_required")
+        challenges.append(
+            {
+                "finding_kind": item.finding_kind.value,
+                "summary": item.summary,
+                "cited_refs": list(item.cited_refs),
+                "discrepancy": item.discrepancy,
+                "alternative_interpretation": item.alternative_interpretation,
+                "message_to_main_agent": item.message_to_main_agent,
+                "requested_next_step": item.requested_next_step,
+                "uncertainty": item.uncertainty,
+            }
+        )
+    return {
+        "conclusion": judgment.conclusion,
+        "reviewer_challenges": challenges,
+    }
+
+
+def _judgment_from_response_json(value: object) -> object:
+    """Decode a durable SEMANTIC_RESPONSE judgment object into SemanticJudgment."""
+
+    from yoetz.domain.findings import FindingKind
+    from yoetz.ports.semantic import (
+        ReviewerChallenge,
+        ReviewerNextStep,
+        SemanticConclusion,
+        SemanticJudgment,
+    )
+
+    if type(value) is not dict:
+        raise ValueError("semantic_response_judgment_invalid")
+    source = cast(dict[str, object], value)
+    conclusion_raw = source.get("conclusion")
+    raw_challenges = source.get("reviewer_challenges")
+    # Backward-compatible with the earlier structural-only challenge_count form.
+    if raw_challenges is None and "challenge_count" in source:
+        if conclusion_raw == "challenges_returned":
+            raise ValueError("semantic_response_judgment_incomplete")
+        if type(conclusion_raw) is not str:
+            raise ValueError("semantic_response_judgment_invalid")
+        return SemanticJudgment(cast(SemanticConclusion, conclusion_raw), ())
+    if type(conclusion_raw) is not str or type(raw_challenges) is not list:
+        raise ValueError("semantic_response_judgment_invalid")
+    challenges: list[ReviewerChallenge] = []
+    for item in cast(list[object], raw_challenges):
+        if type(item) is not dict:
+            raise ValueError("semantic_response_judgment_invalid")
+        row = cast(dict[str, object], item)
+        cited = row.get("cited_refs")
+        if type(cited) is not list or any(
+            type(ref) is not str for ref in cast(list[object], cited)
+        ):
+            raise ValueError("semantic_response_judgment_invalid")
+        next_step = row.get("requested_next_step")
+        if type(next_step) is not str:
+            raise ValueError("semantic_response_judgment_invalid")
+        try:
+            kind = FindingKind(cast(str, row["finding_kind"]))
+            challenges.append(
+                ReviewerChallenge(
+                    kind,
+                    cast(str, row["summary"]),
+                    tuple(cast(list[str], cited)),
+                    cast(str, row["discrepancy"]),
+                    cast(str, row["alternative_interpretation"]),
+                    cast(str, row["message_to_main_agent"]),
+                    cast(ReviewerNextStep, next_step),
+                    cast(str, row["uncertainty"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("semantic_response_judgment_invalid") from exc
+    return SemanticJudgment(cast(SemanticConclusion, conclusion_raw), tuple(challenges))
+
+
 async def _publish_semantic_response_object(
     runtime: TaskRuntime,
     *,
@@ -1489,7 +1575,7 @@ async def _publish_semantic_response_object(
     evaluation: FinalSemanticEvaluation,
     clock: ClockPort,
 ) -> ObjectRef:
-    """Persist bounded SEMANTIC_RESPONSE facts (judgment/provenance only; no raw provider text)."""
+    """Persist SEMANTIC_RESPONSE facts (full judgment + provenance; no raw provider text)."""
 
     body: dict[str, CanonicalJsonValue] = {
         "schema": "yoetz.semantic-response/1",
@@ -1498,10 +1584,7 @@ async def _publish_semantic_response_object(
         "reason": evaluation.reason.value,
     }
     if evaluation.judgment is not None:
-        body["judgment"] = {
-            "conclusion": evaluation.judgment.conclusion,
-            "challenge_count": len(evaluation.judgment.challenges),
-        }
+        body["judgment"] = _judgment_to_response_json(evaluation.judgment)
     if evaluation.provenance is not None:
         body["provenance"] = cast(
             CanonicalJsonValue, dict(semantic_provenance_to_json(evaluation.provenance).items())
@@ -1517,6 +1600,60 @@ async def _publish_semantic_response_object(
         ),
     )
     return await runtime.objects.finalize(staged)
+
+
+async def _recover_selected_evaluation(
+    runtime: TaskRuntime,
+    job: object,
+) -> FinalSemanticEvaluation | None:
+    """Load judgment/provenance from the durable selected SEMANTIC_RESPONSE object."""
+
+    from yoetz.domain.findings import semantic_provenance_from_json
+    from yoetz.ports.ledger import SemanticJobRecord as _Job
+    from yoetz.ports.semantic import SemanticJudgment
+    from yoetz.protocol.canonical import strict_json_parse
+    from yoetz.protocol.models import SemanticReason, SemanticStatus
+
+    if type(job) is not _Job:
+        return None
+    ref = job.selected_result_object_ref
+    if ref is None:
+        return None
+    try:
+        resolved = await runtime.objects.resolve_verified(ref.object_id, ref.envelope_digest)
+        payload = b"".join([chunk async for chunk in runtime.objects.open_verified(resolved)])
+        parsed = strict_json_parse(payload)
+    except KeyError, OSError, TypeError, ValueError:
+        return None
+    if type(parsed) is not dict:
+        return None
+    body = cast(dict[str, object], parsed)
+    try:
+        status = SemanticStatus(cast(str, body["status"]))
+        reason = SemanticReason(cast(str, body["reason"]))
+    except KeyError, TypeError, ValueError:
+        return None
+    judgment = None
+    provenance = None
+    raw_judgment = body.get("judgment")
+    if raw_judgment is not None:
+        try:
+            decoded = _judgment_from_response_json(raw_judgment)
+        except TypeError, ValueError:
+            return None
+        if type(decoded) is SemanticJudgment:
+            judgment = decoded
+    raw_provenance = body.get("provenance")
+    if raw_provenance is not None:
+        try:
+            from yoetz.domain.values import JsonValue as _DomainJson
+
+            provenance = semantic_provenance_from_json(cast(_DomainJson, raw_provenance))
+        except TypeError, ValueError:
+            return None
+    if status is SemanticStatus.SUCCEEDED and (judgment is None or provenance is None):
+        return None
+    return FinalSemanticEvaluation(status, reason, judgment=judgment, provenance=provenance)
 
 
 def _privacy_gated_semantic_evaluator(
@@ -1672,6 +1809,21 @@ def _privacy_gated_semantic_evaluator(
                     clock=clock,
                 )
 
+            # Track the latest check lease so phase advance/commit after a long semantic
+            # deadline still holds a valid CAS fence (renewals happen inside the attempt loop).
+            from yoetz.ports.ledger import OperationLease as _OpLease
+            from yoetz.ports.ledger import SemanticJobRecord as _JobRecord
+
+            current_lease: list[_OpLease] = [frozen.lease]
+
+            def _on_lease_renewed(renewed: object) -> None:
+                assert type(renewed) is _OpLease
+                current_lease[0] = renewed
+
+            async def _recover_selected(job_row: object) -> FinalSemanticEvaluation | None:
+                assert type(job_row) is _JobRecord
+                return await _recover_selected_evaluation(runtime, job_row)
+
             def _build_final(
                 status: SemanticStatus,
                 reason: SemanticReason,
@@ -1690,12 +1842,22 @@ def _privacy_gated_semantic_evaluator(
                         and evaluation.provenance is not None
                     ):
                         provenance = evaluation.provenance
+                # Terminal recovery of a succeeded job without a recoverable response object
+                # must not invent a judgment; surface an honest coordinator failure instead.
+                if status is SemanticStatus.SUCCEEDED and (judgment is None or provenance is None):
+                    return FinalSemanticEvaluation(
+                        SemanticStatus.FAILED,
+                        SemanticReason.COORDINATOR_FAILURE,
+                        attempt_accounting=accounting,
+                        operation_lease=current_lease[0],
+                    )
                 return FinalSemanticEvaluation(
                     status,
                     reason,
                     judgment=judgment,
                     provenance=provenance,
                     attempt_accounting=accounting,
+                    operation_lease=current_lease[0],
                 )
 
             return cast(
@@ -1710,6 +1872,8 @@ def _privacy_gated_semantic_evaluator(
                     dispatch=_dispatch,
                     publish_success_response=_publish_success,
                     build_final=_build_final,
+                    recover_selected=_recover_selected,
+                    on_lease_renewed=_on_lease_renewed,
                 ),
             )
         except Exception as exc:

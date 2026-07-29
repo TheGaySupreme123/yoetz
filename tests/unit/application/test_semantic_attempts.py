@@ -248,6 +248,8 @@ class _FakeLedger:
     provider_ids: list[str] | None = None
     selected: str | None = None
     attempts: dict[str, SemanticAttemptRecord] | None = None
+    renew_count: int = 0
+    claim_calls: int = 0
 
     def __post_init__(self) -> None:
         self.outcomes = []
@@ -255,10 +257,27 @@ class _FakeLedger:
         self.attempt_ids = []
         self.provider_ids = []
         self.attempts = {}
+        self.renew_count = 0
+        self.claim_calls = 0
+
+    async def renew_leases(self, lease: OperationLease) -> OperationLease:
+        assert lease.writer_id == self.lease.writer_id
+        assert lease.operation_id == self.lease.operation_id
+        self.renew_count += 1
+        self.lease = replace(
+            self.lease,
+            lease_generation=self.lease.lease_generation + 1,
+            lease_expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+        )
+        return self.lease
 
     async def claim_semantic_job(self, lease: OperationLease, job_id: str) -> SemanticAttemptHandle:
+        # After terminal recovery, claim must not be invoked.
+        if self.job.state in {"succeeded", "failed", "quarantined"}:
+            raise AssertionError("claim_semantic_job_on_terminal_job")
         assert lease == self.lease
         assert job_id == self.job.job_id
+        self.claim_calls += 1
         ordinal = self.job.attempt_count + 1
         att = f"att_40000000-0000-4000-8000-{ordinal:012x}"
         req = f"req_40000000-0000-4000-8000-{ordinal:012x}"
@@ -644,3 +663,211 @@ async def test_policy_block_never_retries() -> None:
     assert ledger.dispatches is not None and len(ledger.dispatches) == 1
     assert result[0] is SemanticStatus.BLOCKED_BY_POLICY
     assert ledger.outcomes is not None and ledger.outcomes[0][1] is AttemptOutcome.FAILED
+
+
+@pytest.mark.anyio
+async def test_terminal_failed_job_recovers_without_claim() -> None:
+    """Crash after final FAILED, before check commit: replay must not re-claim."""
+
+    lease = _lease()
+    job = SemanticJobRecord(
+        _JOB,
+        _WRITER,
+        _OP,
+        _CASE,
+        _case_ref(),
+        "failed",
+        1,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        SemanticReason.PROVIDER_TIMEOUT,
+        datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    ledger = _FakeLedger(job, lease)
+    ledger.attempts = {
+        _ATT1: SemanticAttemptRecord(
+            _JOB,
+            _ATT1,
+            1,
+            "req_40000000-0000-4000-8000-0000000000aa",
+            "failed",
+            SemanticReason.PROVIDER_TIMEOUT,
+            None,
+        )
+    }
+
+    async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
+        raise AssertionError("dispatch_not_expected_on_terminal_recovery")
+
+    async def publish(handle: SemanticAttemptHandle, evaluation: object) -> ObjectRef:
+        raise AssertionError("publish_not_expected")
+
+    def build_final(
+        status: SemanticStatus,
+        reason: SemanticReason,
+        evaluation: object | None,
+        accounting: SemanticAttemptAccounting,
+    ) -> object:
+        return (status, reason, accounting)
+
+    result = cast(
+        tuple[SemanticStatus, SemanticReason, SemanticAttemptAccounting],
+        await run_durable_semantic_attempts(
+            ledger=ledger,
+            lease=lease,
+            job=job,
+            deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
+            max_retries=2,
+            now_monotonic=lambda: 0.0,
+            dispatch=dispatch,
+            publish_success_response=publish,
+            sleep=lambda _: _async_noop(),
+            build_final=build_final,
+        ),
+    )
+    assert ledger.claim_calls == 0
+    assert result[0] is SemanticStatus.TIMEOUT
+    assert result[1] is SemanticReason.PROVIDER_TIMEOUT
+    assert result[2].attempted_count == 1
+    assert ledger.renew_count >= 1
+
+
+@pytest.mark.anyio
+async def test_terminal_succeeded_job_recovers_via_selected_callback() -> None:
+    """Crash after select_attempt: recover judgment/provenance without re-claim."""
+
+    lease = _lease()
+    job = SemanticJobRecord(
+        _JOB,
+        _WRITER,
+        _OP,
+        _CASE,
+        _case_ref(),
+        "succeeded",
+        1,
+        None,
+        _ATT1,
+        None,
+        None,
+        None,
+        _response_ref(),
+        SemanticReason.SEMANTIC_COMPLETED,
+        datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    ledger = _FakeLedger(job, lease)
+    ledger.attempts = {
+        _ATT1: SemanticAttemptRecord(
+            _JOB,
+            _ATT1,
+            1,
+            "req_40000000-0000-4000-8000-0000000000aa",
+            "selected",
+            SemanticReason.SEMANTIC_COMPLETED,
+            _response_ref(),
+        )
+    }
+    recovered = _Eval(SemanticStatus.SUCCEEDED, SemanticReason.SEMANTIC_COMPLETED, judgment="j")
+
+    async def recover_selected(row: SemanticJobRecord) -> _Eval | None:
+        assert row.state == "succeeded"
+        return recovered
+
+    async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
+        raise AssertionError("dispatch_not_expected_on_terminal_recovery")
+
+    async def publish(handle: SemanticAttemptHandle, evaluation: object) -> ObjectRef:
+        raise AssertionError("publish_not_expected")
+
+    def build_final(
+        status: SemanticStatus,
+        reason: SemanticReason,
+        evaluation: object | None,
+        accounting: SemanticAttemptAccounting,
+    ) -> object:
+        return (status, reason, evaluation, accounting)
+
+    result = cast(
+        tuple[SemanticStatus, SemanticReason, object | None, SemanticAttemptAccounting],
+        await run_durable_semantic_attempts(
+            ledger=ledger,
+            lease=lease,
+            job=job,
+            deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
+            max_retries=2,
+            now_monotonic=lambda: 0.0,
+            dispatch=dispatch,
+            publish_success_response=publish,
+            sleep=lambda _: _async_noop(),
+            build_final=build_final,
+            recover_selected=recover_selected,
+        ),
+    )
+    assert ledger.claim_calls == 0
+    assert result[0] is SemanticStatus.SUCCEEDED
+    assert result[2] is recovered
+    assert result[3].selected_attempt_id == _ATT1
+
+
+@pytest.mark.anyio
+async def test_attempt_loop_renews_operation_lease() -> None:
+    """Lease is renewed around claim/select so timeout_seconds can exceed the 60s TTL."""
+
+    lease = _lease()
+    job = SemanticJobRecord(
+        _JOB,
+        _WRITER,
+        _OP,
+        _CASE,
+        _case_ref(),
+        "queued",
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    ledger = _FakeLedger(job, lease)
+    renewed: list[OperationLease] = []
+
+    async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
+        return _Eval(SemanticStatus.SUCCEEDED, SemanticReason.SEMANTIC_COMPLETED)
+
+    async def publish(handle: SemanticAttemptHandle, evaluation: object) -> ObjectRef:
+        return _response_ref()
+
+    def build_final(
+        status: SemanticStatus,
+        reason: SemanticReason,
+        evaluation: object | None,
+        accounting: SemanticAttemptAccounting,
+    ) -> object:
+        return (status, reason, accounting)
+
+    def on_lease(renewed_lease: OperationLease) -> None:
+        renewed.append(renewed_lease)
+
+    await run_durable_semantic_attempts(
+        ledger=ledger,
+        lease=lease,
+        job=job,
+        deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
+        max_retries=0,
+        now_monotonic=lambda: 0.0,
+        dispatch=dispatch,
+        publish_success_response=publish,
+        sleep=lambda _: _async_noop(),
+        build_final=build_final,
+        on_lease_renewed=on_lease,
+    )
+    # At least: initial renew + pre-claim renew + post-dispatch renew.
+    assert ledger.renew_count >= 3
+    assert len(renewed) >= 3
+    assert renewed[-1].lease_generation > lease.lease_generation

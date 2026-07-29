@@ -841,7 +841,15 @@ blocks, human denial, secret detection, invalid case, stale frontier, refusal, a
 authority never retry. `confirm_every_request` requires a fresh foreground decision per physical
 attempt. Attempt accounting (`attempted_count`, `selected_attempt_id`, terminal reason counts,
 `exhausted`) is reconstructed from durable job/attempt rows via `load_semantic_job` +
-`list_semantic_attempts` — not from memory-only coordinator state.
+`list_semantic_attempts` — not from memory-only coordinator state. When
+`enqueue_semantic_job` recovers an already-terminal job (`succeeded` / `failed` /
+`quarantined`), the attempt loop must not call `claim_semantic_job`; it rebuilds the final
+status/reason (and selected judgment/provenance from the durable `SEMANTIC_RESPONSE` object on
+success) so crash-after-select or crash-after-final-failure remains reproducible. Because the
+check operation lease TTL is 60 seconds while `timeout_seconds` may be up to 300, the durable
+attempt coordinator renews the operation lease around claim/select and returns the renewed lease
+for later phase advance/commit — a valid provider result must not become `operation_pending`
+solely because the 60-second lease expired inside the semantic deadline.
 
 These field sets are closed: `OperationLease` and `SemanticAttemptHandle` carry the complete
 owner/lease/frontier/dependency compare-and-swap fence, while job, selected-attempt, and pending
