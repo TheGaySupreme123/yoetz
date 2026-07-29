@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Sequence
 
 from builders.policy_cases import (
     clm,
@@ -31,6 +32,7 @@ from yoetz.domain.events import (
     ObligationStatus,
     PlanPublishedPayload,
 )
+from yoetz.domain.findings import Finding
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
@@ -38,7 +40,11 @@ from yoetz.domain.privacy import (
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
-from yoetz.domain.values import timestamp_from_string
+from yoetz.domain.values import EvidenceId, timestamp_from_string
+from yoetz.kernel.deterministic_checks import DeterministicCase
+from yoetz.kernel.projections import EvidenceProjectionRecord
+from yoetz.ports.semantic import SemanticCase
+from yoetz.protocol.canonical import strict_json_parse
 from yoetz.protocol.coverage import EvidenceImmutability
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import DataCategory
@@ -49,7 +55,7 @@ class _Ids:
         return new_id(kind)
 
 
-def _case_with_material(*, with_evidence: bool = True):
+def _case_with_material(*, with_evidence: bool = True) -> DeterministicCase:
     plan = plan_record(PlanPublishedPayload(1, "Ship the review packet", (obl(1),)), 1)
     obligation = obligation_record(
         ObligationPublishedPayload(
@@ -68,7 +74,7 @@ def _case_with_material(*, with_evidence: bool = True):
         ),
         3,
     )
-    evidence = {}
+    evidence: dict[EvidenceId, EvidenceProjectionRecord] = {}
     extra = (clm(1), obl(1))
     if with_evidence:
         evidence[evd(1)] = evidence_record(
@@ -91,7 +97,7 @@ def _case_with_material(*, with_evidence: bool = True):
     )
 
 
-def _findings_for(case):
+def _findings_for(case: DeterministicCase) -> tuple[Finding, ...]:
     assessments, _ = run_deterministic_policies(
         case,
         CheckScope((), ()),
@@ -101,12 +107,12 @@ def _findings_for(case):
 
 
 def _build(
-    case,
+    case: DeterministicCase,
     profile: ReviewContextProfile,
     *,
-    findings=(),
+    findings: Sequence[Finding] = (),
     dependency: str = "sha256:" + "b" * 64,
-):
+) -> SemanticCase:
     return build_semantic_case(
         case_id="cas_10000000-0000-4000-8000-000000000001",
         frozen_case=case,
@@ -281,7 +287,28 @@ def test_prepared_payload_binds_selected_packet_and_withheld_omissions() -> None
     }
     payload = semantic_case_to_prepared_payload(semantic, included)
     assert b"yoetz.review-packet-case/1" in payload
-    assert b"withheld_by_policy" in payload or b"timeline" in payload
+    document = strict_json_parse(payload)
+    assert isinstance(document, dict)
+    packet = document.get("review_packet")
+    assert isinstance(packet, dict)
+    omissions = packet.get("omissions")
+    assert isinstance(omissions, list)
+    reasons: set[str] = set()
+    for row in omissions:
+        if isinstance(row, dict):
+            reason = row.get("reason")
+            if type(reason) is str:
+                reasons.add(reason)
+    assert "withheld_by_policy" in reasons
+    raw_items = document.get("items")
+    assert isinstance(raw_items, list)
+    item_ids: set[str] = set()
+    for row in raw_items:
+        if isinstance(row, dict):
+            item_id = row.get("item_id")
+            if type(item_id) is str:
+                item_ids.add(item_id)
+    assert item_ids == included
     assert semantic.case_digest.encode("ascii") in payload
 
 

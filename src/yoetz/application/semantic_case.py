@@ -61,6 +61,7 @@ from yoetz.protocol.models import (
 __all__ = [
     "REVIEW_PACKET_ITEM_ID",
     "SEMANTIC_REVIEW_PURPOSE",
+    "assemble_filtered_review_packet",
     "build_semantic_case",
     "review_selection_digest",
     "semantic_case_to_candidate_context",
@@ -162,15 +163,14 @@ def _content_item(
     occurred_order: int,
     text: str,
 ) -> SemanticCaseItem:
-    content = _utf8(
-        text[:MAX_REVIEW_TEXT_BYTES] if len(text.encode("utf-8")) > MAX_REVIEW_TEXT_BYTES else text
-    )
-    if len(content) > MAX_SEMANTIC_ITEM_BYTES:
-        content = content[:MAX_SEMANTIC_ITEM_BYTES]
-        # Keep valid UTF-8 after truncation.
-        content = content.decode("utf-8", errors="ignore").encode("utf-8")
-        if not content:
-            raise ValueError("semantic_case_content_invalid")
+    # Bound by UTF-8 bytes, not characters — multi-byte prose must not raise.
+    limit = min(MAX_REVIEW_TEXT_BYTES, MAX_SEMANTIC_ITEM_BYTES)
+    raw = text.encode("utf-8")
+    if len(raw) > limit:
+        raw = raw[:limit].decode("utf-8", errors="ignore").encode("utf-8")
+    if not raw:
+        raise ValueError("semantic_case_content_invalid")
+    content = _utf8(raw.decode("utf-8"), maximum=limit)
     digest = "sha256:" + hashlib.sha256(content).hexdigest()
     return SemanticCaseItem(
         item_id=item_id,
@@ -562,7 +562,16 @@ def build_semantic_case(
         timeline_candidates.sort(
             key=lambda row: (row[0], row[1].encode("ascii"), row[3].encode("ascii"))
         )
-        for order, _event, source_kind, source_ref, body in timeline_candidates[
+        # item_id is timeline-{source_ref}; duplicate source_ref would invalidate the case.
+        seen_timeline_refs: set[str] = set()
+        deduped_timeline: list[tuple[int, str, _SourceKind, str, Mapping[str, JsonValue]]] = []
+        for row in timeline_candidates:
+            source_ref = row[3]
+            if source_ref in seen_timeline_refs:
+                continue
+            seen_timeline_refs.add(source_ref)
+            deduped_timeline.append(row)
+        for order, _event, source_kind, source_ref, body in deduped_timeline[
             : selection.max_timeline_items
         ]:
             linked = (source_ref,) if source_ref in allowed else ()
@@ -589,36 +598,35 @@ def build_semantic_case(
             if selection.include_finding_prose:
                 finding_ref = str(finding.finding_id)
                 linked = tuple(str(ref) for ref in finding.subject_refs)
-                if not set(linked) <= allowed:
-                    linked = tuple(ref for ref in linked if ref in allowed)
-                if not linked:
-                    continue
-                summary_id = f"finding-summary-{finding_ref}"
-                detail_id = f"finding-detail-{finding_ref}"
-                items.append(
-                    _content_item(
-                        item_id=summary_id,
-                        section="deterministic_summary",
-                        category=DataCategory.FINDING_SUMMARY,
-                        source_kind="finding",
-                        source_ref=finding_ref,
-                        linked_subject_refs=linked,
-                        occurred_order=finding.subject_frontier.sequence,
-                        text=finding.summary,
+                # Prose requires exact-match allowlist on every subject_ref; otherwise keep the
+                # deterministic assessment without summary/detail content items.
+                if linked and set(linked) <= allowed:
+                    summary_id = f"finding-summary-{finding_ref}"
+                    detail_id = f"finding-detail-{finding_ref}"
+                    items.append(
+                        _content_item(
+                            item_id=summary_id,
+                            section="deterministic_summary",
+                            category=DataCategory.FINDING_SUMMARY,
+                            source_kind="finding",
+                            source_ref=finding_ref,
+                            linked_subject_refs=linked,
+                            occurred_order=finding.subject_frontier.sequence,
+                            text=finding.summary,
+                        )
                     )
-                )
-                items.append(
-                    _content_item(
-                        item_id=detail_id,
-                        section="deterministic_detail",
-                        category=DataCategory.FINDING_SUMMARY,
-                        source_kind="finding",
-                        source_ref=finding_ref,
-                        linked_subject_refs=linked,
-                        occurred_order=finding.subject_frontier.sequence,
-                        text=finding.detail,
+                    items.append(
+                        _content_item(
+                            item_id=detail_id,
+                            section="deterministic_detail",
+                            category=DataCategory.FINDING_SUMMARY,
+                            source_kind="finding",
+                            source_ref=finding_ref,
+                            linked_subject_refs=linked,
+                            occurred_order=finding.subject_frontier.sequence,
+                            text=finding.detail,
+                        )
                     )
-                )
             projected = project_review_assessment(
                 assessment,
                 str(finding.finding_id),
@@ -819,6 +827,17 @@ def build_semantic_case(
                         _omit(ref, DataCategory.EVIDENCE_EXCERPT, "failure", "not_recorded")
                     )
                     continue
+                encoded = summary.encode("utf-8")
+                if len(encoded) > selection.max_excerpt_bytes:
+                    summary = encoded[: selection.max_excerpt_bytes].decode(
+                        "utf-8", errors="ignore"
+                    )
+                    encoded = summary.encode("utf-8")
+                if excerpt_bytes_used + len(encoded) > selection.max_total_excerpt_bytes:
+                    omissions.append(
+                        _omit(ref, DataCategory.EVIDENCE_EXCERPT, "failure", "not_selected")
+                    )
+                    continue
                 linked = tuple(
                     item
                     for item in (ref, str(record.payload.action_id), str(record.source_event_id))
@@ -849,6 +868,7 @@ def build_semantic_case(
                         content_bytes=item.content_bytes,
                     )
                 )
+                excerpt_bytes_used += item.content_bytes
 
     # Cap lists per selection.
     goal_ids = goal_ids[:4]
@@ -965,6 +985,7 @@ def build_semantic_case(
     )
 
     selection_digest = review_selection_digest(selection)
+    # Bind assessments/omissions/packet lists into the digest so provenance covers the full case.
     case_digest = canonical_digest(
         cast(
             JsonValue,
@@ -984,6 +1005,7 @@ def build_semantic_case(
                 "policy_version": policy_version,
                 "question_set": list(_QUESTION_SET),
                 "review_context_profile": review_context_profile.value,
+                "review_packet": _packet_to_json(packet),
                 "review_selection_digest": selection_digest,
                 "schema": "yoetz.semantic-case/1",
                 "subject_frontier": dict(frozen_case.frontier.as_wire()),
@@ -1089,6 +1111,27 @@ def _packet_to_json(packet: ReviewPacket) -> dict[str, JsonValue]:
     )
 
 
+def _item_catalog_json(items: Sequence[SemanticCaseItem]) -> list[dict[str, JsonValue]]:
+    """Metadata-only catalog so egress can project without reverse-engineering origin_ref."""
+
+    return [
+        cast(
+            dict[str, JsonValue],
+            {
+                "category": item.category.value,
+                "content_bytes": item.content_bytes,
+                "content_digest": item.content_digest,
+                "item_id": item.item_id,
+                "linked_subject_refs": list(item.linked_subject_refs),
+                "section": item.section,
+                "source_kind": item.source_kind,
+                "source_ref": item.source_ref,
+            },
+        )
+        for item in items
+    ]
+
+
 def _case_envelope_json(case: SemanticCase) -> dict[str, JsonValue]:
     return cast(
         dict[str, JsonValue],
@@ -1097,6 +1140,7 @@ def _case_envelope_json(case: SemanticCase) -> dict[str, JsonValue]:
             "case_id": case.case_id,
             "dependency_digest": case.dependency_digest,
             "frontier_refs": sorted(case.frontier_refs),
+            "item_catalog": _item_catalog_json(case.items),
             "local_check_refs": sorted(case.local_check_refs),
             "policy_id": case.policy_id,
             "policy_version": case.policy_version,
@@ -1108,6 +1152,230 @@ def _case_envelope_json(case: SemanticCase) -> dict[str, JsonValue]:
             "subject_frontier": dict(case.subject_frontier.as_wire()),
         },
     )
+
+
+def assemble_filtered_review_packet(
+    envelope: Mapping[str, object],
+    *,
+    content_by_id: Mapping[str, bytes],
+    included_item_ids: frozenset[str] | set[str],
+) -> bytes:
+    """Assemble ``yoetz.review-packet-case/1`` from a builder envelope + approved content.
+
+    Single shared projection used by the application prepared-payload path and the privacy
+    enforcer. Filters by approved item id only; never re-derives section/source metadata from
+    origin pointers.
+    """
+
+    included = set(included_item_ids)
+    frontier_raw = envelope.get("frontier_refs")
+    local_raw = envelope.get("local_check_refs")
+    frontier_refs: set[str] = (
+        {item for item in cast(list[object], frontier_raw) if type(item) is str}
+        if type(frontier_raw) is list
+        else set()
+    )
+    local_check_refs: set[str] = (
+        {item for item in cast(list[object], local_raw) if type(item) is str}
+        if type(local_raw) is list
+        else set()
+    )
+    allowed: set[str] = frontier_refs | local_check_refs
+
+    catalog_raw = envelope.get("item_catalog")
+    catalog: list[dict[str, object]] = []
+    if type(catalog_raw) is list:
+        for row in cast(list[object], catalog_raw):
+            if isinstance(row, dict):
+                catalog.append(cast(dict[str, object], row))
+
+    content_rows: list[dict[str, JsonValue]] = []
+    omitted_extra: list[dict[str, JsonValue]] = []
+    for meta in catalog:
+        item_id = meta.get("item_id")
+        if type(item_id) is not str or item_id == REVIEW_PACKET_ITEM_ID:
+            continue
+        category = meta.get("category")
+        source_kind = meta.get("source_kind")
+        source_ref = meta.get("source_ref")
+        section = meta.get("section")
+        linked_raw = meta.get("linked_subject_refs")
+        linked = (
+            [ref for ref in cast(list[object], linked_raw) if type(ref) is str]
+            if type(linked_raw) is list
+            else []
+        )
+        if item_id in included and item_id in content_by_id:
+            plaintext = content_by_id[item_id]
+            try:
+                text = plaintext.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            content_rows.append(
+                cast(
+                    dict[str, JsonValue],
+                    {
+                        "category": category if type(category) is str else "",
+                        "content": text,
+                        "content_bytes": len(plaintext),
+                        "content_digest": "sha256:" + hashlib.sha256(plaintext).hexdigest(),
+                        "item_id": item_id,
+                        "linked_subject_refs": linked,
+                        "section": section if type(section) is str else "timeline",
+                        "source_kind": source_kind if type(source_kind) is str else "task",
+                        "source_ref": source_ref if type(source_ref) is str else item_id,
+                    },
+                )
+            )
+            continue
+        if item_id in included:
+            continue
+        # Prefer allowlisted source_ref, then any allowlisted linked ref; skip only if none.
+        subject: str | None = None
+        if type(source_ref) is str and source_ref in allowed:
+            subject = source_ref
+        else:
+            for ref in linked:
+                if ref in allowed:
+                    subject = ref
+                    break
+        if subject is None:
+            continue
+        omitted_extra.append(
+            cast(
+                dict[str, JsonValue],
+                {
+                    "category": category if type(category) is str else "",
+                    "reason": "withheld_by_policy",
+                    "source_kind": source_kind if type(source_kind) is str else "task",
+                    "subject_ref": subject,
+                },
+            )
+        )
+    content_rows.sort(key=lambda row: cast(str, row["item_id"]).encode("ascii"))
+
+    packet_raw = envelope.get("review_packet")
+    packet_obj: dict[str, JsonValue] = (
+        cast(dict[str, JsonValue], dict(cast(dict[object, object], packet_raw)))
+        if isinstance(packet_raw, dict)
+        else {}
+    )
+
+    def _filter_ids(raw: object) -> list[JsonValue]:
+        if type(raw) is not list:
+            return []
+        return [
+            item_id
+            for item_id in cast(list[object], raw)
+            if type(item_id) is str and item_id in included
+        ]
+
+    for key in (
+        "goal_item_ids",
+        "obligation_item_ids",
+        "claim_item_ids",
+        "decision_item_ids",
+        "timeline_item_ids",
+    ):
+        packet_obj[key] = _filter_ids(packet_obj.get(key))
+
+    excerpts_raw = packet_obj.get("targeted_excerpts")
+    if type(excerpts_raw) is list:
+        packet_obj["targeted_excerpts"] = cast(
+            JsonValue,
+            [
+                row
+                for row in cast(list[object], excerpts_raw)
+                if isinstance(row, dict)
+                and cast(dict[str, object], row).get("excerpt_item_id") in included
+            ],
+        )
+    else:
+        packet_obj["targeted_excerpts"] = cast(JsonValue, [])
+
+    assessments_raw = packet_obj.get("deterministic_assessments")
+    filtered_assessments: list[JsonValue] = []
+    if type(assessments_raw) is list:
+        for raw in cast(list[object], assessments_raw):
+            if not isinstance(raw, dict):
+                continue
+            row = dict(cast(dict[str, JsonValue], cast(dict[object, object], raw)))
+            summary = row.get("summary_item_id")
+            detail = row.get("detail_item_id")
+            if type(summary) is str and type(detail) is str:
+                if summary not in included or detail not in included:
+                    row.pop("summary_item_id", None)
+                    row.pop("detail_item_id", None)
+            filtered_assessments.append(row)
+    packet_obj["deterministic_assessments"] = filtered_assessments
+
+    base_omissions: list[dict[str, JsonValue]] = []
+    omissions_raw = packet_obj.get("omissions")
+    if type(omissions_raw) is list:
+        for raw in cast(list[object], omissions_raw):
+            if isinstance(raw, dict):
+                base_omissions.append(
+                    cast(dict[str, JsonValue], dict(cast(dict[object, object], raw)))
+                )
+
+    seen: set[tuple[str, str, str]] = set()
+    omissions: list[JsonValue] = []
+    for row in [*base_omissions, *omitted_extra]:
+        subject_ref = row.get("subject_ref")
+        category = row.get("category")
+        reason = row.get("reason")
+        if type(subject_ref) is not str or type(category) is not str or type(reason) is not str:
+            continue
+        key = (subject_ref, category, reason)
+        if key in seen:
+            continue
+        if subject_ref not in allowed:
+            continue
+        seen.add(key)
+        omissions.append(row)
+    omissions.sort(
+        key=lambda row: (
+            cast(str, cast(dict[str, JsonValue], row)["subject_ref"]).encode("ascii"),
+            cast(str, cast(dict[str, JsonValue], row)["category"]).encode("ascii"),
+            cast(str, cast(dict[str, JsonValue], row)["reason"]).encode("ascii"),
+        )
+    )
+    packet_obj["omissions"] = omissions
+
+    # Preserve change_observations / coverage as supplied by the builder envelope.
+    if "change_observations" not in packet_obj:
+        packet_obj["change_observations"] = cast(JsonValue, [])
+    if "coverage" not in packet_obj:
+        packet_obj["coverage"] = cast(JsonValue, {})
+
+    document = cast(
+        dict[str, JsonValue],
+        {
+            "case_digest": envelope.get("case_digest", ""),
+            "case_id": envelope.get("case_id", ""),
+            "dependency_digest": envelope.get("dependency_digest", ""),
+            "frontier_refs": sorted(frontier_refs),
+            "items": content_rows,
+            "local_check_refs": sorted(local_check_refs),
+            "policy_id": envelope.get("policy_id", ""),
+            "policy_version": envelope.get("policy_version", ""),
+            "question_set": (
+                list(cast(list[object], envelope["question_set"]))
+                if type(envelope.get("question_set")) is list
+                else []
+            ),
+            "review_context_profile": envelope.get("review_context_profile", ""),
+            "review_packet": packet_obj,
+            "review_selection_digest": envelope.get("review_selection_digest", ""),
+            "schema": _PACKET_SCHEMA,
+            "subject_frontier": (
+                dict(cast(dict[object, object], envelope["subject_frontier"]))
+                if isinstance(envelope.get("subject_frontier"), dict)
+                else {}
+            ),
+        },
+    )
+    return canonical_encode(cast(JsonValue, document))
 
 
 def semantic_case_to_candidate_context(
@@ -1140,7 +1408,11 @@ def semantic_case_to_candidate_context(
             # Last resort: assessments truncated in envelope; content items still carry prose.
             packet["deterministic_assessments"] = stripped[:8]
             packet["omissions"] = cast(list[JsonValue], packet["omissions"])[:16]
+            catalog = cast(list[JsonValue], compact.get("item_catalog", []))
+            compact["item_catalog"] = catalog[:64]
             envelope = canonical_encode(cast(JsonValue, compact))
+        if len(envelope) > MAX_SEMANTIC_ITEM_BYTES:
+            raise ValueError("semantic_case_envelope_too_large")
 
     items: list[CandidateContextItem] = [
         CandidateContextItem(
@@ -1179,145 +1451,11 @@ def semantic_case_to_prepared_payload(
 ) -> bytes:
     """Assemble the provider-facing review-packet document from privacy-approved items."""
 
-    included = set(included_item_ids)
-    content_items = [item for item in case.items if item.item_id in included]
-    # Update packet lists to only reference included content.
-    packet = case.packet
-    omitted_extra: list[dict[str, JsonValue]] = []
-    for item in case.items:
-        if item.item_id in included:
-            continue
-        subject = (
-            item.source_ref
-            if item.source_ref in (case.frontier_refs | case.local_check_refs)
-            else next(iter(item.linked_subject_refs), item.source_ref)
-        )
-        omitted_extra.append(
-            cast(
-                dict[str, JsonValue],
-                {
-                    "category": item.category.value,
-                    "reason": "withheld_by_policy",
-                    "source_kind": item.source_kind,
-                    "subject_ref": subject,
-                },
-            )
-        )
-
-    def _filter_ids(ids: tuple[str, ...]) -> list[str]:
-        return [item_id for item_id in ids if item_id in included]
-
-    assessments: list[dict[str, JsonValue]] = []
-    for assessment in packet.deterministic_assessments:
-        body = _assessment_to_json(assessment)
-        if assessment.summary_item_id is not None and assessment.detail_item_id is not None:
-            if (
-                assessment.summary_item_id not in included
-                or assessment.detail_item_id not in included
-            ):
-                body.pop("summary_item_id", None)
-                body.pop("detail_item_id", None)
-        assessments.append(body)
-
-    excerpts = [
-        {
-            "content_bytes": item.content_bytes,
-            "content_digest": item.content_digest,
-            "content_visibility": item.content_visibility,
-            "excerpt_item_id": item.excerpt_item_id,
-            "linked_subject_refs": list(item.linked_subject_refs),
-            "source_kind": item.source_kind,
-            "subject_state_relation": item.subject_state_relation.value,
-        }
-        for item in packet.targeted_excerpts
-        if item.excerpt_item_id in included
-    ]
-
-    base_omissions: list[dict[str, JsonValue]] = [
-        cast(
-            dict[str, JsonValue],
-            {
-                "category": item.category.value,
-                "reason": item.reason,
-                "source_kind": item.source_kind,
-                "subject_ref": item.subject_ref,
-            },
-        )
-        for item in packet.omissions
-    ]
-    # Dedup omissions by (subject_ref, category, reason).
-    seen: set[tuple[str, str, str]] = set()
-    omissions: list[dict[str, JsonValue]] = []
-    for row in [*base_omissions, *omitted_extra]:
-        key = (
-            cast(str, row["subject_ref"]),
-            cast(str, row["category"]),
-            cast(str, row["reason"]),
-        )
-        if key in seen:
-            continue
-        # subject_ref must be allowlisted; skip invalid withheld markers.
-        if key[0] not in (case.frontier_refs | case.local_check_refs):
-            continue
-        seen.add(key)
-        omissions.append(row)
-    omissions.sort(
-        key=lambda row: (
-            cast(str, row["subject_ref"]).encode("ascii"),
-            cast(str, row["category"]).encode("ascii"),
-            cast(str, row["reason"]).encode("ascii"),
-        )
+    if type(case) is not SemanticCase:
+        raise TypeError("semantic_case_invalid")
+    content_by_id = {item.item_id: item.content for item in case.items}
+    return assemble_filtered_review_packet(
+        _case_envelope_json(case),
+        content_by_id=content_by_id,
+        included_item_ids=included_item_ids,
     )
-
-    document = cast(
-        dict[str, JsonValue],
-        {
-            "case_digest": case.case_digest,
-            "case_id": case.case_id,
-            "dependency_digest": case.dependency_digest,
-            "frontier_refs": sorted(case.frontier_refs),
-            "items": [
-                {
-                    "category": item.category.value,
-                    "content": item.content.decode("utf-8"),
-                    "content_bytes": item.content_bytes,
-                    "content_digest": item.content_digest,
-                    "item_id": item.item_id,
-                    "linked_subject_refs": list(item.linked_subject_refs),
-                    "section": item.section,
-                    "source_kind": item.source_kind,
-                    "source_ref": item.source_ref,
-                }
-                for item in content_items
-            ],
-            "local_check_refs": sorted(case.local_check_refs),
-            "policy_id": case.policy_id,
-            "policy_version": case.policy_version,
-            "question_set": list(case.question_set),
-            "review_context_profile": case.review_context_profile.value,
-            "review_packet": {
-                "change_observations": [
-                    {
-                        "claimed_change": item.claimed_change,
-                        "content_visibility": item.content_visibility,
-                        "subject_refs": list(item.subject_refs),
-                        "subject_state_relation": item.subject_state_relation.value,
-                    }
-                    for item in packet.change_observations
-                ],
-                "claim_item_ids": _filter_ids(packet.claim_item_ids),
-                "coverage": coverage_to_json(packet.coverage),
-                "decision_item_ids": _filter_ids(packet.decision_item_ids),
-                "deterministic_assessments": assessments,
-                "goal_item_ids": _filter_ids(packet.goal_item_ids),
-                "obligation_item_ids": _filter_ids(packet.obligation_item_ids),
-                "omissions": omissions,
-                "targeted_excerpts": excerpts,
-                "timeline_item_ids": _filter_ids(packet.timeline_item_ids),
-            },
-            "review_selection_digest": review_selection_digest(case.review_selection),
-            "schema": _PACKET_SCHEMA,
-            "subject_frontier": dict(case.subject_frontier.as_wire()),
-        },
-    )
-    return canonical_encode(cast(JsonValue, document))

@@ -7,6 +7,10 @@ import hashlib
 from dataclasses import dataclass
 from typing import Protocol, cast
 
+from yoetz.application.semantic_case import (
+    REVIEW_PACKET_ITEM_ID,
+    assemble_filtered_review_packet,
+)
 from yoetz.domain.privacy import (
     CandidateContext,
     CandidateContextItem,
@@ -103,7 +107,6 @@ def scan_exact_bytes(data: bytes) -> tuple[ForbiddenDataKind, ...]:
     return tuple(sorted(mapped, key=lambda value: value.value.encode()))
 
 
-_REVIEW_PACKET_ITEM_ID = "review-packet"
 _SEMANTIC_PACKET_SCHEMA = "yoetz.review-packet-case/1"
 
 
@@ -113,13 +116,14 @@ def _assemble_semantic_review_payload(
 ) -> bytes:
     """Assemble the versioned review-packet document from privacy-approved case items.
 
-    The pre-egress builder supplies one structural ``review-packet`` envelope plus separate
-    categorized content items. This keeps classification/minimization item-identity exact while
-    still delivering a readable packet to the provider.
+    The pre-egress builder supplies one structural ``review-packet`` envelope (with item catalog
+    and packet metadata) plus separate categorized content items. Projection reuses the shared
+    builder filter so section/source_kind/subject_ref are never reverse-engineered from origin_ref.
     """
 
+    del classified  # catalog on the envelope is the authority; classified only supplied included.
     included_by_id = {item.candidate.item_id: item for item in included}
-    envelope_item = included_by_id.get(_REVIEW_PACKET_ITEM_ID)
+    envelope_item = included_by_id.get(REVIEW_PACKET_ITEM_ID)
     if envelope_item is None:
         # Structural envelope withheld or missing: fail closed to empty authorized payload shape
         # recognized by the coordinator as insufficient approved context when ids are empty.
@@ -150,107 +154,16 @@ def _assemble_semantic_review_payload(
         return canonical_encode(
             cast(JsonValue, {"items": [], "omissions": [], "schema": _SEMANTIC_PACKET_SCHEMA})
         )
-    document = cast(dict[str, JsonValue], dict(cast(dict[object, object], envelope)))
-    included_ids = set(included_by_id)
-    content_rows: list[dict[str, JsonValue]] = []
-    for item in classified.items:
-        candidate = item.candidate
-        if candidate.item_id == _REVIEW_PACKET_ITEM_ID:
-            continue
-        if candidate.item_id not in included_ids:
-            continue
-        try:
-            text = candidate.plaintext.decode("utf-8")
-        except UnicodeDecodeError:
-            continue
-        # Section/source metadata is carried on the origin pointer when present.
-        origin = candidate.origin_ref
-        section = "timeline"
-        if origin.startswith("/case/"):
-            parts = origin.split("/")
-            if len(parts) >= 3 and parts[2]:
-                section = parts[2]
-        content_rows.append(
-            {
-                "category": candidate.category.value,
-                "content": text,
-                "content_bytes": len(candidate.plaintext),
-                "content_digest": f"sha256:{hashlib.sha256(candidate.plaintext).hexdigest()}",
-                "item_id": candidate.item_id,
-                "section": section,
-            }
-        )
-    content_rows.sort(key=lambda row: cast(str, row["item_id"]).encode("ascii"))
-
-    packet = document.get("review_packet")
-    if isinstance(packet, dict):
-        packet_obj = cast(dict[str, JsonValue], dict(cast(dict[object, object], packet)))
-        for key in (
-            "goal_item_ids",
-            "obligation_item_ids",
-            "claim_item_ids",
-            "decision_item_ids",
-            "timeline_item_ids",
-        ):
-            raw_ids = packet_obj.get(key)
-            if type(raw_ids) is list:
-                packet_obj[key] = [
-                    item_id
-                    for item_id in cast(list[object], raw_ids)
-                    if type(item_id) is str and item_id in included_ids
-                ]
-        excerpts = packet_obj.get("targeted_excerpts")
-        if type(excerpts) is list:
-            packet_obj["targeted_excerpts"] = [
-                row
-                for row in cast(list[object], excerpts)
-                if isinstance(row, dict)
-                and cast(dict[str, object], row).get("excerpt_item_id") in included_ids
-            ]
-        assessments = packet_obj.get("deterministic_assessments")
-        if type(assessments) is list:
-            filtered_assessments: list[JsonValue] = []
-            for raw in cast(list[object], assessments):
-                if not isinstance(raw, dict):
-                    continue
-                row = dict(cast(dict[str, JsonValue], cast(dict[object, object], raw)))
-                summary = row.get("summary_item_id")
-                detail = row.get("detail_item_id")
-                if type(summary) is str and type(detail) is str:
-                    if summary not in included_ids or detail not in included_ids:
-                        row.pop("summary_item_id", None)
-                        row.pop("detail_item_id", None)
-                filtered_assessments.append(row)
-            packet_obj["deterministic_assessments"] = filtered_assessments
-        omissions = packet_obj.get("omissions")
-        omission_rows: list[JsonValue] = (
-            list(cast(list[JsonValue], omissions)) if type(omissions) is list else []
-        )
-        for item in classified.items:
-            candidate = item.candidate
-            if candidate.item_id == _REVIEW_PACKET_ITEM_ID or candidate.item_id in included_ids:
-                continue
-            # Withheld content is represented exactly; subject identity stays structural.
-            origin = candidate.origin_ref
-            subject_ref = candidate.item_id
-            if origin.startswith("/case/") and len(origin.split("/")) >= 4:
-                subject_ref = origin.split("/", 3)[3]
-            omission_rows.append(
-                {
-                    "category": candidate.category.value,
-                    "reason": "withheld_by_policy",
-                    "source_kind": "finding"
-                    if candidate.category is DataCategory.FINDING_SUMMARY
-                    else "task",
-                    "subject_ref": subject_ref,
-                }
-            )
-        packet_obj["omissions"] = omission_rows
-        document["review_packet"] = packet_obj
-
-    document["items"] = cast(JsonValue, content_rows)
-    document["schema"] = _SEMANTIC_PACKET_SCHEMA
-    return canonical_encode(cast(JsonValue, document))
+    content_by_id = {
+        item_id: item.candidate.plaintext
+        for item_id, item in included_by_id.items()
+        if item_id != REVIEW_PACKET_ITEM_ID
+    }
+    return assemble_filtered_review_packet(
+        cast(dict[str, object], envelope),
+        content_by_id=content_by_id,
+        included_item_ids=set(included_by_id),
+    )
 
 
 class LocalPrivacyEnforcer:

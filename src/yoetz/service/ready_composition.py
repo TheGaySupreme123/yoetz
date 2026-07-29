@@ -1479,21 +1479,24 @@ def _privacy_gated_semantic_evaluator(
                 route.task_id,
             )
             typed_findings = tuple(item for item in findings if type(item) is Finding)
-            # Live effective policy owns review selection; selection narrows candidates only.
-            # Composition test doubles may omit the policy application: fall back to structural.
+            # Live effective policy owns review selection; never mint a synthetic policy identity.
             policy_app = getattr(privacy, "policy_application", None)
-            if policy_app is not None:
-                effective = await policy_app.policy_store.effective_policy(scope)
-                policy = effective.policy
-                review_profile = policy.review_context_profile
-                review_selection = policy.review_selection
-                policy_id = policy.policy_id
-                policy_version = str(policy.version)
-            else:
-                review_profile = ReviewContextProfile.STRUCTURAL
-                review_selection = ReviewSelectionPolicy.for_profile(review_profile)
-                policy_id = ids.new(IdKind.PRIVACY_POLICY)
-                policy_version = "1"
+            if policy_app is None:
+                record_bounded_event_without_raising(
+                    component="semantic_composition",
+                    operation="semantic_not_dispatched_policy_unavailable",
+                    reason=SemanticReason.COORDINATOR_FAILURE.value,
+                    request_id=frozen.lease.operation_id,
+                )
+                return FinalSemanticEvaluation(
+                    SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE
+                )
+            effective = await policy_app.policy_store.effective_policy(scope)
+            policy = effective.policy
+            review_profile = policy.review_context_profile
+            review_selection = policy.review_selection
+            policy_id = policy.policy_id
+            policy_version = str(policy.version)
             semantic_case = build_semantic_case(
                 case_id=ids.new(IdKind.OUTBOUND_CASE),
                 frozen_case=frozen.case,
