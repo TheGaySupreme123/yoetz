@@ -78,6 +78,7 @@ from yoetz.ports.ledger import (
     ProjectionView,
     SelectedAttempt,
     SemanticAttemptHandle,
+    SemanticAttemptRecord,
     SemanticJobRecord,
     StoredProjection,
 )
@@ -1384,6 +1385,16 @@ class SqliteLedger:
         result = await self._oracle().select_attempt(lease, handle, selected_result_object_ref)
         await self._sync_after_mutation()
         return result
+
+    async def load_semantic_job(
+        self, writer_id: str, operation_id: str
+    ) -> SemanticJobRecord | None:
+        await self._ensure_recovered()
+        return await self._oracle().load_semantic_job(writer_id, operation_id)
+
+    async def list_semantic_attempts(self, job_id: str) -> tuple[SemanticAttemptRecord, ...]:
+        await self._ensure_recovered()
+        return await self._oracle().list_semantic_attempts(job_id)
 
     async def renew_leases(self, lease: OperationLease) -> OperationLease:
         await self._ensure_recovered()

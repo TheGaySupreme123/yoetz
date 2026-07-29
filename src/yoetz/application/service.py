@@ -850,9 +850,18 @@ class Application:
         return self.receipt_version_resolver(runtime)
 
     async def evaluate_semantic_check(
-        self, frozen: FrozenCase, deterministic_findings: tuple[Finding, ...]
+        self,
+        frozen: FrozenCase,
+        deterministic_findings: tuple[Finding, ...],
+        runtime: object | None = None,
     ) -> object:
-        return await self.semantic_evaluator(frozen, deterministic_findings)
+        evaluator = self.semantic_evaluator
+        # Production evaluators accept the task runtime for durable job/attempt coordination.
+        # Test doubles may still be binary callables.
+        try:
+            return await evaluator(frozen, deterministic_findings, runtime)  # type: ignore[misc]
+        except TypeError:
+            return await evaluator(frozen, deterministic_findings)
 
     async def project_result_for_client(
         self,

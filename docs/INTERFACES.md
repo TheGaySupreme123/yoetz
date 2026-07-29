@@ -772,9 +772,14 @@ the frontier merely advanced.
   FrozenCase | CheckCommitResult`;
 - `advance_check_phase(lease, expected_phase, next_phase, durable_object_ref?) -> OperationLease`;
 - `enqueue_semantic_job(lease, case_digest, case_object_ref) -> SemanticJobRecord`;
-- `claim_semantic_job(lease, job_id) -> SemanticAttemptHandle`;
+- `claim_semantic_job(lease, job_id) -> SemanticAttemptHandle` (same-owner live lease resumes the
+  active started attempt; expired lease closes the prior attempt as `expired` then mints the next
+  ordinal — never reuses a consumed authorization identity);
 - `record_attempt_outcome(handle, outcome, result_object_ref?, terminal_code?) -> None`;
 - `select_attempt(lease, handle, selected_result_object_ref) -> SelectedAttempt`;
+- `load_semantic_job(writer_id, operation_id) -> SemanticJobRecord | None`;
+- `list_semantic_attempts(job_id) -> tuple[SemanticAttemptRecord, ...]` (ordinal-sorted bounded
+  audit rows; no raw provider text);
 - `renew_leases(lease) -> OperationLease`;
 - `reclaim_operation(writer_id, operation_id, request_digest) -> OperationLease | PendingVerdict`;
 - `commit_check_if_current(frozen, findings, policy_executions, semantic_status, semantic_reason,
@@ -819,10 +824,32 @@ The exact shared frozen records, also owned by `ports/ledger.py`, are:
   provider_request_id, writer_id, operation_id, owner_generation, lease_owner_id,
   lease_generation: positive int, lease_expires_at, frontier: Frontier, dependency_digest)`;
 - `SelectedAttempt(job_id, attempt_id, result_object_ref: ObjectRef, selected_at,
-  frontier: Frontier, dependency_digest)`; and
+  frontier: Frontier, dependency_digest)`;
+- `SemanticAttemptRecord(job_id, attempt_id, attempt_ordinal: positive int,
+  provider_request_id, state: started|response_durable|selected|failed|expired|late,
+  terminal_code: SemanticReason?, result_object_ref?)` — structural audit row for one physical
+  dispatch; and
 - `PendingVerdict(kind: PendingVerdictKind, operation: OperationRecord | None,
   retry_after_ms: int | None)`, where retry time is present only for `live` and is bounded by the
   remaining lease lifetime.
+
+Semantic attempt budget (ADR-006): `ProviderProfileConfig.timeout_seconds` is the total
+semantic-operation deadline; `max_retries` (0..2) is the maximum additional physical attempts
+(so physical budget is `1 + max_retries`, at most three). Yoetz owns the retry loop with SDK
+`max_retries=0`. Retries are admitted only for timeout / transport / rate-limited classes; policy
+blocks, human denial, secret detection, invalid case, stale frontier, refusal, and exhausted
+authority never retry. `confirm_every_request` requires a fresh foreground decision per physical
+attempt. Attempt accounting (`attempted_count`, `selected_attempt_id`, terminal reason counts,
+`exhausted`) is reconstructed from durable job/attempt rows via `load_semantic_job` +
+`list_semantic_attempts` — not from memory-only coordinator state. When
+`enqueue_semantic_job` recovers an already-terminal job (`succeeded` / `failed` /
+`quarantined`), the attempt loop must not call `claim_semantic_job`; it rebuilds the final
+status/reason (and selected judgment/provenance from the durable `SEMANTIC_RESPONSE` object on
+success) so crash-after-select or crash-after-final-failure remains reproducible. Because the
+check operation lease TTL is 60 seconds while `timeout_seconds` may be up to 300, the durable
+attempt coordinator renews the operation lease around claim/select and returns the renewed lease
+for later phase advance/commit — a valid provider result must not become `operation_pending`
+solely because the 60-second lease expired inside the semantic deadline.
 
 These field sets are closed: `OperationLease` and `SemanticAttemptHandle` carry the complete
 owner/lease/frontier/dependency compare-and-swap fence, while job, selected-attempt, and pending
