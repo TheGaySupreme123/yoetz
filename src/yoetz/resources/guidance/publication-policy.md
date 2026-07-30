@@ -6,6 +6,12 @@ Publish a fact when it changes an independently reviewable work package, a reque
 
 For a large inventory, create obligations per coherent work package. Publish one bounded manifest evidence item for its leaf files and one material package transition. Do not create one obligation or routine event per file.
 
+## Cadence
+
+Publish one batch per material transition, roughly one to eight events. A normal session is a handful of batches: the plan and its obligations, each independently useful result with its evidence, the completion claim, and any finding response. It is not one batch per file, per tool call, or per message.
+
+These are not publishable transitions: reading or searching, running a command whose result you already expect, formatting, regenerating a derived file, repeating a status read, or republishing state that has not changed since the last accepted event. When in doubt, ask whether an independent reader of the ledger alone would conclude something different without the fact.
+
 ## The sixteen event families
 
 - `session_opened` — establishes the recorded session; it does not prove workspace access.

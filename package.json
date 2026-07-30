@@ -11,5 +11,8 @@
   },
   "devDependencies": {
     "pyright": "1.1.411"
+  },
+  "dependencies": {
+    "@openai/codex-security": "^0.1.4"
   }
 }
