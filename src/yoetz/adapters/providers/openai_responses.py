@@ -47,6 +47,7 @@ from yoetz.protocol.canonical import (
 )
 from yoetz.protocol.models import (
     ProviderChallengeModel,
+    ProviderJudgmentEnvelopeModel,
     ProviderJudgmentModel,
     SemanticStatus,
 )
@@ -123,6 +124,9 @@ _SYSTEM_INSTRUCTION: Final = (
 _PROVIDER_JUDGMENT_ADAPTER: Final[TypeAdapter[ProviderJudgmentModel]] = TypeAdapter(
     ProviderJudgmentModel
 )
+_PROVIDER_JUDGMENT_ENVELOPE_ADAPTER: Final[TypeAdapter[ProviderJudgmentEnvelopeModel]] = (
+    TypeAdapter(ProviderJudgmentEnvelopeModel)
+)
 
 
 def _rename_schema_defs(raw: dict[str, object]) -> dict[str, object]:
@@ -195,12 +199,23 @@ def _sort_schema_lists(node: object) -> object:
     return node
 
 
+_SCHEMA_ANNOTATION_KEYS: Final = frozenset({"title", "description"})
+
+
 def _strip_schema_titles(node: object) -> object:
-    """Drop pydantic title metadata so the wire schema is stable and title-free."""
+    """Drop pydantic title/description metadata so the wire schema carries shape only.
+
+    Docstrings are developer commentary about *why* the contract is shaped this way; they are not
+    instructions for the reviewer and must not be dispatched to a provider as schema descriptions.
+    """
 
     if type(node) is dict:
         source = cast(dict[str, object], node)
-        return {key: _strip_schema_titles(value) for key, value in source.items() if key != "title"}
+        return {
+            key: _strip_schema_titles(value)
+            for key, value in source.items()
+            if key not in _SCHEMA_ANNOTATION_KEYS
+        }
     if type(node) is list:
         return [_strip_schema_titles(item) for item in cast(list[object], node)]
     return node
@@ -209,15 +224,19 @@ def _strip_schema_titles(node: object) -> object:
 def build_judgment_json_schema() -> dict[str, JsonValue]:
     """Generate the constrained-output schema from the single owning provider judgment model.
 
-    The same :data:`ProviderJudgmentModel` validates provider responses in
-    :func:`normalize_judgment`. The generated document expresses closed enums, ref pattern and
-    counts, non-empty bounded text, challenge cardinality, conclusion/challenge coupling through
-    explicit union branches, and ``additionalProperties: false``. Normalization matches the frozen
-    catalog shape (def rename + enum/required sort) so runtime and
+    The schema is generated from :data:`ProviderJudgmentEnvelopeModel`, which nests the same
+    :data:`ProviderJudgmentModel` used by :func:`normalize_judgment` under a required ``judgment``
+    property. The nesting is load-bearing: constrained-output requests are sent with
+    ``strict: true``, and a provider rejects a schema whose root is a union rather than an object
+    before generation starts, which surfaces only as an opaque transport failure. The generated
+    document expresses closed enums, ref pattern and counts, non-empty bounded text, challenge
+    cardinality, conclusion/challenge coupling through explicit union branches, and
+    ``additionalProperties: false``. Normalization matches the frozen catalog shape (def rename +
+    enum/required sort) so runtime and
     ``schemas/findings/provider-judgment-1.0.0.schema.json`` stay shape-equivalent.
     """
 
-    raw = cast(dict[str, object], _PROVIDER_JUDGMENT_ADAPTER.json_schema())
+    raw = cast(dict[str, object], _PROVIDER_JUDGMENT_ENVELOPE_ADAPTER.json_schema())
     cleaned = _strip_schema_titles(_sort_schema_lists(_rename_schema_defs(raw)))
     if type(cleaned) is not dict:
         raise RuntimeError("provider_judgment_schema_invalid")
@@ -483,10 +502,20 @@ def normalize_judgment(parsed: JsonValue) -> SemanticJudgment:
     into acceptance.
     """
 
-    try:
-        model: ProviderJudgmentModel = _PROVIDER_JUDGMENT_ADAPTER.validate_python(parsed)
-    except ValidationError as exc:
-        raise ValueError("openai_judgment_shape_invalid") from exc
+    # The request schema asks for the envelope, so that is tried first. A bare judgment is also
+    # accepted because the two shapes are unambiguous (``judgment`` versus ``conclusion``) and a
+    # provider that flattens the wrapper is still returning output the contract can admit.
+    model: ProviderJudgmentModel
+    if type(parsed) is dict and "judgment" in parsed:
+        try:
+            model = _PROVIDER_JUDGMENT_ENVELOPE_ADAPTER.validate_python(parsed).judgment
+        except ValidationError as exc:
+            raise ValueError("openai_judgment_shape_invalid") from exc
+    else:
+        try:
+            model = _PROVIDER_JUDGMENT_ADAPTER.validate_python(parsed)
+        except ValidationError as exc:
+            raise ValueError("openai_judgment_shape_invalid") from exc
     challenges = tuple(_challenge_from_model(item) for item in model.reviewer_challenges)
     return SemanticJudgment(model.conclusion, challenges)
 

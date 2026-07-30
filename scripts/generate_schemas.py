@@ -454,8 +454,8 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "provider-judgment",
         lambda: (
             __import__(
-                "yoetz.protocol.models", fromlist=["ProviderJudgmentModel"]
-            ).ProviderJudgmentModel
+                "yoetz.protocol.models", fromlist=["ProviderJudgmentEnvelopeModel"]
+            ).ProviderJudgmentEnvelopeModel
         ),
     ),
     _RegistryEntry(

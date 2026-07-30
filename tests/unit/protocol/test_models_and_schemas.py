@@ -1008,6 +1008,7 @@ def test_protocol_models_public_exports_are_closed() -> None:
         PublishWorkAcceptedProjectionUnavailableModel PublishWorkRequest
         PublishWorkRequestModel PublishWorkResult PublishWorkResultModel
         ProviderChallengeModel ProviderJudgmentChallengesModel
+        ProviderJudgmentEnvelopeModel
         ProviderJudgmentInsufficientModel ProviderJudgmentModel
         ProviderJudgmentNoDiscrepancyModel
         ReceiptFormat ReceiptInclude ReceiptRedactionProfile
