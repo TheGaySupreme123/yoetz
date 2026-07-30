@@ -29,8 +29,6 @@ golden vectors under [`fixtures/`](../fixtures/) win over any prose, including t
   surfaces, tests, and honest release status. Enforced by `tests/conformance/claims/`.
 - [`guidance/`](../guidance/) — agent-facing guidance, shipped byte-identically to every harness and
   over MCP.
-- [`docs/postmortems/`](postmortems/) — dated incident and dogfood records. Historical: they are not
-  updated as the product changes.
 
 ## Root documents
 
