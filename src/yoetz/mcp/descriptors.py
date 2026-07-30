@@ -936,7 +936,9 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "substantive work; skip trivial questions or edits. Records or resumes a cooperative work "
         "session and returns its compact record. It does not show that work outside the published "
         "record occurred. Every request_id across these tools is a fresh req_ prefixed random "
-        "UUID, and workspace_ref and external_ref are admitted only as a pair. Guidance: "
+        "UUID, and workspace_ref and external_ref are admitted only as a pair. Call it once per "
+        "task: on resume, attach to the existing task rather than starting a second one. Author "
+        "the request from this input schema plus the guidance below, never from memory. Guidance: "
         "yoetz://guidance/workflow.md.",
         read_only=False,
         idempotent=True,
@@ -955,8 +957,11 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "publishing the material claim and evidence, call check, disposition any findings with "
         "respond, then call receipt before claiming completion. Every reference list, in a draft "
         "envelope and in a payload alike, is admitted only when its members are unique and already "
-        "in ascending ASCII order; a rejection names the owning field. Guidance: "
-        "yoetz://guidance/publication-policy.md.",
+        "in ascending ASCII order; a rejection names the owning field. Cadence: one batch per "
+        "material transition, usually one to eight events and never one batch per file, per tool "
+        "call, or per message; a batch admits up to 100 drafts, so keep one transition together "
+        "rather than splitting it. Reading, searching, formatting, and unchanged state are not "
+        "publishable. Guidance: yoetz://guidance/publication-policy.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -971,7 +976,15 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "security or privacy reasoning, interoperability, or whether the code satisfies the ask; "
         "deterministic_only only for explicitly local or structural checks, a semantic-disabled "
         "policy, or a deliberate no-egress choice, and then disclose that limitation. Omitting "
-        "mode resolves through the configured verification policy. Guidance: "
+        "mode resolves through the configured verification policy. Call it after publishing the "
+        "completion claim and its evidence, and again after any material edit, new evidence, or "
+        "finding response; a check with no new events since the last one adds nothing. Semantic "
+        "review that does not succeed is a coverage gap rather than a retry problem: "
+        "not_configured, blocked_by_policy, and human_denied will not change without owner "
+        "action; unavailable and timeout already spent that job's own attempt budget; refused, "
+        "invalid, and failed are not retried inside the job at all. When a second job in one "
+        "session again returns no judgment, stop requesting semantic review, run "
+        "deterministic_only, and disclose the gap with the recorded status and reason. Guidance: "
         "yoetz://guidance/coverage-and-receipts.md.",
         read_only=False,
         idempotent=True,
@@ -982,7 +995,10 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "Respond to a finding",
         "Records an acknowledgement, rejection, or bounded waiver for one finding at its recorded "
         "frontier. It does not resolve other findings or establish that underlying work changed. "
-        "Guidance: yoetz://guidance/publication-policy.md.",
+        "No disposition clears the finding it answers: every actionable finding recorded in a task "
+        "keeps the receipt conclusion at unresolved_findings_remain, so repair the record and word "
+        "the conclusion accordingly rather than calling the finding resolved. Call it once per "
+        "finding, then recheck. Guidance: yoetz://guidance/publication-policy.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -997,7 +1013,11 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "view=operation takes filter.operation_request_id and returns that operation's stored "
         "result for recovery without resending the body. view=findings reads recorded findings; "
         "view=candidate_findings returns unrecorded deterministic candidates without verdicts or "
-        "IDs. Guidance: yoetz://guidance/workflow.md.",
+        "IDs. Read closure_readiness on any result before spending a check or a receipt: it names "
+        "the open obligations, unresolved findings, and declared gaps that currently bound a "
+        "conclusion. Call it after a resume, a compaction, or a delegate handoff, and before a "
+        "completion claim, rather than between routine tool calls. Guidance: "
+        "yoetz://guidance/workflow.md.",
         read_only=True,
         idempotent=True,
     ),
@@ -1007,7 +1027,10 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "Records and returns a receipt of the recorded conclusion and coverage limitations at one "
         "frontier. It does not establish correctness beyond that recorded coverage. Prefer format "
         "markdown or text; json is an owner-export format that stricter agent-context policies may "
-        "block. Guidance: yoetz://guidance/coverage-and-receipts.md.",
+        "block. Call it once at the end, and again only if material state changed since the "
+        "previous receipt. Keep the final answer no stronger than this receipt's weakest material "
+        "coverage, freshness, unresolved findings, and limitations. Guidance: "
+        "yoetz://guidance/coverage-and-receipts.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -1059,30 +1082,30 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
     {
         "policy": MappingProxyType(
             {
-                "start": "sha256:47e93d5f95052135270685becfa02f16784968c0d04428943ef1480b8a3687df",
-                "publish_work": "sha256:2215e3060629db7f09d162b5a9cc6a993eb21f8503578ed252c2fe2ef5fba792",
-                "check": "sha256:7779e486e6790b9d26b698566eafcc7b48792c32dade57f53869ee75b29a9018",
-                "respond": "sha256:4a05e83bfce79c5ca6c767c535070fe6011278b6fdbe38958725398928ec751e",
-                "status": "sha256:6abdca221944fc026c915a01ea9cd9110074279532acac5fe285e0e07f3f6b77",
-                "receipt": "sha256:ff32853f91572e04b00f2a61b37f9a1f4f838360aea332967776b5c364ff4291",
+                "start": "sha256:be9afee0713c2b99e65b2fba15ed8656b3ace3682d8a858a20cb63e144db1f69",
+                "publish_work": "sha256:e29c8b514d8eeab7efdc4d7b16181f766d45824f91b6960eb6c93ff0a9071d34",
+                "check": "sha256:b2022458a7093d94d749ee80eb066adfec9945638aacda60f82aaba9c749e86b",
+                "respond": "sha256:7af2775e5204a902a116eefb24e4588eb66645df39f6748f22975ba44a7896e6",
+                "status": "sha256:f50314514f180a19f912662e191fec7880e2e41a6fc8dd475a063c2263eafa61",
+                "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
             }
         ),
         "strict": MappingProxyType(
             {
-                "start": "sha256:47e93d5f95052135270685becfa02f16784968c0d04428943ef1480b8a3687df",
-                "publish_work": "sha256:2215e3060629db7f09d162b5a9cc6a993eb21f8503578ed252c2fe2ef5fba792",
-                "check": "sha256:692ddaf55f6845a8e5a78d54590f61b55f92e30405d5591ee6a138b61dd5d111",
-                "respond": "sha256:4a05e83bfce79c5ca6c767c535070fe6011278b6fdbe38958725398928ec751e",
-                "status": "sha256:6abdca221944fc026c915a01ea9cd9110074279532acac5fe285e0e07f3f6b77",
-                "receipt": "sha256:ff32853f91572e04b00f2a61b37f9a1f4f838360aea332967776b5c364ff4291",
+                "start": "sha256:be9afee0713c2b99e65b2fba15ed8656b3ace3682d8a858a20cb63e144db1f69",
+                "publish_work": "sha256:e29c8b514d8eeab7efdc4d7b16181f766d45824f91b6960eb6c93ff0a9071d34",
+                "check": "sha256:f1e27bafa93a25e16fe235cf5126b13b718fbf54eb4c2b4eb781bb79ed32de1a",
+                "respond": "sha256:7af2775e5204a902a116eefb24e4588eb66645df39f6748f22975ba44a7896e6",
+                "status": "sha256:f50314514f180a19f912662e191fec7880e2e41a6fc8dd475a063c2263eafa61",
+                "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
             }
         ),
     }
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:4850a84f993c26ed0d80a5f7c19a2d058f14c603501064138bcda53f7b2d9ea4",
-        "strict": "sha256:46984b916409aa79097068c0198a1c99efb76f9df75f63329c3d6763389d99b2",
+        "policy": "sha256:d8a5c11d7fd790dd83d6e8d7b3dedbd9ebb0e09cdf147eb01f30a5f1e96b34eb",
+        "strict": "sha256:fbb71a3cbbe1a108c4eeb70fdf2728608c64fcac4f24a44ca2e2bf90b9afc42a",
     }
 )
 

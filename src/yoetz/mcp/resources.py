@@ -60,8 +60,9 @@ GUIDANCE_RESOURCES: Final = (
         name="agent-instructions.md",
         title="Yoetz agent instructions",
         description=(
-            "Read at session start when cooperative recorded-work guidance is needed. "
-            "Always-delivered floor instructions for using the recorded work surface."
+            "Read at session start, and re-read if the initialize instructions are not in "
+            "context. The non-negotiable floor: when to activate, how often to call each "
+            "operation, what is never published, and how honestly to word a conclusion."
         ),
         annotations=GuidanceResourceAnnotations(audience=("assistant",), priority=1.0),
     ),
@@ -71,8 +72,8 @@ GUIDANCE_RESOURCES: Final = (
         name="workflow.md",
         title="Yoetz cooperative workflow",
         description=(
-            "Read at task intake before substantive work. The bounded cooperative workflow for "
-            "recording, checking, and resuming work."
+            "Read before the first start call. The ten steps, the per-operation cadence, when to "
+            "stop retrying, resume and handoff behavior, and how to state what the run changed."
         ),
         annotations=GuidanceResourceAnnotations(audience=("assistant",), priority=0.9),
     ),
@@ -82,10 +83,10 @@ GUIDANCE_RESOURCES: Final = (
         name="publication-policy.md",
         title="Yoetz publication policy",
         description=(
-            "Read before publishing material work events. Rules for publishing into the local "
-            "record."
+            "Read before the first publish_work call. What is material enough to publish, how "
+            "large a batch should be, the sixteen event families, and what is never published."
         ),
-        annotations=GuidanceResourceAnnotations(audience=("assistant",), priority=0.6),
+        annotations=GuidanceResourceAnnotations(audience=("assistant",), priority=0.8),
     ),
     GuidanceResource(
         uri="yoetz://guidance/coverage-and-receipts.md",
@@ -93,9 +94,10 @@ GUIDANCE_RESOURCES: Final = (
         name="coverage-and-receipts.md",
         title="Yoetz coverage and receipts",
         description=(
-            "Read before interpreting coverage, findings, conclusions, or receipt limitations."
+            "Read before the first check call. The coverage vector, why a recorded finding stays "
+            "recorded, when to stop requesting semantic review, and how to word a conclusion."
         ),
-        annotations=GuidanceResourceAnnotations(audience=("assistant",), priority=0.6),
+        annotations=GuidanceResourceAnnotations(audience=("assistant",), priority=0.8),
     ),
 )
 

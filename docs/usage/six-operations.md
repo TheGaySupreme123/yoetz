@@ -65,8 +65,10 @@ verdict `incomplete_check`, an explicit reason, and no semantic findings.
 
 ### `respond`
 Answers a finding: accept and act, supply evidence, revise the claim, dispute with evidence, or
-state an unresolved limitation. **A response does not erase a finding.** Recheck after any material
-edit, evidence change, plan change, or response.
+state an unresolved limitation. **A response does not erase a finding**, and no disposition
+resolves one: an actionable finding keeps the receipt conclusion at `unresolved_findings_remain`
+for the rest of the task, whichever disposition is recorded. Recheck after any material edit,
+evidence change, plan change, or response.
 
 ### `status`
 Reads current state — use it after a resume, a compaction, a handoff, or any uncertainty about what
@@ -97,6 +99,34 @@ See [Receipts and coverage](receipts-and-coverage.md) for how to read one.
 8. `check` — again, after any material change.
 9. `receipt` — and keep the final answer no stronger than its weakest coverage, freshness,
    unresolved findings, and limitations.
+
+## How often to call each one
+
+| Operation | How often |
+| --- | --- |
+| `start` | Once per task, before substantive work. On resume, attach to the existing task instead of starting a second one. |
+| `publish_work` | One batch per material transition, roughly one to eight events. A normal session is a handful of batches, never one per file, tool call, or message. |
+| `status` | After resume, compaction, or delegate handoff, and before any completion claim. Not between routine tool calls. |
+| `check` | After publishing the completion claim and its evidence, and again after any material edit, new evidence, or finding response. A check with no new events since the last one adds nothing. |
+| `respond` | Once per finding, at that finding's recorded frontier. |
+| `receipt` | Once at the end, and again only if material state changed after the previous receipt. |
+
+Under-publishing hides the work; over-publishing buries it. Reading, searching, formatting,
+regenerating derived files, repeating a status read, and republishing unchanged state are not
+publishable transitions.
+
+### When to stop retrying
+
+Semantic review that does not succeed is a coverage gap, not a retry problem. `not_configured`,
+`blocked_by_policy`, and `human_denied` will not change without owner action. `unavailable` and
+`timeout` are the only statuses retried inside a job, so by the time you see one that job already
+spent its attempt budget; `refused`, `invalid`, and `failed` are not retried in-job at all. When a
+second job in one session again returns no judgment, switch to `deterministic_only`, disclose the
+gap with the recorded status and reason, and do not spend a third job on the same binding.
+
+On `OPERATION_PENDING`, read `status` with
+`view=operation` once and replay the same `request_id` once; if it is still pending, continue with
+a new deterministic-only request and say the earlier operation never reached a terminal result.
 
 The agent-facing version of this loop, including when *not* to use Yoetz at all, is
 [`guidance/workflow.md`](../../guidance/workflow.md).

@@ -91,3 +91,16 @@ claim, dispute with evidence, or state an unresolved limitation. Then recheck af
 
 A response never deletes the original challenge. That is the point — the record keeps the
 disagreement visible.
+
+No disposition resolves a finding. `acknowledged`, `rejected`, and `waived` each record what was
+decided and what evidence was attached; none of them clears the finding for receipt purposes. Every
+actionable finding recorded in a task keeps the receipt conclusion at `unresolved_findings_remain`,
+even after later checks return no findings at all.
+
+Repairing the record is still worth doing — it stops the next check from firing the same rule, and
+it shows a reader what was done — but a task that fired an actionable finding does not go on to
+produce a clean completion receipt, and the final answer should not describe one.
+
+The cheapest finding is the one that never fires. Before the first `check`, confirm that every
+requested item has an exact `attempted_items` entry, that every claim has linked evidence, and that
+every open obligation is either resolved or deliberately left open with a stated reason.

@@ -8,6 +8,30 @@ Yoetz is a local ledger for bounded, participant-published work facts and a dete
 
 Use Yoetz for material multi-step work, multiple requested outcomes, delegation, meaningful verification, long-running or resumable work, or a material completion claim. Skip it for translation, ordinary questions, explanations, and trivial edits where the ceremony would exceed the integrity benefit.
 
+## How often to call each operation
+
+<a id="cadence"></a>
+
+| Operation | How often |
+| --- | --- |
+| `start` | Once per task, before substantive work. On resume, attach to the existing task instead of starting a second one. |
+| `publish_work` | One batch per material transition, usually one to eight events; a batch admits up to 100, so keep one transition in one batch rather than splitting it. A normal session is a handful of batches, never one per file, tool call, or message. |
+| `status` | After resume, compaction, or delegate handoff, and before any completion claim. Not between routine tool calls. |
+| `check` | After publishing the completion claim and its evidence, and again after any material edit, new evidence, or finding response. A check with no new events since the last one adds nothing. |
+| `respond` | Once per finding, at that finding's recorded frontier. |
+| `receipt` | Once at the end, and again only if material state changed after the previous receipt. |
+
+Under-publishing hides the work; over-publishing buries it. The test is whether an independent reader reviewing only the ledger would reach a different conclusion without the fact.
+
+## When to stop retrying
+
+<a id="stop-rules"></a>
+
+- Semantic review that does not succeed is a coverage gap, not a retry problem. `not_configured`, `blocked_by_policy`, and `human_denied` will not change without owner action: take the first answer. `unavailable` and `timeout` already spent that job's own attempt budget. `refused`, `invalid`, and `failed` are not retried inside the job at all, so a fresh request is a fresh gamble rather than a continuation.
+- When a second job in one session again returns no judgment, stop: run `deterministic_only`, disclose the gap naming the recorded `semantic_status` and `semantic_reason`, and do not spend a third job on the same binding.
+- On `OPERATION_PENDING`, read `status` with `view=operation` once and replay the same `request_id` once. If it is still pending, continue with a new deterministic-only request and state that the earlier operation never reached a terminal result.
+- A rejected request is a schema problem, not a retry problem. Correct the named field and resend once; do not resend the same body.
+
 ## Startup and availability disclosure
 
 Tell the user briefly that Yoetz is being used as a local work ledger and verifier. Do not imply initialization succeeded before `start` returns. If the optional service is unavailable, continue unless the user or host requires it, disclose that no live ledger or receipt will exist, and invent no state.
@@ -21,7 +45,7 @@ Tell the user briefly that Yoetz is being used as a local work ledger and verifi
 5. Publish material work-package transitions: assignment, decision, blocked attempt, independently useful result, completion, or revision. Omit routine reads, searches, formatting, and per-file mechanics.
 6. Stay next to the record. After resume, compaction, handoff, or uncertainty about what is already done or committed, call `status`. `view=candidate_findings` is an advisory read: it creates no verdict, IDs, receipt, or event.
 7. Before completion, publish the intended material completion claim and current evidence, then call `check`. Read `closure_readiness` on any `status` result first: it names the open obligations, unresolved findings, and declared gaps that currently bound a conclusion. Spending a check or receipt while those stand returns a predictably insufficient result; resolve or explicitly record them instead. Choose mode deliberately: `semantic_if_configured` for most material implementation/review claims; `semantic_required` when completion depends on qualitative correctness, design conformance, security/privacy reasoning, interoperability, or whether the code satisfies the ask; `deterministic_only` only for explicitly local/structural checks, semantic-disabled policy, or a deliberate no-egress choice — and disclose that limitation. Publish the smallest state-bound diff/symbol and the directly relevant test or failure excerpt; never rely on self-asserted completion prose alone.
-8. Respond to each challenge by accepting and acting, supplying evidence, revising the claim, disputing with evidence, or stating an unresolved limitation. A response does not erase a finding.
+8. Respond to each challenge by accepting and acting, supplying evidence, revising the claim, disputing with evidence, or stating an unresolved limitation. A response does not erase a finding: whichever disposition you record, every actionable finding recorded in the task keeps the receipt conclusion at `unresolved_findings_remain`. Repair the record anyway — it stops the next check from firing the same rule and it shows the reader what you did — but do not expect a later receipt to come back clean, and do not describe an acknowledged finding as resolved.
 9. Recheck after any material edit, evidence change, plan change, or finding response.
 10. Request a receipt and keep the final answer no stronger than its weakest material coverage, freshness, unresolved findings, and limitations. All receipt formats (`json`, `markdown`, `text`) project under default policy; if a stricter owner policy blocks `json`, re-request `markdown` or `text`.
 
@@ -46,6 +70,8 @@ On resume, attach to the existing task and read status before reconstructing wor
 ## Findings and recheck
 
 Candidate findings are what deterministic packs currently say about the record. They carry no verdict and cannot be cited as a check. An empty candidate list means only that no rule fired in that advisory read. Only a recorded check can support receipt-bounded completion wording.
+
+The cheapest finding is the one that never fires. Before the first `check`, confirm that every requested item has an exact `attempted_items` entry, every claim has linked evidence, and every open obligation is either resolved or deliberately left open with a stated reason. That pre-flight costs one `status` read; an actionable finding costs the receipt for the rest of the task.
 
 ## Degraded and unavailable behavior
 

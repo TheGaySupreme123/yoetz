@@ -443,12 +443,60 @@ def _node_package_json() -> dict[str, object]:
     return json.loads((_REPO_ROOT / "package.json").read_text(encoding="utf-8"))
 
 
-def test_node_dev_toolchain_is_pinned_and_typecheck_only() -> None:
+# Every Node package this repository may declare, each exactly pinned and each dev-only. This is
+# an allowlist, not a cap: adding a tool means adding a reviewed line here, in the same change that
+# adds it to package.json. Ranges are rejected below so a review cannot be silently re-resolved.
+_ALLOWED_NODE_DEV_PACKAGES: Final = {
+    # Typechecker invoked by the `typecheck` script and by CI.
+    "pyright": "1.1.411",
+    # Review tooling run against working copies. Apache-2.0, never imported by shipped code.
+    "@openai/codex-security": "0.1.4",
+}
+# An exact version: no caret, tilde, range, tag, URL, or git specifier.
+_EXACT_NODE_PIN = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$", re.ASCII)
+_RUNTIME_DEPENDENCY_KEYS: Final = (
+    "dependencies",
+    "optionalDependencies",
+    "peerDependencies",
+    "bundleDependencies",
+    "bundledDependencies",
+)
+
+
+def test_node_dev_toolchain_is_pinned_and_dev_only() -> None:
     package = _node_package_json()
     assert package["engines"] == {"node": "26.5.0", "npm": "12.0.1"}
-    assert package["devDependencies"] == {"pyright": "1.1.411"}
+    assert package["devDependencies"] == _ALLOWED_NODE_DEV_PACKAGES
     assert package["private"] is True
     assert package["scripts"] == {"typecheck": "pyright"}
+
+
+def test_no_node_package_is_declared_as_a_runtime_requirement() -> None:
+    """Nothing here may be a runtime dependency, whatever it is used for.
+
+    This manifest exists to pin local tooling; the shipped artifact is the Python package and
+    carries no Node runtime. The dev-only allowlist above is the reviewed surface, so a tool
+    recorded under `dependencies` would both misdeclare itself and land outside that review. Guard
+    the runtime keys directly rather than inferring their absence from the dev list.
+    """
+
+    package = _node_package_json()
+    declared = [key for key in _RUNTIME_DEPENDENCY_KEYS if package.get(key)]
+    assert declared == [], f"node packages declared as runtime requirements: {declared}"
+
+
+def test_every_node_dev_package_is_an_exact_version() -> None:
+    """A range would let the reviewed toolchain drift without a diff to review."""
+
+    package = _node_package_json()
+    dev_dependencies = package["devDependencies"]
+    assert isinstance(dev_dependencies, dict)
+    unpinned = sorted(
+        f"{name}@{spec}"
+        for name, spec in cast(dict[str, str], dev_dependencies).items()
+        if _EXACT_NODE_PIN.fullmatch(spec) is None
+    )
+    assert unpinned == [], f"node dev packages are not exactly pinned: {unpinned}"
 
 
 def test_node_lockfile_is_present_and_self_consistent() -> None:

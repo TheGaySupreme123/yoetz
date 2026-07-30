@@ -71,6 +71,33 @@ def test_every_registered_guidance_resource_is_readable_offline(resource: object
     assert packaged.read_bytes() == payload
 
 
+def test_the_skill_states_how_often_to_call_each_operation() -> None:
+    """Knowing *when* to activate is not enough; the dogfood agent had to infer cadence.
+
+    The skill is the only always-available surface that can answer "how often", so every operation
+    has to be named there with a frequency, not merely described.
+    """
+
+    text = _skill_text()
+    for operation in ("start", "publish_work", "status", "check", "respond", "receipt"):
+        assert f"`{operation}`" in text, f"the skill never names {operation}"
+    for cadence_marker in (
+        "Once per task",
+        "One batch per material transition",
+        "Once at the end",
+        "never one per file, tool call, or message",
+    ):
+        assert cadence_marker in text, f"the skill states no cadence for: {cadence_marker!r}"
+
+
+def test_the_skill_does_not_promise_that_responding_clears_a_finding() -> None:
+    """Receipts keep every actionable finding unresolved, whatever disposition is recorded."""
+
+    text = _skill_text()
+    assert "unresolved_findings_remain" in text
+    assert "it does not clear the finding" in text
+
+
 def test_start_is_authorable_from_guidance_without_reading_product_source() -> None:
     """The workflow guidance must name what a first `start` call needs.
 

@@ -25,6 +25,8 @@ Evidence bound to an older material state is stale. Hidden, redacted, or unknown
 
 For a finding, choose one recorded response: accept and act; provide additional evidence; revise the claim; dispute with evidence; or state an unresolved limitation. Then recheck after material change. A response never deletes the original challenge.
 
+No disposition resolves a finding. `acknowledged`, `rejected`, and `waived` each record what you decided and what evidence you attached; none of them clears the finding for receipt purposes. Every actionable finding recorded in a task keeps the receipt conclusion at `unresolved_findings_remain`, even when later checks return no findings at all. Word the final answer accordingly: the repair is real and the disposition is recorded, but the receipt is not a clean completion receipt and must not be described as one.
+
 ## State examples
 
 - Same state: evidence may remain current when its exact state binding still matches.
@@ -43,6 +45,14 @@ Forbidden after only a candidate read: “I checked and found nothing.”
 ## Check mode and semantic coverage
 
 A clean deterministic-only check is not an implementation review. When `mode=deterministic_only` (or semantic status is `not_requested`), the receipt/check coverage includes `semantic_review_not_requested` and completeness is coverage-incomplete even if the verdict is `no_issue_detected`. Prefer `semantic_if_configured` for material claims; reserve `deterministic_only` for structural checks and disclose the limitation.
+
+A non-succeeding `semantic_status` is a coverage gap, not a failure to retry away.
+
+- `not_configured`, `blocked_by_policy`, and `human_denied` will not change without owner action: take the first answer.
+- `unavailable` and `timeout` are the only statuses retried inside a job, and only for a transport-unavailable, provider-timeout, or rate-limited reason. By the time you see one, that job already spent its own attempt budget.
+- `refused`, `invalid`, and `failed` are not retried inside the job at all, so a fresh request is a fresh gamble rather than a continuation.
+
+When a second job in one session again returns no judgment, stop requesting semantic review: run `deterministic_only` and say in the final answer that semantic review was requested and did not run, naming the recorded `semantic_status` and `semantic_reason`. A terminal reason such as `retry_budget_exhausted` describes the retry outcome, not the initiating cause; do not present it as a diagnosis.
 
 ## Receipt format
 
