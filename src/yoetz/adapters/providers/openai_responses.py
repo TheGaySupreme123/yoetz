@@ -495,11 +495,11 @@ def _challenge_from_model(challenge: ProviderChallengeModel) -> ReviewerChalleng
 def normalize_judgment(parsed: JsonValue) -> SemanticJudgment:
     """Validate a parsed judgment against the single provider judgment contract.
 
-    Validation runs through :data:`ProviderJudgmentModel` — the same model that generates
-    :data:`JUDGMENT_JSON_SCHEMA` — so any output that satisfies the machine-enforced provider schema
-    can enter domain construction. Cited refs are then ASCII-canonicalized; invalid IDs, invented
-    enums, empty prose, duplicates, and conclusion/challenge contradictions are never normalized
-    into acceptance.
+    Validation runs through :data:`ProviderJudgmentModel`, which
+    :data:`ProviderJudgmentEnvelopeModel` nests to generate :data:`JUDGMENT_JSON_SCHEMA`, so any
+    output that satisfies the machine-enforced provider schema can enter domain construction. Cited
+    refs are then ASCII-canonicalized; invalid IDs, invented enums, empty prose, duplicates, and
+    conclusion/challenge contradictions are never normalized into acceptance.
     """
 
     # The request schema asks for the envelope, so that is tried first. A bare judgment is also
