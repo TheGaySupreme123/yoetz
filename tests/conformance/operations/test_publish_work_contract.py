@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from builders.replay import replay_records
 from yoetz.application.publish_work import (
     Application,
+    _draft_pointer,  # pyright: ignore[reportPrivateUsage]
     prepare_publication,
 )
 from yoetz.domain.events import EventPayload, encode_payload
@@ -213,6 +214,49 @@ def test_unsorted_causal_parents_reject_as_event_invalid_unsorted_set_field() ->
         "reason_code": "unsorted_set_field",
         "field": "/event_drafts/0",
     }
+
+
+def test_unsorted_payload_set_field_is_located_by_name() -> None:
+    """A rejected reference list names itself, so the fix does not need guesswork.
+
+    Regression for the 2026-07-30 dogfood: `/event_drafts/N/payload` alone left an agent
+    choosing between `supporting_refs` and `obligation_refs` by trial and error.
+    """
+
+    base = _request_for_record("claim_recorded")
+    draft = dict(cast(dict[str, object], base.event_drafts[0]))
+    payload = dict(cast(dict[str, object], draft["payload"]))
+    payload["supporting_refs"] = (
+        "evd_00000000-0000-4000-8000-000000000002",
+        "evd_00000000-0000-4000-8000-000000000001",
+    )
+    draft["payload"] = payload
+    request = base.model_copy(update={"event_drafts": (draft,)})
+
+    with pytest.raises(PublicOperationError) as caught:
+        prepare_publication(
+            request,
+            channel=PublicationChannel.LOCAL_CLI,
+            app=cast(Application, _App()),
+        )
+
+    assert caught.value.code is PublicErrorCode.EVENT_INVALID
+    assert caught.value.safe_details == {
+        "reason_code": "unsorted_set_field",
+        "field": "/event_drafts/0/payload/supporting_refs",
+    }
+
+
+def test_payload_pointer_admits_only_registered_field_names() -> None:
+    """An unregistered field name degrades to the payload pointer rather than echoing itself."""
+
+    assert (
+        _draft_pointer(0, "payload", "supporting_refs") == "/event_drafts/0/payload/supporting_refs"
+    )
+    assert _draft_pointer(0, "payload", "../../etc/passwd") == "/event_drafts/0/payload"
+    assert _draft_pointer(0, "payload", None) == "/event_drafts/0/payload"
+    # Only the payload is descended into; every other subfield stays one level deep.
+    assert _draft_pointer(0, "schema", "supporting_refs") == "/event_drafts/0/schema"
 
 
 def _unknown_import_request() -> PublishWorkRequestModel:

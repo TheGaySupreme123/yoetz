@@ -935,7 +935,9 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "Call for material multi-step, delegated, resumable, or verification-heavy work before "
         "substantive work; skip trivial questions or edits. Records or resumes a cooperative work "
         "session and returns its compact record. It does not show that work outside the published "
-        "record occurred. Guidance: yoetz://guidance/workflow.md.",
+        "record occurred. Every request_id across these tools is a fresh req_ prefixed random "
+        "UUID, and workspace_ref and external_ref are admitted only as a pair. Guidance: "
+        "yoetz://guidance/workflow.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -951,7 +953,9 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "validate a batch and preview what would be accepted without appending; the preview is not "
         "evidential and is not citable as a check, publication, or coverage source. After "
         "publishing the material claim and evidence, call check, disposition any findings with "
-        "respond, then call receipt before claiming completion. Guidance: "
+        "respond, then call receipt before claiming completion. Every reference list, in a draft "
+        "envelope and in a payload alike, is admitted only when its members are unique and already "
+        "in ascending ASCII order; a rejection names the owning field. Guidance: "
         "yoetz://guidance/publication-policy.md.",
         read_only=False,
         idempotent=True,
@@ -1055,8 +1059,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
     {
         "policy": MappingProxyType(
             {
-                "start": "sha256:d87c67630fbf0d75c6bde24383e5a0d56b8b4e66cda214998b60e5106b401d1a",
-                "publish_work": "sha256:384d539552ebc03b03892d4bfe05462b20fca734701198e46c3b143826535a56",
+                "start": "sha256:47e93d5f95052135270685becfa02f16784968c0d04428943ef1480b8a3687df",
+                "publish_work": "sha256:2215e3060629db7f09d162b5a9cc6a993eb21f8503578ed252c2fe2ef5fba792",
                 "check": "sha256:7779e486e6790b9d26b698566eafcc7b48792c32dade57f53869ee75b29a9018",
                 "respond": "sha256:4a05e83bfce79c5ca6c767c535070fe6011278b6fdbe38958725398928ec751e",
                 "status": "sha256:6abdca221944fc026c915a01ea9cd9110074279532acac5fe285e0e07f3f6b77",
@@ -1065,8 +1069,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         ),
         "strict": MappingProxyType(
             {
-                "start": "sha256:d87c67630fbf0d75c6bde24383e5a0d56b8b4e66cda214998b60e5106b401d1a",
-                "publish_work": "sha256:384d539552ebc03b03892d4bfe05462b20fca734701198e46c3b143826535a56",
+                "start": "sha256:47e93d5f95052135270685becfa02f16784968c0d04428943ef1480b8a3687df",
+                "publish_work": "sha256:2215e3060629db7f09d162b5a9cc6a993eb21f8503578ed252c2fe2ef5fba792",
                 "check": "sha256:692ddaf55f6845a8e5a78d54590f61b55f92e30405d5591ee6a138b61dd5d111",
                 "respond": "sha256:4a05e83bfce79c5ca6c767c535070fe6011278b6fdbe38958725398928ec751e",
                 "status": "sha256:6abdca221944fc026c915a01ea9cd9110074279532acac5fe285e0e07f3f6b77",
@@ -1077,8 +1081,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:5884d2597909ec877135672ba869cc210249c2ff08fa76e6039600d0de1949d7",
-        "strict": "sha256:b2df0892bc3dd9d52e0ad463bebfbda8aa48d3519f6e2d6c84f6d3cd5b5a29bb",
+        "policy": "sha256:4850a84f993c26ed0d80a5f7c19a2d058f14c603501064138bcda53f7b2d9ea4",
+        "strict": "sha256:46984b916409aa79097068c0198a1c99efb76f9df75f63329c3d6763389d99b2",
     }
 )
 
