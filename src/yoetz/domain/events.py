@@ -320,18 +320,25 @@ def _tuple(value: object, minimum: int, maximum: int) -> tuple[object, ...]:
     return items
 
 
-def _validate_ascii_sorted_unique(values: tuple[str, ...]) -> None:
+def _validate_ascii_sorted_unique(values: tuple[str, ...], *, field: str | None = None) -> None:
+    """Enforce the canonical set form, naming the owning field so a rejection is actionable.
+
+    ``field`` is a frozen payload field name from this module, never caller data. A non-ASCII
+    member is its own reason: reporting it as unsorted sent agents hunting for an ordering bug
+    that was not there.
+    """
+
     previous: bytes | None = None
     for value in values:
         try:
             encoded = value.encode("ascii", errors="strict")
         except UnicodeEncodeError as exc:
-            raise ProtocolValueError("unsorted_set_field") from exc
+            raise ProtocolValueError("set_member_not_ascii", field=field) from exc
         if previous is not None:
             if encoded == previous:
-                raise ProtocolValueError("duplicate_set_member")
+                raise ProtocolValueError("duplicate_set_member", field=field)
             if encoded < previous:
-                raise ProtocolValueError("unsorted_set_field")
+                raise ProtocolValueError("unsorted_set_field", field=field)
         previous = encoded
 
 
@@ -341,10 +348,11 @@ def _id_tuple[T](
     *,
     minimum: int = 0,
     maximum: int = MAX_REF_LIST,
+    field: str | None = None,
 ) -> tuple[T, ...]:
     raw = _tuple(value, minimum, maximum)
     validated = tuple(constructor(item) for item in raw)
-    _validate_ascii_sorted_unique(cast(tuple[str, ...], validated))
+    _validate_ascii_sorted_unique(cast(tuple[str, ...], validated), field=field)
     return validated
 
 
@@ -377,10 +385,11 @@ def _evidence_result_tuple(
     *,
     minimum: int = 0,
     maximum: int = MAX_REF_LIST,
+    field: str | None = None,
 ) -> tuple[EvidenceId | ResultId, ...]:
     raw = _tuple(value, minimum, maximum)
     result = tuple(_evidence_result_ref(item) for item in raw)
-    _validate_ascii_sorted_unique(cast(tuple[str, ...], result))
+    _validate_ascii_sorted_unique(cast(tuple[str, ...], result), field=field)
     return result
 
 
@@ -453,6 +462,7 @@ class ObligationChange:
             self.replacement_obligation_ids,
             obligation_id,
             maximum=8,
+            field="replacement_obligation_ids",
         )
         object.__setattr__(self, "replacement_obligation_ids", replacements)
         if change in {ObligationChangeKind.SUPERSEDED, ObligationChangeKind.WAIVED}:
@@ -600,8 +610,12 @@ class ProjectionLocator:
             raise ProtocolValueError("invalid_projection_locator") from exc
         events = tuple(event_id(item) for item in raw_events)
         objects = tuple(object_id(item) for item in raw_objects)
-        _validate_ascii_sorted_unique(cast(tuple[str, ...], events))
-        _validate_ascii_sorted_unique(cast(tuple[str, ...], objects))
+        _validate_ascii_sorted_unique(
+            cast(tuple[str, ...], events), field="redaction_target_event_ids"
+        )
+        _validate_ascii_sorted_unique(
+            cast(tuple[str, ...], objects), field="redaction_target_object_ids"
+        )
         object.__setattr__(self, "redaction_target_event_ids", events)
         object.__setattr__(self, "redaction_target_object_ids", objects)
         key_kind = _locator_key_kind(self.schema)
@@ -708,7 +722,7 @@ class PlanPublishedPayload:
         object.__setattr__(
             self,
             "obligation_refs",
-            _id_tuple(self.obligation_refs, obligation_id),
+            _id_tuple(self.obligation_refs, obligation_id, field="obligation_refs"),
         )
         object.__setattr__(
             self,
@@ -872,12 +886,13 @@ class ObligationPublishedPayload:
         object.__setattr__(
             self,
             "source_refs",
-            _id_tuple(self.source_refs, event_id),
+            _id_tuple(self.source_refs, event_id, field="source_refs"),
         )
         minimum = 1 if status is ObligationStatus.RESOLVED else 0
         resolution_refs = _evidence_result_tuple(
             self.resolution_evidence_refs,
             minimum=minimum,
+            field="resolution_evidence_refs",
         )
         object.__setattr__(self, "resolution_evidence_refs", resolution_refs)
         if status is ObligationStatus.OPEN and resolution_refs:
@@ -901,6 +916,7 @@ class AssignmentRecordedPayload:
                 self.obligation_ids,
                 obligation_id,
                 minimum=1,
+                field="obligation_ids",
             ),
         )
         object.__setattr__(
@@ -943,7 +959,7 @@ class DecisionRecordedPayload:
         object.__setattr__(
             self,
             "affected_obligation_ids",
-            _id_tuple(self.affected_obligation_ids, obligation_id),
+            _id_tuple(self.affected_obligation_ids, obligation_id, field="affected_obligation_ids"),
         )
         if self.supersedes_event_id is not None:
             object.__setattr__(
@@ -977,7 +993,7 @@ class ActionRecordedPayload:
         object.__setattr__(
             self,
             "obligation_refs",
-            _id_tuple(self.obligation_refs, obligation_id),
+            _id_tuple(self.obligation_refs, obligation_id, field="obligation_refs"),
         )
         object.__setattr__(
             self,
@@ -1018,7 +1034,7 @@ class ResultRecordedPayload:
         object.__setattr__(
             self,
             "evidence_refs",
-            _id_tuple(self.evidence_refs, evidence_id),
+            _id_tuple(self.evidence_refs, evidence_id, field="evidence_refs"),
         )
 
 
@@ -1101,18 +1117,18 @@ class ClaimRecordedPayload:
         object.__setattr__(self, "statement", _bounded_text(self.statement, MAX_TEXT_BYTES))
         supporting_raw = _tuple(self.supporting_refs, 0, MAX_REF_LIST)
         supporting = tuple(_claim_supporting_ref(item) for item in supporting_raw)
-        _validate_ascii_sorted_unique(cast(tuple[str, ...], supporting))
+        _validate_ascii_sorted_unique(cast(tuple[str, ...], supporting), field="supporting_refs")
         object.__setattr__(self, "supporting_refs", supporting)
         if self.subject_state is not None:
             object.__setattr__(self, "subject_state", _subject_state(self.subject_state))
         object.__setattr__(
             self,
             "obligation_refs",
-            _id_tuple(self.obligation_refs, obligation_id),
+            _id_tuple(self.obligation_refs, obligation_id, field="obligation_refs"),
         )
         disputes_raw = _tuple(self.disputes_refs, 0, MAX_ALTERNATIVES)
         disputes = tuple(_claim_dispute_ref(item) for item in disputes_raw)
-        _validate_ascii_sorted_unique(cast(tuple[str, ...], disputes))
+        _validate_ascii_sorted_unique(cast(tuple[str, ...], disputes), field="disputes_refs")
         object.__setattr__(self, "disputes_refs", disputes)
 
 
@@ -1181,7 +1197,7 @@ class ResponseRecordedPayload:
         object.__setattr__(
             self,
             "evidence_refs",
-            _evidence_result_tuple(self.evidence_refs),
+            _evidence_result_tuple(self.evidence_refs, field="evidence_refs"),
         )
         if disposition in {ResponseDisposition.REJECTED, ResponseDisposition.WAIVED}:
             if self.reason is None:
@@ -1203,8 +1219,8 @@ class RedactionRecordedPayload:
     remaining_gap: str
 
     def __post_init__(self) -> None:
-        events = _id_tuple(self.target_event_ids, event_id)
-        objects = _id_tuple(self.target_object_ids, object_id)
+        events = _id_tuple(self.target_event_ids, event_id, field="target_event_ids")
+        objects = _id_tuple(self.target_object_ids, object_id, field="target_object_ids")
         if not events and not objects:
             raise ProtocolValueError("redaction_target_required")
         object.__setattr__(self, "target_event_ids", events)
@@ -1262,8 +1278,8 @@ class CheckRecordedPayload:
         object.__setattr__(self, "policies", policies)
         if type(self.scope) is not CheckScopeModel:
             raise ProtocolValueError("invalid_event_value_type")
-        _id_tuple(self.scope.claim_ids, claim_id)
-        _id_tuple(self.scope.obligation_ids, obligation_id)
+        _id_tuple(self.scope.claim_ids, claim_id, field="scope")
+        _id_tuple(self.scope.obligation_ids, obligation_id, field="scope")
         executions_raw = _tuple(self.policy_executions, 1, 2)
         if any(type(execution) is not CheckPolicyExecutionModel for execution in executions_raw):
             raise ProtocolValueError("invalid_event_value_type")
@@ -1286,6 +1302,7 @@ class CheckRecordedPayload:
                 self.returned_finding_ids,
                 finding_id,
                 maximum=_MAX_FINDINGS_LIMIT,
+                field="returned_finding_ids",
             ),
         )
         object.__setattr__(
@@ -1522,10 +1539,12 @@ def _decode_scope(value: object) -> CheckScopeModel:
     claim_ids = _id_tuple(
         tuple(_array(_field(source, "claim_ids"))),
         claim_id,
+        field="scope",
     )
     obligation_ids = _id_tuple(
         tuple(_array(_field(source, "obligation_ids"))),
         obligation_id,
+        field="scope",
     )
     try:
         return CheckScopeModel.model_validate(

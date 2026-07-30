@@ -247,14 +247,21 @@ _EMPTY_SAFE_DETAILS: Mapping[str, SafeDetailValue] = MappingProxyType({})
 class ProtocolValueError(ValueError):
     """A bounded internal protocol-value failure."""
 
-    __slots__ = ("reason_code",)
+    __slots__ = ("field", "reason_code")
 
     reason_code: str
+    field: str | None
 
-    def __init__(self, reason_code: str) -> None:
+    def __init__(self, reason_code: str, *, field: str | None = None) -> None:
         if type(reason_code) is not str or reason_code not in PROTOCOL_REASON_CODES:
             raise ValueError("unregistered_protocol_reason_code")
+        if field is not None and type(field) is not str:
+            raise ValueError("unregistered_protocol_reason_code")
         self.reason_code = reason_code
+        # A hint naming the owning payload field, never a value. Callers that turn this into a
+        # public error location must still check it against their own frozen allowlist, so a
+        # caller-derived string can never reach a public pointer through this attribute.
+        self.field = field
         super().__init__(reason_code)
 
 

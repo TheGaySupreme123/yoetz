@@ -219,8 +219,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:5884d2597909ec877135672ba869cc210249c2ff08fa76e6039600d0de1949d7",
-        "strict": "sha256:b2df0892bc3dd9d52e0ad463bebfbda8aa48d3519f6e2d6c84f6d3cd5b5a29bb",
+        "policy": "sha256:4850a84f993c26ed0d80a5f7c19a2d058f14c603501064138bcda53f7b2d9ea4",
+        "strict": "sha256:46984b916409aa79097068c0198a1c99efb76f9df75f63329c3d6763389d99b2",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -236,6 +236,14 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert "Omitting mode resolves through the configured verification policy" in check_description
     assert descriptor_for("start").description.startswith(
         "Call for material multi-step, delegated, resumable, or verification-heavy work"
+    )
+    # The two argument conventions a first-time caller cannot infer from prose alone. Both cost a
+    # rejected start call in the 2026-07-30 dogfood before the descriptor named them.
+    start_description = descriptor_for("start").description
+    assert "fresh req_ prefixed random UUID" in start_description
+    assert "workspace_ref and external_ref are admitted only as a pair" in start_description
+    assert (
+        "unique and already in ascending ASCII order" in descriptor_for("publish_work").description
     )
     for descriptors in TOOL_DESCRIPTORS.values():
         assert {item.name for item in descriptors if item.annotations.read_only} == {"status"}

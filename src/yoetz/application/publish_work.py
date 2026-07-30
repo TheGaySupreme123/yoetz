@@ -271,11 +271,38 @@ _LOCATABLE_DRAFT_SUBFIELDS: Final = frozenset(
 )
 
 
-def _draft_pointer(event_index: int, subfield: str | None) -> str | None:
+# The payload fields that own a canonical set, which are frozen schema names declared by
+# `yoetz.domain.events`. `/event_drafts/N/payload` alone cannot be acted on: a rejected batch left
+# an agent guessing which of several reference lists broke the canonical set form.
+_LOCATABLE_PAYLOAD_FIELDS: Final = frozenset(
+    {
+        "affected_obligation_ids",
+        "disputes_refs",
+        "evidence_refs",
+        "obligation_ids",
+        "obligation_refs",
+        "redaction_target_event_ids",
+        "redaction_target_object_ids",
+        "replacement_obligation_ids",
+        "resolution_evidence_refs",
+        "returned_finding_ids",
+        "scope",
+        "source_refs",
+        "supporting_refs",
+        "target_event_ids",
+        "target_object_ids",
+    }
+)
+
+
+def _draft_pointer(
+    event_index: int, subfield: str | None, payload_field: str | None = None
+) -> str | None:
     """Locate one rejected draft without ever naming caller-supplied keys or values.
 
     Every segment is a frozen schema name plus the draft's ordinal, which is bounded by
-    ``MAX_EVENTS_PER_BATCH``. Nothing here is derived from the submitted payload.
+    ``MAX_EVENTS_PER_BATCH``. Nothing here is derived from the submitted payload: a payload field
+    is admitted only when it is already registered in ``_LOCATABLE_PAYLOAD_FIELDS``.
     """
 
     if type(event_index) is not int or not 0 <= event_index < MAX_EVENTS_PER_BATCH:
@@ -284,7 +311,18 @@ def _draft_pointer(event_index: int, subfield: str | None) -> str | None:
         return f"/event_drafts/{event_index}"
     if subfield not in _LOCATABLE_DRAFT_SUBFIELDS:
         return None
-    return f"/event_drafts/{event_index}/{subfield}"
+    pointer = f"/event_drafts/{event_index}/{subfield}"
+    # Only the payload has opaque interior structure worth naming one level deeper.
+    if subfield == "payload" and payload_field in _LOCATABLE_PAYLOAD_FIELDS:
+        return f"{pointer}/{payload_field}"
+    return pointer
+
+
+def _payload_field_of(exc: BaseException) -> str | None:
+    """Read the owning payload field a protocol rejection carried, if it named one."""
+
+    field = getattr(exc, "field", None)
+    return field if type(field) is str else None
 
 
 def _event_invalid(
@@ -292,6 +330,7 @@ def _event_invalid(
     *,
     event_index: int | None = None,
     subfield: str | None = None,
+    payload_field: str | None = None,
 ) -> PublicOperationError:
     # Only a stale frontier is fixed by rereading status; every other reason needs the event
     # payload corrected first, and retrying it unchanged would fail the same way.
@@ -304,7 +343,7 @@ def _event_invalid(
         message = "The event batch is invalid. Correct the event payload before retrying."
     details: dict[str, str] = {"reason_code": reason_code}
     if event_index is not None:
-        pointer = _draft_pointer(event_index, subfield)
+        pointer = _draft_pointer(event_index, subfield, payload_field)
         if pointer is not None:
             # Which draft failed is the difference between a one-line fix and re-deriving the
             # whole batch; a batch may carry up to MAX_EVENTS_PER_BATCH drafts.
@@ -375,7 +414,10 @@ def _decode_draft(value: JsonValue, event_index: int) -> _PreparedDraft:
             raise
         except (TypeError, ValueError) as exc:
             raise _event_invalid(
-                _reason_code_of(exc), event_index=event_index, subfield=subfield
+                _reason_code_of(exc),
+                event_index=event_index,
+                subfield=subfield,
+                payload_field=_payload_field_of(exc),
             ) from exc
 
     schema_source = _locate("schema", lambda: _mapping(_field(source, "schema")))
