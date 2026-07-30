@@ -82,8 +82,11 @@ def _finding(kind: FindingKind) -> Finding:
 def _response(disposition: ResponseDisposition) -> ResponseRecordedPayload:
     reason = None if disposition is ResponseDisposition.ACKNOWLEDGED else "Stated on the record."
     waiver_scope = WaiverScope.FINDING_ONLY if disposition is ResponseDisposition.WAIVED else None
+    # Deliberately far future: this case is about an *unexpired* waiver still failing to resolve
+    # its finding. A near-term date would silently become the expired-waiver path once it passed,
+    # and a clock-derived one would make the payload digest nondeterministic.
     waiver_expiry = (
-        timestamp_from_string("2026-08-30T00:00:00.000Z")
+        timestamp_from_string("2999-01-01T00:00:00.000Z")
         if disposition is ResponseDisposition.WAIVED
         else None
     )
