@@ -21,6 +21,7 @@ _SECRET_CANARY = b"policy-secret-canary-2026"
 _TTY_PROBE = r"""
 import asyncio, json, os, sys, time
 from yoetz.cli import privacy_control
+from yoetz.cli import trusted_console
 from yoetz.cli import unlock as unlock_helper
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.service.confidential_protocol import (
@@ -37,7 +38,7 @@ REAL_OPEN = os.open
 def OPEN_TTY(path, flags):
     assert path == "/dev/tty"
     return os.dup(0)
-unlock_helper.os.open = OPEN_TTY
+trusted_console.os.open = OPEN_TTY
 POLICY_MODE = MODE in {"policy", "auto_policy"}
 TARGET = PrivacyPendingTarget("policy" if POLICY_MODE else "disclosure", "pending-1")
 TARGET_DIGEST = canonical_digest({"decision_kind": TARGET.decision_kind, "kind": TARGET.kind, "pending_id": TARGET.pending_id})
@@ -313,5 +314,8 @@ def test_no_tty_fails_before_opening_human_control() -> None:
     )
     assert completed.returncode == 0
     assert completed.stderr == b""
-    assert json.loads(completed.stdout) == {"opened": False, "reason": "tty_required"}
+    assert json.loads(completed.stdout) == {
+        "opened": False,
+        "reason": "trusted_console_required",
+    }
     assert _SECRET_CANARY not in completed.stdout + completed.stderr

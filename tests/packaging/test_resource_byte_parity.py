@@ -1,6 +1,6 @@
 """Reviewed/source/embedded/installed resource byte equality.
 
-Proves each of the 75 manifest-declared runtime resources is the exact reviewed byte set in the
+Proves each of the 81 manifest-declared runtime resources is the exact reviewed byte set in the
 root canonical source tree, the ``src/yoetz/resources`` package tree, the built wheel, and a clean
 offline install; that the nine canonical fixtures are the only ``fixtures/`` corpus shipped; and
 that corruption/missing/extra resource drift is detected before decode/use, both at the source
@@ -26,12 +26,12 @@ import pytest
 _REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 _VERIFY_SCRIPT: Final = _REPO_ROOT / "scripts" / "verify_resource_manifest.py"
 _BUILD_TIMEOUT: Final = 120
-_EXPECTED_TOTAL: Final = 76
+_EXPECTED_TOTAL: Final = 81
 _EXPECTED_KIND_COUNTS: Final = {
     "canonical_vector": 9,
     "guidance": 4,
     "migration": 6,
-    "json_schema": 54,
+    "json_schema": 59,
     "skill": 1,
     "compatibility_manifest": 1,
     "runtime_support": 1,
@@ -64,7 +64,7 @@ def _export_clean_source(dest: Path) -> None:
         tar_path.unlink(missing_ok=True)
 
 
-def test_manifest_has_exactly_75_entries_with_the_reviewed_kind_counts() -> None:
+def test_manifest_has_exactly_81_entries_with_the_reviewed_kind_counts() -> None:
     manifest = _load_manifest()
     entries = manifest["entries"]
     assert len(entries) == _EXPECTED_TOTAL

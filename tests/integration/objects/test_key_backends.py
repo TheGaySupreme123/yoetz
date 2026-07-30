@@ -18,6 +18,7 @@ from yoetz.adapters.keys.encrypted_vault import (
 from yoetz.adapters.keys.os_keyring import (
     AutoUnlockPassphraseStore,
     KeyringInitializationBinding,
+    OSKeyringError,
     OSKeyringState,
     OSVaultRootKeySource,
 )
@@ -97,6 +98,99 @@ def test_auto_unlock_load_distinguishes_absent_rejected_and_provisioned(
     loaded, reason = store.load_with_reason()
     assert loaded == unicode_value
     assert reason == "none"
+
+
+def test_initialization_refuses_preexisting_auto_unlock_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.adapters.keys.os_keyring as keyring_module
+
+    backend = _AtomicBackend()
+    store = AutoUnlockPassphraseStore(tmp_path.resolve(), backend=backend)
+    store._backend_id = "keyring.backends.macOS.Keyring"  # pyright: ignore[reportPrivateUsage]
+    store.save(bytearray(b"a" * 48))
+    original_entry = dict(backend.values)
+    wiped: list[bytes] = []
+    original_overwrite = keyring_module._overwrite  # pyright: ignore[reportPrivateUsage]
+
+    def observe_overwrite(value: bytearray) -> None:
+        original_overwrite(value)
+        wiped.append(bytes(value))
+
+    monkeypatch.setattr(keyring_module, "_overwrite", observe_overwrite)
+    with pytest.raises(OSKeyringError) as exc:
+        store.create_for_initialization()
+
+    assert exc.value.reason == "entry_exists"
+    assert backend.values == original_entry
+    assert wiped and set(wiped[-1]) <= {0}
+
+
+class _WriteRaisesBackend:
+    def get_password(self, _service: str, _username: str) -> None:
+        return None
+
+    def set_password(self, _service: str, _username: str, _password: str) -> None:
+        raise RuntimeError
+
+
+class _ReadbackRaisesBackend:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def get_password(self, _service: str, _username: str) -> None:
+        self.calls += 1
+        if self.calls > 1:
+            raise RuntimeError
+
+    def set_password(self, _service: str, _username: str, _password: str) -> None:
+        pass
+
+
+class _ReadbackMismatchBackend:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def get_password(self, _service: str, _username: str) -> str | None:
+        self.calls += 1
+        return None if self.calls == 1 else "different"
+
+    def set_password(self, _service: str, _username: str, _password: str) -> None:
+        pass
+
+
+@pytest.mark.parametrize(
+    ("backend_type", "reason"),
+    [
+        (_WriteRaisesBackend, "ambiguous_write"),
+        (_ReadbackRaisesBackend, "readback_failed"),
+        (_ReadbackMismatchBackend, "unverified"),
+    ],
+)
+def test_auto_unlock_creation_fails_closed_and_wipes_generated_buffer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_type: type[object],
+    reason: str,
+) -> None:
+    import yoetz.adapters.keys.os_keyring as keyring_module
+
+    backend = backend_type()
+    store = AutoUnlockPassphraseStore(tmp_path.resolve(), backend=backend)
+    store._backend_id = "keyring.backends.macOS.Keyring"  # pyright: ignore[reportPrivateUsage]
+    wiped: list[bytes] = []
+    original_overwrite = keyring_module._overwrite  # pyright: ignore[reportPrivateUsage]
+
+    def observe_overwrite(value: bytearray) -> None:
+        original_overwrite(value)
+        wiped.append(bytes(value))
+
+    monkeypatch.setattr(keyring_module, "_overwrite", observe_overwrite)
+    with pytest.raises(OSKeyringError) as exc:
+        store.load_or_create()
+    assert exc.value.reason == reason
+    assert wiped and set(wiped[-1]) <= {0}
 
 
 def test_bundle_hkdf_and_aes_kw_known_answers() -> None:

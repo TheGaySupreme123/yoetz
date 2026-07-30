@@ -1374,22 +1374,40 @@ no server-side `edit` action. Idle-policy secret reauthentication uses only wire
 `SecretIngressService` and `HumanControlService` are server authority. Client-safe
 `service/confidential_client.py` alone exports `HumanControlClient`, `HumanControlSession`, and
 `ConfidentialSecretClient`; it imports only the pure protocol and connect-only local transport.
-`cli/unlock.py` owns foreground `/dev/tty` no-echo collection. These channels are absent from
+`cli/trusted_console.py` owns the `TrustedForegroundConsole` boundary and `cli/unlock.py` owns the
+confidential ceremony driver. On macOS/Linux the console opens `/dev/tty`, matches the standard
+input/error terminal identity, verifies the foreground process group, and performs no-echo reads.
+On Windows it opens `CONIN$`/`CONOUT$`, validates real console handles and current-process
+attachment, and performs no-echo reads through Win32 console APIs. It never falls back to
+redirected standard streams. These channels are absent from
 `ControlClientPort`, ordinary CLI/MCP import graphs and schemas, argv, environment, config, stdin,
 logs, traces, transcripts, and LLM context. Same-UID raw connection/TTY emulation remains an
 explicit threat-model limit, not a claimed cryptographic exclusion.
 
 Elevated consent (`service/elevated_bootstrap.py`, CLI `yoetz consent` /
 `yoetz elevated-bootstrap`) is a separate owner-only pending-file lane outside
-`ControlClientPort`. It catalogues non-default ops (`yoetz.consent.catalog/1`), creates
-digest-bound pending challenges (`yoetz.elevated-bootstrap.pending/1`), and after exact phrase
-approval may read secrets only from inherited FDs other than `0`/`1`/`2` for implemented
-`secret_ingress` ops. Agent projection may include structural `danger_text`, digests, and a
-confirmation phrase for human display, plus an `approve_command` template that must use a
-`<confirmation_phrase>` placeholder (never a pre-filled live phrase). Pending consent is
-single-shot. Phrase-only irreversible ops remain catalogued with `implemented=false` until
-owning mutation paths consume a durable grant. This lane never carries secrets on MCP/argv/env/
-config/stdin and does not unlock an already-locked vault.
+`ControlClientPort`. It catalogues non-default operations (`yoetz.consent.catalog/2`) and creates
+digest-bound pending records (`yoetz.elevated-bootstrap.pending/2`). The v2 agent-safe projection
+contains only operation, risk class, bounded danger text, exact digests, expiry, pending ID, and
+the fixed `["yoetz","consent","review"]` command. A legacy v1 record is invalidated.
+
+`yoetz consent review` is the only approval path. It opens the trusted console before atomically
+claiming and reloading the request, renders the exact action, and accepts explicit `approve` or
+`deny` input only from that console. Approval, denial, cancellation, expiry, and post-claim failure
+consume the request once; a crash marker blocks reuse. No argv, environment, stdin, MCP, JSON, or
+caller boolean can authorize review. Vault initialization generates its passphrase inside the
+trusted helper, verifies a write/read round trip through the scoped credential store, and submits
+it directly to the confidential ceremony. A pre-existing scoped entry is rejected rather than
+used as the initialization secret. A known pre-write unavailable backend may offer the existing
+manual human ceremony; ambiguous write or read-back stops before initialization.
+Provider credential set/rotate use the same review surface. This lane does not unlock an
+already-locked vault.
+
+The public v2 JSON Schema contracts are `catalog`, `pending-agent`, `prepare-result`,
+`review-result`, and `status`, each at version `2.0.0` under `schemas/consent/`. `review_only` irreversible
+operations remain catalogued with `implemented=false` until owning mutation paths consume review.
+The Windows console adapter is a focused boundary implementation, not a claim that the Yoetz
+service, transport, peer authentication, packaging, or release surface supports Windows.
 
 `HumanControlService` implements trusted `HumanPrivacyControlPort`. Policy widening/provider
 credential/admin changes require exact OS `UserPresencePort` or established passphrase-mode

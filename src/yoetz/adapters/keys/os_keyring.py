@@ -61,7 +61,9 @@ _APPROVED_BACKENDS: Final = frozenset(
 _ERRORS: Final = frozenset(
     {
         "locked",
+        "ambiguous_write",
         "missing",
+        "readback_failed",
         "unsupported",
         "unverified",
         "human_authority_unavailable",
@@ -250,25 +252,42 @@ class AutoUnlockPassphraseStore:
         return value, "none"
 
     def load_or_create(self) -> bytearray:
-        existing = self.load()
+        existing, load_reason = self.load_with_reason()
         if existing is not None:
             return existing
-        if not self.available:
+        return self._create_after_absent(load_reason)
+
+    def create_for_initialization(self) -> bytearray:
+        """Create a fresh secret; never initialize a vault from a pre-existing entry."""
+
+        existing, load_reason = self.load_with_reason()
+        if existing is not None:
+            _overwrite(existing)
+            raise OSKeyringError("entry_exists")
+        return self._create_after_absent(load_reason)
+
+    def _create_after_absent(self, load_reason: str) -> bytearray:
+        if load_reason == "auto_unlock_backend_unavailable":
             raise OSKeyringError("unsupported")
+        if load_reason != "auto_unlock_absent":
+            raise OSKeyringError("entry_invalid")
         generated = bytearray(base64.urlsafe_b64encode(os.urandom(48)).rstrip(b"="))
         encoded = base64.urlsafe_b64encode(generated).rstrip(b"=").decode("ascii")
         try:
             backend = cast(AnyKeyringBackend, self._backend)
             backend.set_password(_AUTO_UNLOCK_SERVICE_NAME, self._username, encoded)
-            verified = backend.get_password(_AUTO_UNLOCK_SERVICE_NAME, self._username)
-            if verified != encoded:
-                raise OSKeyringError("unverified")
-        except OSKeyringError:
-            _overwrite(generated)
-            raise
         except Exception:
             _overwrite(generated)
-            raise OSKeyringError("locked") from None
+            # A backend exception cannot prove whether the write committed.
+            raise OSKeyringError("ambiguous_write") from None
+        try:
+            verified = backend.get_password(_AUTO_UNLOCK_SERVICE_NAME, self._username)
+        except Exception:
+            _overwrite(generated)
+            raise OSKeyringError("readback_failed") from None
+        if verified != encoded:
+            _overwrite(generated)
+            raise OSKeyringError("unverified")
         return generated
 
     def save(self, value: bytearray) -> None:
@@ -284,12 +303,14 @@ class AutoUnlockPassphraseStore:
         try:
             backend = cast(AnyKeyringBackend, self._backend)
             backend.set_password(_AUTO_UNLOCK_SERVICE_NAME, self._username, encoded)
-            if backend.get_password(_AUTO_UNLOCK_SERVICE_NAME, self._username) != encoded:
-                raise OSKeyringError("unverified")
-        except OSKeyringError:
-            raise
         except Exception:
-            raise OSKeyringError("locked") from None
+            raise OSKeyringError("ambiguous_write") from None
+        try:
+            verified = backend.get_password(_AUTO_UNLOCK_SERVICE_NAME, self._username)
+        except Exception:
+            raise OSKeyringError("readback_failed") from None
+        if verified != encoded:
+            raise OSKeyringError("unverified")
 
 
 class AnyKeyringBackend(Protocol):

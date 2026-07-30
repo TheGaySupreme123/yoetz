@@ -1,91 +1,79 @@
-# ADR-016 — Human review for non-default actions (easy consent, hard secrets)
+# ADR-016 — Human review for non-default actions
 
-**Status:** Working decision — expands ADR-015 from bootstrap-only into a risk-class consent
-framework for every *non-default* Yoetz action agents might request.
-**Implemented by:** `src/yoetz/service/elevated_bootstrap.py` (consent registry),
-`src/yoetz/cli/elevated.py`, `guidance/agent-instructions.md`, ADR-008/009 amendments,
-`OPEN_QUESTIONS.md`.
-**Relates to:** ADR-015 (bootstrap path), ADR-008 (vault/TTY), ADR-009 (egress/privacy).
+**Status:** Working decision; amended 2026-07-30 to require trusted-console review.
+**Implemented by:** `src/yoetz/service/elevated_bootstrap.py`,
+`src/yoetz/cli/elevated.py`, `src/yoetz/cli/trusted_console.py`,
+`src/yoetz/protocol/consent.py`, and `guidance/agent-instructions.md`.
+**Relates to:** ADR-015 (bootstrap path), ADR-008 (vault/console), ADR-009
+(egress/privacy).
 
 ## Context
 
-ADR-015 unblocked cloud-agent vault initialize and provider credential set. Users still need a
-clear rule for everything else that is “not usual”: privacy widening, idle-relock weakening,
-credential rotate, portable recovery, backup/restore/migrate, skill/MCP installs, and any path
-that could move secrets into agent context.
-
-Peer tools separate **containment** (sandbox/VM/egress) from **approval** (when to ask a human).
-Yoetz must do the same without a standing `--yolo`, without putting secrets in chat/MCP, and
-without making ordinary cooperative workflow painful.
-
-## Goals
-
-1. **Easy for humans.** One status surface, short danger text, one confirmation phrase, one exact
-   approve command. Prefer phrase-only when no secret bytes are required.
-2. **Safe for secrets.** Passphrases, API keys, recovery material, and reauth secrets never travel
-   over MCP, chat, argv, environment, config, or transcripts. Inherited FDs only after phrase
-   consent, and only for `secret_ingress` / `secret_reauth` lanes.
-3. **Safe for durable harm.** Irreversible storage/route/config mutations require digest-bound
-   phrase consent even when no secret is involved. Yoetz has no hardware-destructive surface; the
-   analogous class is irreversible local state change (backup/restore/migrate, skill replace,
-   harness MCP registration).
-4. **Default stays fast.** Ordinary MCP workflow tools and privacy *tighten* remain ungated.
-   Agents must still refuse to publish secrets (existing guidance).
+Yoetz needs one understandable rule for actions outside the ordinary cooperative workflow while
+keeping approval authority and secret entry out of agent-visible channels. Human review is
+per-operation and digest-bound; host sandboxing and egress policy remain separate containment
+controls.
 
 ## Risk classes
 
 | Class | Examples | Human UX | Secret path |
 |---|---|---|---|
-| `default_safe` | MCP `start`/`publish_work`/`check`/`respond`/`status`/`receipt`; privacy tighten | No consent ceremony | None; publication policy still forbids secrets |
-| `secret_ingress` | `vault_initialize`, `provider_credential_set`, `provider_credential_rotate`, portable recovery | Phrase + danger text | Inherited FDs after approve |
-| `secret_reauth` | idle-relock disable/change, some privacy widen decisions | Phrase + danger text | Reauth FD after approve |
-| `phrase_only` | backup/restore/migrate execute, skill install/replace/remove, harness MCP register | Phrase + plan/preview digest | None |
-| `privacy_widen` | privacy policy widen, disclosure approve | Phrase + exact pending/policy digest | Reauth when the ceremony requires it |
+| `default_safe` | MCP `start`/`publish_work`/`check`/`respond`/`status`/`receipt`; privacy tighten | No consent ceremony | None |
+| `secret_ingress` | vault initialize; provider credential set/rotate | Trusted review of exact digests | Trusted confidential ceremony only |
+| `secret_reauth` | idle-relock weakening; some privacy widening | Trusted review plus owning reauthentication | Trusted confidential ceremony only |
+| `review_only` | backup/restore/migrate execute; skill or harness configuration | Trusted review of exact plan digest | None |
+| `privacy_widen` | privacy policy widen; disclosure approve | Trusted review of exact policy/pending digest | Owning ceremony when required |
 
 ## Decisions
 
-1. **Consent catalog is authoritative.** `yoetz consent catalog` (alias
-   `yoetz elevated-bootstrap catalog`) and `status` list every non-default operation, its risk
-   class, whether FDs are required, the prepare template, and an `implemented` flag. Agents must
-   consult the catalog before attempting a non-default action. Ops with `implemented=false` must
-   not be prepared; they are reserved until durable grant consumption exists at the owning
-   mutation boundary.
+1. **Catalog authority.** `yoetz consent catalog` and `status` list every non-default operation,
+   risk class, prepare hint, binding requirements, and `implemented` flag. Operations marked
+   `implemented=false` cannot be prepared.
 
-2. **One pending consent at a time.** Same singleton + TTL model as ADR-015. Approve consumes
-   pending immediately on accept (single-shot); ceremony failure requires a new prepare.
+2. **Agent-safe contracts.** Catalog, pending projection, prepare result, review result, and status
+   are frozen v2 contracts in `schemas/consent/`. They contain no authorization credential,
+   reusable approval value, secret transport instruction, generated passphrase, or credential.
 
-3. **No standing danger mode.** Rejected again: a session-wide bypass is how secrets and
-   irreversible actions leak past review.
+3. **One pending request.** One owner-only request with a 15-minute TTL may exist. The trusted
+   reviewer atomically claims it. Every terminal decision and every post-claim failure is
+   single-shot.
 
-4. **Easy path ≠ weak path.** “Easy” means fewer steps and clearer copy, not fewer checks. Phrase
-   confirmation binds the exact `danger_digest` / `target_digest`. `approve_command` uses a
-   `<confirmation_phrase>` placeholder; agents must not auto-fill the live phrase from status.
+4. **Trusted review only.** The fixed `yoetz consent review` command takes no authority-bearing
+   arguments. It requires a verified foreground console, renders exact structural facts, and
+   accepts `approve` or `deny` only through that console. Redirected or headless execution fails
+   before mutation.
 
-5. **Ordinary TTY remains preferred** when a controlling user-owned `/dev/tty` exists. Elevated
-   consent is for cloud/no-TTY orchestration and for surfacing non-default risk to agents.
+5. **No standing danger mode.** There is no session-wide bypass or broad grant. Easy review means
+   short bounded text and one console decision, not reduced checks.
 
-6. **Hardware safety.** Yoetz does not expose device firmware, disk wipe, or kernel privilege
-   ops. Path-safety refusals (shared temp, sync folders, symlinks, broad perms) stay non-overridable
-   without a separate reviewed exception — consent cannot waive path safety.
+6. **Path safety is independent.** Consent cannot waive shared-temp, sync-folder, symlink,
+   ownership, or broad-permission refusals.
 
-7. **Inherited FDs stay narrow.** Secret FD ingress applies only to catalogued `secret_ingress` /
-   `secret_reauth` ops after digest-bound phrase consent (ADR-008 amendment). Phrase-only ops never
-   take secret FDs and are not `implemented` until execute paths consume a durable grant.
+7. **Secrets remain confined.** Implemented secret-ingress operations enter the existing YZH1/YZS1
+   confidential service ceremony from the trusted console. Agent-facing surfaces never carry the
+   bytes or directions for transporting them.
+
+8. **Future operations.** Backup, restore, migration, skill mutation, harness registration,
+   idle-relock weakening, and privacy widening remain catalogued but unimplemented until the
+   owning mutation boundary consumes this single-shot review safely.
 
 ## Consequences
 
-Agents get a single, teachable rule: if it is not default-safe, consult the catalog; if
-`implemented`, prepare consent, show the human the danger text, wait for the phrase, then approve
-with FDs only when the catalog says so. Humans get short reviewable prompts without pasting
-secrets. ADR-015 bootstrap ops (plus credential rotate) are the implemented secret-ingress lane;
-phrase-only irreversible ops remain catalogued but `implemented=false` until grant consumption
-lands.
+Agents may prepare and inspect a request, then must ask the human to run the fixed review command
+locally. The agent cannot derive or submit anything that authorizes the operation. Approval of one
+operation does not grant another operation, another digest, another installation, or a later
+session.
+
+Native biometrics, natural-language host approval, approved-machine profiles, monthly grants,
+E2EE service authority, and authority-bearing MCP elicitation require separate ADRs and threat
+reviews.
 
 ## Alternatives considered
 
-**MCP elicitation for secrets.** Rejected: models/clients must not observe secret entry.
+**Agent-held bearer grant.** Rejected because it delegates approval authority to the requesting
+channel.
 
-**Agent-held bearer grant reusable across ops.** Rejected: becomes standing elevation.
+**Approve once per session.** Rejected because secret and irreversible operations require distinct
+targets and digests.
 
-**Ask once per session for “all elevated.”** Rejected: too coarse; irreversible and secret ops need
-per-operation digests.
+**MCP secret entry.** Rejected because clients and model contexts must not observe secret bytes.

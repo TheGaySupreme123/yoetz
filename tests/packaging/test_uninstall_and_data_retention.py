@@ -7,7 +7,7 @@ offline wheel afterward rediscovers the preserved data untouched.
 
 Scope note: exercising this against a fully unlocked vault would require driving the real
 foreground passphrase-vault ceremony, which needs a genuine controlling TTY
-(``yoetz/cli/unlock.py``'s ``_ForegroundTerminal`` opens ``/dev/tty`` and checks
+(``TrustedForegroundConsole`` opens ``/dev/tty`` on POSIX and checks
 ``os.tcgetpgrp``/isatty plus matching stdin/stderr terminal endpoints). That is real, deliberate, out-of-scope-to-relax product
 security (not a gap in this file), and is exercised in ``test_clean_install.py``/
 ``test_offline_reinstall.py`` instead. This file's own invariant -- "package removal never deletes

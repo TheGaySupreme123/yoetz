@@ -1,72 +1,43 @@
 # Elevated bootstrap peer patterns
 
-Sources: ADR-015, `guidance/agent-instructions.md`, Codex sandbox/approval docs,
+Sources: ADR-015, ADR-016, `guidance/agent-instructions.md`, Codex sandbox/approval docs,
 Claude Code permission-mode docs, MCP elicitation spec, and Cursor Cloud environment notes.
 
 ## Peer pattern summary
 
-- Codex CLI:
-  - Separates `sandbox_mode` (technical containment: `read-only`, `workspace-write`,
-    `danger-full-access`) from `approval_policy` (when the agent must stop).
-  - Lower-risk automation uses workspace write plus on-request approvals; full access is an
-    explicit danger posture, especially when paired with never-ask approvals.
-  - Granular approval settings can keep sandbox escapes, MCP prompts, and permission requests
-    interactive or auto-rejected instead of making one global trust decision.
-- Claude Code:
-  - Permission modes range from `plan`/manual read-only behavior through `acceptEdits`, `auto`,
-    `dontAsk`, and `bypassPermissions`.
-  - `bypassPermissions` is documented for isolated containers/VMs only, and still leaves some
-    forced prompts/circuit breakers and MCP `requiresUserInteraction` cases.
-  - `plan` keeps edits out of scope; `dontAsk` denies tools unless pre-approved, matching
-    locked-down CI rather than human consent.
-- MCP elicitation:
-  - In-band forms may ask reviewable non-secret questions, but must not request passwords,
-    API keys, access tokens, payment credentials, or equivalent secrets.
-  - Sensitive flows use out-of-band URL-mode style interaction with explicit user consent and
-    a displayed target, keeping the client and model from observing the secret entry.
-  - Elicitation is not authorization for the MCP client itself and does not mint a reusable
-    bearer capability for the agent.
-- Cursor Cloud:
-  - Agents run in isolated cloud VMs/environments; egress policy can be allow-all, defaults plus
-    allowlist, or allowlist-only at user/team/environment scope.
-  - This run reports unrestricted egress and owner-restricted environment JSON, which illustrates
-    that host isolation/egress are containment facts, not Yoetz bootstrap consent.
-  - Secrets and network policy are environment configuration; they do not authorize a specific
-    vault initialization or provider-credential operation.
+- Agent hosts separate technical containment from human approval. A sandbox, VM, or egress
+  allowlist does not establish that a human approved one exact Yoetz operation.
+- MCP elicitation may present reviewable non-secret information, but it does not establish a
+  verified client/user authority channel and must not expose passwords, API keys, or equivalent
+  secrets to the model.
+- Out-of-band human interaction is strongest when the approval surface displays the exact target
+  and keeps both authority and secret entry outside the agent-visible channel.
 
-## Mapping to ADR-015/016 choices
+## Mapping to ADR-015/016
 
-- `prepare` mirrors peer approval prompts: the agent can request elevation and surface operation,
-  `danger_text`, `danger_digest`, confirmation phrase (for display), expiry/state, and command
-  template with a `<confirmation_phrase>` placeholder only.
-- The human phrase binds reviewer intent to the exact digest for implemented secret-ingress ops
-  (`vault_initialize`, `provider_credential_set`, `provider_credential_rotate`). Phrase-only
-  irreversible ops are catalogued with `implemented=false` until durable grant consumption exists.
-- `approve` consumes one pending record (single-shot) and supplies secret bytes only on inherited
-  FDs, preserving ADR-008's service/vault boundary while allowing the no-TTY cloud case.
-- There is no standing Yoetz `--yolo`, bypass mode, secret bearer token, or generic headless
-  passphrase/unlock API; broader containment remains the host sandbox/VM/egress policy.
+- `prepare` lets an agent request elevation and inspect only operation, risk class, bounded danger
+  text, exact digests, expiry, pending ID, and the fixed `yoetz consent review` command.
+- `review` requires a verified foreground console, reloads and validates the pending record, and
+  consumes the request once on approval, denial, cancellation, expiry, or failure.
+- Vault initialization generates and verifies its secret inside the trusted helper. Provider
+  credential set/rotate collect their secrets inside the same confidential review surface.
+- There is no standing Yoetz `--yolo`, agent-held grant, generic headless passphrase/unlock API, or
+  authority-bearing caller argument.
 
-## MCP/status should tell agents
+## Agent-facing status
 
-- Report `elevated_bootstrap.required` or pending state, operation, `danger_text`,
-  `danger_digest`, confirmation phrase (display only), expiry/state, and `approve_command`
-  template with `<confirmation_phrase>` placeholder — never pre-fill the live phrase into the
-  command.
-- Instruct the agent to stop ordinary work, show those fields to the human, wait for the repeated
-  phrase, substitute only the human-typed phrase, then run approve with inherited secret FDs when
-  listed. Refuse prepare when catalog `implemented` is false.
-- Return a blocked reason when FD delivery, pending state, digest match, or phrase match is
-  unavailable; do not suggest alternate secret channels. Locked vaults need local TTY unlock;
-  elevated consent does not unlock.
+- Report the v2 pending projection exactly and refuse preparation when catalog
+  `implemented=false`.
+- Ask the human to run `yoetz consent review` directly in a foreground console.
+- If the console or pending validation is unavailable, report the bounded structural error and do
+  not suggest another approval or secret channel.
 - After completion, expose only sanitized structural success/failure/audit facts.
 
-## NEVER over MCP/chat
+## Never expose to an agent-capable channel
 
-- Vault passphrases, reauth passphrases, provider API keys, access tokens, OAuth/device codes, or
-  recovery material.
-- Secret FD contents, FD paths/proofs, local endpoint/socket paths, bearer consent tokens, or
-  reusable vault capabilities.
-- Owner-only pending-file paths, environment-variable secret values, argv secrets, or config files
-  containing secrets.
-- Full prompts/transcripts, hidden reasoning, or broad unrelated source/context.
+- Vault passphrases, reauthentication secrets, provider API keys, access tokens, OAuth/device
+  codes, or recovery material.
+- Any reusable approval value, generated initialization passphrase, credential-store value,
+  confidential transport detail, bearer capability, or vault capability.
+- Owner-only pending paths, environment secret values, process arguments containing secrets,
+  config files containing secrets, prompts/transcripts, or hidden reasoning.

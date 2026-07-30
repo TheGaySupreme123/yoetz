@@ -166,19 +166,19 @@ after the helper's local two-entry match; unlock is available only for an alread
 passphrase vault. Their handles are not interchangeable. The pure confidential protocol maps the
 wire purpose to one one-shot `SecretHandle(SecretPurpose.vault_unlock)` consumed by the trusted
 unlock coordinator; ordinary clients cannot construct it. The helper must prove a same-user,
-foreground controlling TTY; read directly from `/dev/tty` in no-echo mode; require stdin and
-stderr to be TTYs for the same user-visible terminal, and require the process to be in the
-foreground process group of `/dev/tty`. Terminal-device ownership and device-number equality with
-`/dev/tty` are not user-identity evidence: macOS may expose a root-owned, device-distinct
-controlling-terminal alias. The helper still rejects stdin redirection, pipes,
-environment/config/argument input, and noninteractive execution; establish a
+foreground trusted console. On macOS/Linux it reads directly from `/dev/tty` in no-echo mode,
+requires stdin and stderr to be TTYs for the same user-visible terminal, and requires the process
+to be in the foreground process group. On Windows it opens `CONIN$`/`CONOUT$`, requires real
+console handles and current-process attachment, and reads through no-echo Win32 console APIs.
+Terminal ownership alone is not user-identity evidence. The helper rejects redirection, pipes,
+environment/config/argument input, and noninteractive execution; establishes a
 separately typed peer-authenticated connection; and erase mutable buffers best-effort after the
 service consumes them. No MCP registry, `ServiceClient`, or public application method can reach
-this channel. **Amendment (ADR-015/016):** the founder-authorized `yoetz consent` /
-`elevated-bootstrap` path may, after exact digest-bound human consent, admit secrets for
-catalogued `secret_ingress` operations (`vault_initialize`, `provider_credential_set`,
-`provider_credential_rotate`) only from inherited file descriptors on `approve` — still never via
-MCP, argv, environment secret values, config, or chat paste. Provider credentials become opaque adapter-scoped handles in the service vault;
+this channel. **Amendment (ADR-015/016, 2026-07-30):** `yoetz consent review` uses this same
+trusted-console boundary for `vault_initialize`, `provider_credential_set`, and
+`provider_credential_rotate`. Initialization accepts only its helper-generated,
+credential-store-verified passphrase; provider secrets are entered inside the confidential
+ceremony. Provider credentials become opaque adapter-scoped handles in the service vault;
 provider adapters and normal clients never receive reusable credential bytes.
 
 `UnlockCoordinator` solely owns the persistent passphrase throttle: admission delay, in-progress
@@ -245,22 +245,21 @@ CLI and MCP processes would handle keys or prompts, an MCP agent could influence
 multiple clients would retain decrypted state, and service behavior would depend on client
 lifetime. A noninteractive MCP process has no acceptable human prompt.
 
-### D. Inherited secret descriptor for headless passphrase unlock — evaluated, not selected as a *generic* path
+### D. Headless secret transport — evaluated, not selected
 
-An anonymous, one-shot descriptor inherited directly from an explicitly configured trusted
-supervisor can avoid argv/env/config/history exposure, but descriptor provenance, inheritance,
-buffering, lifetime, and platform supervisor semantics require a dedicated design and review.
-Resolved decision F-008 requires unattended readiness but does not require a generic unattended
-passphrase transport. v0.1 supports restart readiness for an already initialized verified
-OS-keyring vault and for a passphrase vault whose exact bundle-scoped auto-unlock entry was
-provisioned by trusted setup or repair. A pristine headless install still cannot auto-select
-keyring mode or create passphrase auto-unlock without the applicable verified local setup
-authority, and there is no generic password-fd option. **Amendment (ADR-015/016):** after exact
-digest-bound human consent, the
-elevated consent approve path may admit secrets on inherited FDs only for catalogued
-`secret_ingress` / `secret_reauth` operations (implemented: vault initialize and provider
-credential set/rotate). This is not a generic headless unlock FD API and does not unlock an
-already-locked vault unless the separately scoped platform auto-unlock entry already exists.
+Unattended restart readiness does not require an agent- or process-selected secret transport.
+v0.1 supports restart readiness for an already initialized verified OS-keyring vault and for a
+passphrase vault whose exact bundle-scoped auto-unlock entry was provisioned by trusted setup or
+repair. A pristine headless install cannot auto-select keyring mode or create passphrase
+auto-unlock without verified local setup authority.
+
+**Amendment (ADR-015/016, 2026-07-30):** elevated vault initialization and provider credential
+set/rotate use `yoetz consent review` on `TrustedForegroundConsole`. Vault initialization generates
+the high-entropy passphrase inside the helper and round-trips it through the scoped credential
+store before direct confidential submission. Provider secret entry occurs inside the same trusted
+console ceremony. No agent-visible channel or general headless API carries approval authority or
+secret bytes. This still does not unlock an already-locked vault unless the separately scoped
+auto-unlock entry already exists.
 
 ### E. Native vault subprocess — stronger remaining option, not selected for v0.1
 

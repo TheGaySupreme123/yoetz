@@ -157,7 +157,7 @@ policy — it is not a logging or support-bundle mode that exists today.
 |---|---|---|---|
 | Fresh install stays locked with setup required | `human_authority_unavailable` | Keyring works but presence evidence is missing/stale/unavailable | Not keyring corruption; not a bug |
 | Existing vault reachable without presence prompt | (no error — `ready`, activation fenced) | Existing keyring data may load for local work | Not full external authority |
-| Vault locked after restart | (expected) | Passphrase mode never auto-unlocks; keyring mode retries automatically | MCP cannot unlock it for you |
+| Vault locked after restart | (expected) | No valid scoped auto-unlock entry was available; keyring mode retries automatically | MCP cannot unlock it for you |
 | Idle-relocked mid-session | (expected) | Default 900s idle timer elapsed with no active work | Not a crash |
 
 Troubleshooting always uses these bounded reason codes — never a raw file path, account name, or

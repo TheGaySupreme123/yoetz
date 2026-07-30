@@ -1,24 +1,25 @@
-"""Elevated consent pending + catalog contract (ADR-015/016)."""
+"""Trusted-review pending and catalog contract (ADR-015/016)."""
 
 from __future__ import annotations
 
 import json
-import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 
 from yoetz.protocol.canonical import canonical_digest
+from yoetz.protocol.schemas import validate_schema_instance
 from yoetz.service.elevated_bootstrap import (
     ElevatedBootstrapError,
-    approve_pending,
     catalog_payload,
-    clear_pending,
+    claim_pending_for_review,
+    complete_review,
     load_pending,
     prepare_pending,
     projection_for_status,
-    read_secret_fd,
     status_payload,
 )
 
@@ -28,63 +29,173 @@ _BINDING = {
     "endpoint_profile_version": "1",
     "model_id": "accounts/fireworks/models/minimax-m3",
     "provider_id": "fireworks",
-    "purpose": "semantic_review",
-    "purpose_digest": "sha256:" + ("a" * 64),
+    "purpose": "semantic-review",
+    "purpose_digest": canonical_digest({"purpose": "semantic-review"}),
     "scope_digest": "sha256:" + ("b" * 64),
+}
+_AGENT_FORBIDDEN = {
+    "approve_command",
+    "confirmation_phrase",
+    "credential_fd",
+    "passphrase_fd",
+    "reauth_fd",
+    "secret_fds",
 }
 
 
-def test_catalog_lists_risk_classes_and_default_safe() -> None:
+def _assert_agent_safe(value: object) -> None:
+    rendered = json.dumps(value, sort_keys=True)
+    for forbidden in _AGENT_FORBIDDEN:
+        assert forbidden not in rendered
+
+
+def test_catalog_is_review_only_and_agent_safe() -> None:
     catalog = cast(dict[str, Any], catalog_payload())
-    assert catalog["schema"] == "yoetz.consent.catalog/1"
+    assert catalog["schema"] == "yoetz.consent.catalog/2"
     assert "mcp.start" in catalog["default_safe"]
     assert catalog["rules"]["no_standing_yolo"] is True
+    assert catalog["rules"]["trusted_console_review_only"] is True
+    assert catalog["rules"]["agent_selected_initialization_secret_forbidden"] is True
     by_name = {item["operation"]: item for item in catalog["operations"]}
     assert by_name["vault_initialize"]["implemented"] is True
     assert by_name["provider_credential_rotate"]["implemented"] is True
     assert by_name["backup_execute"]["implemented"] is False
-    assert by_name["privacy_policy_widen"]["implemented"] is False
+    assert by_name["backup_execute"]["risk_class"] == "review_only"
+    _assert_agent_safe(catalog)
 
 
-def test_prepare_vault_initialize_projection_and_approve(tmp_path: Path) -> None:
+def test_prepare_projection_contains_only_agent_safe_review_fields(tmp_path: Path) -> None:
     pending = prepare_pending("vault_initialize", target_digest=_TARGET, _state=tmp_path)
-    assert pending.operation == "vault_initialize"
-    assert pending.risk_class == "secret_ingress"
-    assert pending.secret_fds == ("passphrase-fd",)
-    assert pending.expires_at_unix - pending.created_at_unix == 15 * 60
-
     projection = cast(dict[str, Any], projection_for_status(pending))
-    assert projection["required"] is True
-    assert projection["risk_class"] == "secret_ingress"
-    approve_command = cast(list[str], projection["approve_command"])
-    assert approve_command[-2:] == ["--passphrase-fd", "3"]
-    assert "<confirmation_phrase>" in approve_command
-    assert pending.confirmation_phrase not in approve_command
-    assert "user_steps" in projection
 
-    approved = approve_pending(
-        pending_id=pending.pending_id,
-        danger_digest=pending.danger_digest,
-        confirm=pending.confirmation_phrase,
-        _state=tmp_path,
+    assert set(projection) == {
+        "danger_digest",
+        "danger_text",
+        "expires_at_unix",
+        "operation",
+        "pending_id",
+        "review_command",
+        "risk_class",
+        "schema",
+        "target_digest",
+    }
+    assert projection["schema"] == "yoetz.consent.pending-agent/2"
+    assert projection["review_command"] == ["yoetz", "consent", "review"]
+    assert pending.expires_at_unix - pending.created_at_unix == 15 * 60
+    stored = json.loads(
+        (tmp_path / "elevated-bootstrap" / "elevated-bootstrap-pending.json").read_text()
     )
-    assert approved == pending
+    assert stored["schema"] == "yoetz.elevated-bootstrap.pending/2"
+    _assert_agent_safe(projection)
+    _assert_agent_safe(stored)
+
+
+def test_review_claim_is_single_shot_for_approval_and_duplicate(tmp_path: Path) -> None:
+    prepared = prepare_pending("vault_initialize", target_digest=_TARGET, _state=tmp_path)
+    claimed = claim_pending_for_review(_state=tmp_path)
+    assert claimed == prepared
     assert load_pending(_state=tmp_path) is None
+
+    with pytest.raises(ElevatedBootstrapError) as duplicate:
+        claim_pending_for_review(_state=tmp_path)
+    assert duplicate.value.reason == "pending_absent"
+
+    complete_review(claimed, outcome="approved", _state=tmp_path)
     with pytest.raises(ElevatedBootstrapError) as reused:
-        approve_pending(
-            pending_id=pending.pending_id,
-            danger_digest=pending.danger_digest,
-            confirm=pending.confirmation_phrase,
-            _state=tmp_path,
-        )
+        complete_review(claimed, outcome="approved", _state=tmp_path)
     assert reused.value.reason == "pending_absent"
 
 
-def test_phrase_only_ops_not_implemented(tmp_path: Path) -> None:
-    plan = canonical_digest({"kind": "backup_plan", "n": 1})
+@pytest.mark.parametrize("outcome", ["denied", "cancelled", "failed"])
+def test_review_consumes_denial_cancellation_and_failure(tmp_path: Path, outcome: str) -> None:
+    prepare_pending("vault_initialize", target_digest=_TARGET, _state=tmp_path)
+    claimed = claim_pending_for_review(_state=tmp_path)
+    complete_review(claimed, outcome=outcome, _state=tmp_path)
+    assert load_pending(_state=tmp_path) is None
+
+
+def test_concurrent_review_has_one_winner(tmp_path: Path) -> None:
+    prepare_pending("vault_initialize", target_digest=_TARGET, _state=tmp_path)
+
+    def claim() -> tuple[str, object]:
+        try:
+            return "ok", claim_pending_for_review(_state=tmp_path)
+        except ElevatedBootstrapError as exc:
+            return "error", exc.reason
+
+    def claim_index(_index: int) -> tuple[str, object]:
+        return claim()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(claim_index, range(2)))
+
+    winners = [value for status, value in outcomes if status == "ok"]
+    losers = [value for status, value in outcomes if status == "error"]
+    assert len(winners) == 1
+    assert losers[0] in {"pending_absent", "review_in_progress"}
+    complete_review(cast(Any, winners[0]), outcome="cancelled", _state=tmp_path)
+
+
+def test_interrupted_review_marker_blocks_reuse_and_new_prepare(tmp_path: Path) -> None:
+    prepare_pending("vault_initialize", target_digest=_TARGET, _state=tmp_path)
+    claimed = claim_pending_for_review(_state=tmp_path)
+    assert load_pending(_state=tmp_path) is None
+    with pytest.raises(ElevatedBootstrapError) as duplicate:
+        claim_pending_for_review(_state=tmp_path)
+    assert duplicate.value.reason == "pending_absent"
+    with pytest.raises(ElevatedBootstrapError) as replacement:
+        prepare_pending("vault_initialize", target_digest=_TARGET, _state=tmp_path)
+    assert replacement.value.reason == "review_in_progress"
+    complete_review(claimed, outcome="failed", _state=tmp_path)
+
+
+def test_legacy_v1_record_is_invalidated_not_migrated(tmp_path: Path) -> None:
+    root = tmp_path / "elevated-bootstrap"
+    root.mkdir(mode=0o700)
+    path = root / "elevated-bootstrap-pending.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "yoetz.elevated-bootstrap.pending/1",
+                "confirmation_phrase": "reusable value",
+            }
+        )
+    )
+
     with pytest.raises(ElevatedBootstrapError) as exc:
-        prepare_pending("backup_execute", target_digest=plan, _state=tmp_path)
-    assert exc.value.reason == "operation_not_implemented"
+        load_pending(_state=tmp_path)
+    assert exc.value.reason == "legacy_pending_invalidated"
+    assert not path.exists()
+    audit = (root / "elevated-bootstrap-audit.jsonl").read_text()
+    assert "legacy_pending_invalidated" in audit
+    assert "reusable value" not in audit
+
+
+def test_expiry_consumes_before_review(tmp_path: Path) -> None:
+    with patch("yoetz.service.elevated_bootstrap.time.time", return_value=1_000):
+        prepare_pending("vault_initialize", target_digest=_TARGET, _state=tmp_path)
+    with patch("yoetz.service.elevated_bootstrap.time.time", return_value=1_901):
+        with pytest.raises(ElevatedBootstrapError) as exc:
+            claim_pending_for_review(_state=tmp_path)
+    assert exc.value.reason == "pending_absent"
+    assert load_pending(_state=tmp_path) is None
+
+
+def test_tampered_digest_or_operation_is_rejected_before_claim(tmp_path: Path) -> None:
+    prepare_pending("vault_initialize", target_digest=_TARGET, _state=tmp_path)
+    path = tmp_path / "elevated-bootstrap" / "elevated-bootstrap-pending.json"
+    payload = json.loads(path.read_text())
+    payload["danger_digest"] = "sha256:" + ("0" * 64)
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ElevatedBootstrapError) as digest:
+        claim_pending_for_review(_state=tmp_path)
+    assert digest.value.reason == "pending_tampered"
+
+    payload["operation"] = "provider_credential_set"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ElevatedBootstrapError) as operation:
+        claim_pending_for_review(_state=tmp_path)
+    assert operation.value.reason in {"pending_corrupt", "pending_tampered"}
 
 
 def test_prepare_provider_binding_rules(tmp_path: Path) -> None:
@@ -109,102 +220,32 @@ def test_prepare_provider_binding_rules(tmp_path: Path) -> None:
     assert incomplete.value.reason == "provider_binding_invalid"
 
 
-def test_target_digest_must_be_sha256(tmp_path: Path) -> None:
-    with pytest.raises(ElevatedBootstrapError) as exc:
+def test_target_digest_and_unimplemented_operations_are_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ElevatedBootstrapError) as digest:
         prepare_pending("vault_initialize", target_digest="sha256:not-hex", _state=tmp_path)
-    assert exc.value.reason == "target_digest_invalid"
-
-
-def test_unimplemented_privacy_widen_refused(tmp_path: Path) -> None:
-    with pytest.raises(ElevatedBootstrapError) as exc:
+    assert digest.value.reason == "target_digest_invalid"
+    with pytest.raises(ElevatedBootstrapError) as unimplemented:
         prepare_pending(
             "privacy_policy_widen",
             target_digest=canonical_digest({"pending": "x"}),
             _state=tmp_path,
         )
-    assert exc.value.reason == "operation_not_implemented"
+    assert unimplemented.value.reason == "operation_not_implemented"
 
 
-def test_singleton_and_exact_approve(tmp_path: Path) -> None:
-    first = prepare_pending("vault_initialize", target_digest=_TARGET, _state=tmp_path)
-    with pytest.raises(ElevatedBootstrapError) as duplicate:
-        prepare_pending("vault_initialize", target_digest=_TARGET, _state=tmp_path)
-    assert duplicate.value.reason == "pending_already_active"
-    with pytest.raises(ElevatedBootstrapError) as bad_phrase:
-        approve_pending(
-            pending_id=first.pending_id,
-            danger_digest=first.danger_digest,
-            confirm=first.confirmation_phrase.lower(),
-            _state=tmp_path,
-        )
-    assert bad_phrase.value.reason == "confirmation_mismatch"
-    assert load_pending(_state=tmp_path) is not None
+def test_status_contains_nullable_pending_and_catalog(tmp_path: Path) -> None:
+    empty = cast(dict[str, Any], status_payload(_state=tmp_path))
+    assert empty["schema"] == "yoetz.elevated-bootstrap.status/2"
+    assert empty["pending"] is None
+    assert empty["consent_catalog"]["schema"] == "yoetz.consent.catalog/2"
+    _assert_agent_safe(empty)
 
-
-def test_load_pending_rejects_tampered_danger_text(tmp_path: Path) -> None:
-    prepare_pending("vault_initialize", target_digest=_TARGET, _state=tmp_path)
-    path = tmp_path / "elevated-bootstrap" / "elevated-bootstrap-pending.json"
-    payload = json.loads(path.read_text())
-    payload["danger_text"] = "tampered"
-    path.write_text(json.dumps(payload))
-    with pytest.raises(ElevatedBootstrapError) as exc:
-        load_pending(_state=tmp_path)
-    assert exc.value.reason in {"pending_tampered", "pending_corrupt"}
-    clear_pending(_state=tmp_path)
-
-
-def test_read_secret_fd_bounds() -> None:
-    with pytest.raises(ElevatedBootstrapError):
-        read_secret_fd(0, maximum=16)
-    with pytest.raises(ElevatedBootstrapError):
-        read_secret_fd(1, maximum=16)
-    with pytest.raises(ElevatedBootstrapError):
-        read_secret_fd(2, maximum=16)
-    with pytest.raises(ElevatedBootstrapError):
-        read_secret_fd(-1, maximum=16)
-    read_end, write_end = os.pipe()
-    try:
-        os.write(write_end, b"secret-value\n")
-        os.close(write_end)
-        write_end = -1
-        value = read_secret_fd(read_end, maximum=64)
-        assert bytes(value) == b"secret-value"
-    finally:
-        os.close(read_end)
-        if write_end >= 0:
-            os.close(write_end)
-
-
-def test_read_secret_fd_empty_and_oversized() -> None:
-    read_end, write_end = os.pipe()
-    try:
-        os.close(write_end)
-        write_end = -1
-        with pytest.raises(ElevatedBootstrapError) as empty:
-            read_secret_fd(read_end, maximum=64)
-        assert empty.value.reason == "secret_empty"
-    finally:
-        os.close(read_end)
-        if write_end >= 0:
-            os.close(write_end)
-
-    read_end, write_end = os.pipe()
-    try:
-        os.write(write_end, b"x" * 8)
-        os.close(write_end)
-        write_end = -1
-        with pytest.raises(ElevatedBootstrapError) as oversized:
-            read_secret_fd(read_end, maximum=4)
-        assert oversized.value.reason == "secret_too_large"
-    finally:
-        os.close(read_end)
-        if write_end >= 0:
-            os.close(write_end)
-
-
-def test_status_includes_catalog(tmp_path: Path) -> None:
-    payload = cast(dict[str, Any], status_payload(_state=tmp_path))
-    elevated = cast(dict[str, Any], payload["elevated_bootstrap"])
-    catalog = cast(dict[str, Any], payload["consent_catalog"])
-    assert elevated["required"] is False
-    assert catalog["schema"] == "yoetz.consent.catalog/1"
+    prepare_pending(
+        "provider_credential_set", target_digest=_TARGET, provider_binding=_BINDING, _state=tmp_path
+    )
+    prepared = cast(dict[str, Any], status_payload(_state=tmp_path))
+    assert prepared["pending"]["operation"] == "provider_credential_set"
+    _assert_agent_safe(prepared)
+    validate_schema_instance("catalog", "2.0.0", prepared["consent_catalog"])
+    validate_schema_instance("pending-agent", "2.0.0", prepared["pending"])
+    validate_schema_instance("status", "2.0.0", prepared)

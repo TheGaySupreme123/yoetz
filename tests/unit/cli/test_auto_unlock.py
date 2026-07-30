@@ -168,7 +168,7 @@ async def test_auto_unlock_repair_maps_missing_trusted_tty_to_usage_failure(
     client = _Client(state="locked", reason="passphrase_required")
 
     def no_tty() -> bytearray:
-        raise unlock_module.HumanCeremonyCliError("tty_required")
+        raise unlock_module.HumanCeremonyCliError("trusted_console_required")
 
     monkeypatch.setattr(module, "build_service_client", lambda: _async_value(client))
     monkeypatch.setattr(unlock_module, "read_vault_passphrase_for_auto_unlock", no_tty)
@@ -209,16 +209,18 @@ def test_foreground_terminal_accepts_macos_controlling_tty_alias(
     def fake_tcgetpgrp(_fd: int) -> int:
         return 41
 
-    monkeypatch.setattr(unlock_module.os, "isatty", fake_isatty)
-    monkeypatch.setattr(unlock_module.os, "open", fake_open)
-    monkeypatch.setattr(unlock_module.os, "close", fake_close)
-    monkeypatch.setattr(unlock_module.os, "fstat", fake_fstat)
-    monkeypatch.setattr(unlock_module.os, "tcgetpgrp", fake_tcgetpgrp)
-    monkeypatch.setattr(unlock_module.os, "getpgrp", lambda: 41)
+    import yoetz.cli.trusted_console as console_module
+
+    monkeypatch.setattr(console_module.os, "isatty", fake_isatty)
+    monkeypatch.setattr(console_module.os, "open", fake_open)
+    monkeypatch.setattr(console_module.os, "close", fake_close)
+    monkeypatch.setattr(console_module.os, "fstat", fake_fstat)
+    monkeypatch.setattr(console_module.os, "tcgetpgrp", fake_tcgetpgrp)
+    monkeypatch.setattr(console_module.os, "getpgrp", lambda: 41)
 
     terminal = unlock_module._ForegroundTerminal()  # pyright: ignore[reportPrivateUsage]
     with terminal:
-        assert terminal.fd == 9
+        assert opened == [9]
 
     assert opened == [9]
     assert closed == [9]
