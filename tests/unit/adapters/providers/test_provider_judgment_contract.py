@@ -78,8 +78,10 @@ def _judgment(
 
 
 def _provider_schema_accepts(value: JsonValue) -> bool:
+    """Validate a bare judgment against the request schema, which asks for the envelope."""
+
     validator = cast(Any, Draft202012Validator(JUDGMENT_JSON_SCHEMA))
-    return cast(bool, validator.is_valid(value))
+    return cast(bool, validator.is_valid({"judgment": value}))
 
 
 def _responses_profile() -> OpenAIProfile:
@@ -161,11 +163,13 @@ def test_generated_schema_matches_owning_model_and_frozen_artifact() -> None:
     assert frozen_doc["$id"].endswith("provider-judgment-1.0.0.schema.json")
 
     def _strip_titles(node: object) -> object:
+        # The catalog artifact keeps title/description chrome for human readers; the request
+        # schema carries shape only, so both annotations are dropped before comparing.
         if type(node) is dict:
             return {
                 key: _strip_titles(value)
                 for key, value in cast(dict[str, object], node).items()
-                if key != "title"
+                if key not in {"title", "description"}
             }
         if type(node) is list:
             return [_strip_titles(item) for item in cast(list[object], node)]
@@ -184,6 +188,71 @@ def test_generated_schema_matches_owning_model_and_frozen_artifact() -> None:
         )["enum"],
     )
     assert set(kinds) == {kind.value for kind in FindingKind}
+
+
+def test_request_schema_root_is_an_object_never_a_union() -> None:
+    """A constrained-output root must be an object; a root union fails the request outright.
+
+    Regression guard: generating the request schema straight from the ``ProviderJudgmentModel``
+    union puts ``anyOf`` at the root. Providers reject that schema before generation starts, and
+    the rejection reaches the ledger only as an opaque transport failure, so no test that exercises
+    parsing or normalization can see it. This asserts the wire shape itself.
+    """
+
+    assert JUDGMENT_JSON_SCHEMA.get("type") == "object"
+    assert "anyOf" not in JUDGMENT_JSON_SCHEMA
+    assert "oneOf" not in JUDGMENT_JSON_SCHEMA
+    assert "allOf" not in JUDGMENT_JSON_SCHEMA
+    assert "$ref" not in JUDGMENT_JSON_SCHEMA
+    assert JUDGMENT_JSON_SCHEMA.get("additionalProperties") is False
+
+    # Every object in the document, including union branches, stays closed and fully required.
+    def _walk(node: object, path: str) -> None:
+        if type(node) is dict:
+            source = cast(dict[str, Any], node)
+            if source.get("type") == "object":
+                assert source.get("additionalProperties") is False, path
+                properties = cast(dict[str, Any], source.get("properties", {}))
+                required = cast(list[str], source.get("required", []))
+                assert set(properties) == set(required), path
+            for key, value in source.items():
+                if key in {"properties", "$defs"}:
+                    for name, child in cast(dict[str, Any], value).items():
+                        _walk(child, f"{path}.{key}.{name}")
+                else:
+                    _walk(value, f"{path}.{key}")
+        elif type(node) is list:
+            for index, item in enumerate(cast(list[Any], node)):
+                _walk(item, f"{path}[{index}]")
+
+    _walk(JUDGMENT_JSON_SCHEMA, "$")
+
+
+def test_request_schema_carries_no_docstring_commentary() -> None:
+    """Developer docstrings explain the contract to maintainers, never to the provider."""
+
+    def _annotations(node: object) -> list[str]:
+        found: list[str] = []
+        if type(node) is dict:
+            for key, value in cast(dict[str, Any], node).items():
+                if key in {"title", "description"}:
+                    found.append(key)
+                found.extend(_annotations(value))
+        elif type(node) is list:
+            for item in cast(list[Any], node):
+                found.extend(_annotations(item))
+        return found
+
+    assert _annotations(JUDGMENT_JSON_SCHEMA) == []
+
+
+def test_envelope_and_bare_judgment_both_normalize() -> None:
+    """The schema asks for the envelope; a provider that flattens it is still admitted."""
+
+    bare = _judgment("challenges_returned", [_challenge()])
+    enveloped: dict[str, JsonValue] = {"judgment": cast(JsonValue, bare)}
+    assert normalize_judgment(bare) == normalize_judgment(enveloped)
+    assert _provider_schema_accepts(bare)
 
 
 def test_every_finding_kind_is_admitted_and_near_misses_are_rejected() -> None:

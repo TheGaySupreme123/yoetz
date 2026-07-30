@@ -100,6 +100,7 @@ __all__ = [
     "RespondResultModel",
     "ProviderChallengeModel",
     "ProviderJudgmentChallengesModel",
+    "ProviderJudgmentEnvelopeModel",
     "ProviderJudgmentInsufficientModel",
     "ProviderJudgmentModel",
     "ProviderJudgmentNoDiscrepancyModel",
@@ -1350,6 +1351,18 @@ type ProviderJudgmentModel = (
     | ProviderJudgmentChallengesModel
     | ProviderJudgmentInsufficientModel
 )
+
+
+class ProviderJudgmentEnvelopeModel(_ClosedModel):
+    """Root wrapper that carries the judgment union one level below the schema root.
+
+    Constrained-output (``strict: true``) schemas must have an object at the root; a root-level
+    ``anyOf`` is rejected by the provider before generation starts. Nesting the union under a
+    single required property keeps one owning contract for generation and consumption while
+    still expressing the conclusion/challenge coupling through explicit union branches.
+    """
+
+    judgment: ProviderJudgmentModel
 
 
 class StartCompactViewModel(_ClosedModel):
