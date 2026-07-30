@@ -36,5 +36,8 @@ coverage.xml
 /.debug-mode/
 /.tmp/
 
-# Local Codex/agent handoff drafting inputs (never tracked; fold sanitized conclusions into docs/postmortems/).
-.codex-test-handoff.md
+# Local agent work products and execution records; never part of the public repository.
+/.codex-test-handoff.md
+/docs/dogfood/
+/docs/plans/
+/docs/postmortems/

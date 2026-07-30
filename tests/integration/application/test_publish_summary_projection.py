@@ -290,9 +290,8 @@ async def _project(
     return public_model_to_wire(projected)
 
 
-# The recorded 2026-07-27 payloads, verbatim from
-# docs/dogfood/2026-07-27-grok-easy-linking/codex-events.jsonl (items 21 and 53). Only the
-# installation-bound identities (request/session/writer/frontier) are supplied by the replay.
+# Payloads retained from a 2026-07-27 local interoperability run. Only the installation-bound
+# identities (request/session/writer/frontier) are supplied by the replay.
 _PLAN_DRAFT: Mapping[str, JsonValue] = {
     "event_id": "evt_4a1b2c3d-5e6f-4a78-9b01-2c3d4e5f6a78",
     "schema": {"name": "plan_published", "version": "1.0.0"},
