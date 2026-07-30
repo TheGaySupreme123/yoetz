@@ -10,7 +10,7 @@
     "typecheck": "pyright"
   },
   "devDependencies": {
-    "@openai/codex-security": "^0.1.4",
+    "@openai/codex-security": "0.1.4",
     "pyright": "1.1.411"
   }
 }
