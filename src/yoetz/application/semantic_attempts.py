@@ -24,6 +24,7 @@ from yoetz.ports.ledger import (
 from yoetz.ports.objects import ObjectRef
 from yoetz.ports.semantic import Deadline
 from yoetz.protocol.canonical import JsonValue
+from yoetz.protocol.errors import PublicOperationError
 from yoetz.protocol.models import VALID_SEMANTIC_REASONS, SemanticReason, SemanticStatus
 
 __all__ = [
@@ -405,6 +406,51 @@ async def _terminalize_after_failure(
         return attempt_accounting_from_rows(None, (), max_retries=max_retries)
 
 
+async def _terminalize_cancellation_safe(
+    *,
+    ledger: _SemanticAttemptLedger,
+    renew: Callable[[], Awaitable[OperationLease]],
+    lease_holder: Callable[[], OperationLease],
+    job_id: str,
+    handle: SemanticAttemptHandle | None,
+    max_retries: int,
+) -> tuple[SemanticAttemptAccounting, bool]:
+    """Finish terminal writes even if cancellation is delivered again during cleanup.
+
+    The cleanup runs in its own task so cancelling this coordinator task cannot cancel a ledger
+    write through the await chain. ``shield`` still reports each new cancellation to this task;
+    remember that fact, keep waiting for cleanup, then let the caller restore cancellation by
+    raising after durability and accounting have finished.
+    """
+
+    cleanup = asyncio.create_task(
+        _terminalize_after_failure(
+            ledger=ledger,
+            renew=renew,
+            lease_holder=lease_holder,
+            job_id=job_id,
+            handle=handle,
+            max_retries=max_retries,
+        )
+    )
+    cancellation_received = False
+    while True:
+        try:
+            accounting = await asyncio.shield(cleanup)
+            return accounting, cancellation_received
+        except asyncio.CancelledError:
+            cancellation_received = True
+            if cleanup.done():
+                if not cleanup.cancelled():
+                    return cleanup.result(), True
+                # A cleanup implementation that cancelled itself cannot be resumed. Preserve
+                # the signal and return bounded fallback accounting to the caller.
+                return (
+                    attempt_accounting_from_rows(None, (), max_retries=max_retries),
+                    True,
+                )
+
+
 async def run_durable_semantic_attempts(
     *,
     ledger: _SemanticAttemptLedger,
@@ -465,9 +511,14 @@ async def run_durable_semantic_attempts(
     budget = physical_attempt_budget(max_retries)
     last: _AttemptEvaluation | None = None
     attempts_completed = 0
+    pending_claim_error: PublicOperationError | None = None
 
     while attempts_completed < budget:
         if deadline.expired(now_monotonic()):
+            if last is None and pending_claim_error is not None:
+                # Another live owner still has authority over the job. Do not falsify that
+                # recoverable state as a coordinator failure or mutate its active attempt.
+                raise pending_claim_error
             if last is None:
                 await ledger.fail_semantic_job(
                     current_lease,
@@ -499,7 +550,19 @@ async def run_durable_semantic_attempts(
         await _renew()
         handle: SemanticAttemptHandle | None = None
         try:
-            handle = await ledger.claim_semantic_job(current_lease, job.job_id)
+            try:
+                handle = await ledger.claim_semantic_job(current_lease, job.job_id)
+            except PublicOperationError as exc:
+                if not exc.retryable:
+                    raise
+                # A live lease held elsewhere is durable pending state, not a failed physical
+                # attempt. Poll inside the total deadline without consuming an attempt slot.
+                pending_claim_error = exc
+                remaining = deadline.remaining_seconds(now_monotonic())
+                if remaining > 0.0:
+                    await sleep(min(0.05, remaining))
+                continue
+            pending_claim_error = None
             remaining = deadline.remaining_seconds(now_monotonic())
             attempt_deadline = Deadline(
                 deadline.expires_at_utc,
@@ -512,7 +575,7 @@ async def run_durable_semantic_attempts(
             # and, because claim resumes the same attempt on replay, the operation could never
             # recover. This frame is the only one that knows the durable state, so it finalizes
             # here rather than letting the exception reach the coordinator's catch-all.
-            accounting = await _terminalize_after_failure(
+            accounting, cancellation_received = await _terminalize_cancellation_safe(
                 ledger=ledger,
                 renew=_renew,
                 lease_holder=lambda: current_lease,
@@ -520,6 +583,8 @@ async def run_durable_semantic_attempts(
                 handle=handle,
                 max_retries=max_retries,
             )
+            if cancellation_received:
+                raise asyncio.CancelledError
             if isinstance(exc, Exception):
                 return build_final(
                     SemanticStatus.FAILED,

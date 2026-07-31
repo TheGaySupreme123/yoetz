@@ -1028,7 +1028,10 @@ async def execute_check_commit(
         # A review that ran without material its own profile selected is not full coverage, even
         # though it reports succeeded. Saying so here is what stops a hollow review from reading
         # as a clean one in the check result and the receipt derived from it.
-        if semantic_result.withheld_review_categories:
+        if (
+            semantic_result.status is SemanticStatus.SUCCEEDED
+            and semantic_result.withheld_review_categories
+        ):
             declared_gaps.add(SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP)
         new_gaps = declared_gaps - set(coverage.known_gaps)
         if new_gaps:

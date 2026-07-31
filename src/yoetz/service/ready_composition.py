@@ -1766,7 +1766,7 @@ def _privacy_gated_semantic_evaluator(
                 record_bounded_event_without_raising(
                     component="semantic_composition",
                     operation="semantic_review_context_categories_withheld",
-                    reason=SemanticReason.SEMANTIC_COMPLETED.value,
+                    reason=SemanticReason.CONTENT_CATEGORY_NOT_AUTHORIZED.value,
                     request_id=frozen.lease.operation_id,
                 )
             semantic_case = build_semantic_case(
@@ -1928,6 +1928,10 @@ def _privacy_gated_semantic_evaluator(
                     on_lease_renewed=_on_lease_renewed,
                 ),
             )
+        except PublicOperationError:
+            # Retryable durable-state conflicts remain public pending state; collapsing one into
+            # coordinator_failure would tell the caller the opposite of what the ledger knows.
+            raise
         except Exception as exc:
             record_unexpected_exception_without_raising(
                 exc,

@@ -591,8 +591,9 @@ async def test_raising_dispatch_strands_nothing_in_either_real_ledger() -> None:
         judgment: object | None = None
         provenance: object | None = None
 
-    for adapter in (memory_ledger(ledger_command()), sqlite_ledger(ledger_command())):
+    for factory in (memory_ledger, sqlite_ledger):
         command = ledger_command()
+        adapter = factory(command)
         await adapter.append_batch(command)
         frozen = await adapter.freeze_case(
             command.session_id,

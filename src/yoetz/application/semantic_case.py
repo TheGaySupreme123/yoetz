@@ -1478,7 +1478,7 @@ def assemble_filtered_review_packet(
             summary = row.get("summary_item_id")
             detail = row.get("detail_item_id")
             if type(summary) is str and type(detail) is str:
-                if summary not in included or detail not in included:
+                if summary not in carried or detail not in carried:
                     row.pop("summary_item_id", None)
                     row.pop("detail_item_id", None)
             filtered_assessments.append(row)
@@ -1535,7 +1535,15 @@ def assemble_filtered_review_packet(
     accounting: dict[str, JsonValue] = (
         cast(dict[str, JsonValue], dict(cast(dict[object, object], accounting_raw)))
         if isinstance(accounting_raw, dict)
-        else {"catalog_dropped_count": "0", "reason": "not_minimized"}
+        else {
+            "assessment_links_stripped_count": "0",
+            "catalog_dropped_count": "0",
+            "change_observations_dropped_count": "0",
+            "deterministic_assessments_dropped_count": "0",
+            "omissions_dropped_count": "0",
+            "reason": "not_minimized",
+            "targeted_excerpts_dropped_count": "0",
+        }
     )
     accounting["uncatalogued_approved_count"] = str(uncatalogued)
 
@@ -1662,34 +1670,46 @@ def _drop_packet_row(envelope: dict[str, JsonValue], key: str) -> bool:
     return True
 
 
-def _strip_assessment_links(envelope: dict[str, JsonValue]) -> bool:
+def _strip_assessment_links(envelope: dict[str, JsonValue]) -> int:
     """Drop assessment item-id links, which duplicate ids the catalog already carries."""
 
     packet_obj = envelope.get("review_packet")
     if not isinstance(packet_obj, dict):
-        return False
+        return 0
     rows = packet_obj.get("deterministic_assessments")
     if type(rows) is not list:
-        return False
-    removed = False
+        return 0
+    removed = 0
     for raw in cast(list[object], rows):
         if not isinstance(raw, dict):
             continue
         row = cast(dict[str, object], raw)
         for key in ("summary_item_id", "detail_item_id"):
             if row.pop(key, None) is not None:
-                removed = True
+                removed += 1
     return removed
 
 
-def _set_selection_accounting(envelope: dict[str, JsonValue], dropped: int) -> None:
+def _set_selection_accounting(
+    envelope: dict[str, JsonValue], reductions: Mapping[str, int]
+) -> None:
     """Record what bounding removed, so a truncated packet can never read as a complete one."""
 
+    minimized = any(count > 0 for count in reductions.values())
     envelope["selection_accounting"] = cast(
         JsonValue,
         {
-            "catalog_dropped_count": str(dropped),
-            "reason": "size_minimized" if dropped else "not_minimized",
+            "assessment_links_stripped_count": str(reductions["assessment_links_stripped_count"]),
+            "catalog_dropped_count": str(reductions["catalog_dropped_count"]),
+            "change_observations_dropped_count": str(
+                reductions["change_observations_dropped_count"]
+            ),
+            "deterministic_assessments_dropped_count": str(
+                reductions["deterministic_assessments_dropped_count"]
+            ),
+            "omissions_dropped_count": str(reductions["omissions_dropped_count"]),
+            "reason": "size_minimized" if minimized else "not_minimized",
+            "targeted_excerpts_dropped_count": str(reductions["targeted_excerpts_dropped_count"]),
         },
     )
 
@@ -1708,29 +1728,44 @@ def bounded_case_envelope(case: SemanticCase) -> bytes:
     """
 
     envelope = _case_envelope_json(case)
-    _set_selection_accounting(envelope, 0)
+    reductions = {
+        "assessment_links_stripped_count": 0,
+        "catalog_dropped_count": 0,
+        "change_observations_dropped_count": 0,
+        "deterministic_assessments_dropped_count": 0,
+        "omissions_dropped_count": 0,
+        "targeted_excerpts_dropped_count": 0,
+    }
+    _set_selection_accounting(envelope, reductions)
     encoded = canonical_encode(cast(JsonValue, envelope))
     if len(encoded) <= MAX_EGRESS_ENVELOPE_BYTES:
         return encoded
 
-    _strip_assessment_links(envelope)
-    dropped_catalog_rows = 0
-    reductions: tuple[Callable[[dict[str, JsonValue]], bool], ...] = (
-        lambda env: _drop_packet_row(env, "change_observations"),
-        lambda env: _drop_packet_row(env, "targeted_excerpts"),
-        lambda env: _drop_packet_row(env, "omissions"),
-        lambda env: _drop_packet_row(env, "deterministic_assessments"),
-        _drop_catalog_row,
+    reductions["assessment_links_stripped_count"] += _strip_assessment_links(envelope)
+    reducers: tuple[tuple[str, Callable[[dict[str, JsonValue]], bool]], ...] = (
+        (
+            "change_observations_dropped_count",
+            lambda env: _drop_packet_row(env, "change_observations"),
+        ),
+        (
+            "targeted_excerpts_dropped_count",
+            lambda env: _drop_packet_row(env, "targeted_excerpts"),
+        ),
+        ("omissions_dropped_count", lambda env: _drop_packet_row(env, "omissions")),
+        (
+            "deterministic_assessments_dropped_count",
+            lambda env: _drop_packet_row(env, "deterministic_assessments"),
+        ),
+        ("catalog_dropped_count", _drop_catalog_row),
     )
     while True:
-        _set_selection_accounting(envelope, dropped_catalog_rows)
+        _set_selection_accounting(envelope, reductions)
         encoded = canonical_encode(cast(JsonValue, envelope))
         if len(encoded) <= MAX_EGRESS_ENVELOPE_BYTES:
             return encoded
-        for index, reduce in enumerate(reductions):
+        for accounting_key, reduce in reducers:
             if reduce(envelope):
-                if index == len(reductions) - 1:
-                    dropped_catalog_rows += 1
+                reductions[accounting_key] += 1
                 break
         else:
             raise SemanticCaseTooLarge("semantic_case_envelope_too_large")

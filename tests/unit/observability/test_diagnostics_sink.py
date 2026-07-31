@@ -173,8 +173,8 @@ def test_diagnostic_origin_is_rejected_unless_it_is_a_yoetz_source_location(
 ) -> None:
     """The written field can only ever be a yoetz module and a line number.
 
-    The frame walk reads ``co_filename``-adjacent metadata, so the allowlist — not the walk — is
-    what guarantees a filesystem path or a user value can never reach the durable record.
+    The frame walk reads only the module name and traceback line, and the allowlist independently
+    guarantees a filesystem path or a user value can never reach the durable record.
     """
 
     correlation_id = "err_00000000-0000-4000-8000-0000000000f1"
@@ -183,7 +183,7 @@ def test_diagnostic_origin_is_rejected_unless_it_is_a_yoetz_source_location(
         component="service.daemon",
         operation="status_read_projection_failed",
         reason="exception_attribute_error",
-        origin="/Users/someone/secret/path.py:12",
+        origin="yoetz/application/status.py:12",
         root=tmp_path,
     )
     records = lookup_diagnostic_records(correlation_id, root=tmp_path)
@@ -202,3 +202,14 @@ def test_diagnostic_origin_is_rejected_unless_it_is_a_yoetz_source_location(
     assert lookup_diagnostic_records(good, root=tmp_path)[0]["origin"] == (
         "yoetz.application.status:1097"
     )
+
+    bare = "err_00000000-0000-4000-8000-0000000000f3"
+    append_diagnostic_record(
+        correlation_id=bare,
+        component="service.daemon",
+        operation="status_read_projection_failed",
+        reason="exception_attribute_error",
+        origin="yoetz:12",
+        root=tmp_path,
+    )
+    assert lookup_diagnostic_records(bare, root=tmp_path)[0]["origin"] == "yoetz:12"

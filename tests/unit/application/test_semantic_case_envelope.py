@@ -130,6 +130,25 @@ def test_unbounded_case_reports_no_minimization() -> None:
     assert cast(Mapping[str, JsonValue], accounting)["reason"] == "not_minimized"
 
 
+def test_non_catalog_reduction_is_reported_as_minimization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removing assessment links must be visible even when no catalog row is dropped."""
+
+    import yoetz.application.semantic_case as module
+
+    semantic = _semantic(ReviewContextProfile.EXPANDED)
+    original = bounded_case_envelope(semantic)
+    monkeypatch.setattr(module, "MAX_EGRESS_ENVELOPE_BYTES", len(original) - 1)
+    envelope = bounded_case_envelope(semantic)
+
+    assert len(envelope) <= len(original) - 1
+    accounting = cast(Mapping[str, JsonValue], _parsed(envelope)["selection_accounting"])
+    assert int(cast(str, accounting["assessment_links_stripped_count"])) > 0
+    assert accounting["catalog_dropped_count"] == "0"
+    assert accounting["reason"] == "size_minimized"
+
+
 def test_minimization_terminates_and_is_accounted_under_a_tiny_bound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -243,6 +262,14 @@ def test_prepared_payload_matches_the_authorized_envelope(
         if isinstance(row, Mapping)
     }
     assert carried == approved - {REVIEW_PACKET_ITEM_ID}
+    packet = cast(Mapping[str, JsonValue], document["review_packet"])
+    for raw in cast(list[object], packet["deterministic_assessments"]):
+        assert isinstance(raw, Mapping)
+        row = cast(Mapping[str, JsonValue], raw)
+        for key in ("summary_item_id", "detail_item_id"):
+            linked = row.get(key)
+            if linked is not None:
+                assert linked in carried
     accounting = cast(Mapping[str, JsonValue], document["selection_accounting"])
     assert int(cast(str, accounting["catalog_dropped_count"])) > 0
     # Nothing was approved that the document could not carry.

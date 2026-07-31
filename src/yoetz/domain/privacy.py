@@ -523,9 +523,7 @@ class ReviewSelectionPolicy:
             "claims": DataCategory.CLAIM_TEXT,
             "decisions": DataCategory.DECISION_EXCERPT,
         }
-        required = {
-            by_section[section] for section in self.sections if section in by_section
-        }
+        required = {by_section[section] for section in self.sections if section in by_section}
         # The timeline and the structural spine are always bounded metadata.
         required.add(DataCategory.BOUNDED_STRUCTURAL_METADATA)
         if self.include_finding_prose:
@@ -783,11 +781,7 @@ class PrivacyPolicy:
         """
 
         channel = next(
-            (
-                item
-                for item in self.channel_policies
-                if item.channel is EgressChannel.LLM_INFERENCE
-            ),
+            (item for item in self.channel_policies if item.channel is EgressChannel.LLM_INFERENCE),
             None,
         )
         if channel is None or not channel.enabled:

@@ -363,11 +363,11 @@ def exception_origin(exc: BaseException) -> str | None:
     class alone cannot distinguish which of a dozen guarded call sites raised, so the only route
     to a fix was reproducing it, and the whole point of a durable diagnostic is that you cannot.
 
-    This is deliberately the narrowest thing that closes that gap. It reads ``co_filename`` and
-    ``f_lineno`` from our own frames only — never ``f_locals``, never ``str(exc)`` — and the
-    result must still satisfy the ``origin`` allowlist pattern before it is written, so the field
-    can carry a source location and nothing else. Frames from stdlib or dependencies are skipped
-    rather than reported, since their paths are not ours to disclose.
+    This is deliberately the narrowest thing that closes that gap. It reads the module from
+    ``frame.f_globals["__name__"]`` and the line from ``traceback.tb_lineno`` in our own frames
+    only — never ``f_locals``, never ``str(exc)`` — and the result must still satisfy the
+    ``origin`` allowlist pattern before it is written, so the field can carry a source location
+    and nothing else. Frames from stdlib or dependencies are skipped rather than reported.
     """
 
     try:

@@ -30,6 +30,7 @@ from yoetz.ports.ledger import (
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef
 from yoetz.ports.semantic import Deadline
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import SemanticReason, SemanticStatus
 
 _JOB = "job_40000000-0000-4000-8000-000000000001"
@@ -1209,3 +1210,159 @@ async def test_cancellation_terminalizes_before_propagating() -> None:
     assert ledger.job.state == "failed"
     assert ledger.attempts is not None
     assert [row.state for row in ledger.attempts.values()] == ["failed"]
+
+
+@pytest.mark.anyio
+async def test_repeated_cancellation_cannot_interrupt_terminal_writes() -> None:
+    """A second task cancellation during a suspending ledger write waits for durability."""
+
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+
+    class _SuspendingLedger(_FakeLedger):
+        async def record_attempt_outcome(
+            self,
+            handle: SemanticAttemptHandle,
+            outcome: AttemptOutcome,
+            result_object_ref: ObjectRef | None = None,
+            terminal_code: SemanticReason | None = None,
+        ) -> None:
+            cleanup_started.set()
+            await allow_cleanup.wait()
+            await super().record_attempt_outcome(handle, outcome, result_object_ref, terminal_code)
+
+    lease = _lease()
+    job = SemanticJobRecord(
+        _JOB,
+        _WRITER,
+        _OP,
+        _CASE,
+        _case_ref(),
+        "queued",
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    ledger = _SuspendingLedger(job, lease)
+    dispatch_started = asyncio.Event()
+
+    async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
+        dispatch_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def publish(handle: SemanticAttemptHandle, evaluation: object) -> ObjectRef:
+        raise AssertionError("publish_must_not_run")
+
+    def build_final(
+        status: SemanticStatus,
+        reason: SemanticReason,
+        evaluation: object | None,
+        accounting: SemanticAttemptAccounting,
+    ) -> object:
+        raise AssertionError("build_final_must_not_run_on_cancel")
+
+    task = asyncio.create_task(
+        run_durable_semantic_attempts(
+            ledger=ledger,
+            lease=lease,
+            job=job,
+            deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
+            max_retries=0,
+            now_monotonic=lambda: 0.0,
+            dispatch=dispatch,
+            publish_success_response=publish,
+            sleep=lambda _: _async_noop(),
+            build_final=build_final,
+        )
+    )
+    await dispatch_started.wait()
+    task.cancel()
+    await cleanup_started.wait()
+    task.cancel()
+    allow_cleanup.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert ledger.job.state == "failed"
+    assert ledger.attempts is not None
+    assert [row.state for row in ledger.attempts.values()] == ["failed"]
+
+
+@pytest.mark.anyio
+async def test_retryable_claim_conflict_does_not_consume_an_attempt() -> None:
+    """A live-owner claim conflict stays pending until the existing retry path can claim."""
+
+    class _ConflictingLedger(_FakeLedger):
+        conflict_count = 0
+
+        async def claim_semantic_job(
+            self, lease: OperationLease, job_id: str
+        ) -> SemanticAttemptHandle:
+            if self.conflict_count == 0:
+                self.conflict_count += 1
+                raise PublicOperationError(
+                    PublicErrorCode.OPERATION_PENDING,
+                    "operation pending",
+                    True,
+                )
+            return await super().claim_semantic_job(lease, job_id)
+
+    lease = _lease()
+    job = SemanticJobRecord(
+        _JOB,
+        _WRITER,
+        _OP,
+        _CASE,
+        _case_ref(),
+        "queued",
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    ledger = _ConflictingLedger(job, lease)
+
+    async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
+        return _Eval(SemanticStatus.SUCCEEDED, SemanticReason.SEMANTIC_COMPLETED)
+
+    async def publish(handle: SemanticAttemptHandle, evaluation: object) -> ObjectRef:
+        return _response_ref()
+
+    result = await run_durable_semantic_attempts(
+        ledger=ledger,
+        lease=lease,
+        job=job,
+        deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
+        max_retries=0,
+        now_monotonic=lambda: 0.0,
+        dispatch=dispatch,
+        publish_success_response=publish,
+        sleep=lambda _: _async_noop(),
+        build_final=lambda status, reason, evaluation, accounting: (
+            status,
+            reason,
+            accounting,
+        ),
+    )
+
+    status, reason, accounting = cast(
+        tuple[SemanticStatus, SemanticReason, SemanticAttemptAccounting], result
+    )
+    assert (status, reason) == (
+        SemanticStatus.SUCCEEDED,
+        SemanticReason.SEMANTIC_COMPLETED,
+    )
+    assert accounting.attempted_count == 1
+    assert ledger.conflict_count == 1

@@ -15,11 +15,13 @@ import ast
 import pathlib
 
 from yoetz.adapters import runtime as runtime_module
+from yoetz.application import status as status_module
 
 # ``execute_status`` is the read-routed entry point: it routes with ``RouteAccess.PAYLOAD_READ``
 # and therefore receives the facades below rather than the real ports. Write and import-review
 # routes get the real objects, so their mutator calls are legitimately absent from the facades.
-_READ_ROUTED_MODULE = pathlib.Path("src/yoetz/application/status.py")
+assert status_module.__file__ is not None
+_READ_ROUTED_MODULE = pathlib.Path(status_module.__file__)
 
 _FACADES = {
     "ledger": runtime_module._ReadLedger,  # pyright: ignore[reportPrivateUsage]
@@ -29,7 +31,7 @@ _FACADES = {
 
 
 def _calls_on_runtime_attributes(source: pathlib.Path) -> dict[str, set[str]]:
-    """Collect ``runtime.<port>.<method>(...)`` call names, keyed by port attribute."""
+    """Collect direct ``runtime.<port>.<method>(...)`` calls, not local port aliases."""
 
     found: dict[str, set[str]] = {name: set() for name in _FACADES}
     tree = ast.parse(source.read_text(encoding="utf-8"))
@@ -65,7 +67,8 @@ def test_read_facades_expose_every_port_method_the_read_view_calls() -> None:
     assert not missing, (
         f"read-routed status calls methods the facade does not expose: {missing}. "
         "A read route receives the facade, so this raises AttributeError in production while "
-        "tests that use the raw port keep passing."
+        "tests that use the raw port keep passing. The scan detects direct runtime.<port> calls "
+        "only; extend it before relying on aliases such as `ledger = runtime.ledger`."
     )
 
 
