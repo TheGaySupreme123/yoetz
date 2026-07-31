@@ -57,6 +57,7 @@ from yoetz.application.semantic_attempts import (
     run_durable_semantic_attempts,
 )
 from yoetz.application.semantic_case import (
+    SemanticCaseTooLarge,
     build_semantic_case,
     semantic_case_to_candidate_context,
 )
@@ -1675,6 +1676,20 @@ def _privacy_gated_semantic_evaluator(
         findings: tuple[object, ...],
         runtime: TaskRuntime | None = None,
     ) -> FinalSemanticEvaluation:
+        from yoetz.ports.ledger import OperationLease as _OpLease
+
+        # Tracked from the top so *every* exit — including the catch-all below — can return the
+        # newest lease. The attempt loop renews before it does anything else, which bumps
+        # lease_generation; a return without the renewed token leaves the caller holding a stale
+        # one, and there is no API to re-acquire your own live lease. The check then fails
+        # OPERATION_PENDING and the whole operation is lost rather than recording an honest
+        # semantic failure. That is what stranded the 2026-07-30 dogfood run.
+        current_lease: list[_OpLease] = [frozen.lease]
+
+        def _on_lease_renewed(renewed: object) -> None:
+            assert type(renewed) is _OpLease
+            current_lease[0] = renewed
+
         # Re-resolve against the live generation-fenced registry on every check: a binding
         # activated after composition must take effect without a service restart, and a revoked
         # binding must not remain usable from the stale readiness snapshot.
@@ -1767,6 +1782,30 @@ def _privacy_gated_semantic_evaluator(
                 result = await privacy.evaluate_semantic(candidate, deadline)
                 return _map_egress_to_final(result, ids)
 
+            # Build the packet before anything durable exists. A packet that cannot be built is a
+            # property of the case, not a transient fault, so it must not consume a job or an
+            # attempt: claiming first is what let one deterministic build failure strand a check
+            # permanently, since claim resumes the same attempt on every replay.
+            try:
+                semantic_case_to_candidate_context(
+                    semantic_case,
+                    request_id=frozen.lease.operation_id,
+                    scope=scope,
+                    provider_binding=provider,
+                )
+            except SemanticCaseTooLarge:
+                record_bounded_event_without_raising(
+                    component="semantic_composition",
+                    operation="semantic_not_dispatched_case_envelope_unbounded",
+                    reason=SemanticReason.COORDINATOR_FAILURE.value,
+                    request_id=frozen.lease.operation_id,
+                )
+                return FinalSemanticEvaluation(
+                    SemanticStatus.FAILED,
+                    SemanticReason.COORDINATOR_FAILURE,
+                    operation_lease=current_lease[0],
+                )
+
             # One durable semantic job per check: create/recover after freeze, before dispatch.
             case_ref = await _publish_semantic_case_object(
                 runtime,
@@ -1787,7 +1826,9 @@ def _privacy_gated_semantic_evaluator(
                 from yoetz.ports.ledger import SemanticAttemptHandle as _Handle
 
                 assert type(handle) is _Handle
-                # Fresh request identity per physical attempt so authorization cannot be reused.
+                # Rebuilt per attempt for a fresh request identity so authorization cannot be
+                # reused. The envelope itself is a pure function of the case, so the bytes are
+                # identical to the ones validated above; only the request id differs.
                 candidate = semantic_case_to_candidate_context(
                     semantic_case,
                     request_id=handle.provider_request_id,
@@ -1809,16 +1850,9 @@ def _privacy_gated_semantic_evaluator(
                     clock=clock,
                 )
 
-            # Track the latest check lease so phase advance/commit after a long semantic
-            # deadline still holds a valid CAS fence (renewals happen inside the attempt loop).
-            from yoetz.ports.ledger import OperationLease as _OpLease
+            # ``current_lease`` / ``_on_lease_renewed`` are bound at the top of _evaluate so the
+            # catch-all can return the newest token too, not only the normal returns here.
             from yoetz.ports.ledger import SemanticJobRecord as _JobRecord
-
-            current_lease: list[_OpLease] = [frozen.lease]
-
-            def _on_lease_renewed(renewed: object) -> None:
-                assert type(renewed) is _OpLease
-                current_lease[0] = renewed
 
             async def _recover_selected(job_row: object) -> FinalSemanticEvaluation | None:
                 assert type(job_row) is _JobRecord
@@ -1884,7 +1918,9 @@ def _privacy_gated_semantic_evaluator(
                 request_id=frozen.lease.operation_id,
             )
             return FinalSemanticEvaluation(
-                SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE
+                SemanticStatus.FAILED,
+                SemanticReason.COORDINATOR_FAILURE,
+                operation_lease=current_lease[0],
             )
 
     return _evaluate

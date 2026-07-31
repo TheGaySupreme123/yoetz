@@ -1794,9 +1794,7 @@ def semantic_case_to_prepared_payload(
     content_by_id = {item.item_id: item.content for item in case.items}
     # Assemble from the same bounded envelope that was offered for authorization, never the
     # unbounded one: the prepared payload must describe exactly what privacy approved.
-    envelope = cast(
-        Mapping[str, JsonValue], strict_json_parse(bounded_case_envelope(case))
-    )
+    envelope = cast(Mapping[str, JsonValue], strict_json_parse(bounded_case_envelope(case)))
     return assemble_filtered_review_packet(
         envelope,
         content_by_id=content_by_id,

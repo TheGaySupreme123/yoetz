@@ -13,6 +13,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Final, Literal, Protocol
 
+from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.ports.ledger import (
     AttemptOutcome,
     OperationLease,
@@ -339,6 +340,71 @@ async def _recover_terminal_job(
     return build_final(status, reason, None, accounting)
 
 
+async def _terminalize_after_failure(
+    *,
+    ledger: _SemanticAttemptLedger,
+    renew: Callable[[], Awaitable[OperationLease]],
+    lease_holder: Callable[[], OperationLease],
+    job_id: str,
+    handle: SemanticAttemptHandle | None,
+    max_retries: int,
+) -> SemanticAttemptAccounting:
+    """Drive a failed attempt and its job to a terminal state, whatever went wrong.
+
+    Total by construction: every step is individually guarded and recorded, because a second
+    fault while cleaning up after the first must not re-raise and strand the very state this is
+    trying to release. Returns whatever accounting could be read, empty if none.
+
+    ``record_attempt_outcome(FAILED)`` terminalizes the job as well as the attempt, so it is the
+    right call whenever an attempt was claimed. ``fail_semantic_job`` is for the other case only —
+    it rejects a job that still has an active attempt.
+    """
+
+    try:
+        await renew()
+    except Exception as exc:
+        record_unexpected_exception_without_raising(
+            exc,
+            component="semantic_attempts",
+            operation="semantic_terminalize_renew_failed",
+        )
+    if handle is not None:
+        try:
+            await ledger.record_attempt_outcome(
+                handle,
+                AttemptOutcome.FAILED,
+                terminal_code=SemanticReason.COORDINATOR_FAILURE,
+            )
+        except Exception as exc:
+            # The attempt may already have left "started" if the raise came after the outcome
+            # write; that is the state we wanted, so it is not worth escalating.
+            record_unexpected_exception_without_raising(
+                exc,
+                component="semantic_attempts",
+                operation="semantic_terminalize_attempt_failed",
+            )
+    else:
+        try:
+            await ledger.fail_semantic_job(
+                lease_holder(), job_id, SemanticReason.COORDINATOR_FAILURE
+            )
+        except Exception as exc:
+            record_unexpected_exception_without_raising(
+                exc,
+                component="semantic_attempts",
+                operation="semantic_terminalize_job_failed",
+            )
+    try:
+        return await _accounting_for(ledger, lease_holder(), job_id, max_retries=max_retries)
+    except Exception as exc:
+        record_unexpected_exception_without_raising(
+            exc,
+            component="semantic_attempts",
+            operation="semantic_terminalize_accounting_failed",
+        )
+        return attempt_accounting_from_rows(None, (), max_retries=max_retries)
+
+
 async def run_durable_semantic_attempts(
     *,
     ledger: _SemanticAttemptLedger,
@@ -431,13 +497,39 @@ async def run_durable_semantic_attempts(
 
         # Keep the operation lease alive across provider latency and backoff.
         await _renew()
-        handle = await ledger.claim_semantic_job(current_lease, job.job_id)
-        remaining = deadline.remaining_seconds(now_monotonic())
-        attempt_deadline = Deadline(
-            deadline.expires_at_utc,
-            now_monotonic() + remaining,
-        )
-        evaluation = await dispatch(handle, attempt_deadline)
+        handle: SemanticAttemptHandle | None = None
+        try:
+            handle = await ledger.claim_semantic_job(current_lease, job.job_id)
+            remaining = deadline.remaining_seconds(now_monotonic())
+            attempt_deadline = Deadline(
+                deadline.expires_at_utc,
+                now_monotonic() + remaining,
+            )
+            evaluation = await dispatch(handle, attempt_deadline)
+        except BaseException as exc:
+            # A raise between claim and the terminal write used to unwind past every
+            # terminalizing call, leaving the attempt "started" and the job "leased" forever —
+            # and, because claim resumes the same attempt on replay, the operation could never
+            # recover. This frame is the only one that knows the durable state, so it finalizes
+            # here rather than letting the exception reach the coordinator's catch-all.
+            accounting = await _terminalize_after_failure(
+                ledger=ledger,
+                renew=_renew,
+                lease_holder=lambda: current_lease,
+                job_id=job.job_id,
+                handle=handle,
+                max_retries=max_retries,
+            )
+            if isinstance(exc, Exception):
+                return build_final(
+                    SemanticStatus.FAILED,
+                    SemanticReason.COORDINATOR_FAILURE,
+                    None,
+                    accounting,
+                )
+            # Cancellation and other BaseExceptions still propagate — but only after the durable
+            # state has been made terminal.
+            raise
         attempts_completed = handle.attempt_ordinal
         last = evaluation
 

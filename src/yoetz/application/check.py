@@ -886,6 +886,12 @@ async def _semantic_evaluation(
             operation="semantic_not_dispatched_coordinator_failure",
             request_id=request.request_id,
         )
+        # Deliberately no operation_lease: reaching here means the evaluator raised *before* it
+        # could renew, so the caller's token is still the live one. The evaluator itself catches
+        # everything from the durable path and returns its renewed lease, and the attempt loop
+        # terminalizes rather than raising — if either of those regresses, this path would start
+        # handing back a stale lease and the check would be lost to OPERATION_PENDING instead of
+        # recording an honest failure. There is no API to re-acquire a lease you already hold.
         return FinalSemanticEvaluation(
             SemanticStatus.FAILED,
             SemanticReason.COORDINATOR_FAILURE,

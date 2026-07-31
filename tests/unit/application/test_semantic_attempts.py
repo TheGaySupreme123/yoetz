@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Literal, cast
@@ -1006,3 +1007,205 @@ async def test_attempt_loop_renews_operation_lease() -> None:
     assert ledger.renew_count >= 3
     assert len(renewed) >= 3
     assert renewed[-1].lease_generation > lease.lease_generation
+
+
+@pytest.mark.anyio
+async def test_raising_dispatch_terminalizes_attempt_and_job() -> None:
+    """A dispatch that raises must not strand the durable state (dogfood run 2026-07-30).
+
+    The production failure raised ``semantic_case_envelope_too_large`` while building the packet,
+    after the attempt had already been claimed. Every terminalizing call sat on a normal-return
+    path, so the exception unwound past all of them: the attempt stayed ``started``, the job
+    stayed ``leased``, and because claim resumes the same attempt on replay, the check could
+    never recover.
+    """
+
+    lease = _lease()
+    job = SemanticJobRecord(
+        _JOB,
+        _WRITER,
+        _OP,
+        _CASE,
+        _case_ref(),
+        "queued",
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    ledger = _FakeLedger(job, lease)
+
+    async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
+        raise ValueError("semantic_case_envelope_too_large")
+
+    async def publish(handle: SemanticAttemptHandle, evaluation: object) -> ObjectRef:
+        raise AssertionError("publish_must_not_run")
+
+    def build_final(
+        status: SemanticStatus,
+        reason: SemanticReason,
+        evaluation: object | None,
+        accounting: SemanticAttemptAccounting,
+    ) -> object:
+        return (status, reason, accounting)
+
+    result = await run_durable_semantic_attempts(
+        ledger=ledger,
+        lease=lease,
+        job=job,
+        deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
+        max_retries=2,
+        now_monotonic=lambda: 0.0,
+        dispatch=dispatch,
+        publish_success_response=publish,
+        sleep=lambda _: _async_noop(),
+        build_final=build_final,
+    )
+
+    status, reason, accounting = cast(
+        tuple[SemanticStatus, SemanticReason, SemanticAttemptAccounting], result
+    )
+    assert status is SemanticStatus.FAILED
+    assert reason is SemanticReason.COORDINATOR_FAILURE
+    # The durable rows are terminal, not stranded.
+    assert ledger.job.state == "failed"
+    assert ledger.job.terminal_code is SemanticReason.COORDINATOR_FAILURE
+    assert ledger.attempts is not None
+    assert [row.state for row in ledger.attempts.values()] == ["failed"]
+    # Accounting survives the failure, so the check can report what was attempted.
+    assert accounting.attempted_count == 1
+    # A deterministic build failure must not burn the whole retry budget re-raising.
+    assert ledger.claim_calls == 1
+
+
+@pytest.mark.anyio
+async def test_raising_claim_terminalizes_job_without_an_attempt() -> None:
+    """A raise before any attempt exists fails the job, never leaving it queued forever.
+
+    ``record_attempt_outcome`` is not usable here — there is no claimed attempt — so this is the
+    one case that belongs to ``fail_semantic_job``.
+    """
+
+    lease = _lease()
+    job = SemanticJobRecord(
+        _JOB,
+        _WRITER,
+        _OP,
+        _CASE,
+        _case_ref(),
+        "queued",
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    class _ClaimRaises(_FakeLedger):
+        async def claim_semantic_job(
+            self, lease: OperationLease, job_id: str
+        ) -> SemanticAttemptHandle:
+            raise RuntimeError("claim_exploded")
+
+    ledger = _ClaimRaises(job, lease)
+
+    async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
+        raise AssertionError("dispatch_must_not_run")
+
+    async def publish(handle: SemanticAttemptHandle, evaluation: object) -> ObjectRef:
+        raise AssertionError("publish_must_not_run")
+
+    def build_final(
+        status: SemanticStatus,
+        reason: SemanticReason,
+        evaluation: object | None,
+        accounting: SemanticAttemptAccounting,
+    ) -> object:
+        return (status, reason, accounting)
+
+    result = await run_durable_semantic_attempts(
+        ledger=ledger,
+        lease=lease,
+        job=job,
+        deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
+        max_retries=0,
+        now_monotonic=lambda: 0.0,
+        dispatch=dispatch,
+        publish_success_response=publish,
+        sleep=lambda _: _async_noop(),
+        build_final=build_final,
+    )
+
+    status, reason, _ = cast(
+        tuple[SemanticStatus, SemanticReason, SemanticAttemptAccounting], result
+    )
+    assert status is SemanticStatus.FAILED
+    assert reason is SemanticReason.COORDINATOR_FAILURE
+    assert ledger.job.state == "failed"
+    assert ledger.attempts == {}
+
+
+@pytest.mark.anyio
+async def test_cancellation_terminalizes_before_propagating() -> None:
+    """Cancellation must still release the durable state, then keep propagating."""
+
+    lease = _lease()
+    job = SemanticJobRecord(
+        _JOB,
+        _WRITER,
+        _OP,
+        _CASE,
+        _case_ref(),
+        "queued",
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    ledger = _FakeLedger(job, lease)
+
+    async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
+        raise asyncio.CancelledError
+
+    async def publish(handle: SemanticAttemptHandle, evaluation: object) -> ObjectRef:
+        raise AssertionError("publish_must_not_run")
+
+    def build_final(
+        status: SemanticStatus,
+        reason: SemanticReason,
+        evaluation: object | None,
+        accounting: SemanticAttemptAccounting,
+    ) -> object:
+        raise AssertionError("build_final_must_not_run_on_cancel")
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_durable_semantic_attempts(
+            ledger=ledger,
+            lease=lease,
+            job=job,
+            deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
+            max_retries=0,
+            now_monotonic=lambda: 0.0,
+            dispatch=dispatch,
+            publish_success_response=publish,
+            sleep=lambda _: _async_noop(),
+            build_final=build_final,
+        )
+
+    assert ledger.job.state == "failed"
+    assert ledger.attempts is not None
+    assert [row.state for row in ledger.attempts.values()] == ["failed"]

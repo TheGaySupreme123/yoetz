@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from typing import cast
 
 import pytest
+
 from builders.large_semantic_cases import large_case
 from yoetz.application.check import CheckScope, allocate_findings, run_deterministic_policies
 from yoetz.application.semantic_case import (
@@ -207,9 +208,7 @@ def test_candidate_context_offers_only_catalogued_content(
         provider_binding=_BINDING,
     )
 
-    envelope_item = next(
-        item for item in candidate.items if item.item_id == REVIEW_PACKET_ITEM_ID
-    )
+    envelope_item = next(item for item in candidate.items if item.item_id == REVIEW_PACKET_ITEM_ID)
     catalogued = {
         cast(str, cast(Mapping[str, JsonValue], row)["item_id"])
         for row in cast(list[object], _parsed(envelope_item.plaintext)["item_catalog"])
