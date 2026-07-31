@@ -182,3 +182,40 @@ def test_p0_4_non_llm_enablement_is_rejected_before_pending_consent() -> None:
             created_at=_NOW,
             expires_at=datetime(2026, 3, 8, 0, 1, tzinfo=UTC),
         )
+
+
+def test_review_recipes_recommend_a_reviewable_context_without_loosening_first_run() -> None:
+    """The recommended recipe must actually enable review; the pre-consent seed must not move.
+
+    Both halves matter together. A structural recipe sends no goal, obligations, claims,
+    decisions or finding prose, so a reviewer given one cannot judge whether a claim is supported
+    — recommending it makes semantic review ceremonial. But leading with a richer recipe is only
+    safe because nothing egresses until the user picks one: the first-run seed stays all-denied,
+    local-only, with network egress off.
+    """
+
+    recipes = ReviewSelectionPolicy.for_profile(ReviewContextProfile.ASSISTED)
+    # The recommended recipe carries the material a reviewer needs.
+    assert recipes.include_finding_prose is True
+    assert {"goal", "obligations", "claims", "decisions"} <= set(recipes.sections)
+    assert recipes.max_excerpts > 0
+
+    # The structural recipes remain available and remain metadata-only.
+    structural = ReviewSelectionPolicy.for_profile(ReviewContextProfile.STRUCTURAL)
+    assert structural.include_finding_prose is False
+    assert structural.max_excerpts == 0
+
+    # Nothing leaves the machine before the user has consented to a provider at all.
+    # yoetz.config.privacy and yoetz.config.models import each other, so the package must be
+    # entered through models for the cycle to resolve in the order the runtime uses.
+    from yoetz.config.models import ConfigError  # noqa: F401  # enters the package first
+    from yoetz.config.privacy import safe_privacy_bootstrap
+
+    assert ConfigError is not None
+
+    seed = safe_privacy_bootstrap()
+    assert seed.profile == "local_only"
+    assert seed.network_egress_permitted is False
+    assert seed.local_model_enabled is False
+    assert seed.review_context_profile == "structural"
+    assert all(value is False for value in seed.channel_policies.model_dump().values())

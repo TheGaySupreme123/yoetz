@@ -282,15 +282,21 @@ async def privacy_get_setup(
             context,
             ReviewSelectionPolicy.for_profile(context),
         )
+        # Ordered most-recommended first. ``assisted_review`` leads because the structural
+        # recipes send no goal, obligations, claims, decisions or finding prose at all — a
+        # reviewer given only a metadata spine cannot judge whether a claim is supported, so a
+        # semantic review under those recipes is close to ceremonial. Leading with the recipe
+        # that actually enables review is a presentation change only: nothing is enabled without
+        # the user choosing it, and the first-run seed remains all-denied.
         for name, profile, context in (
-            ("private", PrivacyProfile.LOCAL_ONLY, ReviewContextProfile.STRUCTURAL),
+            ("assisted_review", PrivacyProfile.MINIMAL_EXTERNAL, ReviewContextProfile.ASSISTED),
+            ("expanded_review", PrivacyProfile.TRUSTED_PROVIDER, ReviewContextProfile.EXPANDED),
             (
                 "metadata_only",
                 PrivacyProfile.CONFIRM_EVERY_REQUEST,
                 ReviewContextProfile.STRUCTURAL,
             ),
-            ("assisted_review", PrivacyProfile.MINIMAL_EXTERNAL, ReviewContextProfile.ASSISTED),
-            ("expanded_review", PrivacyProfile.TRUSTED_PROVIDER, ReviewContextProfile.EXPANDED),
+            ("private", PrivacyProfile.LOCAL_ONLY, ReviewContextProfile.STRUCTURAL),
         )
     )
     return PrivacySetupView(effective, choices, examples, recipes)
