@@ -52,7 +52,7 @@ __all__ = [
 SCHEMA_NAMESPACE: Final = "https://schemas.yoetz.dev/0.1/"
 SCHEMA_MANIFEST_SCHEMA: Final = "yoetz.schema-manifest/1.0.0"
 SCHEMA_MANIFEST_VERSION: Final = "1.0.0"
-SCHEMA_MEMBER_COUNT: Final = 53
+SCHEMA_MEMBER_COUNT: Final = 58
 
 _DRAFT_2020_12: Final = "https://json-schema.org/draft/2020-12/schema"
 _SCHEMA_MEDIA_TYPE: Final = "application/schema+json"
@@ -375,7 +375,15 @@ def _derive_kind(path: str) -> SchemaKind:
         return SchemaKind.CONFIG
     if prefix == "version":
         return SchemaKind.VERSION_MANIFEST
-    if prefix in {"common", "operations", "findings", "receipts", "privacy", "service"}:
+    if prefix in {
+        "common",
+        "consent",
+        "operations",
+        "findings",
+        "receipts",
+        "privacy",
+        "service",
+    }:
         return SchemaKind.REQUEST_RESULT
     _protocol_error("schema_kind_mismatch")
 
@@ -386,6 +394,8 @@ def _derive_role(path: str) -> SchemaArtifactRole:
         if filename.startswith("operation-result-"):
             return SchemaArtifactRole.MCP_OUTPUT
         return SchemaArtifactRole.COMMON_VALUE
+    if directory == "consent":
+        return SchemaArtifactRole.LOCAL_CONTROL
     if directory == "operations":
         if "-request-" in filename:
             return SchemaArtifactRole.MCP_INPUT
@@ -618,7 +628,7 @@ def _load_catalog_state() -> _CatalogState:
             key=lambda item: item.schema_name.replace("-", "_").encode("ascii"),
         )
     }
-    if len(request_versions_dict) != 32 or len(event_versions_dict) != 16:
+    if len(request_versions_dict) != 37 or len(event_versions_dict) != 16:
         _protocol_error("schema_catalog_incomplete")
 
     catalog = SchemaCatalog(

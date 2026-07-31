@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import hmac
-import os
-import termios
 from dataclasses import dataclass
-from types import TracebackType
-from typing import Any, Final, Literal, Protocol, Self, cast
+from typing import Final, Literal, Protocol, cast
 
+from yoetz.cli.trusted_console import TrustedConsoleError, TrustedForegroundConsole
 from yoetz.protocol.canonical import JsonValue, canonical_digest
 from yoetz.service.confidential_client import (
     ConfidentialClientError,
@@ -67,23 +65,21 @@ __all__ = [
     "retry_keyring",
     "rotate_provider_credential",
     "run_human_ceremony",
+    "run_human_ceremony_on_terminal",
     "set_provider_credential",
     "unlock_vault",
+    "overwrite_secret_buffer",
 ]
 
-_TTY_PATH: Final = "/dev/tty"
-_CHOICE_MAX_BYTES: Final = 32
 _FIXED_ERROR_REASONS: Final = frozenset(
     {
-        "background_process",
         "cancelled",
         "confirmation_mismatch",
         "input_invalid",
         "interrupted",
         "preview_invalid",
         "result_invalid",
-        "tty_mismatch",
-        "tty_required",
+        "trusted_console_required",
     }
 )
 
@@ -155,137 +151,40 @@ class IdleRelockCliResult:
             raise ValueError("idle_relock_cli_result_invalid")
 
 
-def _overwrite(value: bytearray) -> None:
+def overwrite_secret_buffer(value: bytearray) -> None:
     for index in range(len(value)):
         value[index] = 0
 
 
-class _ForegroundTerminal:
-    """Verified foreground controlling terminal; never falls back to stdio input."""
+class _ForegroundTerminal(TrustedForegroundConsole):
+    """Compatibility facade that maps console failures into ceremony failures."""
 
-    __slots__ = ("_fd",)
+    __slots__ = ()
 
-    def __init__(self) -> None:
-        self._fd = -1
-
-    @property
-    def fd(self) -> int:
-        if self._fd < 0:
-            raise HumanCeremonyCliError("tty_required")
-        return self._fd
-
-    def __enter__(self) -> Self:
-        if not os.isatty(0) or not os.isatty(2):
-            raise HumanCeremonyCliError("tty_required")
-        flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+    def __enter__(self) -> _ForegroundTerminal:
         try:
-            fd = os.open(_TTY_PATH, flags)
-        except OSError as exc:
-            raise HumanCeremonyCliError("tty_required") from exc
-        try:
-            if not os.isatty(fd):
-                raise HumanCeremonyCliError("tty_required")
-            # macOS can expose /dev/tty as a root-owned controlling-terminal alias
-            # with a different device number than the user's terminal endpoints.
-            # The alias is still the correct no-echo input surface. Require stdin
-            # and stderr to be terminals for the same user-visible endpoint, then
-            # separately verify that this process is foreground on /dev/tty.
-            # Terminal device ownership is not a reliable user-identity signal.
-            if os.fstat(0).st_rdev != os.fstat(2).st_rdev:
-                raise HumanCeremonyCliError("tty_mismatch")
-            if os.tcgetpgrp(fd) != os.getpgrp():
-                raise HumanCeremonyCliError("background_process")
-        except BaseException:
-            os.close(fd)
-            raise
-        self._fd = fd
+            super().__enter__()
+        except TrustedConsoleError as exc:
+            raise HumanCeremonyCliError(exc.reason) from exc
         return self
 
-    def __exit__(
-        self,
-        _exception_type: type[BaseException] | None,
-        _exception: BaseException | None,
-        _traceback: TracebackType | None,
-    ) -> None:
-        if self._fd >= 0:
-            os.close(self._fd)
-            self._fd = -1
-
     def write(self, value: str) -> None:
-        if type(value) is not str:
-            raise TypeError("terminal_text_invalid")
-        encoded = value.encode("utf-8", errors="strict")
-        position = 0
-        while position < len(encoded):
-            try:
-                written = os.write(self.fd, encoded[position:])
-            except OSError as exc:
-                raise HumanCeremonyCliError("interrupted") from exc
-            if written <= 0:
-                raise HumanCeremonyCliError("interrupted")
-            position += written
-
-    def _read_line(self, prompt: str, maximum: int, *, hidden: bool) -> bytearray:
-        if type(maximum) is not int or maximum <= 0:
-            raise TypeError("terminal_bound_invalid")
-        original: Any = None
-        storage = bytearray(maximum + 1)
-        used = 0
         try:
-            if hidden:
-                original = termios.tcgetattr(self.fd)
-                changed = list(original)
-                changed[3] = cast(int, changed[3]) & ~termios.ECHO
-                termios.tcsetattr(self.fd, termios.TCSADRAIN, changed)
-            self.write(prompt)
-            while used < len(storage):
-                view = memoryview(storage)[used:]
-                try:
-                    count = os.readv(self.fd, [view])
-                except InterruptedError as exc:
-                    raise HumanCeremonyCliError("interrupted") from exc
-                finally:
-                    view.release()
-                if count <= 0:
-                    raise HumanCeremonyCliError("input_invalid")
-                used += count
-                if storage[used - 1] == 10:
-                    break
-            if used == 0 or storage[used - 1] != 10:
-                raise HumanCeremonyCliError("input_invalid")
-            storage[used - 1] = 0
-            for index in range(used, len(storage)):
-                storage[index] = 0
-            del storage[used - 1 :]
-            return storage
-        except BaseException:
-            _overwrite(storage)
-            raise
-        finally:
-            if original is not None:
-                try:
-                    termios.tcsetattr(self.fd, termios.TCSADRAIN, original)
-                finally:
-                    self.write("\n")
+            super().write(value)
+        except TrustedConsoleError as exc:
+            raise HumanCeremonyCliError(exc.reason) from exc
 
-    def read_choice(
-        self,
-        prompt: str,
-        allowed: tuple[bytes, ...],
-    ) -> bytes:
-        if type(allowed) is not tuple or not allowed:
-            raise TypeError("terminal_choices_invalid")
-        value = self._read_line(prompt, _CHOICE_MAX_BYTES, hidden=False)
+    def read_choice(self, prompt: str, allowed: tuple[bytes, ...]) -> bytes:
         try:
-            for candidate in allowed:
-                if hmac.compare_digest(value, candidate):
-                    return candidate
-            raise HumanCeremonyCliError("input_invalid")
-        finally:
-            _overwrite(value)
+            return super().read_choice(prompt, allowed)
+        except TrustedConsoleError as exc:
+            raise HumanCeremonyCliError(exc.reason) from exc
 
     def read_secret(self, prompt: str, maximum: int) -> bytearray:
-        return self._read_line(prompt, maximum, hidden=True)
+        try:
+            return super().read_secret(prompt, maximum)
+        except TrustedConsoleError as exc:
+            raise HumanCeremonyCliError(exc.reason) from exc
 
 
 class _CeremonyTerminal(Protocol):
@@ -522,10 +421,10 @@ def _read_secret(
             if not hmac.compare_digest(first, confirmation):
                 raise HumanCeremonyCliError("confirmation_mismatch")
         finally:
-            _overwrite(confirmation)
+            overwrite_secret_buffer(confirmation)
         return first
     except BaseException:
-        _overwrite(first)
+        overwrite_secret_buffer(first)
         raise
 
 
@@ -539,7 +438,7 @@ async def _send_secret(
         token = session._session_token()  # pyright: ignore[reportPrivateUsage]
         await secret_client.send_once(phase.binding, source, token)
     finally:
-        _overwrite(source)
+        overwrite_secret_buffer(source)
 
 
 def _expected_result_type(kind: HumanCeremonyKind) -> type[HumanResult]:
@@ -639,15 +538,42 @@ async def _drive_session(
     raise HumanCeremonyCliError("result_invalid")
 
 
-async def run_human_ceremony(
+async def _complete_human_ceremony(
+    client: HumanControlClient,
+    terminal: _CeremonyTerminal,
     kind: HumanCeremonyKind,
     target: HumanOpenTarget,
-    provider_credential: bytearray | None = None,
-    passphrase: bytearray | None = None,
-    provider_reauthentication: bytearray | None = None,
+    provider_credential: bytearray | None,
+    passphrase: bytearray | None,
+    provider_reauthentication: bytearray | None,
 ) -> HumanResult:
-    """Run one exact foreground YZH1/YZS1 ceremony and return structural state only."""
+    session = await client.open(kind, target)
+    async with session:
+        try:
+            preview = _verify_preview(kind, target, session)
+            _render_preview(terminal, preview)
+            result, _decision = await _drive_session(
+                session,
+                terminal,
+                kind,
+                target,
+                session.opened.phase,
+                provider_credential,
+                passphrase,
+                provider_reauthentication,
+            )
+            return result
+        except BaseException:
+            await _cancel_quietly(session)
+            raise
 
+
+def _validate_supplied_secrets(
+    kind: HumanCeremonyKind,
+    provider_credential: bytearray | None,
+    passphrase: bytearray | None,
+    provider_reauthentication: bytearray | None,
+) -> tuple[bool, bool]:
     if type(kind) is not HumanCeremonyKind:
         raise TypeError("human_ceremony_kind_invalid")
     provider_kind = kind in {
@@ -665,8 +591,26 @@ async def run_human_ceremony(
     ):
         for supplied in (provider_credential, passphrase, provider_reauthentication):
             if supplied is not None:
-                _overwrite(supplied)
+                overwrite_secret_buffer(supplied)
         raise ValueError("provider_credential_target_invalid")
+    return provider_kind, passphrase_kind
+
+
+async def run_human_ceremony(
+    kind: HumanCeremonyKind,
+    target: HumanOpenTarget,
+    provider_credential: bytearray | None = None,
+    passphrase: bytearray | None = None,
+    provider_reauthentication: bytearray | None = None,
+) -> HumanResult:
+    """Run one exact foreground YZH1/YZS1 ceremony and return structural state only."""
+
+    provider_kind, passphrase_kind = _validate_supplied_secrets(
+        kind,
+        provider_credential,
+        passphrase,
+        provider_reauthentication,
+    )
     fully_supplied = (
         passphrase is not None
         if passphrase_kind
@@ -676,45 +620,70 @@ async def run_human_ceremony(
     )
     client = HumanControlClient()
 
-    async def complete(terminal: _CeremonyTerminal) -> HumanResult:
-        session = await client.open(kind, target)
-        async with session:
-            try:
-                preview = _verify_preview(kind, target, session)
-                _render_preview(terminal, preview)
-                result, _decision = await _drive_session(
-                    session,
-                    terminal,
-                    kind,
-                    target,
-                    session.opened.phase,
-                    provider_credential,
-                    passphrase,
-                    provider_reauthentication,
-                )
-                return result
-            except BaseException:
-                await _cancel_quietly(session)
-                raise
-
     try:
         if fully_supplied:
-            try:
-                return await complete(_SuppliedSecretTerminal())
-            finally:
-                await client.close()
+            return await _complete_human_ceremony(
+                client,
+                _SuppliedSecretTerminal(),
+                kind,
+                target,
+                provider_credential,
+                passphrase,
+                provider_reauthentication,
+            )
         with _ForegroundTerminal() as terminal:
-            try:
-                return await complete(terminal)
-            finally:
-                await client.close()
+            return await _complete_human_ceremony(
+                client,
+                terminal,
+                kind,
+                target,
+                provider_credential,
+                passphrase,
+                provider_reauthentication,
+            )
     finally:
+        await client.close()
         if provider_credential is not None:
-            _overwrite(provider_credential)
+            overwrite_secret_buffer(provider_credential)
         if passphrase is not None:
-            _overwrite(passphrase)
+            overwrite_secret_buffer(passphrase)
         if provider_reauthentication is not None:
-            _overwrite(provider_reauthentication)
+            overwrite_secret_buffer(provider_reauthentication)
+
+
+async def run_human_ceremony_on_terminal(
+    terminal: _CeremonyTerminal,
+    kind: HumanCeremonyKind,
+    target: HumanOpenTarget,
+    *,
+    provider_credential: bytearray | None = None,
+    passphrase: bytearray | None = None,
+    provider_reauthentication: bytearray | None = None,
+) -> HumanResult:
+    """Run a ceremony on an already verified console owned by the trusted helper."""
+
+    _validate_supplied_secrets(
+        kind,
+        provider_credential,
+        passphrase,
+        provider_reauthentication,
+    )
+    client = HumanControlClient()
+    try:
+        return await _complete_human_ceremony(
+            client,
+            terminal,
+            kind,
+            target,
+            provider_credential,
+            passphrase,
+            provider_reauthentication,
+        )
+    finally:
+        await client.close()
+        for supplied in (provider_credential, passphrase, provider_reauthentication):
+            if supplied is not None:
+                overwrite_secret_buffer(supplied)
 
 
 async def initialize_passphrase_vault(passphrase: bytearray | None = None) -> VaultStateResult:

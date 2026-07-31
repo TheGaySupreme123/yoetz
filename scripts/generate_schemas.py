@@ -145,6 +145,65 @@ def _operation_result_schema() -> object:
     return OperationFailureModel
 
 
+def _version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Update the reviewed closed version schema from current runtime inventory constants.
+
+    The version report intentionally has a stronger, finite contract than Pydantic can infer from
+    its tuple-backed runtime dataclass. Preserve that reviewed schema shape while regenerating the
+    exact request/result version map and resource inventory cardinalities through this owning tool.
+    """
+
+    from yoetz.version import build_version_manifest
+
+    source = Path(__file__).resolve().parent.parent / "schemas" / entry.relative_path
+    try:
+        document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+        definitions = cast(dict[str, JsonValue], document["$defs"])
+        request_versions = cast(dict[str, JsonValue], definitions["request_result_schema_versions"])
+        resource_counts = cast(dict[str, JsonValue], definitions["resource_counts"])
+        resources = cast(dict[str, JsonValue], document["properties"])["resources"]
+        if not isinstance(resources, dict):
+            raise TypeError
+    except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
+        raise SchemaGenerationError(
+            "version_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+
+    manifest = build_version_manifest()
+    version_pairs = dict(manifest.request_result_schema_versions)
+    request_versions.clear()
+    request_versions.update(
+        cast(
+            dict[str, JsonValue],
+            {
+                "additionalProperties": False,
+                "maxProperties": len(version_pairs),
+                "minProperties": len(version_pairs),
+                "properties": {
+                    name: {"const": version}
+                    for name, version in sorted(
+                        version_pairs.items(), key=lambda item: item[0].encode()
+                    )
+                },
+                "required": sorted(version_pairs, key=str.encode),
+                "type": "object",
+            },
+        )
+    )
+
+    counts = dict(manifest.resource_counts)
+    count_properties: dict[str, JsonValue] = {
+        name: {"const": value}
+        for name, value in sorted(counts.items(), key=lambda item: item[0].encode())
+    }
+    resource_counts["properties"] = count_properties
+    resource_counts["required"] = cast(list[JsonValue], sorted(counts, key=str.encode))
+    total = int(counts["total"])
+    resources["maxItems"] = total
+    resources["oneOf"] = [{"maxItems": 0}, {"maxItems": total, "minItems": total}]
+    return document
+
+
 _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
     _RegistryEntry(
         "common/actor-assertion-1.0.0.schema.json",
@@ -217,6 +276,64 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "config",
         "configuration",
         lambda: __import__("yoetz.config.models", fromlist=["YoetzConfig"]).YoetzConfig,
+    ),
+    _RegistryEntry(
+        "consent/catalog-2.0.0.schema.json",
+        "catalog",
+        "2.0.0",
+        "request_result",
+        "local-control",
+        lambda: (
+            __import__(
+                "yoetz.protocol.consent", fromlist=["ConsentCatalogModel"]
+            ).ConsentCatalogModel
+        ),
+    ),
+    _RegistryEntry(
+        "consent/pending-agent-2.0.0.schema.json",
+        "pending-agent",
+        "2.0.0",
+        "request_result",
+        "local-control",
+        lambda: (
+            __import__(
+                "yoetz.protocol.consent", fromlist=["AgentSafePendingModel"]
+            ).AgentSafePendingModel
+        ),
+    ),
+    _RegistryEntry(
+        "consent/prepare-result-2.0.0.schema.json",
+        "prepare-result",
+        "2.0.0",
+        "request_result",
+        "local-control",
+        lambda: (
+            __import__(
+                "yoetz.protocol.consent", fromlist=["ConsentPrepareResultModel"]
+            ).ConsentPrepareResultModel
+        ),
+    ),
+    _RegistryEntry(
+        "consent/review-result-2.0.0.schema.json",
+        "review-result",
+        "2.0.0",
+        "request_result",
+        "local-control",
+        lambda: (
+            __import__(
+                "yoetz.protocol.consent", fromlist=["ConsentReviewResultModel"]
+            ).ConsentReviewResultModel
+        ),
+    ),
+    _RegistryEntry(
+        "consent/status-2.0.0.schema.json",
+        "status",
+        "2.0.0",
+        "request_result",
+        "local-control",
+        lambda: (
+            __import__("yoetz.protocol.consent", fromlist=["ConsentStatusModel"]).ConsentStatusModel
+        ),
     ),
     _RegistryEntry(
         "events/accepted-event-1.0.0.schema.json",
@@ -875,15 +992,17 @@ def build_schema_documents(
         seen_paths.add(entry.relative_path)
 
         assert entry.loader is not None  # narrowed by the pending-check above
-        try:
-            python_type = entry.loader()
-            raw_schema = TypeAdapter(python_type).json_schema()
-        except Exception as exc:  # noqa: BLE001 - normalized into a bounded generator error
-            raise SchemaGenerationError(
-                "model_introspection_failed", entries=(entry.relative_path,)
-            ) from exc
-
-        normalized = _normalize(cast(dict[str, object], raw_schema), entry)
+        if entry.relative_path == "version/version-manifest-1.0.0.schema.json":
+            normalized = _version_manifest_schema(entry)
+        else:
+            try:
+                python_type = entry.loader()
+                raw_schema = TypeAdapter(python_type).json_schema()
+            except Exception as exc:  # noqa: BLE001 - normalized into a bounded generator error
+                raise SchemaGenerationError(
+                    "model_introspection_failed", entries=(entry.relative_path,)
+                ) from exc
+            normalized = _normalize(cast(dict[str, object], raw_schema), entry)
         schema_id = cast(str, normalized["$id"])
         if schema_id in seen_ids:
             raise SchemaGenerationError("duplicate_schema_id", entries=(schema_id,))
@@ -1002,15 +1121,29 @@ def update_schema_manifest(documents: tuple[SchemaDocument, ...], root: Path) ->
         cast(str, cast(dict[str, JsonValue], member)["path"]): cast(dict[str, JsonValue], member)
         for member in members
     }
+    registry_by_path = {entry.relative_path: entry for entry in _REGISTRY}
     for document in documents:
         member = by_path.get(document.relative_path)
         if member is None:
-            raise SchemaGenerationError(
-                "schema_manifest_member_missing",
-                entries=(document.relative_path,),
-            )
+            entry = registry_by_path[document.relative_path]
+            assert entry.loader is not None
+            owning_type = entry.loader()
+            member = {
+                "$id": document.schema_id,
+                "artifact_role": document.artifact_role,
+                "byte_length": len(document.schema_bytes),
+                "media_type": _SCHEMA_MEDIA_TYPE,
+                "owning_model": getattr(owning_type, "__name__", type(owning_type).__name__),
+                "path": document.relative_path,
+                "schema_kind": document.schema_kind,
+                "schema_version": document.schema_version,
+                "sha256": "sha256:" + hashlib.sha256(document.schema_bytes).hexdigest(),
+            }
+            members.append(cast(JsonValue, member))
+            by_path[document.relative_path] = member
         member["byte_length"] = len(document.schema_bytes)
         member["sha256"] = "sha256:" + hashlib.sha256(document.schema_bytes).hexdigest()
+    members.sort(key=lambda item: cast(str, cast(dict[str, JsonValue], item)["path"]).encode())
     manifest_path.write_bytes(canonical_encode(cast(JsonValue, manifest)))
 
 

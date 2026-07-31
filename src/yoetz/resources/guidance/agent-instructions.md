@@ -59,7 +59,7 @@ Never fabricate a session ID, publication, finding, verdict, or receipt. If a ca
 
 # Non-default actions need consent
 
-Ordinary MCP tools and privacy tighten are default-safe. For anything else, run `yoetz consent catalog` / `status`. Only ops with `implemented=true` may be prepared. If consent is required, show `danger_text` and wait for the human to repeat `confirmation_phrase`. Substitute the human-typed phrase into `approve_command` (do not auto-fill from status). Never take secrets via chat, MCP, argv, env, or config; only inherited FDs when the catalog lists them. Exception: the ADR-012 narrow `yoetz --set --api-key` compatibility path (shell-history risk). Locked vaults need a local TTY unlock; elevated consent initializes an uninitialized vault or sets credentials, it does not unlock. No `--yolo`.
+Only operations explicitly listed in `catalog.default_safe` are default-safe. For anything else, run `yoetz consent catalog` / `status`. Only operations with `implemented=true` may be prepared. The agent-safe pending view contains structural review facts and the fixed `yoetz consent review` command, but nothing that grants authority. Review requires independently verified action-bound OS user presence; a foreground console or pseudo-terminal alone is never approval. The current runtime has no production presence adapter, so the command fails closed with `human_authority_unavailable` and leaves pending state untouched. Do not attempt to approve through arguments, environment, stdin, MCP, JSON, caller booleans, or terminal automation. The explicitly selected manual `yoetz service initialize-passphrase` ceremony remains separate. Locked vaults still need the ordinary local-human unlock ceremony. No `--yolo`.
 
 # Read more
 

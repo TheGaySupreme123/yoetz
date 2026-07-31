@@ -100,7 +100,7 @@ migrate_app = typer.Typer(help="Preview or execute a migration.", no_args_is_hel
 elevated_app = typer.Typer(
     help=(
         "Human-review consent for non-default actions (ADR-015/016). "
-        "Secrets never over chat/MCP; phrase confirm + optional inherited FDs."
+        "Authority and secrets stay inside a verified foreground-console review."
     ),
     no_args_is_help=True,
 )
@@ -241,7 +241,7 @@ def _control_failure(error: ControlError) -> int:
         PublicErrorCode.VAULT_LOCKED: (
             "vault_locked: unlock from a local terminal "
             "(`yoetz service unlock`); if uninitialized with no TTY, "
-            "`yoetz consent prepare vault_initialize` then approve with a passphrase FD"
+            "prepare `vault_initialize`, then run `yoetz consent review` on a trusted console"
         ),
         PublicErrorCode.SERVICE_UNAVAILABLE: (
             "service_unavailable: run 'yoetz service run' under your selected user supervisor"
@@ -1675,33 +1675,20 @@ def elevated_prepare(
     _human_or_json(payload, json_output=json_output)
 
 
-@elevated_app.command("approve")
-def elevated_approve(
-    pending_id: Annotated[str, typer.Option("--pending-id")],
-    danger_digest: Annotated[str, typer.Option("--danger-digest")],
-    confirm: Annotated[str, typer.Option("--confirm")],
-    passphrase_fd: Annotated[int | None, typer.Option("--passphrase-fd")] = None,
-    reauth_fd: Annotated[int | None, typer.Option("--reauth-fd")] = None,
-    credential_fd: Annotated[int | None, typer.Option("--credential-fd")] = None,
+@elevated_app.command("review")
+def elevated_review(
     json_output: _JSON = True,
 ) -> None:
-    """Approve exact pending consent and complete via inherited secret FDs."""
+    """Review one pending action on a verified foreground console."""
 
     module = importlib.import_module("yoetz.cli.elevated")
     errors = importlib.import_module("yoetz.service.elevated_bootstrap")
     elevated_error = cast(type[Exception], getattr(errors, "ElevatedBootstrapError"))
-    approve = cast(Callable[..., Awaitable[object]], getattr(module, "approve_elevated"))
+    review = cast(Callable[[], Awaitable[object]], getattr(module, "review_elevated"))
 
     async def _run() -> int:
         try:
-            payload = await approve(
-                pending_id=pending_id,
-                danger_digest=danger_digest,
-                confirm=confirm,
-                passphrase_fd=passphrase_fd,
-                reauth_fd=reauth_fd,
-                credential_fd=credential_fd,
-            )
+            payload = await review()
         except elevated_error as exc:
             _stderr(f"elevated_bootstrap: {getattr(exc, 'reason', 'failed')}")
             return 2

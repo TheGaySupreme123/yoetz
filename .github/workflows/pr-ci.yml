@@ -5,7 +5,7 @@
 # Fast, deterministic evidence that a public change preserves contracts, style/types, pure truth
 # behavior, adapter parity, bounded durable/transport behavior, package construction, and the
 # public/private boundary. Never uses production credentials or live providers. Required checks
-# (branch protection) are the seven job names below.
+# (branch protection) are aggregated by `pr-ci-required`.
 
 name: PR CI
 
@@ -39,6 +39,42 @@ defaults:
     shell: bash
 
 jobs:
+  # ---------------------------------------------------------------------------------------------
+  # trusted-console-boundary — adapter-only platform proof, not full Windows runtime support.
+  # ---------------------------------------------------------------------------------------------
+  trusted-console-boundary:
+    name: trusted-console-boundary (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+          lfs: false
+
+      - name: Install uv and pinned Python
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+
+      - name: Test only the portable console boundary
+        env:
+          PYTHONPATH: src
+        run: >-
+          uv run --no-project --python 3.14.6 --with pytest==9.1.1
+          pytest tests/unit/cli/test_trusted_console.py -q
+
   # ---------------------------------------------------------------------------------------------
   # contracts-and-resources — spec manifest, generated schema/resource parity, public boundary.
   # ---------------------------------------------------------------------------------------------
@@ -500,6 +536,7 @@ jobs:
   pr-ci-required:
     name: pr-ci-required
     needs:
+      - trusted-console-boundary
       - contracts-and-resources
       - format-lint-type
       - unit-and-conformance
@@ -516,6 +553,7 @@ jobs:
         run: |
           set -euo pipefail
           declare -A results=(
+            [trusted-console-boundary]="${{ needs.trusted-console-boundary.result }}"
             [contracts-and-resources]="${{ needs.contracts-and-resources.result }}"
             [format-lint-type]="${{ needs.format-lint-type.result }}"
             [unit-and-conformance]="${{ needs.unit-and-conformance.result }}"

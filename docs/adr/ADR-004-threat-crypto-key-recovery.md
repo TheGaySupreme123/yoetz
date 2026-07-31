@@ -212,15 +212,15 @@ Without measured user presence either mode is ready only for locally permitted w
 activation remains fenced. A pristine headless installation cannot auto-create keyring mode or a
 passphrase auto-unlock entry unless its exact release cell carries the applicable verified setup
 authority; otherwise it remains setup-required.
-**Scoped exception (ADR-015/016):** after exact digest-bound human phrase consent, elevated consent
-may admit secrets on inherited FDs for catalogued `secret_ingress` / `secret_reauth` operations
-(implemented: vault initialize and provider credential set/rotate). That is not generic
-`--password-fd` unlock and does not unlock an already-locked vault without a local TTY ceremony.
-A broader inherited-descriptor unlock API still requires its own reviewed adapter/specification and
-platform tests. This is the resolved F-008 boundary: v0.1 provides unattended readiness through an
-approved OS-keyring vault or the exact bundle-scoped platform-entry passphrase restart exception in
-ADR-008. Generic passphrase unlock through an inherited FD, argv, environment, config, stdin, or a
-plaintext path remains prohibited.
+**Scoped exception (ADR-015/016, amended 2026-07-31):** elevated vault initialization and provider
+credential set/rotate require independently verified action-bound OS user presence before
+`yoetz consent review` may open a foreground console. The current runtime has no production
+presence adapter and fails closed with `human_authority_unavailable` before pending claim.
+Initialization uses a helper-generated, credential-store-verified secret; provider credentials
+are entered within the confidential console ceremony. This is not generic headless unlock and
+does not unlock an already-locked vault. F-008 unattended readiness remains limited to an approved
+OS-keyring vault or the exact bundle-scoped platform-entry restart exception in ADR-008. Generic
+passphrase input through process-visible channels or a plaintext path remains prohibited.
 
 ## What stays plaintext
 

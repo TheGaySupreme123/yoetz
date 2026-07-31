@@ -1,6 +1,6 @@
 """Human-review consent for non-default actions (ADR-015 / ADR-016).
 
-Pending consent is owner-only file state. Secrets enter only through inherited FDs on approve.
+Pending consent is owner-only file state. Console input never substitutes for OS user presence.
 """
 
 from __future__ import annotations
@@ -10,14 +10,20 @@ import json
 import os
 import secrets
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal, cast
+from typing import Final, Literal, NoReturn, cast
 
 from yoetz.config.paths import ensure_owner_only_dir, state_dir
 from yoetz.domain.values import ProtocolValueError, validate_sha256_digest
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
+from yoetz.protocol.consent import (
+    AgentSafePendingModel,
+    ConsentCatalogModel,
+    ConsentStatusModel,
+)
+from yoetz.service.confidential_protocol import ProviderCredentialTarget
 
 __all__ = [
     "CONSENT_OPERATIONS",
@@ -26,14 +32,14 @@ __all__ = [
     "ElevatedOperation",
     "PendingElevatedConsent",
     "RiskClass",
-    "approve_pending",
     "catalog_payload",
+    "claim_pending_for_review",
     "clear_pending",
+    "complete_review",
     "load_pending",
     "operation_spec",
     "prepare_pending",
     "projection_for_status",
-    "read_secret_fd",
     "status_payload",
 ]
 
@@ -41,7 +47,7 @@ RiskClass = Literal[
     "default_safe",
     "secret_ingress",
     "secret_reauth",
-    "phrase_only",
+    "review_only",
     "privacy_widen",
 ]
 
@@ -58,13 +64,13 @@ ElevatedOperation = Literal[
     "harness_mcp_register",
 ]
 
-_SCHEMA: Final = "yoetz.elevated-bootstrap.pending/1"
+_SCHEMA: Final = "yoetz.elevated-bootstrap.pending/2"
+_LEGACY_SCHEMA: Final = "yoetz.elevated-bootstrap.pending/1"
 _TTL_SECONDS: Final = 15 * 60
-_PHRASE_BYTES: Final = 3
 _PENDING_NAME: Final = "elevated-bootstrap-pending.json"
+_REVIEW_NAME: Final = "elevated-bootstrap-reviewing.json"
 _AUDIT_NAME: Final = "elevated-bootstrap-audit.jsonl"
 _FORBIDDEN: Final = ("mcp", "argv", "env", "stdin", "config", "transcript")
-_CONFIRM_PLACEHOLDER: Final = "<confirmation_phrase>"
 _PROVIDER_BINDING_KEYS: Final = (
     "provider_id",
     "model_id",
@@ -86,7 +92,6 @@ class ConsentOperationSpec:
     danger_text: str
     requires_provider_binding: bool
     requires_target_digest_arg: bool
-    secret_fds: tuple[str, ...]
     implemented: bool
 
 
@@ -96,14 +101,13 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         risk_class="secret_ingress",
         summary="Create the local vault passphrase (cloud/no-TTY).",
         danger_text=(
-            "DANGER — vault initialize. Creates this installation's vault passphrase without a "
-            "user-owned /dev/tty. After you confirm the phrase, the agent supplies the passphrase "
-            "on an inherited FD only. Never paste the passphrase into chat. Prefer "
-            "`yoetz service initialize-passphrase` on a local terminal when possible."
+            "DANGER — vault initialize. Creates this installation's encrypted vault and stores a "
+            "helper-generated auto-unlock secret in the scoped platform credential store. Review "
+            "requires independent action-bound OS user presence; a foreground console alone is "
+            "never authorization."
         ),
         requires_provider_binding=False,
         requires_target_digest_arg=False,
-        secret_fds=("passphrase-fd",),
         implemented=True,
     ),
     ConsentOperationSpec(
@@ -111,13 +115,12 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         risk_class="secret_ingress",
         summary="Store an LLM API credential in the vault.",
         danger_text=(
-            "DANGER — provider credential set. Stores an API credential in the local vault without "
-            "a user-owned /dev/tty. After you confirm, the agent supplies reauth and credential "
-            "bytes on inherited FDs only. Never paste API keys into chat."
+            "DANGER — provider credential set. Stores an API credential in the local vault. "
+            "Review requires independent action-bound OS user presence and the exact provider "
+            "binding; secret entry occurs only inside the foreground console."
         ),
         requires_provider_binding=True,
         requires_target_digest_arg=False,
-        secret_fds=("reauth-fd", "credential-fd"),
         implemented=True,
     ),
     ConsentOperationSpec(
@@ -125,13 +128,12 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         risk_class="secret_ingress",
         summary="Rotate a stored LLM API credential.",
         danger_text=(
-            "DANGER — provider credential rotate. Replaces a stored API credential without a "
-            "user-owned /dev/tty. After you confirm, reauth and new credential bytes arrive on "
-            "inherited FDs only. Never paste API keys into chat."
+            "DANGER — provider credential rotate. Replaces a stored API credential. Review requires "
+            "independent action-bound OS user presence and the exact provider binding; secret entry "
+            "occurs only inside the foreground console."
         ),
         requires_provider_binding=True,
         requires_target_digest_arg=False,
-        secret_fds=("reauth-fd", "credential-fd"),
         implemented=True,
     ),
     ConsentOperationSpec(
@@ -139,12 +141,11 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         risk_class="secret_reauth",
         summary="Disable idle vault relock (weakens locked-session protection).",
         danger_text=(
-            "DANGER — disable idle relock. Weakens automatic vault locking. Confirm only if you "
-            "intend this change; reauthentication is still required on an inherited FD."
+            "DANGER — disable idle relock. Weakens automatic vault locking. Approve only from the "
+            "verified foreground console after reviewing the exact change."
         ),
         requires_provider_binding=False,
         requires_target_digest_arg=False,
-        secret_fds=("reauth-fd",),
         implemented=False,
     ),
     ConsentOperationSpec(
@@ -158,27 +159,24 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         ),
         requires_provider_binding=False,
         requires_target_digest_arg=True,
-        secret_fds=("reauth-fd",),
         implemented=False,
     ),
     ConsentOperationSpec(
         operation="backup_execute",
-        risk_class="phrase_only",
+        risk_class="review_only",
         summary="Execute a backup plan (irreversible artifact write).",
         danger_text=(
-            "DANGER — backup execute. Writes a durable backup for the exact plan digest. No secret "
-            "bytes travel over chat; portable recovery secrets still use FDs in a later step when "
-            "required. Confirm only if you reviewed the preview."
+            "DANGER — backup execute. Writes a durable backup for the exact plan digest. Approve "
+            "only from the verified foreground console after reviewing the preview."
         ),
         requires_provider_binding=False,
         requires_target_digest_arg=True,
-        secret_fds=(),
         # Catalogued for ADR-016; prepare refuses until owning CLIs consume a durable grant.
         implemented=False,
     ),
     ConsentOperationSpec(
         operation="restore_execute",
-        risk_class="phrase_only",
+        risk_class="review_only",
         summary="Execute a restore plan (may switch active route).",
         danger_text=(
             "DANGER — restore execute. May replace or switch local ledger state for the exact plan "
@@ -186,12 +184,11 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         ),
         requires_provider_binding=False,
         requires_target_digest_arg=True,
-        secret_fds=(),
         implemented=False,
     ),
     ConsentOperationSpec(
         operation="migrate_execute",
-        risk_class="phrase_only",
+        risk_class="review_only",
         summary="Execute a storage migration plan.",
         danger_text=(
             "DANGER — migrate execute. Changes on-disk storage layout for the exact plan digest. "
@@ -199,12 +196,11 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         ),
         requires_provider_binding=False,
         requires_target_digest_arg=True,
-        secret_fds=(),
         implemented=False,
     ),
     ConsentOperationSpec(
         operation="skill_install",
-        risk_class="phrase_only",
+        risk_class="review_only",
         summary="Install or replace a harness skill bundle.",
         danger_text=(
             "DANGER — skill install/replace. Changes agent guidance files for the exact preview "
@@ -212,12 +208,11 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         ),
         requires_provider_binding=False,
         requires_target_digest_arg=True,
-        secret_fds=(),
         implemented=False,
     ),
     ConsentOperationSpec(
         operation="harness_mcp_register",
-        risk_class="phrase_only",
+        risk_class="review_only",
         summary="Register Yoetz as an MCP server in a harness config.",
         danger_text=(
             "DANGER — harness MCP registration. Mutates harness config for the exact preview "
@@ -225,7 +220,6 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         ),
         requires_provider_binding=False,
         requires_target_digest_arg=True,
-        secret_fds=(),
         implemented=False,
     ),
 )
@@ -252,12 +246,10 @@ class PendingElevatedConsent:
     risk_class: RiskClass
     danger_text: str
     danger_digest: str
-    confirmation_phrase: str
     created_at_unix: int
     expires_at_unix: int
     target_digest: str
     provider_binding: Mapping[str, str] | None
-    secret_fds: tuple[str, ...]
 
     def as_json(self) -> dict[str, JsonValue]:
         payload: dict[str, JsonValue] = {
@@ -268,11 +260,9 @@ class PendingElevatedConsent:
             "risk_class": self.risk_class,
             "danger_text": self.danger_text,
             "danger_digest": self.danger_digest,
-            "confirmation_phrase": self.confirmation_phrase,
             "created_at_unix": self.created_at_unix,
             "expires_at_unix": self.expires_at_unix,
             "target_digest": self.target_digest,
-            "secret_fds": list(self.secret_fds),
         }
         if self.provider_binding is not None:
             payload["provider_binding"] = dict(self.provider_binding)
@@ -297,12 +287,12 @@ def pending_path(*, _state: Path | None = None) -> Path:
     return elevated_dir(_state=_state) / _PENDING_NAME
 
 
+def review_path(*, _state: Path | None = None) -> Path:
+    return elevated_dir(_state=_state) / _REVIEW_NAME
+
+
 def audit_path(*, _state: Path | None = None) -> Path:
     return elevated_dir(_state=_state) / _AUDIT_NAME
-
-
-def _confirmation_phrase() -> str:
-    return f"YOETZ APPROVE {secrets.token_hex(_PHRASE_BYTES).upper()}"
 
 
 def _danger_digest(
@@ -310,22 +300,18 @@ def _danger_digest(
     operation: str,
     risk_class: str,
     danger_text: str,
-    confirmation_phrase: str,
     target_digest: str,
     pending_id: str,
     expires_at_unix: int,
     provider_binding: Mapping[str, str] | None,
-    secret_fds: Sequence[str],
 ) -> str:
     body: dict[str, JsonValue] = {
-        "confirmation_phrase": confirmation_phrase,
         "danger_text": danger_text,
         "expires_at_unix": expires_at_unix,
         "operation": operation,
         "pending_id": pending_id,
         "risk_class": risk_class,
-        "schema": "yoetz.elevated-bootstrap.danger/1",
-        "secret_fds": list(secret_fds),
+        "schema": "yoetz.elevated-bootstrap.danger/2",
         "target_digest": target_digest,
     }
     if provider_binding is not None:
@@ -354,24 +340,23 @@ def prepare_pending(
         validated_digest = validate_sha256_digest(target_digest)
     except ProtocolValueError as exc:
         raise ElevatedBootstrapError("target_digest_invalid") from exc
+    if review_path(_state=_state).is_file():
+        raise ElevatedBootstrapError("review_in_progress")
     existing = load_pending(_state=_state)
     if existing is not None and existing.expires_at_unix > int(time.time()):
         raise ElevatedBootstrapError("pending_already_active")
     now = int(time.time())
     pending_id = secrets.token_hex(32)
-    phrase = _confirmation_phrase()
     text = spec.danger_text
     expires = now + _TTL_SECONDS
     digest = _danger_digest(
         operation=operation,
         risk_class=spec.risk_class,
         danger_text=text,
-        confirmation_phrase=phrase,
         target_digest=validated_digest,
         pending_id=pending_id,
         expires_at_unix=expires,
         provider_binding=binding,
-        secret_fds=spec.secret_fds,
     )
     pending = PendingElevatedConsent(
         pending_id=pending_id,
@@ -379,12 +364,10 @@ def prepare_pending(
         risk_class=spec.risk_class,
         danger_text=text,
         danger_digest=digest,
-        confirmation_phrase=phrase,
         created_at_unix=now,
         expires_at_unix=expires,
         target_digest=validated_digest,
         provider_binding=binding,
-        secret_fds=spec.secret_fds,
     )
     _write_pending(pending, _state=_state)
     _audit(
@@ -416,6 +399,19 @@ def _validated_provider_binding(binding: Mapping[str, str]) -> dict[str, str]:
                 raise ElevatedBootstrapError("provider_binding_invalid") from exc
         else:
             normalized[key] = value
+    try:
+        ProviderCredentialTarget(
+            action="set",
+            provider_id=normalized["provider_id"],
+            model_id=normalized["model_id"],
+            endpoint_profile_id=normalized["endpoint_profile_id"],
+            endpoint_profile_version=normalized["endpoint_profile_version"],
+            purpose=normalized["purpose"],
+            scope_digest=normalized["scope_digest"],
+            purpose_digest=normalized["purpose_digest"],
+        )
+    except (TypeError, ValueError) as exc:
+        raise ElevatedBootstrapError("provider_binding_invalid") from exc
     return normalized
 
 
@@ -425,8 +421,36 @@ def _require_int(value: object) -> int:
     return value
 
 
-def load_pending(*, _state: Path | None = None) -> PendingElevatedConsent | None:
-    path = pending_path(_state=_state)
+def _require_str(value: object) -> str:
+    if type(value) is not str or not value:
+        raise ElevatedBootstrapError("pending_corrupt")
+    return value
+
+
+def _validated_pending_id(value: object) -> str:
+    pending_id = _require_str(value)
+    if len(pending_id) != 64 or any(
+        character not in "0123456789abcdef" for character in pending_id
+    ):
+        raise ElevatedBootstrapError("pending_corrupt")
+    return pending_id
+
+
+def _invalidate_legacy(path: Path, *, _state: Path | None) -> NoReturn:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise ElevatedBootstrapError("pending_clear_failed") from exc
+    _audit({"event": "legacy_pending_invalidated"}, _state=_state)
+    raise ElevatedBootstrapError("legacy_pending_invalidated")
+
+
+def _load_pending_path(
+    path: Path,
+    *,
+    _state: Path | None,
+    expire: bool,
+) -> PendingElevatedConsent | None:
     if not path.is_file():
         return None
     try:
@@ -436,10 +460,28 @@ def load_pending(*, _state: Path | None = None) -> PendingElevatedConsent | None
     if not isinstance(raw, dict):
         raise ElevatedBootstrapError("pending_corrupt")
     source = cast(dict[str, object], raw)
+    if source.get("schema") == _LEGACY_SCHEMA:
+        _invalidate_legacy(path, _state=_state)
     try:
         if source.get("schema") != _SCHEMA:
             raise ElevatedBootstrapError("pending_corrupt")
-        operation = str(source["operation"])
+        expected_keys = {
+            "created_at_unix",
+            "danger_digest",
+            "danger_text",
+            "expires_at_unix",
+            "operation",
+            "pending_id",
+            "risk_class",
+            "schema",
+            "state",
+            "target_digest",
+        }
+        if "provider_binding" in source:
+            expected_keys.add("provider_binding")
+        if set(source) != expected_keys or source.get("state") != "pending":
+            raise ElevatedBootstrapError("pending_corrupt")
+        operation = _require_str(source["operation"])
         if operation not in _OPS:
             raise ElevatedBootstrapError("pending_corrupt")
         spec = _OPS[operation]
@@ -463,33 +505,26 @@ def load_pending(*, _state: Path | None = None) -> PendingElevatedConsent | None
             raise ElevatedBootstrapError("pending_corrupt")
         if not spec.requires_provider_binding and binding is not None:
             raise ElevatedBootstrapError("pending_corrupt")
-        fds_raw = source.get("secret_fds")
-        if not isinstance(fds_raw, list) or not all(
-            isinstance(item, str) for item in cast(list[object], fds_raw)
-        ):
-            raise ElevatedBootstrapError("pending_corrupt")
-        secret_fds = tuple(str(item) for item in cast(list[object], fds_raw))
-        risk = str(source["risk_class"])
-        danger_text = str(source["danger_text"])
-        if (
-            risk != spec.risk_class
-            or danger_text != spec.danger_text
-            or secret_fds != spec.secret_fds
-        ):
+        risk = _require_str(source["risk_class"])
+        danger_text = _require_str(source["danger_text"])
+        if risk != spec.risk_class or danger_text != spec.danger_text:
             raise ElevatedBootstrapError("pending_tampered")
-        target_digest = validate_sha256_digest(str(source["target_digest"]))
+        target_digest = validate_sha256_digest(_require_str(source["target_digest"]))
+        danger_digest = validate_sha256_digest(_require_str(source["danger_digest"]))
+        created_at = _require_int(source["created_at_unix"])
+        expires_at = _require_int(source["expires_at_unix"])
+        if created_at <= 0 or expires_at - created_at != _TTL_SECONDS:
+            raise ElevatedBootstrapError("pending_tampered")
         pending = PendingElevatedConsent(
-            pending_id=str(source["pending_id"]),
+            pending_id=_validated_pending_id(source["pending_id"]),
             operation=operation,  # type: ignore[arg-type]
             risk_class=risk,  # type: ignore[arg-type]
             danger_text=danger_text,
-            danger_digest=str(source["danger_digest"]),
-            confirmation_phrase=str(source["confirmation_phrase"]),
-            created_at_unix=_require_int(source["created_at_unix"]),
-            expires_at_unix=_require_int(source["expires_at_unix"]),
+            danger_digest=danger_digest,
+            created_at_unix=created_at,
+            expires_at_unix=expires_at,
             target_digest=target_digest,
             provider_binding=binding,
-            secret_fds=secret_fds,
         )
     except ElevatedBootstrapError:
         raise
@@ -499,23 +534,37 @@ def load_pending(*, _state: Path | None = None) -> PendingElevatedConsent | None
         operation=pending.operation,
         risk_class=pending.risk_class,
         danger_text=pending.danger_text,
-        confirmation_phrase=pending.confirmation_phrase,
         target_digest=pending.target_digest,
         pending_id=pending.pending_id,
         expires_at_unix=pending.expires_at_unix,
         provider_binding=pending.provider_binding,
-        secret_fds=pending.secret_fds,
     )
     if not _exact_match(expected, pending.danger_digest):
         raise ElevatedBootstrapError("pending_tampered")
-    if pending.expires_at_unix <= int(time.time()):
-        clear_pending(_state=_state)
+    if expire and pending.expires_at_unix <= int(time.time()):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise ElevatedBootstrapError("pending_clear_failed") from exc
         _audit(
             {"event": "expire", "pending_id": pending.pending_id, "operation": pending.operation},
             _state=_state,
         )
         return None
     return pending
+
+
+def load_pending(*, _state: Path | None = None) -> PendingElevatedConsent | None:
+    claim = review_path(_state=_state)
+    path = pending_path(_state=_state)
+    if claim.is_file():
+        # Complete an interrupted hard-link claim by ensuring the public pending name is gone.
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise ElevatedBootstrapError("pending_clear_failed") from exc
+        return None
+    return _load_pending_path(path, _state=_state, expire=True)
 
 
 def clear_pending(*, _state: Path | None = None) -> None:
@@ -532,27 +581,45 @@ def _exact_match(left: str, right: str) -> bool:
     return hmac.compare_digest(left, right)
 
 
-def approve_pending(
-    *,
-    pending_id: str,
-    danger_digest: str,
-    confirm: str,
-    _state: Path | None = None,
-) -> PendingElevatedConsent:
+def claim_pending_for_review(*, _state: Path | None = None) -> PendingElevatedConsent:
+    """Atomically consume one pending request for a verified-console review."""
+
     pending = load_pending(_state=_state)
     if pending is None:
         raise ElevatedBootstrapError("pending_absent")
-    if not _exact_match(pending.pending_id, pending_id):
-        raise ElevatedBootstrapError("pending_id_mismatch")
-    if not _exact_match(pending.danger_digest, danger_digest):
-        raise ElevatedBootstrapError("danger_digest_mismatch")
-    if not _exact_match(pending.confirmation_phrase, confirm):
-        raise ElevatedBootstrapError("confirmation_mismatch")
     if not operation_spec(pending.operation).implemented:
         raise ElevatedBootstrapError("operation_not_implemented")
+    source = pending_path(_state=_state)
+    claim = review_path(_state=_state)
+    try:
+        os.link(source, claim)
+    except FileExistsError as exc:
+        raise ElevatedBootstrapError("review_in_progress") from exc
+    except FileNotFoundError as exc:
+        raise ElevatedBootstrapError("pending_absent") from exc
+    except OSError as exc:
+        raise ElevatedBootstrapError("pending_claim_failed") from exc
+    try:
+        source.unlink()
+    except OSError as exc:
+        try:
+            claim.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise ElevatedBootstrapError("pending_claim_failed") from exc
+    claimed = _load_pending_path(claim, _state=_state, expire=False)
+    if claimed is None or claimed != pending:
+        try:
+            claim.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise ElevatedBootstrapError("pending_tampered")
+    if claimed.expires_at_unix <= int(time.time()):
+        complete_review(claimed, outcome="expired", _state=_state)
+        raise ElevatedBootstrapError("pending_expired")
     _audit(
         {
-            "event": "approve_accepted",
+            "event": "review_claimed",
             "pending_id": pending.pending_id,
             "operation": pending.operation,
             "risk_class": pending.risk_class,
@@ -560,117 +627,61 @@ def approve_pending(
         },
         _state=_state,
     )
-    # Single-shot: consume pending immediately so a second approve cannot reuse it.
-    clear_pending(_state=_state)
-    return pending
+    return claimed
 
 
-def read_secret_fd(fd: int, *, maximum: int) -> bytearray:
-    """Read one secret from an inherited FD; requires EOF; never uses 0/1/2."""
+def complete_review(
+    pending: PendingElevatedConsent,
+    *,
+    outcome: str,
+    _state: Path | None = None,
+) -> None:
+    """Consume the claimed request exactly once for approval, denial, cancellation, or expiry."""
 
-    if type(fd) is not int or fd in {0, 1, 2} or fd < 0:
-        raise ElevatedBootstrapError("secret_fd_invalid")
-    if type(maximum) is not int or maximum <= 0:
-        raise ElevatedBootstrapError("secret_bound_invalid")
-    storage = bytearray(maximum + 1)
-    used = 0
+    if type(pending) is not PendingElevatedConsent:
+        raise TypeError("pending_review_invalid")
+    if outcome not in {"approved", "cancelled", "denied", "expired", "failed"}:
+        raise ElevatedBootstrapError("review_outcome_invalid")
+    claim = review_path(_state=_state)
+    claimed = _load_pending_path(claim, _state=_state, expire=False)
+    if claimed is None:
+        raise ElevatedBootstrapError("pending_absent")
+    if claimed != pending:
+        raise ElevatedBootstrapError("pending_tampered")
     try:
-        while used < len(storage):
-            view = memoryview(storage)[used:]
-            try:
-                count = os.readv(fd, [view])
-            finally:
-                view.release()
-            if count == 0:
-                break
-            used += count
-        if used == 0:
-            raise ElevatedBootstrapError("secret_empty")
-        if used > maximum:
-            raise ElevatedBootstrapError("secret_too_large")
-        if storage[used - 1] in {10, 13}:
-            used -= 1
-            if used == 0:
-                raise ElevatedBootstrapError("secret_empty")
-        for index in range(used, len(storage)):
-            storage[index] = 0
-        del storage[used:]
-        return storage
-    except ElevatedBootstrapError:
-        _overwrite(storage)
-        raise
+        claim.unlink()
     except OSError as exc:
-        _overwrite(storage)
-        raise ElevatedBootstrapError("secret_fd_read_failed") from exc
+        raise ElevatedBootstrapError("pending_clear_failed") from exc
+    _audit(
+        {
+            "event": "review_consumed",
+            "pending_id": pending.pending_id,
+            "operation": pending.operation,
+            "outcome": outcome,
+        },
+        _state=_state,
+    )
 
 
-def _approve_command(pending: PendingElevatedConsent) -> list[str]:
-    # Phrase is a placeholder: agents must substitute the phrase the human typed.
-    # Pre-filling the live phrase would make approve agent-complete without human review.
-    approve = [
-        "yoetz",
-        "consent",
-        "approve",
-        "--pending-id",
-        pending.pending_id,
-        "--danger-digest",
-        pending.danger_digest,
-        "--confirm",
-        _CONFIRM_PLACEHOLDER,
-    ]
-    next_fd = 3
-    for name in pending.secret_fds:
-        approve.extend([f"--{name}", str(next_fd)])
-        next_fd += 1
-    return approve
-
-
-def projection_for_status(pending: PendingElevatedConsent | None) -> dict[str, JsonValue]:
-    """Structural status projection for agents — includes danger_text for human review."""
+def projection_for_status(
+    pending: PendingElevatedConsent | None,
+) -> dict[str, JsonValue] | None:
+    """Versioned agent-safe pending projection with no authorization or secret-ingress value."""
 
     if pending is None:
-        return {
-            "required": False,
-            "state": "not_prepared",
-            "operation": None,
-            "risk_class": None,
-            "pending_id": None,
-            "danger_digest": None,
-            "confirmation_phrase": None,
-            "secret_fds": [],
-            "forbidden_channels": list(_FORBIDDEN),
-            "user_steps": [
-                "If a non-default action is needed, run prepare for that operation.",
-                "Show the human danger_text and ask them to repeat confirmation_phrase.",
-                "Never ask for secrets in chat; use inherited FDs only when catalog requires them.",
-            ],
-        }
-    return {
-        "required": True,
-        "state": "pending",
-        "operation": pending.operation,
-        "risk_class": pending.risk_class,
-        "pending_id": pending.pending_id,
-        "danger_digest": pending.danger_digest,
-        "confirmation_phrase": pending.confirmation_phrase,
-        "danger_text": pending.danger_text,
-        "expires_at_unix": pending.expires_at_unix,
-        "target_digest": pending.target_digest,
-        "secret_fds": cast(JsonValue, list(pending.secret_fds)),
-        "approve_command": cast(JsonValue, _approve_command(pending)),
-        "forbidden_channels": cast(JsonValue, list(_FORBIDDEN)),
-        "user_steps": cast(
-            JsonValue,
-            [
-                "Show danger_text to the human.",
-                "Ask them to repeat confirmation_phrase exactly.",
-                (
-                    "Substitute the human-typed phrase for <confirmation_phrase> in approve_command; "
-                    "do not auto-fill from this projection. Supply secret FDs only if listed."
-                ),
-            ],
-        ),
-    }
+        return None
+    model = AgentSafePendingModel(
+        schema="yoetz.consent.pending-agent/2",
+        operation=pending.operation,
+        risk_class=pending.risk_class,
+        pending_id=pending.pending_id,
+        danger_digest=pending.danger_digest,
+        danger_text=pending.danger_text,
+        expires_at_unix=pending.expires_at_unix,
+        target_digest=pending.target_digest,
+        review_command=("yoetz", "consent", "review"),
+    )
+    return cast(dict[str, JsonValue], model.model_dump(mode="json", by_alias=True))
 
 
 def catalog_payload() -> dict[str, JsonValue]:
@@ -686,41 +697,49 @@ def catalog_payload() -> dict[str, JsonValue]:
                 "implemented": spec.implemented,
                 "requires_provider_binding": spec.requires_provider_binding,
                 "requires_target_digest_arg": spec.requires_target_digest_arg,
-                "secret_fds": list(spec.secret_fds),
                 "prepare_hint": (
                     f"yoetz consent prepare {spec.operation}"
                     + (" --target-digest <sha256:...>" if spec.requires_target_digest_arg else "")
                 ),
             }
         )
-    return {
-        "schema": "yoetz.consent.catalog/1",
-        "default_safe": [
-            "mcp.start",
-            "mcp.publish_work",
-            "mcp.check",
-            "mcp.respond",
-            "mcp.status",
-            "mcp.receipt",
-            "privacy.tighten",
-        ],
-        "rules": {
-            "never_over_chat_or_mcp": list(_FORBIDDEN),
-            "no_standing_yolo": True,
-            "path_safety_not_waivable_by_consent": True,
-            "prefer_tty_when_available": True,
-            "one_pending_at_a_time": True,
-        },
-        "operations": operations,
-    }
+    model = ConsentCatalogModel.model_validate(
+        {
+            "schema": "yoetz.consent.catalog/2",
+            "default_safe": [
+                "mcp.start",
+                "mcp.publish_work",
+                "mcp.check",
+                "mcp.respond",
+                "mcp.status",
+                "mcp.receipt",
+                "privacy.tighten",
+            ],
+            "rules": {
+                "never_over_chat_or_mcp": list(_FORBIDDEN),
+                "no_standing_yolo": True,
+                "path_safety_not_waivable_by_consent": True,
+                "verified_user_presence_required": True,
+                "trusted_console_is_not_authority": True,
+                "one_pending_at_a_time": True,
+                "approval_arguments_forbidden": True,
+                "agent_selected_initialization_secret_forbidden": True,
+            },
+            "operations": operations,
+        }
+    )
+    return cast(dict[str, JsonValue], model.model_dump(mode="json", by_alias=True))
 
 
 def status_payload(*, _state: Path | None = None) -> dict[str, JsonValue]:
-    return {
-        "schema": "yoetz.elevated-bootstrap.status/1",
-        "elevated_bootstrap": projection_for_status(load_pending(_state=_state)),
-        "consent_catalog": catalog_payload(),
-    }
+    model = ConsentStatusModel.model_validate(
+        {
+            "schema": "yoetz.elevated-bootstrap.status/2",
+            "pending": projection_for_status(load_pending(_state=_state)),
+            "consent_catalog": catalog_payload(),
+        }
+    )
+    return cast(dict[str, JsonValue], model.model_dump(mode="json", by_alias=True))
 
 
 def _write_pending(pending: PendingElevatedConsent, *, _state: Path | None) -> None:
@@ -749,8 +768,3 @@ def _audit(event: Mapping[str, JsonValue], *, _state: Path | None) -> None:
         os.write(fd, line)
     finally:
         os.close(fd)
-
-
-def _overwrite(buffer: bytearray) -> None:
-    for index in range(len(buffer)):
-        buffer[index] = 0

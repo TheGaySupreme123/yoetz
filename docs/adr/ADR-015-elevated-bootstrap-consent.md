@@ -1,70 +1,88 @@
-# ADR-015 — Founder-authorized elevated bootstrap consent for cloud agents
+# ADR-015 — OS-presence-gated elevated bootstrap consent
 
-**Status:** Superseded in scope by ADR-016 for the general non-default consent catalog; the
-bootstrap secret-ingress lane and FD rules below remain binding.
+**Status:** Amended 2026-07-31; superseded in scope by ADR-016 for the general non-default
+consent catalog. Elevated execution remains fail-closed until a verified OS-presence adapter is
+installed.
 **Implemented by:** `src/yoetz/service/elevated_bootstrap.py`,
-`src/yoetz/cli/elevated.py`, amendments to ADR-008, ADR-009 agent-context wording for
-structural consent projection only, `guidance/agent-instructions.md`, `OPEN_QUESTIONS.md`.
-**Relates to:** ADR-008 (vault/TTY ceremony), ADR-009 (egress / agent context), ADR-012 (setup).
+`src/yoetz/cli/elevated.py`, `src/yoetz/cli/trusted_console.py`, and
+`src/yoetz/protocol/consent.py`.
+**Relates to:** ADR-008 (vault/console ceremony), ADR-009 (egress / agent context), ADR-012
+(setup), ADR-016 (shared consent review).
 
 ## Context
 
-Cloud coding agents (Cursor Cloud, Codex remote, similar) run without a user-owned controlling
-`/dev/tty`. ADR-008 therefore blocks `vault_initialize` and `provider_credential_set` in those
-environments even when the human is present in the host UI and can grant consent.
-
-Leading agent hosts separate **capability containment** from **human consent** (Codex approval
-policies, Claude permission modes, Cursor cloud isolation + allowlists, MCP elicitation). Yoetz
-needs an analogous, narrower path: the agent may *request* elevated bootstrap; the human must
-*grant* exact digest-bound consent; secrets still never travel over MCP, argv, env, config, or
-chat paste.
+An agent may prepare and inspect a non-default operation, but the same agent-capable channel must
+not receive a reusable value that authorizes it. Vault initialization also must not accept an
+agent-selected passphrase. Consent therefore needs a local human boundary independent of argv,
+environment, stdin, MCP, agent JSON, and caller booleans.
 
 ## Decisions
 
-1. **Ordinary path unchanged.** Interactive local users keep the ADR-008 `/dev/tty` ceremony.
+1. **Implemented bootstrap operations.** `vault_initialize`, `provider_credential_set`, and
+   `provider_credential_rotate` use this lane. It is not a vault-unlock API, recovery API, or
+   standing elevation mode.
 
-2. **Scoped elevated bootstrap only (ADR-015 lane).** Exact *implemented* secret-ingress
-   operations: `vault_initialize`, `provider_credential_set`, and (per ADR-016 catalog)
-   `provider_credential_rotate`. Not vault unlock loops, privacy widening, idle-relock weakening,
-   portable recovery, phrase-only irreversible ops, or a general `--yolo`. ADR-016 catalogues
-   additional ops with `implemented=false` until durable grant consumption exists.
+2. **Agent-safe preparation.** `yoetz consent prepare` creates one owner-only
+   `yoetz.elevated-bootstrap.pending/2` record. Its agent projection is
+   `yoetz.consent.pending-agent/2` and contains only operation, risk class, bounded danger text,
+   exact danger and target digests, expiry, pending ID, and the fixed
+   `["yoetz","consent","review"]` command. Version-1 pending records are invalidated, not migrated.
 
-3. **Consent challenge, then FD secrets.** Flow:
-   - `yoetz elevated-bootstrap prepare …` creates one owner-only pending record with danger text,
-     `danger_digest`, and a random confirmation phrase (no secrets).
-   - MCP / agent instructions surface structural pending facts and an approve-command template
-     with a `<confirmation_phrase>` placeholder — never tokens, secrets, paths, proofs, or a
-     pre-filled live phrase in the command template (phrase is shown separately for human display).
-   - Human reviews danger text in the host UI/chat and supplies the confirmation phrase.
-   - `yoetz consent approve … --confirm "…" --passphrase-fd N` (and for credentials,
-     `--reauth-fd` / `--credential-fd`) verifies pending digests/phrase (single-shot consume), then
-     drives the existing YZH1/YZS1 path with secret bytes read only from inherited FDs (not 0/1/2).
+3. **One approval surface.** `yoetz consent review` takes no authority-bearing arguments. Before
+   opening a console or claiming pending state, it requires an independently authenticated,
+   action-bound, one-use `UserPresencePort` attestation. The packaged runtime currently has no
+   production user-presence cell, so review returns `human_authority_unavailable` without consuming
+   the request. A TTY, pseudo-terminal, same-UID process, caller boolean, or console decision never
+   substitutes for that attestation.
 
-4. **ADR-008 amendment (narrow).** The rejected “generic inherited password FD” alternative is
-   opened **only** for this founder-authorized elevated-bootstrap approve path after exact
-   pending consent. MCP and ordinary `ServiceClient` still cannot carry secret bytes.
+4. **Single-shot state.** A review claim consumes the public pending name. Approval, denial,
+   cancellation, expiry, and post-claim failure consume the claim once. Concurrent and duplicate
+   reviewers fail closed. An ambiguous crash may leave the private reviewing marker in place; that
+   blocks both reuse and a new preparation until an explicit repair path is designed.
 
-5. **Storage.** Pending consent is ephemeral owner-only file state under platformdirs (not a
-   catalog `0002`), because bootstrap must work while the vault is uninitialized. Structural
-   audit events append to an owner-only JSONL file without secret material.
+5. **Vault initialization secret.** The trusted helper generates a high-entropy passphrase,
+   round-trips it through the exact bundle-scoped platform credential store, and submits it
+   directly through the existing confidential ceremony. No agent- or caller-selected
+   initialization passphrase is accepted. A pre-existing scoped entry, even when valid, blocks
+   initialization rather than becoming the vault secret. Generated mutable buffers are overwritten
+   best-effort.
 
-6. **Same-UID honesty.** This does not claim cryptographic exclusion of malicious same-UID
-   code. It records human intent for cloud-agent orchestration; TTY remains the stronger local
-   human ceremony.
+6. **Credential-store failures.** A backend known to be unavailable before any write may offer the
+   existing manual human-passphrase ceremony on the same trusted console. An ambiguous write,
+   failed read-back, any existing entry, or mismatch stops before vault initialization.
+
+7. **Provider credentials.** Set and rotate use the same trusted review and confidential ceremony.
+   Credential bytes never enter the pending record, catalog, result, log, error, or agent
+   projection.
+
+8. **Console is not authority.** On macOS/Linux, the boundary opens `/dev/tty`, requires matching terminal
+   identities for standard input/error, requires the current foreground process group, and uses
+   no-echo reads. On Windows it opens `CONIN$`/`CONOUT$`, validates real console handles and current
+   process attachment, and reads through Win32 console APIs with echo disabled. It never falls back
+   to redirected standard streams. It is a presentation and secret-ingress boundary only. Absence
+   or ambiguity returns `trusted_console_required`; presence still grants no authority.
 
 ## Consequences
 
-Cloud agents can complete first-run vault init and provider credential set after explicit human
-consent, without putting secrets on MCP. Local interactive installs remain on the TTY path.
-OPEN_QUESTIONS “generic headless passphrase input” stays deferred; this ADR is a scoped
-exception, not a general headless vault API.
+Until a production `UserPresencePort` is capability-tested and wired, elevated review cannot
+initialize a vault or mutate provider credentials. The explicit manual
+`service initialize-passphrase` ceremony remains available. Existing vault data,
+vault mode, installation identity, and auto-unlock credentials are not migrated or rewrapped.
+Later restarts continue through the existing scoped auto-unlock path. The Windows console adapter
+does not imply support for the full Windows service transport, peer authentication, packaging, or
+release surface.
+
+Native OS-authenticated prompts, natural-language host approval, approved-machine profiles,
+durable grants, E2EE service authority, and MCP presentation UX remain separate design work.
 
 ## Alternatives considered
 
-**Agent-held bearer consent token + later complete.** Rejected: token is vault-adjacent
-capability until burn; races widen the same-UID window.
+**Agent-visible approval value.** Rejected because the requesting channel could also submit it.
 
-**Secrets via MCP elicitation form.** Rejected: ADR-009 / MCP guidance forbid secrets in agent
-context; use out-of-band FDs after consent.
+**Agent-supplied initialization secret.** Rejected because it lets the agent control the vault
+root secret even if a human approved the operation.
 
-**Standing danger mode / `--yolo`.** Rejected: too broad; contradicts ADR-008 threat model.
+**MCP elicitation as authority.** Deferred. It may later present the request but cannot authorize
+without a verified client/user identity channel.
+
+**Standing danger mode.** Rejected because its scope outlives one exact operation and digest.
