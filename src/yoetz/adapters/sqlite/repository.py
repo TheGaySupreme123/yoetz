@@ -769,12 +769,32 @@ class SqliteLedger:
             self._inventory_object(job.case_object_ref)
             if job.selected_result_object_ref is not None:
                 self._inventory_object(job.selected_result_object_ref)
+            # ON CONFLICT DO UPDATE, not INSERT OR REPLACE, for two reasons. It preserves
+            # created_at: the old form rewrote it to "now" on every sync of every job, so a job
+            # could appear to have been created after it terminated and the durable rows could
+            # not be used to reconstruct what happened. And it updates the row in place instead
+            # of deleting and re-inserting it, which matters because semantic_jobs and
+            # semantic_attempts reference each other — the delete was only survivable because of
+            # the deferred-foreign-keys pragma.
             self._db.execute(
-                "INSERT OR REPLACE INTO semantic_jobs(job_id,writer_id,operation_id,case_digest,"
+                "INSERT INTO semantic_jobs(job_id,writer_id,operation_id,case_digest,"
                 "case_object_id,state,active_attempt_id,selected_attempt_id,attempt_count,"
                 "owner_generation,lease_owner_id,lease_generation,lease_expires_at,"
                 "selected_result_object_id,terminal_code,terminal_at,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(job_id) DO UPDATE SET "
+                "state=excluded.state,active_attempt_id=excluded.active_attempt_id,"
+                "selected_attempt_id=excluded.selected_attempt_id,"
+                "attempt_count=excluded.attempt_count,"
+                "owner_generation=excluded.owner_generation,"
+                "lease_owner_id=excluded.lease_owner_id,"
+                "lease_generation=excluded.lease_generation,"
+                "lease_expires_at=excluded.lease_expires_at,"
+                "selected_result_object_id=excluded.selected_result_object_id,"
+                "terminal_code=excluded.terminal_code,"
+                # Stamped once, on the transition; never dragged forward by a later sync.
+                "terminal_at=COALESCE(semantic_jobs.terminal_at,excluded.terminal_at),"
+                "updated_at=excluded.updated_at",
                 (
                     job.job_id,
                     job.writer_id,
@@ -804,10 +824,18 @@ class SqliteLedger:
             if attempt.result_object_ref is not None:
                 self._inventory_object(attempt.result_object_ref)
             handle = attempt.handle
+            # started_at is the claim time and must survive every later sync; the old form
+            # rewrote it to "now" each time, which is why the recorded attempt timestamps from
+            # the stranded dogfood run could not be trusted.
             self._db.execute(
-                "INSERT OR REPLACE INTO semantic_attempts(attempt_id,job_id,attempt_ordinal,"
+                "INSERT INTO semantic_attempts(attempt_id,job_id,attempt_ordinal,"
                 "provider_request_id,owner_generation,lease_owner_id,lease_generation,state,"
-                "result_object_id,terminal_code,started_at,terminal_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "result_object_id,terminal_code,started_at,terminal_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(attempt_id) DO UPDATE SET "
+                "state=excluded.state,result_object_id=excluded.result_object_id,"
+                "terminal_code=excluded.terminal_code,"
+                "terminal_at=COALESCE(semantic_attempts.terminal_at,excluded.terminal_at)",
                 (
                     handle.attempt_id,
                     handle.job_id,
