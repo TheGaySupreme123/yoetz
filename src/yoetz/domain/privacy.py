@@ -507,6 +507,33 @@ class ReviewSelectionPolicy:
             max_total_excerpt_bytes=max_total_excerpt_bytes,
         )
 
+    def required_categories(self) -> frozenset[DataCategory]:
+        """Categories the selected sections will actually produce case items in.
+
+        Selection decides what the case is *built* from; a channel's ``allowed_categories``
+        decides what may *leave*. The two are configured independently and nothing reconciled
+        them, so a profile could select obligations and finding prose while the channel forbade
+        ``obligation_text`` and ``finding_summary`` — the reviewer was then asked whether the work
+        satisfied its obligations with the obligations withheld, and answered nothing.
+        """
+
+        by_section: dict[str, DataCategory] = {
+            "goal": DataCategory.TASK_DESCRIPTION,
+            "obligations": DataCategory.OBLIGATION_TEXT,
+            "claims": DataCategory.CLAIM_TEXT,
+            "decisions": DataCategory.DECISION_EXCERPT,
+        }
+        required = {
+            by_section[section] for section in self.sections if section in by_section
+        }
+        # The timeline and the structural spine are always bounded metadata.
+        required.add(DataCategory.BOUNDED_STRUCTURAL_METADATA)
+        if self.include_finding_prose:
+            required.add(DataCategory.FINDING_SUMMARY)
+        if self.max_excerpts:
+            required.add(DataCategory.EVIDENCE_EXCERPT)
+        return frozenset(required)
+
     def meet(self, other: ReviewSelectionPolicy) -> ReviewSelectionPolicy:
         if type(other) is not ReviewSelectionPolicy:
             raise _invalid()
@@ -743,6 +770,34 @@ class PrivacyPolicy:
             policy.channel
             for policy in self.channel_policies
             if policy.enabled and policy.channel is not EgressChannel.LLM_INFERENCE
+        )
+
+    @property
+    def withheld_review_categories(self) -> tuple[DataCategory, ...]:
+        """Categories the review selects but the inference channel will not let out.
+
+        Non-empty means the semantic reviewer receives a case with holes in exactly the places
+        the review profile claimed to fill. That is a legitimate configuration — narrowing egress
+        is always allowed — but it must never be silent, because the review still reports
+        ``succeeded`` while being unable to answer the question it was asked.
+        """
+
+        channel = next(
+            (
+                item
+                for item in self.channel_policies
+                if item.channel is EgressChannel.LLM_INFERENCE
+            ),
+            None,
+        )
+        if channel is None or not channel.enabled:
+            return ()
+        permitted = set(channel.allowed_categories)
+        return tuple(
+            sorted(
+                self.review_selection.required_categories() - permitted,
+                key=lambda item: item.value.encode("ascii"),
+            )
         )
 
 

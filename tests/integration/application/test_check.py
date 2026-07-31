@@ -441,3 +441,36 @@ async def test_route_identity_mismatch_maps_to_session_conflict() -> None:
 
     assert caught.value.code is PublicErrorCode.SESSION_CONFLICT
     assert cast(_Runtime, app.runtime).release_count == 1
+
+
+@pytest.mark.anyio
+async def test_succeeded_review_with_withheld_context_is_not_reported_as_full_coverage() -> None:
+    """A review that ran without material its own profile selected must show up in coverage.
+
+    A live installation ran review profile ``assisted`` while its inference channel permitted
+    neither ``obligation_text`` nor ``finding_summary``. The reviewer was asked whether the work
+    satisfied its obligations with the obligations withheld, produced zero findings, and reported
+    ``semantic_status: succeeded`` — which reads as a clean, complete review. Coverage has to
+    carry the difference, or the receipt inherits the same false impression.
+    """
+
+    from yoetz.domain.receipts import SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP
+
+    app = _App(semantic=True)
+    app.semantic_result = FinalSemanticEvaluation(
+        SemanticStatus.NOT_REQUESTED,
+        SemanticReason.DETERMINISTIC_MODE,
+        withheld_review_categories=("finding_summary", "obligation_text"),
+    )
+    result = await execute_check_commit(app, _request("semantic_if_configured"))
+    assert SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP in result.coverage.known_gaps
+    assert result.verdict.value != "no_issue_detected"
+
+    # A review whose profile and channel agree declares no such gap.
+    agreed = _App(semantic=True)
+    agreed.semantic_result = FinalSemanticEvaluation(
+        SemanticStatus.NOT_REQUESTED,
+        SemanticReason.DETERMINISTIC_MODE,
+    )
+    clean = await execute_check_commit(agreed, _request("semantic_if_configured"))
+    assert SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP not in clean.coverage.known_gaps

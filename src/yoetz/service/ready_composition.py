@@ -1685,6 +1685,9 @@ def _privacy_gated_semantic_evaluator(
         # OPERATION_PENDING and the whole operation is lost rather than recording an honest
         # semantic failure. That is what stranded the 2026-07-30 dogfood run.
         current_lease: list[_OpLease] = [frozen.lease]
+        # Bound here too: the catch-all below can be reached before the policy is resolved, and
+        # an unbound name there would turn a reportable failure into a second one.
+        withheld: tuple[str, ...] = ()
 
         def _on_lease_renewed(renewed: object) -> None:
             assert type(renewed) is _OpLease
@@ -1754,6 +1757,18 @@ def _privacy_gated_semantic_evaluator(
             review_selection = policy.review_selection
             policy_id = policy.policy_id
             policy_version = str(policy.version)
+            # Selection and channel categories are configured independently. When they disagree
+            # the reviewer is handed a case with holes exactly where its profile promised
+            # material, yet still reports succeeded — so record it and carry it into coverage
+            # rather than letting a hollow review read as a complete one.
+            withheld = tuple(item.value for item in policy.withheld_review_categories)
+            if withheld:
+                record_bounded_event_without_raising(
+                    component="semantic_composition",
+                    operation="semantic_review_context_categories_withheld",
+                    reason=SemanticReason.SEMANTIC_COMPLETED.value,
+                    request_id=frozen.lease.operation_id,
+                )
             semantic_case = build_semantic_case(
                 case_id=ids.new(IdKind.OUTBOUND_CASE),
                 frozen_case=frozen.case,
@@ -1804,6 +1819,7 @@ def _privacy_gated_semantic_evaluator(
                     SemanticStatus.FAILED,
                     SemanticReason.COORDINATOR_FAILURE,
                     operation_lease=current_lease[0],
+                    withheld_review_categories=withheld,
                 )
 
             # One durable semantic job per check: create/recover after freeze, before dispatch.
@@ -1884,6 +1900,7 @@ def _privacy_gated_semantic_evaluator(
                         SemanticReason.COORDINATOR_FAILURE,
                         attempt_accounting=accounting,
                         operation_lease=current_lease[0],
+                        withheld_review_categories=withheld,
                     )
                 return FinalSemanticEvaluation(
                     status,
@@ -1892,6 +1909,7 @@ def _privacy_gated_semantic_evaluator(
                     provenance=provenance,
                     attempt_accounting=accounting,
                     operation_lease=current_lease[0],
+                    withheld_review_categories=withheld,
                 )
 
             return cast(
@@ -1921,6 +1939,7 @@ def _privacy_gated_semantic_evaluator(
                 SemanticStatus.FAILED,
                 SemanticReason.COORDINATOR_FAILURE,
                 operation_lease=current_lease[0],
+                withheld_review_categories=withheld,
             )
 
     return _evaluate
