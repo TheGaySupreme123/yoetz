@@ -20,6 +20,7 @@ from yoetz.domain.findings import (
 from yoetz.domain.receipts import (
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
+    SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
 )
@@ -240,6 +241,9 @@ class FinalSemanticEvaluation:
     # When the durable semantic phase renewed the check operation lease (lease TTL is 60s while
     # timeout_seconds may be longer), later phase advance / commit must use this CAS fence.
     operation_lease: OperationLease | None = None
+    # Categories the review profile selected that the inference channel did not permit. A review
+    # can succeed while structurally unable to answer its own question; coverage must say so.
+    withheld_review_categories: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         validate_semantic_outcome(self.status, self.reason)
@@ -886,6 +890,12 @@ async def _semantic_evaluation(
             operation="semantic_not_dispatched_coordinator_failure",
             request_id=request.request_id,
         )
+        # Deliberately no operation_lease: reaching here means the evaluator raised *before* it
+        # could renew, so the caller's token is still the live one. The evaluator itself catches
+        # everything from the durable path and returns its renewed lease, and the attempt loop
+        # terminalizes rather than raising — if either of those regresses, this path would start
+        # handing back a stale lease and the check would be lost to OPERATION_PENDING instead of
+        # recording an honest failure. There is no API to re-acquire a lease you already hold.
         return FinalSemanticEvaluation(
             SemanticStatus.FAILED,
             SemanticReason.COORDINATOR_FAILURE,
@@ -1014,9 +1024,18 @@ async def execute_check_commit(
             SemanticStatus.SUCCEEDED,
         }
         semantic_gap = semantic_coverage_gap_code(semantic_result.status, semantic_result.reason)
-        if semantic_gap is not None and semantic_gap not in coverage.known_gaps:
-            gaps = set(coverage.known_gaps)
-            gaps.add(semantic_gap)
+        declared_gaps: set[str] = set() if semantic_gap is None else {semantic_gap}
+        # A review that ran without material its own profile selected is not full coverage, even
+        # though it reports succeeded. Saying so here is what stops a hollow review from reading
+        # as a clean one in the check result and the receipt derived from it.
+        if (
+            semantic_result.status is SemanticStatus.SUCCEEDED
+            and semantic_result.withheld_review_categories
+        ):
+            declared_gaps.add(SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP)
+        new_gaps = declared_gaps - set(coverage.known_gaps)
+        if new_gaps:
+            gaps = set(coverage.known_gaps) | new_gaps
             freshness = coverage.ledger_freshness
             if freshness is LedgerFreshness.CURRENT:
                 freshness = LedgerFreshness.PARTIAL

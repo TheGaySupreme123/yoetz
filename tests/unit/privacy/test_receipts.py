@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 import pytest
 
 from yoetz.domain.privacy import (
+    MAX_EGRESS_CASE_BYTES,
     AuthorizationScope,
     AuthorizationScopeKind,
     ConsentSource,
@@ -200,7 +201,9 @@ def test_no_dispatch_forbidden_data_receipt_requires_none_consent_and_failed_sca
 
 def test_counts_scan_and_destination_cross_field_invariants_fail_closed() -> None:
     with pytest.raises(ValueError, match="invalid_privacy_value"):
-        ReceiptCounts(2, 2, 1, 1, 1, 10, 262_145)
+        # Track the constant rather than a literal: this previously pinned 262_145 and silently
+        # stopped testing the boundary when the egress ceiling moved.
+        ReceiptCounts(2, 2, 1, 1, 1, 10, MAX_EGRESS_CASE_BYTES + 1)
     with pytest.raises(ValueError, match="invalid_privacy_value"):
         ReceiptSecretScan("1", _DIGEST, 1, 1)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="invalid_privacy_value"):

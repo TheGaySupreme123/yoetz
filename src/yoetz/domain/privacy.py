@@ -67,14 +67,28 @@ __all__ = [
     "ReceiptPolicyBinding",
     "ReceiptSecretScan",
     "ReceiptTransformations",
+    "REVIEW_PACKET_ITEM_ID",
     "RequestCommitment",
     "ReviewContextProfile",
     "ReviewSelectionPolicy",
     "outcome_reason_is_valid",
 ]
 
+# Reserved item id for the structural review-packet envelope. Owned here rather than in the
+# application layer because the egress bound below is keyed on it.
+REVIEW_PACKET_ITEM_ID: Final = "review-packet"
+
 MAX_EGRESS_ITEM_BYTES: Final = 16 * 1024
-MAX_EGRESS_CASE_BYTES: Final = 256 * 1024
+# The structural review-packet envelope is one candidate item by transport, but it is not one
+# piece of content: it is the catalog and packet spine indexing every other item in the case.
+# Budgeting it as a single excerpt is what made a real 44 KiB case unsendable, so it carries its
+# own bound. Only the generated envelope may use it — see ``_envelope_item_limit``.
+MAX_EGRESS_ENVELOPE_BYTES: Final = 128 * 1024
+# Bounds the whole assembled outbound document (envelope spine + every approved content item),
+# so it must exceed the parts: MAX_EGRESS_ENVELOPE_BYTES + MAX_SEMANTIC_CASE_BYTES = 384 KiB.
+# It previously equalled the content budget alone, which made a maximum-content case impossible
+# to dispatch no matter how small its envelope was.
+MAX_EGRESS_CASE_BYTES: Final = 512 * 1024
 AUDIT_STORE_VERSION: Final = 1
 PRIVACY_REQUEST_COMMITMENT_ALGORITHM: Final = "hmac-sha256/yoetz-privacy-egress-request-v1"
 
@@ -493,6 +507,31 @@ class ReviewSelectionPolicy:
             max_total_excerpt_bytes=max_total_excerpt_bytes,
         )
 
+    def required_categories(self) -> frozenset[DataCategory]:
+        """Categories the selected sections will actually produce case items in.
+
+        Selection decides what the case is *built* from; a channel's ``allowed_categories``
+        decides what may *leave*. The two are configured independently and nothing reconciled
+        them, so a profile could select obligations and finding prose while the channel forbade
+        ``obligation_text`` and ``finding_summary`` — the reviewer was then asked whether the work
+        satisfied its obligations with the obligations withheld, and answered nothing.
+        """
+
+        by_section: dict[str, DataCategory] = {
+            "goal": DataCategory.TASK_DESCRIPTION,
+            "obligations": DataCategory.OBLIGATION_TEXT,
+            "claims": DataCategory.CLAIM_TEXT,
+            "decisions": DataCategory.DECISION_EXCERPT,
+        }
+        required = {by_section[section] for section in self.sections if section in by_section}
+        # The timeline and the structural spine are always bounded metadata.
+        required.add(DataCategory.BOUNDED_STRUCTURAL_METADATA)
+        if self.include_finding_prose:
+            required.add(DataCategory.FINDING_SUMMARY)
+        if self.max_excerpts:
+            required.add(DataCategory.EVIDENCE_EXCERPT)
+        return frozenset(required)
+
     def meet(self, other: ReviewSelectionPolicy) -> ReviewSelectionPolicy:
         if type(other) is not ReviewSelectionPolicy:
             raise _invalid()
@@ -731,6 +770,30 @@ class PrivacyPolicy:
             if policy.enabled and policy.channel is not EgressChannel.LLM_INFERENCE
         )
 
+    @property
+    def withheld_review_categories(self) -> tuple[DataCategory, ...]:
+        """Categories the review selects but the inference channel will not let out.
+
+        Non-empty means the semantic reviewer receives a case with holes in exactly the places
+        the review profile claimed to fill. That is a legitimate configuration — narrowing egress
+        is always allowed — but it must never be silent, because the review still reports
+        ``succeeded`` while being unable to answer the question it was asked.
+        """
+
+        channel = next(
+            (item for item in self.channel_policies if item.channel is EgressChannel.LLM_INFERENCE),
+            None,
+        )
+        if channel is None or not channel.enabled:
+            return ()
+        permitted = set(channel.allowed_categories)
+        return tuple(
+            sorted(
+                self.review_selection.required_categories() - permitted,
+                key=lambda item: item.value.encode("ascii"),
+            )
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class PolicyOverlay:
@@ -778,6 +841,19 @@ class PolicyOverlay:
             raise _invalid()
 
 
+def _envelope_item_limit(item_id: str, category: DataCategory) -> int:
+    """Per-item plaintext bound, widened only for the generated structural envelope.
+
+    The exemption is keyed on both the reserved item id and the bounded-structural category, so a
+    caller cannot widen the bound for prose by borrowing the id, nor by declaring the category on
+    an item the builder did not generate.
+    """
+
+    if item_id == REVIEW_PACKET_ITEM_ID and category is DataCategory.BOUNDED_STRUCTURAL_METADATA:
+        return MAX_EGRESS_ENVELOPE_BYTES
+    return MAX_EGRESS_ITEM_BYTES
+
+
 @dataclass(frozen=True, slots=True)
 class CandidateContextItem:
     item_id: str
@@ -793,7 +869,9 @@ class CandidateContextItem:
         if type(self.source_scope) is not AuthorizationScope:
             raise _invalid()
         _origin_ref(self.origin_ref)
-        if type(self.plaintext) is not bytes or len(self.plaintext) > MAX_EGRESS_ITEM_BYTES:
+        if type(self.plaintext) is not bytes or len(self.plaintext) > _envelope_item_limit(
+            self.item_id, self.category
+        ):
             raise _invalid()
         object.__setattr__(self, "contributor_refs", _sorted_text(self.contributor_refs))
 

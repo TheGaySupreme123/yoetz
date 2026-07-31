@@ -69,6 +69,7 @@ __all__ = [
     "ReceiptSectionKey",
     "ReceiptVersionSlice",
     "SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP",
+    "SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP",
     "SEMANTIC_REVIEW_NOT_CONFIGURED_GAP",
     "SEMANTIC_REVIEW_NOT_REQUESTED_GAP",
     "SchemaVersionEntry",
@@ -83,6 +84,9 @@ __all__ = [
 # semantic_review_not_requested marks every deterministic-only check (semantic never attempted).
 SEMANTIC_REVIEW_NOT_CONFIGURED_GAP: Final = "semantic_review_not_configured"
 SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP: Final = "semantic_relevance_review_not_run"
+# The review ran, but the inference channel withheld categories the review profile
+# selected, so it judged the work without material it was configured to receive.
+SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP: Final = "semantic_review_context_withheld"
 SEMANTIC_REVIEW_NOT_REQUESTED_GAP: Final = "semantic_review_not_requested"
 OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP: Final = "optional_semantic_review_blocked_by_policy"
 _SEMANTIC_REVIEW_NOT_RUN_GAPS: Final = frozenset(

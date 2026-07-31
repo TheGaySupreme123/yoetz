@@ -6,8 +6,8 @@ import asyncio
 import hashlib
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import replace
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import apsw
@@ -32,6 +32,7 @@ from yoetz.ports.ledger import (
     FrozenCase,
     OperationKind,
     SelectedAttempt,
+    SemanticAttemptHandle,
 )
 from yoetz.ports.objects import (
     ObjectKind,
@@ -466,3 +467,184 @@ async def test_semantic_job_can_fail_terminally_without_fabricating_an_attempt()
         assert failed.attempt_count == 0
         assert failed.terminal_code is SemanticReason.PROVIDER_TIMEOUT
         assert await adapter.list_semantic_attempts(job.job_id) == ()
+
+
+@pytest.mark.anyio
+async def test_semantic_lifecycle_timestamps_survive_later_syncs() -> None:
+    """Durable job/attempt timestamps must record when things happened, not when we last synced.
+
+    Every ``_sync_runtime_state`` rewrote ``created_at`` / ``started_at`` / ``terminal_at`` to the
+    current clock for *every* job and attempt, so the stranded 2026-07-30 rows showed a claim time
+    later than the failure that caused them. Reconstructing a durable lifecycle from rows that get
+    restamped on unrelated writes is not possible, which is exactly what recovery needs to do.
+    """
+
+    command = ledger_command()
+
+    class _AdvancingClock:
+        """A clock that moves, so identical timestamps prove preservation rather than a fixed clock.
+
+        With the suite's fixed clock every write stamps the same instant, so a test asserting
+        "created_at is unchanged" would pass even with the original rewrite-everything-to-now
+        behaviour. Advancing time is what makes the assertion mean something.
+        """
+
+        def __init__(self) -> None:
+            self._ticks = 0
+
+        def now_utc(self) -> datetime:
+            self._ticks += 1
+            return datetime(2026, 7, 19, 12, 0, tzinfo=UTC) + timedelta(seconds=self._ticks)
+
+        def monotonic_seconds(self) -> float:
+            return float(self._ticks)
+
+    db = apsw.Connection(":memory:")
+    initialize_bundle(
+        db,
+        {
+            "task_id": command.task_id,
+            "owner_generation": "1",
+            "owner_nonce": "ledger-test-nonce",
+        },
+    )
+    ids = _Ids()
+    adapter = SqliteLedger(
+        db=db,
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=_AdvancingClock(),
+        ids=ids,
+        objects=_Objects(ids),
+    )
+    await adapter.append_batch(command)
+    frozen = await adapter.freeze_case(
+        command.session_id,
+        command.writer_id,
+        1,
+        "req_00000000-0000-4000-8000-000000000012",
+        "sha256:" + "c" * 64,
+    )
+    assert type(frozen) is FrozenCase
+    lease = await adapter.advance_check_phase(
+        frozen.lease,
+        CheckPhase.RESERVED,
+        CheckPhase.LOCAL_READY,
+        await _local_result_ref(adapter, command),
+    )
+    lease = await adapter.advance_check_phase(
+        lease, CheckPhase.LOCAL_READY, CheckPhase.SEMANTIC_WAIT
+    )
+    case_ref = await _object_ref(adapter, command, ObjectKind.SEMANTIC_CASE)
+    job = await adapter.enqueue_semantic_job(lease, "sha256:" + "d" * 64, case_ref)
+    handle = await adapter.claim_semantic_job(lease, job.job_id)
+
+    def _row(table: str, column: str, key: str) -> str:
+        key_column = "job_id" if table == "semantic_jobs" else "attempt_id"
+        cursor = adapter._db.execute(  # pyright: ignore[reportPrivateUsage]
+            f"SELECT {column} FROM {table} WHERE {key_column}=?", (key,)
+        )
+        value = next(iter(cursor))[0]
+        assert type(value) is str
+        return value
+
+    created_at = _row("semantic_jobs", "created_at", job.job_id)
+    started_at = _row("semantic_attempts", "started_at", handle.attempt_id)
+
+    # An unrelated durable write drives another full runtime sync.
+    await adapter.record_attempt_outcome(
+        handle, AttemptOutcome.FAILED, terminal_code=SemanticReason.COORDINATOR_FAILURE
+    )
+    terminal_at = _row("semantic_attempts", "terminal_at", handle.attempt_id)
+    assert _row("semantic_jobs", "created_at", job.job_id) == created_at
+    assert _row("semantic_attempts", "started_at", handle.attempt_id) == started_at
+
+    await adapter.renew_leases(lease)
+    assert _row("semantic_jobs", "created_at", job.job_id) == created_at
+    assert _row("semantic_attempts", "started_at", handle.attempt_id) == started_at
+    # Terminal instants are stamped once, never dragged forward by a later sync either.
+    assert _row("semantic_attempts", "terminal_at", handle.attempt_id) == terminal_at
+
+
+@pytest.mark.anyio
+async def test_raising_dispatch_strands_nothing_in_either_real_ledger() -> None:
+    """The attempt loop must leave no leased job or started attempt, against real adapters.
+
+    Every existing attempt-loop test drives a hand-written fake ledger, so the invariant that
+    actually failed in production — durable rows left mid-flight after a raise — was only ever
+    asserted against a stand-in for the thing that holds them. This runs the real loop against
+    both shipped adapters.
+    """
+
+    from yoetz.application.semantic_attempts import (
+        SemanticAttemptAccounting,
+        run_durable_semantic_attempts,
+    )
+    from yoetz.ports.semantic import Deadline
+
+    @dataclass(frozen=True, slots=True)
+    class _Eval:
+        """Satisfies the dispatch return protocol; never actually constructed here."""
+
+        status: SemanticStatus
+        reason: SemanticReason
+        judgment: object | None = None
+        provenance: object | None = None
+
+    for factory in (memory_ledger, sqlite_ledger):
+        command = ledger_command()
+        adapter = factory(command)
+        await adapter.append_batch(command)
+        frozen = await adapter.freeze_case(
+            command.session_id,
+            command.writer_id,
+            1,
+            "req_00000000-0000-4000-8000-000000000013",
+            "sha256:" + "e" * 64,
+        )
+        assert type(frozen) is FrozenCase
+        lease = await adapter.advance_check_phase(
+            frozen.lease,
+            CheckPhase.RESERVED,
+            CheckPhase.LOCAL_READY,
+            await _local_result_ref(adapter, command),
+        )
+        lease = await adapter.advance_check_phase(
+            lease, CheckPhase.LOCAL_READY, CheckPhase.SEMANTIC_WAIT
+        )
+        case_ref = await _object_ref(adapter, command, ObjectKind.SEMANTIC_CASE)
+        job = await adapter.enqueue_semantic_job(lease, "sha256:" + "f" * 64, case_ref)
+
+        async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
+            raise ValueError("semantic_case_envelope_too_large")
+
+        async def publish(handle: SemanticAttemptHandle, evaluation: object) -> ObjectRef:
+            raise AssertionError("publish_must_not_run")
+
+        def build_final(
+            status: SemanticStatus,
+            reason: SemanticReason,
+            evaluation: object | None,
+            accounting: SemanticAttemptAccounting,
+        ) -> object:
+            return (status, reason)
+
+        outcome = await run_durable_semantic_attempts(
+            ledger=adapter,
+            lease=lease,
+            job=job,
+            deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1_000.0),
+            max_retries=2,
+            now_monotonic=lambda: 0.0,
+            dispatch=dispatch,
+            publish_success_response=publish,
+            build_final=build_final,
+        )
+        assert outcome == (SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE)
+
+        loaded = await adapter.load_semantic_job(command.writer_id, frozen.lease.operation_id)
+        assert loaded is not None
+        assert loaded.state == "failed"
+        assert loaded.active_attempt_id is None
+        attempts = await adapter.list_semantic_attempts(loaded.job_id)
+        assert [row.state for row in attempts] == ["failed"]

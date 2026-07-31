@@ -21,6 +21,7 @@ from yoetz.ports.ledger import (
     CaseAvailabilityFacts,
     LedgerPort,
     LedgerRecord,
+    OperationRecord,
     ProjectionPage,
     ProjectionQuery,
     ProjectionState,
@@ -225,6 +226,20 @@ class _ReadLedger:
 
     async def query_projection(self, query: ProjectionQuery) -> ProjectionPage:
         return await self._value.query_projection(query)
+
+    async def lookup_operation(self, writer_id: str, operation_id: str) -> OperationRecord | None:
+        """Read one operation record by request id.
+
+        Omitting this made ``status(view=operation)`` fail for every caller, every time: the view
+        exists so an agent that got OPERATION_PENDING can find out what is pending, and it is
+        routed read-only, so it received this facade and raised AttributeError before touching
+        the ledger. Recovery was unavailable exactly when it was needed.
+
+        It belongs here on the same grounds as the other four: it reads one already-committed
+        record and cannot mutate anything.
+        """
+
+        return await self._value.lookup_operation(writer_id, operation_id)
 
 
 class _PayloadObjects:

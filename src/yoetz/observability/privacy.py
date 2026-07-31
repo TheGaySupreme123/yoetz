@@ -42,6 +42,13 @@ _MAX_STRUCTURAL_TEXT_BYTES: Final = 128
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
 
 _TOKEN = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$", re.ASCII)
+# One yoetz-owned source location, nothing else: a dotted module path under ``yoetz`` and a line
+# number. Deliberately cannot express a filesystem path, a symbol, or any runtime value, so the
+# field carries where our own code failed and can carry nothing about the caller's data.
+_ORIGIN = re.compile(
+    r"^yoetz(?:\.[a-z_][a-z0-9_]{0,63}){0,8}:[0-9]{1,6}(?:#[A-Za-z_][A-Za-z0-9_]{0,63})?$",
+    re.ASCII,
+)
 _VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._/+:-]{0,127}$", re.ASCII)
 _HASH = re.compile(r"^(?:hmac-)?sha256:[0-9a-f]{64}$", re.ASCII)
 
@@ -84,6 +91,7 @@ _LOG_FIELDS: Final = frozenset(
         "duration_ms",
         "outcome",
         "reason",
+        "origin",
         "engine_version",
         "policy_version",
         "sqlite_source_id_hash",
@@ -421,6 +429,8 @@ def redact_diagnostic_value(name: str, value: object) -> JsonValue:
             return validate_id(IdKind.CORRELATION, value)
         if name in {"session_id_hash", "sqlite_source_id_hash"}:
             return value if type(value) is str and _HASH.fullmatch(value) else "unavailable"
+        if name == "origin":
+            return value if type(value) is str and _ORIGIN.fullmatch(value) else "unavailable"
         if name in _TOKEN_FIELDS:
             return _bounded_token(value, _TOKEN)
         if name in _VERSION_FIELDS:
