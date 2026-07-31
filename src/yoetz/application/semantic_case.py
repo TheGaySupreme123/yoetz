@@ -10,7 +10,7 @@ environment, database, or provider access. Missing material becomes an omission.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Final, Literal, cast
 
 from yoetz.application.check import (
@@ -30,6 +30,8 @@ from yoetz.domain.events import (
 )
 from yoetz.domain.findings import Finding, FindingKind
 from yoetz.domain.privacy import (
+    MAX_EGRESS_ENVELOPE_BYTES,
+    REVIEW_PACKET_ITEM_ID,
     AuthorizationScope,
     CandidateContext,
     CandidateContextItem,
@@ -55,7 +57,12 @@ from yoetz.ports.semantic import (
     TargetedExcerptRef,
     project_review_assessment,
 )
-from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
+from yoetz.protocol.canonical import (
+    JsonValue,
+    canonical_digest,
+    canonical_encode,
+    strict_json_parse,
+)
 from yoetz.protocol.coverage import coverage_to_json
 from yoetz.protocol.models import (
     MAX_REVIEW_TEXT_BYTES,
@@ -74,8 +81,14 @@ __all__ = [
 ]
 
 SEMANTIC_REVIEW_PURPOSE: Final = "semantic-review"
-REVIEW_PACKET_ITEM_ID: Final = "review-packet"
 _PACKET_SCHEMA: Final = "yoetz.review-packet-case/1"
+_PACKET_ID_LIST_KEYS: Final = (
+    "goal_item_ids",
+    "obligation_item_ids",
+    "claim_item_ids",
+    "decision_item_ids",
+    "timeline_item_ids",
+)
 _CANONICAL_PACKS: Final = ("research-evidence/0.1.0", "work-integrity/0.1.0")
 _QUESTION_SET: Final = (
     "Does the supplied packet contain a material discrepancy against the goal and obligations?",
@@ -1420,22 +1433,21 @@ def assemble_filtered_review_packet(
         else {}
     )
 
+    # Filter by what the document will actually carry — approved *and* catalogued. Filtering by
+    # approval alone let an id survive here whose catalog row bounding had already removed, so the
+    # packet pointed at an item absent from ``items``.
+    carried = {cast(str, row["item_id"]) for row in content_rows}
+
     def _filter_ids(raw: object) -> list[JsonValue]:
         if type(raw) is not list:
             return []
         return [
             item_id
             for item_id in cast(list[object], raw)
-            if type(item_id) is str and item_id in included
+            if type(item_id) is str and item_id in carried
         ]
 
-    for key in (
-        "goal_item_ids",
-        "obligation_item_ids",
-        "claim_item_ids",
-        "decision_item_ids",
-        "timeline_item_ids",
-    ):
+    for key in _PACKET_ID_LIST_KEYS:
         packet_obj[key] = _filter_ids(packet_obj.get(key))
 
     excerpts_raw = packet_obj.get("targeted_excerpts")
@@ -1446,7 +1458,7 @@ def assemble_filtered_review_packet(
                 row
                 for row in cast(list[object], excerpts_raw)
                 if isinstance(row, dict)
-                and cast(dict[str, object], row).get("excerpt_item_id") in included
+                and cast(dict[str, object], row).get("excerpt_item_id") in carried
             ],
         )
     else:
@@ -1507,11 +1519,28 @@ def assemble_filtered_review_packet(
     if "coverage" not in packet_obj:
         packet_obj["coverage"] = cast(JsonValue, {})
 
+    # Approved content whose catalog row is absent cannot be described (the catalog *is* its
+    # metadata), so it cannot travel. Counting it keeps the omission visible instead of letting
+    # the packet read as though that material was never approved.
+    uncatalogued = sum(
+        1
+        for item_id in included
+        if item_id != REVIEW_PACKET_ITEM_ID and item_id in content_by_id and item_id not in carried
+    )
+    accounting_raw = envelope.get("selection_accounting")
+    accounting: dict[str, JsonValue] = (
+        cast(dict[str, JsonValue], dict(cast(dict[object, object], accounting_raw)))
+        if isinstance(accounting_raw, dict)
+        else {"catalog_dropped_count": "0", "reason": "not_minimized"}
+    )
+    accounting["uncatalogued_approved_count"] = str(uncatalogued)
+
     document = cast(
         dict[str, JsonValue],
         {
             "case_digest": envelope.get("case_digest", ""),
             "case_id": envelope.get("case_id", ""),
+            "selection_accounting": cast(JsonValue, accounting),
             "dependency_digest": envelope.get("dependency_digest", ""),
             "frontier_refs": sorted(frontier_refs),
             "items": content_rows,
@@ -1537,6 +1566,172 @@ def assemble_filtered_review_packet(
     return canonical_encode(cast(JsonValue, document))
 
 
+class SemanticCaseTooLarge(ValueError):
+    """The structural envelope cannot be reduced within its bound.
+
+    Raised only when the irreducible core alone exceeds ``MAX_EGRESS_ENVELOPE_BYTES``. Every
+    droppable row has already been removed and accounted for by then, so this is a genuine
+    "this case cannot be reviewed", not a transient coordinator fault. Callers must map it to a
+    terminal semantic outcome rather than swallowing it as an unexpected exception.
+    """
+
+
+def _catalog_rows(envelope: Mapping[str, JsonValue]) -> list[dict[str, JsonValue]]:
+    raw = envelope.get("item_catalog")
+    if type(raw) is not list:
+        return []
+    return [
+        cast(dict[str, JsonValue], row) for row in cast(list[object], raw) if isinstance(row, dict)
+    ]
+
+
+def _catalog_item_ids(envelope: Mapping[str, JsonValue]) -> frozenset[str]:
+    ids: set[str] = set()
+    for row in _catalog_rows(envelope):
+        item_id = row.get("item_id")
+        if type(item_id) is str:
+            ids.add(item_id)
+    return frozenset(ids)
+
+
+def _drop_catalog_row(envelope: dict[str, JsonValue]) -> bool:
+    """Remove the lowest-priority catalog row and every reference that would dangle.
+
+    Catalog order is the case's own section/occurrence order, so the tail is the least
+    structurally load-bearing row. Dropping a row without also dropping its ids would leave
+    ``*_item_ids`` and ``targeted_excerpts`` pointing at an item the packet no longer carries.
+    """
+
+    rows = _catalog_rows(envelope)
+    if not rows:
+        return False
+    dropped = rows.pop()
+    envelope["item_catalog"] = cast(JsonValue, rows)
+    dropped_id = dropped.get("item_id")
+    if type(dropped_id) is not str:
+        return True
+    packet_obj = envelope.get("review_packet")
+    if not isinstance(packet_obj, dict):
+        return True
+    for key in _PACKET_ID_LIST_KEYS:
+        current = packet_obj.get(key)
+        if type(current) is list:
+            packet_obj[key] = cast(
+                JsonValue,
+                [
+                    value
+                    for value in cast(list[object], current)
+                    if not (type(value) is str and value == dropped_id)
+                ],
+            )
+    excerpts = packet_obj.get("targeted_excerpts")
+    if type(excerpts) is list:
+        packet_obj["targeted_excerpts"] = cast(
+            JsonValue,
+            [
+                row
+                for row in cast(list[object], excerpts)
+                if not (
+                    isinstance(row, dict)
+                    and cast(dict[str, object], row).get("excerpt_item_id") == dropped_id
+                )
+            ],
+        )
+    for key in ("summary_item_id", "detail_item_id"):
+        assessments = packet_obj.get("deterministic_assessments")
+        if type(assessments) is not list:
+            continue
+        for raw in cast(list[object], assessments):
+            if isinstance(raw, dict) and cast(dict[str, object], raw).get(key) == dropped_id:
+                cast(dict[str, object], raw).pop(key, None)
+    return True
+
+
+def _drop_packet_row(envelope: dict[str, JsonValue], key: str) -> bool:
+    packet_obj = envelope.get("review_packet")
+    if not isinstance(packet_obj, dict):
+        return False
+    rows = packet_obj.get(key)
+    if type(rows) is not list or not rows:
+        return False
+    packet_obj[key] = cast(JsonValue, cast(list[object], rows)[:-1])
+    return True
+
+
+def _strip_assessment_links(envelope: dict[str, JsonValue]) -> bool:
+    """Drop assessment item-id links, which duplicate ids the catalog already carries."""
+
+    packet_obj = envelope.get("review_packet")
+    if not isinstance(packet_obj, dict):
+        return False
+    rows = packet_obj.get("deterministic_assessments")
+    if type(rows) is not list:
+        return False
+    removed = False
+    for raw in cast(list[object], rows):
+        if not isinstance(raw, dict):
+            continue
+        row = cast(dict[str, object], raw)
+        for key in ("summary_item_id", "detail_item_id"):
+            if row.pop(key, None) is not None:
+                removed = True
+    return removed
+
+
+def _set_selection_accounting(envelope: dict[str, JsonValue], dropped: int) -> None:
+    """Record what bounding removed, so a truncated packet can never read as a complete one."""
+
+    envelope["selection_accounting"] = cast(
+        JsonValue,
+        {
+            "catalog_dropped_count": str(dropped),
+            "reason": "size_minimized" if dropped else "not_minimized",
+        },
+    )
+
+
+def bounded_case_envelope(case: SemanticCase) -> bytes:
+    """Canonical case envelope guaranteed to fit ``MAX_EGRESS_ENVELOPE_BYTES``.
+
+    The previous implementation was a fixed three-stage ladder whose last stage truncated the
+    catalog to 64 rows — dead code, because a ``SemanticCase`` already admits at most 64 items.
+    A real 44 KiB case therefore reduced to 38 KiB and then raised, stranding the whole check.
+
+    This reduces one row at a time in a declared priority order and re-encodes, so it terminates:
+    every step strictly shrinks the document, and the loop ends when the irreducible core is all
+    that remains. Anything the catalog loses is counted in ``selection_accounting`` so the reader
+    of the packet — and the receipt derived from it — sees that the case was minimized.
+    """
+
+    envelope = _case_envelope_json(case)
+    _set_selection_accounting(envelope, 0)
+    encoded = canonical_encode(cast(JsonValue, envelope))
+    if len(encoded) <= MAX_EGRESS_ENVELOPE_BYTES:
+        return encoded
+
+    _strip_assessment_links(envelope)
+    dropped_catalog_rows = 0
+    reductions: tuple[Callable[[dict[str, JsonValue]], bool], ...] = (
+        lambda env: _drop_packet_row(env, "change_observations"),
+        lambda env: _drop_packet_row(env, "targeted_excerpts"),
+        lambda env: _drop_packet_row(env, "omissions"),
+        lambda env: _drop_packet_row(env, "deterministic_assessments"),
+        _drop_catalog_row,
+    )
+    while True:
+        _set_selection_accounting(envelope, dropped_catalog_rows)
+        encoded = canonical_encode(cast(JsonValue, envelope))
+        if len(encoded) <= MAX_EGRESS_ENVELOPE_BYTES:
+            return encoded
+        for index, reduce in enumerate(reductions):
+            if reduce(envelope):
+                if index == len(reductions) - 1:
+                    dropped_catalog_rows += 1
+                break
+        else:
+            raise SemanticCaseTooLarge("semantic_case_envelope_too_large")
+
+
 def semantic_case_to_candidate_context(
     case: SemanticCase,
     *,
@@ -1548,30 +1743,12 @@ def semantic_case_to_candidate_context(
 
     if type(case) is not SemanticCase:
         raise TypeError("semantic_case_invalid")
-    envelope = canonical_encode(cast(JsonValue, _case_envelope_json(case)))
-    if len(envelope) > MAX_SEMANTIC_ITEM_BYTES:
-        # Packet envelope must remain structural and bounded: drop prose-bearing assessment links
-        # already live as separate items; keep assessments without item id references if needed.
-        compact = _case_envelope_json(case)
-        packet = cast(dict[str, JsonValue], compact["review_packet"])
-        assessments = cast(list[JsonValue], packet["deterministic_assessments"])
-        stripped: list[JsonValue] = []
-        for raw in assessments:
-            row = dict(cast(dict[str, JsonValue], raw))
-            row.pop("summary_item_id", None)
-            row.pop("detail_item_id", None)
-            stripped.append(row)
-        packet["deterministic_assessments"] = stripped
-        envelope = canonical_encode(cast(JsonValue, compact))
-        if len(envelope) > MAX_SEMANTIC_ITEM_BYTES:
-            # Last resort: assessments truncated in envelope; content items still carry prose.
-            packet["deterministic_assessments"] = stripped[:8]
-            packet["omissions"] = cast(list[JsonValue], packet["omissions"])[:16]
-            catalog = cast(list[JsonValue], compact.get("item_catalog", []))
-            compact["item_catalog"] = catalog[:64]
-            envelope = canonical_encode(cast(JsonValue, compact))
-        if len(envelope) > MAX_SEMANTIC_ITEM_BYTES:
-            raise ValueError("semantic_case_envelope_too_large")
+    envelope = bounded_case_envelope(case)
+    # The catalog is the authority for what the provider payload may carry, so an item bounding
+    # removed from the catalog must not travel as a candidate item either. Offering content whose
+    # catalog row is gone would get it approved by privacy and then silently discarded during
+    # assembly — the packet would claim coverage it never had.
+    catalogued = _catalog_item_ids(cast(Mapping[str, JsonValue], strict_json_parse(envelope)))
 
     items: list[CandidateContextItem] = [
         CandidateContextItem(
@@ -1583,6 +1760,8 @@ def semantic_case_to_candidate_context(
         )
     ]
     for item in case.items:
+        if item.item_id not in catalogued:
+            continue
         items.append(
             CandidateContextItem(
                 item.item_id,
@@ -1613,8 +1792,13 @@ def semantic_case_to_prepared_payload(
     if type(case) is not SemanticCase:
         raise TypeError("semantic_case_invalid")
     content_by_id = {item.item_id: item.content for item in case.items}
+    # Assemble from the same bounded envelope that was offered for authorization, never the
+    # unbounded one: the prepared payload must describe exactly what privacy approved.
+    envelope = cast(
+        Mapping[str, JsonValue], strict_json_parse(bounded_case_envelope(case))
+    )
     return assemble_filtered_review_packet(
-        _case_envelope_json(case),
+        envelope,
         content_by_id=content_by_id,
         included_item_ids=included_item_ids,
     )

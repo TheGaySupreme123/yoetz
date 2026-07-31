@@ -67,14 +67,28 @@ __all__ = [
     "ReceiptPolicyBinding",
     "ReceiptSecretScan",
     "ReceiptTransformations",
+    "REVIEW_PACKET_ITEM_ID",
     "RequestCommitment",
     "ReviewContextProfile",
     "ReviewSelectionPolicy",
     "outcome_reason_is_valid",
 ]
 
+# Reserved item id for the structural review-packet envelope. Owned here rather than in the
+# application layer because the egress bound below is keyed on it.
+REVIEW_PACKET_ITEM_ID: Final = "review-packet"
+
 MAX_EGRESS_ITEM_BYTES: Final = 16 * 1024
-MAX_EGRESS_CASE_BYTES: Final = 256 * 1024
+# The structural review-packet envelope is one candidate item by transport, but it is not one
+# piece of content: it is the catalog and packet spine indexing every other item in the case.
+# Budgeting it as a single excerpt is what made a real 44 KiB case unsendable, so it carries its
+# own bound. Only the generated envelope may use it — see ``_envelope_item_limit``.
+MAX_EGRESS_ENVELOPE_BYTES: Final = 128 * 1024
+# Bounds the whole assembled outbound document (envelope spine + every approved content item),
+# so it must exceed the parts: MAX_EGRESS_ENVELOPE_BYTES + MAX_SEMANTIC_CASE_BYTES = 384 KiB.
+# It previously equalled the content budget alone, which made a maximum-content case impossible
+# to dispatch no matter how small its envelope was.
+MAX_EGRESS_CASE_BYTES: Final = 512 * 1024
 AUDIT_STORE_VERSION: Final = 1
 PRIVACY_REQUEST_COMMITMENT_ALGORITHM: Final = "hmac-sha256/yoetz-privacy-egress-request-v1"
 
@@ -778,6 +792,19 @@ class PolicyOverlay:
             raise _invalid()
 
 
+def _envelope_item_limit(item_id: str, category: DataCategory) -> int:
+    """Per-item plaintext bound, widened only for the generated structural envelope.
+
+    The exemption is keyed on both the reserved item id and the bounded-structural category, so a
+    caller cannot widen the bound for prose by borrowing the id, nor by declaring the category on
+    an item the builder did not generate.
+    """
+
+    if item_id == REVIEW_PACKET_ITEM_ID and category is DataCategory.BOUNDED_STRUCTURAL_METADATA:
+        return MAX_EGRESS_ENVELOPE_BYTES
+    return MAX_EGRESS_ITEM_BYTES
+
+
 @dataclass(frozen=True, slots=True)
 class CandidateContextItem:
     item_id: str
@@ -793,7 +820,9 @@ class CandidateContextItem:
         if type(self.source_scope) is not AuthorizationScope:
             raise _invalid()
         _origin_ref(self.origin_ref)
-        if type(self.plaintext) is not bytes or len(self.plaintext) > MAX_EGRESS_ITEM_BYTES:
+        if type(self.plaintext) is not bytes or len(self.plaintext) > _envelope_item_limit(
+            self.item_id, self.category
+        ):
             raise _invalid()
         object.__setattr__(self, "contributor_refs", _sorted_text(self.contributor_refs))
 
