@@ -16,7 +16,8 @@ from yoetz.cli import elevated
 from yoetz.cli.app import app
 from yoetz.cli.trusted_console import TrustedForegroundConsole
 from yoetz.protocol.canonical import canonical_digest
-from yoetz.protocol.schemas import validate_schema_instance
+from yoetz.protocol.consent import ConsentReviewResultModel
+from yoetz.protocol.schemas import SchemaInstanceInvalid, validate_schema_instance
 from yoetz.service.confidential_protocol import ProviderCredentialResult, VaultStateResult
 from yoetz.service.elevated_bootstrap import ElevatedBootstrapError, load_pending
 
@@ -81,6 +82,53 @@ def test_review_result_rejects_unknown_or_unbounded_result_fields(tmp_path: Path
             outcome="completed",
             result={"provider_text": "unbounded"},
         )
+
+
+@pytest.mark.parametrize(
+    ("operation", "risk_class", "outcome", "result"),
+    [
+        ("vault_initialize", "secret_ingress", "completed", {"decision": "denied"}),
+        (
+            "vault_initialize",
+            "secret_ingress",
+            "completed",
+            {"action": "set", "generation": 1, "outcome": "stored"},
+        ),
+        (
+            "provider_credential_set",
+            "secret_ingress",
+            "completed",
+            {"action": "rotate", "generation": 1, "outcome": "stored"},
+        ),
+        ("backup_execute", "review_only", "denied", {"decision": "denied"}),
+        ("vault_initialize", "default_safe", "denied", {"decision": "denied"}),
+        (
+            "provider_credential_rotate",
+            "secret_ingress",
+            "denied",
+            {"action": "rotate", "generation": 1, "outcome": "stored"},
+        ),
+    ],
+)
+def test_review_result_binds_operation_outcome_and_result_in_model_and_schema(
+    operation: str,
+    risk_class: str,
+    outcome: str,
+    result: dict[str, object],
+) -> None:
+    payload = {
+        "schema": "yoetz.elevated-bootstrap.result/2",
+        "pending_id": "a" * 64,
+        "operation": operation,
+        "risk_class": risk_class,
+        "outcome": outcome,
+        "danger_digest": f"sha256:{'b' * 64}",
+        "result": result,
+    }
+    with pytest.raises(ValidationError):
+        ConsentReviewResultModel.model_validate(payload)
+    with pytest.raises(SchemaInstanceInvalid):
+        validate_schema_instance("review-result", "2.0.0", cast(Any, payload))
 
 
 def test_review_approval_consumes_pending_and_returns_no_secret(tmp_path: Path) -> None:
