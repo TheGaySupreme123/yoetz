@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
@@ -32,6 +32,7 @@ from yoetz.ports.ledger import (
     FrozenCase,
     OperationKind,
     SelectedAttempt,
+    SemanticAttemptHandle,
 )
 from yoetz.ports.objects import (
     ObjectKind,
@@ -563,3 +564,86 @@ async def test_semantic_lifecycle_timestamps_survive_later_syncs() -> None:
     assert _row("semantic_attempts", "started_at", handle.attempt_id) == started_at
     # Terminal instants are stamped once, never dragged forward by a later sync either.
     assert _row("semantic_attempts", "terminal_at", handle.attempt_id) == terminal_at
+
+
+@pytest.mark.anyio
+async def test_raising_dispatch_strands_nothing_in_either_real_ledger() -> None:
+    """The attempt loop must leave no leased job or started attempt, against real adapters.
+
+    Every existing attempt-loop test drives a hand-written fake ledger, so the invariant that
+    actually failed in production — durable rows left mid-flight after a raise — was only ever
+    asserted against a stand-in for the thing that holds them. This runs the real loop against
+    both shipped adapters.
+    """
+
+    from yoetz.application.semantic_attempts import (
+        SemanticAttemptAccounting,
+        run_durable_semantic_attempts,
+    )
+    from yoetz.ports.semantic import Deadline
+
+    @dataclass(frozen=True, slots=True)
+    class _Eval:
+        """Satisfies the dispatch return protocol; never actually constructed here."""
+
+        status: SemanticStatus
+        reason: SemanticReason
+        judgment: object | None = None
+        provenance: object | None = None
+
+    for adapter in (memory_ledger(ledger_command()), sqlite_ledger(ledger_command())):
+        command = ledger_command()
+        await adapter.append_batch(command)
+        frozen = await adapter.freeze_case(
+            command.session_id,
+            command.writer_id,
+            1,
+            "req_00000000-0000-4000-8000-000000000013",
+            "sha256:" + "e" * 64,
+        )
+        assert type(frozen) is FrozenCase
+        lease = await adapter.advance_check_phase(
+            frozen.lease,
+            CheckPhase.RESERVED,
+            CheckPhase.LOCAL_READY,
+            await _local_result_ref(adapter, command),
+        )
+        lease = await adapter.advance_check_phase(
+            lease, CheckPhase.LOCAL_READY, CheckPhase.SEMANTIC_WAIT
+        )
+        case_ref = await _object_ref(adapter, command, ObjectKind.SEMANTIC_CASE)
+        job = await adapter.enqueue_semantic_job(lease, "sha256:" + "f" * 64, case_ref)
+
+        async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
+            raise ValueError("semantic_case_envelope_too_large")
+
+        async def publish(handle: SemanticAttemptHandle, evaluation: object) -> ObjectRef:
+            raise AssertionError("publish_must_not_run")
+
+        def build_final(
+            status: SemanticStatus,
+            reason: SemanticReason,
+            evaluation: object | None,
+            accounting: SemanticAttemptAccounting,
+        ) -> object:
+            return (status, reason)
+
+        outcome = await run_durable_semantic_attempts(
+            ledger=adapter,
+            lease=lease,
+            job=job,
+            deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1_000.0),
+            max_retries=2,
+            now_monotonic=lambda: 0.0,
+            dispatch=dispatch,
+            publish_success_response=publish,
+            build_final=build_final,
+        )
+        assert outcome == (SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE)
+
+        loaded = await adapter.load_semantic_job(command.writer_id, frozen.lease.operation_id)
+        assert loaded is not None
+        assert loaded.state == "failed"
+        assert loaded.active_attempt_id is None
+        attempts = await adapter.list_semantic_attempts(loaded.job_id)
+        assert [row.state for row in attempts] == ["failed"]
