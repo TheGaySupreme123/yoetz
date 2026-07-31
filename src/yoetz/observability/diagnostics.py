@@ -41,6 +41,7 @@ _FIELD_ORDER: Final = (
     "component",
     "operation",
     "reason",
+    "origin",
     "request_id",
 )
 _lock = Lock()
@@ -60,6 +61,7 @@ def append_diagnostic_record(
     operation: str,
     reason: str,
     request_id: str | None = None,
+    origin: str | None = None,
     root: Path | None = None,
     now: datetime | None = None,
 ) -> None:
@@ -72,6 +74,7 @@ def append_diagnostic_record(
             operation=operation,
             reason=reason,
             request_id=request_id,
+            origin=origin,
             now=now,
         )
         if record is None:
@@ -123,6 +126,7 @@ def _build_record(
     operation: str,
     reason: str,
     request_id: str | None,
+    origin: str | None,
     now: datetime | None,
 ) -> dict[str, object] | None:
     try:
@@ -142,6 +146,8 @@ def _build_record(
     }
     if request_id is not None:
         raw["request_id"] = request_id
+    if origin is not None:
+        raw["origin"] = origin
     output: dict[str, object] = {}
     for name in _FIELD_ORDER:
         if name not in raw:

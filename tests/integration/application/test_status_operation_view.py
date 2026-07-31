@@ -719,8 +719,14 @@ async def test_status_view_operation_records_invalid_compact_enrichment(
             "component": "application.status",
             "operation": item["operation"],
             "reason": "exception_attribute_error",
+            # Bounded source location: the exception class alone cannot distinguish which guarded
+            # site degraded, which is what made the production AttributeError undiagnosable.
+            "origin": item["origin"],
             "request_id": "req_00000000-0000-4000-8000-000000000872",
         }
+        origin = item["origin"]
+        assert type(origin) is str
+        assert origin.startswith("yoetz.application.status:")
     assert "traceback" not in raw
     assert "_ShapelessPage" not in raw
     assert str(tmp_path) not in raw
@@ -785,3 +791,68 @@ async def test_status_view_operation_page_from_corrupt_record_is_storage_corrupt
             ),
         )
     assert caught.value.code is PublicErrorCode.STORAGE_CORRUPT
+
+
+async def test_status_view_operation_survives_a_stranded_semantic_wait_check() -> None:
+    """Recovery must work for the shape that actually failed in production.
+
+    The 2026-07-30 dogfood run left a check pending in ``SEMANTIC_WAIT`` with a leased semantic
+    job and an attempt still ``started``, and every ``status(view=operation)`` against it failed
+    with an AttributeError recorded as ``read_projection_failed``. The existing pending-operation
+    test seeds ``CheckPhase.RESERVED`` with no semantic job at all, which is why it never caught
+    this: the failing state is specifically a check parked mid-dispatch.
+    """
+
+    app, _objects, seed, ledger = _publish_composition()
+    op_id = "req_00000000-0000-4000-8000-000000000801"
+    resume = ObjectRef(
+        "obj_00000000-0000-4000-8000-00000000bbbb",
+        1,
+        "hmac-sha256:" + "a" * 64,
+        "sha256:" + "b" * 64,
+        "yoetz-object/1",
+        "bmk-1",
+        ObjectMetadata(
+            # A check parked in SEMANTIC_WAIT has already produced its deterministic result.
+            ObjectKind.DETERMINISTIC_RESULT,
+            "application/vnd.yoetz.deterministic-result+json",
+            seed.task_id,
+            datetime(2026, 1, 1, tzinfo=UTC),
+        ),
+    )
+    pending = OperationRecord(
+        seed.writer_id,
+        op_id,
+        OperationKind.CHECK,
+        "sha256:" + "c" * 64,
+        OperationState.PENDING,
+        CheckPhase.SEMANTIC_WAIT,
+        "owner-generation-1",
+        "lease-owner-1",
+        1,
+        datetime(2030, 1, 1, tzinfo=UTC),
+        resume,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    ledger._state.operations[(seed.writer_id, op_id)] = (  # pyright: ignore[reportPrivateUsage]
+        pending,
+        None,
+    )
+
+    status = await execute_status(
+        cast(StatusApplication, app),
+        _status_operation_request(
+            session_id=seed.session_id,
+            writer_id=seed.writer_id,
+            operation_request_id=op_id,
+            request_tail=802,
+        ),
+    )
+    page = cast(StatusOperationPageModel, status.page)
+    assert page.found is True
+    assert page.state == "pending"
+    assert page.operation_kind == "check"

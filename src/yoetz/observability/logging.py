@@ -27,6 +27,7 @@ __all__ = [
     "StructuredLogger",
     "configure_logging",
     "get_logger",
+    "exception_origin",
     "record_bounded_event_without_raising",
     "record_fatal_exception_without_raising",
     "record_unexpected_exception_without_raising",
@@ -43,6 +44,7 @@ _FIELD_ORDER: Final = (
     "duration_ms",
     "outcome",
     "reason",
+    "origin",
     "engine_version",
     "policy_version",
     "sqlite_source_id_hash",
@@ -352,6 +354,45 @@ def get_logger(component: str) -> StructuredLogger:
     return StructuredLogger(component)
 
 
+def exception_origin(exc: BaseException) -> str | None:
+    """Return the innermost ``yoetz`` frame as ``module:lineno``, or ``None``.
+
+    Retaining only the exception class made a production ``AttributeError`` undiagnosable: the
+    class alone cannot distinguish which of a dozen guarded call sites raised, so the only route
+    to a fix was reproducing it, and the whole point of a durable diagnostic is that you cannot.
+
+    This is deliberately the narrowest thing that closes that gap. It reads ``co_filename`` and
+    ``f_lineno`` from our own frames only — never ``f_locals``, never ``str(exc)`` — and the
+    result must still satisfy the ``origin`` allowlist pattern before it is written, so the field
+    can carry a source location and nothing else. Frames from stdlib or dependencies are skipped
+    rather than reported, since their paths are not ours to disclose.
+    """
+
+    try:
+        module: str | None = None
+        lineno = 0
+        seen: set[int] = set()
+        current: BaseException | None = exc
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            traceback = current.__traceback__
+            while traceback is not None:
+                frame = traceback.tb_frame
+                name = frame.f_globals.get("__name__")
+                if type(name) is str and (name == "yoetz" or name.startswith("yoetz.")):
+                    module = name
+                    lineno = traceback.tb_lineno
+                traceback = traceback.tb_next
+            if module is not None:
+                break
+            current = current.__cause__ or current.__context__
+        if module is None or not 0 < lineno < 1_000_000:
+            return None
+        return f"{module}:{lineno}"
+    except BaseException:
+        return None
+
+
 def record_unexpected_exception_without_raising(
     exc: BaseException,
     *,
@@ -371,6 +412,7 @@ def record_unexpected_exception_without_raising(
 
     correlation_id = _new_correlation()
     reason = _exception_reason(exc)
+    origin = exception_origin(exc)
     try:
         get_logger(component).error(
             operation,
@@ -378,6 +420,7 @@ def record_unexpected_exception_without_raising(
             request_id=request_id,
             outcome="internal_error",
             reason=reason,
+            origin=origin,
         )
     except BaseException:
         pass
@@ -390,6 +433,7 @@ def record_unexpected_exception_without_raising(
             operation=operation,
             reason=reason,
             request_id=request_id,
+            origin=origin,
         )
     except BaseException:
         pass

@@ -19,8 +19,10 @@ from yoetz.observability.diagnostics import (
 from yoetz.observability.logging import (
     LogMode,
     configure_logging,
+    exception_origin,
     record_unexpected_exception_without_raising,
 )
+from yoetz.protocol.ids import IdKind, validate_id
 
 _CORRELATION = "err_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 _REQUEST = "req_bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
@@ -122,3 +124,81 @@ def test_record_unexpected_exception_writes_durable_sink(
     err = capsys.readouterr().err
     assert "must-not-leak" not in err
     assert correlation_id in err
+
+
+def test_unexpected_exception_records_a_bounded_yoetz_origin() -> None:
+    """An unexpected exception must say *where* in our code it came from.
+
+    Keeping only the exception class made the production ``status(view=operation)`` AttributeError
+    undiagnosable: a dozen guarded call sites raise the same class, so the class alone cannot
+    point at any of them and the only route to a fix is a reproduction the durable diagnostic
+    exists precisely to avoid needing.
+    """
+
+    origin: str | None = None
+    try:
+        validate_id(IdKind.REQUEST, "not-a-request-id")
+    except Exception as exc:
+        origin = exception_origin(exc)
+
+    assert origin is not None
+    module, _, lineno = origin.partition(":")
+    assert module.startswith("yoetz.")
+    assert lineno.isdigit()
+
+
+def test_origin_names_our_frame_not_the_caller_that_caught_it() -> None:
+    """The location is where our code raised, not the test frame that observed it."""
+
+    origin: str | None = None
+    try:
+        validate_id(IdKind.REQUEST, "still-not-valid")
+    except Exception as exc:
+        origin = exception_origin(exc)
+
+    assert origin is not None
+    # The test module is not a ``yoetz`` module, so it must never be the reported origin.
+    assert not origin.startswith("tests")
+    assert origin.startswith("yoetz.protocol")
+
+
+def test_origin_is_absent_for_exceptions_with_no_yoetz_frame() -> None:
+    """Third-party and traceback-less exceptions report nothing rather than a foreign path."""
+
+    assert exception_origin(ValueError("never raised, so no traceback")) is None
+
+
+def test_diagnostic_origin_is_rejected_unless_it_is_a_yoetz_source_location(
+    tmp_path: Path,
+) -> None:
+    """The written field can only ever be a yoetz module and a line number.
+
+    The frame walk reads ``co_filename``-adjacent metadata, so the allowlist — not the walk — is
+    what guarantees a filesystem path or a user value can never reach the durable record.
+    """
+
+    correlation_id = "err_00000000-0000-4000-8000-0000000000f1"
+    append_diagnostic_record(
+        correlation_id=correlation_id,
+        component="service.daemon",
+        operation="status_read_projection_failed",
+        reason="exception_attribute_error",
+        origin="/Users/someone/secret/path.py:12",
+        root=tmp_path,
+    )
+    records = lookup_diagnostic_records(correlation_id, root=tmp_path)
+    assert len(records) == 1
+    assert records[0]["origin"] == "unavailable"
+
+    good = "err_00000000-0000-4000-8000-0000000000f2"
+    append_diagnostic_record(
+        correlation_id=good,
+        component="service.daemon",
+        operation="status_read_projection_failed",
+        reason="exception_attribute_error",
+        origin="yoetz.application.status:1097",
+        root=tmp_path,
+    )
+    assert lookup_diagnostic_records(good, root=tmp_path)[0]["origin"] == (
+        "yoetz.application.status:1097"
+    )
