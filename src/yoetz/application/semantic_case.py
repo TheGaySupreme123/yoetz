@@ -218,13 +218,17 @@ def _content_item(
 
 
 def _structural_json(value: Mapping[str, JsonValue]) -> str:
-    return canonical_encode(cast(JsonValue, dict(value))).decode("ascii")
+    # canonical_encode emits UTF-8 and does not escape non-ASCII, so these must be decoded as
+    # UTF-8. Decoding as ASCII meant a single em dash, curly quote or accented character anywhere
+    # in the ledger raised UnicodeDecodeError while building the case — surfacing as
+    # coordinator_failure with no semantic review at all. Agents write such characters constantly.
+    return canonical_encode(cast(JsonValue, dict(value))).decode("utf-8")
 
 
 def _bounded_json(value: Mapping[str, JsonValue]) -> tuple[str, bool]:
     encoded = canonical_encode(cast(JsonValue, dict(value)))
     if len(encoded) <= MAX_REVIEW_TEXT_BYTES:
-        return encoded.decode("ascii"), False
+        return encoded.decode("utf-8"), False
     marker = {
         "content_digest": canonical_digest(cast(JsonValue, dict(value))),
         "original_bytes": len(encoded),

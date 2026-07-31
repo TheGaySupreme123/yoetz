@@ -54,6 +54,8 @@ _CALLER_FIELDS: Final = _FIELD_SET - {"timestamp", "level", "component", "operat
 _STRUCTURAL_MARKER: Final = "_yoetz_structured_record"
 _STRUCTURAL_FIELDS: Final = "_yoetz_structured_fields"
 _COMPONENT_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$", re.ASCII)
+# Python identifiers only: an attribute name is a symbol from our source, never a value.
+_ATTRIBUTE_NAME: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$", re.ASCII)
 _MAX_RECORD_BYTES: Final = 4_096
 _FALLBACK_CORRELATION: Final = "err_00000000-0000-4000-8000-000000000000"
 
@@ -388,7 +390,16 @@ def exception_origin(exc: BaseException) -> str | None:
             current = current.__cause__ or current.__context__
         if module is None or not 0 < lineno < 1_000_000:
             return None
-        return f"{module}:{lineno}"
+        location = f"{module}:{lineno}"
+        # One source line can contain several attribute accesses, so the location alone still
+        # leaves an AttributeError ambiguous. ``AttributeError.name`` is the identifier the
+        # interpreter looked up — a symbol from our own source, never a value — so appending it
+        # resolves the ambiguity without widening what the record can carry. The allowlist
+        # pattern below still has to accept the result.
+        attribute = getattr(exc, "name", None) if isinstance(exc, AttributeError) else None
+        if type(attribute) is str and _ATTRIBUTE_NAME.fullmatch(attribute):
+            return f"{location}#{attribute}"
+        return location
     except BaseException:
         return None
 

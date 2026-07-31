@@ -38,9 +38,12 @@ __all__ = ["large_case"]
 
 # Prose long enough to be realistic without dominating the envelope: the envelope carries only
 # metadata and digests per item, so item count — not item size — is what grows it.
+# Deliberately contains the non-ASCII characters agents actually type — an em dash and a curly
+# apostrophe. The case builder used to decode canonical UTF-8 as ASCII, so a single one of these
+# anywhere in the ledger killed the whole semantic review with coordinator_failure.
 _DETAIL = (
-    "The reviewer needs enough surrounding context to judge whether the claimed change is "
-    "supported by the recorded evidence rather than merely asserted alongside it."
+    "The reviewer needs enough surrounding context — including the author’s stated intent — to "
+    "judge whether the claimed change is supported by recorded evidence rather than asserted."
 )
 
 

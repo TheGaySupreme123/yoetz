@@ -261,3 +261,48 @@ def test_irreducible_core_raises_a_typed_terminal(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(module, "MAX_EGRESS_ENVELOPE_BYTES", 1)
     with pytest.raises(SemanticCaseTooLarge):
         bounded_case_envelope(_semantic(ReviewContextProfile.STRUCTURAL))
+
+
+def test_non_ascii_ledger_content_still_builds_a_case() -> None:
+    """An em dash must not stop the semantic review.
+
+    ``canonical_encode`` emits UTF-8 without escaping non-ASCII, but the case builder decoded it
+    as ASCII. One curly quote, em dash or accented character anywhere in a plan, obligation or
+    claim therefore raised UnicodeDecodeError while building the case, which the coordinator
+    surfaced as ``coordinator_failure`` with no semantic review at all. A live dogfood run hit
+    this within minutes; agents write these characters constantly.
+    """
+
+    case = large_case(obligation_count=3, claim_count=2, evidence_count=2)
+    semantic = build_semantic_case(
+        case_id="cas_10000000-0000-4000-8000-000000000001",
+        frozen_case=case,
+        dependency_digest="sha256:" + "b" * 64,
+        findings=_findings_for(case),
+        review_context_profile=ReviewContextProfile.EXPANDED,
+        review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED),
+        policy_id="pvy_10000000-0000-4000-8000-000000000001",
+        policy_version="1",
+    )
+    assert bounded_case_envelope(semantic)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "plan — with an em dash",
+        "the user’s curly apostrophe",
+        "café; naïve; résumé",
+        "ship it 🚀",
+    ],
+)
+def test_bounded_json_round_trips_non_ascii(text: str) -> None:
+    """Every character class an agent realistically writes must survive encoding."""
+
+    from yoetz.application import semantic_case as module
+
+    value = {"text": text}
+    encoded, truncated = module._bounded_json(value)  # pyright: ignore[reportPrivateUsage]
+    assert truncated is False
+    assert text in encoded
+    assert text in module._structural_json(value)  # pyright: ignore[reportPrivateUsage]

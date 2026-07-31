@@ -45,7 +45,10 @@ _TOKEN = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$", re.ASCII)
 # One yoetz-owned source location, nothing else: a dotted module path under ``yoetz`` and a line
 # number. Deliberately cannot express a filesystem path, a symbol, or any runtime value, so the
 # field carries where our own code failed and can carry nothing about the caller's data.
-_ORIGIN = re.compile(r"^yoetz(?:\.[a-z_][a-z0-9_]{0,63}){1,8}:[0-9]{1,6}$", re.ASCII)
+_ORIGIN = re.compile(
+    r"^yoetz(?:\.[a-z_][a-z0-9_]{0,63}){1,8}:[0-9]{1,6}(?:#[A-Za-z_][A-Za-z0-9_]{0,63})?$",
+    re.ASCII,
+)
 _VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._/+:-]{0,127}$", re.ASCII)
 _HASH = re.compile(r"^(?:hmac-)?sha256:[0-9a-f]{64}$", re.ASCII)
 
