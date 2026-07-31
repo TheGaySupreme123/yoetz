@@ -9,11 +9,12 @@ from unittest.mock import patch
 
 import anyio
 import pytest
+from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from yoetz.cli import elevated
 from yoetz.cli.app import app
-from yoetz.cli.trusted_console import TrustedConsoleError, TrustedForegroundConsole
+from yoetz.cli.trusted_console import TrustedForegroundConsole
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.schemas import validate_schema_instance
 from yoetz.service.confidential_protocol import ProviderCredentialResult, VaultStateResult
@@ -45,6 +46,12 @@ def _patch_state(tmp_path: Path) -> Any:
     return patch("yoetz.service.elevated_bootstrap.state_dir", return_value=tmp_path)
 
 
+def _patch_verified_presence() -> Any:
+    """Admit post-presence behavior in unit tests; production remains fail-closed."""
+
+    return patch("yoetz.cli.elevated._require_action_bound_user_presence", return_value=None)
+
+
 def test_catalog_and_prepare_are_agent_safe(tmp_path: Path) -> None:
     with _patch_state(tmp_path):
         catalog = cast(dict[str, Any], elevated.catalog_elevated())
@@ -63,6 +70,19 @@ def test_catalog_and_prepare_are_agent_safe(tmp_path: Path) -> None:
         assert forbidden not in rendered
 
 
+def test_review_result_rejects_unknown_or_unbounded_result_fields(tmp_path: Path) -> None:
+    with _patch_state(tmp_path):
+        elevated.prepare_elevated("vault_initialize")
+        pending = load_pending(_state=tmp_path)
+    assert pending is not None
+    with pytest.raises(ValidationError):
+        elevated._review_result(  # pyright: ignore[reportPrivateUsage]
+            pending,
+            outcome="completed",
+            result={"provider_text": "unbounded"},
+        )
+
+
 def test_review_approval_consumes_pending_and_returns_no_secret(tmp_path: Path) -> None:
     console = _Console()
 
@@ -73,6 +93,7 @@ def test_review_approval_consumes_pending_and_returns_no_secret(tmp_path: Path) 
         with _patch_state(tmp_path):
             elevated.prepare_elevated("vault_initialize")
             with (
+                _patch_verified_presence(),
                 patch("yoetz.cli.elevated.TrustedForegroundConsole", return_value=console),
                 patch("yoetz.cli.elevated._complete_approved", side_effect=complete),
             ):
@@ -90,9 +111,12 @@ def test_review_denial_and_cancellation_are_single_shot(tmp_path: Path) -> None:
     async def deny() -> dict[str, Any]:
         with _patch_state(tmp_path):
             elevated.prepare_elevated("vault_initialize")
-            with patch(
-                "yoetz.cli.elevated.TrustedForegroundConsole",
-                return_value=_Console(b"deny"),
+            with (
+                _patch_verified_presence(),
+                patch(
+                    "yoetz.cli.elevated.TrustedForegroundConsole",
+                    return_value=_Console(b"deny"),
+                ),
             ):
                 return cast(dict[str, Any], await elevated.review_elevated())
 
@@ -109,9 +133,12 @@ def test_review_denial_and_cancellation_are_single_shot(tmp_path: Path) -> None:
                 raise KeyboardInterrupt
 
             console.read_choice = interrupt
-            with patch(
-                "yoetz.cli.elevated.TrustedForegroundConsole",
-                return_value=console,
+            with (
+                _patch_verified_presence(),
+                patch(
+                    "yoetz.cli.elevated.TrustedForegroundConsole",
+                    return_value=console,
+                ),
             ):
                 with pytest.raises(ElevatedBootstrapError) as exc:
                     await elevated.review_elevated()
@@ -121,21 +148,22 @@ def test_review_denial_and_cancellation_are_single_shot(tmp_path: Path) -> None:
     assert load_pending(_state=tmp_path) is None
 
 
-def test_untrusted_or_headless_console_fails_without_consuming_pending(tmp_path: Path) -> None:
-    class _Headless:
-        def __enter__(self) -> None:
-            raise TrustedConsoleError("trusted_console_required")
-
-        def __exit__(self, *_args: object) -> None:
-            pass
-
+def test_pty_like_console_cannot_authorize_without_os_presence(tmp_path: Path) -> None:
     async def run() -> None:
         with _patch_state(tmp_path):
             elevated.prepare_elevated("vault_initialize")
-            with patch("yoetz.cli.elevated.TrustedForegroundConsole", return_value=_Headless()):
+            with (
+                patch(
+                    "yoetz.cli.elevated.TrustedForegroundConsole",
+                    return_value=_Console(b"approve"),
+                ) as console,
+                patch("yoetz.cli.elevated._complete_approved") as complete,
+            ):
                 with pytest.raises(ElevatedBootstrapError) as exc:
                     await elevated.review_elevated()
-                assert exc.value.reason == "trusted_console_required"
+                assert exc.value.reason == "human_authority_unavailable"
+                console.assert_not_called()
+                complete.assert_not_called()
 
     anyio.run(run)
     assert load_pending(_state=tmp_path) is not None
@@ -185,7 +213,7 @@ def test_generated_initialization_secret_is_submitted_then_overwritten() -> None
         with (
             patch("yoetz.cli.elevated._auto_unlock_store", return_value=_Store()),
             patch(
-                "yoetz.cli.elevated._run_human_ceremony_on_terminal",
+                "yoetz.cli.elevated.run_human_ceremony_on_terminal",
                 side_effect=ceremony,
             ),
         ):
@@ -217,7 +245,10 @@ def test_trusted_review_displays_exact_provider_binding(tmp_path: Path) -> None:
     async def run() -> None:
         with _patch_state(tmp_path):
             elevated.prepare_elevated("provider_credential_set", provider_binding=binding)
-            with patch("yoetz.cli.elevated.TrustedForegroundConsole", return_value=console):
+            with (
+                _patch_verified_presence(),
+                patch("yoetz.cli.elevated.TrustedForegroundConsole", return_value=console),
+            ):
                 await elevated.review_elevated()
 
     anyio.run(run)
@@ -302,7 +333,7 @@ def test_provider_secret_ingress_uses_only_the_trusted_review_ceremony(
 
     async def run() -> dict[str, object]:
         with patch(
-            "yoetz.cli.elevated._run_human_ceremony_on_terminal",
+            "yoetz.cli.elevated.run_human_ceremony_on_terminal",
             side_effect=ceremony,
         ):
             return cast(

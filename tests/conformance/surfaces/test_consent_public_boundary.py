@@ -18,6 +18,9 @@ _FORBIDDEN = (
     "confirmation_phrase",
     "approve_command",
     "secret_fds",
+    "credential_fd",
+    "passphrase_fd",
+    "reauth_fd",
     "passphrase-fd",
     "reauth-fd",
     "credential-fd",
@@ -41,4 +44,5 @@ def test_live_agent_projection_contains_only_v2_structural_review_data(tmp_path:
     )
     for forbidden in _FORBIDDEN:
         assert forbidden not in rendered
-    assert '"trusted_console_review_only": true' in rendered
+    assert '"verified_user_presence_required": true' in rendered
+    assert '"trusted_console_is_not_authority": true' in rendered

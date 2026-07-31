@@ -65,8 +65,10 @@ __all__ = [
     "retry_keyring",
     "rotate_provider_credential",
     "run_human_ceremony",
+    "run_human_ceremony_on_terminal",
     "set_provider_credential",
     "unlock_vault",
+    "overwrite_secret_buffer",
 ]
 
 _FIXED_ERROR_REASONS: Final = frozenset(
@@ -149,7 +151,7 @@ class IdleRelockCliResult:
             raise ValueError("idle_relock_cli_result_invalid")
 
 
-def _overwrite(value: bytearray) -> None:
+def overwrite_secret_buffer(value: bytearray) -> None:
     for index in range(len(value)):
         value[index] = 0
 
@@ -419,10 +421,10 @@ def _read_secret(
             if not hmac.compare_digest(first, confirmation):
                 raise HumanCeremonyCliError("confirmation_mismatch")
         finally:
-            _overwrite(confirmation)
+            overwrite_secret_buffer(confirmation)
         return first
     except BaseException:
-        _overwrite(first)
+        overwrite_secret_buffer(first)
         raise
 
 
@@ -436,7 +438,7 @@ async def _send_secret(
         token = session._session_token()  # pyright: ignore[reportPrivateUsage]
         await secret_client.send_once(phase.binding, source, token)
     finally:
-        _overwrite(source)
+        overwrite_secret_buffer(source)
 
 
 def _expected_result_type(kind: HumanCeremonyKind) -> type[HumanResult]:
@@ -566,15 +568,12 @@ async def _complete_human_ceremony(
             raise
 
 
-async def run_human_ceremony(
+def _validate_supplied_secrets(
     kind: HumanCeremonyKind,
-    target: HumanOpenTarget,
-    provider_credential: bytearray | None = None,
-    passphrase: bytearray | None = None,
-    provider_reauthentication: bytearray | None = None,
-) -> HumanResult:
-    """Run one exact foreground YZH1/YZS1 ceremony and return structural state only."""
-
+    provider_credential: bytearray | None,
+    passphrase: bytearray | None,
+    provider_reauthentication: bytearray | None,
+) -> tuple[bool, bool]:
     if type(kind) is not HumanCeremonyKind:
         raise TypeError("human_ceremony_kind_invalid")
     provider_kind = kind in {
@@ -592,8 +591,26 @@ async def run_human_ceremony(
     ):
         for supplied in (provider_credential, passphrase, provider_reauthentication):
             if supplied is not None:
-                _overwrite(supplied)
+                overwrite_secret_buffer(supplied)
         raise ValueError("provider_credential_target_invalid")
+    return provider_kind, passphrase_kind
+
+
+async def run_human_ceremony(
+    kind: HumanCeremonyKind,
+    target: HumanOpenTarget,
+    provider_credential: bytearray | None = None,
+    passphrase: bytearray | None = None,
+    provider_reauthentication: bytearray | None = None,
+) -> HumanResult:
+    """Run one exact foreground YZH1/YZS1 ceremony and return structural state only."""
+
+    provider_kind, passphrase_kind = _validate_supplied_secrets(
+        kind,
+        provider_credential,
+        passphrase,
+        provider_reauthentication,
+    )
     fully_supplied = (
         passphrase is not None
         if passphrase_kind
@@ -605,41 +622,36 @@ async def run_human_ceremony(
 
     try:
         if fully_supplied:
-            try:
-                return await _complete_human_ceremony(
-                    client,
-                    _SuppliedSecretTerminal(),
-                    kind,
-                    target,
-                    provider_credential,
-                    passphrase,
-                    provider_reauthentication,
-                )
-            finally:
-                await client.close()
+            return await _complete_human_ceremony(
+                client,
+                _SuppliedSecretTerminal(),
+                kind,
+                target,
+                provider_credential,
+                passphrase,
+                provider_reauthentication,
+            )
         with _ForegroundTerminal() as terminal:
-            try:
-                return await _complete_human_ceremony(
-                    client,
-                    terminal,
-                    kind,
-                    target,
-                    provider_credential,
-                    passphrase,
-                    provider_reauthentication,
-                )
-            finally:
-                await client.close()
+            return await _complete_human_ceremony(
+                client,
+                terminal,
+                kind,
+                target,
+                provider_credential,
+                passphrase,
+                provider_reauthentication,
+            )
     finally:
+        await client.close()
         if provider_credential is not None:
-            _overwrite(provider_credential)
+            overwrite_secret_buffer(provider_credential)
         if passphrase is not None:
-            _overwrite(passphrase)
+            overwrite_secret_buffer(passphrase)
         if provider_reauthentication is not None:
-            _overwrite(provider_reauthentication)
+            overwrite_secret_buffer(provider_reauthentication)
 
 
-async def _run_human_ceremony_on_terminal(  # pyright: ignore[reportUnusedFunction]
+async def run_human_ceremony_on_terminal(
     terminal: _CeremonyTerminal,
     kind: HumanCeremonyKind,
     target: HumanOpenTarget,
@@ -650,25 +662,12 @@ async def _run_human_ceremony_on_terminal(  # pyright: ignore[reportUnusedFuncti
 ) -> HumanResult:
     """Run a ceremony on an already verified console owned by the trusted helper."""
 
-    if type(kind) is not HumanCeremonyKind:
-        raise TypeError("human_ceremony_kind_invalid")
-    provider_kind = kind in {
-        HumanCeremonyKind.PROVIDER_CREDENTIAL_SET,
-        HumanCeremonyKind.PROVIDER_CREDENTIAL_ROTATE,
-    }
-    passphrase_kind = kind in {
-        HumanCeremonyKind.VAULT_INITIALIZE,
-        HumanCeremonyKind.VAULT_UNLOCK,
-    }
-    if (
-        (provider_credential is not None and not provider_kind)
-        or (provider_reauthentication is not None and not provider_kind)
-        or (passphrase is not None and not passphrase_kind)
-    ):
-        for supplied in (provider_credential, passphrase, provider_reauthentication):
-            if supplied is not None:
-                _overwrite(supplied)
-        raise ValueError("provider_credential_target_invalid")
+    _validate_supplied_secrets(
+        kind,
+        provider_credential,
+        passphrase,
+        provider_reauthentication,
+    )
     client = HumanControlClient()
     try:
         return await _complete_human_ceremony(
@@ -684,7 +683,7 @@ async def _run_human_ceremony_on_terminal(  # pyright: ignore[reportUnusedFuncti
         await client.close()
         for supplied in (provider_credential, passphrase, provider_reauthentication):
             if supplied is not None:
-                _overwrite(supplied)
+                overwrite_secret_buffer(supplied)
 
 
 async def initialize_passphrase_vault(passphrase: bytearray | None = None) -> VaultStateResult:

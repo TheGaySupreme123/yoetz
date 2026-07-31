@@ -46,7 +46,7 @@ def test_redirected_stdin_cannot_approve_or_consume_pending(tmp_path: Path) -> N
     before = pending.read_bytes()
     reviewed = _run(tmp_path, ["consent", "review"], input_bytes=b"approve\n")
     assert reviewed.returncode == 2
-    assert b"trusted_console_required" in reviewed.stderr
+    assert b"human_authority_unavailable" in reviewed.stderr
     assert pending.read_bytes() == before
     assert b"Traceback" not in reviewed.stderr
 

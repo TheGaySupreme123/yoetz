@@ -1,6 +1,6 @@
 """Human-review consent for non-default actions (ADR-015 / ADR-016).
 
-Pending consent is owner-only file state. Authority and secrets remain inside trusted review.
+Pending consent is owner-only file state. Console input never substitutes for OS user presence.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal, cast
+from typing import Final, Literal, NoReturn, cast
 
 from yoetz.config.paths import ensure_owner_only_dir, state_dir
 from yoetz.domain.values import ProtocolValueError, validate_sha256_digest
@@ -102,8 +102,9 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         summary="Create the local vault passphrase (cloud/no-TTY).",
         danger_text=(
             "DANGER — vault initialize. Creates this installation's encrypted vault and stores a "
-            "helper-generated auto-unlock secret in the scoped platform credential store. Approve "
-            "only on the verified foreground console for the installation you intend to initialize."
+            "helper-generated auto-unlock secret in the scoped platform credential store. Review "
+            "requires independent action-bound OS user presence; a foreground console alone is "
+            "never authorization."
         ),
         requires_provider_binding=False,
         requires_target_digest_arg=False,
@@ -115,8 +116,8 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         summary="Store an LLM API credential in the vault.",
         danger_text=(
             "DANGER — provider credential set. Stores an API credential in the local vault. "
-            "Approve only on the verified foreground console after reviewing the exact provider "
-            "binding; secret entry occurs only inside that console."
+            "Review requires independent action-bound OS user presence and the exact provider "
+            "binding; secret entry occurs only inside the foreground console."
         ),
         requires_provider_binding=True,
         requires_target_digest_arg=False,
@@ -127,9 +128,9 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         risk_class="secret_ingress",
         summary="Rotate a stored LLM API credential.",
         danger_text=(
-            "DANGER — provider credential rotate. Replaces a stored API credential. Approve only "
-            "on the verified foreground console after reviewing the exact provider binding; "
-            "secret entry occurs only inside that console."
+            "DANGER — provider credential rotate. Replaces a stored API credential. Review requires "
+            "independent action-bound OS user presence and the exact provider binding; secret entry "
+            "occurs only inside the foreground console."
         ),
         requires_provider_binding=True,
         requires_target_digest_arg=False,
@@ -435,7 +436,7 @@ def _validated_pending_id(value: object) -> str:
     return pending_id
 
 
-def _invalidate_legacy(path: Path, *, _state: Path | None) -> None:
+def _invalidate_legacy(path: Path, *, _state: Path | None) -> NoReturn:
     try:
         path.unlink(missing_ok=True)
     except OSError as exc:
@@ -718,7 +719,8 @@ def catalog_payload() -> dict[str, JsonValue]:
                 "never_over_chat_or_mcp": list(_FORBIDDEN),
                 "no_standing_yolo": True,
                 "path_safety_not_waivable_by_consent": True,
-                "trusted_console_review_only": True,
+                "verified_user_presence_required": True,
+                "trusted_console_is_not_authority": True,
                 "one_pending_at_a_time": True,
                 "approval_arguments_forbidden": True,
                 "agent_selected_initialization_secret_forbidden": True,

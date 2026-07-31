@@ -10,8 +10,8 @@ from typing import Protocol
 from yoetz.cli.trusted_console import TrustedConsoleError, TrustedForegroundConsole
 from yoetz.cli.unlock import (
     HumanCeremonyCliError,
-    _overwrite,  # pyright: ignore[reportPrivateUsage]
-    _run_human_ceremony_on_terminal,  # pyright: ignore[reportPrivateUsage]
+    overwrite_secret_buffer,
+    run_human_ceremony_on_terminal,
 )
 from yoetz.protocol.canonical import JsonValue, canonical_digest
 from yoetz.protocol.consent import ConsentPrepareResultModel, ConsentReviewResultModel
@@ -110,12 +110,22 @@ def _review_result(
     return model.model_dump(mode="json", by_alias=True)
 
 
+def _require_action_bound_user_presence() -> None:
+    """Fail closed until a production action-bound UserPresencePort is installed."""
+
+    # ADR-008 explicitly excludes TTY, same-UID, and unlocked-session signals from human
+    # authority.  The packaged runtime currently advertises no verified UserPresencePort cell, so
+    # accepting the console decision here would let an automated pseudo-terminal self-authorize.
+    raise ElevatedBootstrapError("human_authority_unavailable")
+
+
 async def review_elevated() -> dict[str, JsonValue]:
-    """Review and consume one pending operation solely on a trusted foreground console."""
+    """Review one pending operation after independently verified OS user presence."""
 
     pending: PendingElevatedConsent | None = None
     consumed = False
     try:
+        _require_action_bound_user_presence()
         with TrustedForegroundConsole() as console:
             pending = claim_pending_for_review()
             _render_review(console, pending)
@@ -197,13 +207,13 @@ async def _complete_vault_initialize(
                 raise ElevatedBootstrapError(f"auto_unlock_{exc.reason}") from exc
             # The backend was known unavailable before any write. The existing local-human
             # passphrase ceremony remains the only permitted fallback.
-            result = await _run_human_ceremony_on_terminal(
+            result = await run_human_ceremony_on_terminal(
                 console,
                 HumanCeremonyKind.VAULT_INITIALIZE,
                 target,
             )
         else:
-            result = await _run_human_ceremony_on_terminal(
+            result = await run_human_ceremony_on_terminal(
                 console,
                 HumanCeremonyKind.VAULT_INITIALIZE,
                 target,
@@ -215,7 +225,7 @@ async def _complete_vault_initialize(
         raise ElevatedBootstrapError(exc.reason) from exc
     finally:
         if generated is not None:
-            _overwrite(generated)
+            overwrite_secret_buffer(generated)
     if type(result) is not VaultStateResult:
         raise ElevatedBootstrapError("result_invalid")
     return {"state": result.state, "reason": result.reason}
@@ -245,7 +255,7 @@ async def _complete_provider_credential(
         purpose_digest=binding["purpose_digest"],
     )
     try:
-        result = await _run_human_ceremony_on_terminal(console, kind, target)
+        result = await run_human_ceremony_on_terminal(console, kind, target)
     except ConfidentialClientError as exc:
         raise ElevatedBootstrapError(f"ceremony_{exc.reason}") from exc
     except HumanCeremonyCliError as exc:
@@ -272,20 +282,19 @@ def _target_digest(
     if operation in {"provider_credential_set", "provider_credential_rotate"}:
         if provider_binding is None:
             raise ElevatedBootstrapError("provider_binding_required")
+        from yoetz.service.vault import ProviderCredentialBinding
+
         action = "set" if operation == "provider_credential_set" else "rotate"
-        return canonical_digest(
-            {
-                "action": action,
-                "endpoint_profile_id": provider_binding["endpoint_profile_id"],
-                "endpoint_profile_version": provider_binding["endpoint_profile_version"],
-                "kind": "provider_credential",
-                "model_id": provider_binding["model_id"],
-                "provider_id": provider_binding["provider_id"],
-                "purpose": provider_binding["purpose"],
-                "purpose_digest": provider_binding["purpose_digest"],
-                "scope_digest": provider_binding["scope_digest"],
-            }
+        binding = ProviderCredentialBinding(
+            provider_id=provider_binding["provider_id"],
+            model_id=provider_binding["model_id"],
+            endpoint_profile_id=provider_binding["endpoint_profile_id"],
+            endpoint_profile_version=provider_binding["endpoint_profile_version"],
+            purpose=provider_binding["purpose"],
+            authorization_scope_digest=provider_binding["scope_digest"],
+            purpose_digest=provider_binding["purpose_digest"],
         )
+        return binding.target_digest(action)
     if spec.requires_target_digest_arg:
         if target_digest is None:
             raise ElevatedBootstrapError("target_digest_required")

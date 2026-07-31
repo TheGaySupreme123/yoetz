@@ -54,7 +54,8 @@ def test_catalog_is_review_only_and_agent_safe() -> None:
     assert catalog["schema"] == "yoetz.consent.catalog/2"
     assert "mcp.start" in catalog["default_safe"]
     assert catalog["rules"]["no_standing_yolo"] is True
-    assert catalog["rules"]["trusted_console_review_only"] is True
+    assert catalog["rules"]["verified_user_presence_required"] is True
+    assert catalog["rules"]["trusted_console_is_not_authority"] is True
     assert catalog["rules"]["agent_selected_initialization_secret_forbidden"] is True
     by_name = {item["operation"]: item for item in catalog["operations"]}
     assert by_name["vault_initialize"]["implemented"] is True

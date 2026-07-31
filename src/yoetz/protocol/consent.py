@@ -83,7 +83,8 @@ class ConsentRulesModel(_ClosedModel):
     ]
     no_standing_yolo: Literal[True]
     path_safety_not_waivable_by_consent: Literal[True]
-    trusted_console_review_only: Literal[True]
+    verified_user_presence_required: Literal[True]
+    trusted_console_is_not_authority: Literal[True]
     one_pending_at_a_time: Literal[True]
     approval_arguments_forbidden: Literal[True]
     agent_selected_initialization_secret_forbidden: Literal[True]
@@ -125,6 +126,21 @@ class ConsentPrepareResultModel(_ClosedModel):
     pending: AgentSafePendingModel
 
 
+class ConsentDeniedResultModel(_ClosedModel):
+    decision: Literal["denied"]
+
+
+class ConsentVaultInitializedResultModel(_ClosedModel):
+    state: Literal["ready"]
+    reason: Literal["succeeded"]
+
+
+class ConsentProviderCredentialResultModel(_ClosedModel):
+    action: Literal["set", "rotate"]
+    generation: Annotated[int, Field(gt=0)]
+    outcome: Literal["active", "local_only", "stored"]
+
+
 class ConsentReviewResultModel(_ClosedModel):
     schema_: Literal["yoetz.elevated-bootstrap.result/2"] = Field(alias="schema")
     pending_id: PendingId
@@ -132,4 +148,8 @@ class ConsentReviewResultModel(_ClosedModel):
     risk_class: RiskClass
     outcome: Literal["completed", "denied"]
     danger_digest: Digest
-    result: dict[str, str | int]
+    result: (
+        ConsentDeniedResultModel
+        | ConsentVaultInitializedResultModel
+        | ConsentProviderCredentialResultModel
+    )

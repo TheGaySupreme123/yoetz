@@ -143,6 +143,8 @@ class _PosixConsoleAdapter:
                     break
             if used == 0 or storage[used - 1] != 10:
                 raise TrustedConsoleError("input_invalid")
+            if used == 1:
+                raise TrustedConsoleError("input_invalid")
             storage[used - 1] = 0
             for index in range(used, len(storage)):
                 storage[index] = 0
@@ -172,7 +174,7 @@ class _WindowsConsoleApi(Protocol):
 
     def write(self, handle: int, value: str) -> None: ...
 
-    def read_line(self, handle: int, maximum: int, *, hidden: bool) -> str: ...
+    def read_line(self, handle: int, maximum: int, *, hidden: bool) -> bytearray: ...
 
     def close(self, handle: int) -> None: ...
 
@@ -190,6 +192,8 @@ class _CtypesWindowsConsoleApi:
     _FILE_TYPE_CHAR: Final = 0x0002
     _ENABLE_ECHO_INPUT: Final = 0x0004
     _ENABLE_LINE_INPUT: Final = 0x0002
+    _CP_UTF8: Final = 65001
+    _WC_ERR_INVALID_CHARS: Final = 0x00000080
     _STD_INPUT_HANDLE: Final = -10
     _STD_ERROR_HANDLE: Final = -12
     _INVALID_HANDLE_VALUE: Final = ctypes.c_void_p(-1).value
@@ -237,6 +241,17 @@ class _CtypesWindowsConsoleApi:
             ctypes.c_void_p,
         )
         kernel32.ReadConsoleW.restype = ctypes.c_int
+        kernel32.WideCharToMultiByte.argtypes = (
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        )
+        kernel32.WideCharToMultiByte.restype = ctypes.c_int
         kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
         kernel32.CloseHandle.restype = ctypes.c_int
         self._kernel32 = kernel32
@@ -300,7 +315,7 @@ class _CtypesWindowsConsoleApi:
         ) or int(written.value) != len(value):
             raise TrustedConsoleError("interrupted")
 
-    def read_line(self, handle: int, maximum: int, *, hidden: bool) -> str:
+    def read_line(self, handle: int, maximum: int, *, hidden: bool) -> bytearray:
         original = ctypes.c_uint32()
         if not self._kernel32.GetConsoleMode(handle, ctypes.byref(original)):
             raise TrustedConsoleError(_TRUST_FAILURE)
@@ -320,9 +335,49 @@ class _CtypesWindowsConsoleApi:
                 None,
             ):
                 raise TrustedConsoleError("input_invalid")
-            return "".join(buffer[index] for index in range(int(read.value)))
+            used = int(read.value)
+            while used > 0 and buffer[used - 1] in {"\r", "\n"}:
+                used -= 1
+            if used <= 0:
+                raise TrustedConsoleError("input_invalid")
+            encoded_size = int(
+                self._kernel32.WideCharToMultiByte(
+                    self._CP_UTF8,
+                    self._WC_ERR_INVALID_CHARS,
+                    buffer,
+                    used,
+                    None,
+                    0,
+                    None,
+                    None,
+                )
+            )
+            if encoded_size <= 0 or encoded_size > maximum:
+                raise TrustedConsoleError("input_invalid")
+            encoded = bytearray(encoded_size)
+            destination = (ctypes.c_char * encoded_size).from_buffer(encoded)
+            converted = int(
+                self._kernel32.WideCharToMultiByte(
+                    self._CP_UTF8,
+                    self._WC_ERR_INVALID_CHARS,
+                    buffer,
+                    used,
+                    destination,
+                    encoded_size,
+                    None,
+                    None,
+                )
+            )
+            if converted != encoded_size:
+                _overwrite(encoded)
+                raise TrustedConsoleError("input_invalid")
+            return encoded
         finally:
-            if not self._kernel32.SetConsoleMode(handle, int(original.value)):
+            ctypes.memset(ctypes.addressof(buffer), 0, ctypes.sizeof(buffer))
+            if (
+                not self._kernel32.SetConsoleMode(handle, int(original.value))
+                and sys.exc_info()[0] is None
+            ):
                 raise TrustedConsoleError("interrupted")
 
     def close(self, handle: int) -> None:
@@ -387,13 +442,9 @@ class _WindowsConsoleAdapter:
         if not self._input or not self._output:
             raise TrustedConsoleError(_TRUST_FAILURE)
         self.write(prompt)
-        text = self._api.read_line(self._input, maximum, hidden=hidden)
+        encoded = self._api.read_line(self._input, maximum, hidden=hidden)
         if hidden:
             self.write("\n")
-        if not text.endswith(("\n", "\r")):
-            raise TrustedConsoleError("input_invalid")
-        normalized = text.rstrip("\r\n")
-        encoded = bytearray(normalized.encode("utf-8", errors="strict"))
         if not encoded or len(encoded) > maximum:
             _overwrite(encoded)
             raise TrustedConsoleError("input_invalid")

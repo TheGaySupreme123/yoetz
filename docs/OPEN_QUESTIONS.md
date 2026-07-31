@@ -150,8 +150,10 @@ that evidence.
   lifecycle/reason status, while all six task operations fail closed when required keys are locked.
 - Generic headless passphrase input remains deferred. v0.1 unattended readiness uses only an
   existing vault through a release-tested OS keyring; passphrase mode requires the confidential
-  human ceremony. **Scoped exception (ADR-015/016, amended 2026-07-30):** vault initialization and
-  provider credential set/rotate use trusted foreground-console review. Initialization uses a
+  human ceremony. **Scoped exception (ADR-015/016, amended 2026-07-31):** vault initialization and
+  provider credential set/rotate require action-bound OS user presence before foreground-console
+  review. The current runtime fails closed because no production presence adapter is wired.
+  Initialization uses a
   helper-generated, credential-store-verified secret; provider credentials are entered inside the
   confidential ceremony. `review_only` irreversible operations remain catalogued with
   `implemented=false` until durable review consumption exists at owning CLIs. This is not a

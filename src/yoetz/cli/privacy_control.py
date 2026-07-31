@@ -10,10 +10,10 @@ from yoetz.cli.unlock import (
     _cancel_quietly,  # pyright: ignore[reportPrivateUsage]
     _drive_session,  # pyright: ignore[reportPrivateUsage]
     _ForegroundTerminal,  # pyright: ignore[reportPrivateUsage]
-    _overwrite,  # pyright: ignore[reportPrivateUsage]
     _render_preview,  # pyright: ignore[reportPrivateUsage]
     _SuppliedSecretTerminal,  # pyright: ignore[reportPrivateUsage]
     _verify_preview,  # pyright: ignore[reportPrivateUsage]
+    overwrite_secret_buffer,
 )
 from yoetz.service.confidential_client import HumanControlClient
 from yoetz.service.confidential_protocol import (
@@ -122,7 +122,7 @@ async def decide_policy(
 
     if (decision is None) != (passphrase is None):
         if passphrase is not None:
-            _overwrite(passphrase)
+            overwrite_secret_buffer(passphrase)
         raise ValueError("privacy_decision_supplied_pair_invalid")
     if decision is not None and passphrase is not None:
         return await _decide_policy_supplied(pending_id, decision, passphrase)
@@ -145,7 +145,7 @@ async def decide_policy_with_local_reauthentication(
     try:
         return await _decide("policy", pending_id, passphrase=passphrase)
     finally:
-        _overwrite(passphrase)
+        overwrite_secret_buffer(passphrase)
 
 
 async def _decide_policy_supplied(
@@ -182,7 +182,7 @@ async def _decide_policy_supplied(
                 raise
     finally:
         await client.close()
-        _overwrite(passphrase)
+        overwrite_secret_buffer(passphrase)
 
 
 class _DecisionTerminal:

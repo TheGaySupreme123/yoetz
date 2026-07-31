@@ -1,7 +1,8 @@
-# ADR-015 — Trusted-console elevated bootstrap consent
+# ADR-015 — OS-presence-gated elevated bootstrap consent
 
-**Status:** Amended 2026-07-30; superseded in scope by ADR-016 for the general non-default
-consent catalog. The trusted-console bootstrap lane below remains binding.
+**Status:** Amended 2026-07-31; superseded in scope by ADR-016 for the general non-default
+consent catalog. Elevated execution remains fail-closed until a verified OS-presence adapter is
+installed.
 **Implemented by:** `src/yoetz/service/elevated_bootstrap.py`,
 `src/yoetz/cli/elevated.py`, `src/yoetz/cli/trusted_console.py`, and
 `src/yoetz/protocol/consent.py`.
@@ -27,11 +28,12 @@ environment, stdin, MCP, agent JSON, and caller booleans.
    exact danger and target digests, expiry, pending ID, and the fixed
    `["yoetz","consent","review"]` command. Version-1 pending records are invalidated, not migrated.
 
-3. **One approval surface.** `yoetz consent review` is the only approval path. It first opens a
-   `TrustedForegroundConsole`, then atomically claims and reloads the pending request, validates
-   operation, digests, expiry, and binding, displays the exact action, and accepts an explicit
-   `approve` or `deny` decision. Approval is never accepted through arguments, environment, stdin,
-   MCP, JSON, or a caller-supplied boolean.
+3. **One approval surface.** `yoetz consent review` takes no authority-bearing arguments. Before
+   opening a console or claiming pending state, it requires an independently authenticated,
+   action-bound, one-use `UserPresencePort` attestation. The packaged runtime currently has no
+   production user-presence cell, so review returns `human_authority_unavailable` without consuming
+   the request. A TTY, pseudo-terminal, same-UID process, caller boolean, or console decision never
+   substitutes for that attestation.
 
 4. **Single-shot state.** A review claim consumes the public pending name. Approval, denial,
    cancellation, expiry, and post-claim failure consume the claim once. Concurrent and duplicate
@@ -53,23 +55,25 @@ environment, stdin, MCP, agent JSON, and caller booleans.
    Credential bytes never enter the pending record, catalog, result, log, error, or agent
    projection.
 
-8. **Console boundary.** On macOS/Linux, the boundary opens `/dev/tty`, requires matching terminal
+8. **Console is not authority.** On macOS/Linux, the boundary opens `/dev/tty`, requires matching terminal
    identities for standard input/error, requires the current foreground process group, and uses
    no-echo reads. On Windows it opens `CONIN$`/`CONOUT$`, validates real console handles and current
    process attachment, and reads through Win32 console APIs with echo disabled. It never falls back
-   to redirected standard streams. Absence or ambiguity returns `trusted_console_required` before
-   pending consumption or vault mutation.
+   to redirected standard streams. It is a presentation and secret-ingress boundary only. Absence
+   or ambiguity returns `trusted_console_required`; presence still grants no authority.
 
 ## Consequences
 
-The normal initialization path requires one human review per installation. Existing vault data,
+Until a production `UserPresencePort` is capability-tested and wired, elevated review cannot
+initialize a vault or mutate provider credentials. The explicit manual
+`service initialize-passphrase` ceremony remains available. Existing vault data,
 vault mode, installation identity, and auto-unlock credentials are not migrated or rewrapped.
 Later restarts continue through the existing scoped auto-unlock path. The Windows console adapter
 does not imply support for the full Windows service transport, peer authentication, packaging, or
 release surface.
 
-Native biometric prompts, natural-language host approval, approved-machine profiles, durable
-grants, E2EE service authority, and MCP presentation UX remain separate design work.
+Native OS-authenticated prompts, natural-language host approval, approved-machine profiles,
+durable grants, E2EE service authority, and MCP presentation UX remain separate design work.
 
 ## Alternatives considered
 

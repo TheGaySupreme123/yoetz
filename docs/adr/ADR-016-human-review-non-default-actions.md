@@ -1,6 +1,7 @@
 # ADR-016 — Human review for non-default actions
 
-**Status:** Working decision; amended 2026-07-30 to require trusted-console review.
+**Status:** Working decision; amended 2026-07-31 to require action-bound OS user presence before
+console review.
 **Implemented by:** `src/yoetz/service/elevated_bootstrap.py`,
 `src/yoetz/cli/elevated.py`, `src/yoetz/cli/trusted_console.py`,
 `src/yoetz/protocol/consent.py`, and `guidance/agent-instructions.md`.
@@ -38,10 +39,12 @@ controls.
    reviewer atomically claims it. Every terminal decision and every post-claim failure is
    single-shot.
 
-4. **Trusted review only.** The fixed `yoetz consent review` command takes no authority-bearing
-   arguments. It requires a verified foreground console, renders exact structural facts, and
-   accepts `approve` or `deny` only through that console. Redirected or headless execution fails
-   before mutation.
+4. **Verified presence before review.** The fixed `yoetz consent review` command takes no
+   authority-bearing arguments. An independently authenticated, action-bound, one-use
+   `UserPresencePort` attestation must succeed before the helper opens a foreground console or
+   claims pending state. The current runtime has no production adapter and therefore returns
+   `human_authority_unavailable`. Redirected, headless, pseudo-terminal, and same-UID automation
+   cannot authorize mutation.
 
 5. **No standing danger mode.** There is no session-wide bypass or broad grant. Easy review means
    short bounded text and one console decision, not reduced checks.
@@ -60,7 +63,9 @@ controls.
 ## Consequences
 
 Agents may prepare and inspect a request, then must ask the human to run the fixed review command
-locally. The agent cannot derive or submit anything that authorizes the operation. Approval of one
+locally. Until an approved OS-presence adapter is installed, that command fails closed and the
+explicit manual passphrase-initialization path remains the available setup route. The agent cannot
+derive or submit anything that authorizes the operation. Approval of one
 operation does not grant another operation, another digest, another installation, or a later
 session.
 

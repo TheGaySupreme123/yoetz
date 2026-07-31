@@ -1381,8 +1381,9 @@ On Windows it opens `CONIN$`/`CONOUT$`, validates real console handles and curre
 attachment, and performs no-echo reads through Win32 console APIs. It never falls back to
 redirected standard streams. These channels are absent from
 `ControlClientPort`, ordinary CLI/MCP import graphs and schemas, argv, environment, config, stdin,
-logs, traces, transcripts, and LLM context. Same-UID raw connection/TTY emulation remains an
-explicit threat-model limit, not a claimed cryptographic exclusion.
+logs, traces, transcripts, and LLM context. These console properties protect secret ingress but
+never establish human presence; pseudo-terminal and same-UID automation are explicitly rejected as
+authorization signals.
 
 Elevated consent (`service/elevated_bootstrap.py`, CLI `yoetz consent` /
 `yoetz elevated-bootstrap`) is a separate owner-only pending-file lane outside
@@ -1391,17 +1392,15 @@ digest-bound pending records (`yoetz.elevated-bootstrap.pending/2`). The v2 agen
 contains only operation, risk class, bounded danger text, exact digests, expiry, pending ID, and
 the fixed `["yoetz","consent","review"]` command. A legacy v1 record is invalidated.
 
-`yoetz consent review` is the only approval path. It opens the trusted console before atomically
-claiming and reloading the request, renders the exact action, and accepts explicit `approve` or
-`deny` input only from that console. Approval, denial, cancellation, expiry, and post-claim failure
-consume the request once; a crash marker blocks reuse. No argv, environment, stdin, MCP, JSON, or
-caller boolean can authorize review. Vault initialization generates its passphrase inside the
-trusted helper, verifies a write/read round trip through the scoped credential store, and submits
-it directly to the confidential ceremony. A pre-existing scoped entry is rejected rather than
-used as the initialization secret. A known pre-write unavailable backend may offer the existing
-manual human ceremony; ambiguous write or read-back stops before initialization.
-Provider credential set/rotate use the same review surface. This lane does not unlock an
-already-locked vault.
+`yoetz consent review` is the only elevated review command, but it is not currently an approval
+path. It requires an independently authenticated, action-bound, one-use `UserPresencePort`
+attestation before opening the trusted console or atomically claiming the request. Because no
+production adapter is wired, it returns `human_authority_unavailable` and leaves pending state
+untouched. No TTY, pseudo-terminal, same-UID process, argv, environment, stdin, MCP, JSON, or caller
+boolean can authorize review. Once a verified adapter exists, vault initialization may generate a
+passphrase inside the trusted helper and provider credential set/rotate may use the same
+presence-gated surface. This lane does not unlock an already-locked vault. The explicit manual
+passphrase-initialization ceremony remains separate.
 
 The public v2 JSON Schema contracts are `catalog`, `pending-agent`, `prepare-result`,
 `review-result`, and `status`, each at version `2.0.0` under `schemas/consent/`. `review_only` irreversible

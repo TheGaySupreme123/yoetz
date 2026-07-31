@@ -12,6 +12,7 @@ from yoetz.cli import trusted_console
 from yoetz.cli.trusted_console import TrustedConsoleError, TrustedForegroundConsole
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX terminal checks are unavailable")
 def test_posix_redirected_stdin_fails_before_open() -> None:
     adapter = trusted_console._PosixConsoleAdapter()  # pyright: ignore[reportPrivateUsage]
     with (
@@ -24,6 +25,7 @@ def test_posix_redirected_stdin_fails_before_open() -> None:
     opened.assert_not_called()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="foreground-pgrp checks are POSIX-only")
 def test_posix_background_or_mismatched_terminal_fails_and_closes() -> None:
     adapter = trusted_console._PosixConsoleAdapter()  # pyright: ignore[reportPrivateUsage]
     terminal = SimpleNamespace(st_rdev=10)
@@ -41,6 +43,7 @@ def test_posix_background_or_mismatched_terminal_fails_and_closes() -> None:
     closed.assert_called_once_with(9)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX terminal checks are unavailable")
 def test_posix_ambiguous_terminal_error_is_bounded_and_closes() -> None:
     adapter = trusted_console._PosixConsoleAdapter()  # pyright: ignore[reportPrivateUsage]
     with (
@@ -53,6 +56,24 @@ def test_posix_ambiguous_terminal_error_is_bounded_and_closes() -> None:
             adapter.open()
     assert exc.value.reason == "trusted_console_required"
     closed.assert_called_once_with(9)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX terminal checks are unavailable")
+def test_posix_empty_line_is_rejected() -> None:
+    adapter = trusted_console._PosixConsoleAdapter()  # pyright: ignore[reportPrivateUsage]
+    adapter._fd = 9  # pyright: ignore[reportPrivateUsage]
+
+    def newline(_fd: int, buffers: list[memoryview]) -> int:
+        buffers[0][0] = 10
+        return 1
+
+    with (
+        patch("yoetz.cli.trusted_console._PosixConsoleAdapter.write"),
+        patch("yoetz.cli.trusted_console.os.readv", side_effect=newline),
+    ):
+        with pytest.raises(TrustedConsoleError) as exc:
+            adapter.read_line("Secret: ", 64, hidden=False)
+    assert exc.value.reason == "input_invalid"
 
 
 class _WindowsApi:
@@ -91,10 +112,10 @@ class _WindowsApi:
         del handle
         self.writes.append(value)
 
-    def read_line(self, handle: int, maximum: int, *, hidden: bool) -> str:
+    def read_line(self, handle: int, maximum: int, *, hidden: bool) -> bytearray:
         del handle, maximum
         self.hidden_reads.append(hidden)
-        return "secret\r\n"
+        return bytearray(b"secret")
 
     def close(self, handle: int) -> None:
         self.closed.append(handle)

@@ -174,9 +174,11 @@ Terminal ownership alone is not user-identity evidence. The helper rejects redir
 environment/config/argument input, and noninteractive execution; establishes a
 separately typed peer-authenticated connection; and erase mutable buffers best-effort after the
 service consumes them. No MCP registry, `ServiceClient`, or public application method can reach
-this channel. **Amendment (ADR-015/016, 2026-07-30):** `yoetz consent review` uses this same
+this channel. **Amendment (ADR-015/016, 2026-07-31):** `yoetz consent review` may use this
 trusted-console boundary for `vault_initialize`, `provider_credential_set`, and
-`provider_credential_rotate`. Initialization accepts only its helper-generated,
+`provider_credential_rotate` only after independently authenticated, action-bound OS user
+presence. The current runtime has no production presence adapter and fails closed before console
+open or pending claim. Initialization accepts only its helper-generated,
 credential-store-verified passphrase; provider secrets are entered inside the confidential
 ceremony. Provider credentials become opaque adapter-scoped handles in the service vault;
 provider adapters and normal clients never receive reusable credential bytes.
@@ -253,8 +255,10 @@ passphrase vault whose exact bundle-scoped auto-unlock entry was provisioned by 
 repair. A pristine headless install cannot auto-select keyring mode or create passphrase
 auto-unlock without verified local setup authority.
 
-**Amendment (ADR-015/016, 2026-07-30):** elevated vault initialization and provider credential
-set/rotate use `yoetz consent review` on `TrustedForegroundConsole`. Vault initialization generates
+**Amendment (ADR-015/016, 2026-07-31):** elevated vault initialization and provider credential
+set/rotate require action-bound OS user presence before `yoetz consent review` may use
+`TrustedForegroundConsole`. The current runtime has no production presence adapter and returns
+`human_authority_unavailable` before pending claim. Vault initialization generates
 the high-entropy passphrase inside the helper and round-trips it through the scoped credential
 store before direct confidential submission. Provider secret entry occurs inside the same trusted
 console ceremony. No agent-visible channel or general headless API carries approval authority or
