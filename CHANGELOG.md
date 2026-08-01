@@ -1,17 +1,13 @@
 # Changelog
 
 All notable user-visible changes to Yoetz are documented in this file. Format is a lightweight,
-project-native heading style: one permanent `Unreleased` section above reverse-chronological
-released versions.
+project-native heading style that marks the pending version as unreleased above
+reverse-chronological released versions.
 
-## Unreleased
+## 0.1.0 — Public alpha (unreleased)
 
-_Nothing yet._
-
-## 0.1.0 — Public alpha
-
-Initial public alpha release. No version shipped before it, so every entry below describes behavior
-as it first ships rather than a change from a previous release.
+Planned initial public alpha release. No version has shipped before it, so every entry below
+describes behavior intended for the first release rather than a change from a previous release.
 
 ### Added
 
@@ -31,9 +27,9 @@ as it first ships rather than a change from a previous release.
   zero-egress (`local_only`, global network ceiling off, all five channels disabled).
 - An optional, privacy-gated semantic review path behind the same gateway, with a reviewed OpenAI
   Responses adapter, a local-model AF_UNIX profile, and a scripted fake provider for testing.
-- Codex integration as the first harness adapter: an explicit trusted-project skill install/status/
-  remove flow, an MCP stdio bridge, and a JSONL transcript importer for an exact tested Codex
-  version range.
+- Codex integration as the first-party harness adapter: an explicit trusted-project skill
+  install/status/remove flow, an MCP stdio bridge, and a JSONL transcript importer. The tested
+  Codex version set remains empty pending exact installed-artifact capability evidence.
 - Backup, restore, and forward-only migration support with frontier-pinned manifests and verified
   route switches; see [`docs/runbooks/`](docs/runbooks/) for the operator procedures.
 

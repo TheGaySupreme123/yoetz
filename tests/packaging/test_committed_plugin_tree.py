@@ -17,9 +17,10 @@ everywhere. These cases are what make that claim falsifiable for this surface.
 
 from __future__ import annotations
 
-import json
+import hashlib
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 import pytest
 
@@ -29,6 +30,7 @@ from yoetz.adapters.integrations.codex_plugin import (
     render_plugin_tree,
 )
 from yoetz.ports.integrations import IntegrationScope, IntegrationTarget
+from yoetz.protocol.canonical import JsonValue, canonical_digest, strict_json_parse
 
 _REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 _COMMITTED_TREE: Final = _REPO_ROOT / PLUGIN_ROOT
@@ -75,16 +77,24 @@ def test_the_committed_tree_has_no_unmanaged_extra_files() -> None:
 def test_the_install_marker_records_the_committed_bytes() -> None:
     """A stale marker is how the drift stayed self-consistent and therefore invisible."""
 
-    marker = json.loads((_COMMITTED_TREE / _MARKER_NAME).read_text(encoding="utf-8"))
-    recorded = {entry["relative_path"]: entry for entry in marker["managed_files"]}
+    parsed = strict_json_parse((_COMMITTED_TREE / _MARKER_NAME).read_bytes())
+    assert isinstance(parsed, Mapping), "install marker is not an object"
+    marker = cast(Mapping[str, JsonValue], parsed)
+    managed_files = marker["managed_files"]
+    assert isinstance(managed_files, list), "install marker managed_files is not a list"
+    entries = [cast(Mapping[str, JsonValue], entry) for entry in managed_files]
+    recorded = {cast(str, entry["relative_path"]): entry for entry in entries}
     rendered = _rendered()
     assert set(recorded) == set(rendered), "marker managed_files disagrees with the rendered tree"
     for relative_path, data in sorted(rendered.items()):
         entry = recorded[relative_path]
         assert entry["size"] == len(data), f"marker size is stale for {relative_path}"
-        assert entry["sha256"].startswith("sha256:"), (
-            f"marker digest is unprefixed: {relative_path}"
-        )
+        expected_digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
+        assert entry["sha256"] == expected_digest, f"marker digest is stale for {relative_path}"
+
+    marker_body = dict(marker)
+    recorded_marker_digest = marker_body.pop("marker_digest")
+    assert recorded_marker_digest == canonical_digest(marker_body), "marker digest is stale"
 
 
 def test_the_committed_guidance_matches_the_repository_guidance() -> None:

@@ -16,9 +16,10 @@ evidence that observation ingest earns `hook_observed` only from real observatio
 
 ## Context
 
-Yoetz is intended to work with any agent through MCP, with Codex as the first *officially supported*
-harness. The drafted v0.1 tree did not express that split, and drifted toward Codex being the only
-harness that could work well:
+Yoetz is intended to work with any agent through MCP, with Codex as the first harness targeted by a
+first-party integration. Codex remains untested rather than supported until an exact capability
+cell satisfies E-002 and E-013. The drafted v0.1 tree did not express that split, and drifted toward
+Codex being the only harness that could work well:
 
 1. `IntegrationsPort` named its adapter in its own method set — `preview_codex_skill`,
    `install_codex_skill`, `status_codex_skill`, `remove_codex_skill` — with `CodexSkillSource` and
