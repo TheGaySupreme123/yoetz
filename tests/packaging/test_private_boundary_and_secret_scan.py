@@ -309,6 +309,77 @@ def test_missing_artifact_blocks_as_incomplete_via_cli(scanner: ModuleType, tmp_
     assert rc == 1
 
 
+def test_runtime_tree_scans_recursively_with_a_bounded_label(
+    scanner: ModuleType, tmp_path: Path
+) -> None:
+    runtime = tmp_path / "runtime"
+    nested = runtime / "nested"
+    nested.mkdir(parents=True)
+    (nested / "clean.bin").write_bytes(b"clean runtime bytes")
+    (runtime / "catalog.sqlite3").write_bytes(b"expected encrypted runtime database")
+    report_path = tmp_path / "runtime-report.json"
+
+    rc = scanner.main(["--runtime-tree", str(runtime), "--json-out", str(report_path)])
+
+    assert rc == 0
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["target_kind"] == "runtime"
+    assert report["target_label"] == "runtime-1"
+    assert report["finding_count"] == 0
+    assert str(tmp_path) not in report_path.read_text(encoding="utf-8")
+
+
+def test_missing_runtime_tree_blocks_as_incomplete_via_cli(
+    scanner: ModuleType, tmp_path: Path
+) -> None:
+    rc = scanner.main(["--runtime-tree", str(tmp_path / "missing")])
+    assert rc == 1
+
+
+def test_runtime_tree_symlink_blocks_as_incomplete_via_cli(
+    scanner: ModuleType, tmp_path: Path
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    runtime_link = tmp_path / "runtime-link"
+    runtime_link.symlink_to(target, target_is_directory=True)
+
+    rc = scanner.main(["--runtime-tree", str(runtime_link)])
+
+    assert rc == 1
+
+
+def test_runtime_tree_canary_is_detected_and_redacted(
+    scanner: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    canary = b"YOETZ_RUNTIME_CANARY_0123456789abcdef"
+    (runtime / "leak.bin").write_bytes(b"prefix:" + canary)
+    canary_file = tmp_path / "canary.bin"
+    canary_file.write_bytes(canary)
+    report_path = tmp_path / "runtime-report.json"
+
+    rc = scanner.main(
+        [
+            "--runtime-tree",
+            str(runtime),
+            "--canary-file",
+            str(canary_file),
+            "--json-out",
+            str(report_path),
+        ]
+    )
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    report = report_path.read_bytes()
+    assert canary not in captured.out.encode()
+    assert canary not in captured.err.encode()
+    assert canary not in report
+    assert json.loads(report)["finding_count"] == 1
+
+
 # ---------------------------------------------------------------------------
 # Rule-config loading (the test-only substitution mechanism that does exist)
 # ---------------------------------------------------------------------------

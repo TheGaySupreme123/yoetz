@@ -319,8 +319,18 @@ class _Env:
 
 
 def test_canaries_absent_from_structural_surfaces(tmp_path: Path) -> None:
-    env = _Env(tmp_path)
-    canary = f"CANARY-{os.urandom(8).hex()}".encode()
+    retained_root = os.environ.get("YOETZ_RUNTIME_CANARY_ROOT")
+    canary_file = os.environ.get("YOETZ_RUNTIME_CANARY_FILE")
+    assert bool(retained_root) is bool(canary_file), (
+        "YOETZ_RUNTIME_CANARY_ROOT and YOETZ_RUNTIME_CANARY_FILE must be set together"
+    )
+    root = Path(retained_root) if retained_root else tmp_path
+    root.mkdir(parents=True, exist_ok=not retained_root)
+    env = _Env(root)
+    canary = (
+        Path(canary_file).read_bytes() if canary_file else f"CANARY-{os.urandom(8).hex()}".encode()
+    )
+    assert canary and len(canary) <= 4_096, "runtime canary must be nonempty and bounded"
     never_send_canary = f"NEVERSEND-{os.urandom(8).hex()}".encode()
 
     async def run() -> tuple[object, object]:
@@ -351,6 +361,7 @@ def test_canaries_absent_from_structural_surfaces(tmp_path: Path) -> None:
     poisoned.write_bytes(b"unrelated noise around " + canary)
     control_findings = scan_for_sensitive_content(poisoned.read_bytes(), canaries=(canary,))
     assert control_findings != ()
+    poisoned.unlink()
 
     # The never-send canary must never have reached any structural surface at all: it was blocked
     # before any content object was written, so scanning for it must find nothing anywhere,
