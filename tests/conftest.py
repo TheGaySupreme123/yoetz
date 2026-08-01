@@ -7,7 +7,6 @@ from types import ModuleType
 
 import pytest
 
-import yoetz.observability.diagnostics as diagnostics_module
 from builders import clock as clock_builder_module
 from builders import events as event_builder_module
 from builders import ids as id_builder_module
@@ -26,7 +25,17 @@ def _isolated_diagnostic_log(  # pyright: ignore[reportUnusedFunction]
     tests that assert on records already redirect it; this makes the default safe for the ones
     that only pass through. A test that sets its own ``log_dir`` still wins, because its
     ``monkeypatch`` is applied after this fixture and undone before it.
+
+    The import is deliberately inside the fixture. The portable console-boundary job runs
+    ``tests/unit/cli/test_trusted_console.py`` with pytest alone and no project dependencies, and
+    this file is a ``conftest`` on that path; importing the diagnostics module at module scope
+    pulls in ``platformdirs`` through ``yoetz.config.paths`` and breaks collection there.
     """
+
+    try:
+        import yoetz.observability.diagnostics as diagnostics_module
+    except ImportError:
+        return  # No project dependencies installed, so there is no durable sink to redirect.
 
     root = tmp_path_factory.mktemp("diagnostics")
     monkeypatch.setattr(diagnostics_module, "log_dir", lambda: Path(root))
