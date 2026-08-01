@@ -626,6 +626,10 @@ async def _propose(candidate: PrivacyPolicy, expected_digest: str) -> str | None
         result = await client.privacy_propose_policy(
             JsonObject(
                 {
+                    # Required by the frozen privacy_propose_policy body. Without it the frame
+                    # fails validation before it leaves this process, and the whole setup flow
+                    # reports a closed invalid_request that names nothing.
+                    "schema_version": "1.0.0",
                     "expected_policy_digest": expected_digest,
                     "candidate_policy": encode_privacy_policy_json(candidate),
                 }

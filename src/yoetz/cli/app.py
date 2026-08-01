@@ -6,8 +6,9 @@ import dataclasses
 import importlib
 import os
 import sys
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from enum import Enum
+from functools import cache
 from pathlib import Path
 from typing import Annotated, Any, BinaryIO, Final, Literal, cast
 
@@ -46,10 +47,18 @@ from yoetz.protocol.models import (
     StatusSuccessModel,
     public_model_to_wire,
 )
+from yoetz.protocol.schemas import schema_document_for
 from yoetz.service.client import ServiceClient, connect_service
 from yoetz.service.control_protocol import public_error_code_for_control_reason
 
-__all__ = ["app", "build_service_client", "main", "run_async"]
+__all__ = [
+    "app",
+    "build_service_client",
+    "main",
+    "run_async",
+    "support_methods_carrying_schema_version",
+    "with_body_schema_version",
+]
 
 _MAX_INPUT_BYTES: Final = 1_048_576
 _INPUT = Annotated[
@@ -506,6 +515,63 @@ app.command("status")(_workflow_command("status", StatusRequest))
 app.command("receipt")(_workflow_command("receipt", ReceiptRequest))
 
 
+@cache
+def support_methods_carrying_schema_version() -> frozenset[str]:
+    """Support methods whose frozen request body declares the const ``schema_version`` field.
+
+    Derived from the frozen control-request schema rather than listed here, so a method added or
+    changed there cannot leave this behind.
+    """
+
+    document = schema_document_for("control-request", "1.0.0").json_schema
+    # The catalog hands back frozen values, so JSON arrays arrive as tuples rather than lists.
+    branches = document.get("oneOf")
+    if not isinstance(branches, Sequence) or type(branches) is str:
+        return frozenset()  # pragma: no cover - the frozen schema is a oneOf of calls
+    definitions = document.get("$defs")
+    defs: Mapping[str, JsonValue] = (
+        cast(Mapping[str, JsonValue], definitions) if isinstance(definitions, Mapping) else {}
+    )
+    methods: set[str] = set()
+    for raw in cast(Sequence[JsonValue], branches):
+        if not isinstance(raw, Mapping):
+            continue
+        properties = cast(Mapping[str, JsonValue], raw).get("properties")
+        if not isinstance(properties, Mapping):
+            continue
+        fields = cast(Mapping[str, JsonValue], properties)
+        method_node = fields.get("method")
+        body_node = fields.get("body")
+        if not isinstance(method_node, Mapping) or not isinstance(body_node, Mapping):
+            continue
+        name = cast(Mapping[str, JsonValue], method_node).get("const")
+        reference = cast(Mapping[str, JsonValue], body_node).get("$ref")
+        if type(name) is not str or type(reference) is not str:
+            continue
+        body = defs.get(reference.removeprefix("#/$defs/"))
+        if not isinstance(body, Mapping):
+            continue
+        required = cast(Mapping[str, JsonValue], body).get("required")
+        if isinstance(required, Sequence) and "schema_version" in required:
+            methods.add(name)
+    return frozenset(methods)
+
+
+def with_body_schema_version(method: str, request: JsonObject) -> JsonObject:
+    """Fill in ``schema_version`` when the method's body requires it and the input omitted it.
+
+    The field is a ``const``: there is exactly one value the frozen schema accepts, so an input
+    file without it is unambiguous rather than incomplete. Omitting it used to fail frame encoding
+    before the request left the process, and the caller saw only a closed ``invalid_request`` that
+    named no field. An input that supplies its own value is passed through untouched and still
+    validated, so a wrong version is still rejected rather than silently corrected.
+    """
+
+    if method not in support_methods_carrying_schema_version() or "schema_version" in request:
+        return request
+    return JsonObject({**dict(request), "schema_version": "1.0.0"})
+
+
 async def _call_support(
     method: str,
     input_path: str | None,
@@ -524,6 +590,7 @@ async def _call_support(
                 from yoetz.cli.provider_status import machine_scope_request
 
                 request = machine_scope_request()
+            request = with_body_schema_version(method, request)
         client = await build_service_client()
         try:
             result = await getattr(client, method)(request, deadline_ms=deadline_ms)
