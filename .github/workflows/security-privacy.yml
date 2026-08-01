@@ -406,14 +406,21 @@ jobs:
             tests/subprocess/test_mcp_stdout_purity.py \
             -m "not fault and not soak and not live" -q --timeout=180
 
+      # This gate is prevention, not reporting: a detected plaintext/canary leak or an incomplete
+      # scan must fail the job, because security-evidence and security-required both accept this
+      # job's success as proof the sweep was clean.
       - name: Scan every allowed temp surface byte-for-byte and produce redacted evidence
         run: |
+          set -euo pipefail
           mkdir -p "${RUNNER_TEMP}/runtime-canary-evidence"
           uv run --locked python scripts/scan_public_boundary.py \
             --source-tree "${YOETZ_DENY_NETWORK:+$HOME}" \
-            --evidence-dir "${RUNNER_TEMP}/runtime-canary-evidence" || true
+            --evidence-dir "${RUNNER_TEMP}/runtime-canary-evidence"
 
+      # Runs even when the scan above fails, so a real finding is uploaded as redacted evidence
+      # rather than lost with the job.
       - name: Upload runtime plaintext-canary evidence (redacted only)
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: security-runtime-canary-evidence
