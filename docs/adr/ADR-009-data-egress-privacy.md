@@ -328,6 +328,13 @@ agent-context and local-model fences; exact approval binding/restart behavior; n
 overclaiming a separate model runtime; and no plaintext canaries across databases, objects, logs, traces, prompts,
 receipts, errors, or transports. Public copy must reserve “zero network egress” for the composite
 ceiling-plus-channel state, not infer it from `local_only` alone.
+The runtime plaintext release gate binds one per-run synthetic canary to the privacy integration
+suite and retains that suite's encrypted/structural state under the isolated XDG data tree. It then
+recursively scans only the explicitly selected XDG data, config, cache, and runtime trees under the
+same fixed file, aggregate-byte, member-count, and no-symlink caps as release evidence. A planted
+runtime-tree negative control must be detected without exposing the canary, and the subsequent clean
+scan must emit a nonempty canonical redacted report; a finding, missing surface, over-limit surface,
+or absent report fails the release gate.
 The setup/conformance matrix additionally proves every `ReviewContextProfile`, the recommended
 recipe expansion, problem-local selection, agent-context delivery of reviewer findings, current
 provider data-use recommendation metadata, and automatic no-prompt behavior after standing policy

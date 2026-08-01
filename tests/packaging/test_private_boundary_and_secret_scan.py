@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tarfile
@@ -307,6 +308,120 @@ def test_missing_artifact_blocks_as_incomplete_via_cli(scanner: ModuleType, tmp_
     missing = tmp_path / "does-not-exist.whl"
     rc = scanner.main(["--artifact", str(missing)])
     assert rc == 1
+
+
+def test_runtime_tree_scans_recursively_with_a_bounded_label(
+    scanner: ModuleType, tmp_path: Path
+) -> None:
+    runtime = tmp_path / "runtime"
+    nested = runtime / "nested"
+    nested.mkdir(parents=True)
+    (nested / "clean.bin").write_bytes(b"clean runtime bytes")
+    (runtime / "catalog.sqlite3").write_bytes(b"expected encrypted runtime database")
+    report_path = tmp_path / "runtime-report.json"
+
+    entries = scanner.enumerate_target(
+        scanner.ScanTarget(kind="runtime", label="runtime-1", path=runtime)
+    )
+    rc = scanner.main(["--runtime-tree", str(runtime), "--json-out", str(report_path)])
+
+    assert rc == 0
+    relative_paths = [entry.relative_path for entry in entries]
+    assert relative_paths == sorted(relative_paths, key=lambda value: value.encode("utf-8"))
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["target_kind"] == "runtime"
+    assert report["target_label"] == "runtime-1"
+    assert report["finding_count"] == 0
+    assert str(tmp_path) not in report_path.read_text(encoding="utf-8")
+
+
+def test_missing_runtime_tree_blocks_as_incomplete_via_cli(
+    scanner: ModuleType, tmp_path: Path
+) -> None:
+    rc = scanner.main(["--runtime-tree", str(tmp_path / "missing")])
+    assert rc == 1
+
+
+def test_runtime_tree_symlink_blocks_as_incomplete_via_cli(
+    scanner: ModuleType, tmp_path: Path
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    runtime_link = tmp_path / "runtime-link"
+    runtime_link.symlink_to(target, target_is_directory=True)
+
+    rc = scanner.main(["--runtime-tree", str(runtime_link)])
+
+    assert rc == 1
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform has no FIFO support")
+def test_runtime_tree_fifo_blocks_without_reading(scanner: ModuleType, tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    os.mkfifo(runtime / "blocked.fifo")
+
+    rc = scanner.main(["--runtime-tree", str(runtime)])
+
+    assert rc == 1
+
+
+def test_runtime_tree_member_cap_applies_before_file_reads(
+    scanner: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "a.txt").write_text("a", encoding="utf-8")
+    (runtime / "b.txt").write_text("b", encoding="utf-8")
+    monkeypatch.setattr(scanner, "_MAX_MEMBER_COUNT", 1)
+
+    rc = scanner.main(["--runtime-tree", str(runtime)])
+
+    assert rc == 1
+
+
+def test_runtime_tree_file_cap_applies_before_unbounded_read(
+    scanner: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "too-large.bin").write_bytes(b"ab")
+    monkeypatch.setattr(scanner, "_MAX_FILE_BYTES", 1)
+
+    rc = scanner.main(["--runtime-tree", str(runtime)])
+
+    assert rc == 1
+
+
+def test_runtime_tree_canary_is_detected_and_redacted(
+    scanner: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    canary = b"YOETZ_RUNTIME_CANARY_0123456789abcdef"
+    (runtime / "leak.bin").write_bytes(b"prefix:" + canary)
+    canary_file = tmp_path / "canary.bin"
+    canary_file.write_bytes(canary)
+    report_path = tmp_path / "runtime-report.json"
+
+    rc = scanner.main(
+        [
+            "--runtime-tree",
+            str(runtime),
+            "--canary-file",
+            str(canary_file),
+            "--json-out",
+            str(report_path),
+        ]
+    )
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    report = report_path.read_bytes()
+    assert canary not in captured.out.encode()
+    assert canary not in captured.err.encode()
+    assert canary not in report
+    assert json.loads(report)["finding_count"] == 1
 
 
 # ---------------------------------------------------------------------------

@@ -1,18 +1,20 @@
-"""Public-repository and artifact privacy boundary gate.
+"""Public-repository, artifact, and runtime privacy boundary gate.
 
-Blocks publication of private strategy/business material, local paths, transcripts,
-credentials, tenant/customer identifiers, secret canaries, and unexpected files across candidate
-source, sdist, wheel, and release-evidence targets. This is a deterministic prevention gate, not a
-claim that pattern matching can discover every secret; human review and dependency/license
-scanners remain separate gates. The scanner performs no network calls and writes only the report
-paths explicitly requested by the caller.
+Blocks publication or unsafe runtime persistence of private strategy/business material, local
+paths, transcripts, credentials, tenant/customer identifiers, secret canaries, and unexpected
+files across candidate source, sdist, wheel, release-evidence, and explicitly selected live-runtime
+targets. This is a deterministic prevention gate, not a claim that pattern matching can discover
+every secret; human review and dependency/license scanners remain separate gates. The scanner
+performs no network calls and writes only the report paths explicitly requested by the caller.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
 import tarfile
@@ -114,6 +116,7 @@ _MAX_FILE_BYTES: Final = 25_000_000
 _MAX_AGGREGATE_BYTES: Final = 500_000_000
 _MAX_MEMBER_COUNT: Final = 200_000
 _MAX_COMPRESSION_RATIO: Final = 200
+_READ_CHUNK_BYTES: Final = 1_048_576
 
 # Reviewed public rule config, committed beside the script. Patterns are bounded, anchored where
 # practical, and public (synthetic examples only, never real credentials).
@@ -122,7 +125,7 @@ _DEFAULT_RULES: Final[tuple[BoundaryRule, ...]] = (
         "PRIV-PATH-001",
         "local_home_path",
         "high",
-        "all",
+        "publication",
         "content",
         r"(?<![\w/.])/Users/[A-Za-z0-9_.\-]+",
         "A maintainer's absolute macOS home path must never reach a public artifact.",
@@ -132,7 +135,7 @@ _DEFAULT_RULES: Final[tuple[BoundaryRule, ...]] = (
         "PRIV-PATH-002",
         "local_home_path",
         "high",
-        "all",
+        "publication",
         "content",
         r"(?<![\w/.])/home/[A-Za-z0-9_.\-]+",
         "A maintainer's absolute Linux home path must never reach a public artifact.",
@@ -142,7 +145,7 @@ _DEFAULT_RULES: Final[tuple[BoundaryRule, ...]] = (
         "PRIV-PATH-003",
         "local_repository_path",
         "medium",
-        "all",
+        "publication",
         "content",
         r"(?<![\w/.])[A-Za-z]:\\\\Users\\\\[A-Za-z0-9_.\-]+",
         "A maintainer's absolute Windows home path must never reach a public artifact.",
@@ -152,7 +155,7 @@ _DEFAULT_RULES: Final[tuple[BoundaryRule, ...]] = (
         "PRIV-SESSION-001",
         "transcript_session_marker",
         "high",
-        "all",
+        "publication",
         "filename",
         r"(^|/)\.claude/",
         "Assistant session/config directories are private drafting state, not a public artifact.",
@@ -162,7 +165,7 @@ _DEFAULT_RULES: Final[tuple[BoundaryRule, ...]] = (
         "PRIV-SESSION-002",
         "transcript_session_marker",
         "medium",
-        "all",
+        "publication",
         "filename",
         r"(^|/)CLAUDE\.md$",
         "Private assistant instruction files are not a reviewed public deliverable.",
@@ -202,7 +205,7 @@ _DEFAULT_RULES: Final[tuple[BoundaryRule, ...]] = (
         "PRIV-ENV-001",
         "debug_build_cache_file",
         "medium",
-        "all",
+        "publication",
         "filename",
         r"(^|/)\.env(\.[A-Za-z0-9_.\-]+)?$",
         "Local dotenv files carry ambient secrets and must not be packaged or exported.",
@@ -212,7 +215,7 @@ _DEFAULT_RULES: Final[tuple[BoundaryRule, ...]] = (
         "PRIV-CACHE-001",
         "debug_build_cache_file",
         "low",
-        "all",
+        "publication",
         "filename",
         r"(^|/)__pycache__/|\.pyc$",
         "Interpreter caches are build noise, never a reviewed public deliverable.",
@@ -222,7 +225,7 @@ _DEFAULT_RULES: Final[tuple[BoundaryRule, ...]] = (
         "PRIV-CACHE-002",
         "debug_build_cache_file",
         "low",
-        "all",
+        "publication",
         "filename",
         r"(^|/)\.pytest_cache/|(^|/)\.ruff_cache/|(^|/)\.mypy_cache/",
         "Tool caches are local build state, never a reviewed public deliverable.",
@@ -232,7 +235,7 @@ _DEFAULT_RULES: Final[tuple[BoundaryRule, ...]] = (
         "PRIV-DB-001",
         "database_or_wal_file",
         "medium",
-        "all",
+        "publication",
         "filename",
         r"\.(sqlite3?|db)(-wal|-shm)?$",
         "Local database/WAL/SHM files may carry user data and must not be packaged or exported.",
@@ -242,7 +245,7 @@ _DEFAULT_RULES: Final[tuple[BoundaryRule, ...]] = (
         "PRIV-MAP-001",
         "source_map",
         "low",
-        "all",
+        "publication",
         "filename",
         r"\.map$",
         "Source maps can leak local build paths and are not a reviewed public deliverable.",
@@ -252,7 +255,7 @@ _DEFAULT_RULES: Final[tuple[BoundaryRule, ...]] = (
         "PRIV-PLAN-001",
         "private_planning_document",
         "high",
-        "all",
+        "publication",
         "filename",
         r"(^|/)(STRATEGY|PRIVATE|FOUNDER[-_ ]NOTES?)[A-Za-z0-9_.\- ]*\.(md|txt)$",
         "Private planning/business document names must not enter the public candidate.",
@@ -312,6 +315,15 @@ def load_rules(path: Path | None = None) -> tuple[BoundaryRule, ...]:
     return tuple(rules)
 
 
+def _applicable_rules(rules: Sequence[BoundaryRule], target_kind: str) -> tuple[BoundaryRule, ...]:
+    """Select rules for a publication target or an explicitly bounded runtime tree."""
+
+    scopes = {"all", target_kind}
+    if target_kind != "runtime":
+        scopes.add("publication")
+    return tuple(rule for rule in rules if rule.scope in scopes)
+
+
 # --------------------------------------------------------------------------
 # Path safety
 # --------------------------------------------------------------------------
@@ -341,6 +353,8 @@ def enumerate_target(target: ScanTarget) -> tuple[FileEntry, ...]:
         return _enumerate_artifact(target.path)
     if target.kind == "evidence":
         return _enumerate_evidence(target.path)
+    if target.kind == "runtime":
+        return _enumerate_runtime(target.path)
     raise BoundaryScanError("unsupported_target_kind", detail=target.kind)
 
 
@@ -401,6 +415,92 @@ def _enumerate_evidence(root: Path) -> tuple[FileEntry, ...]:
     if len(entries) > _MAX_MEMBER_COUNT:
         raise BoundaryScanError("member_count_exceeded", detail=str(root))
     return tuple(entries)
+
+
+def _enumerate_runtime(root: Path) -> tuple[FileEntry, ...]:
+    """Enumerate one explicitly selected live-runtime tree without following symlinks."""
+
+    if root.is_symlink() or not root.is_dir():
+        raise BoundaryScanError("runtime_tree_missing", detail=str(root))
+    entries: list[FileEntry] = []
+    aggregate = 0
+    discovered = 0
+    pending: list[tuple[Path, str]] = [(root, "directory")]
+    while pending:
+        candidate, kind = pending.pop()
+        if kind == "directory":
+            children: list[tuple[Path, str]] = []
+            try:
+                with os.scandir(candidate) as iterator:
+                    for child in iterator:
+                        discovered += 1
+                        if discovered > _MAX_MEMBER_COUNT:
+                            raise BoundaryScanError("member_count_exceeded", detail=str(root))
+                        if child.is_symlink():
+                            child_kind = "unsupported"
+                        elif child.is_dir(follow_symlinks=False):
+                            child_kind = "directory"
+                        elif child.is_file(follow_symlinks=False):
+                            child_kind = "file"
+                        else:
+                            child_kind = "unsupported"
+                        children.append((Path(child.path), child_kind))
+            except BoundaryScanError:
+                raise
+            except OSError as exc:
+                raise BoundaryScanError("unscanned_runtime_entry", detail=str(candidate)) from exc
+            children.sort(
+                key=lambda item: item[0].name.encode("utf-8", errors="surrogateescape"),
+                reverse=True,
+            )
+            pending.extend(children)
+            continue
+        if kind != "file":
+            raise BoundaryScanError("unscanned_runtime_entry", detail=str(candidate))
+        relative = candidate.relative_to(root).as_posix()
+        if not _is_safe_member_path(relative):
+            raise BoundaryScanError("unsafe_runtime_path", detail=relative)
+        data = _read_runtime_file(candidate, relative)
+        aggregate += len(data)
+        if aggregate > _MAX_AGGREGATE_BYTES:
+            raise BoundaryScanError("aggregate_too_large", detail=str(root))
+        entries.append(FileEntry(relative_path=relative, size=len(data), data=data))
+    return tuple(entries)
+
+
+def _read_runtime_file(candidate: Path, relative: str) -> bytes:
+    """Read one regular runtime file through a nonblocking, no-follow descriptor."""
+
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(candidate, flags)
+    except OSError as exc:
+        raise BoundaryScanError("unscanned_runtime_entry", detail=str(candidate)) from exc
+    try:
+        facts = os.fstat(descriptor)
+        if not stat.S_ISREG(facts.st_mode):
+            raise BoundaryScanError("unscanned_runtime_entry", detail=str(candidate))
+        if facts.st_size > _MAX_FILE_BYTES:
+            raise BoundaryScanError("file_too_large", detail=relative)
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            chunk = os.read(descriptor, min(_READ_CHUNK_BYTES, _MAX_FILE_BYTES + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > _MAX_FILE_BYTES:
+                raise BoundaryScanError("file_too_large", detail=relative)
+        return b"".join(chunks)
+    except BoundaryScanError:
+        raise
+    except OSError as exc:
+        raise BoundaryScanError("unscanned_runtime_entry", detail=str(candidate)) from exc
+    finally:
+        os.close(descriptor)
 
 
 def _enumerate_artifact(path: Path) -> tuple[FileEntry, ...]:
@@ -714,6 +814,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--evidence-dir", type=Path, default=None, help="Scan a release-evidence output directory."
     )
     parser.add_argument(
+        "--runtime-tree",
+        type=Path,
+        action="append",
+        default=[],
+        help="Scan one explicitly selected live-runtime directory recursively.",
+    )
+    parser.add_argument(
         "--canary-file",
         type=Path,
         default=None,
@@ -741,9 +848,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         targets.append(
             ScanTarget(kind="evidence", label=str(args.evidence_dir), path=args.evidence_dir)
         )
+    for index, runtime_tree in enumerate(args.runtime_tree, start=1):
+        targets.append(ScanTarget(kind="runtime", label=f"runtime-{index}", path=runtime_tree))
 
     if not targets:
-        parser.error("at least one of --source-tree, --artifact, --evidence-dir is required")
+        parser.error(
+            "at least one of --source-tree, --artifact, --evidence-dir, --runtime-tree is required"
+        )
         return 2
 
     canary: bytes | None = None
@@ -773,13 +884,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             continue
 
         total_files += len(entries)
+        target_rules = _applicable_rules(rules, target.kind)
         for entry in entries:
             all_findings.extend(
-                scan_filename(entry, rules, target_label=target.label, canary=canary)
+                scan_filename(entry, target_rules, target_label=target.label, canary=canary)
             )
-            all_findings.extend(scan_bytes(entry, rules, target_label=target.label, canary=canary))
+            all_findings.extend(
+                scan_bytes(entry, target_rules, target_label=target.label, canary=canary)
+            )
         if target.kind == "artifact":
-            all_findings.extend(scan_metadata(entries, rules, target_label=target.label))
+            all_findings.extend(scan_metadata(entries, target_rules, target_label=target.label))
 
     report_bytes = build_report(
         ",".join(target.label for target in targets),

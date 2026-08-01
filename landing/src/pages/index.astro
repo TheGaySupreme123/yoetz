@@ -3,6 +3,7 @@ import "../styles/tokens.css";
 import "../styles/landing.css";
 
 const GITHUB = "https://github.com/yoetz/yoetz-core";
+const INSTALL_COMMAND = "uvx yoetz";
 
 // Terminal transcript — colors match the design-system terminal palette.
 const faint = "#64748b";
@@ -127,8 +128,8 @@ const roadLinks = ["hot", "warm", ""];
             independent check on every claim of “done”.
           </p>
           <div class="ds-hero-ctas">
-            <button class="ds-btn copy-btn" id="copy-install" type="button">
-              <span class="prompt">$</span> npx yoetz
+            <button class="ds-btn copy-btn" id="copy-install" type="button" data-command={INSTALL_COMMAND}>
+              <span class="prompt">$</span> {INSTALL_COMMAND}
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg>
               <span class="copy-note" id="copy-note"></span>
             </button>
@@ -184,7 +185,7 @@ const roadLinks = ["hot", "warm", ""];
           <div class="qs-step">
             <span class="qs-num">1</span>
             <div class="qs-body">
-              <div class="qs-code"><span class="prompt">$</span> npx yoetz</div>
+              <div class="qs-code"><span class="prompt">$</span> {INSTALL_COMMAND}</div>
               <p class="qs-note">Detects Codex, registers the MCP server, installs the skill. Nothing leaves your machine.</p>
             </div>
           </div>
@@ -255,7 +256,7 @@ const roadLinks = ["hot", "warm", ""];
       <div class="ds-section-head">
         <span class="ds-kicker">Harnesses</span>
         <h2 class="ds-h2">An open MCP protocol from day one</h2>
-        <p class="ds-lead">Any MCP host can plug in today — official, tested support starts with Codex.</p>
+        <p class="ds-lead">Any MCP host can plug in today — Codex is the first harness with a first-party integration.</p>
       </div>
       <div class="road">
         {roadmap.map((h, i) => (
@@ -303,12 +304,12 @@ const roadLinks = ["hot", "warm", ""];
     <script>
       const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-      // --- Copy "npx yoetz" ---
+      // --- Copy install command ---
       const copyBtn = document.getElementById("copy-install");
       const copyNote = document.getElementById("copy-note");
       let copyTimer: ReturnType<typeof setTimeout>;
       copyBtn?.addEventListener("click", () => {
-        navigator.clipboard?.writeText("npx yoetz").catch(() => {});
+        navigator.clipboard?.writeText(copyBtn.dataset.command ?? "").catch(() => {});
         if (copyNote) copyNote.textContent = "copied";
         clearTimeout(copyTimer);
         copyTimer = setTimeout(() => {
