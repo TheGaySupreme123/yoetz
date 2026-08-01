@@ -439,6 +439,15 @@ jobs:
             echo "::error::runtime scanner leaked the canary into logs"
             exit 1
           fi
+          if ! jq -e '.finding_count > 0 and any(.findings[]; .rule_id == "CANARY-EXACT-001")' \
+              "$evidence/runtime-negative-control.json" > /dev/null; then
+            echo "::error::runtime scanner failure did not prove canary detection"
+            exit 1
+          fi
+          if grep -Fq -f "$YOETZ_RUNTIME_CANARY_FILE" "$evidence/runtime-negative-control.json"; then
+            echo "::error::runtime scanner leaked the canary into its redacted report"
+            exit 1
+          fi
           rm -rf "$negative" "${RUNNER_TEMP}/runtime-negative-control.log"
           uv run --locked python scripts/scan_public_boundary.py \
             --runtime-tree "$XDG_DATA_HOME" \

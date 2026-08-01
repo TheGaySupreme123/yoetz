@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
 import tarfile
@@ -114,6 +116,7 @@ _MAX_FILE_BYTES: Final = 25_000_000
 _MAX_AGGREGATE_BYTES: Final = 500_000_000
 _MAX_MEMBER_COUNT: Final = 200_000
 _MAX_COMPRESSION_RATIO: Final = 200
+_READ_CHUNK_BYTES: Final = 1_048_576
 
 # Reviewed public rule config, committed beside the script. Patterns are bounded, anchored where
 # practical, and public (synthetic examples only, never real credentials).
@@ -421,24 +424,83 @@ def _enumerate_runtime(root: Path) -> tuple[FileEntry, ...]:
         raise BoundaryScanError("runtime_tree_missing", detail=str(root))
     entries: list[FileEntry] = []
     aggregate = 0
-    for candidate in sorted(root.rglob("*")):
-        if candidate.is_symlink():
-            raise BoundaryScanError("unscanned_runtime_entry", detail=str(candidate))
-        if candidate.is_dir():
+    discovered = 0
+    pending: list[tuple[Path, str]] = [(root, "directory")]
+    while pending:
+        candidate, kind = pending.pop()
+        if kind == "directory":
+            children: list[tuple[Path, str]] = []
+            try:
+                with os.scandir(candidate) as iterator:
+                    for child in iterator:
+                        discovered += 1
+                        if discovered > _MAX_MEMBER_COUNT:
+                            raise BoundaryScanError("member_count_exceeded", detail=str(root))
+                        if child.is_symlink():
+                            child_kind = "unsupported"
+                        elif child.is_dir(follow_symlinks=False):
+                            child_kind = "directory"
+                        elif child.is_file(follow_symlinks=False):
+                            child_kind = "file"
+                        else:
+                            child_kind = "unsupported"
+                        children.append((Path(child.path), child_kind))
+            except BoundaryScanError:
+                raise
+            except OSError as exc:
+                raise BoundaryScanError("unscanned_runtime_entry", detail=str(candidate)) from exc
+            children.sort(
+                key=lambda item: item[0].name.encode("utf-8", errors="surrogateescape"),
+                reverse=True,
+            )
+            pending.extend(children)
             continue
+        if kind != "file":
+            raise BoundaryScanError("unscanned_runtime_entry", detail=str(candidate))
         relative = candidate.relative_to(root).as_posix()
         if not _is_safe_member_path(relative):
             raise BoundaryScanError("unsafe_runtime_path", detail=relative)
-        data = candidate.read_bytes()
-        if len(data) > _MAX_FILE_BYTES:
-            raise BoundaryScanError("file_too_large", detail=relative)
+        data = _read_runtime_file(candidate, relative)
         aggregate += len(data)
         if aggregate > _MAX_AGGREGATE_BYTES:
             raise BoundaryScanError("aggregate_too_large", detail=str(root))
         entries.append(FileEntry(relative_path=relative, size=len(data), data=data))
-    if len(entries) > _MAX_MEMBER_COUNT:
-        raise BoundaryScanError("member_count_exceeded", detail=str(root))
     return tuple(entries)
+
+
+def _read_runtime_file(candidate: Path, relative: str) -> bytes:
+    """Read one regular runtime file through a nonblocking, no-follow descriptor."""
+
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(candidate, flags)
+    except OSError as exc:
+        raise BoundaryScanError("unscanned_runtime_entry", detail=str(candidate)) from exc
+    try:
+        facts = os.fstat(descriptor)
+        if not stat.S_ISREG(facts.st_mode):
+            raise BoundaryScanError("unscanned_runtime_entry", detail=str(candidate))
+        if facts.st_size > _MAX_FILE_BYTES:
+            raise BoundaryScanError("file_too_large", detail=relative)
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            chunk = os.read(descriptor, min(_READ_CHUNK_BYTES, _MAX_FILE_BYTES + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > _MAX_FILE_BYTES:
+                raise BoundaryScanError("file_too_large", detail=relative)
+        return b"".join(chunks)
+    except BoundaryScanError:
+        raise
+    except OSError as exc:
+        raise BoundaryScanError("unscanned_runtime_entry", detail=str(candidate)) from exc
+    finally:
+        os.close(descriptor)
 
 
 def _enumerate_artifact(path: Path) -> tuple[FileEntry, ...]:
