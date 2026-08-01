@@ -92,6 +92,10 @@ def _selected_with_diversity(
     reviewer that raised two or three material challenges had all but the best silently folded
     into ``suppressed_count``. Up to half the cap is now reservable, which keeps deterministic
     findings in the majority while letting more than one challenge be seen.
+
+    ``max_findings == 1`` reserves nothing and stays deterministic-only, unchanged from before:
+    the single seat goes to the highest-ranked finding, because reserving it would mean returning
+    a semantic challenge in place of every deterministic finding rather than alongside them.
     """
 
     selected = ordered[:max_findings]

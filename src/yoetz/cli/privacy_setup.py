@@ -619,20 +619,23 @@ async def _effective_policy() -> PrivacyPolicy:
 
 async def _propose(candidate: PrivacyPolicy, expected_digest: str) -> str | None:
     from yoetz.adapters.privacy.catalog import encode_privacy_policy_json
-    from yoetz.cli.app import build_service_client
+    from yoetz.cli.app import build_service_client, with_body_schema_version
 
     client = await build_service_client()
     try:
         result = await client.privacy_propose_policy(
-            JsonObject(
-                {
-                    # Required by the frozen privacy_propose_policy body. Without it the frame
-                    # fails validation before it leaves this process, and the whole setup flow
-                    # reports a closed invalid_request that names nothing.
-                    "schema_version": "1.0.0",
-                    "expected_policy_digest": expected_digest,
-                    "candidate_policy": encode_privacy_policy_json(candidate),
-                }
+            # The frozen privacy_propose_policy body requires schema_version. Omitting it fails
+            # frame validation before the request leaves this process, and the whole setup flow
+            # reports a closed invalid_request that names nothing. The shared helper derives both
+            # the requirement and the value from the schema, so there is one source of truth.
+            with_body_schema_version(
+                "privacy_propose_policy",
+                JsonObject(
+                    {
+                        "expected_policy_digest": expected_digest,
+                        "candidate_policy": encode_privacy_policy_json(candidate),
+                    }
+                ),
             )
         )
     finally:

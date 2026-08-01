@@ -9,6 +9,7 @@ from yoetz.application.check import (
     SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM,
     SEMANTIC_REJECTED_REF_OUTSIDE_CASE,
     SemanticJudgmentRejected,
+    SemanticJudgmentReview,
     validate_semantic_judgment,
 )
 from yoetz.domain.findings import (
@@ -174,3 +175,60 @@ def test_no_material_discrepancy_returns_no_semantic_candidate() -> None:
     assert review.candidates == ()
     assert review.challenges_returned == 0
     assert review.rejected_by_reason == ()
+
+
+def test_rejection_counts_aggregate_and_reasons_sort_deterministically() -> None:
+    """Repeated drops sum, and two reasons come back in one stable order.
+
+    With a single rejection under a single reason, neither the counter nor the sort is observable;
+    a mixed judgment pins both. Deterministic reproducibility is the point — the same judgment
+    must always produce the same accounting.
+    """
+
+    case = make_case(
+        extra_refs=(clm(1), clm(2)),
+        coverage_overrides={clm(1): replace(BASE_COVERAGE, known_gaps=("missing_ref",))},
+    )
+    hidden = ReviewerChallenge(
+        FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
+        "Claims no change",
+        (str(clm(1)),),
+        "The file is unchanged.",
+        "Nothing was modified.",
+        "Main agent: no further action required.",
+        "state_unresolved_limitation",
+        "The excerpt was never disclosed.",
+    )
+    judgment = SemanticJudgment(
+        "challenges_returned",
+        (
+            _challenge(_INVENTED, summary="First invented"),
+            hidden,
+            _challenge(str(clm(2)), summary="Real"),
+        ),
+    )
+
+    review = validate_semantic_judgment(
+        case,
+        (),
+        judgment,
+        _provenance(),
+        expected_frontier=case.frontier,
+    )
+
+    assert [candidate.summary for candidate in review.candidates] == ["Real"]
+    assert review.challenges_returned == 3
+    assert review.challenges_rejected == 2
+    # Sorted by ASCII reason token, so hidden_source_claim precedes ref_outside_case.
+    assert review.rejected_by_reason == (
+        (SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM, 1),
+        (SEMANTIC_REJECTED_REF_OUTSIDE_CASE, 1),
+    )
+    assert review.challenges_returned == len(review.candidates) + review.challenges_rejected
+
+
+def test_review_rejects_accounting_that_does_not_add_up() -> None:
+    """The value type owns the reconciliation the diagnostic reports."""
+
+    with pytest.raises(ValueError, match="semantic_judgment_review_invalid"):
+        SemanticJudgmentReview((), 3, ((SEMANTIC_REJECTED_REF_OUTSIDE_CASE, 1),))

@@ -590,7 +590,9 @@ async def _call_support(
                 from yoetz.cli.provider_status import machine_scope_request
 
                 request = machine_scope_request()
-            request = with_body_schema_version(method, request)
+        # Every support body passes through here, whichever branch built it, so the normalization
+        # is one step rather than a property of one path.
+        request = with_body_schema_version(method, request)
         client = await build_service_client()
         try:
             result = await getattr(client, method)(request, deadline_ms=deadline_ms)

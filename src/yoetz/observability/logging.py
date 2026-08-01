@@ -58,6 +58,9 @@ _FIELD_ORDER: Final = (
 )
 _FIELD_SET: Final = frozenset(_FIELD_ORDER)
 _CALLER_FIELDS: Final = _FIELD_SET - {"timestamp", "level", "component", "operation"}
+# Fields a bounded-counts caller may supply. The identity fields the emitter binds itself are
+# excluded so a caller can never pass the same keyword twice.
+_COUNT_FIELDS: Final = _CALLER_FIELDS - {"correlation_id", "request_id", "outcome"}
 _STRUCTURAL_MARKER: Final = "_yoetz_structured_record"
 _STRUCTURAL_FIELDS: Final = "_yoetz_structured_fields"
 _COMPONENT_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$", re.ASCII)
@@ -520,7 +523,11 @@ def record_bounded_counts_without_raising(
     """
 
     correlation_id = _new_correlation()
-    fields = {name: value for name, value in counts.items() if name in _CALLER_FIELDS}
+    # Excluding the names bound directly below is load-bearing, not tidiness: a caller that put
+    # ``outcome`` (or a correlation/request id) in ``counts`` would hand the logger the same
+    # keyword twice, and the TypeError is swallowed by the guard below — the record would vanish
+    # exactly where this function exists to make something visible.
+    fields = {name: value for name, value in counts.items() if name in _COUNT_FIELDS}
     try:
         get_logger(component).info(
             operation,

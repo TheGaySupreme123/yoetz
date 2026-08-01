@@ -13,7 +13,6 @@ from yoetz.domain.findings import (
     FindingKind,
     FindingOrigin,
     RankedFindings,
-    SemanticFailureClass,
     SemanticProvenance,
     finding_from_json,
     finding_to_json,
@@ -175,13 +174,21 @@ class SemanticJudgmentReview:
         if (
             type(self.candidates) is not tuple
             or type(self.challenges_returned) is not int
+            or self.challenges_returned < 0
             or type(self.rejected_by_reason) is not tuple
         ):
+            raise _invalid("semantic_judgment_review_invalid")
+        if any(type(pair) is not tuple or len(pair) != 2 for pair in self.rejected_by_reason):
             raise _invalid("semantic_judgment_review_invalid")
         if any(
             reason not in _SEMANTIC_REJECTION_REASONS or type(count) is not int or count < 1
             for reason, count in self.rejected_by_reason
         ):
+            raise _invalid("semantic_judgment_review_invalid")
+        # The diagnostic this value feeds claims that returned == accepted + rejected. Owning the
+        # invariant here turns any future accounting drift into an immediate failure rather than a
+        # durable count that quietly does not add up.
+        if self.challenges_returned != len(self.candidates) + self.challenges_rejected:
             raise _invalid("semantic_judgment_review_invalid")
 
     @property
@@ -1073,11 +1080,14 @@ def _judgment_rejected_evaluation(
         SemanticStatus.INVALID,
         SemanticReason.SEMANTIC_JUDGMENT_REJECTED,
         None,
+        # failure_class stays unset. Every member of the enum names a provider-side fault, and
+        # this path runs only for the structural fence — the coordinator's own inputs were wrong,
+        # not the provider's answer. Naming one would send an operator after the wrong component;
+        # semantic_judgment_rejected already says exactly what happened.
         replace(
             provenance,
             status=SemanticStatus.INVALID,
             reason=SemanticReason.SEMANTIC_JUDGMENT_REJECTED,
-            failure_class=SemanticFailureClass.RESPONSE_CONTENT,
         ),
         result.attempt_accounting,
         result.operation_lease,
