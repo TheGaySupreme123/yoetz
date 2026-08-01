@@ -6,7 +6,36 @@ released versions.
 
 ## Unreleased
 
+_Nothing yet._
+
+## 0.1.0 — Public alpha
+
+Initial public alpha release. No version shipped before it, so every entry below describes behavior
+as it first ships rather than a change from a previous release.
+
 ### Added
+
+- The six-operation protocol (`start`, `publish_work`, `check`, `respond`, `status`, `receipt`) over
+  both the CLI and MCP, with identical request/result contracts and a shared canonical
+  encoding/idempotency model.
+- A persistent, per-user local service that is the sole owner of encryption keys, decrypted state,
+  and SQLite writer connections, reached over an authenticated local control protocol; CLI and MCP
+  are bounded clients of it.
+- Local encrypted object storage (`yoetz-object/1`) and an installation vault with OS-keyring and
+  explicit passphrase initialization modes.
+- Generation-fenced single-writer durability for the installation catalog and every task bundle,
+  built on APSW/SQLite with WAL and verified build/PRAGMA checks.
+- A centrally enforced privacy and data-egress protocol: classification, policy resolution, local
+  minimization/redaction/secret scanning, optional human preview/approval, and a structural
+  `EgressReceipt` for every reserved decision and physical attempt. The default installation is
+  zero-egress (`local_only`, global network ceiling off, all five channels disabled).
+- An optional, privacy-gated semantic review path behind the same gateway, with a reviewed OpenAI
+  Responses adapter, a local-model AF_UNIX profile, and a scripted fake provider for testing.
+- Codex integration as the first harness adapter: an explicit trusted-project skill install/status/
+  remove flow, an MCP stdio bridge, and a JSONL transcript importer for an exact tested Codex
+  version range.
+- Backup, restore, and forward-only migration support with frontier-pinned manifests and verified
+  route switches; see [`docs/runbooks/`](docs/runbooks/) for the operator procedures.
 
 - **Full-screen terminal interface** as the interactive entry point (ADR-017, amending ADR-013
   decisions 1–2 and ADR-012 decision 2 as ADR-013 left it). Bare `yoetz` and `yoetz menu` on a
@@ -36,11 +65,22 @@ released versions.
   Adds one pinned runtime dependency, `textual==8.2.8` (with `linkify-it-py`, `mdit-py-plugins`,
   `uc-micro-py`; all MIT, all on the reviewed-license allowlist).
 
-### Changed
+- First-run setup wizard (ADR-012): bare `yoetz` on an interactive terminal with no completion
+  marker launches `yoetz setup run` — Codex PATH discovery with an explicit choice when several
+  installs exist, preview-and-confirm MCP registration (`codex mcp get` first; foreign entries
+  preserved, never replaced; success verified by re-reading state), a service reachability check,
+  and printed next steps for the privacy-setup and provider-credential ceremonies, which remain
+  human-driven. `yoetz setup status` reports the same posture read-only; every non-TTY bare
+  invocation still prints help.
 
-- The npm launcher propagates signal termination as the conventional `128+n` exit code and gives
-  actionable, platform-specific guidance when `uv` is absent. It still installs nothing, bundles
-  nothing, and duplicates no setup or interface logic.
+- Interactive control menu (ADR-013): bare `yoetz` on an interactive terminal opens a
+  navigable menu (first-run still gets the setup wizard once, then lands in the menu), and the
+  `yoetz menu` command opens it explicitly. The menu shows a status overview (service
+  reachability, vault mode, Codex MCP registration, first-run posture) and dispatches to the
+  existing operations — setup wizard, harness MCP/skill integration, provider-credential
+  ceremonies, privacy posture reads, and service unlock/lock/stop — with every preview/confirm
+  gate and confidential ceremony unchanged. Non-TTY, piped, and CI invocations keep the
+  historical help output byte-for-byte.
 
 - First-party Codex **live observation and advice** as a required v0.1 capability (ADR-010
   amendment): dual-source ingest (hooks primary + selective session-stream reconciliation), local
@@ -62,29 +102,9 @@ released versions.
   widens egress. Credentials, vault unlock, MCP registration, and widening decide remain
   ceremony-only.
 
-- Interactive control menu (ADR-013): bare `yoetz` on an interactive terminal now opens a
-  navigable menu (first-run still gets the setup wizard once, then lands in the menu), and the
-  new `yoetz menu` command opens it explicitly. The menu shows a status overview (service
-  reachability, vault mode, Codex MCP registration, first-run posture) and dispatches to the
-  existing operations — setup wizard, harness MCP/skill integration, provider-credential
-  ceremonies, privacy posture reads, and service unlock/lock/stop — with every preview/confirm
-  gate and confidential ceremony unchanged. Non-TTY, piped, and CI invocations keep the
-  historical help output byte-for-byte.
-
-- First-run setup wizard (ADR-012): bare `yoetz` on an interactive terminal with no completion
-  marker launches `yoetz setup run` — Codex PATH discovery with an explicit choice when several
-  installs exist, preview-and-confirm MCP registration (`codex mcp get` first; foreign entries
-  preserved, never replaced; success verified by re-reading state), a service reachability check,
-  and printed next steps for the privacy-setup and provider-credential ceremonies, which remain
-  human-driven. `yoetz setup status` reports the same posture read-only; every non-TTY bare
-  invocation still prints help.
 - `yoetz integrate <harness> mcp status|preview|install`: digest-bound, preview-gated MCP server
-  registration as a first-class command, backed by the new sibling `HarnessMcpPort` and Codex
+  registration as a first-class command, backed by the sibling `HarnessMcpPort` and Codex
   discovery/registration adapters.
-- Publish-ready npm launcher at `support/npm-launcher/` for a future `npx yoetz`: a
-  dependency-free delegator to the exact pinned `uvx yoetz==<version>`, kept deliberately
-  unpublished (`"private": true`) until a separate release decision.
-- A README Getting started section documenting the install and first-run path.
 
 - `closure_readiness` on every `status` success (`open_obligation_count`,
   `unresolved_finding_count`, `blocking_conditions`), so an agent can see what currently bounds a
@@ -93,11 +113,46 @@ released versions.
   and never strengthens coverage. When the compact singleton is unreadable both counts are `null`
   and the only condition is `readiness_unknown` — unknown is reported as unknown, never as zero.
 
-- A worked `publish_work` example per ordinary publishable event family. Previously only
-  `plan_published` had one, and agents hand-derived action/result/evidence/claim shapes from a
-  large `oneOf`.
+- A worked `publish_work` example per ordinary publishable event family, so agents no longer
+  hand-derive action/result/evidence/claim shapes from a large `oneOf`. `check`, `respond`, and
+  `receipt` carry worked examples too.
 
-### Fixed
+- Publish-ready npm launcher at `support/npm-launcher/` for a future `npx yoetz`: a
+  dependency-free delegator to the exact pinned `uvx yoetz==<version>`, kept deliberately
+  unpublished (`"private": true`) until a separate release decision. It propagates signal
+  termination as the conventional `128+n` exit code and gives actionable, platform-specific
+  guidance when `uv` is absent; it installs nothing, bundles nothing, and duplicates no setup or
+  interface logic.
+
+- Public protocol documentation under [`docs/protocol/`](docs/protocol/) and the evidence-bound
+  claim map at [`docs/public-claims.json`](docs/public-claims.json).
+
+### Documentation and repository
+
+- User documentation: `docs/architecture.md` (topology, module map, honesty rules), `docs/usage/`
+  (install and first run, the terminal interface, the six operations, privacy and semantic review,
+  providers and credentials, receipts and coverage), and `docs/README.md` / `docs/adr/README.md`
+  indexes. `README.md`, `CONTRIBUTING.md`, and `AGENTS.md` were rewritten — the README had still
+  described the repository as containing no implementation.
+- Contribution intake: issue-first process with duplicate search, design gates for
+  protocol/privacy/storage/release/ADR work, mandatory PR checklist, and required disposition of
+  human and code-review-agent comments (`CONTRIBUTING.md`, `.github/ISSUE_TEMPLATE/`,
+  `.github/pull_request_template.md`), plus root `AGENTS.md`, root `CODEOWNERS` for trust
+  boundaries, and a SECURITY threat-model / out-of-scope table.
+- **Retired the spec-mirror tree.** Yoetz was built spec-first, with one Markdown owner per planned
+  file at a mirrored path under `specs/` (640 files, ~63k lines) plus a CI-enforced ownership
+  manifest. That method finished its job — all 626 declared files exist — so the tree was removed
+  rather than maintained as a second copy of shipped code. The authority chain is now `docs/adr/` →
+  `docs/INTERFACES.md` → code and tests. `INTERFACES.md` and `OPEN_QUESTIONS.md` moved to `docs/`;
+  `scripts/verify_spec_manifest.py` and its CI gates are gone; required check names are unchanged.
+  The full tree stays recoverable at tag `specs-tree-final` (`git show specs-tree-final:specs/…`).
+- Release and PR CI no longer swallow packaging/subprocess/integration suite failures behind a
+  "tests not yet present" warning; those gates fail honestly.
+
+### Hardened before first release
+
+These defects were found and fixed during pre-release development. No published version ever
+carried them; they are listed because each one describes the behavior that now ships.
 
 - **Publish recovery must not mask a known authoring error.** When MCP `publish_work` body
   validation fails, envelope-first operation lookup still runs so a committed same-`request_id`
@@ -132,7 +187,6 @@ released versions.
 - **Invalid tool arguments name what is admitted.** The response listed field locations only; it
   now also names the admitted enum members and the required identifier pattern for the rejected
   top-level fields, and points at the tool's worked example — all from checked-in schema bytes.
-  `check`, `respond`, and `receipt` gained the worked examples they never had.
 
 - **A receipt explains why a check does or does not count.** `check_not_applicable` appearing right
   after a successful externally-reviewed check read as a contradiction. The limitations section now
@@ -180,60 +234,6 @@ released versions.
 - `yoetz provider status` now states which lifecycle it probed (`user_service_no_autostart`) and
   whether MCP-local composition starts on demand, so an absent service no longer reads as
   contradicting a working MCP session.
-
-### Changed
-
-- **Retired the spec-mirror tree.** Yoetz was built spec-first, with one Markdown owner per planned
-  file at a mirrored path under `specs/` (640 files, ~63k lines) plus a CI-enforced ownership
-  manifest. That method finished its job — all 626 declared files exist — so the tree was removed
-  rather than maintained as a second copy of shipped code. The authority chain is now `docs/adr/` →
-  `docs/INTERFACES.md` → code and tests. `INTERFACES.md` and `OPEN_QUESTIONS.md` moved to `docs/`;
-  `scripts/verify_spec_manifest.py` and its CI gates are gone; required check names are unchanged.
-  The full tree stays recoverable at tag `specs-tree-final` (`git show specs-tree-final:specs/…`).
-- **New user documentation** replacing what the tree conveyed: `docs/architecture.md` (topology,
-  module map, honesty rules), `docs/usage/` (install and first run, the six operations, privacy and
-  semantic review, providers and credentials, receipts and coverage), and `docs/README.md` /
-  `docs/adr/README.md` indexes. `README.md`, `CONTRIBUTING.md`, and `AGENTS.md` were rewritten — the
-  README had still described the repository as containing no implementation.
-- Release and PR CI no longer swallow packaging/subprocess/integration suite failures behind a
-  "tests not yet present" warning; those gates now fail honestly.
-
-- Strengthened contribution intake: issue-first process with duplicate search, design gates for
-  protocol/privacy/storage/release/ADR work, mandatory PR checklist, and required disposition of
-  human and code-review-agent comments (`CONTRIBUTING.md`, `.github/ISSUE_TEMPLATE/`,
-  `.github/pull_request_template.md`).
-- Added root `AGENTS.md`, root `CODEOWNERS` for trust boundaries, and a SECURITY threat-model /
-  out-of-scope table.
-
-## 0.1.0 — Public alpha
-
-Initial public alpha release.
-
-### Added
-
-- The six-operation protocol (`start`, `publish_work`, `check`, `respond`, `status`, `receipt`) over
-  both the CLI and MCP, with identical request/result contracts and a shared canonical
-  encoding/idempotency model.
-- A persistent, per-user local service that is the sole owner of encryption keys, decrypted state,
-  and SQLite writer connections, reached over an authenticated local control protocol; CLI and MCP
-  are bounded clients of it.
-- Local encrypted object storage (`yoetz-object/1`) and an installation vault with OS-keyring and
-  explicit passphrase initialization modes.
-- Generation-fenced single-writer durability for the installation catalog and every task bundle,
-  built on APSW/SQLite with WAL and verified build/PRAGMA checks.
-- A centrally enforced privacy and data-egress protocol: classification, policy resolution, local
-  minimization/redaction/secret scanning, optional human preview/approval, and a structural
-  `EgressReceipt` for every reserved decision and physical attempt. The default installation is
-  zero-egress (`local_only`, global network ceiling off, all five channels disabled).
-- An optional, privacy-gated semantic review path behind the same gateway, with a reviewed OpenAI
-  Responses adapter, a local-model AF_UNIX profile, and a scripted fake provider for testing.
-- Codex integration as the first harness adapter: an explicit trusted-project skill install/status/
-  remove flow, an MCP stdio bridge, and a JSONL transcript importer for an exact tested Codex
-  version range.
-- Backup, restore, and forward-only migration support with frontier-pinned manifests and verified
-  route switches; see [`docs/runbooks/`](docs/runbooks/) for the operator procedures.
-- Public protocol documentation under [`docs/protocol/`](docs/protocol/) and the evidence-bound
-  claim map at [`docs/public-claims.json`](docs/public-claims.json).
 
 ### Known limitations
 
