@@ -72,8 +72,9 @@ One trusted persistent local service owns the encryption keys, decrypted state, 
 privacy authority, and provider access. CLI, MCP, and the terminal interface are clients — they
 hold none of those things. The interface in particular is presentation only: it dispatches through
 the same application services the commands do, and no secret ever enters it, because credential
-entry suspends the interface and hands the terminal to the existing confidential ceremony. External disclosure is denied by default and must pass centralized classification,
-policy, minimization, secret scanning, exact destination binding, and durable structural audit.
+entry suspends the interface and hands the terminal to the existing confidential ceremony.
+External disclosure is denied by default and must pass centralized classification, policy,
+minimization, secret scanning, exact destination binding, and durable structural audit.
 
 See [Architecture](docs/architecture.md).
 
@@ -90,13 +91,18 @@ See [Architecture](docs/architecture.md).
 
 ## Status
 
-v0.1, pre-release. Every public claim in [`docs/public-claims.json`](docs/public-claims.json) is
-bound to real checked-in evidence and is currently flagged `not_yet_evidenced` — no release has
-shipped, so no release-gated claim is asserted. Every reviewed provider preset resolves to a real
-runtime factory, so a preset you can select is a preset Yoetz can dispatch — but none of the
-non-official presets has recorded live evidence yet, so none is claimed as a confirmed working
-endpoint. That claim stays gated by the capability evidence described in
-[ADR-006](docs/adr/ADR-006-semantic-provider-profile.md).
+v0.1, pre-release; the first release will be a **public alpha**. Every public claim in
+[`docs/public-claims.json`](docs/public-claims.json) is bound to real checked-in evidence and is
+currently flagged `not_yet_evidenced` — no release has shipped, so no release-gated claim is
+asserted. Every reviewed provider preset resolves to a real runtime factory, so a preset you can
+select is a preset Yoetz can dispatch — but none of the non-official presets has recorded live
+evidence yet, so none is claimed as a confirmed working endpoint. That claim stays gated by the
+capability evidence described in [ADR-006](docs/adr/ADR-006-semantic-provider-profile.md).
+
+Two independent threat reviews — of the key hierarchy and recovery design, and of the service,
+credential, and egress boundaries — are open release gates and have **not** been completed. Codex
+integration likewise ships with an empty tested-version set, so it is recorded as untested rather
+than supported. `docs/OPEN_QUESTIONS.md` is the full list of what still gates a stronger claim.
 
 ## Contributing
 
