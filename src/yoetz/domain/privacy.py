@@ -21,7 +21,11 @@ from yoetz.protocol.models import DataCategory
 __all__ = [
     "MAX_EGRESS_CASE_BYTES",
     "MAX_EGRESS_ITEM_BYTES",
+    "MAX_PRIVACY_CHANGES",
+    "MAX_PRIVACY_CHANGE_LABELS",
     "NEVER_SEND_KINDS",
+    "PRIVACY_CHANGE_AREAS",
+    "PRIVACY_CHANGE_FIELDS",
     "AgentProjectionAuditSubject",
     "ApprovedLocalDisclosureCase",
     "ApprovedLocalItem",
@@ -57,6 +61,8 @@ __all__ = [
     "PrivacyDecision",
     "PrivacyOutcome",
     "PrivacyPolicy",
+    "PrivacyPolicyChange",
+    "PrivacyPolicyChangeValue",
     "PrivacyProfile",
     "ProjectionAuditContext",
     "ProjectionProvenanceContext",
@@ -72,6 +78,9 @@ __all__ = [
     "ReviewContextProfile",
     "ReviewSelectionPolicy",
     "outcome_reason_is_valid",
+    "privacy_change_order",
+    "sort_privacy_changes",
+    "validate_privacy_change_set",
 ]
 
 # Reserved item id for the structural review-packet envelope. Owned here rather than in the
@@ -839,6 +848,239 @@ class PolicyOverlay:
             or self.candidate_policy.agent_context_data_classes != self.agent_context_data_classes
         ):
             raise _invalid()
+
+
+PRIVACY_CHANGE_AREAS: Final = frozenset(
+    {"global", "review", "channel", "local_model", "agent_context", "human_control"}
+)
+# Every field token a policy diff may name, keyed by area. The allowlist is the closed
+# vocabulary shared by the classifier, the wire preview, and the trusted renderer: a field
+# absent here can never reach a human approval screen, and a field present here always has a
+# fixed local label. Adding a policy dimension therefore has to add its token in one place.
+PRIVACY_CHANGE_FIELDS: Final = {
+    "global": frozenset({"effective_scope", "network_egress", "provider_data_use_evidence"}),
+    "review": frozenset(
+        {
+            "sections",
+            "excerpt_kinds",
+            "relevance",
+            "include_finding_prose",
+            "include_exact_command_text",
+            "max_timeline_items",
+            "max_assessments",
+            "max_change_observations",
+            "max_excerpts",
+            "max_omissions",
+            "max_excerpt_bytes",
+            "max_total_excerpt_bytes",
+        }
+    ),
+    "channel": frozenset(
+        {
+            "enabled",
+            "categories",
+            "data_classes",
+            "purposes",
+            "provider",
+            "scope_ceiling",
+            "preview_required",
+            "max_bytes",
+            "max_tokens",
+            "authorization_ttl_seconds",
+        }
+    ),
+    "local_model": frozenset({"enabled", "binding", "categories", "data_classes"}),
+    "agent_context": frozenset({"categories", "data_classes"}),
+    "human_control": frozenset({"categories", "data_classes"}),
+}
+MAX_PRIVACY_CHANGE_LABELS: Final = 64
+MAX_PRIVACY_CHANGES: Final = 128
+# Terminal-safe: printable ASCII with no space, control byte, or escape introducer, so a value
+# that reaches the trusted foreground console cannot move the cursor or repaint the screen.
+_PRIVACY_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+@-]{0,127}$", re.ASCII)
+
+
+@dataclass(frozen=True, slots=True)
+class PrivacyPolicyChangeValue:
+    """One bounded canonical side of a policy diff.
+
+    ``none`` means the dimension does not apply on that side (a disabled channel has no
+    ceiling, an unbound sink has no destination) and is deliberately distinct from ``labels``
+    with an empty tuple, which means the dimension applies and permits nothing.
+    """
+
+    kind: Literal["none", "flag", "count", "labels"]
+    flag: bool | None = None
+    count: int | None = None
+    labels: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"none", "flag", "count", "labels"}:
+            raise _invalid()
+        if self.kind == "flag":
+            if type(self.flag) is not bool:
+                raise _invalid()
+        elif self.flag is not None:
+            raise _invalid()
+        if self.kind == "count":
+            _nonnegative(self.count)
+        elif self.count is not None:
+            raise _invalid()
+        if self.kind != "labels":
+            if self.labels != ():
+                raise _invalid()
+            return
+        labels = _sorted_text(self.labels, pattern=_PRIVACY_LABEL)
+        if len(labels) > MAX_PRIVACY_CHANGE_LABELS:
+            raise _invalid()
+        object.__setattr__(self, "labels", labels)
+
+    @classmethod
+    def absent(cls) -> PrivacyPolicyChangeValue:
+        return cls("none")
+
+    @classmethod
+    def of_flag(cls, value: bool) -> PrivacyPolicyChangeValue:
+        return cls("flag", flag=value)
+
+    @classmethod
+    def of_count(cls, value: int) -> PrivacyPolicyChangeValue:
+        return cls("count", count=value)
+
+    @classmethod
+    def of_labels(cls, values: object) -> PrivacyPolicyChangeValue:
+        return cls("labels", labels=_sorted_text(values, pattern=_PRIVACY_LABEL))
+
+
+@dataclass(frozen=True, slots=True)
+class PrivacyPolicyChange:
+    """One security-relevant ``before → after`` step between two privacy policies.
+
+    ``widens`` is derived by the service from the same comparison that classifies a proposal,
+    never supplied by a client, so a widening cannot describe itself as a tightening.
+    """
+
+    area: Literal["global", "review", "channel", "local_model", "agent_context", "human_control"]
+    field: str
+    subject: str | None
+    before: PrivacyPolicyChangeValue
+    after: PrivacyPolicyChangeValue
+    widens: bool
+
+    def __post_init__(self) -> None:
+        if self.area not in PRIVACY_CHANGE_AREAS:
+            raise _invalid()
+        if type(self.field) is not str or self.field not in PRIVACY_CHANGE_FIELDS[self.area]:
+            raise _invalid()
+        if self.subject is not None:
+            _text(self.subject, _PRIVACY_LABEL)
+        if self.area == "channel":
+            if self.subject is None:
+                raise _invalid()
+        elif self.subject is not None:
+            raise _invalid()
+        if (
+            type(self.before) is not PrivacyPolicyChangeValue
+            or type(self.after) is not PrivacyPolicyChangeValue
+        ):
+            raise _invalid()
+        if self.before == self.after:
+            raise _invalid()
+        if type(self.widens) is not bool:
+            raise _invalid()
+
+    @property
+    def identity(self) -> tuple[str, str, str]:
+        """The tuple a diff may name at most once."""
+
+        return (self.area, self.field, self.subject or "")
+
+
+# Presentation order, most consequential first. Whether anything may leave the machine at all
+# outranks where it goes, which outranks whether a human is asked before each request, which
+# outranks what is disclosed, which outranks how much and for how long. Every allowlisted
+# (area, field) pair appears exactly once; the tests assert that, so a new dimension cannot be
+# added to the vocabulary without being given a place in the human's reading order.
+_CHANGE_IMPACT: Final[dict[tuple[str, str], int]] = {
+    ("global", "network_egress"): 0,
+    ("channel", "enabled"): 1,
+    ("channel", "provider"): 2,
+    ("local_model", "enabled"): 3,
+    ("local_model", "binding"): 4,
+    ("channel", "preview_required"): 5,
+    ("global", "provider_data_use_evidence"): 6,
+    ("channel", "data_classes"): 7,
+    ("channel", "categories"): 8,
+    ("channel", "purposes"): 9,
+    ("global", "effective_scope"): 10,
+    ("channel", "scope_ceiling"): 11,
+    ("channel", "authorization_ttl_seconds"): 12,
+    ("channel", "max_bytes"): 13,
+    ("channel", "max_tokens"): 14,
+    ("local_model", "data_classes"): 15,
+    ("local_model", "categories"): 16,
+    ("agent_context", "data_classes"): 17,
+    ("agent_context", "categories"): 18,
+    ("human_control", "data_classes"): 19,
+    ("human_control", "categories"): 20,
+    ("review", "include_exact_command_text"): 21,
+    ("review", "include_finding_prose"): 22,
+    ("review", "relevance"): 23,
+    ("review", "excerpt_kinds"): 24,
+    ("review", "sections"): 25,
+    ("review", "max_excerpt_bytes"): 26,
+    ("review", "max_total_excerpt_bytes"): 27,
+    ("review", "max_excerpts"): 28,
+    ("review", "max_change_observations"): 29,
+    ("review", "max_assessments"): 30,
+    ("review", "max_timeline_items"): 31,
+    ("review", "max_omissions"): 32,
+}
+
+
+def privacy_change_order(change: PrivacyPolicyChange) -> tuple[int, int, str, str, str]:
+    """Total deterministic sort key: widenings first, then impact, then the identity."""
+
+    if type(change) is not PrivacyPolicyChange:
+        raise _invalid()
+    return (
+        0 if change.widens else 1,
+        _CHANGE_IMPACT[(change.area, change.field)],
+        change.area,
+        change.field,
+        change.subject or "",
+    )
+
+
+def sort_privacy_changes(
+    changes: tuple[PrivacyPolicyChange, ...] | list[PrivacyPolicyChange],
+) -> tuple[PrivacyPolicyChange, ...]:
+    return tuple(sorted(changes, key=privacy_change_order))
+
+
+def validate_privacy_change_set(
+    changes: tuple[PrivacyPolicyChange, ...], *, require_widening: bool = False
+) -> None:
+    """Reject a change set that is duplicated, oversized, misordered, or under-reported.
+
+    ``require_widening`` is what closes the finding this type exists for: the trusted approval
+    ceremony only ever runs for a widening, so a widening preview whose change set contains no
+    widening is incomplete by construction and must never reach a human.
+    """
+
+    if type(changes) is not tuple or any(
+        type(change) is not PrivacyPolicyChange for change in changes
+    ):
+        raise _invalid()
+    if len(changes) > MAX_PRIVACY_CHANGES:
+        raise _invalid()
+    identities = [change.identity for change in changes]
+    if len(set(identities)) != len(identities):
+        raise _invalid()
+    if sort_privacy_changes(changes) != changes:
+        raise _invalid()
+    if require_widening and not any(change.widens for change in changes):
+        raise _invalid()
 
 
 def _envelope_item_limit(item_id: str, category: DataCategory) -> int:

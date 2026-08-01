@@ -20,6 +20,7 @@ from yoetz.tui.models import (
     IntegrationPlan,
     LayerState,
     PrivacyPosture,
+    PrivacyRecommendation,
     ProviderOption,
     ProviderPosture,
     ReadinessLayer,
@@ -64,6 +65,18 @@ PLAN = IntegrationPlan(
 )
 
 LOCAL_ONLY = PrivacyPosture(profile="local_only", llm_inference_enabled=False, readable=True)
+# No external provider is bound by default, so the recommendation is Private — the same rule
+# `yoetz.cli.privacy_setup.recommended_privacy_recipe` applies.
+RECOMMEND_PRIVATE = PrivacyRecommendation(
+    "private",
+    "No external provider is configured, so this keeps network egress off entirely.",
+    "In exchange, there is no external semantic review at all.",
+)
+RECOMMEND_METADATA_ONLY = PrivacyRecommendation(
+    "metadata_only",
+    "It enables semantic review while disclosing the least that still works.",
+    "In exchange, the reviewer sees structural metadata only.",
+)
 
 UNBOUND_PROVIDER = ProviderPosture(
     endpoint_bound=False,
@@ -87,6 +100,7 @@ class FakeRuntime:
     mcp: str = "absent"
     secure_storage: bool = True
     privacy: PrivacyPosture = LOCAL_ONLY
+    recommendation: PrivacyRecommendation = RECOMMEND_METADATA_ONLY
     provider: ProviderPosture = UNBOUND_PROVIDER
     vault: VaultPosture = VaultPosture(reachable=True, state="ready", vault_mode="os_keyring")
     plan_error: RuntimeError_ | None = None
@@ -128,23 +142,31 @@ class FakeRuntime:
     async def mcp_state(self, option: HarnessOption) -> str:
         return self.mcp
 
-    async def run_privacy_setup(self, recipe_hint: str) -> object:
+    async def run_privacy_setup(
+        self, recipe_hint: str | None, *, offer_recommended: bool = False
+    ) -> object:
         from yoetz.cli.privacy_setup import PrivacySetupReport
 
-        self.ceremonies.append(f"privacy:{recipe_hint}")
+        # ``None`` means the CLI opens on its recommendation; the fake resolves it the same way
+        # the real one does so the interface cannot be tested against a rule of its own.
+        recipe = recipe_hint or self.recommendation.recipe
+        self.ceremonies.append(f"privacy:{recipe}{'+recommended' if offer_recommended else ''}")
         profile = {
             "private": "local_only",
             "metadata_only": "confirm_every_request",
             "assisted_review": "minimal_external",
             "expanded_review": "trusted_provider",
             "custom": "minimal_external",
-        }[recipe_hint]
+        }[recipe]
         self.privacy = PrivacyPosture(
             profile=profile,
-            llm_inference_enabled=recipe_hint != "private",
+            llm_inference_enabled=recipe != "private",
             readable=True,
         )
         return PrivacySetupReport("configured", profile)
+
+    def privacy_recommendation(self) -> PrivacyRecommendation:
+        return self.recommendation
 
     async def integration_plan(self, option: HarnessOption) -> IntegrationPlan:
         if self.plan_error is not None:

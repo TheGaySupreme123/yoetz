@@ -12,6 +12,13 @@ from dataclasses import dataclass
 from enum import Enum, IntEnum
 from typing import Final, Literal, cast
 
+from yoetz.domain.privacy import (
+    PRIVACY_CHANGE_AREAS,
+    PRIVACY_CHANGE_FIELDS,
+    PrivacyPolicyChange,
+    PrivacyPolicyChangeValue,
+    validate_privacy_change_set,
+)
 from yoetz.domain.values import validate_sha256_digest
 from yoetz.protocol.canonical import (
     JsonValue,
@@ -27,6 +34,7 @@ __all__ = [
     "HUMAN_PROTOCOL_MAGIC",
     "HUMAN_PROTOCOL_VERSION",
     "MAX_HUMAN_CONTROL_FRAME_BYTES",
+    "MAX_PRIVACY_PREVIEW_CHANGE_BYTES",
     "MAX_SECRET_BINDING_BYTES",
     "MAX_SECRET_BYTES",
     "PASSPHRASE_MAX_BYTES",
@@ -103,16 +111,16 @@ PASSPHRASE_MIN_BYTES: Final = 16
 PASSPHRASE_MAX_BYTES: Final = 1_024
 PROVIDER_CREDENTIAL_MAX_BYTES: Final = 8_192
 CEREMONY_EXPIRY_SECONDS: Final = 60
+# Half the 64 KiB frame ceiling. A policy diff is bounded by the closed field vocabulary, so a
+# preview anywhere near this is malformed rather than merely large, and refusing it here keeps
+# the failure at the protocol boundary instead of at frame encoding.
+MAX_PRIVACY_PREVIEW_CHANGE_BYTES: Final = 32_768
 
 _HUMAN_HEADER = struct.Struct(">4sBBI")
 _SECRET_HEADER = struct.Struct(">4sBBHI")
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 _TOKEN = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", re.ASCII)
-# Data categories are snake_case (`bounded_structural_metadata`), which _TOKEN rejects.
-# Accepts either separator so this stays a superset of _TOKEN rather than trading one
-# separator for the other.
-_DATA_CATEGORY_TOKEN = re.compile(r"^[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*$", re.ASCII)
 _IDENTITY = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,127}$", re.ASCII)
 _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$", re.ASCII)
 _VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]{0,127}$", re.ASCII)
@@ -480,25 +488,32 @@ class ProviderCredentialRotatePreview:
 
 @dataclass(frozen=True, slots=True)
 class PrivacyPolicyDecisionPreview:
+    """The complete substantive policy diff a human approves a widening against.
+
+    ``changes`` is the whole security-relevant ``before → after`` diff the service derived
+    from the same comparison that classified the proposal as a widening — never a summary of
+    it. A widening preview with no widening change in it is refused here rather than rendered,
+    because the ceremony exists only for widenings and an incomplete set means the human would
+    be authorizing something the screen does not name. ``diff_digest`` stays as integrity
+    evidence binding the decision to exact bytes; it is not the human-readable description.
+    """
+
     pending_id: str
     diff_digest: str
-    categories: tuple[str, ...]
-    scopes: tuple[str, ...]
+    changes: tuple[PrivacyPolicyChange, ...]
     kind: Literal["privacy_policy_decision"] = "privacy_policy_decision"
 
     def __post_init__(self) -> None:
         if type(self.pending_id) is not str or not self.pending_id:
             raise ValueError("privacy_policy_preview_invalid")
         _require_digest(self.diff_digest, "privacy_policy_preview_invalid")
-        if type(self.categories) is not tuple or tuple(sorted(self.categories)) != self.categories:
+        try:
+            validate_privacy_change_set(self.changes, require_widening=True)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("privacy_policy_preview_invalid") from exc
+        encoded = canonical_encode(cast(JsonValue, [_change_to_json(c) for c in self.changes]))
+        if len(encoded) > MAX_PRIVACY_PREVIEW_CHANGE_BYTES:
             raise ValueError("privacy_policy_preview_invalid")
-        for value in self.categories:
-            if type(value) is not str or _DATA_CATEGORY_TOKEN.fullmatch(value) is None:
-                raise ValueError("privacy_policy_preview_invalid")
-        if type(self.scopes) is not tuple or tuple(sorted(self.scopes)) != self.scopes:
-            raise ValueError("privacy_policy_preview_invalid")
-        for value in self.scopes:
-            _require_token(value, "privacy_policy_preview_invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1484,6 +1499,75 @@ def _human_from_json(frame_type: _HumanFrameType, source: dict[str, JsonValue]) 
     )
 
 
+def _change_value_to_json(value: PrivacyPolicyChangeValue) -> dict[str, JsonValue]:
+    return {
+        "count": value.count,
+        "flag": value.flag,
+        "kind": value.kind,
+        "labels": list(value.labels),
+    }
+
+
+def _change_value_from_json(value: JsonValue) -> PrivacyPolicyChangeValue:
+    source = _closed_object(value)
+    _keys(source, {"count", "flag", "kind", "labels"})
+    labels = source["labels"]
+    if type(labels) is not list:
+        raise ValueError("privacy_policy_preview_invalid")
+    try:
+        return PrivacyPolicyChangeValue(
+            kind=cast(Literal["none", "flag", "count", "labels"], source["kind"]),
+            flag=cast(bool | None, source["flag"]),
+            count=cast(int | None, source["count"]),
+            labels=tuple(cast(list[str], labels)),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("privacy_policy_preview_invalid") from exc
+
+
+def _change_to_json(value: PrivacyPolicyChange) -> dict[str, JsonValue]:
+    return {
+        "after": _change_value_to_json(value.after),
+        "area": value.area,
+        "before": _change_value_to_json(value.before),
+        "field": value.field,
+        "subject": value.subject,
+        "widens": value.widens,
+    }
+
+
+def _change_from_json(value: JsonValue) -> PrivacyPolicyChange:
+    source = _closed_object(value)
+    _keys(source, {"after", "area", "before", "field", "subject", "widens"})
+    area = source["area"]
+    field = source["field"]
+    # Reject an unknown area or field before constructing, so a peer cannot smuggle a token the
+    # trusted renderer has no fixed label for onto an approval screen.
+    if type(area) is not str or area not in PRIVACY_CHANGE_AREAS:
+        raise ValueError("privacy_policy_preview_invalid")
+    if type(field) is not str or field not in PRIVACY_CHANGE_FIELDS[area]:
+        raise ValueError("privacy_policy_preview_invalid")
+    subject = source["subject"]
+    if subject is not None and type(subject) is not str:
+        raise ValueError("privacy_policy_preview_invalid")
+    try:
+        return PrivacyPolicyChange(
+            area=cast(
+                Literal[
+                    "global", "review", "channel", "local_model", "agent_context", "human_control"
+                ],
+                area,
+            ),
+            field=field,
+            subject=subject,
+            before=_change_value_from_json(source["before"]),
+            after=_change_value_from_json(source["after"]),
+            widens=cast(bool, source["widens"]),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("privacy_policy_preview_invalid") from exc
+
+
 def _preview_to_json(value: HumanPreview) -> dict[str, JsonValue]:
     if type(value) is VaultInitializePreview:
         return {
@@ -1511,11 +1595,10 @@ def _preview_to_json(value: HumanPreview) -> dict[str, JsonValue]:
         return {"kind": provider.kind, "target": _target_to_json(provider.target)}
     if type(value) is PrivacyPolicyDecisionPreview:
         return {
-            "categories": list(value.categories),
+            "changes": [_change_to_json(change) for change in value.changes],
             "diff_digest": value.diff_digest,
             "kind": value.kind,
             "pending_id": value.pending_id,
-            "scopes": list(value.scopes),
         }
     if type(value) is PrivacyDisclosureDecisionPreview:
         return {
@@ -1592,12 +1675,14 @@ def _preview_from_json(value: JsonValue) -> HumanPreview:
             else ProviderCredentialRotatePreview(target)
         )
     if kind == "privacy_policy_decision":
-        _keys(source, {"categories", "diff_digest", "kind", "pending_id", "scopes"})
+        _keys(source, {"changes", "diff_digest", "kind", "pending_id"})
+        raw_changes = source["changes"]
+        if type(raw_changes) is not list:
+            raise ValueError("privacy_policy_preview_invalid")
         return PrivacyPolicyDecisionPreview(
             pending_id=cast(str, source["pending_id"]),
             diff_digest=cast(str, source["diff_digest"]),
-            categories=tuple(cast(list[str], source["categories"])),
-            scopes=tuple(cast(list[str], source["scopes"])),
+            changes=tuple(_change_from_json(item) for item in cast(list[JsonValue], raw_changes)),
         )
     if kind == "privacy_disclosure_decision":
         _keys(

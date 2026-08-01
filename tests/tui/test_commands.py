@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 import pytest
 
-from builders.tui_runtime import FakeRuntime
+from builders.tui_runtime import RECOMMEND_PRIVATE, FakeRuntime
 from yoetz.tui.app import YoetzTui
 from yoetz.tui.models import CheckMode, PrivacyPosture, ProviderPosture
 
@@ -205,7 +205,7 @@ async def test_doctor_reports_without_changing_anything(make_app: MakeApp) -> No
 # ---------------------------------------------------------------------------
 
 
-async def test_privacy_offers_the_four_profiles_and_starts_from_the_current_one(
+async def test_privacy_leads_with_the_recommendation_and_three_choices(
     make_app: MakeApp,
 ) -> None:
     app = make_app()
@@ -216,61 +216,85 @@ async def test_privacy_offers_the_four_profiles_and_starts_from_the_current_one(
         assert view is not None
         labels = [option.label for option in view.options]  # type: ignore[attr-defined]
         assert labels == [
-            "Local only",
-            "Ask every time",
-            "Minimal external review",
-            "Trusted provider",
+            "Keep current",
+            "Review recommended change (Metadata only)",
+            "Other privacy options",
         ]
-        assert "Local only is the default" in transcript(app)
+        text = transcript(app)
+        assert "Currently: local only" in text
+        assert "Recommended: Metadata only" in text
+        # The cost of accepting is stated next to the benefit.
+        assert "In exchange, the reviewer sees structural metadata only." in text
 
 
-async def test_widening_privacy_shows_an_exact_disclosure_before_confirming(
+async def test_choosing_the_recommendation_runs_the_trusted_ceremony_with_no_local_approval(
     make_app: MakeApp,
 ) -> None:
-    app = make_app()
+    """The interface hands over directly; it does not take a consent of its own first."""
+
+    runtime = FakeRuntime()
+    app = make_app(runtime=runtime)
     async with app.run_test(size=WIDE) as pilot:
         await pilot.pause()
         await run_command(pilot, app, "/privacy")
-        await pilot.press("down", "down", "enter")  # Minimal external review
+        await pilot.press("down", "enter")  # Review recommended change
+        await pilot.pause()
+        assert runtime.ceremonies == ["privacy:metadata_only"]
+        text = transcript(app)
+        assert "Privacy setup complete" in text
+        assert "Effective profile: confirm_every_request" in text
+
+
+async def test_other_privacy_options_lists_the_command_line_recipe_names(
+    make_app: MakeApp,
+) -> None:
+    runtime = FakeRuntime()
+    app = make_app(runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await run_command(pilot, app, "/privacy")
+        await pilot.press("down", "down", "enter")  # Other privacy options
         await pilot.pause()
         view = app.open_view
         assert view is not None
-        assert view.view_name == "privacy-widen"
-        body = "\n".join(getattr(view, "_body", ()))
-        assert "Data that may be sent" in body
-        assert "Never sent, under any choice" in body
-        assert "Purpose" in body
-        assert "Scope" in body
-        # The cursor starts on the declining option for a widening decision.
-        assert view.selected.key == "decline"  # type: ignore[attr-defined]
+        assert view.view_name == "privacy-recipe"
+        assert [option.label for option in view.options] == [  # type: ignore[attr-defined]
+            "Private",
+            "Metadata only",
+            "Assisted review",
+            "Expanded review",
+            "Custom",
+        ]
+        await pilot.press("down", "down", "down", "enter")  # Expanded review
+        await pilot.pause()
+        assert runtime.ceremonies == ["privacy:expanded_review"]
 
 
-async def test_approving_a_widening_runs_the_trusted_ceremony(
+async def test_a_policy_already_on_the_recommendation_is_not_offered_as_a_change(
     make_app: MakeApp,
 ) -> None:
-    app = make_app()
+    app = make_app(runtime=FakeRuntime(recommendation=RECOMMEND_PRIVATE))
     async with app.run_test(size=WIDE) as pilot:
         await pilot.pause()
         await run_command(pilot, app, "/privacy")
-        await pilot.press("down", "down", "enter")
-        await pilot.pause()
-        await pilot.press("up", "enter")  # approve
-        await pilot.pause()
-        text = transcript(app)
-        assert "Privacy setup complete" in text
-        assert "Effective profile: minimal_external" in text
+        view = app.open_view
+        assert view is not None
+        assert [option.key for option in view.options] == ["keep", "other"]  # type: ignore[attr-defined]
+        assert "already on the recommended privacy policy" in transcript(app)
 
 
 async def test_escaping_the_privacy_picker_keeps_the_current_setting(
     make_app: MakeApp,
 ) -> None:
-    app = make_app()
+    runtime = FakeRuntime()
+    app = make_app(runtime=runtime)
     async with app.run_test(size=WIDE) as pilot:
         await pilot.pause()
         await run_command(pilot, app, "/privacy")
         await pilot.press("escape")
         await pilot.pause()
         assert "Privacy was left unchanged." in transcript(app)
+        assert runtime.ceremonies == []
 
 
 # ---------------------------------------------------------------------------

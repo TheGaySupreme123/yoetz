@@ -25,6 +25,17 @@ describes behavior intended for the first release rather than a change from a pr
   minimization/redaction/secret scanning, optional human preview/approval, and a structural
   `EgressReceipt` for every reserved decision and physical attempt. The default installation is
   zero-egress (`local_only`, global network ceiling off, all five channels disabled).
+- Widening the privacy policy is authorized only at the reauthenticated trusted terminal, which
+  renders the complete `before → after` diff of every security-relevant field the proposal moves —
+  destination, disclosed information, confirmation, authorization scope, limits, and local
+  visibility — derived from the same comparison that classifies the change as a widening. The diff
+  digest is shown as integrity evidence and labelled as such rather than as the description.
+- Privacy setup opens on one recommended policy — Private with no external provider configured,
+  Metadata only with per-request confirmation when one is — with its trade-off stated. Accepting it
+  asks nothing further; declining opens the named recipes (Private, Metadata only, Assisted review,
+  Expanded review, Custom), and only Custom configures individual settings, in five grouped
+  sections. The terminal interface's `/privacy` uses the same rule and the same recipe names, and
+  selects rather than authorizes.
 - An optional, privacy-gated semantic review path behind the same gateway, with a reviewed OpenAI
   Responses adapter, a local-model AF_UNIX profile, and a scripted fake provider for testing.
 - Codex integration as the first-party harness adapter: an explicit trusted-project skill

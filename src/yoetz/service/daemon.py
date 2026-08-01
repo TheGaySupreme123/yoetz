@@ -1585,7 +1585,7 @@ class _LockedHumanEffects:
                 or target.decision_kind != "policy"
             ):
                 raise HumanControlError("kind_forbidden")
-            from yoetz.application.privacy_policy import privacy_widening_summary
+            from yoetz.application.privacy_policy import privacy_policy_changes
 
             app = self._privacy_app()
             store = getattr(app, "policy_store", None)
@@ -1599,9 +1599,11 @@ class _LockedHumanEffects:
                 raise HumanControlError("target_invalid") from exc
             proposal = prepared.proposal
             base = await store.effective_policy(proposal.scope)
-            # The human approves against this summary, so it uses the same comparison that
-            # classifies a widen — egress channels and local-sink ceilings alike.
-            categories, scopes = privacy_widening_summary(base.policy, proposal.proposed_policy)
+            # The human approves against this diff, and it is the *same* call that classifies a
+            # widen — so a dimension the classifier treats as widening cannot be absent from the
+            # screen. The preview type refuses a change set with no widening in it, which turns a
+            # future drift here into a closed failure rather than a silently empty approval.
+            changes = privacy_policy_changes(base.policy, proposal.proposed_policy)
             digest = canonical_digest(
                 {
                     "decision_kind": target.decision_kind,
@@ -1609,16 +1611,13 @@ class _LockedHumanEffects:
                     "pending_id": target.pending_id,
                 }
             )
-            return (
-                PrivacyPolicyDecisionPreview(
-                    target.pending_id,
-                    prepared.exact_diff_digest,
-                    categories,
-                    scopes,
-                ),
-                digest,
-                proposal.expected_generation,
-            )
+            try:
+                preview_policy = PrivacyPolicyDecisionPreview(
+                    target.pending_id, prepared.exact_diff_digest, changes
+                )
+            except ValueError as exc:
+                raise HumanControlError("target_invalid") from exc
+            return (preview_policy, digest, proposal.expected_generation)
         raise HumanControlError("kind_forbidden")
 
     async def complete_portable_recovery(

@@ -1380,6 +1380,30 @@ monotonic sample with the same floor rule.
 `3=portable_recovery`, `4=provider_reauthentication`, `5=provider_credential`,
 `6=privacy_reauthentication`, and `7=security_reauthentication`.
 
+`PrivacyPolicyDecisionPreview` is exactly `{kind, pending_id, diff_digest, changes}`. `changes`
+is the complete substantive policy diff as closed `PrivacyPolicyChange` records —
+`{area, field, subject, before, after, widens}` — never a summary of it and never explanatory
+prose. `area` is one of `global|review|channel|local_model|agent_context|human_control`; `field`
+is an allowlisted token belonging to that area (`PRIVACY_CHANGE_FIELDS`); `subject` is the
+channel identifier for `channel` and null everywhere else. `before`/`after` are bounded canonical
+values tagged `none|flag|count|labels`, where `none` means "does not apply on this side" and is
+distinct from `labels: []` meaning "applies and permits nothing"; labels are sorted, deduplicated,
+at most 64, and match `^[A-Za-z0-9][A-Za-z0-9._:/+@-]{0,127}$` so nothing written to `/dev/tty`
+can move a cursor. `widens` is server-derived, never client-supplied.
+
+The invariant: the service derives `changes` and the tightening classification from the one
+`privacy_policy_changes(current, candidate)` comparison, so `is_privacy_tightening` is exactly
+"no returned change has `widens=true`". A dimension the classifier treats as widening therefore
+cannot be absent from the screen a human approves it on. The set is deduplicated by
+`(area, field, subject)`, sorted widenings-first by fixed impact rank, capped at 128 changes and
+32 KiB encoded, and a `privacy_policy_decision` preview whose change set contains no widening is
+rejected rather than rendered. Simultaneous tightenings are included so the human sees the whole
+diff; lineage-only fields (`policy_id`, `version`, `policy_digest`, `created_at`,
+`supersedes_policy_digest`) are excluded because they always differ on a fresh candidate and
+describe no disclosure boundary. `diff_digest` remains integrity evidence binding the decision to
+exact bytes; it is not the human-readable description, and the trusted renderer says so. Fixed
+plain-English labels for every `(area, field)` live in `cli/unlock.py`, not on the wire.
+
 `HumanOpenTarget` has exactly five branches: `EmptyVaultTarget`, `PortableRecoveryTarget`,
 `ProviderCredentialTarget`, `PrivacyPendingTarget`, and `IdleRelockPolicyTarget`. The last is
 exactly `{kind:"idle_relock_policy", operation:"set", seconds:60..86400}` or
@@ -1592,9 +1616,10 @@ Shared privacy values are `ProviderBinding`, `AuthorizationScope`, `ChannelPolic
 `CandidateContext`, and closed composition supplies reviewed bundled adapters no repository,
 bundle, transcript, environment, log, database, or keyring handle. Third-party/dynamic adapters are
 absent; this is not an OS sandbox against malicious code already inside the trusted service. Policy
-widening requires a reauthenticated local human bound to the exact diff/digest;
-tightening is immediate and revokes affected authorizations/transports. The never-send set is
-non-overridable even by that human.
+widening requires a reauthenticated local human bound to the exact diff/digest and shown the
+complete `before → after` change set that produced the widening classification; tightening is
+immediate after an ordinary explicit confirmation and revokes affected
+authorizations/transports. The never-send set is non-overridable even by that human.
 
 `PreDispatchAuditDecision` is structural-only and terminal; it permits no prepared bytes,
 authorization, or dispatch. A v0.1 content-bearing `DisclosureProposal` has one owning `task_id` and

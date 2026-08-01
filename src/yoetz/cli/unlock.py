@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Final, Literal, Protocol, cast
 
 from yoetz.cli.trusted_console import TrustedConsoleError, TrustedForegroundConsole
+from yoetz.domain.privacy import PrivacyPolicyChange, PrivacyPolicyChangeValue
 from yoetz.protocol.canonical import JsonValue, canonical_digest
 from yoetz.service.confidential_client import (
     ConfidentialClientError,
@@ -318,6 +319,214 @@ def _verify_preview(
     return preview
 
 
+# Every label below is fixed here, in the trusted client. The service sends structured
+# ``(area, field, before, after)`` records and never explanatory prose, so nothing a proposal
+# author writes can appear on this screen — only values drawn from the closed policy vocabulary.
+# ASCII only, including the arrow: this is written straight to /dev/tty with no terminal
+# capability negotiation, and a change a human cannot read is a change they cannot judge.
+_ARROW: Final = " -> "
+
+_CHANGE_GROUPS: Final[tuple[tuple[str, tuple[tuple[str, str], ...]], ...]] = (
+    (
+        "Destination",
+        (
+            ("global", "network_egress"),
+            ("channel", "enabled"),
+            ("channel", "provider"),
+            ("channel", "purposes"),
+        ),
+    ),
+    (
+        "Information disclosed",
+        (
+            ("channel", "categories"),
+            ("channel", "data_classes"),
+            ("review", "sections"),
+            ("review", "excerpt_kinds"),
+            ("review", "relevance"),
+            ("review", "include_finding_prose"),
+            ("review", "include_exact_command_text"),
+        ),
+    ),
+    (
+        "Authorization",
+        (
+            ("channel", "preview_required"),
+            ("channel", "scope_ceiling"),
+            ("channel", "authorization_ttl_seconds"),
+            ("global", "effective_scope"),
+            ("global", "provider_data_use_evidence"),
+        ),
+    ),
+    (
+        "Limits",
+        (
+            ("channel", "max_bytes"),
+            ("channel", "max_tokens"),
+            ("review", "max_excerpts"),
+            ("review", "max_excerpt_bytes"),
+            ("review", "max_total_excerpt_bytes"),
+            ("review", "max_timeline_items"),
+            ("review", "max_assessments"),
+            ("review", "max_change_observations"),
+            ("review", "max_omissions"),
+        ),
+    ),
+    (
+        "Local visibility",
+        (
+            ("local_model", "enabled"),
+            ("local_model", "binding"),
+            ("local_model", "categories"),
+            ("local_model", "data_classes"),
+            ("agent_context", "categories"),
+            ("agent_context", "data_classes"),
+            ("human_control", "categories"),
+            ("human_control", "data_classes"),
+        ),
+    ),
+)
+
+_CHANGE_LABELS: Final[dict[tuple[str, str], str]] = {
+    ("global", "network_egress"): "Data leaving this computer",
+    ("global", "effective_scope"): "Policy applies to",
+    ("global", "provider_data_use_evidence"): "Current provider data-use evidence",
+    ("channel", "enabled"): "Channel",
+    ("channel", "provider"): "Provider and model",
+    ("channel", "purposes"): "Purposes",
+    ("channel", "categories"): "Information allowed",
+    ("channel", "data_classes"): "Sensitivity allowed",
+    ("channel", "scope_ceiling"): "Authorization ceiling",
+    ("channel", "preview_required"): "Confirmation",
+    ("channel", "max_bytes"): "Maximum bytes per case",
+    ("channel", "max_tokens"): "Maximum tokens per case",
+    ("channel", "authorization_ttl_seconds"): "Authorization lifetime (seconds)",
+    ("local_model", "enabled"): "Local model processing",
+    ("local_model", "binding"): "Local model",
+    ("local_model", "categories"): "Information the local model may receive",
+    ("local_model", "data_classes"): "Sensitivity the local model may receive",
+    ("agent_context", "categories"): "Information released to the agent host",
+    ("agent_context", "data_classes"): "Sensitivity released to the agent host",
+    ("human_control", "categories"): "Information shown on your own terminal",
+    ("human_control", "data_classes"): "Sensitivity shown on your own terminal",
+    ("review", "sections"): "Review sections built",
+    ("review", "excerpt_kinds"): "Excerpt kinds built",
+    ("review", "relevance"): "Selection reach",
+    ("review", "include_finding_prose"): "Reviewer sees finding prose",
+    ("review", "include_exact_command_text"): "Reviewer sees exact command text",
+    ("review", "max_timeline_items"): "Maximum timeline items",
+    ("review", "max_assessments"): "Maximum assessments",
+    ("review", "max_change_observations"): "Maximum change observations",
+    ("review", "max_excerpts"): "Maximum excerpts",
+    ("review", "max_omissions"): "Maximum omissions",
+    ("review", "max_excerpt_bytes"): "Maximum bytes per excerpt",
+    ("review", "max_total_excerpt_bytes"): "Maximum excerpt bytes per case",
+}
+
+_CHANNEL_LABELS: Final[dict[str, str]] = {
+    "llm_inference": "External model review",
+    "product_telemetry": "Product telemetry",
+    "crash_diagnostics": "Crash diagnostics",
+    "update_checks": "Update checks",
+    "capability_testing": "Capability testing",
+}
+
+_FLAG_WORDS: Final[dict[tuple[str, str], tuple[str, str]]] = {
+    ("global", "network_egress"): ("Allowed", "Not allowed"),
+    ("global", "provider_data_use_evidence"): ("Required", "Not required"),
+    ("channel", "enabled"): ("On", "Off"),
+    ("channel", "preview_required"): ("Ask before every request", "No confirmation"),
+    ("local_model", "enabled"): ("On", "Off"),
+}
+
+
+def _change_line_label(change: PrivacyPolicyChange) -> str:
+    base = _CHANGE_LABELS[(change.area, change.field)]
+    if change.subject is None:
+        return base
+    channel = _CHANNEL_LABELS.get(change.subject, change.subject)
+    return channel if change.field == "enabled" else f"{base} ({channel})"
+
+
+def _binding_text(labels: tuple[str, ...]) -> str:
+    parts = {name: value for name, _, value in (item.partition(":") for item in labels)}
+    provider = parts.get("provider")
+    model = parts.get("model")
+    if provider is None or model is None:
+        return ", ".join(labels)
+    detail = ", ".join(
+        value for value in (parts.get("endpoint"), parts.get("transport")) if value is not None
+    )
+    return f"{provider} / {model}" + (f" ({detail})" if detail else "")
+
+
+def _scope_text(labels: tuple[str, ...]) -> str:
+    parts = {name: value for name, _, value in (item.partition(":") for item in labels)}
+    kind = parts.get("kind")
+    if kind is None:
+        return ", ".join(labels)
+    narrower = ", ".join(
+        f"{name} {parts[name]}" for name in ("workspace", "task", "request") if name in parts
+    )
+    return f"{kind}" + (f" ({narrower})" if narrower else "")
+
+
+def _change_value_text(change: PrivacyPolicyChange, value: PrivacyPolicyChangeValue) -> str:
+    if value.kind == "none":
+        return "Not applicable"
+    if value.kind == "flag":
+        yes, no = _FLAG_WORDS.get((change.area, change.field), ("Yes", "No"))
+        return yes if value.flag else no
+    if value.kind == "count":
+        return str(value.count)
+    if not value.labels:
+        return "None"
+    if change.field in {"provider", "binding"}:
+        return _binding_text(value.labels)
+    if change.field == "effective_scope":
+        return _scope_text(value.labels)
+    return ", ".join(value.labels)
+
+
+def _privacy_policy_change_text(preview: PrivacyPolicyDecisionPreview) -> str:
+    widening = tuple(change for change in preview.changes if change.widens)
+    lines = [
+        "Action: decide privacy policy widening",
+        f"Pending: {preview.pending_id}",
+        "",
+        "Privacy will become less restrictive.",
+        f"{len(widening)} of {len(preview.changes)} changes below make it less restrictive; "
+        "they are marked (!).",
+    ]
+    placed: set[tuple[str, str, str]] = set()
+    for heading, members in _CHANGE_GROUPS:
+        allowed = set(members)
+        rows = [change for change in preview.changes if (change.area, change.field) in allowed]
+        if not rows:
+            continue
+        lines.extend(("", heading))
+        for change in rows:
+            placed.add(change.identity)
+            marker = "(!)" if change.widens else "   "
+            before = _change_value_text(change, change.before)
+            after = _change_value_text(change, change.after)
+            lines.append(f"  {marker} {_change_line_label(change)}: {before}{_ARROW}{after}")
+    if len(placed) != len(preview.changes):
+        # A field the service is allowed to send but this screen has no group for would be
+        # silently dropped, which is the exact defect this renderer exists to close.
+        raise HumanCeremonyCliError("preview_invalid")
+    lines.extend(
+        (
+            "",
+            "The digest below identifies the exact proposal bytes. It is integrity evidence,",
+            "not a description of the change; the lines above are the change.",
+            f"Diff digest: {preview.diff_digest}",
+            "",
+        )
+    )
+    return "\n".join(lines)
+
+
 def _render_preview(terminal: _CeremonyTerminal, preview: HumanPreview) -> None:
     terminal.write("Yoetz trusted foreground ceremony\n")
     if type(preview) is VaultInitializePreview:
@@ -347,12 +556,7 @@ def _render_preview(terminal: _CeremonyTerminal, preview: HumanPreview) -> None:
             f"Scope digest: {provider.target.scope_digest}\n"
         )
     elif type(preview) is PrivacyPolicyDecisionPreview:
-        terminal.write(
-            f"Action: decide privacy policy widening\nPending: {preview.pending_id}\n"
-            f"Diff digest: {preview.diff_digest}\n"
-            f"Categories: {', '.join(preview.categories)}\n"
-            f"Scopes: {', '.join(preview.scopes)}\n"
-        )
+        terminal.write(_privacy_policy_change_text(preview))
     elif type(preview) is PrivacyDisclosureDecisionPreview:
         terminal.write(
             f"Action: decide one disclosure (authorization change: none)\n"

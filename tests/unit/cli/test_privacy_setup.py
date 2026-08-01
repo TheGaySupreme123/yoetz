@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
 
 import pytest
 
 from builders.privacy_policies import local_only_policy
-from yoetz.cli.privacy_setup import PrivacySetupAnswers, build_candidate_policy
+from yoetz.cli.privacy_setup import (
+    PrivacyRecipe,
+    PrivacySetupAnswers,
+    build_candidate_policy,
+)
 from yoetz.domain.privacy import (
     AuthorizationScopeKind,
     DataClass,
@@ -127,17 +132,28 @@ def test_metadata_only_hint_is_the_selected_privacy_default(
     assert prompts == [("Choose a privacy option", "2")]
 
 
-def test_recommended_metadata_policy_is_bounded_and_confirmation_first(
+def test_recommendation_is_metadata_only_when_a_provider_is_configured() -> None:
+    from yoetz.cli.privacy_setup import recommended_privacy_recipe
+
+    assert recommended_privacy_recipe(_answers().external_provider) == "metadata_only"
+
+
+def test_recommendation_is_private_when_no_provider_is_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import yoetz.cli.privacy_setup as module
 
-    current = local_only_policy()
-    external = _answers().external_provider
-    monkeypatch.setattr(module, "_configured_bindings", lambda: (external, None))
+    monkeypatch.setattr(module, "_configured_bindings", lambda: (None, None))
 
-    answers = module._recommended_metadata_answers(  # pyright: ignore[reportPrivateUsage]
-        current
+    assert module.recommended_privacy_recipe() == "private"
+
+
+def test_recommended_metadata_recipe_is_bounded_and_confirmation_first() -> None:
+    import yoetz.cli.privacy_setup as module
+
+    external = _answers().external_provider
+    answers = module._recipe_answers(  # pyright: ignore[reportPrivateUsage]
+        "metadata_only", local_only_policy(), external
     )
 
     assert answers.network_egress is True
@@ -153,11 +169,11 @@ def test_recommended_metadata_policy_is_bounded_and_confirmation_first(
     assert answers.authorization_scope is AuthorizationScopeKind.TASK
 
 
-def test_private_recommendation_requires_no_provider() -> None:
+def test_private_recipe_requires_no_provider() -> None:
     import yoetz.cli.privacy_setup as module
 
-    answers = module._recommended_private_answers(  # pyright: ignore[reportPrivateUsage]
-        local_only_policy()
+    answers = module._recipe_answers(  # pyright: ignore[reportPrivateUsage]
+        "private", local_only_policy(), None
     )
 
     assert answers.network_egress is False
@@ -165,6 +181,41 @@ def test_private_recommendation_requires_no_provider() -> None:
     assert answers.content_categories == ()
     assert answers.request_confirmation is False
     assert answers.authorization_scope is AuthorizationScopeKind.MACHINE
+
+
+@pytest.mark.parametrize("recipe", ["metadata_only", "assisted_review", "expanded_review"])
+def test_external_recipes_fail_closed_without_a_configured_provider(
+    recipe: PrivacyRecipe,
+) -> None:
+    """No recipe may enable egress against a destination the installation has not bound."""
+
+    import yoetz.cli.privacy_setup as module
+
+    with pytest.raises(ValueError, match="privacy_setup_provider_binding_required"):
+        module._recipe_answers(recipe, local_only_policy(), None)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_named_recipes_never_enable_an_unsupported_channel() -> None:
+    """Telemetry, diagnostics, updates, and capability testing are not recipe-reachable."""
+
+    import yoetz.cli.privacy_setup as module
+
+    named: tuple[PrivacyRecipe, ...] = (
+        "private",
+        "metadata_only",
+        "assisted_review",
+        "expanded_review",
+    )
+    for recipe in named:
+        answers = module._recipe_answers(  # pyright: ignore[reportPrivateUsage]
+            recipe, local_only_policy(), _answers().external_provider
+        )
+        assert (
+            answers.telemetry,
+            answers.crash_diagnostics,
+            answers.updates,
+            answers.capability_testing,
+        ) == (False, False, False, False)
 
 
 def test_privacy_options_explain_tradeoffs_and_change_command(
@@ -206,38 +257,20 @@ def test_named_review_context_reprompts_instead_of_aborting_on_yes(
     assert "Choose structural, goal_aware, assisted, or expanded." in capsys.readouterr().out
 
 
-@pytest.mark.anyio
-async def test_accepting_recommended_policy_skips_one_by_one_questions(
+def _install_setup_stubs(
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    current: PrivacyPolicy,
+    confirmations: Iterator[bool],
+    prompts: list[str],
+    external: ProviderBinding | None = None,
 ) -> None:
-    import yoetz.cli.privacy_setup as module
+    """Stub only the I/O edges, leaving the real recipe and branch selection under test."""
 
-    current = local_only_policy()
+    import yoetz.cli.privacy_setup as module
 
     async def effective() -> PrivacyPolicy:
         return current
-
-    def recommended(_current: PrivacyPolicy) -> PrivacySetupAnswers:
-        return _answers(
-            review_context=ReviewContextProfile.STRUCTURAL,
-            content_categories=(
-                DataCategory.BOUNDED_STRUCTURAL_METADATA,
-                DataCategory.DECLARED_FILE_TYPE,
-            ),
-            content_data_classes=(DataClass.PUBLIC_STRUCTURAL,),
-            request_confirmation=True,
-            require_current_provider_data_use_evidence=False,
-        )
-
-    def forbidden_questions(*_args: object) -> PrivacySetupAnswers:
-        raise AssertionError("recommended acceptance must skip detailed questions")
-
-    prompts: list[str] = []
-
-    def confirm(prompt: str, *, default: bool = False) -> bool:
-        prompts.append(prompt)
-        assert default is True
-        return True
 
     async def propose(_candidate: PrivacyPolicy, _digest: str) -> str:
         return "pvp_1"
@@ -245,94 +278,203 @@ async def test_accepting_recommended_policy_skips_one_by_one_questions(
     async def decide(_proposal: str) -> PrivacyDecisionResult:
         return PrivacyDecisionResult("committed", "sha256:" + "c" * 64)
 
-    def render_options(**_kwargs: object) -> None:
-        return None
+    def confirm(prompt: str, *, default: bool = False) -> bool:
+        del default
+        prompts.append(prompt)
+        return next(confirmations)
+
+    def interactive() -> bool:
+        return True
+
+    def bindings() -> tuple[ProviderBinding | None, ProviderBinding | None]:
+        return external, None
+
+    def render_options(*, recommended: object = None) -> None:
+        del recommended
 
     def render_review(_candidate: PrivacyPolicy) -> None:
         return None
 
-    monkeypatch.setattr(module, "_interactive_terminal", lambda: True)
+    monkeypatch.setattr(module, "_interactive_terminal", interactive)
     monkeypatch.setattr(module, "_effective_policy", effective)
-    monkeypatch.setattr(module, "_recommended_metadata_answers", recommended)
-    monkeypatch.setattr(module, "_ask_answers", forbidden_questions)
+    monkeypatch.setattr(module, "_configured_bindings", bindings)
     monkeypatch.setattr(module, "_render_recipe_options", render_options)
     monkeypatch.setattr(module, "_render_review", render_review)
     monkeypatch.setattr(module.typer, "confirm", confirm)
     monkeypatch.setattr(module, "_propose", propose)
     monkeypatch.setattr(module, "_decide", decide)
 
-    report = await module.run_privacy_setup(
-        recipe_hint="metadata_only",
-        offer_recommended=True,
+
+def _forbid_custom_sections(monkeypatch: pytest.MonkeyPatch, reason: str) -> None:
+    import yoetz.cli.privacy_setup as module
+
+    def forbidden(*_args: object) -> PrivacySetupAnswers:
+        raise AssertionError(reason)
+
+    monkeypatch.setattr(module, "_ask_custom_answers", forbidden)
+
+
+@pytest.mark.anyio
+async def test_accepting_recommended_policy_asks_nothing_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.cli.privacy_setup as module
+
+    prompts: list[str] = []
+
+    def forbidden_choice(_hint: object) -> str:
+        raise AssertionError("accepting the recommendation must not open the recipe list")
+
+    _install_setup_stubs(
+        monkeypatch,
+        current=local_only_policy(),
+        confirmations=iter((True,)),
+        prompts=prompts,
+        external=_answers().external_provider,
     )
+    _forbid_custom_sections(
+        monkeypatch, "recommended acceptance must skip field-level configuration"
+    )
+    monkeypatch.setattr(module, "_recipe_choice", forbidden_choice)
+
+    report = await module.run_privacy_setup(offer_recommended=True)
 
     assert report.outcome == "configured"
     assert prompts == ["Use this recommended privacy policy?"]
 
 
 @pytest.mark.anyio
-async def test_declining_recommended_policy_opens_one_by_one_questions(
+async def test_declining_recommended_policy_opens_the_recipe_list(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import yoetz.cli.privacy_setup as module
 
-    current = local_only_policy()
-    detailed: list[str] = []
-    confirmations = iter((False, True))
+    prompts: list[str] = []
+    offered: list[object] = []
+    _install_setup_stubs(
+        monkeypatch,
+        current=local_only_policy(),
+        confirmations=iter((False, True)),
+        prompts=prompts,
+        external=_answers().external_provider,
+    )
 
-    async def effective() -> PrivacyPolicy:
-        return current
+    def choose(hint: object) -> str:
+        offered.append(hint)
+        return "assisted_review"
 
-    def recommended(_current: PrivacyPolicy) -> PrivacySetupAnswers:
-        return _answers(
-            review_context=ReviewContextProfile.STRUCTURAL,
-            content_categories=(DataCategory.BOUNDED_STRUCTURAL_METADATA,),
-            content_data_classes=(DataClass.PUBLIC_STRUCTURAL,),
-            request_confirmation=True,
-            require_current_provider_data_use_evidence=False,
-        )
+    monkeypatch.setattr(module, "_recipe_choice", choose)
+    _forbid_custom_sections(monkeypatch, "a named recipe must not open field-level configuration")
 
-    def answers(recipe: object, _current: PrivacyPolicy) -> PrivacySetupAnswers:
-        detailed.append(str(recipe))
-        return _answers()
+    report = await module.run_privacy_setup(offer_recommended=True)
 
-    async def propose(_candidate: PrivacyPolicy, _digest: str) -> str:
-        return "pvp_1"
+    assert report.outcome == "configured"
+    # The declined recommendation is what the recipe list starts on.
+    assert offered == ["metadata_only"]
+    assert prompts == [
+        "Use this recommended privacy policy?",
+        "Create this exact privacy proposal (Assisted review)?",
+    ]
 
-    async def decide(_proposal: str) -> PrivacyDecisionResult:
-        return PrivacyDecisionResult("committed", "sha256:" + "c" * 64)
 
-    def choose(_hint: object) -> str:
+@pytest.mark.anyio
+async def test_a_named_recipe_hint_skips_both_the_list_and_the_custom_sections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.cli.privacy_setup as module
+
+    prompts: list[str] = []
+
+    def forbidden_prompt(_hint: object) -> str:
+        raise AssertionError("a named hint must not re-ask which recipe to use")
+
+    _install_setup_stubs(
+        monkeypatch,
+        current=local_only_policy(),
+        confirmations=iter((True,)),
+        prompts=prompts,
+        external=_answers().external_provider,
+    )
+    monkeypatch.setattr(module, "_recipe_prompt", forbidden_prompt)
+    _forbid_custom_sections(monkeypatch, "a named recipe must not open field-level configuration")
+
+    report = await module.run_privacy_setup(recipe_hint="expanded_review")
+
+    assert report.outcome == "configured"
+    assert prompts == ["Create this exact privacy proposal (Expanded review)?"]
+
+
+@pytest.mark.anyio
+async def test_custom_is_the_only_path_into_field_level_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.cli.privacy_setup as module
+
+    prompts: list[str] = []
+    asked: list[object] = []
+    _install_setup_stubs(
+        monkeypatch,
+        current=local_only_policy(),
+        confirmations=iter((True,)),
+        prompts=prompts,
+        external=_answers().external_provider,
+    )
+
+    def custom_recipe(_hint: object) -> str:
         return "custom"
 
-    def render_options(**_kwargs: object) -> None:
-        return None
+    def custom(*args: object) -> PrivacySetupAnswers:
+        asked.append(args)
+        return _answers()
 
-    def render_review(_candidate: PrivacyPolicy) -> None:
-        return None
+    monkeypatch.setattr(module, "_recipe_prompt", custom_recipe)
+    monkeypatch.setattr(module, "_ask_custom_answers", custom)
+
+    report = await module.run_privacy_setup(recipe_hint="custom")
+
+    assert report.outcome == "configured"
+    assert len(asked) == 1
+    assert prompts == ["Use this exact custom privacy policy?"]
+
+
+def test_custom_configuration_announces_all_five_sections(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Grouped sections replace the flat thirteen questions, and none is silently skipped."""
+
+    import yoetz.cli.privacy_setup as module
 
     def confirm(_prompt: str, *, default: bool = False) -> bool:
         del default
-        return next(confirmations)
+        return False
 
-    monkeypatch.setattr(module, "_interactive_terminal", lambda: True)
-    monkeypatch.setattr(module, "_effective_policy", effective)
-    monkeypatch.setattr(module, "_recommended_metadata_answers", recommended)
-    monkeypatch.setattr(module, "_recipe_choice", choose)
-    monkeypatch.setattr(module, "_ask_answers", answers)
-    monkeypatch.setattr(module, "_render_recipe_options", render_options)
-    monkeypatch.setattr(module, "_render_review", render_review)
+    def prompt(_label: str, *, default: str = "") -> str:
+        return default
+
     monkeypatch.setattr(module.typer, "confirm", confirm)
-    monkeypatch.setattr(module, "_propose", propose)
-    monkeypatch.setattr(module, "_decide", decide)
+    monkeypatch.setattr(module.typer, "prompt", prompt)
 
-    report = await module.run_privacy_setup(
-        recipe_hint="metadata_only",
-        offer_recommended=True,
+    answers = module._ask_custom_answers(  # pyright: ignore[reportPrivateUsage]
+        local_only_policy(), _answers().external_provider, None
     )
 
-    assert report.outcome == "configured"
-    assert detailed == ["custom"]
+    output = capsys.readouterr().out
+    for number, title in (
+        (1, "External and local destinations"),
+        (2, "What an external reviewer may see"),
+        (3, "Local visibility: agent host and local model"),
+        (4, "Per-request confirmation and authorization scope"),
+        (5, "Unsupported channels"),
+    ):
+        assert f"Section {number} of 5 — {title}" in output
+    # Section 5 states the unsupported channels; it never asks about them.
+    assert "cannot be turned on here" in output
+    assert (
+        answers.telemetry,
+        answers.crash_diagnostics,
+        answers.updates,
+        answers.capability_testing,
+    ) == (False, False, False, False)
 
 
 @pytest.mark.anyio
@@ -375,38 +517,21 @@ async def test_widening_reports_configured_only_after_committed_trusted_decision
 ) -> None:
     import yoetz.cli.privacy_setup as module
 
-    current = local_only_policy()
-
-    async def effective() -> PrivacyPolicy:
-        return current
-
-    def recipe(_hint: object) -> str:
+    def custom_recipe(_hint: object) -> str:
         return "custom"
 
-    def answers(_recipe: object, _current: PrivacyPolicy) -> PrivacySetupAnswers:
+    def custom(*_args: object) -> PrivacySetupAnswers:
         return _answers()
 
-    def review(_candidate: PrivacyPolicy) -> None:
-        return None
-
-    def confirm(_prompt: str, *, default: bool = False) -> bool:
-        del default
-        return True
-
-    async def propose(_candidate: PrivacyPolicy, _digest: str) -> str:
-        return "pvp_1"
-
-    async def decide(_proposal: str) -> PrivacyDecisionResult:
-        return PrivacyDecisionResult("committed", "sha256:" + "c" * 64)
-
-    monkeypatch.setattr(module, "_interactive_terminal", lambda: True)
-    monkeypatch.setattr(module, "_effective_policy", effective)
-    monkeypatch.setattr(module, "_recipe_prompt", recipe)
-    monkeypatch.setattr(module, "_ask_answers", answers)
-    monkeypatch.setattr(module, "_render_review", review)
-    monkeypatch.setattr(module.typer, "confirm", confirm)
-    monkeypatch.setattr(module, "_propose", propose)
-    monkeypatch.setattr(module, "_decide", decide)
+    _install_setup_stubs(
+        monkeypatch,
+        current=local_only_policy(),
+        confirmations=iter((True,)),
+        prompts=[],
+        external=_answers().external_provider,
+    )
+    monkeypatch.setattr(module, "_recipe_prompt", custom_recipe)
+    monkeypatch.setattr(module, "_ask_custom_answers", custom)
 
     report = await module.run_privacy_setup(recipe_hint="custom")
 

@@ -87,7 +87,7 @@ line above the active one:
 6. **Secure storage** — system keyring, or a Yoetz passphrase.
 7. **Review mode** — Local only, or Add semantic review.
 8. **Semantic setup, when selected** — provider/model, secure API-key handoff, and the trusted
-   thirteen-answer privacy ceremony.
+   recommendation-first privacy ceremony.
 9. **Finish**, with each readiness layer stated separately.
 
 You are never required to configure a provider: Local only is complete and useful. If you choose

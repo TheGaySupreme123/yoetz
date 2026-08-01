@@ -17,12 +17,34 @@ import pytest
 
 _PREVIEW_CANARY = b"privacy-preview-sensitive-canary"
 _SECRET_CANARY = b"policy-secret-canary-2026"
+# Every widening dimension staged by the policy probe below has to be legible on the terminal
+# before the approve prompt appears. Two of these — removed per-request confirmation and a
+# raised byte ceiling — produced a completely empty approval screen under the old
+# categories/scopes summary, which is the defect this file now pins.
+_POLICY_DIFF_MARKERS = (
+    b"(!) Data leaving this computer: Not allowed -> Allowed",
+    b"(!) External model review: Off -> On",
+    b"(!) Provider and model (External model review): Not applicable -> "
+    b"openai / gpt-4.1-mini (openai-responses@1.0.0, external)",
+    b"(!) Confirmation (External model review): Ask before every request -> No confirmation",
+    b"(!) Maximum bytes per case (External model review): 65536 -> 262144",
+    b"(!) Information allowed (External model review): bounded_structural_metadata -> "
+    b"bounded_structural_metadata, evidence_excerpt",
+)
+# Shown without the (!) marker: a simultaneous tightening still belongs on the screen so the
+# human sees the whole substantive diff, but it must not be presented as a widening.
+_POLICY_TIGHTENING_MARKER = (
+    b"      Information released to the agent host: "
+    b"bounded_structural_metadata, declared_file_type -> bounded_structural_metadata"
+)
 
 _TTY_PROBE = r"""
 import asyncio, json, os, sys, time
 from yoetz.cli import privacy_control
 from yoetz.cli import trusted_console
 from yoetz.cli import unlock as unlock_helper
+from yoetz.domain.privacy import PrivacyPolicyChange as Change
+from yoetz.domain.privacy import PrivacyPolicyChangeValue as Value
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.service.confidential_protocol import (
     AuthorizationRequiredPhase, DecisionAction, DecisionRequiredPhase,
@@ -47,6 +69,41 @@ INSTANCE = "svc_11111111-1111-4111-8111-111111111111"
 ACTIONS = []
 SECRET_LENGTHS = []
 
+# Mixed widening/tightening, deliberately including two dimensions the removed
+# categories/scopes summary reported as nothing at all.
+POLICY_CHANGES = (
+    Change("global", "network_egress", None, Value.of_flag(False), Value.of_flag(True), True),
+    Change("channel", "enabled", "llm_inference", Value.of_flag(False), Value.of_flag(True), True),
+    Change(
+        "channel", "provider", "llm_inference", Value.absent(),
+        Value.of_labels((
+            "provider:openai", "model:gpt-4.1-mini",
+            "endpoint:openai-responses@1.0.0", "transport:external",
+        )),
+        True,
+    ),
+    Change(
+        "channel", "preview_required", "llm_inference",
+        Value.of_flag(True), Value.of_flag(False), True,
+    ),
+    Change(
+        "channel", "categories", "llm_inference",
+        Value.of_labels(("bounded_structural_metadata",)),
+        Value.of_labels(("bounded_structural_metadata", "evidence_excerpt")),
+        True,
+    ),
+    Change(
+        "channel", "max_bytes", "llm_inference",
+        Value.of_count(65_536), Value.of_count(262_144), True,
+    ),
+    Change(
+        "agent_context", "categories", None,
+        Value.of_labels(("bounded_structural_metadata", "declared_file_type")),
+        Value.of_labels(("bounded_structural_metadata",)),
+        False,
+    ),
+)
+
 class SecretClient:
     def __init__(self, session): self.session = session
     async def send_once(self, binding, source, token):
@@ -70,8 +127,7 @@ class Session:
         )
         if POLICY_MODE:
             preview = PrivacyPolicyDecisionPreview(
-                "pending-1", "sha256:" + "4" * 64,
-                ("source-content",), ("workspace",),
+                "pending-1", "sha256:" + "4" * 64, POLICY_CHANGES,
             )
         else:
             preview = PrivacyDisclosureDecisionPreview(
@@ -260,6 +316,14 @@ def test_policy_approval_reauthenticates_without_echo_or_secret_output() -> None
     transcript = bytearray()
     deadline = time.monotonic() + 10
     _read_until(master_fd, transcript, b"Decision [approve/deny/edit]: ", deadline)
+    # Everything the proposal changes must already be on screen at the moment the human is
+    # asked, not merely somewhere in the session.
+    shown = bytes(transcript).replace(b"\r\n", b"\n")
+    for marker in _POLICY_DIFF_MARKERS:
+        assert marker in shown, marker
+    assert _POLICY_TIGHTENING_MARKER in shown
+    assert b"6 of 7 changes below make it less restrictive" in shown
+    assert b"Diff digest: sha256:" + b"4" * 64 in shown
     os.write(master_fd, b"approve\n")
     _read_until(master_fd, transcript, b"Passphrase: ", deadline)
     os.write(master_fd, _SECRET_CANARY + b"\n")

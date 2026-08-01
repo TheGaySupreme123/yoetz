@@ -12,7 +12,13 @@ from collections.abc import Callable, Sequence
 import pytest
 
 import builders.tui as build
-from yoetz.tui.models import LayerState, PrivacyChoice, ProviderPosture, ReadinessLayer
+from yoetz.tui.models import (
+    PRIVACY_RECIPES,
+    LayerState,
+    PrivacyChoice,
+    ProviderPosture,
+    ReadinessLayer,
+)
 from yoetz.tui.render import (
     MIN_ASCII_WIDTH,
     render_detection,
@@ -22,7 +28,6 @@ from yoetz.tui.render import (
     render_integration_preview,
     render_integration_technical_details,
     render_layers,
-    render_privacy_disclosure,
     render_project_trust,
     render_provider_endpoint,
     render_provider_failure,
@@ -272,27 +277,24 @@ def test_a_provider_failure_does_not_downgrade_local_readiness() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_widening_privacy_discloses_categories_provider_scope_and_never_send(
-    assert_snapshot: Snapshot,
-) -> None:
-    lines = render_privacy_disclosure(
-        build.LOCAL_ONLY,
-        PrivacyChoice.MINIMAL_EXTERNAL.label,
-        categories=("Structural facts: counts, verdicts, coverage, and check names",),
-        provider="openai",
-        model="gpt-4.1-mini",
-        endpoint="openai-responses",
-        purpose="verification review of recorded work",
-        scope="this installation",
-        never_send=("API keys, passphrases, and anything else secret",),
-        notes=("This provider connection has never been tested.",),
-        width=WIDE,
+def test_recipe_names_match_the_command_line_exactly() -> None:
+    """One vocabulary for one concept.
+
+    The interface used to offer profile-shaped labels ("Minimal external review") while the
+    CLI offered recipe names ("Assisted review"), so the same policy had two names depending
+    on where you met it. Only the trusted terminal ceremony renders the actual policy diff, so
+    this list is a selector — and a selector whose names do not match the documented ones is a
+    way to configure something other than what you thought you chose.
+    """
+
+    assert tuple(label for _recipe, label, _description in PRIVACY_RECIPES) == (
+        "Private",
+        "Metadata only",
+        "Assisted review",
+        "Expanded review",
+        "Custom",
     )
-    assert_snapshot("privacy_widening", lines)
-    joined = "\n".join(lines)
-    assert "local only → Minimal external review" in joined
-    assert "Never sent, under any choice" in joined
-    assert "never been tested" in joined
+    assert all(description for _recipe, _label, description in PRIVACY_RECIPES)
 
 
 def test_local_only_is_the_privacy_choice_described_as_the_default() -> None:
@@ -351,19 +353,6 @@ def test_no_renderer_ever_overflows_the_width_it_was_given(width: int) -> None:
         render_status(build.snapshot(), width),
         render_finish(build.snapshot(), width),
         render_provider_stored(build.UNTESTED_PROVIDER, width),
-        render_privacy_disclosure(
-            build.LOCAL_ONLY,
-            PrivacyChoice.MINIMAL_EXTERNAL.label,
-            categories=("Structural facts: counts, verdicts, coverage, and check names",),
-            provider="openai",
-            model="gpt-4.1-mini",
-            endpoint="openai-responses",
-            purpose="verification review of recorded work",
-            scope="this installation",
-            never_send=("API keys, passphrases, and anything else secret",),
-            notes=("This provider connection has never been tested.",),
-            width=width,
-        ),
         render_receipt(build.receipt(), width),
         render_doctor(build.doctor(), width),
     )

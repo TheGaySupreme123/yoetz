@@ -35,6 +35,7 @@ from yoetz.tui.models import (
     IntegrationPlan,
     LayerState,
     PrivacyPosture,
+    PrivacyRecommendation,
     ProviderOption,
     ProviderPosture,
     ReadinessLayer,
@@ -255,14 +256,16 @@ class YoetzRuntime:
             raise RuntimeError_(error.reason.value, "the Codex registration could not be read")
         return str(state.value)
 
-    async def run_privacy_setup(self, recipe_hint: str) -> object:
+    async def run_privacy_setup(
+        self, recipe_hint: str | None, *, offer_recommended: bool = False
+    ) -> object:
         """Hand the trusted questionnaire to the CLI implementation."""
 
         from yoetz.cli.privacy_setup import run_privacy_setup
         from yoetz.cli.unlock import HumanCeremonyCliError
         from yoetz.ports.control import ControlError
 
-        if recipe_hint not in {
+        if recipe_hint is not None and recipe_hint not in {
             "private",
             "metadata_only",
             "assisted_review",
@@ -279,15 +282,37 @@ class YoetzRuntime:
                         "assisted_review",
                         "expanded_review",
                         "custom",
-                    ],
+                    ]
+                    | None,
                     recipe_hint,
-                )
+                ),
+                offer_recommended=offer_recommended,
             )
         except (ControlError, HumanCeremonyCliError, OSError, ValueError) as error:
             raise RuntimeError_(
                 getattr(error, "reason", "privacy_setup_failed"),
                 "the trusted privacy ceremony could not be completed",
             ) from error
+
+    def privacy_recommendation(self) -> PrivacyRecommendation:
+        """The same recommendation rule the CLI uses, never a second opinion."""
+
+        from yoetz.cli.privacy_setup import recommended_privacy_recipe
+
+        recipe = recommended_privacy_recipe()
+        if recipe == "metadata_only":
+            return PrivacyRecommendation(
+                recipe,
+                "It enables semantic review while disclosing the least that still works, and "
+                "asks before every provider request.",
+                "In exchange, the reviewer sees structural metadata only, so it cannot judge "
+                "whether a claim is actually supported.",
+            )
+        return PrivacyRecommendation(
+            recipe,
+            "No external provider is configured, so this keeps network egress off entirely.",
+            "In exchange, there is no external semantic review at all.",
+        )
 
     # -- integration ----------------------------------------------------
 
