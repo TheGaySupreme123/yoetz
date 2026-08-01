@@ -299,7 +299,14 @@ class YoetzRuntime:
 
         from yoetz.cli.privacy_setup import recommended_privacy_recipe
 
-        recipe = recommended_privacy_recipe()
+        try:
+            recipe = recommended_privacy_recipe()
+        except Exception:
+            # Reading the configured provider binding can fail on its own (an unrecognized
+            # `YOETZ_*` variable, an unreadable file). Recommend the closed posture rather
+            # than propagating: never recommend enabling egress on the strength of a
+            # configuration that could not be read.
+            recipe = "private"
         if recipe == "metadata_only":
             return PrivacyRecommendation(
                 recipe,

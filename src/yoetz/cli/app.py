@@ -1391,7 +1391,13 @@ def privacy_apply_desired(
         if current == candidate:
             _human_or_json({"outcome": "equivalent"}, json_output=json_output)
             return 0
-        if is_privacy_tightening(current, candidate):
+        try:
+            tightening = is_privacy_tightening(current, candidate)
+        except TypeError, ValueError:
+            # Classification is the gate. If it cannot run, this is not a tighten, and the
+            # command must not fall through to the widen message as if it had decided.
+            return _usage_failure()
+        if tightening:
             _human_or_json(
                 {
                     "next": "yoetz privacy tighten",

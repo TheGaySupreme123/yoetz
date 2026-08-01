@@ -325,8 +325,16 @@ def _recipe_choice(hint: PrivacyRecipe | None) -> PrivacyRecipe:
         typer.echo("Please enter 1, 2, 3, 4, or 5.")
 
 
-def _recipe_prompt(hint: PrivacyRecipe | None) -> PrivacyRecipe:
-    _render_recipe_options(recommended=recommended_privacy_recipe())
+def _recipe_prompt(hint: PrivacyRecipe | None, recommended: PrivacyRecipe | None) -> PrivacyRecipe:
+    """Render the options and take one choice.
+
+    The recommendation is passed in rather than derived here. Reading configuration from a
+    rendering helper made merely *listing* the privacy options able to raise ``ConfigError`` —
+    an unrecognized ``YOETZ_*`` variable in the environment turned the option list into an
+    unhandled traceback, since ``ConfigError`` is not a ``ValueError``.
+    """
+
+    _render_recipe_options(recommended=recommended)
     return _recipe_choice(hint)
 
 
@@ -751,10 +759,10 @@ def _choose_candidate(
         typer.echo("")
         typer.echo("Other privacy options:")
         recipe = _recipe_choice(recommended)
-    elif recipe_hint is not None and recipe_hint != "custom":
+    elif recipe_hint is not None:
         recipe = recipe_hint
     else:
-        recipe = _recipe_prompt(recipe_hint)
+        recipe = _recipe_prompt(recipe_hint, recommended_privacy_recipe(external))
     if recipe == "custom":
         return _confirmed_candidate(
             current,

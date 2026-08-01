@@ -23,6 +23,7 @@ __all__ = [
     "MAX_EGRESS_ITEM_BYTES",
     "MAX_PRIVACY_CHANGES",
     "MAX_PRIVACY_CHANGE_LABELS",
+    "MAX_PRIVACY_LABEL_BYTES",
     "NEVER_SEND_KINDS",
     "PRIVACY_CHANGE_AREAS",
     "PRIVACY_CHANGE_FIELDS",
@@ -169,11 +170,13 @@ def _sorted_enums[TEnum: Enum](values: object, enum_type: type[TEnum]) -> tuple[
     return tuple(sorted(typed, key=lambda value: str(value.value).encode("ascii")))
 
 
-def _sorted_text(values: object, *, pattern: re.Pattern[str] = _OPAQUE) -> tuple[str, ...]:
+def _sorted_text(
+    values: object, *, pattern: re.Pattern[str] = _OPAQUE, maximum: int = 128
+) -> tuple[str, ...]:
     if type(values) not in {tuple, list, set, frozenset}:
         raise _invalid()
     raw = cast(tuple[object, ...] | list[object] | set[object] | frozenset[object], values)
-    typed = tuple(_text(value, pattern) for value in raw)
+    typed = tuple(_text(value, pattern, maximum=maximum) for value in raw)
     if len(set(typed)) != len(typed):
         raise _invalid()
     return tuple(sorted(typed, key=str.encode))
@@ -895,9 +898,18 @@ PRIVACY_CHANGE_FIELDS: Final = {
 }
 MAX_PRIVACY_CHANGE_LABELS: Final = 64
 MAX_PRIVACY_CHANGES: Final = 128
+# Derived, not chosen: a label is one fixed prefix plus one policy field, and every policy field
+# is independently bounded at 128 bytes by its own validator. The longest prefix in use is
+# ``endpoint_version:`` (17), so 192 leaves headroom while staying bounded. A tighter bound would
+# reject a legitimate binding, and rejecting one here means a human cannot approve a policy that
+# is otherwise entirely valid.
+MAX_PRIVACY_LABEL_BYTES: Final = 192
 # Terminal-safe: printable ASCII with no space, control byte, or escape introducer, so a value
 # that reaches the trusted foreground console cannot move the cursor or repaint the screen.
-_PRIVACY_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+@-]{0,127}$", re.ASCII)
+# ``\A``/``\Z`` rather than ``^``/``$``: the callers use ``fullmatch``, which already refuses a
+# trailing newline, but anchoring explicitly means a future ``match`` call cannot quietly admit
+# one.
+_PRIVACY_LABEL = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:/+@-]{0,191}\Z", re.ASCII)
 
 
 @dataclass(frozen=True, slots=True)
@@ -930,7 +942,7 @@ class PrivacyPolicyChangeValue:
             if self.labels != ():
                 raise _invalid()
             return
-        labels = _sorted_text(self.labels, pattern=_PRIVACY_LABEL)
+        labels = _sorted_text(self.labels, pattern=_PRIVACY_LABEL, maximum=MAX_PRIVACY_LABEL_BYTES)
         if len(labels) > MAX_PRIVACY_CHANGE_LABELS:
             raise _invalid()
         object.__setattr__(self, "labels", labels)
@@ -949,7 +961,10 @@ class PrivacyPolicyChangeValue:
 
     @classmethod
     def of_labels(cls, values: object) -> PrivacyPolicyChangeValue:
-        return cls("labels", labels=_sorted_text(values, pattern=_PRIVACY_LABEL))
+        return cls(
+            "labels",
+            labels=_sorted_text(values, pattern=_PRIVACY_LABEL, maximum=MAX_PRIVACY_LABEL_BYTES),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -973,7 +988,7 @@ class PrivacyPolicyChange:
         if type(self.field) is not str or self.field not in PRIVACY_CHANGE_FIELDS[self.area]:
             raise _invalid()
         if self.subject is not None:
-            _text(self.subject, _PRIVACY_LABEL)
+            _text(self.subject, _PRIVACY_LABEL, maximum=MAX_PRIVACY_LABEL_BYTES)
         if self.area == "channel":
             if self.subject is None:
                 raise _invalid()

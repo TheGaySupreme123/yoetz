@@ -223,8 +223,12 @@ async def test_privacy_leads_with_the_recommendation_and_three_choices(
         text = transcript(app)
         assert "Currently: local only" in text
         assert "Recommended: Metadata only" in text
-        # The cost of accepting is stated next to the benefit.
-        assert "In exchange, the reviewer sees structural metadata only." in text
+        # The cost of accepting is stated next to the benefit, in the production wording —
+        # including the consequence, which is the part that makes it a cost rather than a note.
+        assert (
+            "In exchange, the reviewer sees structural metadata only, so it cannot judge "
+            "whether a claim is actually supported." in text
+        )
 
 
 async def test_choosing_the_recommendation_runs_the_trusted_ceremony_with_no_local_approval(

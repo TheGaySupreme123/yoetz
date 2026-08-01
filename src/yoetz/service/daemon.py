@@ -1603,7 +1603,6 @@ class _LockedHumanEffects:
             # widen — so a dimension the classifier treats as widening cannot be absent from the
             # screen. The preview type refuses a change set with no widening in it, which turns a
             # future drift here into a closed failure rather than a silently empty approval.
-            changes = privacy_policy_changes(base.policy, proposal.proposed_policy)
             digest = canonical_digest(
                 {
                     "decision_kind": target.decision_kind,
@@ -1612,10 +1611,14 @@ class _LockedHumanEffects:
                 }
             )
             try:
+                changes = privacy_policy_changes(base.policy, proposal.proposed_policy)
                 preview_policy = PrivacyPolicyDecisionPreview(
                     target.pending_id, prepared.exact_diff_digest, changes
                 )
-            except ValueError as exc:
+            except (TypeError, ValueError) as exc:
+                # Both the diff and the preview fail closed on malformed policy state, and
+                # `open_ceremony` only translates `HumanControlError` — anything else escapes
+                # as an unbounded ceremony failure.
                 raise HumanControlError("target_invalid") from exc
             return (preview_policy, digest, proposal.expected_generation)
         raise HumanControlError("kind_forbidden")

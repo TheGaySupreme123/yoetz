@@ -171,3 +171,44 @@ async def test_backing_out_of_the_other_options_list_changes_nothing() -> None:
 
     assert harness.handed == []
     assert "Privacy was left unchanged." in harness.transcript
+
+
+def test_the_fake_runtime_carries_the_production_recommendation_text_verbatim() -> None:
+    """A fake that paraphrases lets tests assert wording the product does not say.
+
+    The recommendation's benefit and cost are the whole basis on which a user accepts it, so
+    the driven-interface tests must be pinned to the real strings, not to a summary of them.
+    """
+
+    from unittest.mock import patch
+
+    from builders.tui_runtime import RECOMMEND_METADATA_ONLY, RECOMMEND_PRIVATE
+    from yoetz.tui.runtime import YoetzRuntime
+
+    runtime = YoetzRuntime()
+    for recipe, expected in (
+        ("metadata_only", RECOMMEND_METADATA_ONLY),
+        ("private", RECOMMEND_PRIVATE),
+    ):
+        with patch("yoetz.cli.privacy_setup.recommended_privacy_recipe", return_value=recipe):
+            assert runtime.privacy_recommendation() == expected
+
+
+def test_an_unreadable_configuration_recommends_the_closed_posture() -> None:
+    """Never recommend enabling egress on the strength of a config that could not be read.
+
+    Reading the configured provider binding loads configuration, which raises `ConfigError`
+    on any unrecognized `YOETZ_*` variable. `ConfigError` is not a `ValueError`, so it used to
+    escape every handler between here and the top of `/privacy`.
+    """
+
+    from unittest.mock import patch
+
+    from yoetz.config.models import ConfigError
+    from yoetz.tui.runtime import YoetzRuntime
+
+    with patch(
+        "yoetz.cli.privacy_setup.recommended_privacy_recipe",
+        side_effect=ConfigError("unknown_config_env_var"),
+    ):
+        assert YoetzRuntime().privacy_recommendation().recipe == "private"

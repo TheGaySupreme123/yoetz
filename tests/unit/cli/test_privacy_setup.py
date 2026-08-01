@@ -126,10 +126,39 @@ def test_metadata_only_hint_is_the_selected_privacy_default(
 
     monkeypatch.setattr(module.typer, "prompt", prompt)
 
-    recipe = module._recipe_prompt("metadata_only")  # pyright: ignore[reportPrivateUsage]
+    recipe = module._recipe_prompt(  # pyright: ignore[reportPrivateUsage]
+        "metadata_only", "metadata_only"
+    )
 
     assert recipe == "metadata_only"
     assert prompts == [("Choose a privacy option", "2")]
+
+
+def test_listing_the_options_never_reads_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rendering must not be able to fail on an unrelated environment variable.
+
+    `_recipe_prompt` briefly derived the recommendation itself, which loads configuration and
+    raises `ConfigError` on any unrecognized `YOETZ_*` variable. `ConfigError` is not a
+    `ValueError`, so it escaped every handler and turned the option list into a traceback.
+    """
+
+    import yoetz.cli.privacy_setup as module
+
+    def exploding_bindings() -> tuple[ProviderBinding | None, ProviderBinding | None]:
+        raise AssertionError("rendering the option list must not read configuration")
+
+    def prompt(_label: str, *, default: str) -> str:
+        return default
+
+    monkeypatch.setattr(module, "_configured_bindings", exploding_bindings)
+    monkeypatch.setattr(module.typer, "prompt", prompt)
+
+    assert (
+        module._recipe_prompt("private", "private")  # pyright: ignore[reportPrivateUsage]
+        == "private"
+    )
 
 
 def test_recommendation_is_metadata_only_when_a_provider_is_configured() -> None:
@@ -435,6 +464,34 @@ async def test_custom_is_the_only_path_into_field_level_configuration(
     assert report.outcome == "configured"
     assert len(asked) == 1
     assert prompts == ["Use this exact custom privacy policy?"]
+
+
+@pytest.mark.anyio
+async def test_a_custom_hint_does_not_reopen_the_recipe_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller that passed `custom` already chose; asking again is a confirmation of nothing."""
+
+    import yoetz.cli.privacy_setup as module
+
+    def forbidden_prompt(*_args: object) -> str:
+        raise AssertionError("a custom hint must not reopen the recipe list")
+
+    _install_setup_stubs(
+        monkeypatch,
+        current=local_only_policy(),
+        confirmations=iter((True,)),
+        prompts=[],
+        external=_answers().external_provider,
+    )
+
+    def custom(*_args: object) -> PrivacySetupAnswers:
+        return _answers()
+
+    monkeypatch.setattr(module, "_recipe_prompt", forbidden_prompt)
+    monkeypatch.setattr(module, "_ask_custom_answers", custom)
+
+    assert (await module.run_privacy_setup(recipe_hint="custom")).outcome == "configured"
 
 
 def test_custom_configuration_announces_all_five_sections(

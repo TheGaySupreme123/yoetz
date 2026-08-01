@@ -143,15 +143,21 @@ action that would change something shows the same preview and approval the first
 
 ### `/privacy`
 
-Four choices, mapping to the durable privacy profiles: **Local only** (the default),
-**Ask every time**, **Minimal external review**, and **Trusted provider**.
+Shows where privacy stands and the one recommended policy — **Private** when no external provider
+is configured, **Metadata only** when one is — with both what accepting it buys and what it costs.
+Then three choices: **Keep current**, **Review recommended change**, and **Other privacy options**.
+The last lists the same five names the command line uses: Private, Metadata only, Assisted review,
+Expanded review, and Custom. If the current policy already matches the recommendation, it is not
+offered as a change.
 
-Widening shows an exact disclosure first — which data categories become eligible, the provider,
-model, endpoint profile, purpose, and scope, plus what is never sent under any choice. The cursor
-starts on *decline*. Approving there hands off to the trusted ceremony
-(`yoetz privacy propose` then `yoetz privacy decide`); the interface does not widen policy itself.
+This screen selects; it never authorizes. Choosing anything but *Keep current* suspends the
+interface and hands the controlling terminal to `yoetz privacy setup`, and that trusted ceremony is
+where the exact `before -> after` policy diff is rendered, where reauthentication happens, and where
+a widening is actually approved. If the terminal cannot be handed over, nothing changes and the
+interface prints the command to run.
 
-Tightening is also an explicit ceremony (`yoetz privacy tighten`).
+Tightening also goes through that handoff, and commits only after an ordinary explicit
+confirmation.
 
 ### `/provider`
 

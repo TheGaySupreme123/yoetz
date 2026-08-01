@@ -72,10 +72,14 @@ RECOMMEND_PRIVATE = PrivacyRecommendation(
     "No external provider is configured, so this keeps network egress off entirely.",
     "In exchange, there is no external semantic review at all.",
 )
+# Verbatim from `YoetzRuntime.privacy_recommendation`. A fake that paraphrases lets a test
+# assert wording the product does not actually say.
 RECOMMEND_METADATA_ONLY = PrivacyRecommendation(
     "metadata_only",
-    "It enables semantic review while disclosing the least that still works.",
-    "In exchange, the reviewer sees structural metadata only.",
+    "It enables semantic review while disclosing the least that still works, and asks before "
+    "every provider request.",
+    "In exchange, the reviewer sees structural metadata only, so it cannot judge whether a "
+    "claim is actually supported.",
 )
 
 UNBOUND_PROVIDER = ProviderPosture(

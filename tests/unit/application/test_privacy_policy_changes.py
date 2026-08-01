@@ -27,11 +27,13 @@ from yoetz.application.privacy_policy import is_privacy_tightening, privacy_poli
 from yoetz.domain.privacy import (
     _CHANGE_IMPACT,  # pyright: ignore[reportPrivateUsage]
     MAX_PRIVACY_CHANGES,
+    MAX_PRIVACY_LABEL_BYTES,
     PRIVACY_CHANGE_FIELDS,
     PrivacyPolicy,
     PrivacyPolicyChange,
     PrivacyPolicyChangeValue,
     PrivacyProfile,
+    ProviderBinding,
     privacy_change_order,
     sort_privacy_changes,
     validate_privacy_change_set,
@@ -280,7 +282,10 @@ def test_not_applicable_is_distinct_from_permitting_nothing() -> None:
         "control\x07char",
         "escape\x1b[31m",
         "newline\nsplit",
-        "x" * 129,
+        # `$` in Python matches before a single trailing newline; the pattern is anchored with
+        # `\A`/`\Z` so neither `fullmatch` nor a future `match` can admit one.
+        "trailing\n",
+        "x" * (MAX_PRIVACY_LABEL_BYTES + 1),
     ],
 )
 def test_a_label_that_could_repaint_a_terminal_is_rejected(value: str) -> None:
@@ -343,3 +348,27 @@ def test_the_widest_possible_diff_stays_inside_the_structural_bound() -> None:
     changes = privacy_policy_changes(local_only_policy(), minimal_external_policy())
 
     assert 0 < len(changes) <= MAX_PRIVACY_CHANGES
+
+
+def test_a_maximal_provider_binding_still_produces_a_renderable_diff() -> None:
+    """Every binding field is independently bounded at 128 bytes by its own validator.
+
+    Joining the endpoint profile and its version into one label could exceed the label bound
+    and raise, which the daemon turns into `target_invalid` — leaving a human unable to approve
+    a policy that is entirely legitimate. One label per field keeps the longest label at one
+    prefix plus one field.
+    """
+
+    current = minimal_external_policy()
+    maximal = ProviderBinding("p" * 128, "m" * 128, "e" * 128, "1" * 128, "external")
+    candidate = with_llm(current, provider_binding=maximal)
+
+    changes = privacy_policy_changes(current, candidate)
+
+    provider = next(change for change in changes if change.field == "provider")
+    assert provider.widens is True
+    assert f"provider:{'p' * 128}" in provider.after.labels
+    assert f"endpoint_version:{'1' * 128}" in provider.after.labels
+    assert all(
+        len(label.encode("utf-8")) <= MAX_PRIVACY_LABEL_BYTES for label in provider.after.labels
+    )

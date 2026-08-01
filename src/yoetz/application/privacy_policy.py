@@ -436,13 +436,23 @@ def _scope_labels(scope: AuthorizationScope) -> PrivacyPolicyChangeValue:
 
 
 def _binding_labels(binding: ProviderBinding | None) -> PrivacyPolicyChangeValue:
+    """One label per binding field, never a concatenation.
+
+    Every field is independently bounded at 128 bytes by its own domain validator, so joining
+    the endpoint profile and its version into one label could exceed the label bound and make
+    this raise — which the daemon turns into ``target_invalid``, leaving a human unable to
+    approve a perfectly legitimate policy. Keeping the fields separate means the longest label
+    a valid binding can produce is one prefix plus one field.
+    """
+
     if binding is None:
         return PrivacyPolicyChangeValue.absent()
     return PrivacyPolicyChangeValue.of_labels(
         (
             f"provider:{binding.provider_id}",
             f"model:{binding.model_id}",
-            f"endpoint:{binding.endpoint_profile_id}@{binding.endpoint_profile_version}",
+            f"endpoint:{binding.endpoint_profile_id}",
+            f"endpoint_version:{binding.endpoint_profile_version}",
             f"transport:{binding.transport}",
         )
     )
