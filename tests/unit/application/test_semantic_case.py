@@ -443,3 +443,39 @@ def test_structural_assessments_have_no_finding_prose_items() -> None:
     assert not any(
         item.section in {"deterministic_summary", "deterministic_detail"} for item in semantic.items
     )
+
+
+def test_prepared_payload_names_the_refs_post_validation_will_accept() -> None:
+    """The reviewer gets one list of citable ids, matching the fence exactly.
+
+    Every ``cited_refs`` value is fenced against ``frontier_refs | local_check_refs``, but the
+    packet only ever carried them as two separate arrays, while the ids most visible in the
+    document — ``items[].item_id``, e.g. ``goal-3`` — are not citable at all. Citing wrong costs
+    the challenge, so the accept set is stated explicitly instead of left to be inferred.
+    """
+
+    case = _case_with_material(with_evidence=True)
+    findings = _findings_for(case)
+    semantic = _build(case, ReviewContextProfile.ASSISTED, findings=findings)
+    included = {item.item_id for item in semantic.items}
+    document = strict_json_parse(semantic_case_to_prepared_payload(semantic, included))
+    assert isinstance(document, dict)
+
+    raw_citable = document.get("citable_refs")
+    assert isinstance(raw_citable, list)
+    citable = [ref for ref in cast(list[object], raw_citable) if type(ref) is str]
+    assert len(citable) == len(raw_citable)
+    assert set(citable) == semantic.frontier_refs | semantic.local_check_refs
+    assert citable == sorted(citable)
+    assert citable
+
+    raw_items = document.get("items")
+    assert isinstance(raw_items, list)
+    item_ids: set[str] = set()
+    for row in cast(list[object], raw_items):
+        if isinstance(row, dict):
+            item_id = cast(dict[str, object], row).get("item_id")
+            if type(item_id) is str:
+                item_ids.add(item_id)
+    # The two vocabularies are disjoint: an item_id is never a citable ref.
+    assert not item_ids & set(citable)

@@ -95,6 +95,14 @@ _LOG_FIELDS: Final = frozenset(
         "engine_version",
         "policy_version",
         "sqlite_source_id_hash",
+        # Bounded structural accounting for one semantic review: what the reviewer returned and
+        # what became of it. Counts and one closed conclusion token only — never challenge text.
+        "semantic_conclusion",
+        "semantic_challenges_returned",
+        "semantic_candidates_accepted",
+        "semantic_challenges_rejected",
+        "semantic_findings_selected",
+        "semantic_findings_suppressed",
     }
 )
 _MANIFEST_FIELDS: Final = frozenset(
@@ -157,6 +165,7 @@ _TOKEN_FIELDS: Final = frozenset(
         "startup_check_outcome",
         "startup_reason_code",
         "capability_probe_id",
+        "semantic_conclusion",
     }
 )
 _VERSION_FIELDS: Final = frozenset(
@@ -176,7 +185,17 @@ _VERSION_FIELDS: Final = frozenset(
     }
 )
 _INTEGER_FIELDS: Final = frozenset(
-    {"duration_ms", "operation_count", "duration_bucket_ms", "terminal_outcome_count"}
+    {
+        "duration_ms",
+        "operation_count",
+        "duration_bucket_ms",
+        "terminal_outcome_count",
+        "semantic_challenges_returned",
+        "semantic_candidates_accepted",
+        "semantic_challenges_rejected",
+        "semantic_findings_selected",
+        "semantic_findings_suppressed",
+    }
 )
 _BOOLEAN_FIELDS: Final = frozenset({"sqlite_compile_options_ok"})
 

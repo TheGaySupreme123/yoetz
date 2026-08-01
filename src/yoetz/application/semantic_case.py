@@ -1552,6 +1552,12 @@ def assemble_filtered_review_packet(
         {
             "case_digest": envelope.get("case_digest", ""),
             "case_id": envelope.get("case_id", ""),
+            # The exact ids post-validation will accept in a challenge's cited_refs, in one place
+            # the reviewer can read. The packet already carried them, split across frontier_refs
+            # and local_check_refs, while items[].item_id — the ids most visible in the document —
+            # are not citable at all. Naming the accept set explicitly is what lets a reviewer cite
+            # correctly instead of guessing and having the challenge dropped.
+            "citable_refs": sorted(frontier_refs | local_check_refs),
             "selection_accounting": cast(JsonValue, accounting),
             "dependency_digest": envelope.get("dependency_digest", ""),
             "frontier_refs": sorted(frontier_refs),

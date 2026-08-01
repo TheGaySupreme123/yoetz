@@ -43,6 +43,12 @@ _FIELD_ORDER: Final = (
     "reason",
     "origin",
     "request_id",
+    "semantic_conclusion",
+    "semantic_challenges_returned",
+    "semantic_candidates_accepted",
+    "semantic_challenges_rejected",
+    "semantic_findings_selected",
+    "semantic_findings_suppressed",
 )
 _lock = Lock()
 
@@ -62,6 +68,7 @@ def append_diagnostic_record(
     reason: str,
     request_id: str | None = None,
     origin: str | None = None,
+    counts: Mapping[str, object] | None = None,
     root: Path | None = None,
     now: datetime | None = None,
 ) -> None:
@@ -75,6 +82,7 @@ def append_diagnostic_record(
             reason=reason,
             request_id=request_id,
             origin=origin,
+            counts=counts,
             now=now,
         )
         if record is None:
@@ -127,6 +135,7 @@ def _build_record(
     reason: str,
     request_id: str | None,
     origin: str | None,
+    counts: Mapping[str, object] | None,
     now: datetime | None,
 ) -> dict[str, object] | None:
     try:
@@ -148,6 +157,12 @@ def _build_record(
         raw["request_id"] = request_id
     if origin is not None:
         raw["origin"] = origin
+    if counts is not None:
+        # Only names already in _FIELD_ORDER survive the projection below, and each still passes
+        # the same value fence as every other field: a caller cannot widen the record from here.
+        for name, value in counts.items():
+            if type(name) is str and name not in raw:
+                raw[name] = value
     output: dict[str, object] = {}
     for name in _FIELD_ORDER:
         if name not in raw:

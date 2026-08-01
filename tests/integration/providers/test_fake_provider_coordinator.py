@@ -27,7 +27,12 @@ from yoetz.adapters.providers.fake import (
     scripted_success,
     scripted_timeout,
 )
-from yoetz.application.check import validate_semantic_judgment
+from yoetz.application.check import (
+    SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM,
+    SEMANTIC_REJECTED_REF_OUTSIDE_CASE,
+    SemanticJudgmentRejected,
+    validate_semantic_judgment,
+)
 from yoetz.domain.findings import (
     FindingKind,
     SemanticDispatchKind,
@@ -215,14 +220,17 @@ async def test_fake_invented_ids_and_coverage_upgrades_are_rejected() -> None:
     )
     invented_result = await invented_evaluator.evaluate(case, deadline)
     assert isinstance(invented_result, SemanticResultSuccess)
-    with pytest.raises(ValueError, match="semantic_ref_outside_case"):
-        validate_semantic_judgment(
-            det_case,
-            (),
-            invented_result.judgment,
-            _finalize(invented_result.provenance, seed="1"),
-            expected_frontier=det_case.frontier,
-        )
+    # An invented ref still yields no finding; it now costs only its own challenge, and the drop
+    # is counted rather than taking the judgment (and the check) down with it.
+    invented_review = validate_semantic_judgment(
+        det_case,
+        (),
+        invented_result.judgment,
+        _finalize(invented_result.provenance, seed="1"),
+        expected_frontier=det_case.frontier,
+    )
+    assert invented_review.candidates == ()
+    assert invented_review.rejected_by_reason == ((SEMANTIC_REJECTED_REF_OUTSIDE_CASE, 1),)
 
     stale_evaluator = ScriptedFakeSemanticEvaluator(
         FakeSemanticScript(
@@ -231,7 +239,7 @@ async def test_fake_invented_ids_and_coverage_upgrades_are_rejected() -> None:
     )
     stale_result = await stale_evaluator.evaluate(case, deadline)
     assert isinstance(stale_result, SemanticResultSuccess)
-    with pytest.raises(ValueError, match="semantic_judgment_invalid"):
+    with pytest.raises(SemanticJudgmentRejected, match="semantic_judgment_invalid"):
         validate_semantic_judgment(
             det_case,
             (),
@@ -254,8 +262,9 @@ async def test_fake_invented_ids_and_coverage_upgrades_are_rejected() -> None:
         _finalize(accepted_result.provenance, seed="3"),
         expected_frontier=det_case.frontier,
     )
-    assert len(accepted) == 1
-    assert accepted[0].subject_refs == (clm(1),)
+    assert len(accepted.candidates) == 1
+    assert accepted.candidates[0].subject_refs == (clm(1),)
+    assert accepted.rejected_by_reason == ()
 
 
 @pytest.mark.anyio
@@ -318,14 +327,14 @@ async def test_fake_structured_packet_and_challenge_matrix() -> None:
         assert isinstance(result, SemanticResultSuccess)
         assert result.judgment.challenges[0].requested_next_step == next_step
 
-        candidates = validate_semantic_judgment(
+        review = validate_semantic_judgment(
             det_case,
             (),
             result.judgment,
             _finalize(result.provenance, seed=str(10 + index)),
             expected_frontier=det_case.frontier,
         )
-        assert len(candidates) == 1
+        assert len(review.candidates) == 1
 
     # The false "missing diff means no change" case: a challenge that claims things are
     # unchanged while its cited ref's recorded coverage says the source was withheld/missing
@@ -351,14 +360,15 @@ async def test_fake_structured_packet_and_challenge_matrix() -> None:
     )
     hidden_result = await hidden_evaluator.evaluate(_approved_case(), _deadline())
     assert isinstance(hidden_result, SemanticResultSuccess)
-    with pytest.raises(ValueError, match="semantic_hidden_source_claim"):
-        validate_semantic_judgment(
-            hidden_case,
-            (),
-            hidden_result.judgment,
-            _finalize(hidden_result.provenance, seed="99"),
-            expected_frontier=hidden_case.frontier,
-        )
+    hidden_review = validate_semantic_judgment(
+        hidden_case,
+        (),
+        hidden_result.judgment,
+        _finalize(hidden_result.provenance, seed="99"),
+        expected_frontier=hidden_case.frontier,
+    )
+    assert hidden_review.candidates == ()
+    assert hidden_review.rejected_by_reason == ((SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM, 1),)
 
 
 @pytest.mark.anyio

@@ -611,6 +611,18 @@ Shared structural gap codes for optional semantic relevance review (distinct fam
 - `semantic_relevance_review_not_run` — evaluation failed/timed out/unavailable without a clean pass;
 - `semantic_review_not_requested` — deterministic-only check; semantic review was never requested.
 
+Two further codes describe a review that did run but could not deliver everything it produced:
+
+- `semantic_review_context_withheld` — the review ran without categories its own profile selected;
+- `semantic_challenges_rejected` — the reviewer returned challenges and post-validation dropped at
+  least one (a citation outside the frozen case, or an unchanged-claim over a withheld source).
+
+Post-validation fences each challenge independently: a rejected challenge costs only itself, the
+challenges beside it still become findings, and the drop is declared through this gap. A judgment
+that fails the *structural* fence yields no semantic findings at all and is recorded as
+`invalid` / `semantic_judgment_rejected` — never as a failed request. A check always commits its
+deterministic findings, whatever the reviewer returned.
+
 The not-configured and not-run codes share the honest compact limitation that semantic relevance
 review was not run; they must not reuse blocked-by-policy wording. The not-requested code marks every
 deterministic-only check and forces coverage incompleteness without changing the deterministic
@@ -632,6 +644,15 @@ credential-unavailable path. These paths use exactly one operation token:
 identity, exception text, payload, and paths remain forbidden from this sink. Exceptions contained
 inside the production composition evaluator retain the existing `semantic_evaluation_failed`
 operation.
+
+Two further check-path operations describe a review that did reach a provider:
+`semantic_judgment_rejected` records a structurally unusable judgment, and
+`semantic_review_accounting` is appended once per dispatched review carrying counts only —
+`semantic_conclusion`, `semantic_challenges_returned`, `semantic_candidates_accepted`,
+`semantic_challenges_rejected`, `semantic_findings_selected`, `semantic_findings_suppressed`.
+The counts reconcile (`returned == accepted + rejected`, `accepted == selected + suppressed`), so
+"the reviewer answered and none of it reached you" is never invisible. Challenge text, refs, and
+provider identity remain forbidden from this sink like every other.
 
 The check-applicability gap family follows the same material-state rule: `check_not_applicable`
 means material work was appended after the recorded check and superseded its verdict, never that
