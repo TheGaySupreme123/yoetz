@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from typing import Literal, Protocol, cast
+from typing import Final, Literal, Protocol, cast
 
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
@@ -12,6 +12,7 @@ from yoetz.domain.findings import (
     Finding,
     FindingKind,
     FindingOrigin,
+    RankedFindings,
     SemanticProvenance,
     finding_from_json,
     finding_to_json,
@@ -19,6 +20,7 @@ from yoetz.domain.findings import (
 )
 from yoetz.domain.receipts import (
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
+    SEMANTIC_CHALLENGES_REJECTED_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
@@ -42,7 +44,10 @@ from yoetz.kernel.deterministic_checks import (
 from yoetz.kernel.policies.research_evidence import research_evidence_findings
 from yoetz.kernel.policies.work_integrity import work_integrity_findings
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
-from yoetz.observability.logging import record_unexpected_exception_without_raising
+from yoetz.observability.logging import (
+    record_bounded_counts_without_raising,
+    record_unexpected_exception_without_raising,
+)
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
@@ -84,9 +89,13 @@ from yoetz.protocol.models import (
 )
 
 __all__ = [
+    "SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM",
+    "SEMANTIC_REJECTED_REF_OUTSIDE_CASE",
     "Application",
     "CheckScope",
     "FinalSemanticEvaluation",
+    "SemanticJudgmentRejected",
+    "SemanticJudgmentReview",
     "allocate_findings",
     "case_coverage",
     "check_internal_json",
@@ -127,8 +136,70 @@ _WORK_KINDS = frozenset(
 )
 
 
+SEMANTIC_REJECTED_REF_OUTSIDE_CASE: Final = "ref_outside_case"
+SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM: Final = "hidden_source_claim"
+
+
+class SemanticJudgmentRejected(ValueError):
+    """The reviewer's judgment failed a structural fence and cannot become findings.
+
+    Deliberately narrower than the module's other ``ValueError``s: the commit path catches exactly
+    this, so a rejected judgment records ``invalid``/``semantic_judgment_rejected`` and still
+    commits the deterministic findings, while a genuine coordinator bug keeps its old disposition.
+    """
+
+
 def _invalid(reason: str = "check_coordinator_invalid") -> ValueError:
     return ValueError(reason)
+
+
+def _rejected(reason: str) -> SemanticJudgmentRejected:
+    return SemanticJudgmentRejected(reason)
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticJudgmentReview:
+    """What the reviewer returned and what the post-validation fence did with it.
+
+    ``rejected_by_reason`` is a sorted tuple of bounded ``(reason, count)`` pairs, never text from
+    the challenge itself: it exists so "the reviewer answered and none of it reached you" is a
+    countable fact on the check path instead of silence.
+    """
+
+    candidates: tuple[CandidateFinding, ...]
+    challenges_returned: int
+    rejected_by_reason: tuple[tuple[str, int], ...]
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.candidates) is not tuple
+            or type(self.challenges_returned) is not int
+            or self.challenges_returned < 0
+            or type(self.rejected_by_reason) is not tuple
+        ):
+            raise _invalid("semantic_judgment_review_invalid")
+        if any(type(pair) is not tuple or len(pair) != 2 for pair in self.rejected_by_reason):
+            raise _invalid("semantic_judgment_review_invalid")
+        if any(
+            reason not in _SEMANTIC_REJECTION_REASONS or type(count) is not int or count < 1
+            for reason, count in self.rejected_by_reason
+        ):
+            raise _invalid("semantic_judgment_review_invalid")
+        # The diagnostic this value feeds claims that returned == accepted + rejected. Owning the
+        # invariant here turns any future accounting drift into an immediate failure rather than a
+        # durable count that quietly does not add up.
+        if self.challenges_returned != len(self.candidates) + self.challenges_rejected:
+            raise _invalid("semantic_judgment_review_invalid")
+
+    @property
+    def challenges_rejected(self) -> int:
+        return sum(count for _reason, count in self.rejected_by_reason)
+
+
+_SEMANTIC_REJECTION_REASONS: Final = frozenset(
+    {SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM, SEMANTIC_REJECTED_REF_OUTSIDE_CASE}
+)
+_EMPTY_SEMANTIC_REVIEW: Final = SemanticJudgmentReview((), 0, ())
 
 
 def _projected_finding_json(finding: Finding) -> JsonValue:
@@ -743,17 +814,24 @@ def _resolve_challenge_refs(
     case: DeterministicCase,
     deterministic: tuple[Finding, ...],
     challenge: ReviewerChallenge,
-) -> tuple[str, ...]:
+) -> tuple[str, ...] | None:
+    """Resolve one challenge's citations to frozen subject refs, or ``None`` if any is outside.
+
+    Every per-ref test below is byte-identical to the fence this replaced; only the disposition of
+    a failure changed, from raising (which discarded the entire judgment, and with it the check)
+    to returning ``None`` so the caller can drop this one challenge and count it.
+    """
+
     findings = {str(item.finding_id): item for item in deterministic}
     resolved: set[str] = set()
     for ref in challenge.cited_refs:
         if ref.startswith("fnd_"):
             finding = findings.get(ref)
             if finding is None:
-                raise _invalid("semantic_ref_outside_case")
+                return None
             resolved.update(map(str, finding.subject_refs))
         elif ref not in case.allowed_ids:
-            raise _invalid("semantic_ref_outside_case")
+            return None
         elif ref.startswith(("evt_", "obl_", "clm_")):
             resolved.add(ref)
         else:
@@ -774,11 +852,27 @@ def _resolve_challenge_refs(
                 record = case.projection.evidence.get(evidence_id(ref))
                 source = None if record is None else str(record.source_event_id)
             if source is None:
-                raise _invalid("semantic_ref_outside_case")
+                return None
             resolved.add(source)
     if not resolved:
-        raise _invalid("semantic_ref_outside_case")
+        return None
     return tuple(sorted(resolved, key=str.encode))
+
+
+def _claims_unchanged_over_hidden_source(
+    case: DeterministicCase,
+    challenge: ReviewerChallenge,
+) -> bool:
+    """Whether this challenge asserts nothing changed while its own basis was withheld."""
+
+    return any(
+        "unchanged" in text.casefold()
+        for text in (challenge.discrepancy, challenge.alternative_interpretation)
+    ) and any(
+        _UNAVAILABLE_GAPS & set(case.coverage_by_ref[cast(FindingBasisRef, ref)].known_gaps)
+        for ref in challenge.cited_refs
+        if ref in case.coverage_by_ref
+    )
 
 
 def validate_semantic_judgment(
@@ -788,8 +882,20 @@ def validate_semantic_judgment(
     provenance: SemanticProvenance,
     *,
     expected_frontier: Frontier,
-) -> tuple[CandidateFinding, ...]:
-    """Fence semantic challenges to the exact frozen refs, coverage, and final provenance."""
+) -> SemanticJudgmentReview:
+    """Fence semantic challenges to the exact frozen refs, coverage, and final provenance.
+
+    Each challenge is fenced independently against the same frozen case. A challenge that fails is
+    dropped and counted by reason; the challenges beside it are unaffected, because nothing about
+    one reviewer challenge is evidence about another. No fence is loosened here — the accept test
+    for a single challenge is unchanged.
+
+    The structural checks below stay hard failures: a wrong type, a drifted frontier, or a
+    provenance that is not the final SUCCEEDED attempt means the *coordinator* handed this function
+    the wrong inputs, not that the reviewer answered badly. They raise
+    :class:`SemanticJudgmentRejected`, which the commit path converts into an honest
+    ``invalid``/``semantic_judgment_rejected`` semantic outcome rather than losing the check.
+    """
 
     if (
         type(case) is not DeterministicCase
@@ -799,22 +905,24 @@ def validate_semantic_judgment(
         or provenance.status is not SemanticStatus.SUCCEEDED
         or provenance.reason is not SemanticReason.SEMANTIC_COMPLETED
     ):
-        raise _invalid("semantic_judgment_invalid")
+        raise _rejected("semantic_judgment_invalid")
     if judgment.conclusion != "challenges_returned":
-        return ()
+        return SemanticJudgmentReview((), 0, ())
     coverage = case_coverage(case, semantic=True)
     candidates: list[CandidateFinding] = []
+    rejections: dict[str, int] = {}
     for challenge in judgment.challenges:
         refs = _resolve_challenge_refs(case, deterministic, challenge)
-        if any(
-            "unchanged" in text.casefold()
-            for text in (challenge.discrepancy, challenge.alternative_interpretation)
-        ) and any(
-            _UNAVAILABLE_GAPS & set(case.coverage_by_ref[cast(FindingBasisRef, ref)].known_gaps)
-            for ref in challenge.cited_refs
-            if ref in case.coverage_by_ref
-        ):
-            raise _invalid("semantic_hidden_source_claim")
+        if refs is None:
+            rejections[SEMANTIC_REJECTED_REF_OUTSIDE_CASE] = (
+                rejections.get(SEMANTIC_REJECTED_REF_OUTSIDE_CASE, 0) + 1
+            )
+            continue
+        if _claims_unchanged_over_hidden_source(case, challenge):
+            rejections[SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM] = (
+                rejections.get(SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM, 0) + 1
+            )
+            continue
         policy_id, policy_version = _policy_identity(challenge.finding_kind)
         priority, _actionable = FINDING_KIND_TRAITS[challenge.finding_kind]
         candidates.append(
@@ -839,7 +947,11 @@ def validate_semantic_judgment(
                 provenance,
             )
         )
-    return tuple(candidates)
+    return SemanticJudgmentReview(
+        tuple(candidates),
+        len(judgment.challenges),
+        tuple(sorted(rejections.items(), key=lambda item: item[0].encode("ascii"))),
+    )
 
 
 def _request_digest(
@@ -900,6 +1012,87 @@ async def _semantic_evaluation(
             SemanticStatus.FAILED,
             SemanticReason.COORDINATOR_FAILURE,
         )
+
+
+def _semantic_conclusion_token(result: FinalSemanticEvaluation) -> str:
+    """The reviewer's own conclusion when it reached one; otherwise why it did not."""
+
+    judgment = result.judgment
+    if judgment is None:
+        return result.reason.value
+    return judgment.conclusion
+
+
+def _record_semantic_review_accounting(
+    request: CheckRequest,
+    result: FinalSemanticEvaluation,
+    review: SemanticJudgmentReview,
+    semantic: tuple[Finding, ...],
+    ranked: RankedFindings,
+) -> None:
+    """Say what the reviewer produced and what became of it, on every dispatched review.
+
+    Without this, "the model returned three challenges and none of them reached you" is invisible:
+    the check reports ``semantic_status: succeeded`` and zero semantic findings, which reads
+    identically to a reviewer that found nothing. The record is counts and closed tokens only, and
+    it reconciles — ``returned == accepted + rejected`` and ``accepted == selected + suppressed``.
+    """
+
+    # Provenance present means a provider attempt reached a terminal outcome. Nothing was reviewed
+    # before that, so there is nothing to account for and no reason to fill the durable ring.
+    if result.provenance is None:
+        return
+    selected = sum(
+        1 for finding in ranked.findings if finding.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    record_bounded_counts_without_raising(
+        component="check",
+        operation="semantic_review_accounting",
+        outcome=result.status.value,
+        request_id=request.request_id,
+        counts={
+            "semantic_conclusion": _semantic_conclusion_token(result),
+            "semantic_challenges_returned": review.challenges_returned,
+            "semantic_candidates_accepted": len(review.candidates),
+            "semantic_challenges_rejected": review.challenges_rejected,
+            "semantic_findings_selected": selected,
+            "semantic_findings_suppressed": len(semantic) - selected,
+        },
+    )
+
+
+def _judgment_rejected_evaluation(
+    result: FinalSemanticEvaluation,
+) -> FinalSemanticEvaluation:
+    """Restate a structurally unusable reviewer answer as the honest terminal semantic outcome.
+
+    ``SemanticStatus.INVALID`` / ``SEMANTIC_JUDGMENT_REJECTED`` has existed in the enum, the ledger
+    CHECK constraints, and ``check-result-1.0.0`` since 0.1 and nothing had ever written it: the
+    rejection escaped as ``INVALID_REQUEST`` instead, taking the whole check — deterministic
+    findings included — with it. The provenance is the same attempt, restated to the outcome it
+    actually reached, because the binding fence requires provenance and result to agree.
+    """
+
+    provenance = result.provenance
+    if provenance is None:  # pragma: no cover - SUCCEEDED always carries final provenance
+        return FinalSemanticEvaluation(SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE)
+    return FinalSemanticEvaluation(
+        SemanticStatus.INVALID,
+        SemanticReason.SEMANTIC_JUDGMENT_REJECTED,
+        None,
+        # failure_class stays unset. Every member of the enum names a provider-side fault, and
+        # this path runs only for the structural fence — the coordinator's own inputs were wrong,
+        # not the provider's answer. Naming one would send an operator after the wrong component;
+        # semantic_judgment_rejected already says exactly what happened.
+        replace(
+            provenance,
+            status=SemanticStatus.INVALID,
+            reason=SemanticReason.SEMANTIC_JUDGMENT_REJECTED,
+        ),
+        result.attempt_accounting,
+        result.operation_lease,
+        result.withheld_review_categories,
+    )
 
 
 async def execute_check_commit(
@@ -1002,18 +1195,29 @@ async def execute_check_commit(
         # Durable semantic attempts may renew the check lease (TTL 60s vs timeout up to 300s).
         if semantic_result.operation_lease is not None:
             frozen = FrozenCase(frozen.case, semantic_result.operation_lease)
-        semantic_candidates: tuple[CandidateFinding, ...] = ()
+        review = _EMPTY_SEMANTIC_REVIEW
         if semantic_result.status is SemanticStatus.SUCCEEDED:
             assert semantic_result.judgment is not None
             assert semantic_result.provenance is not None
-            semantic_candidates = validate_semantic_judgment(
-                frozen.case,
-                deterministic,
-                semantic_result.judgment,
-                semantic_result.provenance,
-                expected_frontier=frozen.case.frontier,
-            )
-        semantic = allocate_findings(app.ids, semantic_candidates)
+            try:
+                review = validate_semantic_judgment(
+                    frozen.case,
+                    deterministic,
+                    semantic_result.judgment,
+                    semantic_result.provenance,
+                    expected_frontier=frozen.case.frontier,
+                )
+            except SemanticJudgmentRejected as exc:
+                # The reviewer's answer is unusable, so the check has no semantic result — but the
+                # deterministic findings below were already earned and must still be committed.
+                record_unexpected_exception_without_raising(
+                    exc,
+                    component="check",
+                    operation="semantic_judgment_rejected",
+                    request_id=request.request_id,
+                )
+                semantic_result = _judgment_rejected_evaluation(semantic_result)
+        semantic = allocate_findings(app.ids, review.candidates)
         coverage = case_coverage(
             frozen.case,
             semantic=semantic_result.status is SemanticStatus.SUCCEEDED,
@@ -1033,6 +1237,10 @@ async def execute_check_commit(
             and semantic_result.withheld_review_categories
         ):
             declared_gaps.add(SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP)
+        # A challenge the fence dropped is material the reviewer raised and the check does not
+        # carry. Saying so is what keeps a dropped challenge from reading as one never made.
+        if review.challenges_rejected:
+            declared_gaps.add(SEMANTIC_CHALLENGES_REJECTED_GAP)
         new_gaps = declared_gaps - set(coverage.known_gaps)
         if new_gaps:
             gaps = set(coverage.known_gaps) | new_gaps
@@ -1060,6 +1268,13 @@ async def execute_check_commit(
             semantic,
             RankingContext(coverage, completeness),
             maximum,
+        )
+        _record_semantic_review_accounting(
+            request,
+            semantic_result,
+            review,
+            semantic,
+            ranked,
         )
         if frozen.lease.phase is not CheckPhase.READY_TO_FINALIZE:
             lease = await runtime.ledger.advance_check_phase(

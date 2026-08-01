@@ -68,6 +68,7 @@ __all__ = [
     "ReceiptSection",
     "ReceiptSectionKey",
     "ReceiptVersionSlice",
+    "SEMANTIC_CHALLENGES_REJECTED_GAP",
     "SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP",
     "SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP",
     "SEMANTIC_REVIEW_NOT_CONFIGURED_GAP",
@@ -87,6 +88,10 @@ SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP: Final = "semantic_relevance_review_not_ru
 # The review ran, but the inference channel withheld categories the review profile
 # selected, so it judged the work without material it was configured to receive.
 SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP: Final = "semantic_review_context_withheld"
+# The review ran and returned challenges, and at least one of them was dropped by the
+# post-validation fence. The reviewer said something the check did not carry; coverage says so
+# rather than letting the drop look like the reviewer having found nothing there.
+SEMANTIC_CHALLENGES_REJECTED_GAP: Final = "semantic_challenges_rejected"
 SEMANTIC_REVIEW_NOT_REQUESTED_GAP: Final = "semantic_review_not_requested"
 OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP: Final = "optional_semantic_review_blocked_by_policy"
 _SEMANTIC_REVIEW_NOT_RUN_GAPS: Final = frozenset(

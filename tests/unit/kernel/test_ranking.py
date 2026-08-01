@@ -255,3 +255,67 @@ def test_one_material_reviewer_challenge_slot_at_default_cap() -> None:
         1,
     )
     assert challenge not in max_one.findings
+
+
+def test_reviewer_challenge_slots_scale_with_the_cap() -> None:
+    """More than one material challenge survives when the cap has room for it.
+
+    The rescue used to be exactly one challenge, so a reviewer that raised two or three material
+    discrepancies had all but the best folded into ``suppressed_count`` — invisible, and
+    indistinguishable from a reviewer that only found one. Up to half the cap is reservable now,
+    which keeps deterministic findings in the majority without discarding the rest of the review.
+    """
+
+    deterministic = tuple(_finding(index) for index in range(1, 7))
+    challenges = (
+        _finding(
+            10,
+            kind=FindingKind.MATERIAL_LIMITATION_OMITTED,
+            origin=FindingOrigin.SEMANTIC_MODEL_DERIVED,
+        ),
+        _finding(
+            11,
+            kind=FindingKind.QUESTIONABLE_FINDING_REJECTION,
+            origin=FindingOrigin.SEMANTIC_MODEL_DERIVED,
+        ),
+        _finding(
+            12,
+            kind=FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED,
+            origin=FindingOrigin.SEMANTIC_MODEL_DERIVED,
+        ),
+    )
+    context = RankingContext(_coverage(), CheckCompleteness.COMPLETE)
+
+    at_six = rank_findings(deterministic, challenges, context, 6)
+    semantic_at_six = [
+        finding
+        for finding in at_six.findings
+        if finding.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    ]
+    assert len(at_six.findings) == 6
+    assert len(semantic_at_six) == 3
+    assert at_six.suppressed_count == 3
+
+    at_four = rank_findings(deterministic, challenges, context, 4)
+    assert (
+        len(
+            [
+                finding
+                for finding in at_four.findings
+                if finding.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+            ]
+        )
+        == 2
+    )
+    assert len(at_four.findings) == 4
+
+    # Deterministic findings still hold the majority of every selection.
+    for ranked in (at_six, at_four):
+        deterministic_selected = [
+            finding for finding in ranked.findings if finding.origin is FindingOrigin.DETERMINISTIC
+        ]
+        assert len(deterministic_selected) >= len(ranked.findings) // 2
+
+    # A cap of one still admits no reserved slot at all.
+    at_one = rank_findings(deterministic, challenges, context, 1)
+    assert all(finding.origin is FindingOrigin.DETERMINISTIC for finding in at_one.findings)

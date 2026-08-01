@@ -84,18 +84,36 @@ def _selected_with_diversity(
     semantic: tuple[Finding, ...],
     max_findings: int,
 ) -> tuple[Finding, ...]:
+    """Reserve part of the cap for material semantic challenges the kind order would evict.
+
+    ``rank_key`` puts origin ninth of ten, so finding kind dominates and enough deterministic
+    findings out-rank every semantic one. That ordering is deliberate and is left alone. What
+    changes here is how many reserved seats survive it: the rescue used to be exactly one, so a
+    reviewer that raised two or three material challenges had all but the best silently folded
+    into ``suppressed_count``. Up to half the cap is now reservable, which keeps deterministic
+    findings in the majority while letting more than one challenge be seen.
+
+    ``max_findings == 1`` reserves nothing and stays deterministic-only, unchanged from before:
+    the single seat goes to the highest-ranked finding, because reserving it would mean returning
+    a semantic challenge in place of every deterministic finding rather than alongside them.
+    """
+
     selected = ordered[:max_findings]
     if max_findings < 2:
         return selected
-    material_challenges = tuple(
-        finding for finding in semantic if finding.priority in _MATERIAL_CHALLENGE_PRIORITIES
+    material_challenges = sorted(
+        (finding for finding in semantic if finding.priority in _MATERIAL_CHALLENGE_PRIORITIES),
+        key=rank_key,
     )
     if not material_challenges:
         return selected
-    challenge = min(material_challenges, key=rank_key)
-    if challenge in selected:
+    reserved = material_challenges[: max_findings // 2]
+    reserved_ids = {finding.finding_id for finding in reserved}
+    if reserved_ids <= {finding.finding_id for finding in selected}:
         return selected
-    return tuple(sorted((*selected[:-1], challenge), key=rank_key))
+    kept = [finding for finding in selected if finding.finding_id not in reserved_ids]
+    room = max_findings - len(reserved)
+    return tuple(sorted((*reserved, *kept[:room]), key=rank_key))
 
 
 def _verdict(

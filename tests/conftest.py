@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import ModuleType
 
 import pytest
@@ -11,6 +12,33 @@ from builders import events as event_builder_module
 from builders import ids as id_builder_module
 from builders import operations as operation_builder_module
 from fixture_loader import FixtureLoader, build_fixture_loader
+
+
+@pytest.fixture(autouse=True)
+def _isolated_diagnostic_log(  # pyright: ignore[reportUnusedFunction]
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the durable diagnostic ring out of the developer's real log directory.
+
+    ``append_diagnostic_record`` defaults to the platform ``log_dir()``, so any test exercising a
+    path that records one appends to the machine's own ``service.diagnostics.jsonl``. Individual
+    tests that assert on records already redirect it; this makes the default safe for the ones
+    that only pass through. A test that sets its own ``log_dir`` still wins, because its
+    ``monkeypatch`` is applied after this fixture and undone before it.
+
+    The import is deliberately inside the fixture. The portable console-boundary job runs
+    ``tests/unit/cli/test_trusted_console.py`` with pytest alone and no project dependencies, and
+    this file is a ``conftest`` on that path; importing the diagnostics module at module scope
+    pulls in ``platformdirs`` through ``yoetz.config.paths`` and breaks collection there.
+    """
+
+    try:
+        import yoetz.observability.diagnostics as diagnostics_module
+    except ImportError:
+        return  # No project dependencies installed, so there is no durable sink to redirect.
+
+    root = tmp_path_factory.mktemp("diagnostics")
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: Path(root))
 
 
 @pytest.fixture(scope="session")

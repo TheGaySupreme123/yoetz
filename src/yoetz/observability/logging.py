@@ -28,6 +28,7 @@ __all__ = [
     "configure_logging",
     "get_logger",
     "exception_origin",
+    "record_bounded_counts_without_raising",
     "record_bounded_event_without_raising",
     "record_fatal_exception_without_raising",
     "record_unexpected_exception_without_raising",
@@ -48,9 +49,18 @@ _FIELD_ORDER: Final = (
     "engine_version",
     "policy_version",
     "sqlite_source_id_hash",
+    "semantic_conclusion",
+    "semantic_challenges_returned",
+    "semantic_candidates_accepted",
+    "semantic_challenges_rejected",
+    "semantic_findings_selected",
+    "semantic_findings_suppressed",
 )
 _FIELD_SET: Final = frozenset(_FIELD_ORDER)
 _CALLER_FIELDS: Final = _FIELD_SET - {"timestamp", "level", "component", "operation"}
+# Fields a bounded-counts caller may supply. The identity fields the emitter binds itself are
+# excluded so a caller can never pass the same keyword twice.
+_COUNT_FIELDS: Final = _CALLER_FIELDS - {"correlation_id", "request_id", "outcome"}
 _STRUCTURAL_MARKER: Final = "_yoetz_structured_record"
 _STRUCTURAL_FIELDS: Final = "_yoetz_structured_fields"
 _COMPONENT_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$", re.ASCII)
@@ -488,6 +498,56 @@ def record_bounded_event_without_raising(
             operation=operation,
             reason=reason,
             request_id=request_id,
+        )
+    except BaseException:
+        pass
+    return correlation_id
+
+
+def record_bounded_counts_without_raising(
+    *,
+    component: str,
+    operation: str,
+    outcome: str,
+    counts: Mapping[str, object],
+    request_id: str | None = None,
+) -> str:
+    """Emit bounded structural counters for a reviewed non-exception event.
+
+    Some outcomes are only legible as arithmetic: a semantic review that returned three challenges
+    and produced no findings is not an error on any single call, so nothing raises and nothing is
+    logged, and the loss is invisible. ``counts`` carries integers and closed tokens under names
+    the sinks already allowlist; anything else is dropped there, exactly as for any other record.
+    The durable owner-only line matters because MCP-spawned services swallow stderr, which is where
+    this would otherwise be the only trace.
+    """
+
+    correlation_id = _new_correlation()
+    # Excluding the names bound directly below is load-bearing, not tidiness: a caller that put
+    # ``outcome`` (or a correlation/request id) in ``counts`` would hand the logger the same
+    # keyword twice, and the TypeError is swallowed by the guard below — the record would vanish
+    # exactly where this function exists to make something visible.
+    fields = {name: value for name, value in counts.items() if name in _COUNT_FIELDS}
+    try:
+        get_logger(component).info(
+            operation,
+            correlation_id=correlation_id,
+            request_id=request_id,
+            outcome=outcome,
+            **fields,
+        )
+    except BaseException:
+        pass
+    try:
+        from yoetz.observability.diagnostics import append_diagnostic_record
+
+        append_diagnostic_record(
+            correlation_id=correlation_id,
+            component=component,
+            operation=operation,
+            reason=outcome,
+            request_id=request_id,
+            counts=fields,
         )
     except BaseException:
         pass

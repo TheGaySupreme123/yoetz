@@ -19,6 +19,8 @@ from yoetz.adapters.providers.openai_chat_completions import (
     normalize_response as normalize_chat_response,
 )
 from yoetz.adapters.providers.openai_responses import (
+    CHALLENGE_FIELD_GLOSSARY,
+    FINDING_KIND_GLOSSARY,
     JUDGMENT_JSON_SCHEMA,
     OpenAIProfile,
     build_judgment_json_schema,
@@ -37,7 +39,11 @@ from yoetz.ports.semantic import (
     SemanticResultTimeout,
 )
 from yoetz.protocol.canonical import JsonValue, canonical_digest, strict_json_parse
-from yoetz.protocol.models import ProviderJudgmentModel
+from yoetz.protocol.models import (
+    ProviderChallengeModel,
+    ProviderJudgmentEnvelopeModel,
+    ProviderJudgmentModel,
+)
 
 _NOW = datetime(2026, 7, 28, tzinfo=UTC)
 _DIGEST = "sha256:" + "c" * 64
@@ -180,7 +186,9 @@ def test_generated_schema_matches_owning_model_and_frozen_artifact() -> None:
         for key, value in cast(dict[str, object], _strip_titles(frozen_doc)).items()
         if key not in {"$id", "$schema"}
     }
-    assert frozen_body == cast(dict[str, object], JUDGMENT_JSON_SCHEMA)
+    # The request schema carries curated reviewer definitions the frozen catalog does not; both
+    # sides drop annotations so what is compared is the shape the two documents must share.
+    assert frozen_body == _strip_titles(cast(dict[str, object], JUDGMENT_JSON_SCHEMA))
     kinds = cast(
         list[str],
         cast(
@@ -229,21 +237,61 @@ def test_request_schema_root_is_an_object_never_a_union() -> None:
 
 
 def test_request_schema_carries_no_docstring_commentary() -> None:
-    """Developer docstrings explain the contract to maintainers, never to the provider."""
+    """Developer docstrings explain the contract to maintainers, never to the provider.
 
-    def _annotations(node: object) -> list[str]:
-        found: list[str] = []
+    The schema does carry descriptions now, but only the curated reviewer definitions written for
+    the model. Every one must come from the glossary; a pydantic docstring reaching the wire — the
+    thing ``_strip_schema_titles`` exists to prevent — fails here.
+    """
+
+    def _annotations(node: object, key_name: str) -> list[object]:
+        found: list[object] = []
         if type(node) is dict:
             for key, value in cast(dict[str, Any], node).items():
-                if key in {"title", "description"}:
-                    found.append(key)
-                found.extend(_annotations(value))
+                if key == key_name:
+                    found.append(value)
+                found.extend(_annotations(value, key_name))
         elif type(node) is list:
             for item in cast(list[Any], node):
-                found.extend(_annotations(item))
+                found.extend(_annotations(item, key_name))
         return found
 
-    assert _annotations(JUDGMENT_JSON_SCHEMA) == []
+    assert _annotations(JUDGMENT_JSON_SCHEMA, "title") == []
+
+    curated = set(CHALLENGE_FIELD_GLOSSARY.values())
+    descriptions = _annotations(JUDGMENT_JSON_SCHEMA, "description")
+    assert descriptions
+    assert set(descriptions) <= curated
+
+    docstrings = {
+        (model.__doc__ or "").strip()
+        for model in (
+            ProviderChallengeModel,
+            ProviderJudgmentEnvelopeModel,
+        )
+    } - {""}
+    assert docstrings
+    assert not docstrings & set(descriptions)
+
+
+def test_every_finding_kind_and_challenge_field_has_a_reviewer_gloss() -> None:
+    """A kind or field the model can emit but has no definition for is an unfair question.
+
+    Adding a ``FindingKind`` or a challenge field without writing its gloss fails here rather than
+    reaching a provider as one more bare token among the rest.
+    """
+
+    assert set(FINDING_KIND_GLOSSARY) == {kind.value for kind in FindingKind}
+    challenge = cast(
+        dict[str, Any], cast(dict[str, Any], JUDGMENT_JSON_SCHEMA["$defs"])["ProviderChallenge"]
+    )
+    assert set(CHALLENGE_FIELD_GLOSSARY) == set(cast(dict[str, Any], challenge["properties"]))
+
+    kind_gloss = cast(
+        dict[str, Any], cast(dict[str, Any], JUDGMENT_JSON_SCHEMA["$defs"])["FindingKindWire"]
+    )["description"]
+    for kind in FindingKind:
+        assert f"{kind.value}: " in kind_gloss
 
 
 def test_envelope_and_bare_judgment_both_normalize() -> None:

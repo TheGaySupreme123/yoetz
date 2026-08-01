@@ -9,6 +9,7 @@ from typing import cast
 
 import pytest
 
+import yoetz.application.check as check_module
 import yoetz.observability.diagnostics as diagnostics_module
 from builders.ledger_adapters import FixedClock, MemoryObjects
 from builders.policy_cases import FRONTIER, clm, make_case, record
@@ -17,6 +18,7 @@ from yoetz.application.service import VerificationPolicy
 from yoetz.domain.events import ClaimKind, ClaimRecordedPayload
 from yoetz.domain.findings import (
     Finding,
+    FindingKind,
     RankedFindings,
     SemanticDispatchKind,
     SemanticProvenance,
@@ -37,7 +39,7 @@ from yoetz.ports.ledger import (
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef
 from yoetz.ports.runtime import BundleRuntimePort, OwnershipFence, RouteCommand, TaskRuntime
-from yoetz.ports.semantic import SamplingParams, SemanticJudgment
+from yoetz.ports.semantic import ReviewerChallenge, SamplingParams, SemanticJudgment
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
 from yoetz.protocol.models import CheckRequest, SemanticReason, SemanticStatus
@@ -273,7 +275,7 @@ class _App:
         return self.semantic_result
 
 
-def _request(mode: str = "deterministic_only") -> CheckRequest:
+def _request(mode: str = "deterministic_only", *, max_findings: str = "1") -> CheckRequest:
     return CheckRequest.model_validate(
         {
             "protocol_version": "0.1",
@@ -286,7 +288,7 @@ def _request(mode: str = "deterministic_only") -> CheckRequest:
                 "head_digest": FRONTIER.head_digest,
             },
             "mode": mode,
-            "max_findings": "1",
+            "max_findings": max_findings,
             "actor": {"actor_id": "harness:test", "actor_type": "harness"},
             "client": {
                 "kind": "test_client",
@@ -500,3 +502,149 @@ async def test_succeeded_review_with_withheld_context_is_not_reported_as_full_co
     agreed.semantic_result = replace(app.semantic_result, withheld_review_categories=())
     clean = await execute_check_commit(agreed, _request("semantic_if_configured"))
     assert SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP not in clean.coverage.known_gaps
+
+
+def _succeeded(judgment: SemanticJudgment) -> FinalSemanticEvaluation:
+    digest = "sha256:" + "a" * 64
+    return FinalSemanticEvaluation(
+        SemanticStatus.SUCCEEDED,
+        SemanticReason.SEMANTIC_COMPLETED,
+        judgment=judgment,
+        provenance=SemanticProvenance(
+            provider="fake",
+            endpoint_profile_id="fake",
+            endpoint_profile_version="1.0.0",
+            model="fake/model",
+            sdk_version="1.0.0",
+            prompt_digest=digest,
+            schema_digest=digest,
+            policy_digest=digest,
+            privacy_policy_digest=digest,
+            sampling_params=SamplingParams(128),
+            latency_ms=1,
+            semantic_attempt_id="att_30000000-0000-4000-8000-000000000001",
+            dispatch_kind=SemanticDispatchKind.EXTERNAL,
+            privacy_receipt_id="egr_30000000-0000-4000-8000-000000000001",
+            status=SemanticStatus.SUCCEEDED,
+            reason=SemanticReason.SEMANTIC_COMPLETED,
+            provider_request_id="fake-semantic-request-1",
+            egress_authorization_id="aut_30000000-0000-4000-8000-000000000001",
+            request_commitment="hmac-sha256:" + "b" * 64,
+        ),
+    )
+
+
+def _reviewer_challenge(ref: str, *, summary: str = "Evidence gap") -> ReviewerChallenge:
+    return ReviewerChallenge(
+        FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
+        summary,
+        (ref,),
+        "The claim lacks a recorded basis.",
+        "The claim may remain unresolved.",
+        "Main agent: provide evidence for the claim.",
+        "provide_evidence",
+        "The missing material may exist outside the case.",
+    )
+
+
+@pytest.mark.anyio
+async def test_rejected_judgment_commits_the_check_instead_of_failing_the_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reviewer answer the fence refuses costs the reviewer's output, never the whole check.
+
+    Regression for a live failure: the post-validation ``ValueError`` escaped ``execute_check_commit``
+    (which caught only ``ProtocolValueError``), reached the daemon catch-all, and became a
+    non-retryable ``INVALID_REQUEST`` with no correlation id. No check was recorded at all, so the
+    deterministic findings were lost and nothing said why. ``SemanticStatus.INVALID`` /
+    ``SEMANTIC_JUDGMENT_REJECTED`` existed for exactly this and had never once been written.
+
+    The structural fence is unreachable through the ordinary call (the coordinator passes the frozen
+    case's own frontier and a SUCCEEDED provenance by construction), so the raise is injected here:
+    what is under test is the disposition of the failure, not its trigger.
+    """
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+
+    def _raise(*_args: object, **_kwargs: object) -> object:
+        raise check_module.SemanticJudgmentRejected("semantic_judgment_invalid")
+
+    monkeypatch.setattr(check_module, "validate_semantic_judgment", _raise)
+
+    app = _App(semantic=True)
+    app.semantic_result = _succeeded(
+        SemanticJudgment("challenges_returned", (_reviewer_challenge(str(clm(1))),))
+    )
+
+    result = await execute_check_commit(app, _request("semantic_if_configured"))
+
+    assert result.semantic_status is SemanticStatus.INVALID
+    assert result.semantic_reason is SemanticReason.SEMANTIC_JUDGMENT_REJECTED
+    assert result.semantic_provenance is not None
+    assert result.semantic_provenance.status is SemanticStatus.INVALID
+    assert result.semantic_provenance.reason is SemanticReason.SEMANTIC_JUDGMENT_REJECTED
+    # The whole point: the deterministic findings the user paid for still committed.
+    assert result.findings
+    assert all(finding.origin.value == "deterministic" for finding in result.findings)
+    assert app.ledger.commit_count == 1
+    assert result.verdict.value != "no_issue_detected"
+
+    raw = diagnostics_module.diagnostic_log_path(root=tmp_path).read_text(encoding="ascii")
+    operations = {json.loads(line)["operation"] for line in raw.splitlines() if line}
+    assert "semantic_judgment_rejected" in operations
+
+
+@pytest.mark.anyio
+async def test_partial_rejection_keeps_accepted_challenges_and_declares_the_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One unusable challenge costs itself; the others become findings and the loss is declared."""
+
+    from yoetz.domain.receipts import SEMANTIC_CHALLENGES_REJECTED_GAP
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    app = _App(semantic=True)
+    app.semantic_result = _succeeded(
+        SemanticJudgment(
+            "challenges_returned",
+            (
+                _reviewer_challenge(str(clm(1)), summary="Accepted challenge"),
+                _reviewer_challenge(
+                    "clm_20000000-0000-4000-8000-000000000099", summary="Invented ref"
+                ),
+            ),
+        )
+    )
+
+    result = await execute_check_commit(app, _request("semantic_if_configured", max_findings="4"))
+
+    semantic_findings = [
+        finding for finding in result.findings if finding.origin.value == "semantic_model_derived"
+    ]
+    assert [finding.summary for finding in semantic_findings] == ["Accepted challenge"]
+    assert result.semantic_status is SemanticStatus.SUCCEEDED
+    assert SEMANTIC_CHALLENGES_REJECTED_GAP in result.coverage.known_gaps
+
+    raw = diagnostics_module.diagnostic_log_path(root=tmp_path).read_text(encoding="ascii")
+    accounting = [
+        json.loads(line)
+        for line in raw.splitlines()
+        if line and json.loads(line)["operation"] == "semantic_review_accounting"
+    ]
+    assert len(accounting) == 1
+    record_json = accounting[0]
+    assert record_json["semantic_conclusion"] == "challenges_returned"
+    assert record_json["semantic_challenges_returned"] == 2
+    assert record_json["semantic_candidates_accepted"] == 1
+    assert record_json["semantic_challenges_rejected"] == 1
+    assert record_json["semantic_findings_selected"] == 1
+    assert record_json["semantic_findings_suppressed"] == 0
+    # The record reconciles: nothing the reviewer returned is unaccounted for.
+    assert record_json["semantic_challenges_returned"] == (
+        record_json["semantic_candidates_accepted"] + record_json["semantic_challenges_rejected"]
+    )
+    assert record_json["semantic_candidates_accepted"] == (
+        record_json["semantic_findings_selected"] + record_json["semantic_findings_suppressed"]
+    )
+    assert "Invented ref" not in raw
+    assert "Accepted challenge" not in raw

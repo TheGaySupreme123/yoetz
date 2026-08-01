@@ -85,9 +85,12 @@ _SYSTEM_INSTRUCTION: Final = (
     "timeline, deterministic finding bases, state/change observations, evidence freshness, "
     "failures, limitations, and selected excerpts. If a material discrepancy exists, address the "
     "main agent directly, explain the discrepancy and strongest plausible alternative, cite only "
-    "supplied refs, and request the smallest resolving action or evidence. Do not invent "
-    "repository facts, fetch more context, overrule deterministic results, waive findings, or "
-    "claim stronger coverage than the packet. Reply with one JSON object and nothing else: no "
+    "supplied refs, and request the smallest resolving action or evidence. Every value in "
+    "cited_refs must come from the packet's citable_refs array and nothing else: an item_id from "
+    "items[] is not citable, and a challenge citing anything outside citable_refs is discarded "
+    "unread. Do not invent repository facts, fetch more context, overrule deterministic results, "
+    "waive findings, or claim stronger coverage than the packet. "
+    "Reply with one JSON object and nothing else: no "
     'prose, no code fence, no explanation outside it. Its exact shape is {"conclusion": one of '
     '"no_material_discrepancy" | "challenges_returned" | "insufficient_packet", '
     '"reviewer_challenges": array of objects with "finding_kind", "summary", "cited_refs", '

@@ -53,6 +53,8 @@ from yoetz.protocol.models import (
 )
 
 __all__ = [
+    "CHALLENGE_FIELD_GLOSSARY",
+    "FINDING_KIND_GLOSSARY",
     "JUDGMENT_JSON_SCHEMA",
     "OFFICIAL_OPENAI_HOST",
     "OFFICIAL_OPENAI_PATH",
@@ -116,9 +118,11 @@ _SYSTEM_INSTRUCTION: Final = (
     "timeline, deterministic finding bases, state/change observations, evidence freshness, "
     "failures, limitations, and selected excerpts. If a material discrepancy exists, address the "
     "main agent directly, explain the discrepancy and strongest plausible alternative, cite only "
-    "supplied refs, and request the smallest resolving action or evidence. Do not invent "
-    "repository facts, fetch more context, overrule deterministic results, waive findings, or "
-    "claim stronger coverage than the packet."
+    "supplied refs, and request the smallest resolving action or evidence. Every value in "
+    "cited_refs must come from the packet's citable_refs array and nothing else: an item_id from "
+    "items[] is not citable, and a challenge citing anything outside citable_refs is discarded "
+    "unread. Do not invent repository facts, fetch more context, overrule deterministic results, "
+    "waive findings, or claim stronger coverage than the packet."
 )
 
 _PROVIDER_JUDGMENT_ADAPTER: Final[TypeAdapter[ProviderJudgmentModel]] = TypeAdapter(
@@ -221,6 +225,137 @@ def _strip_schema_titles(node: object) -> object:
     return node
 
 
+# Reviewer-facing definitions, written deliberately for the model that receives this schema.
+#
+# These are not docstrings and must never be sourced from one: a docstring explains the contract to
+# a maintainer, while these tell a reviewer what the word means when it has to pick one. Stripping
+# every annotation left the model choosing among fourteen bare enum strings and eight bare field
+# names with no gloss anywhere in the request, which is not a fair question to ask it.
+FINDING_KIND_GLOSSARY: Final[dict[str, str]] = {
+    "action_without_result": "an action was taken but no outcome for it was ever recorded",
+    "claim_without_admissible_evidence": (
+        "a claim of fact or completion rests on no evidence the packet actually contains"
+    ),
+    "completion_with_open_obligations": (
+        "work is presented as finished while obligations it was meant to satisfy remain open"
+    ),
+    "contradictory_claims_unresolved": (
+        "two claims in the packet cannot both be true and neither has been withdrawn or reconciled"
+    ),
+    "diff_does_not_match_account": (
+        "the described change and the change actually shown in the packet differ in substance"
+    ),
+    "evidence_does_not_support_claim": (
+        "evidence is cited for a claim but does not establish what the claim asserts"
+    ),
+    "failed_work_omitted": (
+        "a recorded failure, error, or abandoned attempt is missing from the account given"
+    ),
+    "ledger_stale_or_incomplete": (
+        "the record itself is behind or missing entries, so the packet cannot settle the question"
+    ),
+    "material_limitation_omitted": (
+        "a limitation that changes how the result should be read was not disclosed"
+    ),
+    "questionable_finding_rejection": (
+        "a deterministic finding was dismissed or explained away without adequate grounds"
+    ),
+    "requested_item_never_attempted": (
+        "something the user or an obligation asked for was never worked on at all"
+    ),
+    "result_without_action": "an outcome is recorded with no action in the packet that produced it",
+    "stale_evidence_for_changed_state": (
+        "the cited evidence predates a change to what it describes, so it no longer speaks to it"
+    ),
+    "weak_or_stale_response": (
+        "the answer given is thin or out of date relative to what the packet supports"
+    ),
+}
+
+CHALLENGE_FIELD_GLOSSARY: Final[dict[str, str]] = {
+    "finding_kind": (
+        "Which kind of discrepancy this is; pick the one that fits best. "
+        + "; ".join(f"{kind}: {gloss}" for kind, gloss in sorted(FINDING_KIND_GLOSSARY.items()))
+        + "."
+    ),
+    "summary": "One short line naming the discrepancy, readable on its own.",
+    "cited_refs": (
+        "The refs this challenge rests on. Every value must appear in the packet's citable_refs "
+        "array; an items[].item_id is not a ref. A challenge citing anything else is discarded, "
+        "so cite the specific claim, obligation, event, or finding the discrepancy is about."
+    ),
+    "discrepancy": "What the packet shows that does not fit, stated as fact rather than suspicion.",
+    "alternative_interpretation": (
+        "The strongest honest reading under which there is no problem here. Write the case against "
+        "your own challenge, not a weak version of it."
+    ),
+    "message_to_main_agent": (
+        "What you are telling the agent, addressed to it directly, including the smallest action "
+        "or piece of evidence that would resolve this."
+    ),
+    "requested_next_step": (
+        "The single kind of response you are asking the agent for. act: do the missing work; "
+        "provide_evidence: record evidence that already exists; revise_claim: correct or withdraw "
+        "what was claimed; dispute_with_evidence: rebut this challenge if you believe it is wrong; "
+        "state_unresolved_limitation: say plainly that this cannot be settled here."
+    ),
+    "uncertainty": (
+        "What you could not determine from the packet and what would settle it. Say so plainly "
+        "rather than hedging the challenge itself."
+    ),
+}
+
+
+def _apply_reviewer_glossary(schema: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Attach the curated reviewer definitions to the stripped schema.
+
+    Applied after stripping rather than by not stripping, so the only text that can reach a
+    provider is text written above for that purpose.
+    """
+
+    defs = schema.get("$defs")
+    if type(defs) is not dict:
+        raise RuntimeError("provider_judgment_schema_invalid")
+    definitions = cast(dict[str, JsonValue], defs)
+    kinds = definitions.get("FindingKindWire")
+    challenge = definitions.get("ProviderChallenge")
+    if type(kinds) is not dict or type(challenge) is not dict:
+        raise RuntimeError("provider_judgment_schema_invalid")
+    properties = cast(dict[str, JsonValue], challenge).get("properties")
+    if type(properties) is not dict:
+        raise RuntimeError("provider_judgment_schema_invalid")
+    challenge_properties = cast(dict[str, JsonValue], properties)
+    # The glossary must describe exactly the shape the model owns. A field added or renamed there
+    # without a gloss fails the build rather than shipping a silently undefined field.
+    if set(challenge_properties) != set(CHALLENGE_FIELD_GLOSSARY):
+        raise RuntimeError("provider_judgment_schema_invalid")
+    enum_values = cast(dict[str, JsonValue], kinds).get("enum")
+    if type(enum_values) is not list or set(cast(list[JsonValue], enum_values)) != set(
+        FINDING_KIND_GLOSSARY
+    ):
+        raise RuntimeError("provider_judgment_schema_invalid")
+    for name, gloss in CHALLENGE_FIELD_GLOSSARY.items():
+        target = challenge_properties[name]
+        if type(target) is not dict:
+            raise RuntimeError("provider_judgment_schema_invalid")
+        source = cast(dict[str, JsonValue], target)
+        # A property that is a bare ``$ref`` carries its gloss on the referenced definition:
+        # annotations beside ``$ref`` are legal in 2020-12 but not uniformly honored, and the
+        # definition is the one place every use of that vocabulary sees it.
+        reference = source.get("$ref")
+        if type(reference) is str:
+            anchor = reference.removeprefix("#/$defs/")
+            referenced = definitions.get(anchor)
+            if type(referenced) is not dict:
+                raise RuntimeError("provider_judgment_schema_invalid")
+            definitions[anchor] = cast(
+                JsonValue, {**cast(dict[str, JsonValue], referenced), "description": gloss}
+            )
+            continue
+        challenge_properties[name] = cast(JsonValue, {**source, "description": gloss})
+    return schema
+
+
 def build_judgment_json_schema() -> dict[str, JsonValue]:
     """Generate the constrained-output schema from the single owning provider judgment model.
 
@@ -240,7 +375,7 @@ def build_judgment_json_schema() -> dict[str, JsonValue]:
     cleaned = _strip_schema_titles(_sort_schema_lists(_rename_schema_defs(raw)))
     if type(cleaned) is not dict:
         raise RuntimeError("provider_judgment_schema_invalid")
-    return cast(dict[str, JsonValue], cleaned)
+    return _apply_reviewer_glossary(cast(dict[str, JsonValue], cleaned))
 
 
 JUDGMENT_JSON_SCHEMA: Final[dict[str, JsonValue]] = build_judgment_json_schema()
