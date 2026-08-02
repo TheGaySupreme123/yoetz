@@ -36,6 +36,7 @@ from yoetz.ports.control import (
 )
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.service.control_protocol import (
+    ControlProtocolError,
     client_handshake,
     parse_control_result,
     read_control_frame,
@@ -314,10 +315,13 @@ async def test_active_request_exempts_session_from_idle_deadline(
         assert result.method is ControlMethod.SERVICE_STATUS
 
         # After the final call completes, the inactive deadline begins. Withholding the next
-        # frame must eventually close the stream.
+        # frame must eventually close the stream. Assert the server-side close path
+        # (ControlProtocolError on EOF), not a client wait_for TimeoutError that would mask a
+        # missing idle eviction.
         await asyncio.sleep(_SHORT_IDLE + 0.25)
-        with pytest.raises(Exception):
+        with pytest.raises(ControlProtocolError) as idle_close:
             await asyncio.wait_for(read_control_frame(client), timeout=1.0)
+        assert idle_close.value.reason == "frame_invalid"
     finally:
         await client.aclose()
         await _shutdown(daemon, accept_task, listener)

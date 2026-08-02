@@ -174,6 +174,10 @@ _CONTROL_HANDSHAKE_DEADLINE_SECONDS: Final = 5.0
 # After handshake, a session with no active calls may stay silent for at most this long
 # before the stream is closed and the listener admission slot is released.
 _CONTROL_INACTIVE_SESSION_DEADLINE_SECONDS: Final = 300.0
+# Response-frame send must complete within this wall-clock window. A stalled peer that stops
+# reading cannot retain an in-flight entry in ``calls`` (and thus the inactive-session exemption)
+# indefinitely via write backpressure on sock_sendall.
+_CONTROL_RESPONSE_WRITE_DEADLINE_SECONDS: Final = 300.0
 
 _WORKFLOW_METHODS = frozenset(
     {
@@ -1080,7 +1084,11 @@ class ServiceDaemon:
                     )
                     if read_task in done:
                         return await read_task
-                    # A call finished; re-check whether any remain before starting idle.
+                    # Done-callbacks that pop from ``calls`` are scheduled via call_soon and may
+                    # not have run yet. Prune completed tasks now so idle can start on this turn.
+                    for rpc_id, task in tuple(calls.items()):
+                        if task.done():
+                            calls.pop(rpc_id, None)
                     continue
                 try:
                     async with asyncio.timeout(_CONTROL_INACTIVE_SESSION_DEADLINE_SECONDS):
@@ -1105,7 +1113,8 @@ class ServiceDaemon:
         result = await self.dispatch(session.client_kind, request, _defer_stop=True)
         session.correlate(result)
         async with write_lock:
-            await write_control_frame(stream, result)
+            async with asyncio.timeout(_CONTROL_RESPONSE_WRITE_DEADLINE_SECONDS):
+                await write_control_frame(stream, result)
         if request.method is ControlMethod.SERVICE_STOP and result.outcome == "ok":
             await self.stop()
 

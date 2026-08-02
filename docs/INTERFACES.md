@@ -1166,7 +1166,9 @@ complete within **5 seconds** (entire read/write, including partial frames); aft
 session with no active requests may remain inactive for at most **5 minutes**, after which the
 stream is closed and the listener admission slot is released. Active requests exempt the session
 from the inactive timer until the final in-flight call completes; long-running calls are not
-cancelled solely for lack of a subsequent frame.
+cancelled solely for lack of a subsequent frame. Each control-result write is also wall-clock
+bounded (**5 minutes**): a peer that stops reading cannot retain an in-flight call entry (and
+thus the inactive-session exemption) indefinitely via send backpressure.
 
 The private `ControlCallRequest` envelope may carry `route_profile=policy|strict` only for `check`
 and `status`. It is set by the MCP bridge from its immutable process profile, is absent from public
@@ -2238,7 +2240,9 @@ facade and are never MCP tools.
   released. The inactive-session deadline starts immediately when no calls are active and only
   when the final call completes when calls are active; it covers a complete frame read so dripped
   partial bytes cannot retain capacity indefinitely. Active long-running calls are not cancelled
-  merely because no additional frame arrives.
+  merely because no additional frame arrives. Each control-result write is wall-clock bounded
+  (**5 minutes**) so a stalled peer cannot keep a call marked in-flight (and idle-exempt) via
+  send backpressure alone.
 - `adapters/session_events.py`: positively tested lock/suspend monitoring. v0.1 exposes foreground
   `service run` only; user-service-manager installers and hidden client spawn are absent.
 - `adapters/sqlite/connection.py`: `open_writer(path) -> apsw.Connection` (frozen PRAGMA + build
