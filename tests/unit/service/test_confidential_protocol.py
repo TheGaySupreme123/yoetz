@@ -7,6 +7,7 @@ from typing import Literal, cast
 
 import pytest
 
+from yoetz.domain.privacy import PrivacyPolicyChange, PrivacyPolicyChangeValue
 from yoetz.service.confidential_protocol import (
     CEREMONY_EXPIRY_SECONDS,
     MAX_HUMAN_CONTROL_FRAME_BYTES,
@@ -32,6 +33,7 @@ from yoetz.service.confidential_protocol import (
     KeyringRetryResult,
     PortableRecoveryTarget,
     PrivacyPendingTarget,
+    PrivacyPolicyDecisionPreview,
     ProviderCredentialTarget,
     RetryAction,
     SecretIngressBinding,
@@ -389,3 +391,128 @@ def test_errors_are_bounded_and_do_not_echo_input() -> None:
     assert decode_human_frame(encode_human_frame(error)) == error
     with pytest.raises(ValueError, match="server_error_code_invalid"):
         replace(error, code="secret-value-do-not-echo")
+
+
+# ---------------------------------------------------------------------------
+# The privacy-widening preview carries the whole diff, or it does not open
+# ---------------------------------------------------------------------------
+
+
+def _policy_changes() -> tuple[PrivacyPolicyChange, ...]:
+    """A mixed widening: destination enabled, confirmation removed, disclosure narrowed."""
+
+    return (
+        PrivacyPolicyChange(
+            "global",
+            "network_egress",
+            None,
+            PrivacyPolicyChangeValue.of_flag(False),
+            PrivacyPolicyChangeValue.of_flag(True),
+            True,
+        ),
+        PrivacyPolicyChange(
+            "channel",
+            "preview_required",
+            "llm_inference",
+            PrivacyPolicyChangeValue.of_flag(True),
+            PrivacyPolicyChangeValue.of_flag(False),
+            True,
+        ),
+        PrivacyPolicyChange(
+            "agent_context",
+            "categories",
+            None,
+            PrivacyPolicyChangeValue.of_labels(("claim_text", "declared_file_type")),
+            PrivacyPolicyChangeValue.of_labels(("declared_file_type",)),
+            False,
+        ),
+    )
+
+
+def _policy_preview() -> PrivacyPolicyDecisionPreview:
+    return PrivacyPolicyDecisionPreview("pending-1", _DIGEST_A, _policy_changes())
+
+
+def test_privacy_policy_preview_round_trips_the_complete_change_set() -> None:
+    envelope = ServerOpenedEnvelope(
+        "1" * 64,
+        1,
+        HumanCeremonyBinding(
+            1,
+            "1" * 64,
+            "0" * 64,
+            HumanCeremonyKind.PRIVACY_POLICY_DECISION,
+            _SERVICE_ID,
+            3,
+            0,
+            None,
+            _DIGEST_A,
+            60_000,
+        ),
+        _policy_preview(),
+        DecisionRequiredPhase(),
+    )
+
+    assert decode_human_frame(encode_human_frame(envelope)) == envelope
+
+
+def test_a_widening_preview_cannot_be_opened_with_an_incomplete_change_set() -> None:
+    """The finding, at the protocol boundary.
+
+    The ceremony exists only for a widening. A change set with nothing that widens means the
+    diff is missing whatever caused the classification, so the preview refuses to exist rather
+    than rendering an empty approval screen.
+    """
+
+    tightening_only = (_policy_changes()[2],)
+    for changes in ((), tightening_only):
+        with pytest.raises(ValueError, match="privacy_policy_preview_invalid"):
+            PrivacyPolicyDecisionPreview("pending-1", _DIGEST_A, changes)
+
+
+def test_a_privacy_preview_rejects_duplicates_misordering_and_oversize() -> None:
+    changes = _policy_changes()
+    for invalid in (
+        (changes[0], changes[0]),
+        tuple(reversed(changes)),
+        (changes[0],) * 200,
+    ):
+        with pytest.raises(ValueError, match="privacy_policy_preview_invalid"):
+            PrivacyPolicyDecisionPreview("pending-1", _DIGEST_A, invalid)
+
+
+def test_a_decoded_privacy_preview_rejects_an_unknown_area_field_or_extra_key() -> None:
+    """A token the trusted renderer has no fixed label for never reaches an approval screen."""
+
+    encoded = encode_human_frame(
+        ServerOpenedEnvelope(
+            "1" * 64,
+            1,
+            HumanCeremonyBinding(
+                1,
+                "1" * 64,
+                "0" * 64,
+                HumanCeremonyKind.PRIVACY_POLICY_DECISION,
+                _SERVICE_ID,
+                3,
+                0,
+                None,
+                _DIGEST_A,
+                60_000,
+            ),
+            _policy_preview(),
+            DecisionRequiredPhase(),
+        )
+    )
+    magic, version, frame_type, _length = struct.unpack(">4sBBI", encoded[:10])
+    body = encoded[10:].decode("utf-8")
+    for original, replacement in (
+        ('"area":"global"', '"area":"telemetry"'),
+        ('"field":"network_egress"', '"field":"send_everything"'),
+        ('"widens":true', '"widens":true,"explanation":"perfectly safe"'),
+    ):
+        assert original in body, original
+        tampered = body.replace(original, replacement, 1).encode("utf-8")
+        frame = struct.pack(">4sBBI", magic, version, frame_type, len(tampered)) + tampered
+        with pytest.raises((ValueError, ConfidentialProtocolError)):
+            decode_human_frame(frame)

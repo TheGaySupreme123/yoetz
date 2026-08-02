@@ -32,6 +32,7 @@ from yoetz import __version__
 from yoetz.tui.commands import SLASH_COMMANDS, command_named
 from yoetz.tui.events import HistoryEvent, Transcript
 from yoetz.tui.models import (
+    PRIVACY_RECIPES,
     CheckMode,
     Detection,
     HarnessOption,
@@ -48,7 +49,6 @@ from yoetz.tui.render import (
     render_integration_preview,
     render_integration_technical_details,
     render_layers,
-    render_privacy_disclosure,
     render_project_trust,
     render_provider_endpoint,
     render_provider_stored,
@@ -94,6 +94,13 @@ _NEVER_SENT: Final[tuple[str, ...]] = (
     "Raw repository file contents that no rule selected",
     "Absolute filesystem paths",
 )
+
+# Which durable profile each recipe lands on, used only to notice that the current policy
+# already matches the recommendation and stop offering it as a change.
+_PROFILE_FOR_RECIPE: Final[dict[str, str]] = {
+    "private": PrivacyChoice.LOCAL_ONLY.value,
+    "metadata_only": PrivacyChoice.CONFIRM_EVERY_REQUEST.value,
+}
 
 
 class YoetzTui(App[int]):
@@ -454,7 +461,10 @@ class YoetzTui(App[int]):
             )
             return
         try:
-            report = await self.hand_over_terminal(lambda: self.runtime.run_privacy_setup("custom"))
+            # First run gets the same recommendation-first screen as `yoetz --privacy`.
+            report = await self.hand_over_terminal(
+                lambda: self.runtime.run_privacy_setup(None, offer_recommended=True)
+            )
         except SuspendNotSupported:
             self.say(
                 Level.UNPROVEN,
@@ -926,23 +936,47 @@ class YoetzTui(App[int]):
         await self._refresh_header()
 
     async def command_privacy(self) -> None:
+        """Show where privacy stands, then the one recommended move, then everything else.
+
+        This screen selects; it never authorizes. The old flow took its own approval here and
+        then handed over to a second, differently worded approval in the trusted terminal —
+        two consents for one decision, of which only the second one actually gated anything.
+        The trusted terminal ceremony is now the sole authorization for a widening, and it is
+        the only place the exact ``before → after`` policy diff is rendered.
+        """
+
         current = await self.runtime.privacy_posture()
+        recommendation = self.runtime.privacy_recommendation()
+        already = current.choice is not None and current.profile == _PROFILE_FOR_RECIPE.get(
+            recommendation.recipe
+        )
         self.say(
             Level.ACTIVE,
             "Privacy",
             (
                 f"Currently: {current.summary}",
-                "Local only is the default and stays the default.",
+                f"Recommended: {recommendation.label}",
+                recommendation.reason,
+                recommendation.tradeoff,
             ),
         )
-        options = [
-            Option(
-                choice.value,
-                choice.label,
-                choice.description,
+        options = [Option("keep", "Keep current", f"Stay on {current.summary}.")]
+        if already:
+            self.say(
+                Level.OPTIONAL,
+                "You are already on the recommended privacy policy.",
             )
-            for choice in PrivacyChoice
-        ]
+        else:
+            options.append(
+                Option(
+                    "recommended",
+                    f"Review recommended change ({recommendation.label})",
+                    "Opens the trusted terminal, which shows the exact change and asks there.",
+                )
+            )
+        options.append(
+            Option("other", "Other privacy options", "Choose a different named policy, or Custom.")
+        )
         chosen = await self.ask(
             SelectionView(
                 name="privacy",
@@ -951,63 +985,31 @@ class YoetzTui(App[int]):
                 hint="enter to choose · esc to keep the current setting",
             )
         )
-        if chosen is None or chosen == current.profile:
+        if chosen is None or chosen == "keep":
             self.say(Level.OPTIONAL, "Privacy was left unchanged.")
             return
-        target = PrivacyChoice(chosen)
-        if target is PrivacyChoice.LOCAL_ONLY:
-            self.say(
-                Level.ACTIVE,
-                "Tightening privacy is an explicit ceremony",
-                (
-                    "Run 'yoetz privacy tighten' from a terminal to narrow the",
-                    "policy. Yoetz keeps that decision on its own trusted path.",
-                ),
+        recipe = recommendation.recipe
+        if chosen == "other":
+            picked = await self.ask(
+                SelectionView(
+                    name="privacy-recipe",
+                    title="Choose a privacy policy",
+                    options=[
+                        Option(name, label, description)
+                        for name, label, description in PRIVACY_RECIPES
+                    ],
+                    hint="enter to choose · esc to keep the current setting",
+                )
             )
-            return
-        await self._preview_privacy_widening(current, target)
+            if picked is None:
+                self.say(Level.OPTIONAL, "Privacy was left unchanged.")
+                return
+            recipe = picked
+        await self._hand_privacy_to_trusted_terminal(recipe)
 
-    async def _preview_privacy_widening(self, current: Any, target: PrivacyChoice) -> None:
-        provider = await self.runtime.provider_posture()
-        notes: list[str] = []
-        if not provider.endpoint_bound:
-            notes.append("No provider is configured yet, so nothing can be sent even after this.")
-        if provider.credential_connected is not True:
-            notes.append("No provider credential is stored, so review cannot run yet.")
-        if not provider.transport_tested:
-            notes.append("This provider connection has never been tested.")
-        body = render_privacy_disclosure(
-            current,
-            target.label,
-            categories=_categories_for(target),
-            provider=provider.provider_id or "not configured",
-            model=provider.model or "not configured",
-            endpoint=provider.endpoint_profile_id or "not configured",
-            purpose="verification review of recorded work",
-            scope="this installation",
-            never_send=_NEVER_SENT,
-            notes=notes,
-            width=self.body_width,
-        )
-        answer = await self.ask(
-            ApprovalView(
-                name="privacy-widen",
-                title="",
-                body=body,
-                approve_label=f"Yes, allow {target.label.lower()}",
-                decline_label="No, keep the current setting",
-                # A widening decision never starts under the cursor.
-                default_to_safe=True,
-            )
-        )
-        if answer != "approve":
-            self.say(Level.OPTIONAL, "Privacy was left unchanged.")
-            return
-        recipe = {
-            PrivacyChoice.CONFIRM_EVERY_REQUEST: "metadata_only",
-            PrivacyChoice.MINIMAL_EXTERNAL: "custom",
-            PrivacyChoice.TRUSTED_PROVIDER: "expanded_review",
-        }[target]
+    async def _hand_privacy_to_trusted_terminal(self, recipe: str) -> None:
+        """Suspend and let the trusted CLI ceremony own the decision end to end."""
+
         try:
             report = await self.hand_over_terminal(lambda: self.runtime.run_privacy_setup(recipe))
         except SuspendNotSupported:
@@ -1034,7 +1036,7 @@ class YoetzTui(App[int]):
             self.say(
                 Level.VERIFIED,
                 "Privacy setup complete",
-                (f"Effective profile: {getattr(report, 'profile', target.value)}",),
+                (f"Effective profile: {getattr(report, 'profile', recipe)}",),
             )
             return
         self.say(
@@ -1294,19 +1296,3 @@ class YoetzTui(App[int]):
             return self._active_task_title
         await self.command_work()
         return self._active_task_title
-
-
-def _categories_for(target: PrivacyChoice) -> tuple[str, ...]:
-    """The data classes each privacy choice makes eligible to leave the machine."""
-
-    structural = "Structural facts: counts, verdicts, coverage, and check names"
-    prose = "Finding and claim text you or the agent wrote"
-    excerpts = "Short excerpts of files that a rule selected"
-    commands = "Exact command text recorded as evidence"
-    if target is PrivacyChoice.LOCAL_ONLY:
-        return ()
-    if target is PrivacyChoice.CONFIRM_EVERY_REQUEST:
-        return (structural, "Anything else only after you approve that exact request")
-    if target is PrivacyChoice.MINIMAL_EXTERNAL:
-        return (structural,)
-    return (structural, prose, excerpts, commands)

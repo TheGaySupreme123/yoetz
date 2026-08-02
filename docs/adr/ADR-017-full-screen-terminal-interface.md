@@ -178,10 +178,21 @@ system does not have.
   `/provider` reports that a connection test is unavailable rather than reporting a pass. The
   `provider_transport_tested` layer is consequently never verified in this build. This is the
   intended failure mode: a test that cannot run is not a test that succeeded.
-- **Privacy widening is linked, not performed.** `/privacy` renders the exact disclosure preview
-  and takes an explicit approval, and then hands off to `yoetz privacy propose` /
-  `yoetz privacy decide`, because ADR-009 keeps policy widening on its own trusted ceremony.
-  The interface deliberately does not become a second, softer path.
+- **Privacy widening is selected here and authorized only in the trusted terminal.** `/privacy`
+  shows the current posture and the one recommended policy — Private with no external provider
+  configured, Metadata only with one — together with what accepting it costs, then offers exactly
+  `Keep current`, `Review recommended change`, and `Other privacy options`. Choosing anything but
+  `Keep current` suspends the interface and hands the decision to the trusted CLI ceremony, which
+  renders the complete `before → after` policy diff, reauthenticates, and commits.
+
+  The interface takes **no approval of its own.** An earlier revision rendered a disclosure preview
+  and took an explicit "yes, allow this" here, and then handed off to a second, differently worded
+  approval in the trusted terminal. Only the second one gated anything; the first was a consent
+  ritual in an untrusted surface, which is precisely the habit this ADR's trust boundary exists to
+  avoid teaching. Removing it also removed the drift it enabled: this screen listed profile-shaped
+  labels ("Minimal external review") while the CLI listed recipe names, so the same policy had two
+  names depending on where you met it. `Other privacy options` now lists the CLI's five recipe
+  names verbatim — Private, Metadata only, Assisted review, Expanded review, Custom.
 
 ## Alternatives considered
 
@@ -202,3 +213,9 @@ guarantees exactly as they are, which is the only version of this that is worth 
 **Have the interface own privacy widening and provider probing directly.** Rejected for the same
 reason ADR-013 rejected inline privacy editing: these are trusted-local decisions with their own
 ceremonies, and a friendlier path to them is a weaker path to them.
+
+**Keep an approval step in the interface as "informed consent before the handoff."** Rejected. Two
+approvals for one decision do not make it twice as considered; they make the first one a formality
+the user learns to click through, and the formality lives in the surface that cannot authenticate
+anyone. The exact change and the authorization belong in the same place, and that place is the
+trusted terminal.

@@ -31,8 +31,9 @@ exactly those contracts and connects the steps without weakening any existing tr
    provider-credential ceremonies. Founder-authorized amendment (2026-07-29): before registration,
    interactive first run chooses a complete `local_only` path or a semantic-review path. The latter
    registers the policy route, configures the provider and credential, then renders one exact
-   recommended `metadata_only` policy. Accepting that exact draft skips the thirteen expert
-   questions; declining it opens the recipe choice and all settings one by one. Both paths propose
+   recommended `metadata_only` policy. Accepting that exact draft asks nothing further; declining
+   it opens the named recipes, which materialize directly into a draft, with only `custom`
+   reaching field-level configuration in five grouped sections. Both paths propose
    the reviewed exact disclosure and hand widening to the separately reauthenticated trusted
    decision ceremony. On a real local TTY it may invoke the
    already-reviewed hidden-input vault initialize/unlock and credential ceremony; it adds no
@@ -143,7 +144,7 @@ availability, structured-output interoperability, provider data use, or E-007 ca
 A new user's path is now: `npx yoetz` or `uvx yoetz` → interactive wizard → detected-harness
 selection (Codex in v0.1) → installation selection when needed → explicit `Y`/`N` confirmation →
 local-only or semantic-review choice → route-matched Codex MCP registration → on-demand local
-service → local vault/provider ceremonies when semantic was chosen → thirteen-answer privacy
+service → local vault/provider ceremonies when semantic was chosen → recommendation-first privacy
 review → separately reauthenticated privacy decision.
 Each mutating step is previewed, digest-bound, and individually declinable; `yoetz setup status`
 reports the same posture read-only at any time. The CLI support-command matrix grows by one

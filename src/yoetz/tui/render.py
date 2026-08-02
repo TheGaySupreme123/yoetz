@@ -24,7 +24,6 @@ from yoetz.tui.models import (
     HarnessOption,
     IntegrationPlan,
     LayerState,
-    PrivacyPosture,
     ProviderOption,
     ProviderPosture,
     ReadinessLayer,
@@ -43,7 +42,6 @@ __all__ = [
     "render_integration_preview",
     "render_integration_technical_details",
     "render_layers",
-    "render_privacy_disclosure",
     "render_provider_stored",
     "render_receipt",
     "render_session_header",
@@ -513,58 +511,6 @@ def render_provider_failure(message: str, width: int) -> tuple[str, ...]:
     lines.append("The provider returned:")
     lines.extend(_indent(wrap(message, body - 2), width=2))
     return tuple(lines)
-
-
-def render_privacy_disclosure(
-    current: PrivacyPosture,
-    target_label: str,
-    *,
-    categories: Sequence[str],
-    provider: str,
-    model: str,
-    endpoint: str,
-    purpose: str,
-    scope: str,
-    never_send: Sequence[str],
-    notes: Sequence[str],
-    width: int,
-) -> tuple[str, ...]:
-    """The exact disclosure preview shown before privacy is ever widened."""
-
-    body = max(width - 2, 1)
-    indented_body = max(body - 2, 1)
-    lines = list(
-        wrap(
-            f"Change what may leave this computer: {current.summary} → {target_label}",
-            body,
-        )
-    )
-    lines.extend(("", "Data that may be sent"))
-    disclosed = categories or ("nothing",)
-    for item in disclosed:
-        lines.extend(_indent(wrap(f"+ {item}", indented_body), width=2))
-    lines.append("")
-    lines.extend(
-        _labelled(
-            (
-                ("Provider", provider),
-                ("Model", model),
-                ("Endpoint profile", endpoint),
-                ("Purpose", purpose),
-                ("Scope", scope),
-            ),
-            width,
-            gap=4,
-        )
-    )
-    lines.append("")
-    lines.append("Never sent, under any choice")
-    for item in never_send:
-        lines.extend(_indent(wrap(f"· {item}", indented_body), width=2))
-    for note in notes:
-        lines.append("")
-        lines.extend(_indent(wrap(f"{symbol_for(Level.UNPROVEN)} {note}", indented_body), width=2))
-    return tuple(truncate(line, width) for line in lines)
 
 
 # ---------------------------------------------------------------------------

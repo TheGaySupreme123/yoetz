@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Literal, cast
+from typing import Final, Literal, cast
 
 from yoetz.domain.privacy import (
     AuthorizationScope,
@@ -13,10 +14,15 @@ from yoetz.domain.privacy import (
     EgressChannel,
     PolicyOverlay,
     PrivacyPolicy,
+    PrivacyPolicyChange,
+    PrivacyPolicyChangeValue,
     PrivacyProfile,
+    ProviderBinding,
     ProviderDataUseProfile,
     ReviewContextProfile,
     ReviewSelectionPolicy,
+    sort_privacy_changes,
+    validate_privacy_change_set,
 )
 from yoetz.domain.values import validate_sha256_digest
 from yoetz.ports.clock import ClockPort
@@ -39,7 +45,6 @@ from yoetz.ports.privacy import (
 )
 from yoetz.protocol.canonical import JsonValue, canonical_digest
 from yoetz.protocol.ids import IdKind, validate_id
-from yoetz.protocol.models import DataCategory
 
 __all__ = [
     "AllowedBlockedExample",
@@ -60,7 +65,7 @@ __all__ = [
     "TightenPrivacyPolicyRequest",
     "decide_privacy_policy",
     "is_privacy_tightening",
-    "privacy_widening_summary",
+    "privacy_policy_changes",
     "privacy_get_effective",
     "privacy_get_setup",
     "privacy_propose_policy",
@@ -400,27 +405,11 @@ def _overlay(policy: PrivacyPolicy) -> PolicyOverlay:
     )
 
 
-def _channel_subset(candidate: ChannelPolicy, current: ChannelPolicy) -> bool:
-    if candidate.channel is not current.channel:
-        return False
-    if candidate.enabled and not current.enabled:
-        return False
-    if not candidate.enabled:
-        return True
-    return (
-        set(candidate.allowed_categories) <= set(current.allowed_categories)
-        and set(candidate.allowed_data_classes) <= set(current.allowed_data_classes)
-        and set(candidate.allowed_purposes) <= set(current.allowed_purposes)
-        and candidate.provider_binding == current.provider_binding
-        and _scope_rank(candidate.scope_ceiling.value) >= _scope_rank(current.scope_ceiling.value)
-        and (candidate.preview_required or not current.preview_required)
-        and candidate.max_bytes <= current.max_bytes
-        and candidate.max_tokens <= current.max_tokens
-        and candidate.authorization_ttl_seconds <= current.authorization_ttl_seconds
-    )
-
-
-def _scope_rank(value: str) -> int:
+def _scope_rank(value: str | None) -> int:
+    # A channel that is off grants no scope at all, so it ranks narrower than every ceiling
+    # and any ceiling a proposal gives it reads as a widening.
+    if value is None:
+        return 4
     return {"machine": 0, "workspace": 1, "task": 2, "request": 3}[value]
 
 
@@ -430,68 +419,359 @@ def is_privacy_tightening(current: PrivacyPolicy, candidate: PrivacyPolicy) -> b
     return _is_tightening(current, candidate)
 
 
-def privacy_widening_summary(
-    current: PrivacyPolicy, candidate: PrivacyPolicy
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Every data category and authorization scope ``candidate`` newly permits.
+def _enum_labels(values: tuple[Enum, ...]) -> PrivacyPolicyChangeValue:
+    return PrivacyPolicyChangeValue.of_labels(tuple(str(item.value) for item in values))
 
-    This is what a human is shown before approving a widen, so it has to cover the same
-    surface :func:`_is_tightening` classifies on — egress channels *and* the local-sink
-    ceilings — or a real widening can be approved against an empty summary. Returns sorted
-    tuples, both empty when nothing widened.
+
+def _scope_labels(scope: AuthorizationScope) -> PrivacyPolicyChangeValue:
+    parts = [f"kind:{scope.kind.value}", f"installation:{scope.installation_id}"]
+    for name, value in (
+        ("workspace", scope.workspace_ref_commitment),
+        ("task", scope.task_id),
+        ("request", scope.request_id),
+    ):
+        if value is not None:
+            parts.append(f"{name}:{value}")
+    return PrivacyPolicyChangeValue.of_labels(tuple(parts))
+
+
+def _binding_labels(binding: ProviderBinding | None) -> PrivacyPolicyChangeValue:
+    """One label per binding field, never a concatenation.
+
+    Every field is independently bounded at 128 bytes by its own domain validator, so joining
+    the endpoint profile and its version into one label could exceed the label bound and make
+    this raise — which the daemon turns into ``target_invalid``, leaving a human unable to
+    approve a perfectly legitimate policy. Keeping the fields separate means the longest label
+    a valid binding can produce is one prefix plus one field.
     """
 
-    categories: set[str] = set()
-    scopes: set[str] = set()
-    for new, old in zip(candidate.channel_policies, current.channel_policies, strict=True):
-        if not new.enabled or _channel_subset(new, old):
-            continue
-        permitted: set[DataCategory] = set(old.allowed_categories) if old.enabled else set()
-        categories.update(item.value for item in new.allowed_categories if item not in permitted)
-        # A disabled channel grants no scope, so any enablement is itself a scope widening.
-        if not old.enabled or _scope_rank(new.scope_ceiling.value) < _scope_rank(
-            old.scope_ceiling.value
-        ):
-            scopes.add(new.scope_ceiling.value)
-    for new_sink, old_sink in (
-        (candidate.local_model_categories, current.local_model_categories),
-        (candidate.agent_context_categories, current.agent_context_categories),
-        (candidate.trusted_human_control_categories, current.trusted_human_control_categories),
+    if binding is None:
+        return PrivacyPolicyChangeValue.absent()
+    return PrivacyPolicyChangeValue.of_labels(
+        (
+            f"provider:{binding.provider_id}",
+            f"model:{binding.model_id}",
+            f"endpoint:{binding.endpoint_profile_id}",
+            f"endpoint_version:{binding.endpoint_profile_version}",
+            f"transport:{binding.transport}",
+        )
+    )
+
+
+def _append(
+    changes: list[PrivacyPolicyChange],
+    area: str,
+    field: str,
+    subject: str | None,
+    before: PrivacyPolicyChangeValue,
+    after: PrivacyPolicyChangeValue,
+    widens: bool,
+) -> None:
+    """Record one dimension, silently skipping the dimensions that did not move."""
+
+    if before == after:
+        return
+    changes.append(
+        PrivacyPolicyChange(
+            cast(
+                Literal[
+                    "global", "review", "channel", "local_model", "agent_context", "human_control"
+                ],
+                area,
+            ),
+            field,
+            subject,
+            before,
+            after,
+            widens,
+        )
+    )
+
+
+# Every per-channel dimension, as (field, how to render one side, when it widens).
+#
+# The widening predicates read ``old`` directly even when that channel is off, because a
+# disabled ``ChannelPolicy`` is canonically zeroed: empty category/class/purpose sets, no
+# binding, and zero limits are exactly what a channel that is off permits. Only the two
+# dimensions that have no meaningful zero — the scope ceiling, which is a real enum member
+# either way, and the confirmation requirement, whose absence is not its removal — say so
+# explicitly.
+_CHANNEL_DIMENSIONS: Final[
+    tuple[
+        tuple[
+            str,
+            Callable[[ChannelPolicy], PrivacyPolicyChangeValue],
+            Callable[[ChannelPolicy, ChannelPolicy], bool],
+        ],
+        ...,
+    ]
+] = (
+    (
+        "categories",
+        lambda channel: _enum_labels(channel.allowed_categories),
+        lambda new, old: not set(new.allowed_categories) <= set(old.allowed_categories),
+    ),
+    (
+        "data_classes",
+        lambda channel: _enum_labels(channel.allowed_data_classes),
+        lambda new, old: not set(new.allowed_data_classes) <= set(old.allowed_data_classes),
+    ),
+    (
+        "purposes",
+        lambda channel: PrivacyPolicyChangeValue.of_labels(channel.allowed_purposes),
+        lambda new, old: not set(new.allowed_purposes) <= set(old.allowed_purposes),
+    ),
+    (
+        "provider",
+        lambda channel: _binding_labels(channel.provider_binding),
+        lambda new, old: (
+            new.provider_binding is not None and new.provider_binding != old.provider_binding
+        ),
+    ),
+    (
+        "scope_ceiling",
+        lambda channel: PrivacyPolicyChangeValue.of_labels((channel.scope_ceiling.value,)),
+        lambda new, old: (
+            _scope_rank(new.scope_ceiling.value)
+            < _scope_rank(old.scope_ceiling.value if old.enabled else None)
+        ),
+    ),
+    (
+        "preview_required",
+        lambda channel: PrivacyPolicyChangeValue.of_flag(channel.preview_required),
+        lambda new, old: old.enabled and old.preview_required and not new.preview_required,
+    ),
+    (
+        "max_bytes",
+        lambda channel: PrivacyPolicyChangeValue.of_count(channel.max_bytes),
+        lambda new, old: new.max_bytes > old.max_bytes,
+    ),
+    (
+        "max_tokens",
+        lambda channel: PrivacyPolicyChangeValue.of_count(channel.max_tokens),
+        lambda new, old: new.max_tokens > old.max_tokens,
+    ),
+    (
+        "authorization_ttl_seconds",
+        lambda channel: PrivacyPolicyChangeValue.of_count(channel.authorization_ttl_seconds),
+        lambda new, old: new.authorization_ttl_seconds > old.authorization_ttl_seconds,
+    ),
+)
+
+
+def _channel_changes(
+    changes: list[PrivacyPolicyChange], new: ChannelPolicy, old: ChannelPolicy
+) -> None:
+    if new.channel is not old.channel:
+        raise ValueError("privacy_policy_channel_order_invalid")
+    subject = new.channel.value
+    _append(
+        changes,
+        "channel",
+        "enabled",
+        subject,
+        PrivacyPolicyChangeValue.of_flag(old.enabled),
+        PrivacyPolicyChangeValue.of_flag(new.enabled),
+        new.enabled and not old.enabled,
+    )
+    # A channel that is off carries no ceiling at all, so each dimension reads ``absent`` on
+    # that side rather than presenting a zeroed limit as a real one. Nothing widens on a
+    # channel the proposal leaves off; the enablement change carries that case.
+    for field, value_of, widens in _CHANNEL_DIMENSIONS:
+        _append(
+            changes,
+            "channel",
+            field,
+            subject,
+            value_of(old) if old.enabled else PrivacyPolicyChangeValue.absent(),
+            value_of(new) if new.enabled else PrivacyPolicyChangeValue.absent(),
+            new.enabled and widens(new, old),
+        )
+
+
+def _review_changes(
+    changes: list[PrivacyPolicyChange], new: ReviewSelectionPolicy, old: ReviewSelectionPolicy
+) -> None:
+    _append(
+        changes,
+        "review",
+        "sections",
+        None,
+        PrivacyPolicyChangeValue.of_labels(old.sections),
+        PrivacyPolicyChangeValue.of_labels(new.sections),
+        not set(new.sections) <= set(old.sections),
+    )
+    _append(
+        changes,
+        "review",
+        "excerpt_kinds",
+        None,
+        PrivacyPolicyChangeValue.of_labels(old.excerpt_kinds),
+        PrivacyPolicyChangeValue.of_labels(new.excerpt_kinds),
+        not set(new.excerpt_kinds) <= set(old.excerpt_kinds),
+    )
+    _append(
+        changes,
+        "review",
+        "relevance",
+        None,
+        PrivacyPolicyChangeValue.of_labels((old.relevance,)),
+        PrivacyPolicyChangeValue.of_labels((new.relevance,)),
+        new.relevance == "linked_then_in_scope" and old.relevance == "linked_subjects_only",
+    )
+    for field in ("include_finding_prose", "include_exact_command_text"):
+        before = cast(bool, getattr(old, field))
+        after = cast(bool, getattr(new, field))
+        _append(
+            changes,
+            "review",
+            field,
+            None,
+            PrivacyPolicyChangeValue.of_flag(before),
+            PrivacyPolicyChangeValue.of_flag(after),
+            after and not before,
+        )
+    for field in (
+        "max_timeline_items",
+        "max_assessments",
+        "max_change_observations",
+        "max_excerpts",
+        "max_omissions",
+        "max_excerpt_bytes",
+        "max_total_excerpt_bytes",
     ):
-        permitted_sink = set(old_sink)
-        categories.update(item.value for item in new_sink if item not in permitted_sink)
-    if candidate.effective_scope != current.effective_scope:
-        scopes.add(candidate.effective_scope.kind.value)
-    return tuple(sorted(categories)), tuple(sorted(scopes))
+        before_count = cast(int, getattr(old, field))
+        after_count = cast(int, getattr(new, field))
+        _append(
+            changes,
+            "review",
+            field,
+            None,
+            PrivacyPolicyChangeValue.of_count(before_count),
+            PrivacyPolicyChangeValue.of_count(after_count),
+            after_count > before_count,
+        )
+
+
+def privacy_policy_changes(
+    current: PrivacyPolicy, candidate: PrivacyPolicy
+) -> tuple[PrivacyPolicyChange, ...]:
+    """Every security-relevant field ``candidate`` moves, as ``before → after`` steps.
+
+    This is the single source of truth for both halves of a policy transition: the classifier
+    calls a proposal tightening exactly when no returned change has ``widens=True``, and the
+    trusted approval ceremony renders these same records. Deriving the two from one comparison
+    is the invariant — a widening the classifier recognizes can no longer be missing from the
+    screen a human approves it on. Lineage-only fields (``version``, ``policy_digest``,
+    ``created_at``, ``supersedes_policy_digest``, ``policy_id``) are excluded: they always
+    differ on a fresh candidate and describe no disclosure boundary. Simultaneous tightenings
+    are included so the human sees the complete substantive diff, not just its worst half.
+
+    Returned most consequential widening first, then remaining widenings, then tightenings, in
+    a total deterministic order.
+    """
+
+    if type(current) is not PrivacyPolicy or type(candidate) is not PrivacyPolicy:
+        raise TypeError("privacy_policy_changes_invalid")
+    changes: list[PrivacyPolicyChange] = []
+    _append(
+        changes,
+        "global",
+        "effective_scope",
+        None,
+        _scope_labels(current.effective_scope),
+        _scope_labels(candidate.effective_scope),
+        candidate.effective_scope != current.effective_scope,
+    )
+    _append(
+        changes,
+        "global",
+        "network_egress",
+        None,
+        PrivacyPolicyChangeValue.of_flag(current.network_egress_permitted),
+        PrivacyPolicyChangeValue.of_flag(candidate.network_egress_permitted),
+        candidate.network_egress_permitted and not current.network_egress_permitted,
+    )
+    _append(
+        changes,
+        "global",
+        "provider_data_use_evidence",
+        None,
+        PrivacyPolicyChangeValue.of_flag(current.require_current_provider_data_use_evidence),
+        PrivacyPolicyChangeValue.of_flag(candidate.require_current_provider_data_use_evidence),
+        current.require_current_provider_data_use_evidence
+        and not candidate.require_current_provider_data_use_evidence,
+    )
+    _review_changes(changes, candidate.review_selection, current.review_selection)
+    for new, old in zip(candidate.channel_policies, current.channel_policies, strict=True):
+        _channel_changes(changes, new, old)
+    _append(
+        changes,
+        "local_model",
+        "enabled",
+        None,
+        PrivacyPolicyChangeValue.of_flag(current.local_model_enabled),
+        PrivacyPolicyChangeValue.of_flag(candidate.local_model_enabled),
+        candidate.local_model_enabled and not current.local_model_enabled,
+    )
+    _append(
+        changes,
+        "local_model",
+        "binding",
+        None,
+        _binding_labels(current.local_model_binding if current.local_model_enabled else None),
+        _binding_labels(candidate.local_model_binding if candidate.local_model_enabled else None),
+        candidate.local_model_enabled
+        and candidate.local_model_binding != current.local_model_binding,
+    )
+    for area, new_categories, old_categories, new_classes, old_classes in (
+        (
+            "local_model",
+            candidate.local_model_categories,
+            current.local_model_categories,
+            candidate.local_model_data_classes,
+            current.local_model_data_classes,
+        ),
+        (
+            "agent_context",
+            candidate.agent_context_categories,
+            current.agent_context_categories,
+            candidate.agent_context_data_classes,
+            current.agent_context_data_classes,
+        ),
+        (
+            "human_control",
+            candidate.trusted_human_control_categories,
+            current.trusted_human_control_categories,
+            candidate.trusted_human_control_data_classes,
+            current.trusted_human_control_data_classes,
+        ),
+    ):
+        _append(
+            changes,
+            area,
+            "categories",
+            None,
+            _enum_labels(old_categories),
+            _enum_labels(new_categories),
+            not set(new_categories) <= set(old_categories),
+        )
+        _append(
+            changes,
+            area,
+            "data_classes",
+            None,
+            _enum_labels(old_classes),
+            _enum_labels(new_classes),
+            not set(new_classes) <= set(old_classes),
+        )
+    ordered = sort_privacy_changes(changes)
+    validate_privacy_change_set(ordered)
+    return ordered
 
 
 def _is_tightening(current: PrivacyPolicy, candidate: PrivacyPolicy) -> bool:
-    return (
-        current.effective_scope == candidate.effective_scope
-        and (candidate.network_egress_permitted <= current.network_egress_permitted)
-        and all(
-            _channel_subset(new, old)
-            for new, old in zip(candidate.channel_policies, current.channel_policies, strict=True)
-        )
-        and candidate.review_selection.meet(current.review_selection) == candidate.review_selection
-        and (
-            candidate.require_current_provider_data_use_evidence
-            or not current.require_current_provider_data_use_evidence
-        )
-        and set(candidate.local_model_categories) <= set(current.local_model_categories)
-        and set(candidate.local_model_data_classes) <= set(current.local_model_data_classes)
-        and (not candidate.local_model_enabled or current.local_model_enabled)
-        and (
-            not candidate.local_model_enabled
-            or candidate.local_model_binding == current.local_model_binding
-        )
-        and set(candidate.agent_context_categories) <= set(current.agent_context_categories)
-        and set(candidate.agent_context_data_classes) <= set(current.agent_context_data_classes)
-        and set(candidate.trusted_human_control_categories)
-        <= set(current.trusted_human_control_categories)
-        and set(candidate.trusted_human_control_data_classes)
-        <= set(current.trusted_human_control_data_classes)
-    )
+    return not any(change.widens for change in privacy_policy_changes(current, candidate))
 
 
 def _policy_identity(policy: PrivacyPolicy) -> JsonValue:

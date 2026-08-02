@@ -65,24 +65,38 @@ asymmetry is the point: tightening can flow through gates, widening always requi
 The CLI recommends **Metadata only** as the privacy-first semantic starting point: public
 structural metadata and declared file types, task scope, and a foreground approval before every
 provider request. Its advantage is minimal disclosure; its tradeoff is less problem-specific
-feedback. Accepting the displayed exact policy skips the thirteen expert questions. Declining it
-opens Private, Assisted review, Expanded review, Custom, and every underlying setting one by one.
-When no external provider is configured, the shortcut recommends Private instead. The final
-trusted widening decision is never skipped.
+feedback. Accepting the displayed exact policy asks nothing further. Declining it opens Private,
+Metadata only, Assisted review, Expanded review, and Custom; a named recipe goes straight to the
+exact review, and only **Custom** opens the underlying settings, grouped into five sections. When
+no external provider is configured, the recommendation is Private instead. The final trusted
+widening decision is never skipped.
 
 ### `/privacy` in the terminal interface
 
-`/privacy` reads the current posture and, before any widening, renders the exact disclosure: which
-data categories become eligible, the provider, model, endpoint profile, purpose, and scope, plus
-the never-send set and any unavailable or untested provider posture. The cursor starts on the
-declining option.
+`/privacy` shows the current posture and the one recommended policy — Private when no external
+provider is configured, Metadata only when one is — with both what accepting it buys and what it
+costs. It then offers exactly three choices: `Keep current`, `Review recommended change`, and
+`Other privacy options`. `Other privacy options` lists the same five recipe names the CLI uses.
 
-Approving there does **not itself** widen policy. The interface suspends and hands the controlling
-terminal to the same thirteen-answer `yoetz privacy setup` questionnaire, ordinary proposal, and
-separately reauthenticated trusted decision used by the CLI. If terminal handoff is unavailable it
-prints `yoetz privacy setup` and changes nothing. Tightening likewise stays on the existing policy
-gate. `local_only` remains the default and the interface never moves off it on its own
+The interface takes **no approval of its own.** Choosing anything but `Keep current` suspends the
+interface and hands the controlling terminal to the same `yoetz privacy setup` flow, ordinary
+proposal, and separately reauthenticated trusted decision used by the CLI — and that trusted screen
+is where the exact `before → after` policy diff is rendered and where the widening is authorized.
+If terminal handoff is unavailable it prints `yoetz privacy setup` and changes nothing. Tightening
+likewise stays on the existing policy gate. `local_only` remains the default and the interface
+never moves off it on its own
 ([ADR-017](../adr/ADR-017-full-screen-terminal-interface.md) decision 5).
+
+### What the trusted approval screen shows
+
+Before a widening is authorized, the trusted terminal prints every security-relevant field the
+proposal moves as a plain-English `before -> after` line, grouped by destination, information
+disclosed, authorization, limits, and local visibility, with the ones that make privacy less
+restrictive marked `(!)`. Simultaneous tightenings appear too, unmarked, so you see the whole
+change rather than half of it. The service sends structured field/value records and never
+explanatory prose, and the wording is fixed locally by Yoetz. The diff digest is printed underneath
+and labelled for what it is: integrity evidence binding the decision to exact bytes, not a
+description of the change.
 
 ## What semantic review actually sends
 

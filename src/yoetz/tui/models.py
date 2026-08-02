@@ -26,8 +26,10 @@ __all__ = [
     "IntegrationOutcome",
     "IntegrationPlan",
     "LayerState",
+    "PRIVACY_RECIPES",
     "PrivacyChoice",
     "PrivacyPosture",
+    "PrivacyRecommendation",
     "ProviderOption",
     "ProviderPosture",
     "ReadinessLayer",
@@ -205,6 +207,48 @@ _PRIVACY_DESCRIPTIONS: Final[dict[PrivacyChoice, str]] = {
     PrivacyChoice.MINIMAL_EXTERNAL: "Structural summaries only; no prose and no excerpts.",
     PrivacyChoice.TRUSTED_PROVIDER: "The widest review this provider binding allows.",
 }
+
+
+# The recipe vocabulary is the CLI's, verbatim. A user who reads about "Metadata only" in
+# `yoetz privacy setup` must find the same name here; two names for one policy is how people
+# end up believing they configured something they did not.
+PRIVACY_RECIPES: Final[tuple[tuple[str, str, str], ...]] = (
+    ("private", "Private", "Nothing leaves this computer. This is the default."),
+    (
+        "metadata_only",
+        "Metadata only",
+        "Structural metadata and declared file types only, and Yoetz asks before every request.",
+    ),
+    (
+        "assisted_review",
+        "Assisted review",
+        "Bounded excerpts for problem-specific feedback; needs eligible provider data-use "
+        "evidence.",
+    ),
+    (
+        "expanded_review",
+        "Expanded review",
+        "The most reviewer context this provider binding allows, including broader excerpts.",
+    ),
+    ("custom", "Custom", "Configure each privacy setting yourself, in five sections."),
+)
+
+_PRIVACY_RECIPE_LABELS: Final[dict[str, str]] = {
+    recipe: label for recipe, label, _description in PRIVACY_RECIPES
+}
+
+
+@dataclass(frozen=True, slots=True)
+class PrivacyRecommendation:
+    """The one recommended posture, with what it costs stated next to what it buys."""
+
+    recipe: str
+    reason: str
+    tradeoff: str
+
+    @property
+    def label(self) -> str:
+        return _PRIVACY_RECIPE_LABELS.get(self.recipe, self.recipe)
 
 
 @dataclass(frozen=True, slots=True)

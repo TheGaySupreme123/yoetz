@@ -14,11 +14,16 @@ A setup session exposes closed actions `begin`, `answer`, `review`, `propose`, `
 `request_confirmation`, `channel_consents`, `scope`, `review`, `decision_required`, `complete`, and
 `cancelled`.
 
-## The thirteen questions
+## The thirteen settings
 
-After an optional recipe is expanded into visible answers, setup asks exactly these thirteen
-questions. The `question_id` token and answer type are protocol, not UI copy — a future UI localizes
-labels but cannot rename or reshape them.
+These thirteen settings are the complete configurable surface. The `question_id` token and answer
+type are protocol, not UI copy — a future UI localizes labels but cannot rename or reshape them.
+
+They are **settings, not a mandatory question sequence.** Accepting the recommendation or choosing
+a named recipe fills all thirteen from that recipe without asking; only `custom` presents them for
+editing, and then in the five grouped sections below rather than as a flat list. What a surface may
+never do is commit a value the user did not see: every path renders the exact resulting boundary
+before proposing.
 
 | # | `question_id` | Meaning | Answer type |
 |---:|---|---|---|
@@ -38,25 +43,49 @@ labels but cannot rename or reshape them.
 
 The setup UI never accepts a credential, key, recovery secret, provider token, or vault passphrase.
 
+### The five custom sections
+
+`custom` — and only `custom` — presents the settings for editing, grouped so a person can hold the
+decision in mind. Every section is announced even when its questions do not apply, so a section
+that is skipped reads as "off" rather than as hidden:
+
+| # | Section | Settings |
+|---:|---|---|
+| 1 | External and local destinations | `network_egress`, `external_provider`, `local_models` |
+| 2 | What an external reviewer may see | `review_context`, `content_categories` |
+| 3 | Local visibility: agent host and local model | `agent_context_categories`, `local_model_categories` |
+| 4 | Per-request confirmation and authorization scope | `request_confirmation`, `authorization_scope` |
+| 5 | Unsupported channels | `product_telemetry`, `crash_diagnostics`, `update_checks`, `capability_testing` |
+
+Section 5 is **read-only**. Since no transport ships for those four channels, presenting them as
+questions offered a choice that did not exist and trained users to answer "no" to something Yoetz
+could not have done anyway. The section states that they are unsupported and off; it accepts no
+answer, and `propose` still rejects a `true` value with `channel_unavailable`.
+
 ## Recipes are transparent drafts, never consent
 
-The CLI may offer five convenience labels — `private`, `metadata-only`, `assisted-review`
-(recommended when an eligible endpoint exists), `expanded-review`, and `custom` — mapping exactly to
-protocol `recipe_hint` tokens `private`, `metadata_only`, `assisted_review`, `expanded_review`, and
-`custom`. Choosing a recipe expands it into all thirteen ordinary typed answers, which the CLI shows
-and the user may edit; the label is echoed only while the answers still exactly match the recipe,
-and reverts to `custom` after any edit. **Selecting a recipe never commits a widening, provisions a
-credential, or skips the review/decision step.**
+The five convenience labels — Private, Metadata only, Assisted review, Expanded review, and Custom
+— map exactly to protocol `recipe_hint` tokens `private`, `metadata_only`, `assisted_review`,
+`expanded_review`, and `custom`. Every surface uses these exact names; a graphical or terminal UI
+may not rename them, because a policy with two names is a policy a user cannot reason about. A
+named recipe materializes directly into the exact draft and goes to review — it does not open
+field-level configuration. **Selecting a recipe never commits a widening, provisions a credential,
+or skips the review/decision step.**
 
-The first-run CLI and `yoetz --privacy` add a bounded convenience path above that contract. With an
-external provider configured, they materialize and render the exact `metadata_only` draft first:
-public structural metadata and declared file types, task scope, and per-request confirmation.
-Without an external provider binding, they render the exact `private` draft instead, keeping network
-egress off. Accepting the rendered draft sends the same typed answers directly to proposal;
-declining it opens the recipe selector and the thirteen questions one by one. Neither branch skips
-exact review or the separately reauthenticated widening decision. The convenience recommendation is
-privacy-first UI guidance, not the conditional provider-data-use recommendation attached to
-`assisted_review`.
+### The one recommendation rule
+
+First run, `yoetz --privacy`, and the terminal interface's `/privacy` all apply the same rule, from
+one function:
+
+- **No external provider binding configured → `private`.** Network egress stays off entirely.
+- **External provider configured → `metadata_only`, with per-request confirmation.**
+
+The recommendation is rendered first, as an exact draft, with both what it buys and what it costs.
+Accepting it goes straight to proposal and asks nothing further. Declining it opens the recipe list,
+positioned on the declined recommendation. This recommendation is privacy-first guidance, distinct
+from the conditional provider-data-use recommendation attached to `assisted_review` below.
+
+A surface must not offer the recommendation as a change when the current policy already matches it.
 
 ### The fail-safe default draft
 
@@ -111,11 +140,11 @@ selected. `data_classes` may contain only `public_structural`, `ordinary_user_co
 strong reauthentication; selecting a category alone never silently authorizes its sensitive
 instances.
 
-Questions 9–12 are the four non-LLM channels. **v0.1 ships no production transport for any of
-them:** the review marks each `unsupported` and off, and `propose` rejects a `true` answer with
-`channel_unavailable` without changing durable policy or making any I/O. A later Yoetz release
-cannot silently activate an old stored draft or answer — it always requires a fresh local-human
-capability confirmation first.
+Settings 9–12 are the four non-LLM channels. **v0.1 ships no production transport for any of
+them:** they are presented read-only as `unsupported` and off, the review marks each the same way,
+and `propose` rejects a `true` answer with `channel_unavailable` without changing durable policy or
+making any I/O. A later Yoetz release cannot silently activate an old stored draft or answer — it
+always requires a fresh local-human capability confirmation first.
 
 ## Review, propose, and commit
 
@@ -125,14 +154,28 @@ editable data-use runtime guard, the endpoint's data-use profile ID/version/evid
 per-request preview applies, the complete non-overridable never-send set, and a semantic diff from
 the current policy. Widening is visually highlighted and **cannot commit through `review` alone.**
 
-`tighten` commits immediately, but only when the service independently proves every policy dimension
-is no broader than the current one. `propose` never commits a widening by itself: loosening any
-dimension returns `decision_required` with a `privacy_proposal_id`, an exact draft digest, the
-current policy version, an expiry, and — when an external provider is selected — the exact reviewed
-data-use profile ID/version/evidence digest. A separate foreground human-control surface then
-confidentially renders the pending proposal, reauthenticates the local human, and commits
-internally; the ordinary setup schema itself has no decide/confirm method, and no MCP, agent,
-import, or provider schema can reach that authority.
+`tighten` commits immediately after the ordinary explicit confirmation, but only when the service
+independently proves every policy dimension is no broader than the current one. `propose` never
+commits a widening by itself: loosening any dimension returns `decision_required` with a
+`privacy_proposal_id`, an exact draft digest, the current policy version, an expiry, and — when an
+external provider is selected — the exact reviewed data-use profile ID/version/evidence digest. A
+separate foreground human-control surface then confidentially renders the pending proposal,
+reauthenticates the local human, and commits internally; the ordinary setup schema itself has no
+decide/confirm method, and no MCP, agent, import, or provider schema can reach that authority.
+
+**That trusted-terminal ceremony is the single authorization for a widening.** No other surface may
+take its own approval for one first. A selecting surface may show a proposal or hand one over, but a
+second "do you approve?" outside the trusted terminal is not a second gate — it only teaches users
+that consenting in an untrusted surface is what changes privacy.
+
+What the ceremony renders is the **complete substantive diff**, as `before → after` steps derived
+from the same comparison that classified the proposal as a widening, so a recognized widening cannot
+reach approval without appearing on screen. Simultaneous tightenings are shown too, marked as not
+widening, because the human is deciding about the whole change and not its worst half. Labels are
+fixed by the trusted client; the service transmits structured field/value records and never
+explanatory prose a proposal author could write. The diff digest is displayed as integrity evidence
+and explicitly labelled as not being the description of the change. See
+[`../INTERFACES.md`](../INTERFACES.md) for the exact `PrivacyPolicyChange` shape and its bounds.
 
 For `confirm_every_request`, the same renderer shows the exact post-minimization, post-redaction,
 post-secret-scan excerpts immediately before every dispatch. Approval binds one physical dispatch of

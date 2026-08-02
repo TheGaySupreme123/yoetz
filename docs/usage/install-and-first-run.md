@@ -49,9 +49,10 @@ Setup is a linear path inside the interface, each finished step collapsing into 
 7. **Review mode** — finish in complete local-only mode, or configure semantic review.
 8. **Semantic setup, when selected** — provider/model, hidden API-key entry, then one exact
    recommended privacy policy. **Metadata only** sends public structural metadata and declared file
-   types, asks before every provider request, and uses task scope. Accepting it skips the thirteen
-   expert questions; declining it opens those settings one by one. The exact disclosure and
-   separately reauthenticated widening decision remain mandatory.
+   types, asks before every provider request, and uses task scope. Accepting it asks nothing
+   further; declining it opens the named recipes, and only **Custom** opens the settings
+   themselves, in five grouped sections. The exact disclosure and separately reauthenticated
+   widening decision remain mandatory.
 9. **Finish**, stating each readiness layer separately.
 
 Credential status is presence-only. Human output shows the fixed mask `********` when the trusted

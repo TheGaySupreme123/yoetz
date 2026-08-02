@@ -1,9 +1,15 @@
 """Trusted interactive privacy setup used by first run and ``privacy setup``.
 
-The recommended-first path renders one exact bounded policy and asks one question.
-Only declining it opens all thirteen expert settings.  Both paths show the exact
-resulting disclosure boundary and approve any widening through the existing locally
-reauthenticated privacy ceremony.
+One recommendation rule decides the first screen everywhere: **Private** with no external
+provider bound, **Metadata only** with per-request confirmation when one is.  Accepting the
+recommendation asks nothing further.  Declining opens the named recipes, which materialize
+straight into an exact draft; only ``Custom`` opens field-level configuration, and that is
+five grouped sections rather than a flat questionnaire.
+
+Every path ends at the same two gates: the exact resulting disclosure boundary, and — for any
+widening — the separately reauthenticated trusted-terminal ceremony that renders the complete
+``before → after`` policy diff.  Nothing here is an authorization; this module only builds a
+candidate and asks the service to classify it.
 """
 
 from __future__ import annotations
@@ -36,7 +42,12 @@ from yoetz.domain.values import JsonObject
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.models import DataCategory
 
-__all__ = ["PrivacySetupReport", "build_candidate_policy", "run_privacy_setup"]
+__all__ = [
+    "PrivacySetupReport",
+    "build_candidate_policy",
+    "recommended_privacy_recipe",
+    "run_privacy_setup",
+]
 
 type PrivacyRecipe = Literal[
     "private", "metadata_only", "assisted_review", "expanded_review", "custom"
@@ -240,26 +251,64 @@ def _interactive_terminal() -> bool:
         return False
 
 
+_RECIPE_SUMMARIES: Final[dict[PrivacyRecipe, str]] = {
+    "private": "maximum confidentiality; no network egress or external semantic review",
+    "metadata_only": (
+        "strongest semantic privacy; structural metadata only and approval every request"
+    ),
+    "assisted_review": (
+        "better problem-specific feedback from bounded excerpts; "
+        "requires eligible provider data-use evidence"
+    ),
+    "expanded_review": "most reviewer context and detail; allows broader in-scope excerpts",
+    "custom": "maximum control; configure each privacy setting yourself",
+}
+_RECIPE_LABELS: Final[dict[PrivacyRecipe, str]] = {
+    "private": "Private",
+    "metadata_only": "Metadata only",
+    "assisted_review": "Assisted review",
+    "expanded_review": "Expanded review",
+    "custom": "Custom",
+}
+# What accepting the recommendation costs, stated next to what it buys. A recommendation that
+# only lists benefits is advice, not a choice.
+_RECOMMENDATION_TRADEOFF: Final[dict[Literal["private", "metadata_only"], tuple[str, str]]] = {
+    "private": (
+        "No external provider is configured, so this keeps network egress off entirely.",
+        "Trade-off: no external semantic review at all; only local deterministic checks run.",
+    ),
+    "metadata_only": (
+        "It enables semantic review while disclosing the least that still works, and asks "
+        "before every provider request.",
+        "Trade-off: the reviewer sees structural metadata and declared file types only, so it "
+        "cannot judge whether a claim is actually supported.",
+    ),
+}
+
+
+def recommended_privacy_recipe(
+    external: ProviderBinding | None = None,
+) -> Literal["private", "metadata_only"]:
+    """The one recommendation rule, shared by first run, ``--privacy``, and the TUI.
+
+    Pass ``external`` to avoid re-reading configuration; omit it to load the configured
+    binding. Keeping this in one function is why the CLI and the TUI cannot drift into
+    recommending different postures for the same installation.
+    """
+
+    if external is None:
+        external, _local = _configured_bindings()
+    return "metadata_only" if external is not None else "private"
+
+
 def _render_recipe_options(*, recommended: PrivacyRecipe | None = None) -> None:
     typer.echo("Privacy options:")
-    typer.echo(
-        "  1. Private"
-        + (" (recommended)" if recommended == "private" else "")
-        + " — maximum confidentiality; no network egress or external semantic review"
-    )
-    typer.echo(
-        "  2. Metadata only"
-        + (" (recommended)" if recommended == "metadata_only" else "")
-        + " — strongest semantic privacy; structural metadata only and approval every request"
-    )
-    typer.echo(
-        "  3. Assisted review — better problem-specific feedback from bounded excerpts; "
-        "requires eligible provider data-use evidence"
-    )
-    typer.echo(
-        "  4. Expanded review — most reviewer context and detail; allows broader in-scope excerpts"
-    )
-    typer.echo("  5. Custom — maximum control; review each privacy setting one by one")
+    for number, recipe in sorted(_RECIPE_CHOICES.items()):
+        marker = " (recommended)" if recipe == recommended else ""
+        label = _RECIPE_LABELS[cast(PrivacyRecipe, recipe)]
+        typer.echo(
+            f"  {number}. {label}{marker} — {_RECIPE_SUMMARIES[cast(PrivacyRecipe, recipe)]}"
+        )
     typer.echo("Credentials, secrets, complete transcripts, and unrelated files are never sent.")
     typer.echo("You can change this any time by running 'yoetz --privacy'.")
 
@@ -276,81 +325,101 @@ def _recipe_choice(hint: PrivacyRecipe | None) -> PrivacyRecipe:
         typer.echo("Please enter 1, 2, 3, 4, or 5.")
 
 
-def _recipe_prompt(hint: PrivacyRecipe | None) -> PrivacyRecipe:
-    _render_recipe_options()
+def _recipe_prompt(hint: PrivacyRecipe | None, recommended: PrivacyRecipe | None) -> PrivacyRecipe:
+    """Render the options and take one choice.
+
+    The recommendation is passed in rather than derived here. Reading configuration from a
+    rendering helper made merely *listing* the privacy options able to raise ``ConfigError`` —
+    an unrecognized ``YOETZ_*`` variable in the environment turned the option list into an
+    unhandled traceback, since ``ConfigError`` is not a ``ValueError``.
+    """
+
+    _render_recipe_options(recommended=recommended)
     return _recipe_choice(hint)
 
 
-def _recommended_metadata_answers(current: PrivacyPolicy) -> PrivacySetupAnswers:
-    external, _local = _configured_bindings()
-    if external is None:
+def _agent_defaults(
+    current: PrivacyPolicy,
+) -> tuple[tuple[DataCategory, ...], tuple[DataClass, ...]]:
+    """Agent-context visibility is never changed by a named recipe.
+
+    A recipe describes what may leave the machine. What a local agent host may read back is a
+    separate ceiling, so a named recipe carries the current one forward untouched rather than
+    quietly widening or narrowing it.
+    """
+
+    categories = current.agent_context_categories or (
+        DataCategory.BOUNDED_STRUCTURAL_METADATA,
+        DataCategory.DECLARED_FILE_TYPE,
+    )
+    return categories, (current.agent_context_data_classes or (DataClass.PUBLIC_STRUCTURAL,))
+
+
+def _recipe_answers(
+    recipe: PrivacyRecipe, current: PrivacyPolicy, external: ProviderBinding | None
+) -> PrivacySetupAnswers:
+    """Materialize one named recipe into the exact typed answers, asking nothing."""
+
+    if recipe == "custom":
+        raise ValueError("privacy_setup_recipe_invalid")
+    network = recipe != "private"
+    if network and external is None:
         raise ValueError("privacy_setup_provider_binding_required")
+    context = {
+        "private": ReviewContextProfile.STRUCTURAL,
+        "metadata_only": ReviewContextProfile.STRUCTURAL,
+        "assisted_review": ReviewContextProfile.ASSISTED,
+        "expanded_review": ReviewContextProfile.EXPANDED,
+    }[recipe]
+    categories: tuple[DataCategory, ...] = (
+        ()
+        if recipe == "private"
+        else (
+            (DataCategory.BOUNDED_STRUCTURAL_METADATA, DataCategory.DECLARED_FILE_TYPE)
+            if recipe == "metadata_only"
+            else _SEMANTIC_CATEGORIES
+        )
+    )
+    classes: tuple[DataClass, ...] = (
+        (DataClass.PUBLIC_STRUCTURAL,)
+        if recipe in {"private", "metadata_only"}
+        else (DataClass.PUBLIC_STRUCTURAL, DataClass.ORDINARY_USER_CONTENT)
+    )
+    agent_categories, agent_classes = _agent_defaults(current)
     return PrivacySetupAnswers(
-        network_egress=True,
+        network_egress=network,
         local_models=False,
-        external_provider=external,
-        require_current_provider_data_use_evidence=False,
+        external_provider=external if network else None,
+        require_current_provider_data_use_evidence=recipe == "assisted_review",
         local_model_binding=None,
-        review_context=ReviewContextProfile.STRUCTURAL,
-        content_categories=(
-            DataCategory.BOUNDED_STRUCTURAL_METADATA,
-            DataCategory.DECLARED_FILE_TYPE,
-        ),
-        content_data_classes=(DataClass.PUBLIC_STRUCTURAL,),
-        agent_context_categories=(
-            current.agent_context_categories
-            or (
-                DataCategory.BOUNDED_STRUCTURAL_METADATA,
-                DataCategory.DECLARED_FILE_TYPE,
-            )
-        ),
-        agent_context_data_classes=(
-            current.agent_context_data_classes or (DataClass.PUBLIC_STRUCTURAL,)
-        ),
+        review_context=context,
+        content_categories=categories,
+        content_data_classes=classes,
+        agent_context_categories=agent_categories,
+        agent_context_data_classes=agent_classes,
         local_model_categories=(),
         local_model_data_classes=(),
-        request_confirmation=True,
+        request_confirmation=recipe == "metadata_only",
         telemetry=False,
         crash_diagnostics=False,
         updates=False,
         capability_testing=False,
-        authorization_scope=AuthorizationScopeKind.TASK,
+        authorization_scope={
+            "private": AuthorizationScopeKind.MACHINE,
+            "metadata_only": AuthorizationScopeKind.TASK,
+            "assisted_review": AuthorizationScopeKind.WORKSPACE,
+            "expanded_review": AuthorizationScopeKind.WORKSPACE,
+        }[recipe],
     )
 
 
-def _recommended_private_answers(current: PrivacyPolicy) -> PrivacySetupAnswers:
-    return PrivacySetupAnswers(
-        network_egress=False,
-        local_models=False,
-        external_provider=None,
-        require_current_provider_data_use_evidence=False,
-        local_model_binding=None,
-        review_context=ReviewContextProfile.STRUCTURAL,
-        content_categories=(),
-        content_data_classes=(DataClass.PUBLIC_STRUCTURAL,),
-        agent_context_categories=(
-            current.agent_context_categories
-            or (
-                DataCategory.BOUNDED_STRUCTURAL_METADATA,
-                DataCategory.DECLARED_FILE_TYPE,
-            )
-        ),
-        agent_context_data_classes=(
-            current.agent_context_data_classes or (DataClass.PUBLIC_STRUCTURAL,)
-        ),
-        local_model_categories=(),
-        local_model_data_classes=(),
-        request_confirmation=False,
-        telemetry=False,
-        crash_diagnostics=False,
-        updates=False,
-        capability_testing=False,
-        authorization_scope=AuthorizationScopeKind.MACHINE,
-    )
+def _section(number: int, title: str) -> None:
+    typer.echo("")
+    typer.echo(f"Section {number} of 5 — {title}")
 
 
 def _review_context_prompt(default: ReviewContextProfile) -> ReviewContextProfile:
-    typer.echo("4/13 Review context: structural, goal_aware, assisted, or expanded")
+    typer.echo("Review context: structural, goal_aware, assisted, or expanded")
     while True:
         raw = typer.prompt("Review context", default=default.value).strip()
         try:
@@ -367,7 +436,7 @@ def _review_context_prompt(default: ReviewContextProfile) -> ReviewContextProfil
 def _authorization_scope_prompt(default: str) -> AuthorizationScopeKind:
     while True:
         raw = typer.prompt(
-            "13/13 Authorization ceiling (request, task, workspace, machine)",
+            "Authorization ceiling (request, task, workspace, machine)",
             default=default,
         ).strip()
         try:
@@ -376,13 +445,9 @@ def _authorization_scope_prompt(default: str) -> AuthorizationScopeKind:
             typer.echo("Choose request, task, workspace, or machine.")
 
 
-def _categories_prompt(
-    number: int,
-    label: str,
-    default: tuple[DataCategory, ...],
-) -> tuple[DataCategory, ...]:
+def _categories_prompt(label: str, default: tuple[DataCategory, ...]) -> tuple[DataCategory, ...]:
     raw = typer.prompt(
-        f"{number}/13a {label} (comma separated)",
+        f"{label} (comma separated)",
         default=",".join(item.value for item in default),
     ).strip()
     if not raw:
@@ -396,18 +461,14 @@ def _categories_prompt(
     return values
 
 
-def _data_classes_prompt(
-    number: int,
-    label: str,
-    default: tuple[DataClass, ...],
-) -> tuple[DataClass, ...]:
+def _data_classes_prompt(label: str, default: tuple[DataClass, ...]) -> tuple[DataClass, ...]:
     allowed = {
         DataClass.PUBLIC_STRUCTURAL,
         DataClass.ORDINARY_USER_CONTENT,
         DataClass.SENSITIVE_CONFIDENTIAL,
     }
     raw = typer.prompt(
-        f"{number}/13b {label} data classes (comma separated)",
+        f"{label} data classes (comma separated)",
         default=",".join(item.value for item in default),
     ).strip()
     if not raw:
@@ -450,89 +511,75 @@ def _configured_bindings() -> tuple[ProviderBinding | None, ProviderBinding | No
     return external, local
 
 
-def _ask_answers(recipe: PrivacyRecipe, current: PrivacyPolicy) -> PrivacySetupAnswers:
-    external, local = _configured_bindings()
-    semantic = recipe != "private"
-    context = {
-        "private": ReviewContextProfile.STRUCTURAL,
-        "metadata_only": ReviewContextProfile.STRUCTURAL,
-        "assisted_review": ReviewContextProfile.ASSISTED,
-        "expanded_review": ReviewContextProfile.EXPANDED,
-        "custom": ReviewContextProfile.ASSISTED,
-    }[recipe]
-    categories = (
-        (DataCategory.BOUNDED_STRUCTURAL_METADATA, DataCategory.DECLARED_FILE_TYPE)
-        if recipe == "metadata_only"
-        else (() if recipe == "private" else _SEMANTIC_CATEGORIES)
-    )
+def _ask_custom_answers(
+    current: PrivacyPolicy, external: ProviderBinding | None, local: ProviderBinding | None
+) -> PrivacySetupAnswers:
+    """The only field-level path, grouped into five sections a person can hold in mind.
 
-    network = typer.confirm("1/13 Permit network egress?", default=semantic)
+    Every section is announced even when its questions do not apply, so the shape of what is
+    being decided stays visible and a skipped section reads as "off", never as "hidden".
+    """
+
+    _section(1, "External and local destinations")
+    network = typer.confirm("Permit network egress at all?", default=False)
+    use_provider = False
+    require_evidence = False
+    if network:
+        provider_label = (
+            "none configured" if external is None else f"{external.provider_id}/{external.model_id}"
+        )
+        use_provider = typer.confirm(
+            f"Bind external semantic review to {provider_label}?", default=external is not None
+        )
+        if use_provider:
+            require_evidence = typer.confirm(
+                "Require a current eligible provider data-use record?", default=True
+            )
+    else:
+        typer.echo("Network egress stays off, so no external destination is configurable.")
     local_models = typer.confirm(
-        "2/13 Permit configured local-model processing?",
+        "Permit configured local-model processing?",
         default=local is not None and current.local_model_enabled,
     )
-    provider_label = (
-        "none configured" if external is None else f"{external.provider_id}/{external.model_id}"
-    )
-    use_provider = typer.confirm(
-        f"3/13a Bind external semantic review to {provider_label}?",
-        default=network and external is not None,
-    )
-    require_evidence = False
+
+    _section(2, "What an external reviewer may see")
+    review = ReviewContextProfile.STRUCTURAL
+    content: tuple[DataCategory, ...] = ()
+    content_classes: tuple[DataClass, ...] = (DataClass.PUBLIC_STRUCTURAL,)
     if use_provider:
-        require_evidence = typer.confirm(
-            "3/13b Require a current eligible provider data-use record?",
-            default=recipe == "assisted_review",
+        review = _review_context_prompt(ReviewContextProfile.ASSISTED)
+        content = _categories_prompt("External content categories", _SEMANTIC_CATEGORIES)
+        content_classes = _data_classes_prompt(
+            "External content", (DataClass.PUBLIC_STRUCTURAL, DataClass.ORDINARY_USER_CONTENT)
         )
-    review = _review_context_prompt(context)
-    content = _categories_prompt(5, "External content categories", tuple(categories))
-    content_classes = _data_classes_prompt(
-        5,
-        "External content",
-        (
-            (DataClass.PUBLIC_STRUCTURAL,)
-            if recipe in {"private", "metadata_only"}
-            else (DataClass.PUBLIC_STRUCTURAL, DataClass.ORDINARY_USER_CONTENT)
-        ),
-    )
+    else:
+        typer.echo("No external destination is bound, so nothing is sent for review.")
+
+    _section(3, "Local visibility: agent host and local model")
     agent = _categories_prompt(
-        6,
-        "Local agent-context categories",
-        current.agent_context_categories or _AGENT_CATEGORIES,
+        "Local agent-context categories", current.agent_context_categories or _AGENT_CATEGORIES
     )
-    agent_classes = _data_classes_prompt(
-        6,
-        "Local agent context",
-        current.agent_context_data_classes,
-    )
-    local_categories = _categories_prompt(
-        7,
-        "Local-model categories",
-        current.local_model_categories if local_models else (),
-    )
-    local_classes = _data_classes_prompt(
-        7,
-        "Local model",
-        current.local_model_data_classes if local_models else (),
-    )
+    agent_classes = _data_classes_prompt("Local agent context", current.agent_context_data_classes)
+    local_categories: tuple[DataCategory, ...] = ()
+    local_classes: tuple[DataClass, ...] = ()
+    if local_models:
+        local_categories = _categories_prompt(
+            "Local-model categories", current.local_model_categories
+        )
+        local_classes = _data_classes_prompt("Local model", current.local_model_data_classes)
+    else:
+        typer.echo("Local-model processing is off, so it receives nothing.")
+
+    _section(4, "Per-request confirmation and authorization scope")
     confirmation = typer.confirm(
-        "8/13 Require confirmation before every provider request?",
-        default=recipe == "metadata_only",
+        "Require confirmation before every provider request?", default=True
     )
-    telemetry = typer.confirm(
-        "9/13 Enable product telemetry? (unsupported; stays off)", default=False
-    )
-    crash = typer.confirm("10/13 Enable crash diagnostics? (unsupported; stays off)", default=False)
-    updates = typer.confirm(
-        "11/13 Enable network update checks? (unsupported; stays off)", default=False
-    )
-    capability = typer.confirm(
-        "12/13 Enable external capability testing? (unsupported; stays off)", default=False
-    )
-    scope = _authorization_scope_prompt(
-        "workspace"
-        if recipe in {"assisted_review", "expanded_review"}
-        else ("task" if semantic else "machine")
+    scope = _authorization_scope_prompt("task" if use_provider else "machine")
+
+    _section(5, "Unsupported channels")
+    typer.echo(
+        "Product telemetry, crash diagnostics, network update checks, and external capability "
+        "testing ship no transport in this release. They are off and cannot be turned on here."
     )
 
     if network and not use_provider:
@@ -553,10 +600,10 @@ def _ask_answers(recipe: PrivacyRecipe, current: PrivacyPolicy) -> PrivacySetupA
         local_categories,
         local_classes,
         confirmation,
-        telemetry,
-        crash,
-        updates,
-        capability,
+        False,
+        False,
+        False,
+        False,
         scope,
     )
 
@@ -664,6 +711,73 @@ async def _decide(proposal_id: str) -> object:
     return await decide_policy_with_local_reauthentication(proposal_id, passphrase)
 
 
+def _confirmed_candidate(
+    current: PrivacyPolicy,
+    answers: PrivacySetupAnswers,
+    prompt: str,
+    *,
+    default: bool,
+) -> PrivacyPolicy | None:
+    """Render the exact resulting boundary and take one explicit confirmation."""
+
+    candidate = build_candidate_policy(current, answers, now=datetime.now(UTC))
+    _render_review(candidate)
+    return candidate if typer.confirm(prompt, default=default) else None
+
+
+def _choose_candidate(
+    current: PrivacyPolicy,
+    external: ProviderBinding | None,
+    local: ProviderBinding | None,
+    *,
+    recipe_hint: PrivacyRecipe | None,
+    offer_recommended: bool,
+) -> PrivacyPolicy | None:
+    """Select the exact candidate policy, or ``None`` when the user declined outright.
+
+    Three entry shapes, one exit: the recommendation, a named recipe, or the custom sections.
+    Accepting the recommendation is a complete answer and asks nothing further; only ``custom``
+    ever reaches field-level configuration.
+    """
+
+    if offer_recommended:
+        recommended = recommended_privacy_recipe(external)
+        _render_recipe_options(recommended=recommended)
+        typer.echo("")
+        typer.echo(f"Recommended policy: {_RECIPE_LABELS[recommended]}")
+        why, tradeoff = _RECOMMENDATION_TRADEOFF[recommended]
+        typer.echo(f"Why: {why}")
+        typer.echo(tradeoff)
+        candidate = _confirmed_candidate(
+            current,
+            _recipe_answers(recommended, current, external),
+            "Use this recommended privacy policy?",
+            default=True,
+        )
+        if candidate is not None:
+            return candidate
+        typer.echo("")
+        typer.echo("Other privacy options:")
+        recipe = _recipe_choice(recommended)
+    elif recipe_hint is not None:
+        recipe = recipe_hint
+    else:
+        recipe = _recipe_prompt(recipe_hint, recommended_privacy_recipe(external))
+    if recipe == "custom":
+        return _confirmed_candidate(
+            current,
+            _ask_custom_answers(current, external, local),
+            "Use this exact custom privacy policy?",
+            default=False,
+        )
+    return _confirmed_candidate(
+        current,
+        _recipe_answers(recipe, current, external),
+        f"Create this exact privacy proposal ({_RECIPE_LABELS[recipe]})?",
+        default=False,
+    )
+
+
 async def run_privacy_setup(
     *,
     recipe_hint: PrivacyRecipe | None = None,
@@ -678,57 +792,19 @@ async def run_privacy_setup(
             reason="local_terminal_required",
         )
     current = await _effective_policy()
-    if offer_recommended:
-        recommended_recipe: PrivacyRecipe = "metadata_only"
-        try:
-            recommended_answers = _recommended_metadata_answers(current)
-        except ValueError as error:
-            if str(error) != "privacy_setup_provider_binding_required":
-                return PrivacySetupReport("failed", current.profile.value, reason=str(error))
-            recommended_recipe = "private"
-            recommended_answers = _recommended_private_answers(current)
-        _render_recipe_options(recommended=recommended_recipe)
-        typer.echo("")
-        if recommended_recipe == "metadata_only":
-            typer.echo("Recommended policy: Metadata only")
-            typer.echo(
-                "Why: it enables semantic review while minimizing disclosure and asks before "
-                "every provider request."
-            )
-        else:
-            typer.echo("Recommended policy: Private")
-            typer.echo("Why: no external provider is configured, so this keeps network egress off.")
-        candidate = build_candidate_policy(
+    external, local = _configured_bindings()
+    try:
+        candidate = _choose_candidate(
             current,
-            recommended_answers,
-            now=datetime.now(UTC),
+            external,
+            local,
+            recipe_hint=recipe_hint,
+            offer_recommended=offer_recommended,
         )
-        _render_review(candidate)
-        if not typer.confirm("Use this recommended privacy policy?", default=True):
-            typer.echo("")
-            typer.echo("Customize privacy one setting at a time.")
-            recipe = _recipe_choice(recommended_recipe)
-            try:
-                answers = _ask_answers(recipe, current)
-                candidate = build_candidate_policy(current, answers, now=datetime.now(UTC))
-            except ValueError as error:
-                return PrivacySetupReport("failed", current.profile.value, reason=str(error))
-            _render_review(candidate)
-            if not typer.confirm("Use this exact custom privacy policy?", default=False):
-                return PrivacySetupReport("cancelled", current.profile.value)
-    else:
-        recipe = _recipe_prompt(recipe_hint)
-        try:
-            answers = _ask_answers(recipe, current)
-            candidate = build_candidate_policy(current, answers, now=datetime.now(UTC))
-        except ValueError as error:
-            return PrivacySetupReport("failed", current.profile.value, reason=str(error))
-        _render_review(candidate)
-        if not typer.confirm(
-            "Create this exact privacy proposal?",
-            default=False,
-        ):
-            return PrivacySetupReport("cancelled", current.profile.value)
+    except ValueError as error:
+        return PrivacySetupReport("failed", current.profile.value, reason=str(error))
+    if candidate is None:
+        return PrivacySetupReport("cancelled", current.profile.value)
     if _substantive_identity(candidate) == _substantive_identity(current):
         return PrivacySetupReport("unchanged", current.profile.value)
     proposal_id = await _propose(candidate, current.policy_digest)
