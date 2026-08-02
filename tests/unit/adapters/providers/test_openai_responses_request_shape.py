@@ -462,3 +462,56 @@ async def test_headerless_body_exactly_at_cap_is_accepted_by_transport() -> None
     assert body == exact
     assert inner.stream.closed is True
     assert inner.stream.chunks_started == 3
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("declared", ["identity", "", "  ", "identity, identity"])
+async def test_no_op_content_codings_are_accepted(declared: str) -> None:
+    """A header that states no coding must not fail an otherwise honest response."""
+
+    inner = _ScriptedStreamTransport(
+        chunks=[_success_body()],
+        headers={"content-encoding": declared},
+    )
+    result, _, _ = await _evaluate_with_inner(inner)
+
+    assert type(result) is SemanticResultSuccess
+
+
+@pytest.mark.anyio
+async def test_a_real_coding_beside_identity_is_still_rejected() -> None:
+    inner = _ScriptedStreamTransport(
+        chunks=[_success_body()],
+        headers={"content-encoding": "identity, gzip"},
+    )
+    result, _, _ = await _evaluate_with_inner(inner)
+
+    assert type(result) is SemanticResultUnavailable
+    assert result.provenance.failure_class is SemanticFailureClass.TRANSPORT
+    assert inner.stream.closed is True
+    assert inner.stream.chunks_started == 0
+
+
+@pytest.mark.anyio
+async def test_stream_of_neither_flavour_stays_unavailable() -> None:
+    """A stream of neither flavour fails closed, whichever error the close path raises."""
+
+    class _OpaqueStream:
+        def __iter__(self):  # noqa: ANN204 - deliberately neither httpx stream flavour
+            yield b"{}"
+
+    class _OpaqueStreamTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            await request.aread()
+            response = httpx.Response(
+                200,
+                request=request,
+                headers={"content-type": "application/json"},
+            )
+            cast(Any, response).stream = _OpaqueStream()
+            return response
+
+    result, _, _ = await _evaluate_with_inner(_OpaqueStreamTransport())
+
+    assert type(result) is SemanticResultUnavailable
+    assert result.provenance.failure_class is SemanticFailureClass.TRANSPORT

@@ -104,6 +104,9 @@ _ALLOWED_PATHS: Final = frozenset(
         "/v1beta/openai/chat/completions",
     }
 )
+# Response content codings that transform nothing, so the raw-stream cap already bounds the
+# decoded body. Every other coding is refused: decompression could expand past the cap.
+_NO_OP_CONTENT_CODINGS: Final = frozenset({"", "identity"})
 _IDENTITY_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$", re.ASCII)
 _MODEL_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$", re.ASCII)
 _HOSTNAME_PATTERN: Final = re.compile(
@@ -961,7 +964,13 @@ class OneAttemptCredentialTransport(httpx.AsyncBaseTransport):
         request.headers["authorization"] = f"Bearer {token}"
         response = await self._inner.handle_async_request(request)
         content_encoding = response.headers.get("content-encoding")
-        if content_encoding is not None and content_encoding.strip().lower() != "identity":
+        if content_encoding is not None and any(
+            coding.strip().lower() not in _NO_OP_CONTENT_CODINGS
+            for coding in content_encoding.split(",")
+        ):
+            # Only the no-op codings pass: a real coding would let decompression expand past
+            # the raw-stream cap. An absent, empty, or ``identity`` header states no coding at
+            # all, so refusing those would fail an honest uncompressed response for nothing.
             await response.aclose()
             raise ValueError("openai_response_encoding_forbidden")
         content_length = response.headers.get("content-length")
