@@ -357,6 +357,61 @@ async def test_declared_content_length_above_cap_closes_without_reading() -> Non
 
 
 @pytest.mark.anyio
+async def test_malformed_content_length_closes_without_reading() -> None:
+    """Non-integer Content-Length must aclose and fail closed without leaking header text."""
+
+    body = _success_body()
+    inner = _ScriptedStreamTransport(
+        chunks=[body],
+        headers={"content-length": "not-a-number"},
+    )
+    result, _, _ = await _evaluate_with_inner(inner)
+
+    assert type(result) is SemanticResultUnavailable
+    assert result.provenance.failure_class is SemanticFailureClass.TRANSPORT
+    assert inner.stream.closed is True
+    assert inner.stream.chunks_started == 0
+
+
+@pytest.mark.anyio
+async def test_non_async_response_stream_is_rejected_fail_closed() -> None:
+    """Sync/missing streams must not silently skip the raw byte cap."""
+
+    body = _success_body()
+
+    class _SyncBodyStream(httpx.SyncByteStream):
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+            self.closed = False
+
+        def __iter__(self):  # noqa: ANN204 - httpx SyncByteStream contract
+            yield self._payload
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _SyncStreamTransport(httpx.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self.stream = _SyncBodyStream(body)
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            await request.aread()
+            return httpx.Response(
+                200,
+                request=request,
+                headers={"content-type": "application/json"},
+                stream=self.stream,
+            )
+
+    inner = _SyncStreamTransport()
+    result, _, _ = await _evaluate_with_inner(inner)
+
+    assert type(result) is SemanticResultUnavailable
+    assert result.provenance.failure_class is SemanticFailureClass.TRANSPORT
+    assert inner.stream.closed is True
+
+
+@pytest.mark.anyio
 async def test_non_identity_content_encoding_is_rejected_fail_closed() -> None:
     body = _success_body()
     inner = _ScriptedStreamTransport(

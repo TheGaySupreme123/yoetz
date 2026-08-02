@@ -965,12 +965,23 @@ class OneAttemptCredentialTransport(httpx.AsyncBaseTransport):
             await response.aclose()
             raise ValueError("openai_response_encoding_forbidden")
         content_length = response.headers.get("content-length")
-        if content_length is not None and int(content_length) > OPENAI_MAX_RESPONSE_BODY_BYTES:
-            await response.aclose()
-            raise ValueError("openai_response_body_too_large")
+        if content_length is not None:
+            try:
+                declared_size = int(content_length)
+            except (TypeError, ValueError):
+                # Provider-controlled header text must not appear in structural errors.
+                await response.aclose()
+                raise ValueError("openai_response_content_length_invalid") from None
+            if declared_size > OPENAI_MAX_RESPONSE_BODY_BYTES:
+                await response.aclose()
+                raise ValueError("openai_response_body_too_large")
         stream = response.stream
-        if isinstance(stream, httpx.AsyncByteStream):
-            response.stream = _BoundedResponseByteStream(stream)
+        if not isinstance(stream, httpx.AsyncByteStream):
+            # Fail closed: never skip the byte cap for sync/missing streams.
+            # Sync streams raise RuntimeError on aclose; use the matching close path.
+            response.close()
+            raise ValueError("openai_response_stream_invalid")
+        response.stream = _BoundedResponseByteStream(stream)
         return response
 
     async def aclose(self) -> None:
