@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import re
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Final, Protocol, cast
 
@@ -835,6 +836,38 @@ def classify_provider_failure(
     )
 
 
+class _BoundedResponseByteStream(httpx.AsyncByteStream):
+    """Count raw response bytes and refuse anything above the provider body cap.
+
+    ``Content-Length`` is only an early-rejection hint; chunked or headerless bodies still
+    stream through this wrapper so the cap is enforced on the bytes the SDK actually reads.
+    The overflowing chunk is never yielded: the underlying stream is closed first, then a
+    private size failure is raised for classification as generic transport unavailability.
+    """
+
+    __slots__ = ("_closed", "_inner", "_received")
+
+    def __init__(self, inner: httpx.AsyncByteStream) -> None:
+        self._inner = inner
+        self._received = 0
+        self._closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        async for chunk in self._inner:
+            size = len(chunk)
+            if self._received + size > OPENAI_MAX_RESPONSE_BODY_BYTES:
+                await self.aclose()
+                raise ValueError("openai_response_body_too_large")
+            self._received += size
+            yield chunk
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await self._inner.aclose()
+
+
 class OneAttemptCredentialTransport(httpx.AsyncBaseTransport):
     """Adapter-private, one-attempt custom HTTP transport bound to one credential handle.
 
@@ -842,7 +875,9 @@ class OneAttemptCredentialTransport(httpx.AsyncBaseTransport):
     method, destination, or encoding mismatch. It ignores poisoned proxy/netrc/environment
     configuration (``trust_env=False``), strips any SDK-fixed ``Authorization`` placeholder, and
     injects the real credential only inside :meth:`inject_and_start`, which the credential handle
-    invokes exactly once.
+    invokes exactly once. Response bodies are capped at :data:`OPENAI_MAX_RESPONSE_BODY_BYTES`
+    whether or not ``Content-Length`` is present; non-identity ``Content-Encoding`` is refused
+    so decompression cannot bypass the raw-stream cap.
     """
 
     __slots__ = (
@@ -925,9 +960,17 @@ class OneAttemptCredentialTransport(httpx.AsyncBaseTransport):
         token = bytes(credential_view).decode("ascii")
         request.headers["authorization"] = f"Bearer {token}"
         response = await self._inner.handle_async_request(request)
+        content_encoding = response.headers.get("content-encoding")
+        if content_encoding is not None and content_encoding.strip().lower() != "identity":
+            await response.aclose()
+            raise ValueError("openai_response_encoding_forbidden")
         content_length = response.headers.get("content-length")
         if content_length is not None and int(content_length) > OPENAI_MAX_RESPONSE_BODY_BYTES:
+            await response.aclose()
             raise ValueError("openai_response_body_too_large")
+        stream = response.stream
+        if isinstance(stream, httpx.AsyncByteStream):
+            response.stream = _BoundedResponseByteStream(stream)
         return response
 
     async def aclose(self) -> None:
