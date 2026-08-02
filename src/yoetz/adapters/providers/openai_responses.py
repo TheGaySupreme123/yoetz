@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import re
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Final, Protocol, cast
 
@@ -103,6 +104,9 @@ _ALLOWED_PATHS: Final = frozenset(
         "/v1beta/openai/chat/completions",
     }
 )
+# Response content codings that transform nothing, so the raw-stream cap already bounds the
+# decoded body. Every other coding is refused: decompression could expand past the cap.
+_NO_OP_CONTENT_CODINGS: Final = frozenset({"", "identity"})
 _IDENTITY_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$", re.ASCII)
 _MODEL_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$", re.ASCII)
 _HOSTNAME_PATTERN: Final = re.compile(
@@ -835,6 +839,38 @@ def classify_provider_failure(
     )
 
 
+class _BoundedResponseByteStream(httpx.AsyncByteStream):
+    """Count raw response bytes and refuse anything above the provider body cap.
+
+    ``Content-Length`` is only an early-rejection hint; chunked or headerless bodies still
+    stream through this wrapper so the cap is enforced on the bytes the SDK actually reads.
+    The overflowing chunk is never yielded: the underlying stream is closed first, then a
+    private size failure is raised for classification as generic transport unavailability.
+    """
+
+    __slots__ = ("_closed", "_inner", "_received")
+
+    def __init__(self, inner: httpx.AsyncByteStream) -> None:
+        self._inner = inner
+        self._received = 0
+        self._closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        async for chunk in self._inner:
+            size = len(chunk)
+            if self._received + size > OPENAI_MAX_RESPONSE_BODY_BYTES:
+                await self.aclose()
+                raise ValueError("openai_response_body_too_large")
+            self._received += size
+            yield chunk
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await self._inner.aclose()
+
+
 class OneAttemptCredentialTransport(httpx.AsyncBaseTransport):
     """Adapter-private, one-attempt custom HTTP transport bound to one credential handle.
 
@@ -842,7 +878,9 @@ class OneAttemptCredentialTransport(httpx.AsyncBaseTransport):
     method, destination, or encoding mismatch. It ignores poisoned proxy/netrc/environment
     configuration (``trust_env=False``), strips any SDK-fixed ``Authorization`` placeholder, and
     injects the real credential only inside :meth:`inject_and_start`, which the credential handle
-    invokes exactly once.
+    invokes exactly once. Response bodies are capped at :data:`OPENAI_MAX_RESPONSE_BODY_BYTES`
+    whether or not ``Content-Length`` is present; non-identity ``Content-Encoding`` is refused
+    so decompression cannot bypass the raw-stream cap.
     """
 
     __slots__ = (
@@ -925,9 +963,34 @@ class OneAttemptCredentialTransport(httpx.AsyncBaseTransport):
         token = bytes(credential_view).decode("ascii")
         request.headers["authorization"] = f"Bearer {token}"
         response = await self._inner.handle_async_request(request)
+        content_encoding = response.headers.get("content-encoding")
+        if content_encoding is not None and any(
+            coding.strip().lower() not in _NO_OP_CONTENT_CODINGS
+            for coding in content_encoding.split(",")
+        ):
+            # Only the no-op codings pass: a real coding would let decompression expand past
+            # the raw-stream cap. An absent, empty, or ``identity`` header states no coding at
+            # all, so refusing those would fail an honest uncompressed response for nothing.
+            await response.aclose()
+            raise ValueError("openai_response_encoding_forbidden")
         content_length = response.headers.get("content-length")
-        if content_length is not None and int(content_length) > OPENAI_MAX_RESPONSE_BODY_BYTES:
-            raise ValueError("openai_response_body_too_large")
+        if content_length is not None:
+            try:
+                declared_size = int(content_length)
+            except TypeError, ValueError:
+                # Provider-controlled header text must not appear in structural errors.
+                await response.aclose()
+                raise ValueError("openai_response_content_length_invalid") from None
+            if declared_size > OPENAI_MAX_RESPONSE_BODY_BYTES:
+                await response.aclose()
+                raise ValueError("openai_response_body_too_large")
+        stream = response.stream
+        if not isinstance(stream, httpx.AsyncByteStream):
+            # Fail closed: never skip the byte cap for sync/missing streams.
+            # Sync streams raise RuntimeError on aclose; use the matching close path.
+            response.close()
+            raise ValueError("openai_response_stream_invalid")
+        response.stream = _BoundedResponseByteStream(stream)
         return response
 
     async def aclose(self) -> None:
