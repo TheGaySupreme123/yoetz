@@ -968,7 +968,7 @@ class OneAttemptCredentialTransport(httpx.AsyncBaseTransport):
         if content_length is not None:
             try:
                 declared_size = int(content_length)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 # Provider-controlled header text must not appear in structural errors.
                 await response.aclose()
                 raise ValueError("openai_response_content_length_invalid") from None
