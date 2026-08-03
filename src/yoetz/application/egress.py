@@ -93,6 +93,10 @@ type LocalDisclosureResult = (
 _SEMANTIC_PURPOSE = "semantic-review"
 _MEDIA_TYPE = "application/json"
 _SCHEMA_ID = "yoetz-semantic-case-1.0.0"
+# Breadth order, matching ``_scope_rank`` in ``yoetz.application.privacy_policy``: a lower rank
+# is a *broader* scope. ``machine`` is therefore the widest authorization ceiling a channel can
+# carry and ``request`` the narrowest, which is why moving a ceiling from ``task`` to ``machine``
+# is classified as ``scope_ceiling_broadened`` by the widen/tighten ceremony.
 _SCOPE_KIND_RANK = {
     AuthorizationScopeKind.MACHINE: 0,
     AuthorizationScopeKind.WORKSPACE: 1,
@@ -706,7 +710,10 @@ class PrivacyCoordinator:
                 PrivacyOutcome.BLOCKED_BY_POLICY,
                 PrivacyReason.PURPOSE_NOT_ALLOWED,
             )
-        if _SCOPE_KIND_RANK[candidate.scope.kind] > _SCOPE_KIND_RANK[llm.scope_ceiling]:
+        # Block only a candidate whose scope is *broader* than the ceiling the channel commits to.
+        # A narrower candidate (task under a workspace ceiling) is inside the consented authority,
+        # which is the shipped assisted_review / expanded_review shape.
+        if _SCOPE_KIND_RANK[candidate.scope.kind] < _SCOPE_KIND_RANK[llm.scope_ceiling]:
             return await self._complete_semantic_predispatch(
                 candidate,
                 effective,

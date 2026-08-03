@@ -242,12 +242,15 @@ async def test_oversize_tokens_blocks_admission() -> None:
     result = await coordinator.evaluate_semantic(_candidate(), _deadline())
     assert isinstance(result, SemanticEgressBlocked)
     assert result.outcome is PrivacyOutcome.BLOCKED_BY_POLICY
+    assert result.reason is PrivacyReason.POLICY_DENIED
     assert audit.prepared == []
 
 
 @pytest.mark.anyio
 async def test_scope_broader_than_ceiling_blocks() -> None:
-    policy = _policy_with_ceilings(scope_ceiling=AuthorizationScopeKind.WORKSPACE)
+    """A request-scoped ceiling is the narrowest one; a task-scoped case is broader than it."""
+
+    policy = _policy_with_ceilings(scope_ceiling=AuthorizationScopeKind.REQUEST)
     coordinator, audit = _coordinator(policy, byte_count=16, token_count=1)
     result = await coordinator.evaluate_semantic(
         _candidate(scope_kind=AuthorizationScopeKind.TASK),
@@ -256,6 +259,24 @@ async def test_scope_broader_than_ceiling_blocks() -> None:
     assert isinstance(result, SemanticEgressBlocked)
     assert result.reason is PrivacyReason.SCOPE_MISMATCH
     assert audit.prepared == []
+
+
+@pytest.mark.anyio
+async def test_workspace_ceiling_admits_task_scoped_candidate() -> None:
+    """The shipped assisted_review / expanded_review shape must keep working.
+
+    Those recipes commit ``scope_ceiling=workspace`` while every semantic case is task-scoped.
+    A task scope is narrower than a workspace ceiling, so it sits inside the consented
+    authority and must be admitted rather than blocked as a scope mismatch.
+    """
+
+    policy = _policy_with_ceilings(scope_ceiling=AuthorizationScopeKind.WORKSPACE)
+    coordinator, audit = _coordinator(policy, byte_count=16, token_count=1)
+    result = await coordinator.evaluate_semantic(
+        _candidate(scope_kind=AuthorizationScopeKind.TASK),
+        _deadline(),
+    )
+    assert audit.prepared, f"task case under a workspace ceiling must reach prepare; got {result!r}"
 
 
 @pytest.mark.anyio
