@@ -1979,7 +1979,13 @@ Independent verification support (local control, not MCP):
 
 - `WorkspaceInspectPort` — descriptor-safe bounded relative-path artifact inspection under a
   consented workspace root; returns digests + capped excerpts; never absolute paths in public
-  status.
+  status. The handle retains an authenticated root directory descriptor for its lifetime.
+  Descendants are opened descriptor-relatively with no-follow semantics against that descriptor
+  (not by re-resolving the root pathname). In-root symlinks remain readable: targets are resolved
+  only within the root, with a bounded chain depth (eight resolutions per requested path); absolute
+  targets, climbs above the root, and exhausted depth map to `symlink_escape`. Content whose
+  identity or size changes during the read is refused as `read_failed` rather than returned.
+
 - Approved-check runner — executes only commitment-approved argv (`shell=False`, bounded
   time/output, sanitized env, no network unless separately authorized); binds results to the
   observed subject-state digest so later edits stale prior success.

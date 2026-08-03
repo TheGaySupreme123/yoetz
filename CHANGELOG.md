@@ -164,6 +164,14 @@ describes behavior intended for the first release rather than a change from a pr
 These defects were found and fixed during pre-release development. No published version ever
 carried them; they are listed because each one describes the behavior that now ships.
 
+- **Workspace inspection no longer follows mutable names after validation (security).** Opening an
+  inspect workspace retains an authenticated root directory descriptor for the handle's lifetime.
+  Later reads open descendants descriptor-relatively with no-follow semantics and re-check the root
+  identity; replacing the root directory between open and inspect can no longer redirect a read
+  outside the consented workspace. Intermediate directory symlinks that escape the root are refused
+  (`symlink_escape`); in-root symlink chains remain readable up to a bounded depth. Content that
+  changes during a single read is refused (`read_failed`) rather than returned.
+
 - **Publish recovery must not mask a known authoring error.** When MCP `publish_work` body
   validation fails, envelope-first operation lookup still runs so a committed same-`request_id`
   operation can be recovered. A failed recovery read (for example nested `read_projection_failed`)
