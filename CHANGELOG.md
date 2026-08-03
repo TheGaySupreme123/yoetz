@@ -23,8 +23,13 @@ describes behavior intended for the first release rather than a change from a pr
   built on APSW/SQLite with WAL and verified build/PRAGMA checks.
 - A centrally enforced privacy and data-egress protocol: classification, policy resolution, local
   minimization/redaction/secret scanning, optional human preview/approval, and a structural
-  `EgressReceipt` for every reserved decision and physical attempt. The default installation is
-  zero-egress (`local_only`, global network ceiling off, all five channels disabled).
+  `EgressReceipt` for every reserved decision and physical attempt. The durable product default is
+  `local_only` with structural package update checks on (opt-out) and no task-content egress;
+  true zero-network requires turning `update_checks` off as well.
+- Interactive package-update advisory (TUI first-run finish, resume tip, `/doctor`) and
+  upgrade-over-same-version-reinstall prompts on setup/`/connect`, gated by the independent
+  `update_checks` channel against an allowlisted PyPI identity URL. Upgrade remains a human-run
+  `uv tool upgrade yoetz` command; work receipts are unchanged.
 - Widening the privacy policy is authorized only at the reauthenticated trusted terminal, which
   renders the complete `before → after` diff of every security-relevant field the proposal moves —
   destination, disclosed information, confirmation, authorization scope, limits, and local

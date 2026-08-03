@@ -33,13 +33,16 @@ The four LLM privacy profiles are `local_only`, `confirm_every_request`, `minima
 `trusted_provider`. Trusted-provider permission always binds named categories, purpose, scope,
 provider, model, and endpoint profile; it never means “send everything available.” Telemetry,
 crash diagnostics, update checks, and capability testing have separate policies. Enabling one
-channel never enables another. A separate global network ceiling defaults off; turning it on
-authorizes no channel by itself. `local_only` governs LLM disclosure and may coexist with a
-separately consented bounded structural non-LLM channel. True Yoetz zero-network mode is the
-composite of `local_only`, the global ceiling off, and all five network channels disabled.
-That mode still permits only exact release-profiled local IPC required for the Yoetz service,
-confidential helper, approved local model, OS credential/user-presence service, and session-
-lifecycle monitor; it does not permit arbitrary AF_UNIX destinations.
+channel never enables another. A separate global network ceiling authorizes nothing by itself.
+`local_only` governs LLM disclosure and may coexist with a separately consented bounded structural
+non-LLM channel. **Package update checks** may contact the allowlisted PyPI JSON endpoint for the
+`yoetz` distribution when the durable `update_checks` channel is enabled (product default: on;
+opt-out in privacy setup). That path carries only package name/version identity — never task or
+user content — and never auto-upgrades. True Yoetz zero-network mode is the composite of
+`local_only`, the global ceiling off, and all five network channels disabled (including turning
+update checks off). That mode still permits only exact release-profiled local IPC required for the
+Yoetz service, confidential helper, approved local model, OS credential/user-presence service, and
+session-lifecycle monitor; it does not permit arbitrary AF_UNIX destinations.
 
 An independent review-context profile controls which potentially useful material is selected
 before those disclosure rules run: `structural`, `goal_aware`, `assisted`, `expanded`, or `custom`.
@@ -61,10 +64,10 @@ stale posture removes the recommendation. The recommended recipe visibly enables
 technical user can turn that guard off through a custom policy, but that choice no longer carries
 the upstream no-training recommendation.
 
-The v0.1 working manifest contains no transport implementation for product telemetry, crash
-diagnostics upload, update checks, or capability testing. Setup shows those four channels as
-unavailable/off; policy cannot create dormant consent, and a future installed capability requires a
-fresh local-human transition before it can send anything.
+The v0.1 working manifest ships a transport only for structural package update checks. Product
+telemetry, crash diagnostics upload, and capability testing remain unavailable/off; policy cannot
+create dormant consent for them, and a future installed capability requires a fresh local-human
+transition before it can send anything.
 
 ## Non-overridable never-send content
 

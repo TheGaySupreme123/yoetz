@@ -952,7 +952,12 @@ _LEGACY_AGENT_CONTEXT_DATA_CLASSES: Final = (DataClass.PUBLIC_STRUCTURAL,)
 # that digest is the CAS precondition for later tightenings and is exposed as `effective_digest`.
 # `None` reproduces the pre-ADR-009 payload and exists only to recognize an untouched old seed.
 _BOOTSTRAP_SEED_SCHEMA: Final = "yoetz.privacy-policy.bootstrap/1"
-_BOOTSTRAP_DEFAULT_REVISION: Final = "2026-07-24-verification-output"
+# 2026-07-24: agent-context verification output. 2026-08-03: default-on structural update_checks.
+_BOOTSTRAP_DEFAULT_REVISION: Final = "2026-08-03-package-update-checks"
+_BOOTSTRAP_REVISION_VERIFICATION_OUTPUT: Final = "2026-07-24-verification-output"
+_UPDATE_CHECKS_MAX_BYTES: Final = 4096
+_UPDATE_CHECKS_MAX_TOKENS: Final = 1024
+_UPDATE_CHECKS_TTL_SECONDS: Final = 60
 
 
 def _bootstrap_seed_digest(installation_id: str, *, revision: str | None) -> str:
@@ -966,16 +971,49 @@ def _bootstrap_seed_digest(installation_id: str, *, revision: str | None) -> str
     return canonical_digest(payload)
 
 
+def _disabled_channel_row(channel: EgressChannel) -> ChannelPolicy:
+    return ChannelPolicy(
+        channel=channel,
+        enabled=False,
+        allowed_categories=(),
+        allowed_data_classes=(),
+        provider_binding=None,
+        allowed_purposes=(),
+        scope_ceiling=AuthorizationScopeKind.MACHINE,
+        preview_required=False,
+        max_bytes=0,
+        max_tokens=0,
+        authorization_ttl_seconds=0,
+    )
+
+
+def _update_checks_channel_row() -> ChannelPolicy:
+    return ChannelPolicy(
+        channel=EgressChannel.UPDATE_CHECKS,
+        enabled=True,
+        allowed_categories=(DataCategory.BOUNDED_STRUCTURAL_METADATA,),
+        allowed_data_classes=(DataClass.PUBLIC_STRUCTURAL,),
+        provider_binding=None,
+        allowed_purposes=("package-update-check",),
+        scope_ceiling=AuthorizationScopeKind.MACHINE,
+        preview_required=False,
+        max_bytes=_UPDATE_CHECKS_MAX_BYTES,
+        max_tokens=_UPDATE_CHECKS_MAX_TOKENS,
+        authorization_ttl_seconds=_UPDATE_CHECKS_TTL_SECONDS,
+    )
+
+
 def _shipped_default_policy(policy: PrivacyPolicy, *, revision: str | None) -> PrivacyPolicy:
     """Rebuild a shipped default policy at one revision under an existing policy's identity."""
 
-    rebuilt = _denied_policy(
+    rebuilt = _product_default_policy(
         installation_id=policy.effective_scope.installation_id,
         policy_id=policy.policy_id,
         policy_digest=_bootstrap_seed_digest(
             policy.effective_scope.installation_id, revision=revision
         ),
         created_at=policy.created_at,
+        revision=revision,
     )
     if revision is not None:
         return rebuilt
@@ -991,53 +1029,61 @@ async def _reseed_untouched_default_policy(
     scope: AuthorizationScope,
     policy: PrivacyPolicy,
 ) -> PrivacyPolicy:
-    """Carry an untouched pre-ADR-009 default forward to the current shipped default.
+    """Carry an untouched older bootstrap default forward to the current shipped default.
 
-    Without this, an installation seeded before the default widened keeps the narrow
-    agent-context allowlist and still cannot read its own receipts, so the receipt fix would
-    reach only new installations. Recognition is exact in every field, including the bootstrap
-    seed digest, and the store additionally requires first-run seed provenance, so an owner
-    policy that reproduces the old default's contents is left alone.
+    Without this, an installation seeded before the default widened keeps the prior allowlist
+    forever. Recognition is exact in every field, including the bootstrap seed digest, and the
+    store additionally requires first-run seed provenance, so an owner policy that reproduces an
+    old default's contents is left alone.
     """
 
-    legacy_default = replace(_shipped_default_policy(policy, revision=None), version=policy.version)
-    if policy != legacy_default:
-        return policy
-    replacement = replace(
-        _shipped_default_policy(policy, revision=_BOOTSTRAP_DEFAULT_REVISION),
-        version=policy.version + 1,
-    )
-    return await policies.reseed_untouched_bootstrap_default(
-        scope, expected_current=policy, replacement=replacement
-    )
+    for previous in (None, _BOOTSTRAP_REVISION_VERIFICATION_OUTPUT):
+        previous_default = replace(
+            _shipped_default_policy(policy, revision=previous), version=policy.version
+        )
+        if policy == previous_default:
+            replacement = replace(
+                _shipped_default_policy(policy, revision=_BOOTSTRAP_DEFAULT_REVISION),
+                version=policy.version + 1,
+            )
+            return await policies.reseed_untouched_bootstrap_default(
+                scope, expected_current=policy, replacement=replacement
+            )
+    return policy
 
 
-def _denied_policy(
+def _product_default_policy(
     *,
     installation_id: str,
     policy_id: str,
     policy_digest: str,
     created_at: datetime,
+    revision: str | None,
 ) -> PrivacyPolicy:
+    """Shipped first-run machine policy for one bootstrap revision.
+
+    Config.toml bootstrap remains all-denied (fail-safe file seed). The durable catalog seed is
+    the product default: ``local_only``, LLM off, structural ``update_checks`` on (opt-out), other
+    non-LLM channels off, ``network_egress_permitted`` true only because update checks are on.
+    Older revisions reconstruct all-denied network rows so reseed recognition stays exact.
+    """
+
     safe = safe_privacy_bootstrap()
+    # Config.toml generation-1 seed must remain fail-safe all-denied; it is not durable policy.
+    if safe.network_egress_permitted or safe.local_model_enabled:
+        raise ValueError("privacy_bootstrap_unsafe")
+    if any(safe.channel_policies.model_dump().values()):
+        raise ValueError("privacy_bootstrap_unsafe")
+
+    enable_update_checks = revision == _BOOTSTRAP_DEFAULT_REVISION
     channels = tuple(
-        ChannelPolicy(
-            channel=channel,
-            enabled=False,
-            allowed_categories=(),
-            allowed_data_classes=(),
-            provider_binding=None,
-            allowed_purposes=(),
-            scope_ceiling=AuthorizationScopeKind.MACHINE,
-            preview_required=False,
-            max_bytes=0,
-            max_tokens=0,
-            authorization_ttl_seconds=0,
+        (
+            _update_checks_channel_row()
+            if enable_update_checks and channel is EgressChannel.UPDATE_CHECKS
+            else _disabled_channel_row(channel)
         )
         for channel in sorted(EgressChannel, key=lambda item: item.value)
     )
-    if safe.network_egress_permitted or safe.local_model_enabled:
-        raise ValueError("privacy_bootstrap_unsafe")
     return PrivacyPolicy(
         policy_id=policy_id,
         version=1,
@@ -1046,7 +1092,7 @@ def _denied_policy(
         review_context_profile=ReviewContextProfile.STRUCTURAL,
         review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.STRUCTURAL),
         require_current_provider_data_use_evidence=False,
-        network_egress_permitted=False,
+        network_egress_permitted=enable_update_checks,
         effective_scope=AuthorizationScope(AuthorizationScopeKind.MACHINE, installation_id),
         channel_policies=channels,
         local_model_enabled=False,
@@ -1074,6 +1120,24 @@ def _denied_policy(
             DataClass.SENSITIVE_CONFIDENTIAL,
         ),
         created_at=created_at,
+    )
+
+
+def _denied_policy(
+    *,
+    installation_id: str,
+    policy_id: str,
+    policy_digest: str,
+    created_at: datetime,
+) -> PrivacyPolicy:
+    """Current product default seed (alias kept for call sites and tests)."""
+
+    return _product_default_policy(
+        installation_id=installation_id,
+        policy_id=policy_id,
+        policy_digest=policy_digest,
+        created_at=created_at,
+        revision=_BOOTSTRAP_DEFAULT_REVISION,
     )
 
 

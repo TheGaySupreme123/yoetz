@@ -55,12 +55,12 @@ that is skipped reads as "off" rather than as hidden:
 | 2 | What an external reviewer may see | `review_context`, `content_categories` |
 | 3 | Local visibility: agent host and local model | `agent_context_categories`, `local_model_categories` |
 | 4 | Per-request confirmation and authorization scope | `request_confirmation`, `authorization_scope` |
-| 5 | Unsupported channels | `product_telemetry`, `crash_diagnostics`, `update_checks`, `capability_testing` |
+| 5 | Package updates and unsupported channels | `update_checks` (yes/no, default yes); `product_telemetry`, `crash_diagnostics`, `capability_testing` (read-only off) |
 
-Section 5 is **read-only**. Since no transport ships for those four channels, presenting them as
-questions offered a choice that did not exist and trained users to answer "no" to something Yoetz
-could not have done anyway. The section states that they are unsupported and off; it accepts no
-answer, and `propose` still rejects a `true` value with `channel_unavailable`.
+Section 5 asks a real yes/no for **package update checks** (default yes): structural PyPI package
+identity only, no task/user content. Product telemetry, crash diagnostics, and capability testing
+remain **read-only unsupported/off** — no transport ships for them, and `propose` still rejects a
+`true` value for those three with `channel_unavailable`.
 
 ## Recipes are transparent drafts, never consent
 
@@ -140,11 +140,13 @@ selected. `data_classes` may contain only `public_structural`, `ordinary_user_co
 strong reauthentication; selecting a category alone never silently authorizes its sensitive
 instances.
 
-Settings 9–12 are the four non-LLM channels. **v0.1 ships no production transport for any of
-them:** they are presented read-only as `unsupported` and off, the review marks each the same way,
-and `propose` rejects a `true` answer with `channel_unavailable` without changing durable policy or
-making any I/O. A later Yoetz release cannot silently activate an old stored draft or answer — it
-always requires a fresh local-human capability confirmation first.
+Settings 9–12 are the four non-LLM channels. **`update_checks` (setting 11) is a real yes/no**
+(product default yes) for structural package version checks only. The other three
+(`product_telemetry`, `crash_diagnostics`, `capability_testing`) remain read-only `unsupported`
+and off: `propose` rejects a `true` answer for those three with `channel_unavailable` without
+changing durable policy or making any I/O. A later Yoetz release cannot silently activate an old
+stored draft or answer for those capabilities — it always requires a fresh local-human capability
+confirmation first.
 
 ## Review, propose, and commit
 

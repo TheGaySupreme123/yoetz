@@ -15,13 +15,16 @@ def test_never_send_fixture_and_domain_registry_are_identical() -> None:
     assert NEVER_SEND_KINDS == frozenset(ForbiddenDataKind)
 
 
-def test_every_non_llm_fixture_branch_is_no_dispatch_channel_unavailable() -> None:
+def test_every_unsupported_non_llm_fixture_branch_is_no_dispatch_channel_unavailable() -> None:
     fixture = json.loads(
         (_ROOT / "fixtures/privacy/PRIV-008-independent-channels.case.json").read_text()
     )
     expected = fixture["expected"]["unsupported_channels"]
+    # update_checks ships a structural transport; the remaining three stay unavailable.
     channels = {
-        channel.value for channel in EgressChannel if channel is not EgressChannel.LLM_INFERENCE
+        channel.value
+        for channel in EgressChannel
+        if channel not in {EgressChannel.LLM_INFERENCE, EgressChannel.UPDATE_CHECKS}
     }
     assert set(expected) == channels
     for channel in channels:

@@ -50,14 +50,9 @@ def _current_default() -> PrivacyPolicy:
 def _legacy_default() -> PrivacyPolicy:
     """Reproduce the exact pre-ADR-009 shipped default, including its bootstrap seed digest."""
 
-    return replace(
-        _current_default(),
-        policy_digest=_seed_digest(revision=None),
-        agent_context_categories=(
-            DataCategory.BOUNDED_STRUCTURAL_METADATA,
-            DataCategory.DECLARED_FILE_TYPE,
-        ),
-        agent_context_data_classes=(DataClass.PUBLIC_STRUCTURAL,),
+    base = _current_default()
+    return ready_composition_module._shipped_default_policy(  # pyright: ignore[reportPrivateUsage]
+        base, revision=None
     )
 
 
@@ -81,6 +76,8 @@ class _RecordingStore:
 
 
 def test_default_local_only_allows_receipt_projection_categories() -> None:
+    from yoetz.domain.privacy import EgressChannel
+
     policy = _current_default()
     assert DataCategory.FINDING_SUMMARY in policy.agent_context_categories
     assert DataCategory.OBLIGATION_TEXT in policy.agent_context_categories
@@ -90,6 +87,14 @@ def test_default_local_only_allows_receipt_projection_categories() -> None:
     # Observation-derived / vault-adjacent categories stay off the default allowlist.
     assert DataCategory.REPOSITORY_EXCERPT not in policy.agent_context_categories
     assert DataCategory.TRANSCRIPT_EXCERPT not in policy.agent_context_categories
+    # Product default: structural package update checks on, LLM off, local_only.
+    assert policy.network_egress_permitted is True
+    updates = next(
+        row for row in policy.channel_policies if row.channel is EgressChannel.UPDATE_CHECKS
+    )
+    llm = next(row for row in policy.channel_policies if row.channel is EgressChannel.LLM_INFERENCE)
+    assert updates.enabled is True
+    assert llm.enabled is False
 
 
 @pytest.mark.anyio

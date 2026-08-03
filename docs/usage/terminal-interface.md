@@ -139,7 +139,10 @@ Approved-check policy trusted       Deeper-review evaluator composed
 ### `/connect`
 
 Inspect the current connection, connect or repair it, or view the exact technical state. Any
-action that would change something shows the same preview and approval the first run does.
+action that would change something shows the same preview and approval the first run does. When a
+newer package is available under the durable `update_checks` policy, `/connect` offers upgrade
+first or continue with the running version before harness add/repair — it never reinstalls the same
+package bits to add a harness.
 
 ### `/privacy`
 
@@ -203,7 +206,10 @@ confirmation with the cursor on *no*.
 
 `/doctor` runs bounded read-only checks across runtime, package version, discovery, registration,
 managed files, hooks, consent, policy digest, service reachability, vault, provider, and privacy,
-then suggests safe next steps. **It never changes anything.**
+then suggests safe next steps. When policy permits package update checks and a newer release is
+known, the package line is optional with remediation `uv tool upgrade yoetz`; when the check is
+allowed but fails, the line is unproven with "could not check for updates." **It never changes
+anything.**
 
 ## Secrets
 

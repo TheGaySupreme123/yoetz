@@ -91,8 +91,9 @@ def test_assisted_review_is_bound_to_one_provider_and_bounded_categories() -> No
     assert all(
         not channel.enabled
         for channel in candidate.channel_policies
-        if channel.channel is not EgressChannel.LLM_INFERENCE
+        if channel.channel not in {EgressChannel.LLM_INFERENCE, EgressChannel.UPDATE_CHECKS}
     )
+    # Product default recipes and _answers leave updates off unless set; this helper defaults off.
     assert candidate.supersedes_policy_digest == current.policy_digest
 
 
@@ -103,6 +104,37 @@ def test_unavailable_network_channels_fail_closed() -> None:
             _answers(telemetry=True),
             now=datetime(2026, 7, 29, tzinfo=UTC),
         )
+
+
+def test_update_checks_may_be_enabled_without_llm() -> None:
+    candidate = build_candidate_policy(
+        local_only_policy(),
+        _answers(
+            network_egress=False,
+            external_provider=None,
+            review_context=ReviewContextProfile.STRUCTURAL,
+            content_categories=(),
+            content_data_classes=(DataClass.PUBLIC_STRUCTURAL,),
+            request_confirmation=False,
+            updates=True,
+            authorization_scope=AuthorizationScopeKind.MACHINE,
+        ),
+        now=datetime(2026, 7, 29, tzinfo=UTC),
+    )
+    updates = next(
+        channel
+        for channel in candidate.channel_policies
+        if channel.channel is EgressChannel.UPDATE_CHECKS
+    )
+    llm = next(
+        channel
+        for channel in candidate.channel_policies
+        if channel.channel is EgressChannel.LLM_INFERENCE
+    )
+    assert candidate.network_egress_permitted is True
+    assert updates.enabled is True
+    assert llm.enabled is False
+    assert candidate.profile.value == "local_only"
 
 
 def test_network_egress_requires_an_exact_provider_binding() -> None:
@@ -226,7 +258,7 @@ def test_external_recipes_fail_closed_without_a_configured_provider(
 
 
 def test_named_recipes_never_enable_an_unsupported_channel() -> None:
-    """Telemetry, diagnostics, updates, and capability testing are not recipe-reachable."""
+    """Telemetry, diagnostics, and capability testing stay off; update_checks defaults on."""
 
     import yoetz.cli.privacy_setup as module
 
@@ -245,7 +277,7 @@ def test_named_recipes_never_enable_an_unsupported_channel() -> None:
             answers.crash_diagnostics,
             answers.updates,
             answers.capability_testing,
-        ) == (False, False, False, False)
+        ) == (False, False, True, False)
 
 
 def test_privacy_options_explain_tradeoffs_and_change_command(
@@ -522,11 +554,13 @@ def test_custom_configuration_announces_all_five_sections(
         (2, "What an external reviewer may see"),
         (3, "Local visibility: agent host and local model"),
         (4, "Per-request confirmation and authorization scope"),
-        (5, "Unsupported channels"),
+        (5, "Package updates and unsupported channels"),
     ):
         assert f"Section {number} of 5 — {title}" in output
-    # Section 5 states the unsupported channels; it never asks about them.
+    # Section 5 asks about package updates; the other three remain unsupported/off.
     assert "cannot be turned on here" in output
+    assert "package update" in output.casefold()
+    # Mock confirm returns False for every prompt, so updates is explicitly declined.
     assert (
         answers.telemetry,
         answers.crash_diagnostics,

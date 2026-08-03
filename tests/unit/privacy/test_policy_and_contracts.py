@@ -218,13 +218,13 @@ def test_p0_4_non_llm_enablement_is_rejected_before_pending_consent() -> None:
 
 
 def test_review_recipes_recommend_a_reviewable_context_without_loosening_first_run() -> None:
-    """The recommended recipe must actually enable review; the pre-consent seed must not move.
+    """The recommended recipe must actually enable review; config.toml seed stays fail-safe.
 
     Both halves matter together. A structural recipe sends no goal, obligations, claims,
     decisions or finding prose, so a reviewer given one cannot judge whether a claim is supported
-    — recommending it makes semantic review ceremonial. But leading with a richer recipe is only
-    safe because nothing egresses until the user picks one: the first-run seed stays all-denied,
-    local-only, with network egress off.
+    — recommending it makes semantic review ceremonial. Config.toml generation-1 bootstrap remains
+    all-denied (fail-safe file seed). Durable product default separately enables structural
+    package update checks only — never LLM task content — until the user commits a recipe.
     """
 
     recipes = ReviewSelectionPolicy.for_profile(ReviewContextProfile.ASSISTED)
@@ -238,7 +238,7 @@ def test_review_recipes_recommend_a_reviewable_context_without_loosening_first_r
     assert structural.include_finding_prose is False
     assert structural.max_excerpts == 0
 
-    # Nothing leaves the machine before the user has consented to a provider at all.
+    # Config.toml generation-1 bootstrap is fail-safe all-denied (not durable policy).
     # yoetz.config.privacy and yoetz.config.models import each other, so the package must be
     # entered through models for the cycle to resolve in the order the runtime uses.
     from yoetz.config.models import ConfigError  # noqa: F401  # enters the package first

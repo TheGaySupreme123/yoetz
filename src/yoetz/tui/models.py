@@ -260,6 +260,7 @@ class PrivacyPosture:
     readable: bool
     never_send: tuple[str, ...] = ()
     enabled_channels: tuple[str, ...] = ()
+    network_egress_permitted: bool | None = None
 
     @property
     def choice(self) -> PrivacyChoice | None:
@@ -274,6 +275,14 @@ class PrivacyPosture:
             return "unknown"
         choice = self.choice
         return choice.label.lower() if choice is not None else (self.profile or "unknown")
+
+    @property
+    def update_checks_permitted(self) -> bool:
+        """True when durable policy admits structural package update checks."""
+
+        if not self.readable or self.network_egress_permitted is not True:
+            return False
+        return "update_checks" in self.enabled_channels
 
 
 @dataclass(frozen=True, slots=True)
