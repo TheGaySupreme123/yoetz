@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Final
 
 from yoetz.adapters.privacy.gateway import ExternalProviderFactory
 from yoetz.adapters.providers.openai_responses import (
@@ -28,10 +29,29 @@ from yoetz.protocol.canonical import canonical_digest
 
 __all__ = [
     "OpenAIResponsesExternalFactory",
+    "endpoint_profile_data_use_reviewed",
     "external_factory_builders_from_config",
     "openai_profile_from_provider_config",
     "provider_binding_from_config",
 ]
+
+# Exactly one shipped endpoint profile carries reviewed data-use facts. Every other profile —
+# fireworks, the Vercel gateway, and any owner-declared HTTPS origin — gets
+# ``owner_declared_data_use_profile``, whose facts are ``unknown`` and therefore never
+# ``recommendation_eligible``. Keep this in step with openai_profile_from_provider_config and
+# chat_completions_profile_from_provider_config.
+_REVIEWED_DATA_USE_ENDPOINT_PROFILE_IDS: Final = frozenset({OFFICIAL_OPENAI_ENDPOINT_PROFILE_ID})
+
+
+def endpoint_profile_data_use_reviewed(endpoint_profile_id: str) -> bool:
+    """True when this endpoint profile ships recommendation-eligible provider data-use evidence.
+
+    A policy that sets ``require_current_provider_data_use_evidence`` against a profile this
+    returns ``False`` for cannot dispatch external semantic review at all, so setup surfaces the
+    pairing before the operator commits it rather than at first dispatch.
+    """
+
+    return endpoint_profile_id in _REVIEWED_DATA_USE_ENDPOINT_PROFILE_IDS
 
 
 def provider_binding_from_config(provider: ProviderProfileConfig) -> ProviderBinding:
