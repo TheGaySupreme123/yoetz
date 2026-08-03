@@ -142,7 +142,9 @@ class MemoryPrivacyPolicyStore:
         composed = ordered[0].policy
         for row in ordered[1:]:
             composed = composed.meet(row.policy)
-        generation = max(row.generation for row in eligible)
+        # Most-specific row's own generation: it is the CAS token the transition path compares
+        # against the exact stored row. See the matching note in CatalogPrivacyPolicyStore.
+        generation = ordered[-1].generation
         return EffectivePrivacyPolicy(composed, generation, composed.policy_digest)
 
     async def prepare_transition(

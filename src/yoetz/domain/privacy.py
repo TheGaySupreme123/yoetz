@@ -711,15 +711,12 @@ class ChannelPolicy:
                 0,
                 0,
             )
-        scope_rank = {
-            AuthorizationScopeKind.MACHINE: 0,
-            AuthorizationScopeKind.WORKSPACE: 1,
-            AuthorizationScopeKind.TASK: 2,
-            AuthorizationScopeKind.REQUEST: 3,
-        }
+        # A lower rank is a *broader* ceiling (machine is widest, request narrowest), matching
+        # ``_scope_rank`` in ``yoetz.application.privacy_policy``, where task -> machine is
+        # classified as a widening. The meet must therefore keep the higher-ranked ceiling.
         ceiling = (
             self.scope_ceiling
-            if scope_rank[self.scope_ceiling] <= scope_rank[other.scope_ceiling]
+            if _SCOPE_KIND_RANK[self.scope_ceiling] >= _SCOPE_KIND_RANK[other.scope_ceiling]
             else other.scope_ceiling
         )
         return ChannelPolicy(

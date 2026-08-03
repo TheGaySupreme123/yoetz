@@ -99,7 +99,14 @@ def _local_only(*, scope: AuthorizationScope, policy_id: str, digest: str) -> Pr
     )
 
 
-def _minimal_external(*, scope: AuthorizationScope, policy_id: str, digest: str) -> PrivacyPolicy:
+def _minimal_external(
+    *,
+    scope: AuthorizationScope,
+    policy_id: str,
+    digest: str,
+    scope_ceiling: AuthorizationScopeKind = AuthorizationScopeKind.TASK,
+    max_bytes: int = 262_144,
+) -> PrivacyPolicy:
     channels = {channel: _disabled(channel) for channel in EgressChannel}
     channels[EgressChannel.LLM_INFERENCE] = ChannelPolicy(
         EgressChannel.LLM_INFERENCE,
@@ -117,9 +124,9 @@ def _minimal_external(*, scope: AuthorizationScope, policy_id: str, digest: str)
             "external",
         ),
         ("semantic-review",),
-        AuthorizationScopeKind.TASK,
+        scope_ceiling,
         False,
-        262_144,
+        max_bytes,
         4096,
         300,
     )
@@ -216,3 +223,76 @@ def test_privacy_policy_meet_is_commutative_for_local_and_external() -> None:
     assert right.profile is PrivacyProfile.LOCAL_ONLY
     assert _llm_authorized(left) is False
     assert _llm_authorized(right) is False
+
+
+def _llm(policy: PrivacyPolicy) -> ChannelPolicy:
+    return next(
+        channel
+        for channel in policy.channel_policies
+        if channel.channel is EgressChannel.LLM_INFERENCE
+    )
+
+
+def test_meet_keeps_the_narrower_scope_ceiling() -> None:
+    """A lower scope rank is a *broader* ceiling, so the meet must keep the higher-ranked one.
+
+    ``machine`` is the widest authorization ceiling a channel can carry and ``request`` the
+    narrowest — the widen/tighten ceremony classifies ``task -> machine`` as
+    ``scope_ceiling_broadened``. Intersecting a machine ceiling with a task ceiling must
+    therefore yield ``task``, never ``machine``.
+    """
+
+    wide = _minimal_external(
+        scope=_machine_scope(),
+        policy_id=_POLICY_M,
+        digest=_DIGEST_M,
+        scope_ceiling=AuthorizationScopeKind.MACHINE,
+    )
+    narrow = _minimal_external(
+        scope=_workspace_scope(),
+        policy_id=_POLICY_W,
+        digest=_DIGEST_W,
+        scope_ceiling=AuthorizationScopeKind.TASK,
+    )
+    assert _llm(wide.meet(narrow)).scope_ceiling is AuthorizationScopeKind.TASK
+    assert _llm(narrow.meet(wide)).scope_ceiling is AuthorizationScopeKind.TASK
+
+
+def test_meet_keeps_the_smaller_byte_ceiling() -> None:
+    wide = _minimal_external(
+        scope=_machine_scope(), policy_id=_POLICY_M, digest=_DIGEST_M, max_bytes=262_144
+    )
+    narrow = _minimal_external(
+        scope=_workspace_scope(), policy_id=_POLICY_W, digest=_DIGEST_W, max_bytes=1024
+    )
+    assert _llm(wide.meet(narrow)).max_bytes == 1024
+    assert _llm(narrow.meet(wide)).max_bytes == 1024
+
+
+@pytest.mark.parametrize("store_kind", ["catalog", "memory"])
+def test_effective_generation_tracks_the_most_specific_row(store_kind: str) -> None:
+    """The reported generation is the CAS token the transition path checks against the exact row.
+
+    ``prepare_transition``/``commit_transition`` compare ``expected_generation`` against
+    ``_current_exact(scope)``. Reporting a composed maximum across ancestors would make every
+    transition at that scope fail ``privacy_policy_stale`` once an ancestor outran it.
+    """
+
+    machine = _local_only(scope=_machine_scope(), policy_id=_POLICY_M, digest=_DIGEST_M)
+    workspace = _minimal_external(scope=_workspace_scope(), policy_id=_POLICY_W, digest=_DIGEST_W)
+
+    async def run() -> tuple[int, int]:
+        if store_kind == "catalog":
+            store: CatalogPrivacyPolicyStore | MemoryPrivacyPolicyStore = CatalogPrivacyPolicyStore(
+                _database(), _Clock()
+            )
+        else:
+            store = MemoryPrivacyPolicyStore(MemoryPrivacyCatalogState(), _Clock())
+        await store.seed_if_absent(machine)
+        await store.seed_if_absent(workspace)
+        effective = await store.effective_policy(_task_scope())
+        exact = await store.effective_policy(_workspace_scope())
+        return effective.generation, exact.generation
+
+    composed_generation, workspace_generation = asyncio.run(run())
+    assert composed_generation == workspace_generation

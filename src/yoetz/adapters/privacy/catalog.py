@@ -549,7 +549,13 @@ class CatalogPrivacyPolicyStore:
         composed = ordered[0][0]
         for policy, _generation in ordered[1:]:
             composed = composed.meet(policy)
-        generation = max(item[1] for item in eligible)
+        # Generation stays the most-specific eligible row's own generation, because it is the
+        # CAS token prepare_transition/commit_transition compare against _current_exact(scope).
+        # Reporting a composed maximum here would make every transition at that scope fail
+        # privacy_policy_stale whenever an ancestor row carried a higher generation. Staleness
+        # against ancestor movement is still caught: effective_digest below is the meet digest,
+        # and it is the other half of the same precondition.
+        generation = ordered[-1][1]
         return EffectivePrivacyPolicy(composed, generation, composed.policy_digest)
 
     async def prepare_transition(
