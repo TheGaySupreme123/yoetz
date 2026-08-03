@@ -119,6 +119,7 @@ obligation_change_invalid
 obligation_resolution_invalid
 obligation_resolution_mismatch
 operation_recovery_unavailable
+ownership_contended
 payload_redaction_mismatch
 plan_version_conflict
 privacy_projection_unavailable
@@ -335,7 +336,7 @@ def test_public_error_code_membership() -> None:
 def test_protocol_reason_registry_is_exact_and_import_order_independent() -> None:
     source_values = cast(tuple[str, ...], getattr(errors_module, "_PROTOCOL_REASON_CODE_VALUES"))
     assert source_values == _EXPECTED_REASON_CODES
-    assert len(source_values) == 138
+    assert len(source_values) == 139
     assert source_values == tuple(sorted(source_values, key=str.encode))
     assert len(source_values) == len(set(source_values))
     assert PROTOCOL_REASON_CODES == frozenset(_EXPECTED_REASON_CODES)

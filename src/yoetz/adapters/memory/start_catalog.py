@@ -11,7 +11,7 @@ from types import TracebackType
 from typing import Final, Protocol
 
 from yoetz.domain.privacy import LocalDisclosureSink
-from yoetz.domain.values import format_rfc3339_millis
+from yoetz.domain.values import format_rfc3339_millis, validate_commitment
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.keys import MacKeyHandle
@@ -356,6 +356,20 @@ class MemoryStartCatalogAdapter:
             if record is None or record.active_session_id != session:
                 raise _error(PublicErrorCode.STORAGE_CORRUPT)
         return _route_value(record)
+
+    async def list_workspace_task_ids(self, workspace_ref_commitment: str) -> tuple[str, ...]:
+        try:
+            validate_commitment(workspace_ref_commitment)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        async with self._lock:
+            task_ids = sorted(
+                record.task_id
+                for record in self._state.routes.values()
+                if record.workspace_ref_commitment == workspace_ref_commitment
+                and record.state is not TaskRouteState.QUARANTINED
+            )
+        return tuple(task_ids)
 
     async def lookup(self, key: PublishResponseKey) -> StoredPublishResponse | None:
         if type(key) is not PublishResponseKey:

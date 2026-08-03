@@ -35,10 +35,14 @@ _NOW = datetime(2026, 7, 19, tzinfo=UTC)
 class _FakeRecoveryPersistence:
     quarantines: list[RecoveryReason]
     verification_count: int
+    _live_generation: int | None
+    _live_nonce: str | None
 
     def __init__(self) -> None:
         self.quarantines = []
         self.verification_count = 0
+        self._live_generation = None
+        self._live_nonce = None
 
     def inspect(
         self,
@@ -66,11 +70,28 @@ class _FakeRecoveryPersistence:
         owner_nonce: str,
         now: datetime,
     ) -> int:
-        del service_instance_id, service_generation, owner_nonce, now
-        return state.owner_generation + 1
+        del service_instance_id, service_generation, now
+        # Model the production CAS: a second acquire with a stale inspected snapshot conflicts
+        # and mutates nothing, rather than always returning state.owner_generation + 1.
+        if self._live_generation is not None and (
+            state.owner_generation != self._live_generation or state.owner_nonce != self._live_nonce
+        ):
+            raise ValueError("recovery_ownership_conflict")
+        next_generation = state.owner_generation + 1
+        self._live_generation = next_generation
+        self._live_nonce = owner_nonce
+        return next_generation
 
     def verify_fence(self, state: RecoveryState, fence: OwnershipFence) -> None:
-        assert fence.owner_generation > state.owner_generation
+        # Match production CAS semantics: fence must equal the live generation+nonce
+        # written by acquire, not merely exceed the pre-acquire inspect snapshot.
+        del state
+        if (
+            self._live_generation is None
+            or fence.owner_generation != self._live_generation
+            or fence.nonce != self._live_nonce
+        ):
+            raise ValueError("recovery_fence_invalid")
         self.verification_count += 1
 
     def complete_interrupted(

@@ -13,7 +13,7 @@ from typing import Final, Literal, cast
 import apsw
 
 from yoetz.domain.privacy import LocalDisclosureSink
-from yoetz.domain.values import format_rfc3339_millis, parse_rfc3339_millis
+from yoetz.domain.values import format_rfc3339_millis, parse_rfc3339_millis, validate_commitment
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.keys import MacKeyHandle
@@ -478,6 +478,30 @@ class SqliteStartCatalog:
         if len(rows) != 1:
             raise _error(PublicErrorCode.STORAGE_CORRUPT)
         return _route_value(_route_from_row(rows[0]))
+
+    async def list_workspace_task_ids(self, workspace_ref_commitment: str) -> tuple[str, ...]:
+        """Return non-quarantined task ids under one workspace commitment, ascending.
+
+        Returns task ids only — never refs, titles, or commitments — so the seam carries
+        no user-controlled content. Future cross-conversation discovery builds on this.
+        """
+
+        try:
+            validate_commitment(workspace_ref_commitment)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        rows = self._rows(
+            "SELECT task_id FROM task_routes "
+            "WHERE workspace_ref_commitment = ? AND state != 'quarantined' "
+            "ORDER BY task_id ASC",
+            (workspace_ref_commitment,),
+        )
+        task_ids: list[str] = []
+        for row in rows:
+            if len(row) != 1 or type(row[0]) is not str:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            task_ids.append(row[0])
+        return tuple(task_ids)
 
     async def lookup(self, key: PublishResponseKey) -> StoredPublishResponse | None:
         if type(key) is not PublishResponseKey:

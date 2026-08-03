@@ -471,6 +471,63 @@ async def test_public_operation_error_surfaces_as_ok_false_not_internal_error() 
     await daemon.close()
 
 
+@pytest.mark.anyio
+async def test_runtime_value_error_through_dispatch_is_correlated_internal_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Runtime ValueError after validation must not collapse into frame_invalid (#126 C9)."""
+
+    import yoetz.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+
+    async def boom(request: object) -> object:
+        del request
+        raise ValueError("recovery_generation_not_advanced")
+
+    application.start = boom  # type: ignore[method-assign]
+
+    result = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.START, _start_body()),
+    )
+
+    assert result.outcome == "error"
+    assert isinstance(result.body, ControlError)
+    assert result.body.reason == "internal_error"
+    assert result.body.correlation_id is not None
+    found = lookup_diagnostic_records(result.body.correlation_id, root=tmp_path)
+    assert len(found) == 1
+    assert found[0]["component"] == "service.daemon"
+    assert found[0]["operation"] == "start_internal_error"
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_genuinely_malformed_control_request_is_still_frame_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yoetz.service.control_protocol import ControlProtocolError
+
+    daemon, _application, _vault, _listener = _daemon()
+    await daemon.start()
+
+    def _reject(_request: object) -> None:
+        raise ControlProtocolError("frame_invalid")
+
+    monkeypatch.setattr(daemon_module, "validate_request", _reject)
+    result = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.START, _start_body()),
+    )
+    assert result.outcome == "error"
+    assert isinstance(result.body, ControlError)
+    assert result.body.reason == "frame_invalid"
+    await daemon.close()
+
+
 def _accepted_publish_work_result(request_id: str) -> PublishWorkResult:
     """An ok:false body is enough here: only the post-commit response path is under test."""
 

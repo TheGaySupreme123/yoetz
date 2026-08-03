@@ -671,18 +671,23 @@ class ServiceDaemon:
         """Validate, admit, execute, project, and correlate one ordinary call."""
 
         try:
-            if type(client_kind) is not ControlClientKind:
-                raise ControlError("method_forbidden")
-            if projection_context is None:
-                projection_context = ClientProjectionContext.fail_safe(client_kind)
-            elif (
-                type(projection_context) is not ClientProjectionContext
-                or projection_context.client_kind is not client_kind
-            ):
-                raise ControlError("frame_invalid")
-            validate_request(request)
-            self._validate_generation(request)
-            self._validate_client_method(client_kind, request.method)
+            try:
+                if type(client_kind) is not ControlClientKind:
+                    raise ControlError("method_forbidden")
+                if projection_context is None:
+                    projection_context = ClientProjectionContext.fail_safe(client_kind)
+                elif (
+                    type(projection_context) is not ClientProjectionContext
+                    or projection_context.client_kind is not client_kind
+                ):
+                    raise ControlError("frame_invalid")
+                validate_request(request)
+                self._validate_generation(request)
+                self._validate_client_method(client_kind, request.method)
+            except ControlProtocolError, TypeError, ValueError:
+                # Only the validation prefix maps to frame_invalid. Runtime TypeError/ValueError
+                # from method dispatch must reach the correlated internal_error branch below.
+                return self._error_result(request, ControlError("frame_invalid"))
             if request.method is ControlMethod.SERVICE_STATUS:
                 body: object = self.status()
             elif request.method is ControlMethod.SERVICE_LOCK:
@@ -705,8 +710,6 @@ class ServiceDaemon:
             return self._error_result(request, ControlError(reason, retryable=True))
         except PublicOperationError as exc:
             return self._public_operation_failure_result(request, exc)
-        except ControlProtocolError, TypeError, ValueError:
-            return self._error_result(request, ControlError("frame_invalid"))
         except Exception as exc:
             # Unexpected failure outside the post-commit projection window. A read never committed
             # anything, so the remedy is repeating the request with a fresh request_id — the same

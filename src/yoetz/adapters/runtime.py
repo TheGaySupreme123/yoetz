@@ -175,6 +175,8 @@ class _Entry:
     importer: ImporterPort
     authority: frozenset[RuntimeCapability]
     usages: int = 0
+    # Leases claimed by _entry_for but not yet counted in usages (validate_fence window).
+    pending: int = 0
     poisoned: bool = False
     closed: bool = False
 
@@ -450,31 +452,68 @@ class LocalBundleRuntime(BundleRuntimePort):
         while True:
             self._require_ready()
             close_before_open: _Entry | None = None
+            rebind_entry: _Entry | None = None
             async with self._lock:
                 entry = self._entries.get(task_id)
                 if entry is not None and not entry.poisoned:
                     if self._same_route(
                         entry.inspection.route, inspection.route
                     ) and required_authority.issubset(entry.authority):
+                        # Claim a pending lease before release so rebind cannot race the
+                        # validate_fence window in _lease where usages is still zero.
+                        entry.pending += 1
                         self._entries.move_to_end(task_id)
                         return entry
-                    if entry.usages:
-                        raise _error(PublicErrorCode.BUNDLE_BUSY, _BUSY, retryable=True)
-                    entry.poisoned = True
-                    self._entries.pop(task_id, None)
-                    close_before_open = entry
-                opening = self._opening.get(task_id)
-                if opening is None:
-                    if len(self._entries) + len(self._opening) >= (
-                        self._policy.max_idle_tasks + self._policy.max_opening_tasks
+                    # Same-bundle session rebind: attach keeps task/route generation/identity and
+                    # only changes session/writer. Reuse the open ports and fence instead of
+                    # poison-close-reopen, which would destroy the only writable handle on failure.
+                    # Block rebind while any lease is live or still validating (pending > 0).
+                    if (
+                        self._same_bundle_route(entry.inspection.route, inspection.route)
+                        and entry.usages == 0
+                        and entry.pending == 0
+                        and required_authority.issubset(entry.authority)
                     ):
+                        entry.inspection = inspection
+                        entry.pending += 1
+                        self._entries.move_to_end(task_id)
+                        rebind_entry = entry
+                    elif entry.usages or entry.pending:
                         raise _error(PublicErrorCode.BUNDLE_BUSY, _BUSY, retryable=True)
-                    opening = asyncio.create_task(
-                        self._open_entry(inspection, access, provision_mode=provision_mode)
+                    else:
+                        entry.poisoned = True
+                        self._entries.pop(task_id, None)
+                        close_before_open = entry
+                if rebind_entry is None:
+                    opening = self._opening.get(task_id)
+                    if opening is None:
+                        if len(self._entries) + len(self._opening) >= (
+                            self._policy.max_idle_tasks + self._policy.max_opening_tasks
+                        ):
+                            raise _error(PublicErrorCode.BUNDLE_BUSY, _BUSY, retryable=True)
+                        opening = asyncio.create_task(
+                            self._open_entry(inspection, access, provision_mode=provision_mode)
+                        )
+                        self._opening[task_id] = opening
+                else:
+                    opening = None
+            if rebind_entry is not None:
+                try:
+                    await self._factories.validate_fence(
+                        rebind_entry.inspection, rebind_entry.fence
                     )
-                    self._opening[task_id] = opening
+                except BaseException:
+                    async with self._lock:
+                        rebind_entry.pending = max(0, rebind_entry.pending - 1)
+                        if self._entries.get(task_id) is rebind_entry:
+                            rebind_entry.poisoned = True
+                            self._entries.pop(task_id, None)
+                    await self._close_entry(rebind_entry)
+                    raise
+                return rebind_entry
             if close_before_open is not None:
                 await self._close_entry(close_before_open)
+            assert opening is not None
             try:
                 opened = await asyncio.shield(opening)
             except asyncio.CancelledError:
@@ -497,6 +536,7 @@ class LocalBundleRuntime(BundleRuntimePort):
                 if self._closed or not ready:
                     opened.poisoned = True
                 else:
+                    opened.pending += 1
                     self._entries[task_id] = opened
                     self._entries.move_to_end(task_id)
                     return opened
@@ -589,12 +629,18 @@ class LocalBundleRuntime(BundleRuntimePort):
                 raise
 
     @staticmethod
-    def _same_route(left: TaskRoute, right: TaskRoute) -> bool:
+    def _same_bundle_route(left: TaskRoute, right: TaskRoute) -> bool:
         return (
             left.task_id == right.task_id
-            and left.session_id == right.session_id
             and left.route_generation == right.route_generation
             and left.route_identity_digest == right.route_identity_digest
+        )
+
+    @staticmethod
+    def _same_route(left: TaskRoute, right: TaskRoute) -> bool:
+        return (
+            LocalBundleRuntime._same_bundle_route(left, right)
+            and left.session_id == right.session_id
         )
 
     @staticmethod
@@ -618,51 +664,59 @@ class LocalBundleRuntime(BundleRuntimePort):
         access: RouteAccess,
         writer_id: str | None,
     ) -> TaskRuntime:
-        self._require_ready()
-        await self._factories.validate_fence(entry.inspection, entry.fence)
-        self._require_ready()
-        route = entry.inspection.route
-        ledger: LedgerPort
-        objects: ObjectStorePort
-        importer: ImporterPort
-        observation: TaskObservationPort | None = None
-        if access in {RouteAccess.WRITE, RouteAccess.IMPORT_REVIEW, RouteAccess.MAINTENANCE}:
-            ledger = entry.ledger
-            objects = entry.objects
-            importer = entry.importer
-            if RuntimeCapability.WRITE in admitted:
-                observation = _observation_for(entry.ledger)
-        else:
-            ledger = cast(LedgerPort, _ReadLedger(entry.ledger))
-            objects = cast(
-                ObjectStorePort,
-                _PayloadObjects(entry.objects)
-                if access is RouteAccess.PAYLOAD_READ
-                else _StructuralObjects(),
+        # pending was claimed in _entry_for; release it on every exit path so rebind cannot
+        # observe a zero-usages window while validate_fence is still in flight.
+        try:
+            self._require_ready()
+            await self._factories.validate_fence(entry.inspection, entry.fence)
+            self._require_ready()
+            route = entry.inspection.route
+            ledger: LedgerPort
+            objects: ObjectStorePort
+            importer: ImporterPort
+            observation: TaskObservationPort | None = None
+            if access in {RouteAccess.WRITE, RouteAccess.IMPORT_REVIEW, RouteAccess.MAINTENANCE}:
+                ledger = entry.ledger
+                objects = entry.objects
+                importer = entry.importer
+                if RuntimeCapability.WRITE in admitted:
+                    observation = _observation_for(entry.ledger)
+            else:
+                ledger = cast(LedgerPort, _ReadLedger(entry.ledger))
+                objects = cast(
+                    ObjectStorePort,
+                    _PayloadObjects(entry.objects)
+                    if access is RouteAccess.PAYLOAD_READ
+                    else _StructuralObjects(),
+                )
+                importer = cast(ImporterPort, _StatusImporter(entry.importer))
+            versions = self._versions()
+            runtime = TaskRuntime(
+                task_id=route.task_id,
+                session_id=route.session_id,
+                writer_id=writer_id,
+                capabilities=admitted,
+                ledger=ledger,
+                objects=objects,
+                importer=importer,
+                projection_version=versions["projection_version"],
+                engine_version=versions["engine_version"],
+                protocol_version=versions["protocol_version"],
+                bundle_schema_version=versions["bundle_schema_version"],
+                fence=entry.fence,
+                observation=observation,
             )
-            importer = cast(ImporterPort, _StatusImporter(entry.importer))
-        versions = self._versions()
-        runtime = TaskRuntime(
-            task_id=route.task_id,
-            session_id=route.session_id,
-            writer_id=writer_id,
-            capabilities=admitted,
-            ledger=ledger,
-            objects=objects,
-            importer=importer,
-            projection_version=versions["projection_version"],
-            engine_version=versions["engine_version"],
-            protocol_version=versions["protocol_version"],
-            bundle_schema_version=versions["bundle_schema_version"],
-            fence=entry.fence,
-            observation=observation,
-        )
-        async with self._lock:
-            if entry.poisoned or self._closed:
-                raise _error(PublicErrorCode.SERVICE_UNAVAILABLE, _STALE, retryable=True)
-            entry.usages += 1
-            self._usages[id(runtime)] = entry
-        return runtime
+            async with self._lock:
+                if entry.poisoned or self._closed:
+                    raise _error(PublicErrorCode.SERVICE_UNAVAILABLE, _STALE, retryable=True)
+                entry.usages += 1
+                entry.pending = max(0, entry.pending - 1)
+                self._usages[id(runtime)] = entry
+            return runtime
+        except BaseException:
+            async with self._lock:
+                entry.pending = max(0, entry.pending - 1)
+            raise
 
     def _versions(self) -> dict[str, str]:
         names = (
@@ -714,7 +768,9 @@ class LocalBundleRuntime(BundleRuntimePort):
         )
         await self._factories.validate_fence(entry.inspection, entry.fence)
         self._require_ready()
-        if evidence.owner_generation != entry.fence.owner_generation:
+        # evidence.owner_generation is the start-lease / service generation; bundle fence
+        # rotation is already caught by validate_fence against fence.owner_generation + nonce.
+        if evidence.owner_generation != entry.fence.service_generation:
             raise _error(PublicErrorCode.STORAGE_UNSAFE, _STALE, retryable=True)
         return evidence
 
@@ -727,7 +783,11 @@ class LocalBundleRuntime(BundleRuntimePort):
             if entry is None:
                 return
             entry.usages -= 1
-            idle = [candidate for candidate in self._entries.values() if candidate.usages == 0]
+            idle = [
+                candidate
+                for candidate in self._entries.values()
+                if candidate.usages == 0 and candidate.pending == 0
+            ]
             while len(idle) > self._policy.max_idle_tasks:
                 candidate = idle.pop(0)
                 candidate.poisoned = True

@@ -255,6 +255,52 @@ async def test_attachment_conflict_and_quarantine_paths() -> None:
 
 
 @pytest.mark.anyio
+async def test_workspace_ref_groups_sibling_tasks_and_pair_attaches() -> None:
+    """Same workspace_ref + different external_ref → two tasks; replaying a pair attaches."""
+
+    harness = _Harness.create(840)
+    first_request = await harness.command(841, mode=StartMode.CREATE_OR_ATTACH, refs="A")
+    # Distinct external_ref under the same workspace by rebuilding identity.
+    first = await harness.catalog.reserve_or_resume(first_request)
+    await _complete(harness.catalog, first, 842)
+
+    identity_b = StartIdentityInput("Task title", "workspace-A", "external-B")
+    commitments_b = await harness.catalog.commit_identity(identity_b)
+    second_request = StartCommand(
+        _id(IdKind.REQUEST, 843),
+        canonical_digest(
+            {
+                "external": commitments_b.external_ref_commitment,
+                "mode": StartMode.CREATE_OR_ATTACH.value,
+                "session_id": None,
+                "title": commitments_b.title_commitment,
+                "workspace": commitments_b.workspace_ref_commitment,
+            }
+        ),
+        StartMode.CREATE_OR_ATTACH,
+        identity_b,
+        commitments_b,
+        None,
+    )
+    second = await harness.catalog.reserve_or_resume(second_request)
+    await _complete(harness.catalog, second, 844)
+
+    assert second.task_id != first.task_id
+    workspace = first_request.identity_commitments.workspace_ref_commitment
+    assert workspace is not None
+    grouped = await harness.catalog.list_workspace_task_ids(workspace)
+    assert grouped == tuple(sorted((first.task_id, second.task_id)))
+
+    # Replaying the first pair attaches rather than creating a third task.
+    attach_request = await harness.command(845, mode=StartMode.CREATE_OR_ATTACH, refs="A")
+    attached = await harness.catalog.reserve_or_resume(attach_request)
+    assert attached.route_action == "attached"
+    assert attached.task_id == first.task_id
+    grouped_after = await harness.catalog.list_workspace_task_ids(workspace)
+    assert grouped_after == grouped
+
+
+@pytest.mark.anyio
 async def test_expiry_and_stale_generation_reclaim() -> None:
     harness = _Harness.create(830)
     expired_request = await harness.command(831, refs="expired")

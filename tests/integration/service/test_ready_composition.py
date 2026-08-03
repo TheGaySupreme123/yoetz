@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +13,7 @@ import apsw
 import pytest
 
 import yoetz.adapters.sqlite.connection as connection_module
+import yoetz.adapters.sqlite.recovery as recovery_module
 import yoetz.service.ready_composition as ready_composition_module
 from builders.privacy_policies import minimal_external_policy
 from yoetz.adapters.keys.encrypted_vault import EncryptedVaultStore
@@ -336,6 +337,358 @@ async def test_ready_factory_installs_application_that_starts(tmp_path: Path) ->
         assert isinstance(projected, StartResult)
         assert projected.root.ok is True
         assert projected.root.request_id == request.request_id
+    finally:
+        if app is not None:
+            await app.close()
+        await vault.close()
+        memory.close()
+        await lifecycle.close()
+
+
+def _bundle_meta(tmp_path: Path, task_id: str) -> dict[str, str]:
+    ledger = tmp_path / "tasks" / task_id / "ledger.sqlite3"
+    db = apsw.Connection(
+        f"file:{ledger}?mode=ro", flags=apsw.SQLITE_OPEN_URI | apsw.SQLITE_OPEN_READONLY
+    )
+    try:
+        rows = db.execute("SELECT key, value FROM bundle_meta").fetchall()
+    finally:
+        db.close(force=True)
+    return {cast(str, row[0]): cast(str, row[1]) for row in rows}
+
+
+@pytest.mark.anyio
+async def test_create_then_attach_same_service_generation_advances_owner_once(
+    tmp_path: Path,
+) -> None:
+    """create then attach in one service generation must succeed and advance ownership once.
+
+    Regression for issue #126 / postmortem 019fc8b8: same-generation attach rewrote owner
+    metadata then failed with recovery_generation_not_advanced, poisoning the runtime cache.
+    """
+
+    tmp_path.chmod(0o700)
+    clock = _Clock()
+    memory = LocalSecretMemory()
+    lifecycle = ServiceLifecycle(
+        clock,
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "a" * 64,
+        instance_id=_INSTANCE_ID,
+    )
+    await lifecycle.acquire_singleton()
+    await lifecycle.transition(ServiceState.LOCKED)
+    vault = VaultService(
+        installation_id=_INSTALLATION_ID,
+        service_generation=1,
+        mode=VaultMode.UNINITIALIZED,
+        secret_memory=memory,
+        clock=clock,
+        vault_store_factory=lambda: EncryptedVaultStore(tmp_path / "vault"),
+        pristine_state_digest="sha256:" + "b" * 64,
+    )
+    initialize = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"correct horse battery"))
+    await vault.initialize_passphrase(initialize, "sha256:" + "c" * 64)
+    app = None
+    try:
+        factory = build_ready_application_factory(
+            lifecycle=lifecycle,
+            vault=vault,
+            config=YoetzConfig(),
+            paths=_Paths(tmp_path),
+            clock=clock,
+            secret_memory=memory,
+            diagnostics=_Diagnostics(),
+        )
+        app = await factory(1, vault.generation)
+        common = {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "actor": {"actor_id": "harness:pytest", "actor_type": "harness"},
+            "client": {
+                "kind": "codex_cli",
+                "version": "0.144.6",
+                "integration": "local_cli",
+            },
+            "requested_view": "compact",
+            "task_title": "Resume ownership regression",
+            "workspace_ref": "https://github.com/example/yoetz-core.git",
+            "external_ref": "plan/fix-resumption-ownership",
+        }
+        created = await app.start(
+            StartRequest.model_validate(
+                {
+                    **common,
+                    "request_id": "req_00000000-0000-4000-8000-000000000201",
+                    "mode": "create",
+                }
+            )
+        )
+        assert created.ok is True
+        assert created.outcome == "created"
+        after_create = _bundle_meta(tmp_path, created.task_id)
+        assert after_create["owner_generation"] == "1"
+
+        attached = await app.start(
+            StartRequest.model_validate(
+                {
+                    **common,
+                    "request_id": "req_00000000-0000-4000-8000-000000000202",
+                    "mode": "attach",
+                    "session_id": created.session_id,
+                }
+            )
+        )
+        assert attached.ok is True
+        assert attached.outcome == "attached"
+        assert attached.task_id == created.task_id
+        assert attached.session_id != created.session_id
+        assert attached.writer_id != created.writer_id
+
+        after_attach = _bundle_meta(tmp_path, created.task_id)
+        # Rebind keeps the create-time fence: ownership advanced exactly once from the fresh "0".
+        assert after_attach["owner_generation"] == "1"
+        assert after_attach["owner_nonce"] == after_create["owner_nonce"]
+    finally:
+        if app is not None:
+            await app.close()
+        await vault.close()
+        memory.close()
+        await lifecycle.close()
+
+
+@pytest.mark.anyio
+async def test_attach_failure_before_ownership_commit_leaves_meta_and_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reopen-path ownership failure must not rewrite bundle_meta or strand the task."""
+
+    tmp_path.chmod(0o700)
+    clock = _Clock()
+    memory = LocalSecretMemory()
+    lifecycle = ServiceLifecycle(
+        clock,
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "d" * 64,
+        instance_id=_INSTANCE_ID,
+    )
+    await lifecycle.acquire_singleton()
+    await lifecycle.transition(ServiceState.LOCKED)
+    vault = VaultService(
+        installation_id=_INSTALLATION_ID,
+        service_generation=1,
+        mode=VaultMode.UNINITIALIZED,
+        secret_memory=memory,
+        clock=clock,
+        vault_store_factory=lambda: EncryptedVaultStore(tmp_path / "vault"),
+        pristine_state_digest="sha256:" + "e" * 64,
+    )
+    initialize = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"correct horse battery"))
+    await vault.initialize_passphrase(initialize, "sha256:" + "f" * 64)
+    app = None
+    try:
+        factory = build_ready_application_factory(
+            lifecycle=lifecycle,
+            vault=vault,
+            config=YoetzConfig(),
+            paths=_Paths(tmp_path),
+            clock=clock,
+            secret_memory=memory,
+            diagnostics=_Diagnostics(),
+        )
+        app = await factory(1, vault.generation)
+        common = {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "actor": {"actor_id": "harness:pytest", "actor_type": "harness"},
+            "client": {
+                "kind": "codex_cli",
+                "version": "0.144.6",
+                "integration": "local_cli",
+            },
+            "requested_view": "compact",
+            "task_title": "Ownership failure atomicity",
+            "workspace_ref": "https://github.com/example/yoetz-core.git",
+            "external_ref": "plan/ownership-failure-atomicity",
+        }
+        created = await app.start(
+            StartRequest.model_validate(
+                {
+                    **common,
+                    "request_id": "req_00000000-0000-4000-8000-000000000211",
+                    "mode": "create",
+                }
+            )
+        )
+        before = _bundle_meta(tmp_path, created.task_id)
+
+        # Force close-then-reopen rather than same-bundle rebind: close the cached entry.
+        runtime = app.runtime
+        entries = cast(dict[str, object], getattr(runtime, "_entries"))
+        entry = entries.pop(created.task_id)
+        setattr(entry, "poisoned", True)
+        close_entry = cast(
+            Callable[[object], Awaitable[None]],
+            getattr(runtime, "_close_entry"),
+        )
+        await close_entry(entry)
+
+        backend = recovery_module._backend()  # pyright: ignore[reportPrivateUsage]
+        original = backend.acquire_ownership
+
+        def _failing_acquire(
+            state: object,
+            *,
+            service_instance_id: str,
+            service_generation: int,
+            owner_nonce: str,
+            now: datetime,
+        ) -> int:
+            del state, service_instance_id, service_generation, owner_nonce, now
+            raise ValueError("injected_acquire_failure")
+
+        monkeypatch.setattr(backend, "acquire_ownership", _failing_acquire)
+        with pytest.raises(ValueError, match="injected_acquire_failure"):
+            await app.start(
+                StartRequest.model_validate(
+                    {
+                        **common,
+                        "request_id": "req_00000000-0000-4000-8000-000000000212",
+                        "mode": "attach",
+                        "session_id": created.session_id,
+                    }
+                )
+            )
+        monkeypatch.setattr(backend, "acquire_ownership", original)
+
+        after = _bundle_meta(tmp_path, created.task_id)
+        assert after["owner_generation"] == before["owner_generation"]
+        assert after["owner_nonce"] == before["owner_nonce"]
+        assert after["updated_at"] == before["updated_at"]
+
+        # Original ownership still admits a successful attach once the injection is removed.
+        recovered = await app.start(
+            StartRequest.model_validate(
+                {
+                    **common,
+                    "request_id": "req_00000000-0000-4000-8000-000000000213",
+                    "mode": "attach",
+                    "session_id": created.session_id,
+                }
+            )
+        )
+        assert recovered.ok is True
+        assert recovered.outcome == "attached"
+        assert recovered.task_id == created.task_id
+    finally:
+        if app is not None:
+            await app.close()
+        await vault.close()
+        memory.close()
+        await lifecycle.close()
+
+
+@pytest.mark.anyio
+async def test_stale_recovery_state_cas_loser_mutates_nothing(tmp_path: Path) -> None:
+    """Two interleaved stale RecoveryState snapshots: exactly one CAS wins."""
+
+    tmp_path.chmod(0o700)
+    clock = _Clock()
+    memory = LocalSecretMemory()
+    lifecycle = ServiceLifecycle(
+        clock,
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "11" * 32,
+        instance_id=_INSTANCE_ID,
+    )
+    await lifecycle.acquire_singleton()
+    await lifecycle.transition(ServiceState.LOCKED)
+    vault = VaultService(
+        installation_id=_INSTALLATION_ID,
+        service_generation=1,
+        mode=VaultMode.UNINITIALIZED,
+        secret_memory=memory,
+        clock=clock,
+        vault_store_factory=lambda: EncryptedVaultStore(tmp_path / "vault"),
+        pristine_state_digest="sha256:" + "22" * 32,
+    )
+    initialize = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"correct horse battery"))
+    await vault.initialize_passphrase(initialize, "sha256:" + "33" * 32)
+    app = None
+    try:
+        factory = build_ready_application_factory(
+            lifecycle=lifecycle,
+            vault=vault,
+            config=YoetzConfig(),
+            paths=_Paths(tmp_path),
+            clock=clock,
+            secret_memory=memory,
+            diagnostics=_Diagnostics(),
+        )
+        app = await factory(1, vault.generation)
+        created = await app.start(
+            StartRequest.model_validate(
+                {
+                    "protocol_version": "0.1",
+                    "schema_version": "1.0.0",
+                    "request_id": "req_00000000-0000-4000-8000-000000000221",
+                    "mode": "create",
+                    "task_title": "CAS interleaving",
+                    "actor": {"actor_id": "harness:pytest", "actor_type": "harness"},
+                    "client": {
+                        "kind": "codex_cli",
+                        "version": "0.144.6",
+                        "integration": "local_cli",
+                    },
+                    "requested_view": "compact",
+                }
+            )
+        )
+        before = _bundle_meta(tmp_path, created.task_id)
+        backend = cast(
+            ready_composition_module._RecoveryPersistence,  # pyright: ignore[reportPrivateUsage]
+            recovery_module._backend(),  # pyright: ignore[reportPrivateUsage]
+        )
+        ledger = tmp_path / "tasks" / created.task_id
+        state = cast(
+            recovery_module.RecoveryState,
+            backend.inspect(
+                ledger,
+                catalog_path=tmp_path / "catalog.sqlite3",
+                task_id=created.task_id,
+                route_generation=int(before["route_generation"], 10),
+                route_identity_digest=before["route_identity_digest"],
+            ),
+        )
+        stale = replace(
+            state,
+            owner_generation=int(before["owner_generation"], 10),
+            owner_nonce=before["owner_nonce"],
+        )
+        winner = backend.acquire_ownership(
+            stale,
+            service_instance_id=_INSTANCE_ID,
+            service_generation=1,
+            owner_nonce="winner-owner-nonce-0000001",
+            now=clock.now_utc(),
+        )
+        assert winner == int(before["owner_generation"], 10) + 1
+        mid = _bundle_meta(tmp_path, created.task_id)
+        assert mid["owner_generation"] == str(winner)
+        assert mid["owner_nonce"] == "winner-owner-nonce-0000001"
+
+        with pytest.raises(ValueError, match="recovery_ownership_conflict"):
+            backend.acquire_ownership(
+                stale,
+                service_instance_id=_INSTANCE_ID,
+                service_generation=1,
+                owner_nonce="loser-owner-nonce-00000001",
+                now=clock.now_utc(),
+            )
+        after = _bundle_meta(tmp_path, created.task_id)
+        assert after["owner_generation"] == mid["owner_generation"]
+        assert after["owner_nonce"] == mid["owner_nonce"]
+        assert after["updated_at"] == mid["updated_at"]
     finally:
         if app is not None:
             await app.close()

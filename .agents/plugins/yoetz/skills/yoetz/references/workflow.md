@@ -14,7 +14,7 @@ Use Yoetz for material multi-step work, multiple requested outcomes, delegation,
 
 | Operation | How often |
 | --- | --- |
-| `start` | Once per task, before substantive work. On resume, attach to the existing task instead of starting a second one. |
+| `start` | Once per task, before substantive work. On resume (same or fresh conversation), `mode=create_or_attach` with the same `workspace_ref` + `external_ref` pair and no `session_id`; attach selectors are `session_id` or the ref pair, never bare `task_id`. |
 | `publish_work` | One batch per material transition, usually one to eight events; a batch admits up to 100, so keep one transition in one batch rather than splitting it. A normal session is a handful of batches, never one per file, tool call, or message. |
 | `status` | After resume, compaction, or delegate handoff, and before any completion claim. Not between routine tool calls. |
 | `check` | After publishing the completion claim and its evidence, and again after any material edit, new evidence, or finding response. A check with no new events since the last one adds nothing. |
@@ -66,6 +66,20 @@ The parent publishes assignments and gives each delegate a distinct logical writ
 ## Resume and compaction
 
 On resume, attach to the existing task and read status before reconstructing work from memory. Preserve request and writer sequences and do not duplicate a prior publication. A trigger, when an exact capability profile proves one, may prompt the same bounded re-grounding; it observes nothing and changes no coverage.
+
+### Workspace grouping and attach selectors
+
+`start` resumes by one of two selectors (never by bare `task_id`):
+
+1. `session_id` — continue the exact session you already hold.
+2. `workspace_ref` + `external_ref` as a pair — resolve the durable task for that project work item without a `session_id`. Under `mode=create_or_attach`, the same pair creates on first use and attaches on every later conversation.
+
+Convention:
+
+- `workspace_ref` = stable project identity (repository remote URL, or absolute repository root when there is no remote).
+- `external_ref` = stable task identity within that project (branch name, issue reference, or plan slug).
+
+Same conversation resuming, or a fresh conversation continuing the same work → `mode=create_or_attach` with the same pair and no `session_id`. Sibling work in the same project → same `workspace_ref`, different `external_ref`. Both refs are one-shot redacted values: only installation-keyed HMAC commitments are persisted, so a repository path or remote URL never lands in durable state — do not self-censor into unstable refs.
 
 ## Findings and recheck
 

@@ -495,14 +495,37 @@ class _RecoveryPersistence:
         if type(state) is not recovery_module.RecoveryState:
             raise ValueError("recovery_value_invalid")
         validate_id(IdKind.SERVICE_INSTANCE, service_instance_id)
+        # service_generation remains part of the fence; bundle owner_generation is
+        # per-bundle monotonic and independent of the service/catalog generation.
+        del service_generation
         format_rfc3339_millis(now)
         db = _open_recovery_writer(state.bundle_root / _LEDGER_NAME)
         try:
-            with db:
-                self._set_meta(db, "owner_generation", str(service_generation))
-                self._set_meta(db, "owner_nonce", owner_nonce)
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                metadata = self._bundle_meta(db)
+                if (
+                    metadata.get("task_id") != state.task_id
+                    or metadata.get("route_generation") != str(state.route_generation)
+                    or metadata.get("route_identity_digest") != state.route_identity_digest
+                    or metadata.get("owner_generation") != str(state.owner_generation)
+                    or metadata.get("owner_nonce") != state.owner_nonce
+                ):
+                    raise ValueError("recovery_ownership_conflict")
+                next_generation = state.owner_generation + 1
+                if not self._swap_meta(
+                    db, "owner_generation", str(state.owner_generation), str(next_generation)
+                ):
+                    raise ValueError("recovery_ownership_conflict")
+                if not self._swap_meta(db, "owner_nonce", state.owner_nonce, owner_nonce):
+                    raise ValueError("recovery_ownership_conflict")
                 self._set_meta(db, "updated_at", format_rfc3339_millis(now))
-            return service_generation
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            else:
+                db.execute("COMMIT")
+            return next_generation
         finally:
             _close_db(db)
 
@@ -584,6 +607,14 @@ class _RecoveryPersistence:
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, value),
         )
+
+    @staticmethod
+    def _swap_meta(db: apsw.Connection, key: str, expected: str, value: str) -> bool:
+        db.execute(
+            "UPDATE bundle_meta SET value = ? WHERE key = ? AND value = ?",
+            (value, key, expected),
+        )
+        return db.changes() == 1
 
     @staticmethod
     def _frontier(db: apsw.Connection) -> Frontier:
@@ -783,14 +814,24 @@ def build_runtime_adapter_factories(
             )
             registrar(inspection.ledger_path, fence)
             return fence
-        return recovery_module.acquire_bundle_ownership(
-            cast(recovery_module.RecoveryState, inspection.recovery_state),
-            cast(recovery_module.RecoveryTailVerdict, inspection.recovery_verdict),
-            service_instance_id=service_instance_id,
-            service_generation=service_generation,
-            owner_nonce=_nonce(),
-            now=clock.now_utc(),
-        )
+        try:
+            return recovery_module.acquire_bundle_ownership(
+                cast(recovery_module.RecoveryState, inspection.recovery_state),
+                cast(recovery_module.RecoveryTailVerdict, inspection.recovery_verdict),
+                service_instance_id=service_instance_id,
+                service_generation=service_generation,
+                owner_nonce=_nonce(),
+                now=clock.now_utc(),
+            )
+        except ValueError as exc:
+            if str(exc) != "recovery_ownership_conflict":
+                raise
+            raise PublicOperationError(
+                PublicErrorCode.BUNDLE_BUSY,
+                "Task ownership is contended; retry the same request.",
+                True,
+                safe_details={"reason_code": "ownership_contended"},
+            ) from exc
 
     async def validate_fence(inspection: object, fence: OwnershipFence) -> None:
         if type(inspection) is not _BundleInspection:
@@ -869,7 +910,9 @@ def build_runtime_adapter_factories(
         frontier: Frontier | None = None
         if expectation.milestone is not StartMilestone.BUNDLE_READY:
             frontier = await runtime.ledger.load_frontier()
-        owner_generation = runtime.fence.owner_generation
+        # StartCompletionEvidence.owner_generation is the start-lease / catalog generation
+        # (service generation), not the per-bundle monotonic fence owner_generation.
+        owner_generation = runtime.fence.service_generation
         frontier_value: CanonicalJsonValue = (
             None if frontier is None else cast(CanonicalJsonValue, dict(frontier.as_wire()))
         )
