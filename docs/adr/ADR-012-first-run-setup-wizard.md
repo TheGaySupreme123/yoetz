@@ -43,7 +43,10 @@ exactly those contracts and connects the steps without weakening any existing tr
    scope, with a foreground confirmation before every provider request. It is a starting draft,
    not consent or a provider-data-use recommendation. `private` remains the fail-safe no-egress
    choice, while assisted, expanded, and custom policies remain explicit. `yoetz --privacy` enters
-   the same short recommended-first ceremony at any later time.
+   the same short recommended-first ceremony at any later time. The setup update advisory's version
+   parser is a declared, exactly pinned core dependency; a clean installed-artifact gate imports
+   and enters `setup run` so development-only transitive packages cannot hide a missing runtime
+   dependency.
 
 2. **Bounded bare-invocation change (amends ADR-007 decision 3).** The root Typer app drops
    `no_args_is_help=True`; the root callback reproduces the historical help output for every bare
@@ -62,6 +65,17 @@ exactly those contracts and connects the steps without weakening any existing tr
    by trusting the add exit code. Registration remains a fact separate from skill installation and
    from Codex capability support (E-002/E-013 are untouched); "registered" never implies "Codex
    will successfully connect".
+
+   **Founder-authorized Codex activation repair (2026-08-03).** An accepted setup now also installs
+   the packaged project skill at `.agents/skills/yoetz` before it installs the structural plugin
+   sources and registers MCP. A directory at `.agents/plugins/yoetz` is not reported as Codex
+   plugin activation: current Codex requires marketplace registration plus an explicit plugin add,
+   and setup does not silently mutate that global trust/configuration surface. The plugin directory
+   remains a managed source bundle for guidance and hook definitions; the project skill is the
+   discoverable project-local activation cue. On an unprofiled Codex release, setup may install the
+   byte-exact reviewed skill after the enclosing digest-bound project approval, but reports
+   compatibility as `unsupported` and automatic activation as untested. The standalone
+   `integrate skill install` command retains its exact capability gate.
 
 The short `yoetz --set --fireworks --model MODEL` and `yoetz --set --grok --model MODEL` paths are
 provider-only entries into the same setup ceremonies. They derive internal provider bindings and
@@ -143,9 +157,10 @@ availability, structured-output interoperability, provider data use, or E-007 ca
 
 A new user's path is now: `npx yoetz` or `uvx yoetz` → interactive wizard → detected-harness
 selection (Codex in v0.1) → installation selection when needed → explicit `Y`/`N` confirmation →
-local-only or semantic-review choice → route-matched Codex MCP registration → on-demand local
-service → local vault/provider ceremonies when semantic was chosen → recommendation-first privacy
-review → separately reauthenticated privacy decision.
+local-only or semantic-review choice → discoverable project skill → structural plugin/hook sources
+→ route-matched Codex MCP registration → on-demand local service → local vault/provider ceremonies
+when semantic was chosen → recommendation-first privacy review → separately reauthenticated privacy
+decision.
 Each mutating step is previewed, digest-bound, and individually declinable; `yoetz setup status`
 reports the same posture read-only at any time. The CLI support-command matrix grows by one
 (`setup`), recorded in the conformance contract test in the same change.

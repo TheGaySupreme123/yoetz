@@ -39,7 +39,8 @@ Setup is a linear path inside the interface, each finished step collapsing into 
    executable paths appear on selection and under `D`.
 3. **Project trust.** The repository root and what project-local guidance and hooks are permitted
    to do. Starting in a subfolder is called out, with the root the trust applies to.
-4. **The exact proposed change** — managed guidance and hooks, the `yoetz mcp serve` MCP
+4. **The exact proposed change** — a discoverable project skill under `.agents/skills/yoetz`,
+   managed plugin/hook source files under `.agents/plugins/yoetz`, the `yoetz mcp serve` MCP
    registration, bounded structural event recording, and the approved-check policy digest — plus
    what will *not* happen. Nothing is applied before an explicit approval, and the approval is
    bound to the exact preview and policy digests that were displayed: if either has moved, the
@@ -65,8 +66,8 @@ be completed when policy allowed the check but the registry was unreachable.
 
 When re-running setup or `/connect` with the same installed package version and a newer release
 available, Yoetz offers **upgrade first** or **continue with this version** rather than reinstalling
-the same bits. Continuing still adds or repairs harness integration (plugin + MCP) without a
-package reinstall. Yoetz never auto-upgrades.
+the same bits. Continuing still adds or repairs harness integration (project skill + structural
+plugin sources + MCP) without a package reinstall. Yoetz never auto-upgrades.
 
 **Network honesty:** zero-egress for task content remains the product promise. Structural package
 version checks are opt-out network (disable `update_checks` in privacy setup). Non-interactive CLI,
@@ -81,6 +82,14 @@ When a credential is already stored for the exact provider/model, setup asks whe
 
 `codex mcp get` runs first; an existing foreign entry is always preserved, never replaced, and
 there is no force-replace option anywhere in the interface.
+
+Setup reports these activation layers independently. `installed_exact` at
+`.agents/skills/yoetz` proves the reviewed project skill bytes are present, not that a running Codex
+session loaded or followed them. `.agents/plugins/yoetz` proves only that Yoetz's managed plugin and
+hook source files are present; Codex plugin activation requires its separate marketplace/plugin
+trust flow, which setup does not perform silently. MCP `registered` proves only the configuration
+entry. A stopped service can prevent a later MCP call, but it cannot explain a session that never
+discovered the skill or attempted a Yoetz tool.
 
 Local-only remains the safe default and needs no provider. Semantic review is available from the
 same first-run flow when selected; setup is not marked complete if its provider credential or

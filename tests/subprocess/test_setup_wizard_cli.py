@@ -15,9 +15,17 @@ from typer.testing import CliRunner
 
 import yoetz.cli.app as cli
 from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter, CommandOutput
+from yoetz.application.harness_mcp import HarnessMcpService
 from yoetz.ports.control import ControlClientKind, ControlError
 from yoetz.ports.harness_mcp import HarnessBinary
-from yoetz.ports.integrations import HarnessId, IntegrationError, IntegrationReason
+from yoetz.ports.integrations import (
+    HarnessId,
+    IntegrationError,
+    IntegrationReason,
+    IntegrationState,
+    IntegrationTarget,
+    SkillSource,
+)
 from yoetz.service.client import ServiceClient
 
 _RUNNER = CliRunner()
@@ -86,6 +94,15 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
     async def unreachable_on_demand(_kind: ControlClientKind) -> ServiceClient:
         raise ControlError("service_unavailable")
 
+    async def fake_install_project_skill(_target: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "compatibility": "unsupported",
+            "installed_digest": "sha256:" + "c" * 64,
+            "outcome": "installed",
+            "presence": "installed_exact",
+            "reason": None,
+        }
+
     def fake_grant_observation_consent(workspace: Path | None = None) -> dict[str, str]:
         del workspace
         return {
@@ -142,6 +159,20 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
     monkeypatch.setattr(setup_module, "CodexMcpAdapter", fake_adapter)
     monkeypatch.setattr(setup_module, "_configured_mcp_route_profile", lambda: "strict")
     monkeypatch.setattr(setup_module, "CodexPluginService", _FakePluginService)
+
+    def absent_skill_destination(
+        _target: IntegrationTarget, _source: SkillSource
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            state=IntegrationState.ABSENT,
+            installed_digest=None,
+        )
+
+    monkeypatch.setattr(
+        setup_module,
+        "inspect_destination",
+        absent_skill_destination,
+    )
     from yoetz.adapters.integrations.codex_plugin import (
         PluginHookPresence,
         PluginInspection,
@@ -166,6 +197,7 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
         "_grant_observation_consent",
         fake_grant_observation_consent,
     )
+    monkeypatch.setattr(setup_module, "_install_project_skill", fake_install_project_skill)
     monkeypatch.setattr(cli, "build_service_client", unreachable_client)
     monkeypatch.setattr(
         service_client_module,
@@ -202,6 +234,7 @@ def test_non_interactive_accept_registers_and_writes_marker(
     ]
     result = _RUNNER.invoke(cli.app, ["setup", "run", "--non-interactive", "--accept", "--json"])
     assert result.exit_code == 0
+    assert result.stderr == ""
     report = json.loads(result.stdout)
     assert report["registration"]["outcome"] == "registered"
     assert report["registration"]["state"] == "yoetz_owned"
@@ -211,6 +244,8 @@ def test_non_interactive_accept_registers_and_writes_marker(
     }
     assert report["registration"]["plugin"]["outcome"] == "installed"
     assert report["registration"]["plugin"]["presence"] == "installed"
+    assert report["registration"]["skill"]["outcome"] == "installed"
+    assert report["registration"]["skill"]["presence"] == "installed_exact"
     assert report["readiness"]["observation_ready"] is False  # service unreachable
     assert report["readiness"]["consent"] == "granted"
     assert report["service"]["reachable"] is False
@@ -232,6 +267,7 @@ def test_already_registered_mcp_still_installs_plugin_and_grants_consent(
     report = json.loads(result.stdout)
     assert report["registration"]["outcome"] == "already_registered"
     assert report["registration"]["plugin"]["outcome"] == "installed"
+    assert report["registration"]["skill"]["outcome"] == "installed"
     assert report["registration"]["observation_consent"]["outcome"] == "granted"
     assert report["marker_written"] is True
 
@@ -246,9 +282,38 @@ def test_foreign_entry_is_preserved_and_reported(wizard_env: dict[str, object]) 
     assert report["registration"]["reason"] == "foreign_entry_present"
     assert report["registration"]["observation_consent"]["outcome"] == "absent"
     assert report["registration"]["plugin"]["outcome"] == "skipped"
+    assert report["registration"]["skill"]["outcome"] == "skipped"
     # No mutating `mcp add` ever ran.
     for calls in cast(list[list[tuple[str, ...]]], wizard_env["calls"]):
         assert all(call[1:3] == ("mcp", "get") for call in calls)
+
+
+@pytest.mark.anyio
+async def test_tui_apply_refuses_a_skill_preview_digest_not_shown_to_the_user(
+    wizard_env: dict[str, object],
+) -> None:
+    import yoetz.cli.setup as setup_module
+
+    preview_runner = _ScriptedRunner([_yoetz_entry()])
+    mcp_preview = await HarnessMcpService(
+        CodexMcpAdapter(preview_runner, route_profile="strict")
+    ).preview(_binary())
+    workspace = cast(Path, wizard_env["marker"]).parent
+    wizard_env["outputs"] = [_yoetz_entry()]
+
+    report = await setup_module.apply_codex_integration(
+        _binary(),
+        workspace=workspace,
+        approved_preview_digest=mcp_preview.preview_digest,
+        approved_skill_preview_digest="sha256:" + "0" * 64,
+    )
+
+    assert report["outcome"] == "failed"
+    assert report["reason"] == "preview_stale"
+    skill_report = report["skill"]
+    assert isinstance(skill_report, dict)
+    assert skill_report["reason"] == "preview_stale"
+    assert not (workspace / ".agents").exists()
 
 
 def test_multiple_candidates_fail_closed_non_interactively(
@@ -298,7 +363,8 @@ def test_interactive_wizard_selects_harness_then_installation_and_requires_y_or_
     assert "Skill support: no tested capability profile; automatic activation not tested" in (
         result.stdout
     )
-    assert "Plugin installation:" in result.stdout
+    assert "Plugin source files:" in result.stdout
+    assert "Project skill installation:" in result.stdout
     assert "Hook installation:" in result.stdout
     assert "Observation readiness:" in result.stdout
 
@@ -414,6 +480,9 @@ def test_setup_status_is_read_only(wizard_env: dict[str, object]) -> None:
         "plugin": {"digest": None, "presence": "absent"},
         "skill": {
             "automatic_activation_tested": False,
+            "compatibility": "unsupported",
+            "installed_digest": None,
+            "presence": "absent",
             "source_state": "verified",
             "tested_profiles": [],
         },
@@ -437,9 +506,27 @@ def test_setup_status_reports_invalid_packaged_skill_source(
     report = json.loads(result.stdout)
     assert report["integration"]["skill"] == {
         "automatic_activation_tested": False,
+        "compatibility": "unsupported",
+        "installed_digest": None,
+        "presence": "unknown",
         "source_state": "source_invalid",
         "tested_profiles": [],
     }
+
+
+def test_installed_hooks_use_nested_plugin_hook_path(tmp_path: Path) -> None:
+    import yoetz.cli.setup as setup_module
+
+    hooks_path = tmp_path / ".agents" / "plugins" / "yoetz" / "hooks" / "hooks.json"
+    hooks_path.parent.mkdir(parents=True)
+    hooks_path.write_text(
+        '{"hooks":{"SessionStart":[{"command":"yoetz hooks observe '
+        '--event SessionStart --workspace ."}]}}'
+    )
+
+    assert (
+        setup_module._installed_hooks_declare_workspace_binding(tmp_path) is True  # pyright: ignore[reportPrivateUsage]
+    )
 
 
 def test_integrate_mcp_status_preview_install(wizard_env: dict[str, object]) -> None:

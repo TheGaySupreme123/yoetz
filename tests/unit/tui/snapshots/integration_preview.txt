@@ -4,7 +4,8 @@ Codex installation
   Codex Desktop 0.44
 
 Project changes
-  + Install managed Yoetz guidance and hooks
+  + Install the Yoetz project skill
+  + Install managed Yoetz plugin and hook sources
   + Register MCP server: yoetz mcp serve
   + Allow bounded structural event recording for this project
   + Trust the exact approved-check policy digest: 7f8a92bd

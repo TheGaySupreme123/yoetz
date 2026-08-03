@@ -329,7 +329,7 @@ class YoetzRuntime:
         from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter
         from yoetz.application.codex_plugin import CodexPluginService
         from yoetz.application.harness_mcp import HarnessMcpService
-        from yoetz.cli.setup import check_policy_preview
+        from yoetz.cli.setup import check_policy_preview, project_skill_preview
         from yoetz.ports.harness_mcp import McpRegistrationError, McpRegistrationState
         from yoetz.ports.integrations import IntegrationScope, IntegrationTarget
 
@@ -341,6 +341,7 @@ class YoetzRuntime:
             raise RuntimeError_(error.reason.value, "the Codex registration could not be previewed")
         target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(root))
         plugin_preview = CodexPluginService().preview(target)
+        skill_preview = await project_skill_preview(root)
         policy = check_policy_preview(root)
         digest = policy.get("policy_digest")
         checks = policy.get("check_ids")
@@ -355,12 +356,19 @@ class YoetzRuntime:
             planned_check_ids=tuple(str(item) for item in checks)
             if isinstance(checks, (tuple, list))
             else (),
-            planned_file_count=int(getattr(plugin_preview, "planned_file_count", 0)),
-            managed_paths=(str(root / ".agents" / "plugins" / "yoetz"),),
+            planned_file_count=(
+                int(getattr(plugin_preview, "planned_file_count", 0))
+                + len(skill_preview.file_changes)
+            ),
+            managed_paths=(
+                str(root / ".agents" / "skills" / "yoetz"),
+                str(root / ".agents" / "plugins" / "yoetz"),
+            ),
             state_before=str(mcp_preview.state_before.value),
             already_registered=mcp_preview.state_before is McpRegistrationState.YOETZ_OWNED,
             foreign_entry=mcp_preview.state_before is McpRegistrationState.FOREIGN_PRESENT,
             preview_digest=str(mcp_preview.preview_digest),
+            skill_preview_digest=skill_preview.preview_digest,
         )
 
     async def apply_integration(
@@ -380,6 +388,7 @@ class YoetzRuntime:
             self._binary_for(option),
             workspace=self.project_root(),
             approved_preview_digest=plan.preview_digest,
+            approved_skill_preview_digest=plan.skill_preview_digest,
             approved_policy_digest=plan.policy_digest,
         )
         return self._integration_outcome(report)

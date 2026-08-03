@@ -116,11 +116,13 @@ def test_integration_preview_hides_paths_and_digests_behind_technical_details() 
     friendly = "\n".join(render_integration_preview(plan, WIDE))
     assert plan.executable_path not in friendly
     assert plan.preview_digest not in friendly
+    assert plan.skill_preview_digest not in friendly
 
     technical_lines = render_integration_technical_details(plan, 120)
     technical = "\n".join(technical_lines)
     assert plan.executable_path in technical
     assert plan.preview_digest in technical
+    assert plan.skill_preview_digest in technical
     assert plan.mcp_command in technical
     assert any(
         line.startswith("Planned files") and line.endswith(str(plan.planned_file_count))

@@ -20,6 +20,7 @@ dependencies = [
     "keyring==25.7.0",
     "mcp==1.28.1",
     "openai==2.46.0",
+    "packaging==26.2",
     "platformdirs==4.10.0",
     "pydantic==2.13.4",
     "textual==8.2.8",

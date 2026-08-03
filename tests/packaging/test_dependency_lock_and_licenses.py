@@ -95,6 +95,7 @@ _ALLOWED_LICENSE_IDENTIFIERS: Final = frozenset(
         "BSD-2-Clause",
         "BSD-3-Clause",
         "Apache-2.0",
+        "Apache-2.0 OR BSD-2-Clause",
         "Apache-2.0 OR BSD-3-Clause",
         "MIT OR Apache-2.0",
         "MPL-2.0",

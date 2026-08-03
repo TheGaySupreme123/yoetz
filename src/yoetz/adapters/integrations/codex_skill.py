@@ -451,8 +451,6 @@ def inspect_destination(target: IntegrationTarget, source: SkillSource) -> Desti
                 "marker_valid": marker_valid,
             }
         )
-    if not source.harness_tested_set:
-        state = IntegrationState.INCOMPATIBLE
     return DestinationInspection(
         target,
         destination,
@@ -585,10 +583,16 @@ def recover_interrupted_swap(
 class CodexSkillIntegration(IntegrationsPort):
     """Exact Codex trusted-project integration adapter."""
 
-    __slots__ = ("_resource_source",)
+    __slots__ = ("_allow_untested", "_resource_source")
 
-    def __init__(self, resource_source: SkillResourceSource | None = None) -> None:
+    def __init__(
+        self,
+        resource_source: SkillResourceSource | None = None,
+        *,
+        allow_untested: bool = False,
+    ) -> None:
         self._resource_source = resource_source
+        self._allow_untested = allow_untested
 
     @staticmethod
     def _harness(harness: HarnessId) -> None:
@@ -636,7 +640,7 @@ class CodexSkillIntegration(IntegrationsPort):
         }:
             raise _error(IntegrationReason.DESTINATION_CONFLICT)
         bundle = self._bundle()
-        if not bundle.source.harness_tested_set:
+        if not bundle.source.harness_tested_set and not self._allow_untested:
             raise _error(IntegrationReason.VERSION_INCOMPATIBLE)
         inspection = inspect_destination(command.target, bundle.source)
         current = _preview(
