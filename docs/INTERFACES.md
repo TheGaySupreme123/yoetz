@@ -1920,6 +1920,12 @@ verify these reservations inside their authoritative transaction; terminal trans
 delete them. The closed quarantine registry contains the six source/object/plan/batch/report/phase
 contradiction codes plus `import_commit_state_ambiguous`; malformed or unknown input is a gap.
 
+A job belongs to the writer that published it. `reserve_or_resume` decides that boundary before it
+reads job state, so only the stored `publishing_writer_id` can resume a pending job or replay a
+terminal one; any other writer submitting the same source bytes gets non-retryable
+`INVALID_REQUEST` and never sees the owner's report, request id, or report locator, and its own
+request id stays unaliased. Both adapters decide this at the same point.
+
 Application import/review owns frozen `ImportCodexJsonlRequest`, `ImportReportInternal`,
 `ReviewRequest`, `ReviewCounts`, and `ReviewInternal`. The internal results contain no
 `privacy_projection` and perform no disclosure call; the central application facade projects the

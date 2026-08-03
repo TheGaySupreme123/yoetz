@@ -40,7 +40,10 @@ describes behavior intended for the first release rather than a change from a pr
   Responses adapter, a local-model AF_UNIX profile, and a scripted fake provider for testing.
 - Codex integration as the first-party harness adapter: an explicit trusted-project skill
   install/status/remove flow, an MCP stdio bridge, and a JSONL transcript importer. The tested
-  Codex version set remains empty pending exact installed-artifact capability evidence.
+  Codex version set remains empty pending exact installed-artifact capability evidence. An import
+  job belongs to the writer that published it: only that writer resumes it or replays its terminal
+  report, and another writer submitting the same source bytes is refused rather than shown the
+  owner's report, request id, or report locator.
 - Backup, restore, and forward-only migration support with frontier-pinned manifests and verified
   route switches; see [`docs/runbooks/`](docs/runbooks/) for the operator procedures.
 

@@ -39,6 +39,7 @@ from yoetz.ports.importer import (
     CapturedImportSource,
     EncryptedImportReportRef,
     ImportAllocation,
+    ImportAllocationOutcome,
     ImportBatch,
     ImportCommand,
     ImportEventCandidate,
@@ -68,6 +69,7 @@ from yoetz.protocol.ids import IdKind
 _TASK = "tsk_00000000-0000-4000-8000-000000000001"
 _SESSION = "ses_00000000-0000-4000-8000-000000000002"
 _WRITER = "wri_00000000-0000-4000-8000-000000000003"
+_OTHER_WRITER = "wri_00000000-0000-4000-8000-000000000009"
 _SERVICE = "svc_00000000-0000-4000-8000-000000000004"
 _DIGEST = "sha256:" + "0" * 64
 _NOW = datetime(2026, 7, 19, tzinfo=UTC)
@@ -163,10 +165,10 @@ def _source(number: int) -> tuple[CapturedImportSource, ImportSourceIdentity]:
     return source, identity
 
 
-def _command(identity: ImportSourceIdentity, number: int) -> ImportCommand:
+def _command(identity: ImportSourceIdentity, number: int, writer: str = _WRITER) -> ImportCommand:
     return ImportCommand(
         session_id=session_id(_SESSION),
-        requesting_writer_id=writer_id(_WRITER),
+        requesting_writer_id=writer_id(writer),
         request_id=request_id(_uuid_id("req", number)),
         request_digest=_DIGEST,
         source_identity=identity,
@@ -545,4 +547,108 @@ async def test_prepare_and_review_sources_are_memory_sqlite_equivalent(tmp_path:
             )
         assert quarantined.value.code is PublicErrorCode.STORAGE_CORRUPT
 
+    writer_db.close()
+
+
+@pytest.mark.anyio
+async def test_reserve_or_resume_refuses_a_foreign_writer(tmp_path: Path) -> None:
+    """A writer that did not publish an import never reaches its job.
+
+    Both adapters keyed replay on the source identity alone, so a second writer submitting
+    the same source bytes was handed the publishing writer's terminal report, original
+    request id, and report object locator. The writer boundary now decides before the
+    terminal branch, in both adapters, for pending and terminal jobs alike.
+    """
+
+    fence = OwnershipFence(_SERVICE, 1, 1, _NONCE)
+    clock = cast(ClockPort, _Clock())
+    ids = cast(IdPort, _Ids())
+    objects = cast(ObjectStorePort, None)
+    ledger = cast(LedgerPort, None)
+    memory_state = MemoryImportState()
+    memory = MemoryImporter(
+        task_id=_TASK,
+        admitted_session_id=_SESSION,
+        ownership_fence=fence,
+        state=memory_state,
+        transaction_lock=asyncio.Lock(),
+        objects=objects,
+        ledger=ledger,
+        clock=clock,
+        ids=ids,
+        plan_preparer=_unexpected_prepare_plan,
+        plan_reader=_unexpected_read_plan,
+    )
+
+    database_path = tmp_path / "foreign-writer.sqlite3"
+    writer_db = apsw.Connection(str(database_path))
+    initialize_bundle(
+        writer_db,
+        {
+            "task_id": _TASK,
+            "owner_generation": "1",
+            "owner_nonce": _NONCE,
+        },
+    )
+    for writer in (_WRITER, _OTHER_WRITER):
+        # The foreign writer is a real, admitted writer: the refusal has to come from the
+        # import writer boundary, not from an absent row or a foreign-key failure.
+        writer_db.execute(
+            "INSERT INTO writers VALUES (?,?,?,?,?,?,?)",
+            (writer, _TASK, _SESSION, 1, "genesis", "active", format_rfc3339_millis(_NOW)),
+        )
+
+    def read_factory() -> apsw.Connection:
+        return apsw.Connection(str(database_path))
+
+    sqlite = SqliteImporter(
+        task_id=_TASK,
+        admitted_session_id=_SESSION,
+        ownership_fence=fence,
+        writer=cast(SqliteWriterThread, _ImmediateWriter(writer_db)),
+        read_factory=read_factory,
+        objects=objects,
+        ledger=ledger,
+        clock=clock,
+        ids=ids,
+        plan_preparer=_unexpected_prepare_plan,
+        plan_reader=_unexpected_read_plan,
+    )
+
+    def aliases_for(writer: str) -> int:
+        rows = writer_db.execute(
+            "SELECT count(*) FROM import_request_aliases WHERE requesting_writer_id=?", (writer,)
+        ).fetchone()
+        return cast(int, cast(tuple[object, ...], rows)[0])
+
+    for number, importer in ((50, memory), (51, sqlite)):
+        source, identity = _source(number)
+        owned = await importer.reserve_or_resume(_command(identity, number * 100 + 1), source)
+
+        # Pending: a foreign writer could never resume this job, so it is refused outright.
+        with pytest.raises(PublicOperationError) as pending:
+            await importer.reserve_or_resume(
+                _command(identity, number * 100 + 2, _OTHER_WRITER), source
+            )
+        assert pending.value.code is PublicErrorCode.INVALID_REQUEST
+        assert pending.value.retryable is False
+
+        await importer.quarantine(owned, ImportSafeReason("import_phase_state_contradiction"))
+
+        # Terminal: the branch that used to hand back the publishing writer's report.
+        with pytest.raises(PublicOperationError) as terminal:
+            await importer.reserve_or_resume(
+                _command(identity, number * 100 + 3, _OTHER_WRITER), source
+            )
+        assert terminal.value.code is PublicErrorCode.INVALID_REQUEST
+        assert terminal.value.retryable is False
+
+        # The publishing writer still replays its own terminal job.
+        replayed = await importer.reserve_or_resume(_command(identity, number * 100 + 4), source)
+        assert replayed.outcome is ImportAllocationOutcome.REPLAYED
+
+    # A refused writer leaves no trace: its request ids stay unbound and free to reuse.
+    assert not [key for key in memory_state.aliases if key[0] == _OTHER_WRITER]
+    assert aliases_for(_OTHER_WRITER) == 0
+    assert aliases_for(_WRITER) > 0
     writer_db.close()

@@ -291,16 +291,21 @@ class SqliteImporter:
                     )
                     outcome = ImportAllocationOutcome.RESERVED
                 else:
+                    # Same boundary and same order as MemoryImporter: refuse a foreign writer
+                    # before the terminal branch can replay the publishing writer's report,
+                    # request id, and report locator, and before the alias insert below binds
+                    # the caller's request id to a job it can never own. row[6] is
+                    # publishing_writer_id.
+                    if row[6] != command.requesting_writer_id:
+                        raise _error(
+                            PublicErrorCode.INVALID_REQUEST,
+                            "This import source belongs to a different writer.",
+                            retryable=False,
+                        )
                     state = cast(str, row[21])
                     if state != ImportState.PENDING.value:
                         outcome = ImportAllocationOutcome.REPLAYED
                     else:
-                        if row[6] != command.requesting_writer_id:
-                            raise _error(
-                                PublicErrorCode.OPERATION_PENDING,
-                                "Import is already pending.",
-                                retryable=True,
-                            )
                         live = (
                             row[24] == str(self._fence.owner_generation)
                             and row[27] is not None
