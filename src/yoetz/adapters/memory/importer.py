@@ -478,6 +478,18 @@ class MemoryImporter:
                 self._state.revision += 1
                 outcome = ImportAllocationOutcome.RESERVED
             else:
+                # The writer boundary is decided before any job state is read or recorded.
+                # A terminal job replays the publishing writer's report, request id, and
+                # report locator, so a foreign writer has to be refused ahead of that branch
+                # rather than one branch after it. Deciding here also keeps the caller's
+                # request id unaliased to a job it can never own. A foreign writer could
+                # never resume a pending job either, so the refusal is not retryable.
+                if job.publishing_writer_id != command.requesting_writer_id:
+                    raise _error(
+                        PublicErrorCode.INVALID_REQUEST,
+                        "This import source belongs to a different writer.",
+                        retryable=False,
+                    )
                 if alias is None:
                     self._state.aliases[alias_key] = _Alias(
                         command.request_digest, identity_digest, now
@@ -485,12 +497,6 @@ class MemoryImporter:
                 if job.state is not ImportState.PENDING:
                     self._state.revision += alias is None
                     return self._allocation(job, command, ImportAllocationOutcome.REPLAYED)
-                if job.publishing_writer_id != command.requesting_writer_id:
-                    raise _error(
-                        PublicErrorCode.OPERATION_PENDING,
-                        "Import is already pending.",
-                        retryable=True,
-                    )
                 live = (
                     job.owner_generation == self._fence.owner_generation
                     and job.lease_expires_at is not None
