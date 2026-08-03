@@ -24,6 +24,7 @@ __all__ = [
     "UpdateChecksTransport",
     "UpdateChecksTransportError",
     "fetch_latest_yoetz_version",
+    "parse_latest_version",
 ]
 
 # Exact product allowlist for the update_checks channel. Do not generalize to arbitrary hosts.
@@ -64,7 +65,12 @@ class HttpxUpdateChecksTransport:
         )
 
 
-def _parse_latest_version(body: bytes) -> str:
+def parse_latest_version(body: bytes) -> str:
+    """Extract ``info.version`` from a size-capped PyPI JSON body.
+
+    Raises ``UpdateChecksTransportError`` on invalid JSON, missing fields, or malformed
+    version strings. Callers treat failure as silent unavailability.
+    """
     if not body or len(body) > _MAX_BODY_BYTES:
         raise UpdateChecksTransportError("body_invalid")
     try:
@@ -119,7 +125,7 @@ async def fetch_latest_yoetz_version(
         body = response.content
         if len(body) > max_body_bytes:
             raise UpdateChecksTransportError("body_too_large")
-        return _parse_latest_version(body)
+        return parse_latest_version(body)
     finally:
         if owns_client:
             await http_client.aclose()

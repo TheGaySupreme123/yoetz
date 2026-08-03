@@ -10,7 +10,7 @@ import pytest
 from yoetz.adapters.privacy.update_checks import (
     PYPI_YOETZ_JSON_URL,
     UpdateChecksTransportError,
-    _parse_latest_version,
+    parse_latest_version,
 )
 from yoetz.application.package_update import (
     PACKAGE_UPDATE_UPGRADE_COMMAND,
@@ -239,13 +239,13 @@ def test_transport_failure_is_silent(tmp_path: Path) -> None:
 
 
 def test_parse_latest_version_rejects_bad_bodies() -> None:
-    assert _parse_latest_version(b'{"info":{"version":"1.2.3"}}') == "1.2.3"
+    assert parse_latest_version(b'{"info":{"version":"1.2.3"}}') == "1.2.3"
     with pytest.raises(UpdateChecksTransportError):
-        _parse_latest_version(b"not-json")
+        parse_latest_version(b"not-json")
     with pytest.raises(UpdateChecksTransportError):
-        _parse_latest_version(b'{"info":{}}')
+        parse_latest_version(b'{"info":{}}')
     with pytest.raises(UpdateChecksTransportError):
-        _parse_latest_version(b'{"info":{"version":"1 2"}}')
+        parse_latest_version(b'{"info":{"version":"1 2"}}')
 
 
 def test_allowlisted_url_constant() -> None:
