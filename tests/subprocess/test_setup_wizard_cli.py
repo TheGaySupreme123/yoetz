@@ -720,8 +720,8 @@ def test_uninitialized_provider_setup_provisions_auto_unlock(
     supplied: list[bytes] = []
     loaded_env: list[object] = []
 
-    def fake_load_or_create(_store: object) -> bytearray:
-        calls.append("load_or_create")
+    def fake_create_for_initialization(_store: object) -> bytearray:
+        calls.append("create_for_initialization")
         return bytearray(b"a" * 48)
 
     async def fake_initialize(passphrase: bytearray | None = None) -> object:
@@ -743,8 +743,8 @@ def test_uninitialized_provider_setup_provisions_auto_unlock(
 
     monkeypatch.setattr(
         keyring_module.AutoUnlockPassphraseStore,
-        "load_or_create",
-        fake_load_or_create,
+        "create_for_initialization",
+        fake_create_for_initialization,
     )
     monkeypatch.setattr(unlock_module, "initialize_passphrase_vault", fake_initialize)
     monkeypatch.setattr(binding_module, "prompt_provider_endpoint_binding", lambda: None)
@@ -758,11 +758,100 @@ def test_uninitialized_provider_setup_provisions_auto_unlock(
         )
     )
 
-    assert calls == ["load_or_create"]
+    assert calls == ["create_for_initialization"]
     assert loaded_env == [os.environ]
     assert supplied == [b"a" * 48]
     assert service["state"] == "ready"
     assert report["binding"] == "skipped"
+
+
+def test_uninitialized_setup_refuses_preexisting_auto_unlock_entry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """RT-vault-secrets-1 / ADR-015: pre-existing scoped entry must block vault init.
+
+    Interactive setup must use create_for_initialization (like elevated bootstrap)
+    and must never submit a pre-planted auto-unlock secret to vault_initialize.
+    """
+
+    import base64
+    import hashlib
+
+    import yoetz.adapters.keys.os_keyring as keyring_module
+    import yoetz.cli.provider_binding as binding_module
+    import yoetz.cli.setup as setup_module
+    import yoetz.cli.unlock as unlock_module
+    import yoetz.config.load as config_module
+    import yoetz.config.paths as paths_module
+
+    # Known secret that must not become the vault root passphrase.
+    planted = bytearray(b"attacker-known-vault-secret-0123456789abcdef!!!!")
+    assert 32 <= len(planted) <= 128
+
+    class _AtomicBackend:
+        def __init__(self) -> None:
+            self.values: dict[tuple[str, str], str] = {}
+
+        def get_password(self, service: str, username: str) -> str | None:
+            return self.values.get((service, username))
+
+        def set_password(self, service: str, username: str, password: str) -> None:
+            self.values[(service, username)] = password
+
+    backend = _AtomicBackend()
+    store = keyring_module.AutoUnlockPassphraseStore(tmp_path.resolve(), backend=backend)
+    store._backend_id = (  # pyright: ignore[reportPrivateUsage]
+        "keyring.backends.macOS.Keyring"
+    )
+    store.save(bytearray(planted))
+    encoded = base64.urlsafe_b64encode(planted).rstrip(b"=").decode("ascii")
+    username = "bundle-" + hashlib.sha256(
+        os.fsencode(os.path.abspath(tmp_path.resolve()))
+    ).hexdigest()
+    assert backend.values[("yoetz.auto-unlock.v1", username)] == encoded
+    with pytest.raises(keyring_module.OSKeyringError) as elevated_exc:
+        store.create_for_initialization()
+    assert elevated_exc.value.reason == "entry_exists"
+
+    supplied: list[bytes] = []
+
+    async def fake_initialize(passphrase: bytearray | None = None) -> object:
+        supplied.append(bytes(passphrase or b""))
+        return object()
+
+    async def fake_reachability(*, start_if_absent: bool = False) -> dict[str, object]:
+        del start_if_absent
+        return {"reachable": True, "state": "ready", "vault_mode": "passphrase"}
+
+    def fake_store(_path: Path) -> keyring_module.AutoUnlockPassphraseStore:
+        return store
+
+    def fake_load_config(*_args: object) -> SimpleNamespace:
+        return SimpleNamespace(storage=SimpleNamespace(data_dir=tmp_path))
+
+    def fake_bundle_root(*, _data_dir: Path | None = None, _probe: object | None = None) -> Path:
+        del _data_dir, _probe
+        return tmp_path.resolve()
+
+    monkeypatch.setattr(keyring_module, "AutoUnlockPassphraseStore", fake_store)
+    monkeypatch.setattr(unlock_module, "initialize_passphrase_vault", fake_initialize)
+    monkeypatch.setattr(binding_module, "prompt_provider_endpoint_binding", lambda: None)
+    monkeypatch.setattr(config_module, "load_config", fake_load_config)
+    monkeypatch.setattr(paths_module, "bundle_root", fake_bundle_root)
+    monkeypatch.setattr(setup_module, "_service_reachability", fake_reachability)
+
+    service, report = asyncio.run(
+        setup_module._interactive_provider_setup(  # pyright: ignore[reportPrivateUsage]
+            {"reachable": True, "state": "locked", "vault_mode": "uninitialized"}
+        )
+    )
+
+    # Fail-closed: no vault_initialize with the planted secret; entry unchanged.
+    assert supplied == []
+    assert service == {"reachable": True, "state": "locked", "vault_mode": "uninitialized"}
+    assert report["credential_reason"] == "auto_unlock_entry_exists"
+    assert report["binding"] == "skipped"
+    assert backend.values[("yoetz.auto-unlock.v1", username)] == encoded
 
 
 def test_uninitialized_setup_stops_after_write_with_failed_readback(

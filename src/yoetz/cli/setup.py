@@ -923,16 +923,27 @@ async def _interactive_provider_setup(
                     bundle_root(_data_dir=current_config.storage.data_dir)
                 )
                 try:
-                    auto_passphrase = auto_store.load_or_create()
+                    # ADR-015 decision 5 / ADR-008: generate a fresh scoped secret for
+                    # vault_initialize. Never adopt a pre-existing entry (load_or_create).
+                    # Matches elevated create_for_initialization fail-closed on entry_exists.
+                    auto_passphrase = auto_store.create_for_initialization()
                 except OSKeyringError as error:
                     if error.reason != "unsupported":
                         provider_report["credential_reason"] = f"auto_unlock_{error.reason}"
-                        typer.echo(
-                            "Platform credential entry could not be verified; vault "
-                            "initialization stopped to avoid a conflicting passphrase. "
-                            "Restore credential-store access, then rerun 'yoetz setup'.",
-                            err=True,
-                        )
+                        if error.reason == "entry_exists":
+                            typer.echo(
+                                "A pre-existing platform credential entry blocks vault "
+                                "initialization. Clear or repair the scoped auto-unlock "
+                                "entry for this install, then rerun 'yoetz setup'.",
+                                err=True,
+                            )
+                        else:
+                            typer.echo(
+                                "Platform credential entry could not be verified; vault "
+                                "initialization stopped to avoid a conflicting passphrase. "
+                                "Restore credential-store access, then rerun 'yoetz setup'.",
+                                err=True,
+                            )
                         return service, provider_report
                     typer.echo("Platform credential store unavailable; choose a vault passphrase")
                     typer.echo("Secure vault setup (hidden local-terminal input)")
