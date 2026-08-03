@@ -35,12 +35,23 @@ _READ_CHUNK: Final = 65_536
 _DOMAIN: Final = b"yoetz/workspace-inspect/v1\x00"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class _InspectRoot:
     root: Path
     descriptor: int
     device: int
     inode: int
+
+    def close(self) -> None:
+        if self.descriptor >= 0:
+            os.close(self.descriptor)
+            self.descriptor = -1
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except OSError:
+            pass
 
 
 class _InspectFailure(Exception):
