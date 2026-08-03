@@ -207,6 +207,17 @@ class AutoUnlockPassphraseStore:
         self._username = "bundle-" + hashlib.sha256(encoded).hexdigest()
 
     @property
+    def entry_identity(self) -> tuple[str, str]:
+        """Return the (service, account) this store is scoped to, for operator messages.
+
+        Both halves are bounded structural values — a constant service name and a digest of the
+        bundle path — and neither reveals the secret. Setup surfaces them so an operator asked to
+        clear a blocking entry can actually find it in the platform credential store.
+        """
+
+        return _AUTO_UNLOCK_SERVICE_NAME, self._username
+
+    @property
     def available(self) -> bool:
         return self._backend_id in _AUTO_UNLOCK_BACKENDS and all(
             callable(getattr(self._backend, name, None))
