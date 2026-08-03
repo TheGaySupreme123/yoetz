@@ -766,7 +766,7 @@ def test_uninitialized_provider_setup_provisions_auto_unlock(
 
 
 def test_uninitialized_setup_refuses_preexisting_auto_unlock_entry(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """RT-vault-secrets-1 / ADR-015: pre-existing scoped entry must block vault init.
 
@@ -852,6 +852,15 @@ def test_uninitialized_setup_refuses_preexisting_auto_unlock_entry(
     assert report["credential_reason"] == "auto_unlock_entry_exists"
     assert report["binding"] == "skipped"
     assert backend.values[("yoetz.auto-unlock.v1", username)] == encoded
+
+    # Blocking is only useful if the operator can find and clear the entry that blocked them,
+    # and the message must never echo the secret it refused to adopt.
+    stderr = capsys.readouterr().err
+    assert "yoetz.auto-unlock.v1" in stderr
+    assert username in stderr
+    assert "yoetz setup" in stderr
+    assert encoded not in stderr
+    assert planted.decode("ascii") not in stderr
 
 
 def test_uninitialized_setup_stops_after_write_with_failed_readback(
