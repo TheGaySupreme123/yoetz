@@ -137,6 +137,7 @@ from yoetz.service.confidential_protocol import (
     encode_human_frame,
 )
 from yoetz.service.control_protocol import (
+    ControlFrame,
     ControlProtocolError,
     ControlSession,
     ControlStream,
@@ -167,6 +168,16 @@ _INSTALLATION_MARKER_DOMAIN = b"yoetz/installation-state/v1\x00"
 _SERVICE_GENERATION_DOMAIN = b"yoetz/service-generation/v1\x00"
 _MAX_INSTALLATION_MARKER_BYTES = 65_536
 _HUMAN_HEADER = struct.Struct(">4sBBI")
+# Ordinary-control connection liveness bounds (private; no wire/config surface).
+# Handshake must finish within this wall-clock window, including partial-frame drip.
+_CONTROL_HANDSHAKE_DEADLINE_SECONDS: Final = 5.0
+# After handshake, a session with no active calls may stay silent for at most this long
+# before the stream is closed and the listener admission slot is released.
+_CONTROL_INACTIVE_SESSION_DEADLINE_SECONDS: Final = 300.0
+# Response-frame send must complete within this wall-clock window. A stalled peer that stops
+# reading cannot retain an in-flight entry in ``calls`` (and thus the inactive-session exemption)
+# indefinitely via write backpressure on sock_sendall.
+_CONTROL_RESPONSE_WRITE_DEADLINE_SECONDS: Final = 300.0
 
 _WORKFLOW_METHODS = frozenset(
     {
@@ -1018,9 +1029,17 @@ class ServiceDaemon:
         calls: dict[str, asyncio.Task[None]] = {}
         write_lock = asyncio.Lock()
         try:
-            session = await server_handshake(stream, stream.peer_identity, self.status())
+            try:
+                async with asyncio.timeout(_CONTROL_HANDSHAKE_DEADLINE_SECONDS):
+                    session = await server_handshake(stream, stream.peer_identity, self.status())
+            except TimeoutError:
+                return
             while not self._stop_event.is_set():
-                request = parse_control_request(await read_control_frame(stream))
+                try:
+                    frame = await self._read_control_frame_idle_aware(stream, calls)
+                except TimeoutError:
+                    return
+                request = parse_control_request(frame)
                 session.admit(request)
                 if not isinstance(request, ControlCallRequest):
                     target = calls.get(request.target_rpc_id)
@@ -1042,6 +1061,48 @@ class ServiceDaemon:
             await asyncio.gather(*calls.values(), return_exceptions=True)
             await stream.aclose()
 
+    async def _read_control_frame_idle_aware(
+        self,
+        stream: ControlStream,
+        calls: dict[str, asyncio.Task[None]],
+    ) -> ControlFrame:
+        """Read one frame; apply inactive-session idle only when no calls are active.
+
+        The idle deadline starts immediately when the session has no in-flight calls, and only
+        after the final call completes when the session is busy. It covers the complete frame so
+        dripped partial bytes cannot retain a listener slot past the bound. Active long-running
+        calls are not cancelled merely because no additional frame arrives.
+        """
+
+        read_task = asyncio.create_task(read_control_frame(stream))
+        try:
+            while True:
+                if calls:
+                    done, _pending = await asyncio.wait(
+                        {read_task, *calls.values()},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if read_task in done:
+                        return await read_task
+                    # Done-callbacks that pop from ``calls`` are scheduled via call_soon and may
+                    # not have run yet. Prune completed tasks now so idle can start on this turn.
+                    for rpc_id, task in tuple(calls.items()):
+                        if task.done():
+                            calls.pop(rpc_id, None)
+                    continue
+                try:
+                    async with asyncio.timeout(_CONTROL_INACTIVE_SESSION_DEADLINE_SECONDS):
+                        return await read_task
+                except TimeoutError:
+                    read_task.cancel()
+                    await asyncio.gather(read_task, return_exceptions=True)
+                    raise
+        except BaseException:
+            if not read_task.done():
+                read_task.cancel()
+                await asyncio.gather(read_task, return_exceptions=True)
+            raise
+
     async def _serve_call(
         self,
         stream: ControlStream,
@@ -1052,7 +1113,8 @@ class ServiceDaemon:
         result = await self.dispatch(session.client_kind, request, _defer_stop=True)
         session.correlate(result)
         async with write_lock:
-            await write_control_frame(stream, result)
+            async with asyncio.timeout(_CONTROL_RESPONSE_WRITE_DEADLINE_SECONDS):
+                await write_control_frame(stream, result)
         if request.method is ControlMethod.SERVICE_STOP and result.outcome == "ok":
             await self.stop()
 

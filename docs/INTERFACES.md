@@ -1160,6 +1160,16 @@ arbitrary-path, or policy-loosening field or method. `service_status` is availab
 task operations are not. MCP cannot invoke lifecycle, privacy-control, or observation-control
 methods.
 
+Ordinary-control sessions are peer-authenticated over the fixed owner-only AF_UNIX control
+endpoint. Public connection liveness (enforced by the daemon, not a wire field): handshake must
+complete within **5 seconds** (entire read/write, including partial frames); after handshake, a
+session with no active requests may remain inactive for at most **5 minutes**, after which the
+stream is closed and the listener admission slot is released. Active requests exempt the session
+from the inactive timer until the final in-flight call completes; long-running calls are not
+cancelled solely for lack of a subsequent frame. Each control-result write is also wall-clock
+bounded (**5 minutes**): a peer that stops reading cannot retain an in-flight call entry (and
+thus the inactive-session exemption) indefinitely via send backpressure.
+
 The private `ControlCallRequest` envelope may carry `route_profile=policy|strict` only for `check`
 and `status`. It is set by the MCP bridge from its immutable process profile, is absent from public
 operation request models, and is rejected on every other control method. `strict` prevents
@@ -2221,6 +2231,18 @@ facade and are never MCP tools.
   runtime directory with `0700` parent/`0600` endpoints. Async bind/connect functions have no path
   overload or TCP fallback. Framing/schema/state-machine ownership remains in the ordinary and
   confidential protocol modules; these transport values never enter public workflow results.
+  Ordinary-control connection admission is bounded: each accepted stream holds one of a fixed
+  listener capacity (128) until the stream closes. The daemon enforces private wall-clock
+  liveness bounds on that path (no wire fields, error reasons, configuration options, or public
+  APIs): an ordinary-control client must complete the entire handshake — including partial-frame
+  drip — within **5 seconds**, and after handshake a session with no active requests may remain
+  inactive for at most **5 minutes** before the stream is closed and the admission slot is
+  released. The inactive-session deadline starts immediately when no calls are active and only
+  when the final call completes when calls are active; it covers a complete frame read so dripped
+  partial bytes cannot retain capacity indefinitely. Active long-running calls are not cancelled
+  merely because no additional frame arrives. Each control-result write is wall-clock bounded
+  (**5 minutes**) so a stalled peer cannot keep a call marked in-flight (and idle-exempt) via
+  send backpressure alone.
 - `adapters/session_events.py`: positively tested lock/suspend monitoring. v0.1 exposes foreground
   `service run` only; user-service-manager installers and hidden client spawn are absent.
 - `adapters/sqlite/connection.py`: `open_writer(path) -> apsw.Connection` (frozen PRAGMA + build
