@@ -597,14 +597,6 @@ async def test_widening_reports_configured_only_after_committed_trusted_decision
     assert report.proposal_id == "pvp_1"
 
 
-def _llm_channel(policy: PrivacyPolicy) -> object:
-    return next(
-        channel
-        for channel in policy.channel_policies
-        if channel.channel is EgressChannel.LLM_INFERENCE
-    )
-
-
 def test_review_warns_when_data_use_requirement_cannot_be_satisfied(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
