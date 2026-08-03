@@ -344,6 +344,116 @@ async def test_ready_factory_installs_application_that_starts(tmp_path: Path) ->
         await lifecycle.close()
 
 
+def _bundle_meta(tmp_path: Path, task_id: str) -> dict[str, str]:
+    ledger = tmp_path / "tasks" / task_id / "ledger.sqlite3"
+    db = apsw.Connection(f"file:{ledger}?mode=ro", flags=apsw.SQLITE_OPEN_URI | apsw.SQLITE_OPEN_READONLY)
+    try:
+        rows = db.execute("SELECT key, value FROM bundle_meta").fetchall()
+    finally:
+        db.close(force=True)
+    return {cast(str, row[0]): cast(str, row[1]) for row in rows}
+
+
+@pytest.mark.anyio
+async def test_create_then_attach_same_service_generation_advances_owner_once(
+    tmp_path: Path,
+) -> None:
+    """create then attach in one service generation must succeed and advance ownership once.
+
+    Regression for issue #126 / postmortem 019fc8b8: same-generation attach rewrote owner
+    metadata then failed with recovery_generation_not_advanced, poisoning the runtime cache.
+    """
+
+    tmp_path.chmod(0o700)
+    clock = _Clock()
+    memory = LocalSecretMemory()
+    lifecycle = ServiceLifecycle(
+        clock,
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "a" * 64,
+        instance_id=_INSTANCE_ID,
+    )
+    await lifecycle.acquire_singleton()
+    await lifecycle.transition(ServiceState.LOCKED)
+    vault = VaultService(
+        installation_id=_INSTALLATION_ID,
+        service_generation=1,
+        mode=VaultMode.UNINITIALIZED,
+        secret_memory=memory,
+        clock=clock,
+        vault_store_factory=lambda: EncryptedVaultStore(tmp_path / "vault"),
+        pristine_state_digest="sha256:" + "b" * 64,
+    )
+    initialize = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"correct horse battery"))
+    await vault.initialize_passphrase(initialize, "sha256:" + "c" * 64)
+    app = None
+    try:
+        factory = build_ready_application_factory(
+            lifecycle=lifecycle,
+            vault=vault,
+            config=YoetzConfig(),
+            paths=_Paths(tmp_path),
+            clock=clock,
+            secret_memory=memory,
+            diagnostics=_Diagnostics(),
+        )
+        app = await factory(1, vault.generation)
+        common = {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "actor": {"actor_id": "harness:pytest", "actor_type": "harness"},
+            "client": {
+                "kind": "codex_cli",
+                "version": "0.144.6",
+                "integration": "local_cli",
+            },
+            "requested_view": "compact",
+            "task_title": "Resume ownership regression",
+            "workspace_ref": "https://github.com/example/yoetz-core.git",
+            "external_ref": "plan/fix-resumption-ownership",
+        }
+        created = await app.start(
+            StartRequest.model_validate(
+                {
+                    **common,
+                    "request_id": "req_00000000-0000-4000-8000-000000000201",
+                    "mode": "create",
+                }
+            )
+        )
+        assert created.ok is True
+        assert created.outcome == "created"
+        after_create = _bundle_meta(tmp_path, created.task_id)
+        assert after_create["owner_generation"] == "1"
+
+        attached = await app.start(
+            StartRequest.model_validate(
+                {
+                    **common,
+                    "request_id": "req_00000000-0000-4000-8000-000000000202",
+                    "mode": "attach",
+                    "session_id": created.session_id,
+                }
+            )
+        )
+        assert attached.ok is True
+        assert attached.outcome == "attached"
+        assert attached.task_id == created.task_id
+        assert attached.session_id != created.session_id
+        assert attached.writer_id != created.writer_id
+
+        after_attach = _bundle_meta(tmp_path, created.task_id)
+        # Rebind keeps the create-time fence: ownership advanced exactly once from the fresh "0".
+        assert after_attach["owner_generation"] == "1"
+        assert after_attach["owner_nonce"] == after_create["owner_nonce"]
+    finally:
+        if app is not None:
+            await app.close()
+        await vault.close()
+        memory.close()
+        await lifecycle.close()
+
+
 @pytest.mark.anyio
 async def test_ready_factory_completes_and_projects_deterministic_check(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
