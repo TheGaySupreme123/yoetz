@@ -14,7 +14,12 @@ from yoetz.domain.values import (
     validate_commitment,
     validate_sha256_digest,
 )
-from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
+from yoetz.protocol.canonical import (
+    JsonValue,
+    canonical_digest,
+    canonical_encode,
+    strict_json_parse,
+)
 from yoetz.protocol.ids import IdKind, validate_id
 from yoetz.protocol.models import DataCategory
 
@@ -998,16 +1003,19 @@ class PrivacyPolicy:
         return replace(
             placeholder,
             policy_digest=canonical_digest(
-                {
-                    "components": sorted((self.policy_digest, other.policy_digest)),
-                    "meet": "yoetz.privacy-policy-meet/1",
-                    "network_egress_permitted": placeholder.network_egress_permitted,
-                    "profile": placeholder.profile.value,
-                    "require_current_provider_data_use_evidence": (
-                        placeholder.require_current_provider_data_use_evidence
-                    ),
-                    "review_context_profile": placeholder.review_context_profile.value,
-                }
+                cast(
+                    JsonValue,
+                    {
+                        "components": sorted((self.policy_digest, other.policy_digest)),
+                        "meet": "yoetz.privacy-policy-meet/1",
+                        "network_egress_permitted": placeholder.network_egress_permitted,
+                        "profile": placeholder.profile.value,
+                        "require_current_provider_data_use_evidence": (
+                            placeholder.require_current_provider_data_use_evidence
+                        ),
+                        "review_context_profile": placeholder.review_context_profile.value,
+                    },
+                )
             ),
         )
 
