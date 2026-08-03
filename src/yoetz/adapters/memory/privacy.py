@@ -128,16 +128,22 @@ class MemoryPrivacyPolicyStore:
         ]
         if not eligible:
             raise ValueError("privacy_policy_missing")
+        # ADR-009 / protocol: intersection of every containing current row — not rank-max alone.
         rank = {
             AuthorizationScopeKind.MACHINE: 0,
             AuthorizationScopeKind.WORKSPACE: 1,
             AuthorizationScopeKind.TASK: 2,
             AuthorizationScopeKind.REQUEST: 3,
         }
-        row = max(
-            eligible, key=lambda item: (rank[item.policy.effective_scope.kind], item.generation)
+        ordered = sorted(
+            eligible,
+            key=lambda item: (rank[item.policy.effective_scope.kind], item.generation),
         )
-        return EffectivePrivacyPolicy(row.policy, row.generation, row.policy.policy_digest)
+        composed = ordered[0].policy
+        for row in ordered[1:]:
+            composed = composed.meet(row.policy)
+        generation = max(row.generation for row in eligible)
+        return EffectivePrivacyPolicy(composed, generation, composed.policy_digest)
 
     async def prepare_transition(
         self, proposal: PolicyTransitionProposal

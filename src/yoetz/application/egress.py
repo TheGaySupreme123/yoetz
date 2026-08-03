@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
@@ -15,6 +16,7 @@ from yoetz.domain.privacy import (
     ApprovedLocalItem,
     ApprovedOutboundCase,
     AuthorizationScope,
+    AuthorizationScopeKind,
     CandidateContext,
     ClassifiedContext,
     ConsentSource,
@@ -38,6 +40,7 @@ from yoetz.domain.privacy import (
     PrivacyProfile,
     PrivacyReason,
     ProviderBinding,
+    ProviderDataUseProfile,
     ReceiptCounts,
     ReceiptPolicyBinding,
     ReceiptSecretScan,
@@ -92,6 +95,12 @@ type LocalDisclosureResult = (
 _SEMANTIC_PURPOSE = "semantic-review"
 _MEDIA_TYPE = "application/json"
 _SCHEMA_ID = "yoetz-semantic-case-1.0.0"
+_SCOPE_KIND_RANK = {
+    AuthorizationScopeKind.MACHINE: 0,
+    AuthorizationScopeKind.WORKSPACE: 1,
+    AuthorizationScopeKind.TASK: 2,
+    AuthorizationScopeKind.REQUEST: 3,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,6 +257,7 @@ class PrivacyCoordinator:
         "_close_lock",
         "_close_task",
         "_closed",
+        "_data_use_resolver",
         "_gateway",
         "_human",
         "_ids",
@@ -267,6 +277,7 @@ class PrivacyCoordinator:
         *,
         service_generation: int = 1,
         human: HumanPrivacyControlPort | None = None,
+        data_use_resolver: Callable[[ProviderBinding], ProviderDataUseProfile | None] | None = None,
     ) -> None:
         if type(service_generation) is not int or service_generation <= 0:
             raise ValueError("privacy_service_generation_invalid")
@@ -279,6 +290,7 @@ class PrivacyCoordinator:
         self._ids = ids
         self._service_generation = service_generation
         self._human = human
+        self._data_use_resolver = data_use_resolver
         self._policy_app: PrivacyPolicyApplication | None = None
         self._closed = False
         self._close_lock = asyncio.Lock()
@@ -699,6 +711,24 @@ class PrivacyCoordinator:
                 PrivacyOutcome.BLOCKED_BY_POLICY,
                 PrivacyReason.PURPOSE_NOT_ALLOWED,
             )
+        if _SCOPE_KIND_RANK[candidate.scope.kind] > _SCOPE_KIND_RANK[llm.scope_ceiling]:
+            return await self._complete_semantic_predispatch(
+                candidate,
+                effective,
+                PrivacyOutcome.BLOCKED_BY_POLICY,
+                PrivacyReason.SCOPE_MISMATCH,
+            )
+        if (
+            policy.require_current_provider_data_use_evidence
+            and binding.transport == "external"
+            and not self._data_use_evidence_current(binding)
+        ):
+            return await self._complete_semantic_predispatch(
+                candidate,
+                effective,
+                PrivacyOutcome.BLOCKED_BY_POLICY,
+                PrivacyReason.POLICY_DENIED,
+            )
 
         classified = self._classifier.classify(candidate, effective)
         decision = self._semantic_decision(classified, effective, binding)
@@ -727,6 +757,26 @@ class PrivacyCoordinator:
                 PrivacyOutcome.BLOCKED_BY_POLICY,
                 PrivacyReason.INSUFFICIENT_APPROVED_CONTEXT,
             )
+        # Channel ceilings are operator-visible policy dimensions; fail closed when exceeded.
+        llm = next(
+            item
+            for item in effective.policy.channel_policies
+            if item.channel is EgressChannel.LLM_INFERENCE
+        )
+        if llm.max_bytes > 0 and minimized.byte_count > llm.max_bytes:
+            return await self._complete_semantic_predispatch(
+                candidate,
+                effective,
+                PrivacyOutcome.BLOCKED_BY_POLICY,
+                PrivacyReason.POLICY_DENIED,
+            )
+        if llm.max_tokens > 0 and minimized.token_count > llm.max_tokens:
+            return await self._complete_semantic_predispatch(
+                candidate,
+                effective,
+                PrivacyOutcome.BLOCKED_BY_POLICY,
+                PrivacyReason.POLICY_DENIED,
+            )
 
         task_id = candidate.scope.task_id
         if task_id is None:
@@ -742,6 +792,15 @@ class PrivacyCoordinator:
             LocalDisclosureSink.LOCAL_MODEL if binding.transport == "local_af_unix" else None
         )
         provider_binding = binding if binding.transport == "external" else None
+        # Authorization ceilings bind policy ∩ case (never case size alone).
+        auth_max_bytes = (
+            minimized.byte_count if llm.max_bytes <= 0 else min(llm.max_bytes, minimized.byte_count)
+        )
+        auth_max_tokens = (
+            minimized.token_count
+            if llm.max_tokens <= 0
+            else min(llm.max_tokens, minimized.token_count)
+        )
         try:
             prepared = await self._audit.prepare_disclosure_proposal(
                 DisclosureProposalRequest(
@@ -757,8 +816,8 @@ class PrivacyCoordinator:
                     policy_version=effective.policy.version,
                     policy_generation=effective.generation,
                     policy_digest=effective.effective_digest,
-                    max_bytes=minimized.byte_count,
-                    max_tokens=minimized.token_count,
+                    max_bytes=auth_max_bytes,
+                    max_tokens=auth_max_tokens,
                     expires_at=now
                     + timedelta(seconds=max(60, llm.authorization_ttl_seconds or 60)),
                 )
@@ -1059,6 +1118,17 @@ class PrivacyCoordinator:
             privacy_proposal_id=privacy_proposal_id,
             receipt_id=receipt_id,
         )
+
+    def _data_use_evidence_current(self, binding: ProviderBinding) -> bool:
+        """True when the bound external profile has current recommendation-eligible data-use."""
+
+        resolver = self._data_use_resolver
+        if resolver is None:
+            return False
+        profile = resolver(binding)
+        if type(profile) is not ProviderDataUseProfile:
+            return False
+        return profile.recommendation_eligible(self._clock.now_utc())
 
     def _semantic_decision(
         self,

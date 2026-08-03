@@ -91,6 +91,7 @@ from yoetz.domain.privacy import (
     PrivacyPolicy,
     PrivacyProfile,
     ProviderBinding,
+    ProviderDataUseProfile,
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
@@ -1162,6 +1163,16 @@ async def build_privacy_coordinator(
         True,
     )
     await gateway.reconcile_policy(effective, authority)
+
+    def _data_use_for(binding: ProviderBinding) -> ProviderDataUseProfile | None:
+        registry = getattr(gateway, "_registry", None)
+        if registry is None:
+            return None
+        lookup = getattr(registry, "data_use_profile", None)
+        if lookup is None:
+            return None
+        return cast(ProviderDataUseProfile | None, lookup(binding))
+
     coordinator = PrivacyCoordinator(
         policies,
         classifier,
@@ -1170,6 +1181,7 @@ async def build_privacy_coordinator(
         clock,
         ids,
         service_generation=service_generation,
+        data_use_resolver=_data_use_for,
     )
     policy_app = PrivacyPolicyApplication(
         policies,
