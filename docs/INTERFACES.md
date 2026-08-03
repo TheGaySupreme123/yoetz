@@ -2160,6 +2160,16 @@ partial, unmanaged, unsafe, or changed-after-preview copies are preserved. v0.1 
 profile's exact `skill_root` — `.agents/skills/yoetz/` for `codex` — inside one explicitly supplied
 trusted project; it never edits harness/MCP configuration, Git state, package resources, or
 arbitrary skills.
+
+Filesystem presence and capability compatibility are independent facts: an unprofiled source is
+`unsupported`, while its destination state remains `absent|installed_exact|modified|partial|unsafe`
+rather than being rewritten to `incompatible`. The standalone integration service still refuses an
+unprofiled install. ADR-012's accepted first-run setup is the one narrow exception: it may install
+the same preview-digest-bound packaged bytes into the already approved trusted project so Codex can
+discover the project skill, while reporting compatibility `unsupported` and automatic activation
+untested. Setup separately reports `project_skill_installation`, structural plugin-source
+installation, MCP registration, hooks/consent, service routing, and semantic readiness; none of
+those fields implies another.
 MCP server registration is a sibling port, never an `IntegrationsPort` overload (ADR-012).
 `HarnessMcpPort` methods are `status_registration`, `preview_registration`, and
 `apply_registration`, each taking a `HarnessBinary` (harness ID, redacted-repr executable path,

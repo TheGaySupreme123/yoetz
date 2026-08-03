@@ -24,6 +24,7 @@ from yoetz.ports.integrations import (
     IntegrationState,
     IntegrationTarget,
     SkillApplyCommand,
+    SkillPreviewCommand,
     SkillStatusCommand,
 )
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
@@ -145,12 +146,14 @@ def test_source_mutation_fails_closed_without_checkout_fallback() -> None:
 
 
 @pytest.mark.anyio
-async def test_status_is_read_only_and_incompatible_while_unprofiled(tmp_path: Path) -> None:
+async def test_status_separates_filesystem_state_from_unprofiled_compatibility(
+    tmp_path: Path,
+) -> None:
     tmp_path.chmod(0o700)
     adapter = CodexSkillIntegration(_resources())
     target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
     status = await adapter.status_skill(HarnessId.CODEX, SkillStatusCommand(target))
-    assert status.state is IntegrationState.INCOMPATIBLE
+    assert status.state is IntegrationState.ABSENT
     assert status.compatibility == "unsupported"
     assert not (tmp_path / ".agents").exists()
 
@@ -166,6 +169,38 @@ async def test_status_is_read_only_and_incompatible_while_unprofiled(tmp_path: P
         await adapter.install_skill(HarnessId.CODEX, command)
     assert caught.value.reason is IntegrationReason.VERSION_INCOMPATIBLE
     assert not (tmp_path / ".agents").exists()
+
+
+@pytest.mark.anyio
+async def test_explicit_allow_untested_installs_discoverable_project_skill(
+    tmp_path: Path,
+) -> None:
+    tmp_path.chmod(0o700)
+    adapter = CodexSkillIntegration(_resources(), allow_untested=True)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    request = request_id("req_00000000-0000-4000-8000-000000000032")
+    preview = await adapter.preview_skill(
+        HarnessId.CODEX,
+        SkillPreviewCommand(request, target, IntegrationAction.INSTALL, False),
+    )
+
+    result = await adapter.install_skill(
+        HarnessId.CODEX,
+        SkillApplyCommand(
+            request,
+            target,
+            IntegrationAction.INSTALL,
+            preview.preview_digest,
+            True,
+            False,
+        ),
+    )
+
+    assert result.state_after is IntegrationState.INSTALLED_EXACT
+    status = await adapter.status_skill(HarnessId.CODEX, SkillStatusCommand(target))
+    assert status.state is IntegrationState.INSTALLED_EXACT
+    assert status.compatibility == "unsupported"
+    assert (tmp_path / ".agents/skills/yoetz/SKILL.md").is_file()
 
 
 def test_package_import_has_no_filesystem_side_effect(

@@ -10,7 +10,9 @@ hidden-input confidential helper and never enter wizard arguments, config, or MC
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import os
 import sys
 from collections.abc import Mapping
@@ -23,12 +25,17 @@ import typer
 from yoetz.adapters.integrations.codex_discovery import discover_codex_binaries
 from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter
 from yoetz.adapters.integrations.codex_plugin import PluginHookPresence, inspect_plugin
-from yoetz.adapters.integrations.codex_skill import load_packaged_skill_source
+from yoetz.adapters.integrations.codex_skill import (
+    CodexSkillIntegration,
+    inspect_destination,
+    load_packaged_skill_source,
+)
 from yoetz.application.codex_plugin import CodexPluginService
 from yoetz.application.harness_mcp import HarnessMcpService, McpRegistrationConfirmation
 from yoetz.application.observation_check_policy import load_observation_check_policy
 from yoetz.config.load import load_config
 from yoetz.config.paths import PathSafetyError, setup_marker_path
+from yoetz.domain.values import request_id
 from yoetz.ports.harness_mcp import (
     HarnessBinary,
     McpRegistrationAction,
@@ -37,11 +44,15 @@ from yoetz.ports.harness_mcp import (
 )
 from yoetz.ports.integrations import (
     HarnessId,
+    IntegrationAction,
     IntegrationError,
     IntegrationScope,
     IntegrationTarget,
+    SkillApplyCommand,
+    SkillPreviewCommand,
 )
 from yoetz.protocol.canonical import JsonValue, canonical_encode
+from yoetz.protocol.ids import IdKind, new_id
 
 __all__ = [
     "SETUP_MARKER_SCHEMA",
@@ -123,14 +134,30 @@ def should_offer_first_run() -> bool:
 def _integration_layers() -> dict[str, JsonValue]:
     """Inspect skill, plugin, hook, and trust state without inferring activation."""
 
+    source = None
     try:
         source = load_packaged_skill_source()
     except IntegrationError as error:
         tested_profiles: list[JsonValue] = []
-        skill_state = error.reason.value
+        skill_source_state = error.reason.value
     else:
         tested_profiles = list(source.harness_tested_set)
-        skill_state = "verified"
+        skill_source_state = "verified"
+    skill_presence = "unknown"
+    skill_digest: str | None = None
+    skill_compatibility = "unsupported"
+    if source is not None:
+        try:
+            skill_inspection = inspect_destination(
+                IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(Path.cwd())),
+                source,
+            )
+        except IntegrationError:
+            skill_presence = "unknown"
+        else:
+            skill_presence = skill_inspection.state.value
+            skill_digest = skill_inspection.installed_digest
+            skill_compatibility = "supported" if tested_profiles else "unsupported"
     try:
         inspection = inspect_plugin(
             IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(Path.cwd()))
@@ -149,7 +176,10 @@ def _integration_layers() -> dict[str, JsonValue]:
             },
             "skill": {
                 "automatic_activation_tested": False,
-                "source_state": skill_state,
+                "compatibility": skill_compatibility,
+                "installed_digest": skill_digest,
+                "presence": skill_presence,
+                "source_state": skill_source_state,
                 "tested_profiles": tested_profiles,
             },
         }
@@ -165,7 +195,10 @@ def _integration_layers() -> dict[str, JsonValue]:
         },
         "skill": {
             "automatic_activation_tested": bool(tested_profiles),
-            "source_state": skill_state,
+            "compatibility": skill_compatibility,
+            "installed_digest": skill_digest,
+            "presence": skill_presence,
+            "source_state": skill_source_state,
             "tested_profiles": tested_profiles,
         },
     }
@@ -303,7 +336,7 @@ def _confirm_project_setup(*, include_observation: bool, policy_digest: str | No
     """One confirmed operation covering MCP/plugin/guidance/hooks/observation consent."""
 
     typer.echo("This confirmation covers:")
-    typer.echo("  - Plugin / guidance / hooks installation in this trusted project")
+    typer.echo("  - Project skill plus plugin / hook source installation in this trusted project")
     typer.echo("  - MCP registration")
     if include_observation:
         typer.echo(
@@ -391,8 +424,9 @@ def _emit_registration_preview(
     policy_preview: dict[str, JsonValue] | None = None,
 ) -> None:
     typer.echo("Proposed change: complete Yoetz Codex project integration:")
-    typer.echo("  1. Install plugin / guidance / hooks under .agents/plugins/yoetz")
-    typer.echo("  2. Register the Yoetz MCP server with Codex")
+    typer.echo("  1. Install discoverable guidance under .agents/skills/yoetz")
+    typer.echo("  2. Install structural plugin / hook sources under .agents/plugins/yoetz")
+    typer.echo("  3. Register the Yoetz MCP server with Codex")
     typer.echo("  MCP server name: yoetz")
     serve_command = getattr(mcp_preview, "serve_command", ())
     typer.echo(f"  Command: {' '.join(serve_command)}")
@@ -411,6 +445,56 @@ def _emit_registration_preview(
 
 def _plugin_verified(presence: str | None) -> bool:
     return presence == PluginHookPresence.INSTALLED.value
+
+
+async def _install_project_skill(
+    target: IntegrationTarget,
+) -> dict[str, JsonValue]:
+    """Install the project-scoped skill without claiming Codex capability support.
+
+    Project skill discovery is a separate, native Codex surface from plugin loading.  Setup may
+    explicitly install the reviewed bytes for an unprofiled Codex release after the enclosing
+    project-integration preview is accepted, but the returned compatibility remains unsupported
+    until an exact capability cell is frozen.
+    """
+
+    adapter = CodexSkillIntegration(allow_untested=True)
+    operation_id = request_id(new_id(IdKind.REQUEST))
+    try:
+        preview = await adapter.preview_skill(
+            HarnessId.CODEX,
+            SkillPreviewCommand(
+                operation_id,
+                target,
+                IntegrationAction.INSTALL,
+                False,
+            ),
+        )
+        result = await adapter.install_skill(
+            HarnessId.CODEX,
+            SkillApplyCommand(
+                operation_id,
+                target,
+                IntegrationAction.INSTALL,
+                preview.preview_digest,
+                True,
+                False,
+            ),
+        )
+    except IntegrationError as error:
+        return {
+            "compatibility": "unsupported",
+            "outcome": "failed",
+            "presence": None,
+            "reason": error.reason.value,
+        }
+    return {
+        "compatibility": preview.compatibility,
+        "installed_digest": result.installed_digest,
+        "outcome": "already_installed" if result.action is IntegrationAction.NOOP else "installed",
+        "presence": result.state_after.value,
+        "reason": None,
+    }
 
 
 def _configured_mcp_route_profile() -> Literal["policy", "strict"]:
@@ -437,7 +521,7 @@ def _installed_hooks_declare_workspace_binding(workspace: Path | None = None) ->
     """True when the installed plugin hooks render ``--workspace .`` for observe."""
 
     root = (workspace if workspace is not None else Path.cwd()).resolve()
-    hooks_path = root / ".agents" / "plugins" / "yoetz" / "hooks.json"
+    hooks_path = root / ".agents" / "plugins" / "yoetz" / "hooks" / "hooks.json"
     try:
         raw = hooks_path.read_bytes()
     except OSError:
@@ -474,12 +558,14 @@ def _observation_hook_probe(*, workspace: Path | None = None) -> dict[str, JsonV
             "cwd": ".",
         }
     )
-    code = handle_observe(
-        event_name="SessionStart",
-        stdin_bytes=payload,
-        workspace=".",
-        skip_service=True,
-    )
+    with contextlib.redirect_stderr(io.StringIO()):
+        code = handle_observe(
+            event_name="SessionStart",
+            stdin_bytes=payload,
+            stdout=io.BytesIO(),
+            workspace=".",
+            skip_service=True,
+        )
     if code != 0:
         return {"ok": False, "reason": "observe_exit_nonzero"}
     bound = store.find_workspace_for_codex_session(probe_session)
@@ -498,6 +584,7 @@ def _readiness_layers(
     binary: HarnessBinary | None,
     mcp_state: str | None,
     plugin_presence: str | None,
+    skill_presence: str | None,
     hooks: dict[str, JsonValue],
     consent_outcome: str | None,
     service: dict[str, JsonValue],
@@ -526,6 +613,7 @@ def _readiness_layers(
         },
         "mcp_registration": mcp_state,
         "plugin_installation": plugin_presence,
+        "project_skill_installation": skill_presence,
         "hooks": hooks,
         "consent": consent_outcome or "absent",
         "service_routing": {
@@ -549,7 +637,7 @@ async def _codex_integration_step(
     approved_preview_digest: str | None = None,
     approved_policy_digest: str | None = None,
 ) -> dict[str, JsonValue]:
-    """Preview and apply one Codex integration: plugin + MCP + consent.
+    """Preview and apply one Codex integration: skill + plugin sources + MCP + consent.
 
     ``approved_preview_digest``/``approved_policy_digest`` let a caller that has
     already shown a human the exact preview echo both digests back. They are a
@@ -572,6 +660,7 @@ async def _codex_integration_step(
             "reason": error.reason.value,
             "state": None,
             "plugin": {"outcome": "skipped", "presence": None},
+            "skill": {"outcome": "skipped", "presence": None},
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
 
@@ -591,6 +680,7 @@ async def _codex_integration_step(
                 "presence": inspection.presence.value,
                 "reason": "mcp_foreign_entry",
             },
+            "skill": {"outcome": "skipped", "presence": None},
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
 
@@ -603,6 +693,7 @@ async def _codex_integration_step(
             "reason": "preview_stale",
             "state": mcp_preview.state_before.value,
             "plugin": {"outcome": "skipped", "presence": plugin_preview.presence_before.value},
+            "skill": {"outcome": "skipped", "presence": None},
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
 
@@ -639,10 +730,23 @@ async def _codex_integration_step(
                 "outcome": "declined",
                 "presence": plugin_preview.presence_before.value,
             },
+            "skill": {"outcome": "declined", "presence": None},
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
 
-    # 1) Install and verify plugin/hooks (even when MCP is already registered).
+    # 1) Install the project-scoped skill Codex actually discovers without a marketplace.
+    skill_report = await _install_project_skill(project)
+    if skill_report.get("outcome") == "failed":
+        return {
+            "outcome": "failed",
+            "reason": "skill_install_failed",
+            "state": mcp_preview.state_before.value,
+            "plugin": {"outcome": "skipped", "presence": plugin_preview.presence_before.value},
+            "skill": skill_report,
+            "observation_consent": {"outcome": "absent", "workspace_commitment": None},
+        }
+
+    # 2) Install and verify structural plugin/hook sources (even when MCP is registered).
     plugin_report: dict[str, JsonValue]
     try:
         inspection = plugin_service.install(project, allow_untested=True)
@@ -663,6 +767,7 @@ async def _codex_integration_step(
             "reason": "plugin_install_failed",
             "state": mcp_preview.state_before.value,
             "plugin": plugin_report,
+            "skill": skill_report,
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
 
@@ -674,10 +779,11 @@ async def _codex_integration_step(
             "reason": "plugin_verification_failed",
             "state": mcp_preview.state_before.value,
             "plugin": plugin_report,
+            "skill": skill_report,
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
 
-    # 2) Register and verify MCP (noop when already yoetz-owned).
+    # 3) Register and verify MCP (noop when already yoetz-owned).
     mcp_outcome = (
         "already_registered"
         if already_registered
@@ -704,6 +810,7 @@ async def _codex_integration_step(
                 "reason": error.reason.value,
                 "state": mcp_preview.state_before.value,
                 "plugin": plugin_report,
+                "skill": skill_report,
                 "observation_consent": {"outcome": "absent", "workspace_commitment": None},
             }
         mcp_state = result.state_after
@@ -719,6 +826,7 @@ async def _codex_integration_step(
                 "reason": error.reason.value,
                 "state": mcp_preview.state_before.value,
                 "plugin": plugin_report,
+                "skill": skill_report,
                 "observation_consent": {"outcome": "absent", "workspace_commitment": None},
             }
 
@@ -729,10 +837,11 @@ async def _codex_integration_step(
             "reason": "mcp_verification_failed",
             "state": mcp_state.value,
             "plugin": plugin_report,
+            "skill": skill_report,
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
 
-    # 3) Consent only after both plugin and MCP verified.
+    # 4) Consent only after skill sources, plugin sources, and MCP are verified.
     observation = _grant_observation_consent(workspace)
     check_policy = _activate_check_policy_trust(
         workspace,
@@ -746,6 +855,7 @@ async def _codex_integration_step(
         "serve_command": list(mcp_preview.serve_command),
         "state": mcp_state.value,
         "plugin": plugin_report,
+        "skill": skill_report,
         "observation_consent": observation,
         "check_policy": check_policy,
     }
@@ -778,7 +888,8 @@ async def apply_codex_integration(
     """Apply the exact integration a caller already previewed and got approved.
 
     This exists so a non-prompt front end (the terminal UI) can reuse the whole
-    plugin → MCP → consent → policy-trust sequence with its gates intact instead
+    skill → plugin sources → MCP → consent → policy-trust sequence with its gates
+    intact instead
     of reassembling it. It never prompts, and it refuses rather than proceed when
     the preview it is handed no longer matches what the services would propose.
     """
@@ -1459,12 +1570,23 @@ async def run_setup_wizard(
         if isinstance(plugin, Mapping):
             raw_presence = plugin.get("presence")
             plugin_presence = raw_presence if type(raw_presence) is str else None
+    skill_block = registration.get("skill")
+    skill_presence = None
+    if isinstance(skill_block, Mapping):
+        raw_presence = skill_block.get("presence")
+        skill_presence = raw_presence if type(raw_presence) is str else None
+    else:
+        skill = integration.get("skill")
+        if isinstance(skill, Mapping):
+            raw_presence = skill.get("presence")
+            skill_presence = raw_presence if type(raw_presence) is str else None
     hooks_raw = integration.get("hooks")
     hooks = hooks_raw if isinstance(hooks_raw, dict) else {}
     readiness = _readiness_layers(
         binary=chosen,
         mcp_state=cast(str | None, registration.get("state")),
         plugin_presence=plugin_presence,
+        skill_presence=skill_presence,
         hooks=hooks,
         consent_outcome=consent,
         service=service,
@@ -1524,9 +1646,18 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
         plugin = registration.get("plugin")
         if isinstance(plugin, dict):
             typer.echo(
-                "  Plugin installation: "
+                "  Plugin source files: "
                 f"{plugin.get('outcome') or 'unknown'} "
-                f"(presence={plugin.get('presence') or 'absent'})"
+                f"(presence={plugin.get('presence') or 'absent'}; "
+                "Codex discovery remains unverified)"
+            )
+        skill = registration.get("skill")
+        if isinstance(skill, dict):
+            typer.echo(
+                "  Project skill installation: "
+                f"{skill.get('outcome') or 'unknown'} "
+                f"(presence={skill.get('presence') or 'absent'}; "
+                f"compatibility={skill.get('compatibility') or 'unsupported'})"
             )
     if isinstance(integration, dict):
         skill = integration.get("skill")

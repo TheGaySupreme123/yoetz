@@ -27,8 +27,9 @@ only versions and sorted digests — never a path, username, timestamp, or repos
 
 Check `yoetz version --json`, the installed resource set, and the current compatibility/capability
 matrix. Confirm owner permissions on the target project, that you trust this repository, and the
-expected Codex version. Codex support is an exact tested set (target/maximum-tested `0.144.5`) — a
-newer Codex version is untested, not automatically supported.
+expected Codex version. Codex support is the exact tested set in the packaged manifest; an empty
+set means no Codex release currently carries automatic-activation support evidence. A version
+string or successful file install never promotes an unprofiled release to supported.
 
 ## 3. Status and preview
 
@@ -101,6 +102,13 @@ gated by an explicit digest-bound confirmation, run by Yoetz instead of by hand;
 foreign entry is still preserved and refused, success is verified by re-reading the entry, and
 "registered" still never implies Codex will successfully connect at runtime.
 
+The accepted setup path composes three separately reported layers in order: it installs the
+project skill at `.agents/skills/yoetz`, installs managed structural plugin/hook sources at
+`.agents/plugins/yoetz`, then verifies the MCP entry. The plugin source directory is not evidence
+that Codex activated a plugin. Current Codex plugin activation has its own marketplace and explicit
+add trust flow; setup deliberately does not mutate that global surface. This distinction is why a
+successful setup report includes both project-skill presence and plugin-source presence.
+
 If the host is configured with Yoetz as an optional server and it is unavailable, Codex work
 continues and the skill discloses no live ledger/check/receipt data. If configured as required,
 server failure blocks only the Codex surfaces that the tested capability profile proves are
@@ -141,6 +149,7 @@ manage any MCP configuration yourself if you want it removed too.
 | Incompatible | Use a supported Yoetz/Codex version pair. |
 | Write/swap interrupted | Run `status`; preserve any staged content; do not delete it yourself. |
 | Skill not discovered, or duplicate `$yoetz` names loaded | Check the exact scope, loaded skill roots, managed path, trust, version, and capability matrix; reload Codex. |
+| Setup reports plugin source files but no Yoetz skill appears | Check `.agents/skills/yoetz`; `.agents/plugins/yoetz` alone is not an activated Codex plugin. |
 | MCP name already present | Preserve it and review ownership rather than running `mcp add`. |
 | `setup` skipped MCP registration | Codex not on PATH, or the entry is foreign-owned; run `yoetz integrate codex mcp status --json` for the exact state. |
 | MCP unavailable | Diagnose through separate MCP configuration/startup steps. |

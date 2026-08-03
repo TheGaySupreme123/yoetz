@@ -246,6 +246,36 @@ def test_no_ambient_config_or_global_module_contaminates_the_probe(
     assert not (home / ".yoetz").exists()
 
 
+def test_setup_run_loads_from_a_clean_installed_artifact(
+    built_dist: _BuiltDist, tmp_path: Path
+) -> None:
+    root = tmp_path / "install"
+    home = root / "home"
+    home.mkdir(parents=True)
+    yoetz_exe, env = _tool_install(built_dist.directory, root, home)
+
+    result = subprocess.run(
+        [
+            str(yoetz_exe),
+            "setup",
+            "run",
+            "--non-interactive",
+            "--codex-path",
+            str(tmp_path / "missing-codex"),
+            "--json",
+        ],
+        capture_output=True,
+        timeout=20,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert b"invalid_request" in result.stderr
+    assert b"ModuleNotFoundError" not in result.stderr
+    assert str(_REPO_ROOT).encode("utf-8") not in result.stderr
+
+
 # ---------------------------------------------------------------------------
 # Optional extras enable only their own capability
 # ---------------------------------------------------------------------------
@@ -349,7 +379,7 @@ def test_standard_install_resolves_the_promoted_dependencies_at_their_exact_pins
     home.mkdir(parents=True)
     _, env = _tool_install(built_dist.directory, root, home)
     tool_python = root / "tool" / "yoetz" / "bin" / "python"
-    names = ("argon2-cffi", "httpx", "openai")
+    names = ("argon2-cffi", "httpx", "openai", "packaging")
     probe = subprocess.run(
         [
             str(tool_python),
