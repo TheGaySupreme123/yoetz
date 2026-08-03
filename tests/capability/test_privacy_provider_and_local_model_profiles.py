@@ -191,13 +191,12 @@ async def test_privacy_profiles_channels_and_local_model_offline_cells(
         "custom",
     }
 
-    non_llm = (
+    unsupported_non_llm = (
         EgressChannel.PRODUCT_TELEMETRY,
         EgressChannel.CRASH_DIAGNOSTICS,
-        EgressChannel.UPDATE_CHECKS,
         EgressChannel.CAPABILITY_TESTING,
     )
-    for channel in non_llm:
+    for channel in unsupported_non_llm:
         forced = _policy_forcing(channel)
         assert forced.unsupported_enabled_channels == (channel,)
         with pytest.raises(ValueError, match="channel_unavailable"):
@@ -209,6 +208,17 @@ async def test_privacy_profiles_channels_and_local_model_offline_cells(
                 created_at=_NOW,
                 expires_at=_NOW + timedelta(minutes=1),
             )
+    # update_checks ships a production transport; enablement is not channel_unavailable.
+    update_forced = _policy_forcing(EgressChannel.UPDATE_CHECKS)
+    assert update_forced.unsupported_enabled_channels == ()
+    PolicyTransitionProposal(
+        scope=update_forced.effective_scope,
+        expected_generation=1,
+        proposed_policy=update_forced,
+        proposal_digest=_DIGEST,
+        created_at=_NOW,
+        expires_at=_NOW + timedelta(minutes=1),
+    )
 
     empty = InstalledLocalModelProfileRegistry()
     assert empty.resolve("missing", "1.0.0") is None
@@ -261,7 +271,10 @@ async def test_privacy_profiles_channels_and_local_model_offline_cells(
         fixture_digest=bytes_digest(b"privacy-local-model-offline"),
         test_revision=_TEST_REVISION,
         config_profile_digest=canonical_digest(
-            {"cell": "privacy_local", "channels": [channel.value for channel in non_llm]}
+            {
+                "cell": "privacy_local",
+                "channels": [channel.value for channel in unsupported_non_llm],
+            }
         ),
         external_tool="fake_provider",
         external_version="0.1.0",
@@ -276,7 +289,9 @@ async def test_privacy_profiles_channels_and_local_model_offline_cells(
             Observation("data_use_eligibility_bound", boolean_value=True),
             Observation("empty_local_registry_unavailable", boolean_value=True),
             Observation("fake_provider_offline_success", boolean_value=True),
-            Observation("non_llm_channels_unavailable", integer_value=len(non_llm)),
+            Observation(
+                "non_llm_channels_unavailable", integer_value=len(unsupported_non_llm)
+            ),
             Observation("privacy_profiles_complete", integer_value=len(PrivacyProfile)),
             Observation("review_contexts_complete", integer_value=len(ReviewContextProfile)),
         ),

@@ -53,7 +53,24 @@ Setup is a linear path inside the interface, each finished step collapsing into 
    further; declining it opens the named recipes, and only **Custom** opens the settings
    themselves, in five grouped sections. The exact disclosure and separately reauthenticated
    widening decision remain mandatory.
-9. **Finish**, stating each readiness layer separately.
+9. **Finish**, stating each readiness layer separately. When the durable privacy policy permits
+   package update checks (product default: on) and a newer `yoetz` release is available on PyPI,
+   the finish screen appends a short tip with the installed version, available version, and the
+   exact upgrade command `uv tool upgrade yoetz`. Work receipts never carry update metadata.
+
+On later interactive launches, the resume tip may show the same package-update advisory instead of
+the generic Codex tip when a newer package is available. `/doctor` reports the package line as
+optional with the upgrade command when a newer release is known, or notes that a check could not
+be completed when policy allowed the check but the registry was unreachable.
+
+When re-running setup or `/connect` with the same installed package version and a newer release
+available, Yoetz offers **upgrade first** or **continue with this version** rather than reinstalling
+the same bits. Continuing still adds or repairs harness integration (plugin + MCP) without a
+package reinstall. Yoetz never auto-upgrades.
+
+**Network honesty:** zero-egress for task content remains the product promise. Structural package
+version checks are opt-out network (disable `update_checks` in privacy setup). Non-interactive CLI,
+MCP, CI, and pipes do not open that path as a surprise.
 
 Credential status is presence-only. Human output shows the fixed mask `********` when the trusted
 service confirms that the configured provider has a stored credential, `not stored` when absence

@@ -1018,10 +1018,18 @@ class PrivacyPolicy:
 
     @property
     def unsupported_enabled_channels(self) -> tuple[EgressChannel, ...]:
+        """Non-LLM channels that still have no production transport in this release.
+
+        ``update_checks`` ships a bounded structural transport (PyPI package identity only).
+        The remaining non-LLM rows stay unavailable: enablement is rejected at proposal time,
+        and forced enabled state yields a pre-dispatch ``channel_unavailable`` receipt.
+        """
+
+        supported = frozenset({EgressChannel.LLM_INFERENCE, EgressChannel.UPDATE_CHECKS})
         return tuple(
             policy.channel
             for policy in self.channel_policies
-            if policy.enabled and policy.channel is not EgressChannel.LLM_INFERENCE
+            if policy.enabled and policy.channel not in supported
         )
 
     @property

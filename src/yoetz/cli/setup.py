@@ -1220,6 +1220,83 @@ def _registration_report(
     }
 
 
+async def _resolve_setup_package_update(
+    *,
+    interactive: bool,
+) -> dict[str, JsonValue]:
+    """Structural package-update advisory for setup reports (never auto-upgrades)."""
+
+    from yoetz.application.package_update import (
+        package_update_report_fields,
+        resolve_package_update_advisory,
+    )
+
+    # Noninteractive setup never opens the network for surprise side effects when the
+    # service/policy is not already available; interactive may check when policy allows.
+    try:
+        from yoetz.cli.app import build_service_client
+        from yoetz.cli.provider_status import machine_scope_request
+
+        client = await build_service_client()
+        try:
+            raw = await client.privacy_get_effective(machine_scope_request())
+        finally:
+            await client.close()
+        raw_map = cast(Mapping[str, object], raw)
+        policy_obj = raw_map.get("policy")
+        if not isinstance(policy_obj, Mapping):
+            advisory = await resolve_package_update_advisory(
+                policy=None, allow_network=False
+            )
+        else:
+            # Prefer structural bits over full re-decode when wire shape is partial.
+            policy_map = cast(Mapping[str, object], policy_obj)
+            network = policy_map.get("network_egress_permitted")
+            enabled = False
+            channels = policy_map.get("channel_policies")
+            if isinstance(channels, (list, tuple)):
+                for entry_obj in cast(tuple[object, ...] | list[object], channels):
+                    if not isinstance(entry_obj, Mapping):
+                        continue
+                    row = cast(Mapping[str, object], entry_obj)
+                    if row.get("channel") == "update_checks" and row.get("enabled") is True:
+                        enabled = True
+                        break
+            advisory = await resolve_package_update_advisory(
+                network_egress_permitted=network if type(network) is bool else None,
+                update_checks_enabled=enabled,
+                allow_network=interactive,
+            )
+    except Exception:
+        advisory = await resolve_package_update_advisory(policy=None, allow_network=False)
+    fields = dict(package_update_report_fields(advisory))
+    return cast(dict[str, JsonValue], fields)
+
+
+async def _offer_interactive_package_upgrade(package_update: Mapping[str, JsonValue]) -> bool:
+    """Offer upgrade-over-reinstall when a newer package is known. Returns False to stop setup."""
+
+    if package_update.get("is_newer") is not True:
+        return True
+    installed = package_update.get("installed_version")
+    latest = package_update.get("latest_version")
+    command = package_update.get("upgrade_command")
+    if type(installed) is not str or type(latest) is not str or type(command) is not str:
+        return True
+    typer.echo("")
+    typer.echo(f"A newer Yoetz package is available ({installed} → {latest}).")
+    typer.echo(f"Upgrade command: {command}")
+    upgrade = typer.confirm(
+        "Upgrade the package first (exit and re-run yoetz after upgrade)?",
+        default=False,
+    )
+    if upgrade:
+        typer.echo("Exit this process, run the upgrade command, then re-run yoetz setup.")
+        return False
+    typer.echo("Continuing with this package version; harness add/repair does not reinstall it.")
+    return True
+
+
 async def run_setup_wizard(
     *,
     non_interactive: bool,
@@ -1230,6 +1307,17 @@ async def run_setup_wizard(
     """Run the guided first-run setup and report each step honestly."""
 
     interactive = not non_interactive and _is_interactive_terminal()
+    package_update = await _resolve_setup_package_update(interactive=interactive)
+    if interactive and not await _offer_interactive_package_upgrade(package_update):
+        report: dict[str, JsonValue] = {
+            "package_update": package_update,
+            "schema": _REPORT_SCHEMA,
+            "outcome": "cancelled",
+            "reason": "package_upgrade_deferred",
+        }
+        _emit(report, json_output=json_output)
+        return 0
+
     binaries = discover_codex_binaries()
     try:
         harness = _choose_harness(
@@ -1398,6 +1486,7 @@ async def run_setup_wizard(
         "integration": integration,
         "marker_written": marker_written,
         "next_steps": next_steps,
+        "package_update": package_update,
         "privacy": privacy,
         "provider": provider,
         "readiness": readiness,

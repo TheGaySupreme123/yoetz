@@ -1661,10 +1661,21 @@ finding-prose/exact-command/caps value owned by `domain/privacy.md`; overlays me
 intersection, stricter relevance, logical AND for both booleans, and minimum caps. Selector growth
 or disabling the current-data-use guard
 is a policy loosening. v0.1 owns no production transports for those four rows: setup renders
-them `unsupported`, enabling transitions return `channel_unavailable` without persistence or I/O,
-and forced enabled state yields a pre-dispatch `channel_unavailable/channel_unavailable` decision
-receipt with no authorization/dispatch/commitment/attempt-body fields. A later exact capability
+them `unsupported` except `update_checks`, which ships a bounded structural PyPI transport and is a
+real setup yes/no (product default on). Enabling the remaining three non-LLM rows returns
+`channel_unavailable` without persistence or I/O, and forced enabled state for those rows yields a
+pre-dispatch `channel_unavailable/channel_unavailable` decision receipt with no
+authorization/dispatch/commitment/attempt-body fields. A later exact capability for those rows
 requires a fresh local-human policy transition and cannot activate dormant v0.1 intent.
+
+### Package update advisory
+
+Interactive-only structural DTO (`yoetz.application.package_update.PackageUpdateAdvisory`):
+`outcome` (`newer_available|up_to_date|skipped_policy|skipped_unavailable|skipped_unknown_version`),
+`installed_version`, `latest_version` (nullable), `is_newer`, `upgrade_command`
+(`uv tool upgrade yoetz`), `source` (`network|cache|none`). Setup reports may include a
+`package_update` object with the same field names. Work receipts and ledger documents never carry
+these fields.
 
 `ProviderBinding` is exactly the five nonsecret fields `provider_id`, `model_id`,
 `endpoint_profile_id`, `endpoint_profile_version`, and `transport` (`external|local_af_unix`); it

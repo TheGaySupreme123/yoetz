@@ -790,11 +790,14 @@ class YoetzTui(App[int]):
         snapshot = await self.runtime.status_snapshot()
         await self._refresh_header()
         self.say(Level.VERIFIED, "", render_finish(snapshot, self.body_width))
+        await self._maybe_say_package_update_tip()
 
     async def _resume_flow(self) -> None:
         """Post-install landing: a header, a tip, and the composer. No dashboard."""
 
         await self._refresh_header()
+        if await self._maybe_say_package_update_tip():
+            return
         self.say(
             Level.ACTIVE,
             "",
@@ -803,6 +806,23 @@ class YoetzTui(App[int]):
                 "record of claims, evidence, checks, and limitations.",
             ),
         )
+
+    async def _maybe_say_package_update_tip(self) -> bool:
+        """Show a package-update tip when policy permits and a newer release exists.
+
+        Returns True when a tip was shown so callers can skip the generic Codex tip.
+        Network and policy failures are silent (no tip).
+        """
+
+        try:
+            advisory = await self.runtime.package_update_advisory(allow_network=True)
+        except Exception:
+            return False
+        lines = advisory.tip_lines()
+        if not lines:
+            return False
+        self.say(Level.OPTIONAL, "Package update available", lines)
+        return True
 
     async def _refresh_header(self) -> None:
         harnesses = self.runtime.discover_harnesses()
@@ -900,6 +920,8 @@ class YoetzTui(App[int]):
         option = await self._choose_harness(harnesses)
         if option is None:
             return
+        if not await self._offer_package_upgrade_if_newer():
+            return
         choice = await self.ask(
             SelectionView(
                 name="connect",
@@ -934,6 +956,55 @@ class YoetzTui(App[int]):
             return
         await self._connect(option)
         await self._refresh_header()
+
+    async def _offer_package_upgrade_if_newer(self) -> bool:
+        """When a newer package exists, offer upgrade before harness re-apply.
+
+        Returns False only when the user chooses to exit and re-run after upgrading.
+        Continuing with the current version still repairs/adds harnesses without
+        reinstalling the same package bits.
+        """
+
+        try:
+            advisory = await self.runtime.package_update_advisory(allow_network=True)
+        except Exception:
+            return True
+        if not advisory.is_newer or advisory.latest_version is None:
+            return True
+        choice = await self.ask(
+            SelectionView(
+                name="package-upgrade",
+                title="A newer Yoetz package is available",
+                options=[
+                    Option(
+                        "upgrade",
+                        f"Upgrade to {advisory.latest_version} first",
+                        f"Run: {advisory.upgrade_command}",
+                    ),
+                    Option(
+                        "continue",
+                        f"Continue with {advisory.installed_version}",
+                        "Add or repair harness integration without reinstalling the package.",
+                    ),
+                ],
+                hint="enter to choose · esc to go back",
+            )
+        )
+        if choice is None:
+            return False
+        if choice == "upgrade":
+            self.say(
+                Level.ACTIVE,
+                "Upgrade the package, then re-run yoetz",
+                (
+                    f"Installed: {advisory.installed_version}",
+                    f"Available: {advisory.latest_version}",
+                    f"Command: {advisory.upgrade_command}",
+                    "This process cannot upgrade itself; exit and run the command.",
+                ),
+            )
+            return False
+        return True
 
     async def command_privacy(self) -> None:
         """Show where privacy stands, then the one recommended move, then everything else.

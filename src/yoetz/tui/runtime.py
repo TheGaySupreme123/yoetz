@@ -537,12 +537,15 @@ class YoetzRuntime:
             if isinstance(never, (list, tuple))
             else ()
         )
+        network_raw = policy_map.get("network_egress_permitted")
+        network_egress = network_raw if type(network_raw) is bool else None
         return PrivacyPosture(
             profile=profile if isinstance(profile, str) else None,
             llm_inference_enabled=llm_enabled,
             readable=True,
             never_send=never_send,
             enabled_channels=tuple(enabled),
+            network_egress_permitted=network_egress,
         )
 
     # -- provider -------------------------------------------------------
@@ -1095,6 +1098,24 @@ class YoetzRuntime:
             raise RuntimeError_(reason, detail)
         return payload
 
+    # -- package update advisory ----------------------------------------
+
+    async def package_update_advisory(self, *, allow_network: bool = True):
+        """Best-effort structural package update advisory for interactive surfaces only.
+
+        Fail closed when policy is unreadable or denies ``update_checks``. Network errors
+        yield no tip (or a soft doctor note when the caller is ``doctor``).
+        """
+
+        from yoetz.application.package_update import resolve_package_update_advisory
+
+        posture = await self.privacy_posture()
+        return await resolve_package_update_advisory(
+            network_egress_permitted=posture.network_egress_permitted,
+            update_checks_enabled="update_checks" in posture.enabled_channels,
+            allow_network=allow_network and posture.update_checks_permitted,
+        )
+
     # -- doctor ---------------------------------------------------------
 
     async def doctor(self) -> DoctorReport:
@@ -1115,8 +1136,30 @@ class YoetzRuntime:
                 else "Yoetz requires Python 3.14; reinstall with 'uv tool install yoetz'",
             )
         )
+        package_detail = __version__
+        package_state = LayerState.VERIFIED
+        package_remediation = ""
+        try:
+            advisory = await self.package_update_advisory(allow_network=True)
+        except Exception:
+            advisory = None
+        if advisory is not None and advisory.is_newer and advisory.latest_version is not None:
+            package_state = LayerState.UNPROVEN
+            package_detail = (
+                f"{advisory.installed_version} (available {advisory.latest_version})"
+            )
+            package_remediation = f"{advisory.upgrade_command}  # then re-run yoetz"
+        elif advisory is not None and advisory.outcome == "skipped_unavailable":
+            package_state = LayerState.UNPROVEN
+            package_detail = f"{__version__} (could not check for updates)"
         entries.append(
-            DoctorEntry("package", "Yoetz version", LayerState.VERIFIED, detail=__version__)
+            DoctorEntry(
+                "package",
+                "Yoetz version",
+                package_state,
+                detail=package_detail,
+                remediation=package_remediation,
+            )
         )
         snapshot = await self.status_snapshot()
         remediation = {

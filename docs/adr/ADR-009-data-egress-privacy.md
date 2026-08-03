@@ -36,9 +36,12 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    network channel, and permits a local model only when separately configured and explicitly
    trusted under resolved decision F-013. It may coexist with a separately authorized bounded
    non-LLM policy row, but
-   no such channel may carry task/user content. v0.1 owns no production transport for those four
-   channels, so proposed enablement is rejected and makes no I/O; adding one later requires an exact
-   adapter/use-case owner, ADR review, and fresh human transition.
+   no such channel may carry task/user content. v0.1 ships production transport for
+   `update_checks` only among the non-LLM channels (structural package identity against an
+   allowlisted PyPI URL). The remaining three non-LLM channels (`product_telemetry`,
+   `crash_diagnostics`, `capability_testing`) still have no production transport: proposed
+   enablement is rejected and makes no I/O; adding one later requires an exact adapter/use-case
+   owner, ADR review, and fresh human transition.
    `confirm_every_request` requires an exact durable preview
    of the already minimized/redacted/scanned outbound case and a local-human decision for each
    external request. `minimal_external` automatically permits
@@ -51,12 +54,22 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    `llm_inference`, `product_telemetry`, `crash_diagnostics`, `update_checks`, and
    `capability_testing`. Enabling one never enables another. All four non-LLM channels are limited
    to their reviewed bounded structural or synthetic schemas and cannot carry ordinary or
-   sensitive task/user content. In v0.1 they are policy vocabulary with no production transport:
-   setup marks them unsupported/off and rejects proposed enablement as `channel_unavailable`
-   without persisting dormant consent. A forced/imported enabled state is fenced at use time,
-   records a structural no-dispatch `channel_unavailable` decision receipt, and performs no
-   DNS/socket I/O. A future capability needs a fresh local-human policy transition. The ceiling and
-   every channel default denied; absence is not silently replaced by a generic HTTP client.
+   sensitive task/user content.
+
+   **Revised 2026-08-03 — `update_checks` transport and product default.** v0.1 ships a bounded
+   structural transport for `update_checks` only: a fixed allowlisted HTTPS GET of the `yoetz`
+   distribution identity on PyPI (`https://pypi.org/pypi/yoetz/json`), with `trust_env=False`,
+   size/timeout caps, and response use limited to the latest version string. Interactive TUI
+   surfaces (first-run finish, resume tip, `/doctor`) and interactive setup/`/connect` may surface
+   an advisory plus the exact upgrade command `uv tool upgrade yoetz`; work receipts never carry
+   update metadata. The product durable seed and named recipes default `update_checks` **on** with
+   `network_egress_permitted=true` solely because that channel is on, while `llm_inference` and the
+   other three non-LLM channels stay off and profile remains `local_only`. Config.toml generation-1
+   bootstrap remains fail-safe all-denied and is not continuing disclosure authority. Operators may
+   opt out in privacy custom section 5. The remaining three non-LLM channels stay unsupported: setup
+   marks them read-only off, proposed enablement returns `channel_unavailable` without persistence
+   or I/O, and forced enabled state yields a pre-dispatch `channel_unavailable` decision receipt
+   with no DNS/socket I/O. Absence of a channel is not silently replaced by a generic HTTP client.
 3. **Local disclosure sinks:** `local_model`, `agent_context`, `local_human_view`, and
    `trusted_human_control` are not network-egress channels. They receive only policy-approved
    minimized content and are covered by the never-send fence. The trusted human surface may render an
@@ -210,7 +223,11 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    than being swept or repaired with an invented ledger row.
 10. **Zero-egress definition:** true Yoetz zero-network egress is the composite policy state
     `profile=local_only`, `network_egress_permitted=false`, all five channels disabled, and no
-    network-capable runtime path. In that state the Yoetz-owned tested process set permits only the
+    network-capable runtime path. The product default is **not** that state: it is `local_only`
+    with structural `update_checks` permitted (opt-out) and no task-content egress. Zero-network
+    for package identity checks requires the operator to disable `update_checks` (and therefore
+    the ceiling when no other channel is on). In the true zero-network state the Yoetz-owned tested
+    process set permits only the
     exact service/confidential AF_UNIX endpoints; a separately approved exact local-model AF_UNIX
     endpoint; and exact release-cell platform IPC needed for OS credential storage, user presence,
     or session-lifecycle security events.
@@ -220,8 +237,9 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     arbitrary AF_UNIX, arbitrary bus names/methods, or a local proxy. Yoetz denies AF_INET, AF_INET6,
     DNS, proxies, redirects, external provider
     construction, telemetry, diagnostics upload, update checks, and capability calls. The
-    `local_only` profile alone is not a zero-network claim because a future owned capability may be
-    separately enabled under the global ceiling (v0.1's four non-LLM rows remain unsupported/off).
+    `local_only` profile alone is not a zero-network claim because a separately authorized
+    structural non-LLM row (today: `update_checks`) may raise the ceiling without enabling LLM
+    disclosure; the remaining three non-LLM rows stay unsupported/off.
     Evidence names the exact platform/release profile, Yoetz service/client/confidential-helper
     processes, lifecycle interval from startup through `locked|ready` and tested operations, and
     allowlisted local IPC peers. It proves those Yoetz paths, not the ambient authority of the OS
@@ -252,18 +270,20 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     still passes category/class/scope policy, minimization, redaction, never-send scanning, provider
     binding, caps, authorization, and receipt. The selection profile grants neither live filesystem
     access nor permission beyond the effective privacy policy.
-14. **Two defaults are intentionally different:** an unconfigured installation is seeded
-    `local_only`, global network false, every network channel off, and no local model. When a
-    technical user deliberately runs external semantic setup, the upstream CLI recommends the
-    inspectable `assisted` recipe for an exact endpoint profile with a current data-use record that
-    states customer-content training `prohibited`, retention `none|bounded`, and provider human
-    access `prohibited|restricted`. Known-broad, unknown, or stale posture removes the badge. The
-    recipe sets the editable `require_current_provider_data_use_evidence=true` runtime guard. A
-    technical user may turn it off only through a trusted loosening/custom transition, after which
-    the policy carries no upstream no-training recommendation. The user reviews and commits the expanded policy once. Within
-    that standing workspace policy, checks, retries, reviewer challenges, agent responses, and
-    rechecks run without per-request human prompts. `confirm_every_request` remains the optional
-    high-ceremony alternative.
+14. **Two defaults are intentionally different:** an unconfigured installation's durable seed is
+    `local_only`, structural `update_checks` on (opt-out), other network channels off, global
+    ceiling true only because update checks are on, and no local model. Config.toml generation-1
+    remains fail-safe all-denied. When a technical user deliberately runs external semantic setup,
+    the upstream CLI recommends the inspectable `assisted` recipe for an exact endpoint profile
+    with a current data-use record that states customer-content training `prohibited`, retention
+    `none|bounded`, and provider human access `prohibited|restricted`. Known-broad, unknown, or
+    stale posture removes the badge. The recipe sets the editable
+    `require_current_provider_data_use_evidence=true` runtime guard. A technical user may turn it
+    off only through a trusted loosening/custom transition, after which the policy carries no
+    upstream no-training recommendation. The user reviews and commits the expanded policy once.
+    Within that standing workspace policy, checks, retries, reviewer challenges, agent responses,
+    and rechecks run without per-request human prompts. `confirm_every_request` remains the
+    optional high-ceremony alternative.
 15. **Structural subject-state hashing is a local non-disclosure support effect:** ADR-011 permits
     one explicit trusted local CLI command to read bounded Git/worktree bytes only into streaming
     hashers and return a versioned `SubjectStateRef`. It returns no source, diff, filename, path,

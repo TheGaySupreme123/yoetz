@@ -71,12 +71,17 @@ _SEMANTIC_CATEGORIES: Final = (
     DataCategory.REPOSITORY_EXCERPT,
 )
 _AGENT_CATEGORIES: Final = tuple(DataCategory)
+# Remaining non-LLM channels with no production transport. ``update_checks`` ships a
+# bounded structural transport and is a real yes/no in section 5 (product default: on).
 _UNSUPPORTED_CHANNELS: Final = (
     EgressChannel.PRODUCT_TELEMETRY,
     EgressChannel.CRASH_DIAGNOSTICS,
-    EgressChannel.UPDATE_CHECKS,
     EgressChannel.CAPABILITY_TESTING,
 )
+
+_UPDATE_CHECKS_MAX_BYTES: Final = 4096
+_UPDATE_CHECKS_MAX_TOKENS: Final = 1024
+_UPDATE_CHECKS_TTL_SECONDS: Final = 60
 # The two whole-case ceilings have to express the same budget. The enforcer estimates tokens
 # from the prepared byte count, so a token ceiling set independently of the byte ceiling becomes
 # the real limit at a completely different size: 4096 tokens binds at 16 KiB, sixteen times
@@ -147,6 +152,26 @@ def _disabled_channel(channel: EgressChannel) -> ChannelPolicy:
     )
 
 
+def _update_checks_channel(*, enabled: bool) -> ChannelPolicy:
+    """Structural-only package version check row (no task/user content)."""
+
+    if not enabled:
+        return _disabled_channel(EgressChannel.UPDATE_CHECKS)
+    return ChannelPolicy(
+        EgressChannel.UPDATE_CHECKS,
+        True,
+        (DataCategory.BOUNDED_STRUCTURAL_METADATA,),
+        (DataClass.PUBLIC_STRUCTURAL,),
+        None,
+        ("package-update-check",),
+        AuthorizationScopeKind.MACHINE,
+        False,
+        _UPDATE_CHECKS_MAX_BYTES,
+        _UPDATE_CHECKS_MAX_TOKENS,
+        _UPDATE_CHECKS_TTL_SECONDS,
+    )
+
+
 def _ordered_channels(
     channels: dict[EgressChannel, ChannelPolicy],
 ) -> tuple[ChannelPolicy, ...]:
@@ -170,7 +195,6 @@ def build_candidate_policy(
         (
             answers.telemetry,
             answers.crash_diagnostics,
-            answers.updates,
             answers.capability_testing,
         )
     ):
@@ -181,10 +205,13 @@ def build_candidate_policy(
         answers.local_model_categories or answers.local_model_data_classes
     ):
         raise ValueError("privacy_setup_local_model_binding_required")
+    # External LLM binding is independent of the global ceiling: package update checks may
+    # raise network_egress_permitted without binding a semantic provider.
     if answers.network_egress != (answers.external_provider is not None):
         raise ValueError("privacy_setup_provider_binding_required")
 
     channels = {channel: _disabled_channel(channel) for channel in EgressChannel}
+    channels[EgressChannel.UPDATE_CHECKS] = _update_checks_channel(enabled=answers.updates)
     if answers.network_egress:
         profile = (
             PrivacyProfile.CONFIRM_EVERY_REQUEST
@@ -212,6 +239,9 @@ def build_candidate_policy(
     else:
         profile = PrivacyProfile.LOCAL_ONLY
 
+    # Ceiling is true when any network channel is on (LLM and/or update_checks).
+    network_ceiling = bool(answers.network_egress or answers.updates)
+
     placeholder = PrivacyPolicy(
         current.policy_id,
         current.version + 1,
@@ -220,7 +250,7 @@ def build_candidate_policy(
         answers.review_context,
         ReviewSelectionPolicy.for_profile(answers.review_context),
         answers.require_current_provider_data_use_evidence,
-        answers.network_egress,
+        network_ceiling,
         current.effective_scope,
         _ordered_channels(channels),
         answers.local_models,
@@ -426,7 +456,8 @@ def _recipe_answers(
         request_confirmation=recipe == "metadata_only",
         telemetry=False,
         crash_diagnostics=False,
-        updates=False,
+        # Product default: structural package update checks on (opt-out in custom).
+        updates=True,
         capability_testing=False,
         authorization_scope={
             "private": AuthorizationScopeKind.MACHINE,
@@ -600,10 +631,14 @@ def _ask_custom_answers(
     )
     scope = _authorization_scope_prompt("task" if use_provider else "machine")
 
-    _section(5, "Unsupported channels")
+    _section(5, "Package updates and unsupported channels")
+    updates = typer.confirm(
+        "Permit structural package update checks against PyPI (package name and version only)?",
+        default=True,
+    )
     typer.echo(
-        "Product telemetry, crash diagnostics, network update checks, and external capability "
-        "testing ship no transport in this release. They are off and cannot be turned on here."
+        "Product telemetry, crash diagnostics, and external capability testing ship no "
+        "transport in this release. They are off and cannot be turned on here."
     )
 
     if network and not use_provider:
@@ -626,7 +661,7 @@ def _ask_custom_answers(
         confirmation,
         False,
         False,
-        False,
+        updates,
         False,
         scope,
     )
@@ -705,7 +740,16 @@ def _render_review(candidate: PrivacyPolicy) -> None:
         "  Never sent: credentials, encryption material, environment variables, "
         "complete transcripts, unrelated or out-of-scope files"
     )
-    typer.echo("  Telemetry, crash diagnostics, update checks, capability testing: off")
+    updates_row = next(
+        policy
+        for policy in candidate.channel_policies
+        if policy.channel is EgressChannel.UPDATE_CHECKS
+    )
+    typer.echo(
+        "  Package update checks: "
+        + ("on (structural PyPI version only)" if updates_row.enabled else "off")
+    )
+    typer.echo("  Telemetry, crash diagnostics, capability testing: off")
 
 
 async def _effective_policy() -> PrivacyPolicy:

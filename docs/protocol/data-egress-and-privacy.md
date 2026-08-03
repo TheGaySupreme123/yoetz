@@ -85,11 +85,15 @@ disabled. When `true`, it authorizes nothing by itself — every channel still n
 The five independent `EgressChannel` values are `llm_inference`, `product_telemetry`,
 `crash_diagnostics`, `update_checks`, and `capability_testing`. Enabling one never enables another.
 The four non-LLM channels accept only their reviewed bounded structural/synthetic schemas and can
-never carry task/user content. **v0.1 ships no production transport for the four non-LLM channels:**
-an attempted use terminates before dispatch with outcome `channel_unavailable`, writes a
-no-dispatch structural decision receipt, and makes no DNS or socket attempt.
+never carry task/user content. **v0.1 ships a production transport for `update_checks` only**
+(allowlisted PyPI JSON GET of the `yoetz` distribution version; interactive advisory surfaces
+only). The other three non-LLM channels still have no production transport: an attempted use
+terminates before dispatch with outcome `channel_unavailable`, writes a no-dispatch structural
+decision receipt, and makes no DNS or socket attempt.
 
-Yoetz's zero-network state is the composite `profile=local_only`, `network_egress_permitted=false`,
+The product durable default is `local_only` with structural `update_checks` on (opt-out) and the
+global ceiling true only because that channel is on. Yoetz's true zero-network state is the
+composite `profile=local_only`, `network_egress_permitted=false`,
 and all five channel policies disabled. That state permits only exact release-cell local IPC:
 Yoetz's own service/confidential endpoints, an optional approved local-model AF_UNIX profile, and
 measured OS credential/user-presence/session-lifecycle IPC (for example allowlisted Linux
