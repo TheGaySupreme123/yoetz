@@ -535,19 +535,22 @@ class CatalogPrivacyPolicyStore:
                 eligible.append((policy, cast(int, generation)))
         if not eligible:
             raise ValueError("privacy_policy_missing")
-        policy, generation = max(
+        # ADR-009 / protocol: intersection of every containing current row — not rank-max alone.
+        rank = {
+            AuthorizationScopeKind.MACHINE: 0,
+            AuthorizationScopeKind.WORKSPACE: 1,
+            AuthorizationScopeKind.TASK: 2,
+            AuthorizationScopeKind.REQUEST: 3,
+        }
+        ordered = sorted(
             eligible,
-            key=lambda item: (
-                {
-                    AuthorizationScopeKind.MACHINE: 0,
-                    AuthorizationScopeKind.WORKSPACE: 1,
-                    AuthorizationScopeKind.TASK: 2,
-                    AuthorizationScopeKind.REQUEST: 3,
-                }[item[0].effective_scope.kind],
-                item[1],
-            ),
+            key=lambda item: (rank[item[0].effective_scope.kind], item[1]),
         )
-        return EffectivePrivacyPolicy(policy, generation, policy.policy_digest)
+        composed = ordered[0][0]
+        for policy, _generation in ordered[1:]:
+            composed = composed.meet(policy)
+        generation = max(item[1] for item in eligible)
+        return EffectivePrivacyPolicy(composed, generation, composed.policy_digest)
 
     async def prepare_transition(
         self, proposal: PolicyTransitionProposal
