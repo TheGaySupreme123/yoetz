@@ -308,6 +308,20 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
             connected.add(registry.local_model[0].provider_id)
         return tuple(sorted(connected, key=str.encode))
 
+    def bound_data_use_profile(self, binding: ProviderBinding) -> ProviderDataUseProfile | None:
+        """Return the nonsecret data-use profile of the live factory for this exact binding.
+
+        ``None`` means no live factory, so admission fails closed rather than treating an absent
+        registry as satisfied evidence.
+        """
+
+        if type(binding) is not ProviderBinding:
+            raise TypeError("privacy_gateway_provider_binding_invalid")
+        registry = self._current_registry()
+        if registry is None:
+            return None
+        return registry.data_use_profile(binding)
+
     def has_connected_provider_binding(self, binding: ProviderBinding) -> bool:
         """Return whether the exact configured binding is live in the current registry."""
 
