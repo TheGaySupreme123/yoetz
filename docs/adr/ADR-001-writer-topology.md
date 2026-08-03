@@ -61,8 +61,13 @@ The persistent service removes normal cross-client writer contention, but durabl
 mandatory because stale or duplicate service processes must fail safely.
 
 - A catalog owner generation identifies the active service instance. Each bundle has its own
-  monotonic `owner_generation` and random owner nonce in `bundle_meta`.
-- Acquisition and takeover use `BEGIN IMMEDIATE` compare-and-swap. Every write, operation lease,
+  per-bundle monotonic `owner_generation` and random owner nonce in `bundle_meta`. That bundle
+  generation is independent of the service/catalog generation: acquisition computes
+  `next = current + 1` rather than writing the service generation into the bundle.
+- Acquisition and takeover use `BEGIN IMMEDIATE` compare-and-swap against the inspected
+  `RecoveryState` identity (`task_id`, route generation/digest, `owner_generation`, `owner_nonce`)
+  and conditional row updates that require `changes() == 1`. A mismatch raises
+  `recovery_ownership_conflict` before any durable write. Every write, operation lease,
   import lease, and checkpoint verifies the current generation inside its transaction.
 - Heartbeat time, PID, process-start metadata, boot identity, service endpoint, and advisory lock
   files are diagnostics only. None can authorize a write.

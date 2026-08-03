@@ -140,6 +140,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "obligation_resolution_invalid",
     "obligation_resolution_mismatch",
     "operation_recovery_unavailable",
+    "ownership_contended",
     "payload_redaction_mismatch",
     "plan_version_conflict",
     "privacy_projection_unavailable",
@@ -191,7 +192,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 138
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 139
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)

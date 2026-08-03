@@ -1039,6 +1039,8 @@ in a receipt (`application/status.md`, `application/check.md`).
 `StartCatalogPort` methods are `reserve_or_resume(StartCommand) -> StartAllocation`,
 `commit_identity(StartIdentityInput) -> StartIdentityCommitments`,
 `resolve_route(session_id) -> TaskRoute | None`,
+`list_workspace_task_ids(workspace_ref_commitment) -> tuple[str, ...]` (task ids only, ascending,
+non-quarantined; no public MCP surface yet),
 `advance_phase(allocation, phase, result: EncryptedResultRef | None = None) -> StartAllocation`,
 `complete(allocation,
 EncryptedResultRef, StartCompletionEvidence)`, and `quarantine(allocation, SafeReason)`. `StartPhase` is
@@ -1055,14 +1057,22 @@ canonical task ID/bundle route/route generation; session/state transitions do no
 `StartAllocation` freezes the same generation/digest selected at reservation.
 Its lease is the distinct `StartOperationLease(owner_generation: positive int, lease_owner_id,
 lease_generation: positive int, lease_expires_at)` and is absent only for terminal replay; it is
-not the check-specific `ports.ledger.OperationLease`.
+not the check-specific `ports.ledger.OperationLease`. The lease's `owner_generation` is the
+**start-lease / catalog generation** (the active service generation seeded into catalog meta), not
+the per-bundle monotonic fence generation in `bundle_meta`.
+`StartCompletionEvidence.owner_generation` carries the same start-lease generation so
+`complete` can CAS against the catalog row; bundle-fence rotation is verified separately via
+`validate_fence` against the fence's own `owner_generation` and nonce.
 
 `StartIdentityInput(task_title, workspace_ref?, external_ref?)` is a redacted one-shot value;
 `StartIdentityCommitments(title_commitment, workspace_ref_commitment?,
 external_ref_commitment?)` contains only domain-separated installation-keyed HMAC commitments.
 The application builds the start `request_digest` from those commitments plus nonsecret logical
 fields. `reserve_or_resume` recomputes/verifies them before idempotency or route lookup, preventing
-low-entropy plaintext from leaking through an unkeyed structural request digest.
+low-entropy plaintext from leaking through an unkeyed structural request digest. `workspace_ref`
+is the stable project identity and `external_ref` the stable task identity within that project;
+together they are the attach selector when `session_id` is absent (`mode=create_or_attach` or
+`attach` with the pair). Raw refs never land in durable state — only the commitments do.
 
 ### Immutable objects and keys
 
