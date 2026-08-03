@@ -57,11 +57,15 @@ PLAN = IntegrationPlan(
     policy_digest="7f8a92bd",
     planned_check_ids=("lint",),
     planned_file_count=6,
-    managed_paths=("/tmp/project/.agents/plugins/yoetz",),
+    managed_paths=(
+        "/tmp/project/.agents/skills/yoetz",
+        "/tmp/project/.agents/plugins/yoetz",
+    ),
     state_before="absent",
     already_registered=False,
     foreign_entry=False,
     preview_digest="sha256:abc123",
+    skill_preview_digest="sha256:def456",
 )
 
 LOCAL_ONLY = PrivacyPosture(profile="local_only", llm_inference_enabled=False, readable=True)

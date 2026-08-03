@@ -2167,9 +2167,11 @@ rather than being rewritten to `incompatible`. The standalone integration servic
 unprofiled install. ADR-012's accepted first-run setup is the one narrow exception: it may install
 the same preview-digest-bound packaged bytes into the already approved trusted project so Codex can
 discover the project skill, while reporting compatibility `unsupported` and automatic activation
-untested. Setup separately reports `project_skill_installation`, structural plugin-source
-installation, MCP registration, hooks/consent, service routing, and semantic readiness; none of
-those fields implies another.
+untested. Prompt and non-prompt setup surfaces compute the project-skill preview before acceptance;
+non-prompt front ends echo both the MCP and skill preview digests, and either stale digest refuses
+the whole apply before a file is written. Setup separately reports
+`project_skill_installation`, structural plugin-source installation, MCP registration,
+hooks/consent, service routing, and semantic readiness; none of those fields implies another.
 MCP server registration is a sibling port, never an `IntegrationsPort` overload (ADR-012).
 `HarnessMcpPort` methods are `status_registration`, `preview_registration`, and
 `apply_registration`, each taking a `HarnessBinary` (harness ID, redacted-repr executable path,

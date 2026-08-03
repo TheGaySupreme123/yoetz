@@ -15,6 +15,7 @@ from typer.testing import CliRunner
 
 import yoetz.cli.app as cli
 from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter, CommandOutput
+from yoetz.application.harness_mcp import HarnessMcpService
 from yoetz.ports.control import ControlClientKind, ControlError
 from yoetz.ports.harness_mcp import HarnessBinary
 from yoetz.ports.integrations import (
@@ -93,7 +94,7 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
     async def unreachable_on_demand(_kind: ControlClientKind) -> ServiceClient:
         raise ControlError("service_unavailable")
 
-    async def fake_install_project_skill(_target: object) -> dict[str, object]:
+    async def fake_install_project_skill(_target: object, **_kwargs: object) -> dict[str, object]:
         return {
             "compatibility": "unsupported",
             "installed_digest": "sha256:" + "c" * 64,
@@ -285,6 +286,34 @@ def test_foreign_entry_is_preserved_and_reported(wizard_env: dict[str, object]) 
     # No mutating `mcp add` ever ran.
     for calls in cast(list[list[tuple[str, ...]]], wizard_env["calls"]):
         assert all(call[1:3] == ("mcp", "get") for call in calls)
+
+
+@pytest.mark.anyio
+async def test_tui_apply_refuses_a_skill_preview_digest_not_shown_to_the_user(
+    wizard_env: dict[str, object],
+) -> None:
+    import yoetz.cli.setup as setup_module
+
+    preview_runner = _ScriptedRunner([_yoetz_entry()])
+    mcp_preview = await HarnessMcpService(
+        CodexMcpAdapter(preview_runner, route_profile="strict")
+    ).preview(_binary())
+    workspace = cast(Path, wizard_env["marker"]).parent
+    wizard_env["outputs"] = [_yoetz_entry()]
+
+    report = await setup_module.apply_codex_integration(
+        _binary(),
+        workspace=workspace,
+        approved_preview_digest=mcp_preview.preview_digest,
+        approved_skill_preview_digest="sha256:" + "0" * 64,
+    )
+
+    assert report["outcome"] == "failed"
+    assert report["reason"] == "preview_stale"
+    skill_report = report["skill"]
+    assert isinstance(skill_report, dict)
+    assert skill_report["reason"] == "preview_stale"
+    assert not (workspace / ".agents").exists()
 
 
 def test_multiple_candidates_fail_closed_non_interactively(

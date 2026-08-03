@@ -16,6 +16,7 @@ import io
 import os
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, cast
 
@@ -35,7 +36,7 @@ from yoetz.application.harness_mcp import HarnessMcpService, McpRegistrationConf
 from yoetz.application.observation_check_policy import load_observation_check_policy
 from yoetz.config.load import load_config
 from yoetz.config.paths import PathSafetyError, setup_marker_path
-from yoetz.domain.values import request_id
+from yoetz.domain.values import RequestId, request_id
 from yoetz.ports.harness_mcp import (
     HarnessBinary,
     McpRegistrationAction,
@@ -46,6 +47,7 @@ from yoetz.ports.integrations import (
     HarnessId,
     IntegrationAction,
     IntegrationError,
+    IntegrationPreview,
     IntegrationScope,
     IntegrationTarget,
     SkillApplyCommand,
@@ -59,6 +61,7 @@ __all__ = [
     "apply_codex_integration",
     "check_policy_preview",
     "integrate_mcp",
+    "project_skill_preview",
     "run_provider_setup",
     "run_setup_wizard",
     "setup_marker_present",
@@ -422,6 +425,7 @@ def _emit_registration_preview(
     binary: HarnessBinary,
     mcp_preview: object,
     policy_preview: dict[str, JsonValue] | None = None,
+    skill_preview: IntegrationPreview | None = None,
 ) -> None:
     typer.echo("Proposed change: complete Yoetz Codex project integration:")
     typer.echo("  1. Install discoverable guidance under .agents/skills/yoetz")
@@ -433,6 +437,10 @@ def _emit_registration_preview(
     typer.echo(f"  Codex executable: {binary.executable_path}")
     if binary.reported_version is not None:
         typer.echo(f"  Codex version: {binary.reported_version}")
+    if skill_preview is not None:
+        typer.echo(f"  Project skill state: {skill_preview.state_before.value}")
+        typer.echo(f"  Project skill compatibility: {skill_preview.compatibility}")
+        typer.echo(f"  Project skill preview digest: {skill_preview.preview_digest}")
     digest = None if policy_preview is None else policy_preview.get("policy_digest")
     if type(digest) is str:
         typer.echo(f"  Approved-check policy digest: {digest}")
@@ -449,6 +457,10 @@ def _plugin_verified(presence: str | None) -> bool:
 
 async def _install_project_skill(
     target: IntegrationTarget,
+    *,
+    adapter: CodexSkillIntegration,
+    operation_id: RequestId,
+    accepted_preview: IntegrationPreview,
 ) -> dict[str, JsonValue]:
     """Install the project-scoped skill without claiming Codex capability support.
 
@@ -458,25 +470,14 @@ async def _install_project_skill(
     until an exact capability cell is frozen.
     """
 
-    adapter = CodexSkillIntegration(allow_untested=True)
-    operation_id = request_id(new_id(IdKind.REQUEST))
     try:
-        preview = await adapter.preview_skill(
-            HarnessId.CODEX,
-            SkillPreviewCommand(
-                operation_id,
-                target,
-                IntegrationAction.INSTALL,
-                False,
-            ),
-        )
         result = await adapter.install_skill(
             HarnessId.CODEX,
             SkillApplyCommand(
                 operation_id,
                 target,
                 IntegrationAction.INSTALL,
-                preview.preview_digest,
+                accepted_preview.preview_digest,
                 True,
                 False,
             ),
@@ -489,12 +490,44 @@ async def _install_project_skill(
             "reason": error.reason.value,
         }
     return {
-        "compatibility": preview.compatibility,
+        "compatibility": accepted_preview.compatibility,
         "installed_digest": result.installed_digest,
         "outcome": "already_installed" if result.action is IntegrationAction.NOOP else "installed",
         "presence": result.state_after.value,
         "reason": None,
     }
+
+
+@dataclass(frozen=True, slots=True)
+class _ProjectSkillPlan:
+    adapter: CodexSkillIntegration
+    operation_id: RequestId
+    preview: IntegrationPreview
+
+
+async def _preview_project_skill(target: IntegrationTarget) -> _ProjectSkillPlan:
+    """Create the exact project-skill plan before any setup acceptance is collected."""
+
+    adapter = CodexSkillIntegration(allow_untested=True)
+    operation_id = request_id(new_id(IdKind.REQUEST))
+    preview = await adapter.preview_skill(
+        HarnessId.CODEX,
+        SkillPreviewCommand(
+            operation_id,
+            target,
+            IntegrationAction.INSTALL,
+            False,
+        ),
+    )
+    return _ProjectSkillPlan(adapter, operation_id, preview)
+
+
+async def project_skill_preview(workspace: Path | None = None) -> IntegrationPreview:
+    """Return the exact setup skill preview for a non-prompt front end."""
+
+    root = (workspace if workspace is not None else Path.cwd()).resolve()
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(root))
+    return (await _preview_project_skill(target)).preview
 
 
 def _configured_mcp_route_profile() -> Literal["policy", "strict"]:
@@ -635,12 +668,13 @@ async def _codex_integration_step(
     route_profile: Literal["policy", "strict"] | None = None,
     workspace: Path | None = None,
     approved_preview_digest: str | None = None,
+    approved_skill_preview_digest: str | None = None,
     approved_policy_digest: str | None = None,
 ) -> dict[str, JsonValue]:
     """Preview and apply one Codex integration: skill + plugin sources + MCP + consent.
 
-    ``approved_preview_digest``/``approved_policy_digest`` let a caller that has
-    already shown a human the exact preview echo both digests back. They are a
+    ``approved_preview_digest``/``approved_skill_preview_digest``/``approved_policy_digest``
+    let a caller that has already shown a human the exact previews echo all digests back. They are a
     *stricter* gate than ``accept``, not a softer one: the step re-previews and
     refuses as stale if either digest has moved since the approval was shown,
     and only an explicitly echoed policy digest activates the policy trust.
@@ -684,23 +718,46 @@ async def _codex_integration_step(
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
 
-    if (
-        approved_preview_digest is not None
-        and approved_preview_digest != mcp_preview.preview_digest
+    try:
+        skill_plan = await _preview_project_skill(project)
+    except IntegrationError as error:
+        return {
+            "outcome": "failed",
+            "reason": "skill_preview_failed",
+            "state": mcp_preview.state_before.value,
+            "plugin": {"outcome": "skipped", "presence": plugin_preview.presence_before.value},
+            "skill": {
+                "outcome": "failed",
+                "presence": None,
+                "reason": error.reason.value,
+            },
+            "observation_consent": {"outcome": "absent", "workspace_commitment": None},
+        }
+
+    external_approval = (
+        approved_preview_digest is not None or approved_skill_preview_digest is not None
+    )
+    if external_approval and (
+        approved_preview_digest != mcp_preview.preview_digest
+        or approved_skill_preview_digest != skill_plan.preview.preview_digest
     ):
         return {
             "outcome": "failed",
             "reason": "preview_stale",
             "state": mcp_preview.state_before.value,
             "plugin": {"outcome": "skipped", "presence": plugin_preview.presence_before.value},
-            "skill": {"outcome": "skipped", "presence": None},
+            "skill": {
+                "outcome": "skipped",
+                "presence": skill_plan.preview.state_before.value,
+                "reason": "preview_stale",
+            },
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
 
     accepted = accept
     policy_digest_confirmed = False
-    if approved_preview_digest is not None:
-        # The caller displayed this exact preview and collected an explicit yes.
+    if external_approval:
+        # The caller displayed both exact previews and collected an explicit yes.
         accepted = True
         shown = check_policy.get("policy_digest")
         policy_digest_confirmed = (
@@ -709,7 +766,7 @@ async def _codex_integration_step(
             and approved_policy_digest == shown
         )
     if interactive and not accepted:
-        _emit_registration_preview(binary, mcp_preview, check_policy)
+        _emit_registration_preview(binary, mcp_preview, check_policy, skill_plan.preview)
         typer.echo(
             f"  Plugin presence before apply: {plugin_preview.presence_before.value} "
             f"({plugin_preview.planned_file_count} managed files)"
@@ -730,12 +787,20 @@ async def _codex_integration_step(
                 "outcome": "declined",
                 "presence": plugin_preview.presence_before.value,
             },
-            "skill": {"outcome": "declined", "presence": None},
+            "skill": {
+                "outcome": "declined",
+                "presence": skill_plan.preview.state_before.value,
+            },
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
 
     # 1) Install the project-scoped skill Codex actually discovers without a marketplace.
-    skill_report = await _install_project_skill(project)
+    skill_report = await _install_project_skill(
+        project,
+        adapter=skill_plan.adapter,
+        operation_id=skill_plan.operation_id,
+        accepted_preview=skill_plan.preview,
+    )
     if skill_report.get("outcome") == "failed":
         return {
             "outcome": "failed",
@@ -883,6 +948,7 @@ async def apply_codex_integration(
     *,
     workspace: Path | None = None,
     approved_preview_digest: str,
+    approved_skill_preview_digest: str,
     approved_policy_digest: str | None = None,
 ) -> dict[str, JsonValue]:
     """Apply the exact integration a caller already previewed and got approved.
@@ -900,6 +966,7 @@ async def apply_codex_integration(
         accept=False,
         workspace=workspace,
         approved_preview_digest=approved_preview_digest,
+        approved_skill_preview_digest=approved_skill_preview_digest,
         approved_policy_digest=approved_policy_digest,
     )
 

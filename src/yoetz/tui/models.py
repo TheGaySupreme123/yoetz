@@ -131,13 +131,15 @@ class IntegrationPlan:
     already_registered: bool
     foreign_entry: bool
     preview_digest: str
+    skill_preview_digest: str
 
     @property
     def changes(self) -> tuple[str, ...]:
         """Plain-language additions, in the order they are applied."""
 
         lines = [
-            "Install managed Yoetz guidance and hooks",
+            "Install the Yoetz project skill",
+            "Install managed Yoetz plugin and hook sources",
             f"Register MCP server: {self.mcp_command}",
             "Allow bounded structural event recording for this project",
         ]

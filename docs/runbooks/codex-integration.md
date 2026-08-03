@@ -39,7 +39,8 @@ Always run status first:
 yoetz integrate skill status codex --json
 ```
 
-States: `absent`, `installed_exact`, `modified`/`unmanaged`, `partial`, `incompatible`, `unsafe`.
+Destination states: `absent`, `installed_exact`, `modified`/`unmanaged`, `partial`, `unsafe`.
+Compatibility is reported separately as `supported`, `unsupported`, or `untested`.
 Status is read-only — it never repairs or updates anything. An identical directory without a valid
 managed marker is treated as unmanaged/modified and is protected from removal. `installed_exact`
 does **not** by itself prove Codex has discovered the skill or that MCP is available.
@@ -146,7 +147,7 @@ manage any MCP configuration yourself if you want it removed too.
 | Resource invalid | Reinstall from a verified package artifact. |
 | Preview stale | Run `status`, then a fresh preview. |
 | Modified/partial content | Preserve and review manually; use `replace_modified` deliberately if desired. |
-| Incompatible | Use a supported Yoetz/Codex version pair. |
+| Compatibility is `unsupported` | Automatic activation is unprofiled; use a supported Yoetz/Codex version pair when capability evidence is required. |
 | Write/swap interrupted | Run `status`; preserve any staged content; do not delete it yourself. |
 | Skill not discovered, or duplicate `$yoetz` names loaded | Check the exact scope, loaded skill roots, managed path, trust, version, and capability matrix; reload Codex. |
 | Setup reports plugin source files but no Yoetz skill appears | Check `.agents/skills/yoetz`; `.agents/plugins/yoetz` alone is not an activated Codex plugin. |
