@@ -56,6 +56,7 @@ from yoetz.domain.privacy import (
     PrivacyPolicy,
     PrivacyReason,
     ProviderBinding,
+    ProviderDataUseProfile,
     ReceiptCounts,
     ReceiptPolicyBinding,
     ReceiptSecretScan,
@@ -121,6 +122,7 @@ _PRECONSUME_OUTCOME: Mapping[PrivacyReason, PrivacyOutcome] = MappingProxyType(
         PrivacyReason.DEADLINE_EXPIRED: PrivacyOutcome.TIMEOUT,
         PrivacyReason.PROVIDER_UNAVAILABLE: PrivacyOutcome.TRANSPORT_FAILED,
         PrivacyReason.AUDIT_FAILED: PrivacyOutcome.AUDIT_FAILED,
+        PrivacyReason.POLICY_DENIED: PrivacyOutcome.BLOCKED_BY_POLICY,
     }
 )
 
@@ -171,12 +173,15 @@ class ProviderRegistry:
     human_authority_digest: str
     external: Mapping[ProviderBinding, ExternalProviderFactory]
     local_model: tuple[ProviderBinding, SemanticEvaluatorPort] | None
+    require_current_provider_data_use_evidence: bool = False
 
     def __post_init__(self) -> None:
         if type(self.external) is not MappingProxyType:
             raise TypeError("provider_registry_external_not_immutable")
         if self.local_model is not None and type(self.local_model) is not tuple:
             raise TypeError("provider_registry_local_model_invalid")
+        if type(self.require_current_provider_data_use_evidence) is not bool:
+            raise TypeError("provider_registry_data_use_guard_invalid")
 
     def resolve_external(self, binding: ProviderBinding) -> ExternalProviderFactory | None:
         return self.external.get(binding)
@@ -185,6 +190,14 @@ class ProviderRegistry:
         if self.local_model is not None and self.local_model[0] == binding:
             return self.local_model[1]
         return None
+
+    def data_use_profile(self, binding: ProviderBinding) -> ProviderDataUseProfile | None:
+        factory = self.resolve_external(binding)
+        if factory is None:
+            return None
+        profile = getattr(factory, "profile", None)
+        data_use = getattr(profile, "data_use_profile", None)
+        return data_use if type(data_use) is ProviderDataUseProfile else None
 
 
 def _llm_binding(policy: PrivacyPolicy) -> ProviderBinding | None:
@@ -351,6 +364,7 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
                 human_authority.capability_digest,
                 MappingProxyType(fenced_external),
                 fenced_local,
+                policy.policy.require_current_provider_data_use_evidence,
             )
 
         for factory in stale_external.values():
@@ -449,6 +463,7 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
                 human_authority.capability_digest,
                 MappingProxyType(new_external),
                 new_local,
+                policy.policy.require_current_provider_data_use_evidence,
             )
         return ProviderReconciliation(
             policy.generation, activated, deactivated, tuple(sorted(unavailable))
@@ -608,6 +623,10 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
             return PrivacyReason.DEADLINE_EXPIRED
         if now_utc >= authorization.expires_at:
             return PrivacyReason.AUTHORIZATION_EXPIRED
+        if registry.require_current_provider_data_use_evidence:
+            data_use = registry.data_use_profile(case.provider_binding)
+            if data_use is None or not data_use.recommendation_eligible(now_utc):
+                return PrivacyReason.POLICY_DENIED
         return None
 
     async def _preconsume_failure(

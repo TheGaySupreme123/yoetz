@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
@@ -39,6 +40,7 @@ from yoetz.domain.privacy import (
     PrivacyProfile,
     PrivacyReason,
     ProviderBinding,
+    ProviderDataUseProfile,
     ReceiptCounts,
     ReceiptPolicyBinding,
     ReceiptSecretScan,
@@ -259,6 +261,7 @@ class PrivacyCoordinator:
         "_close_lock",
         "_close_task",
         "_closed",
+        "_data_use_resolver",
         "_gateway",
         "_human",
         "_ids",
@@ -278,6 +281,7 @@ class PrivacyCoordinator:
         *,
         service_generation: int = 1,
         human: HumanPrivacyControlPort | None = None,
+        data_use_resolver: Callable[[ProviderBinding], ProviderDataUseProfile | None] | None = None,
     ) -> None:
         if type(service_generation) is not int or service_generation <= 0:
             raise ValueError("privacy_service_generation_invalid")
@@ -290,6 +294,7 @@ class PrivacyCoordinator:
         self._ids = ids
         self._service_generation = service_generation
         self._human = human
+        self._data_use_resolver = data_use_resolver
         self._policy_app: PrivacyPolicyApplication | None = None
         self._closed = False
         self._close_lock = asyncio.Lock()
@@ -720,6 +725,17 @@ class PrivacyCoordinator:
                 PrivacyOutcome.BLOCKED_BY_POLICY,
                 PrivacyReason.SCOPE_MISMATCH,
             )
+        if (
+            policy.require_current_provider_data_use_evidence
+            and binding.transport == "external"
+            and not self._data_use_evidence_current(binding)
+        ):
+            return await self._complete_semantic_predispatch(
+                candidate,
+                effective,
+                PrivacyOutcome.BLOCKED_BY_POLICY,
+                PrivacyReason.POLICY_DENIED,
+            )
 
         classified = self._classifier.classify(candidate, effective)
         decision = self._semantic_decision(classified, effective, binding)
@@ -1109,6 +1125,17 @@ class PrivacyCoordinator:
             privacy_proposal_id=privacy_proposal_id,
             receipt_id=receipt_id,
         )
+
+    def _data_use_evidence_current(self, binding: ProviderBinding) -> bool:
+        """True when the bound external profile has current recommendation-eligible data-use."""
+
+        resolver = self._data_use_resolver
+        if resolver is None:
+            return False
+        profile = resolver(binding)
+        if type(profile) is not ProviderDataUseProfile:
+            return False
+        return profile.recommendation_eligible(self._clock.now_utc())
 
     def _semantic_decision(
         self,
