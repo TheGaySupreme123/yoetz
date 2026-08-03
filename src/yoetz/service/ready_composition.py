@@ -1162,6 +1162,7 @@ async def build_privacy_coordinator(
         True,
     )
     await gateway.reconcile_policy(effective, authority)
+
     coordinator = PrivacyCoordinator(
         policies,
         classifier,
@@ -1170,6 +1171,7 @@ async def build_privacy_coordinator(
         clock,
         ids,
         service_generation=service_generation,
+        data_use_resolver=gateway.bound_data_use_profile,
     )
     policy_app = PrivacyPolicyApplication(
         policies,

@@ -13,6 +13,7 @@ from yoetz.cli.privacy_setup import (
     PrivacySetupAnswers,
     build_candidate_policy,
 )
+from yoetz.config.models import OFFICIAL_OPENAI_ENDPOINT_PROFILE_ID
 from yoetz.domain.privacy import (
     AuthorizationScopeKind,
     DataClass,
@@ -594,3 +595,82 @@ async def test_widening_reports_configured_only_after_committed_trusted_decision
 
     assert report.outcome == "configured"
     assert report.proposal_id == "pvp_1"
+
+
+def test_review_warns_when_data_use_requirement_cannot_be_satisfied(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """RT-privacy-egress-2 companion: the refusal must be visible before it is committed.
+
+    'fireworks-responses' ships owner-declared data-use, whose facts are unknown and therefore
+    never recommendation-eligible. Paired with the requirement, the runtime guard refuses every
+    external review, so setup has to say so while the operator can still change either side.
+    """
+
+    from yoetz.cli.privacy_setup import _render_review  # pyright: ignore[reportPrivateUsage]
+
+    candidate = build_candidate_policy(
+        local_only_policy(),
+        _answers(require_current_provider_data_use_evidence=True),
+        now=datetime(2026, 7, 29, tzinfo=UTC),
+    )
+    assert candidate.require_current_provider_data_use_evidence is True
+
+    _render_review(candidate)
+
+    out = capsys.readouterr().out
+    assert "fireworks-responses" in out
+    assert "no reviewed data-use evidence" in out
+    assert "will be refused" in out
+
+
+def test_review_is_silent_when_the_requirement_is_off(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from yoetz.cli.privacy_setup import _render_review  # pyright: ignore[reportPrivateUsage]
+
+    candidate = build_candidate_policy(
+        local_only_policy(),
+        _answers(require_current_provider_data_use_evidence=False),
+        now=datetime(2026, 7, 29, tzinfo=UTC),
+    )
+
+    _render_review(candidate)
+
+    assert "will be refused" not in capsys.readouterr().out
+
+
+def test_assisted_recipe_requires_data_use_only_where_it_can_be_satisfied() -> None:
+    """The recipe default must stay dispatchable; the requirement is the operator's call.
+
+    require_current_provider_data_use_evidence is enforced at dispatch, so setting it against an
+    endpoint with unknown data-use facts yields a setup that refuses every external review. The
+    recipe therefore asks for it only where the bound endpoint ships reviewed evidence.
+    """
+
+    import yoetz.cli.privacy_setup as module
+
+    owner_declared = ProviderBinding(
+        "fireworks",
+        "accounts/fireworks/models/minimax-m3",
+        "fireworks-responses",
+        "1.0.0",
+        "external",
+    )
+    reviewed = ProviderBinding(
+        "openai",
+        "gpt-5",
+        OFFICIAL_OPENAI_ENDPOINT_PROFILE_ID,
+        "1.0.0",
+        "external",
+    )
+
+    unknown_answers = module._recipe_answers(  # pyright: ignore[reportPrivateUsage]
+        "assisted_review", local_only_policy(), owner_declared
+    )
+    reviewed_answers = module._recipe_answers(  # pyright: ignore[reportPrivateUsage]
+        "assisted_review", local_only_policy(), reviewed
+    )
+
+    assert unknown_answers.require_current_provider_data_use_evidence is False
+    assert reviewed_answers.require_current_provider_data_use_evidence is True
