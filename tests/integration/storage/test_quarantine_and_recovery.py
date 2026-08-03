@@ -83,7 +83,15 @@ class _FakeRecoveryPersistence:
         return next_generation
 
     def verify_fence(self, state: RecoveryState, fence: OwnershipFence) -> None:
-        assert fence.owner_generation > state.owner_generation
+        # Match production CAS semantics: fence must equal the live generation+nonce
+        # written by acquire, not merely exceed the pre-acquire inspect snapshot.
+        del state
+        if (
+            self._live_generation is None
+            or fence.owner_generation != self._live_generation
+            or fence.nonce != self._live_nonce
+        ):
+            raise ValueError("recovery_fence_invalid")
         self.verification_count += 1
 
     def complete_interrupted(

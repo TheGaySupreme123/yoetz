@@ -69,11 +69,10 @@ On resume, attach to the existing task and read status before reconstructing wor
 
 ### Workspace grouping and attach selectors
 
-`start` resumes by one of three selectors (never by bare `task_id`):
+`start` resumes by one of two selectors (never by bare `task_id`):
 
 1. `session_id` — continue the exact session you already hold.
-2. `workspace_ref` + `external_ref` as a pair — resolve the durable task for that project work item without a `session_id`.
-3. Same pair under `mode=create_or_attach` — create on first use, attach on every later conversation.
+2. `workspace_ref` + `external_ref` as a pair — resolve the durable task for that project work item without a `session_id`. Under `mode=create_or_attach`, the same pair creates on first use and attaches on every later conversation.
 
 Convention:
 
