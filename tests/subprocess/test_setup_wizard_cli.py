@@ -805,9 +805,9 @@ def test_uninitialized_setup_refuses_preexisting_auto_unlock_entry(
     )
     store.save(bytearray(planted))
     encoded = base64.urlsafe_b64encode(planted).rstrip(b"=").decode("ascii")
-    username = "bundle-" + hashlib.sha256(
-        os.fsencode(os.path.abspath(tmp_path.resolve()))
-    ).hexdigest()
+    username = (
+        "bundle-" + hashlib.sha256(os.fsencode(os.path.abspath(tmp_path.resolve()))).hexdigest()
+    )
     assert backend.values[("yoetz.auto-unlock.v1", username)] == encoded
     with pytest.raises(keyring_module.OSKeyringError) as elevated_exc:
         store.create_for_initialization()
