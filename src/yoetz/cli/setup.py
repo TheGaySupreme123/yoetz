@@ -1245,9 +1245,7 @@ async def _resolve_setup_package_update(
         raw_map = cast(Mapping[str, object], raw)
         policy_obj = raw_map.get("policy")
         if not isinstance(policy_obj, Mapping):
-            advisory = await resolve_package_update_advisory(
-                policy=None, allow_network=False
-            )
+            advisory = await resolve_package_update_advisory(policy=None, allow_network=False)
         else:
             # Prefer structural bits over full re-decode when wire shape is partial.
             policy_map = cast(Mapping[str, object], policy_obj)

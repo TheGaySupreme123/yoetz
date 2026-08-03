@@ -43,9 +43,7 @@ __all__ = [
 ]
 
 PACKAGE_UPDATE_UPGRADE_COMMAND: Final = "uv tool upgrade yoetz"
-PACKAGE_INSTALL_COMMAND: Final = (
-    'uv tool install --managed-python --python 3.14.6 yoetz'
-)
+PACKAGE_INSTALL_COMMAND: Final = "uv tool install --managed-python --python 3.14.6 yoetz"
 _CACHE_SCHEMA: Final = "yoetz.package-update-cache/1"
 _CACHE_NAME: Final = "package-update-cache.json"
 _DEFAULT_TTL: Final = timedelta(hours=24)
@@ -157,11 +155,7 @@ def build_package_update_advisory(
     if latest_version is not None and (type(latest_version) is not str or not latest_version):
         raise ValueError("latest_version_invalid")
 
-    newer = (
-        False
-        if latest_version is None
-        else compare_versions(installed_version, latest_version)
-    )
+    newer = False if latest_version is None else compare_versions(installed_version, latest_version)
     if newer is None:
         resolved: PackageUpdateOutcome = outcome or "skipped_unknown_version"
         return PackageUpdateAdvisory(
@@ -225,7 +219,7 @@ def load_package_update_cache(
         return None
     try:
         parsed: object = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError):
+    except UnicodeError, json.JSONDecodeError:
         return None
     if type(parsed) is not dict:
         return None
@@ -272,20 +266,23 @@ def store_package_update_cache(
     document = {
         "schema": _CACHE_SCHEMA,
         "latest_version": latest_version,
-        "fetched_at": fetched_at.astimezone(UTC).replace(microsecond=0).isoformat().replace(
-            "+00:00", "Z"
-        ),
+        "fetched_at": fetched_at.astimezone(UTC)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z"),
         "ttl_seconds": ttl_seconds,
     }
     path = _cache_path(root)
     try:
         ensure_owner_only_dir(path.parent)
-        payload = json.dumps(document, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n"
+        payload = (
+            json.dumps(document, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n"
+        )
         if len(payload) > _MAX_CACHE_BYTES:
             return
         path.write_bytes(payload)
         path.chmod(0o600)
-    except (OSError, PathSafetyError, ValueError):
+    except OSError, PathSafetyError, ValueError:
         return
 
 
@@ -355,9 +352,7 @@ async def resolve_package_update_advisory(
             source="none",
             outcome="skipped_unavailable",
         )
-    store_package_update_cache(
-        latest_version=latest, fetched_at=clock, root=cache_root
-    )
+    store_package_update_cache(latest_version=latest, fetched_at=clock, root=cache_root)
     return build_package_update_advisory(
         installed_version=installed,
         latest_version=latest,

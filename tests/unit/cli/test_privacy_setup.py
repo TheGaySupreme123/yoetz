@@ -91,8 +91,7 @@ def test_assisted_review_is_bound_to_one_provider_and_bounded_categories() -> No
     assert all(
         not channel.enabled
         for channel in candidate.channel_policies
-        if channel.channel
-        not in {EgressChannel.LLM_INFERENCE, EgressChannel.UPDATE_CHECKS}
+        if channel.channel not in {EgressChannel.LLM_INFERENCE, EgressChannel.UPDATE_CHECKS}
     )
     # Product default recipes and _answers leave updates off unless set; this helper defaults off.
     assert candidate.supersedes_policy_digest == current.policy_digest

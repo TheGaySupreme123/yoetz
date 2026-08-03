@@ -256,15 +256,11 @@ def test_is_update_checks_permitted_bits() -> None:
     assert is_update_checks_permitted(_policy(update_checks=True, network=True)) is True
     assert is_update_checks_permitted(_policy(update_checks=False, network=False)) is False
     assert (
-        is_update_checks_permitted(
-            network_egress_permitted=True, update_checks_enabled=True
-        )
+        is_update_checks_permitted(network_egress_permitted=True, update_checks_enabled=True)
         is True
     )
     assert (
-        is_update_checks_permitted(
-            network_egress_permitted=True, update_checks_enabled=False
-        )
+        is_update_checks_permitted(network_egress_permitted=True, update_checks_enabled=False)
         is False
     )
 

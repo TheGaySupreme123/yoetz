@@ -289,9 +289,7 @@ async def test_privacy_profiles_channels_and_local_model_offline_cells(
             Observation("data_use_eligibility_bound", boolean_value=True),
             Observation("empty_local_registry_unavailable", boolean_value=True),
             Observation("fake_provider_offline_success", boolean_value=True),
-            Observation(
-                "non_llm_channels_unavailable", integer_value=len(unsupported_non_llm)
-            ),
+            Observation("non_llm_channels_unavailable", integer_value=len(unsupported_non_llm)),
             Observation("privacy_profiles_complete", integer_value=len(PrivacyProfile)),
             Observation("review_contexts_complete", integer_value=len(ReviewContextProfile)),
         ),

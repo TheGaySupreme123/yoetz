@@ -24,8 +24,7 @@ def test_every_unsupported_non_llm_fixture_branch_is_no_dispatch_channel_unavail
     channels = {
         channel.value
         for channel in EgressChannel
-        if channel
-        not in {EgressChannel.LLM_INFERENCE, EgressChannel.UPDATE_CHECKS}
+        if channel not in {EgressChannel.LLM_INFERENCE, EgressChannel.UPDATE_CHECKS}
     }
     assert set(expected) == channels
     for channel in channels:

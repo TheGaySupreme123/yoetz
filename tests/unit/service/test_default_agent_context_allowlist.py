@@ -92,9 +92,7 @@ def test_default_local_only_allows_receipt_projection_categories() -> None:
     updates = next(
         row for row in policy.channel_policies if row.channel is EgressChannel.UPDATE_CHECKS
     )
-    llm = next(
-        row for row in policy.channel_policies if row.channel is EgressChannel.LLM_INFERENCE
-    )
+    llm = next(row for row in policy.channel_policies if row.channel is EgressChannel.LLM_INFERENCE)
     assert updates.enabled is True
     assert llm.enabled is False
 

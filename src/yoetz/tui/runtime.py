@@ -1145,9 +1145,7 @@ class YoetzRuntime:
             advisory = None
         if advisory is not None and advisory.is_newer and advisory.latest_version is not None:
             package_state = LayerState.UNPROVEN
-            package_detail = (
-                f"{advisory.installed_version} (available {advisory.latest_version})"
-            )
+            package_detail = f"{advisory.installed_version} (available {advisory.latest_version})"
             package_remediation = f"{advisory.upgrade_command}  # then re-run yoetz"
         elif advisory is not None and advisory.outcome == "skipped_unavailable":
             package_state = LayerState.UNPROVEN
