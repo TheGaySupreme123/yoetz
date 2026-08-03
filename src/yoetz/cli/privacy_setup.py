@@ -27,6 +27,7 @@ from yoetz.adapters.privacy.catalog import (
     decode_privacy_policy_canonical,
     encode_privacy_policy_json,
 )
+from yoetz.adapters.privacy.local_enforcer import estimated_token_count
 from yoetz.domain.privacy import (
     AuthorizationScopeKind,
     ChannelPolicy,
@@ -73,6 +74,14 @@ _UNSUPPORTED_CHANNELS: Final = (
     EgressChannel.UPDATE_CHECKS,
     EgressChannel.CAPABILITY_TESTING,
 )
+# The two whole-case ceilings have to express the same budget. The enforcer estimates tokens
+# from the prepared byte count, so a token ceiling set independently of the byte ceiling becomes
+# the real limit at a completely different size: 4096 tokens binds at 16 KiB, sixteen times
+# tighter than 256 KiB, and below the 128 KiB of excerpts the assisted and expanded review
+# selections are already allowed to gather. Derive one from the other so they cannot drift.
+_CASE_MAX_BYTES: Final = 256 * 1024
+_CASE_MAX_TOKENS: Final = estimated_token_count(_CASE_MAX_BYTES)
+
 _RECIPE_DEFAULTS: Final = {
     "private": "1",
     "metadata_only": "2",
@@ -193,8 +202,8 @@ def build_candidate_policy(
             ("semantic-review",),
             answers.authorization_scope,
             answers.request_confirmation,
-            256 * 1024,
-            4096,
+            _CASE_MAX_BYTES,
+            _CASE_MAX_TOKENS,
             300,
         )
     else:
@@ -640,7 +649,13 @@ def _render_review(candidate: PrivacyPolicy) -> None:
         "  Current provider data-use evidence required: "
         + ("yes" if candidate.require_current_provider_data_use_evidence else "no")
     )
-    typer.echo("  Maximum: 16 KiB per excerpt; 256 KiB / 4096 tokens per case")
+    # Read the ceilings off the draft rather than restating constants: these are enforced at
+    # admission, so a case above either one is refused, and the operator is entitled to see the
+    # numbers that will actually refuse it.
+    typer.echo(
+        f"  Maximum: 16 KiB per excerpt; {llm.max_bytes // 1024} KiB / "
+        f"{llm.max_tokens} tokens per case"
+    )
     typer.echo(
         "  Never sent: credentials, encryption material, environment variables, "
         "complete transcripts, unrelated or out-of-scope files"

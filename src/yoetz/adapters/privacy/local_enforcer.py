@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import Final, Protocol, cast
 
 from yoetz.application.semantic_case import (
     REVIEW_PACKET_ITEM_ID,
@@ -29,6 +29,7 @@ from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_pa
 from yoetz.protocol.models import DataCategory
 
 __all__ = [
+    "EGRESS_BYTES_PER_TOKEN_ESTIMATE",
     "ClassificationRuleset",
     "LocalPrivacyEnforcer",
     "MinimizationRuleset",
@@ -36,8 +37,23 @@ __all__ = [
     "ReviewSelectionRuleset",
     "SecretScanRuleset",
     "TrustedProvenanceResolver",
+    "estimated_token_count",
     "scan_exact_bytes",
 ]
+
+# The whole-case token ceiling in ChannelPolicy is compared against this estimate, so anything
+# that publishes a token budget has to derive it the same way or the two ceilings silently
+# disagree. Four bytes per token is the usual rough estimate for this content.
+EGRESS_BYTES_PER_TOKEN_ESTIMATE: Final = 4
+
+
+def estimated_token_count(byte_count: int) -> int:
+    """Estimate the token count a channel ``max_tokens`` ceiling is compared against."""
+
+    if type(byte_count) is not int or byte_count < 0:
+        raise ValueError("egress_byte_count_invalid")
+    return (byte_count + EGRESS_BYTES_PER_TOKEN_ESTIMATE - 1) // EGRESS_BYTES_PER_TOKEN_ESTIMATE
+
 
 _SCANNER_REGISTRY_VERSION = "observability-sensitive-content-v1"
 _SCANNER_PROFILE_DIGEST = "sha256:75d5e5545aec001901b1370f502120114b583662fd473229e545553154f4d605"
@@ -291,7 +307,7 @@ class LocalPrivacyEnforcer:
             blocked_categories=decision.blocked_categories,
             transformation_summary=(("minimized_items", removed),),
             byte_count=len(prepared),
-            token_count=(len(prepared) + 3) // 4,
+            token_count=estimated_token_count(len(prepared)),
             case_digest=f"sha256:{hashlib.sha256(prepared).hexdigest()}",
             scanner_registry_version=self._scanner.version,
             scanner_profile_digest=self._scanner.profile_digest,

@@ -288,3 +288,36 @@ async def test_within_ceilings_stamps_policy_intersect_case_max() -> None:
     request = audit.prepared[0]
     assert request.max_bytes == 100
     assert request.max_tokens == 8
+
+
+@pytest.mark.anyio
+async def test_shipped_recipe_ceilings_admit_a_full_size_review_case() -> None:
+    """The recipe's two whole-case ceilings must express the same budget.
+
+    max_tokens is compared against a token count the enforcer estimates from the prepared byte
+    count, so a token ceiling chosen independently of the byte ceiling becomes the real limit at
+    a different size. At 4096 tokens it bound at 16 KiB — sixteen times tighter than the 256 KiB
+    byte ceiling, and below the 128 KiB of excerpts the assisted and expanded review selections
+    are allowed to gather — so enforcing it refused essentially every real review case.
+    """
+
+    from yoetz.adapters.privacy.local_enforcer import estimated_token_count
+    from yoetz.cli.privacy_setup import (
+        _CASE_MAX_BYTES,  # pyright: ignore[reportPrivateUsage]
+        _CASE_MAX_TOKENS,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    # A case at the byte ceiling must not be over the token ceiling.
+    assert estimated_token_count(_CASE_MAX_BYTES) <= _CASE_MAX_TOKENS
+
+    # The largest excerpt payload either review selection may gather, admitted end to end.
+    selection_bytes = 131_072
+    assert selection_bytes <= _CASE_MAX_BYTES
+    policy = _policy_with_ceilings(max_bytes=_CASE_MAX_BYTES, max_tokens=_CASE_MAX_TOKENS)
+    coordinator, audit = _coordinator(
+        policy,
+        byte_count=selection_bytes,
+        token_count=estimated_token_count(selection_bytes),
+    )
+    result = await coordinator.evaluate_semantic(_candidate(), _deadline())
+    assert audit.prepared, f"a full-size review case must reach prepare; got {result!r}"
