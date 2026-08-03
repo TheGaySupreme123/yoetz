@@ -535,19 +535,28 @@ class CatalogPrivacyPolicyStore:
                 eligible.append((policy, cast(int, generation)))
         if not eligible:
             raise ValueError("privacy_policy_missing")
-        policy, generation = max(
+        # ADR-009 / protocol: intersection of every containing current row — not rank-max alone.
+        rank = {
+            AuthorizationScopeKind.MACHINE: 0,
+            AuthorizationScopeKind.WORKSPACE: 1,
+            AuthorizationScopeKind.TASK: 2,
+            AuthorizationScopeKind.REQUEST: 3,
+        }
+        ordered = sorted(
             eligible,
-            key=lambda item: (
-                {
-                    AuthorizationScopeKind.MACHINE: 0,
-                    AuthorizationScopeKind.WORKSPACE: 1,
-                    AuthorizationScopeKind.TASK: 2,
-                    AuthorizationScopeKind.REQUEST: 3,
-                }[item[0].effective_scope.kind],
-                item[1],
-            ),
+            key=lambda item: (rank[item[0].effective_scope.kind], item[1]),
         )
-        return EffectivePrivacyPolicy(policy, generation, policy.policy_digest)
+        composed = ordered[0][0]
+        for policy, _generation in ordered[1:]:
+            composed = composed.meet(policy)
+        # Generation stays the most-specific eligible row's own generation, because it is the
+        # CAS token prepare_transition/commit_transition compare against _current_exact(scope).
+        # Reporting a composed maximum here would make every transition at that scope fail
+        # privacy_policy_stale whenever an ancestor row carried a higher generation. Staleness
+        # against ancestor movement is still caught: effective_digest below is the meet digest,
+        # and it is the other half of the same precondition.
+        generation = ordered[-1][1]
+        return EffectivePrivacyPolicy(composed, generation, composed.policy_digest)
 
     async def prepare_transition(
         self, proposal: PolicyTransitionProposal

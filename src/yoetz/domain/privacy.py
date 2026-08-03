@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
 from typing import Final, Literal, cast
@@ -14,7 +14,12 @@ from yoetz.domain.values import (
     validate_commitment,
     validate_sha256_digest,
 )
-from yoetz.protocol.canonical import canonical_encode, strict_json_parse
+from yoetz.protocol.canonical import (
+    JsonValue,
+    canonical_digest,
+    canonical_encode,
+    strict_json_parse,
+)
 from yoetz.protocol.ids import IdKind, validate_id
 from yoetz.protocol.models import DataCategory
 
@@ -667,6 +672,88 @@ class ChannelPolicy:
             if set(self.allowed_data_classes) - {DataClass.PUBLIC_STRUCTURAL}:
                 raise _invalid()
 
+    def meet(self, other: ChannelPolicy) -> ChannelPolicy:
+        """Intersect two channel rows (AND enablement, set meet, min ceilings)."""
+
+        if type(other) is not ChannelPolicy or self.channel is not other.channel:
+            raise _invalid()
+        if not self.enabled or not other.enabled:
+            return ChannelPolicy(
+                self.channel,
+                False,
+                (),
+                (),
+                None,
+                (),
+                AuthorizationScopeKind.MACHINE,
+                False,
+                0,
+                0,
+                0,
+            )
+        binding = (
+            self.provider_binding
+            if self.provider_binding is not None and self.provider_binding == other.provider_binding
+            else None
+        )
+        # Enabled external LLM without an exact shared binding cannot authorize a destination.
+        if self.channel is EgressChannel.LLM_INFERENCE and binding is None:
+            return ChannelPolicy(
+                self.channel,
+                False,
+                (),
+                (),
+                None,
+                (),
+                AuthorizationScopeKind.MACHINE,
+                False,
+                0,
+                0,
+                0,
+            )
+        # A lower rank is a *broader* ceiling (machine is widest, request narrowest), matching
+        # ``_scope_rank`` in ``yoetz.application.privacy_policy``, where task -> machine is
+        # classified as a widening. The meet must therefore keep the higher-ranked ceiling.
+        ceiling = (
+            self.scope_ceiling
+            if _SCOPE_KIND_RANK[self.scope_ceiling] >= _SCOPE_KIND_RANK[other.scope_ceiling]
+            else other.scope_ceiling
+        )
+        return ChannelPolicy(
+            self.channel,
+            True,
+            tuple(set(self.allowed_categories) & set(other.allowed_categories)),
+            tuple(set(self.allowed_data_classes) & set(other.allowed_data_classes)),
+            binding,
+            tuple(set(self.allowed_purposes) & set(other.allowed_purposes)),
+            ceiling,
+            self.preview_required or other.preview_required,
+            min(self.max_bytes, other.max_bytes),
+            min(self.max_tokens, other.max_tokens),
+            min(self.authorization_ttl_seconds, other.authorization_ttl_seconds),
+        )
+
+
+_SCOPE_KIND_RANK: Final = {
+    AuthorizationScopeKind.MACHINE: 0,
+    AuthorizationScopeKind.WORKSPACE: 1,
+    AuthorizationScopeKind.TASK: 2,
+    AuthorizationScopeKind.REQUEST: 3,
+}
+_PROFILE_OPENNESS: Final = {
+    PrivacyProfile.LOCAL_ONLY: 0,
+    PrivacyProfile.CONFIRM_EVERY_REQUEST: 1,
+    PrivacyProfile.MINIMAL_EXTERNAL: 2,
+    PrivacyProfile.TRUSTED_PROVIDER: 3,
+}
+_REVIEW_CONTEXT_OPENNESS: Final = {
+    ReviewContextProfile.STRUCTURAL: 0,
+    ReviewContextProfile.GOAL_AWARE: 1,
+    ReviewContextProfile.ASSISTED: 2,
+    ReviewContextProfile.EXPANDED: 3,
+    ReviewContextProfile.CUSTOM: 4,
+}
+
 
 @dataclass(frozen=True, slots=True)
 class PrivacyPolicy:
@@ -773,6 +860,161 @@ class PrivacyPolicy:
         _time(self.created_at)
         if self.supersedes_policy_digest is not None:
             validate_sha256_digest(self.supersedes_policy_digest)
+
+    def meet(self, other: PrivacyPolicy) -> PrivacyPolicy:
+        """Intersect two standing policies (ADR-009 decision 6 / protocol policy resolution).
+
+        Permission fields tighten by meet (AND / set intersection / min ceilings). Identity
+        (``policy_id``, ``version``, ``created_at``, ``effective_scope``) is taken from the
+        more-specific scope when ranks differ, else from ``self``. The result's
+        ``policy_digest`` is recomputed from the meet body so multi-scope composition is not
+        confused with a single stored row.
+        """
+
+        if type(other) is not PrivacyPolicy:
+            raise _invalid()
+        if self.effective_scope.installation_id != other.effective_scope.installation_id:
+            raise _invalid()
+
+        by_self = {channel.channel: channel for channel in self.channel_policies}
+        by_other = {channel.channel: channel for channel in other.channel_policies}
+        channels = tuple(
+            by_self[channel].meet(by_other[channel])
+            for channel in sorted(EgressChannel, key=lambda item: item.value.encode("ascii"))
+        )
+        network = (
+            self.network_egress_permitted
+            and other.network_egress_permitted
+            and any(channel.enabled for channel in channels)
+        )
+        if not network:
+            channels = tuple(
+                ChannelPolicy(
+                    channel.channel,
+                    False,
+                    (),
+                    (),
+                    None,
+                    (),
+                    AuthorizationScopeKind.MACHINE,
+                    False,
+                    0,
+                    0,
+                    0,
+                )
+                for channel in channels
+            )
+
+        llm = next(
+            channel for channel in channels if channel.channel is EgressChannel.LLM_INFERENCE
+        )
+        profile_rank = min(_PROFILE_OPENNESS[self.profile], _PROFILE_OPENNESS[other.profile])
+        if not network or not llm.enabled or llm.provider_binding is None:
+            profile = PrivacyProfile.LOCAL_ONLY
+        else:
+            profile = next(item for item, rank in _PROFILE_OPENNESS.items() if rank == profile_rank)
+            if profile is PrivacyProfile.LOCAL_ONLY:
+                profile = PrivacyProfile.MINIMAL_EXTERNAL
+            if profile is PrivacyProfile.CONFIRM_EVERY_REQUEST and not llm.preview_required:
+                # Meet of preview flags should have ORed; keep construction valid.
+                llm = replace(llm, preview_required=True)
+                channels = tuple(
+                    llm if channel.channel is EgressChannel.LLM_INFERENCE else channel
+                    for channel in channels
+                )
+            if (
+                profile is PrivacyProfile.MINIMAL_EXTERNAL
+                and DataClass.SENSITIVE_CONFIDENTIAL in llm.allowed_data_classes
+            ):
+                llm = replace(
+                    llm,
+                    allowed_data_classes=tuple(
+                        item
+                        for item in llm.allowed_data_classes
+                        if item is not DataClass.SENSITIVE_CONFIDENTIAL
+                    ),
+                )
+                channels = tuple(
+                    llm if channel.channel is EgressChannel.LLM_INFERENCE else channel
+                    for channel in channels
+                )
+
+        review_selection = self.review_selection.meet(other.review_selection)
+        review_rank = min(
+            _REVIEW_CONTEXT_OPENNESS[self.review_context_profile],
+            _REVIEW_CONTEXT_OPENNESS[other.review_context_profile],
+        )
+        review_context = next(
+            item for item, rank in _REVIEW_CONTEXT_OPENNESS.items() if rank == review_rank
+        )
+        if review_context is not ReviewContextProfile.CUSTOM:
+            if review_selection != ReviewSelectionPolicy.for_profile(review_context):
+                review_context = ReviewContextProfile.CUSTOM
+
+        local_enabled = self.local_model_enabled and other.local_model_enabled
+        local_binding = (
+            self.local_model_binding
+            if local_enabled
+            and self.local_model_binding is not None
+            and self.local_model_binding == other.local_model_binding
+            else None
+        )
+        if local_binding is None:
+            local_enabled = False
+
+        identity = (
+            other
+            if _SCOPE_KIND_RANK[other.effective_scope.kind]
+            > _SCOPE_KIND_RANK[self.effective_scope.kind]
+            else self
+        )
+        placeholder = PrivacyPolicy(
+            identity.policy_id,
+            identity.version,
+            "sha256:" + "0" * 64,
+            profile,
+            review_context,
+            review_selection,
+            self.require_current_provider_data_use_evidence
+            or other.require_current_provider_data_use_evidence,
+            network,
+            identity.effective_scope,
+            channels,
+            local_enabled,
+            local_binding,
+            tuple(set(self.local_model_categories) & set(other.local_model_categories)),
+            tuple(set(self.local_model_data_classes) & set(other.local_model_data_classes)),
+            tuple(set(self.agent_context_categories) & set(other.agent_context_categories)),
+            tuple(set(self.agent_context_data_classes) & set(other.agent_context_data_classes)),
+            tuple(
+                set(self.trusted_human_control_categories)
+                & set(other.trusted_human_control_categories)
+            ),
+            tuple(
+                set(self.trusted_human_control_data_classes)
+                & set(other.trusted_human_control_data_classes)
+            ),
+            identity.created_at,
+            None,
+        )
+        return replace(
+            placeholder,
+            policy_digest=canonical_digest(
+                cast(
+                    JsonValue,
+                    {
+                        "components": sorted((self.policy_digest, other.policy_digest)),
+                        "meet": "yoetz.privacy-policy-meet/1",
+                        "network_egress_permitted": placeholder.network_egress_permitted,
+                        "profile": placeholder.profile.value,
+                        "require_current_provider_data_use_evidence": (
+                            placeholder.require_current_provider_data_use_evidence
+                        ),
+                        "review_context_profile": placeholder.review_context_profile.value,
+                    },
+                )
+            ),
+        )
 
     @property
     def unsupported_enabled_channels(self) -> tuple[EgressChannel, ...]:
