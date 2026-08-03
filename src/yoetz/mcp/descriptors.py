@@ -937,9 +937,14 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "session and returns its compact record. It does not show that work outside the published "
         "record occurred. Every request_id across these tools is a fresh req_ prefixed random "
         "UUID, and workspace_ref and external_ref are admitted only as a pair. Call it once per "
-        "task: on resume, attach to the existing task rather than starting a second one. Author "
-        "the request from this input schema plus the guidance below, never from memory. Guidance: "
-        "yoetz://guidance/workflow.md.",
+        "task. Attach selectors are exactly one of: (1) session_id for the session you hold, or "
+        "(2) workspace_ref + external_ref as a pair with no session_id — mode=create_or_attach "
+        "creates on first use and attaches on later conversations. task_id is not an accepted "
+        "field. workspace_ref is the stable project identity (remote URL or absolute repository "
+        "root); external_ref is the stable task identity within that project (branch, issue, or "
+        "plan slug). Both refs are redacted one-shot values; only HMAC commitments are persisted, "
+        "so do not self-censor into unstable refs. Author the request from this input schema plus "
+        "the guidance below, never from memory. Guidance: yoetz://guidance/workflow.md.",
         read_only=False,
         idempotent=True,
     ),
