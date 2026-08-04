@@ -1366,7 +1366,9 @@ class ProviderJudgmentEnvelopeModel(_ClosedModel):
 
 
 class StartCompactViewModel(_ClosedModel):
-    open_obligation_count: CanonicalUInt64Wire
+    # Start reuses the same compact projection as status. A redacted/unreadable current plan
+    # cannot honestly produce a numeric count, so attach preserves null instead of inventing zero.
+    open_obligation_count: CanonicalUInt64Wire | None
     unresolved_finding_count: CanonicalUInt64Wire
     ledger_freshness: Literal[
         "current", "partial", "redacted_gap", "stale_after_material_change", "unknown"
@@ -2228,7 +2230,16 @@ class StatusCompactItemModel(_ClosedModel):
     session_id: SessionIdWire
     task_title: String1To8192 | OmittedContentModel
     current_plan_event_id: EventIdWire | None
-    open_obligation_count: CanonicalUInt64Wire
+    declared_obligation_count: CanonicalUInt64Wire | None
+    no_obligations_reason: (
+        Literal[
+            "no_material_change",
+            "single_atomic_change",
+            "exploratory_scope_unknown",
+        ]
+        | None
+    )
+    open_obligation_count: CanonicalUInt64Wire | None
     unresolved_finding_count: CanonicalUInt64Wire
     open_obligations: tuple[StatusCompactObligationModel, ...]
     unresolved_findings: tuple[StatusCompactFindingModel, ...]
@@ -2246,6 +2257,24 @@ class StatusCompactItemModel(_ClosedModel):
         if len(self.open_obligations) > 10 or len(self.unresolved_findings) > 10:
             raise ValueError("compact_item_limit")
         _require_unique(self.gaps, limit=64)
+        unknown = self.declared_obligation_count is None or self.open_obligation_count is None
+        if unknown and (
+            self.declared_obligation_count is not None
+            or self.open_obligation_count is not None
+            or self.no_obligations_reason is not None
+        ):
+            raise ValueError("compact_scope_partial_unknown")
+        if self.current_plan_event_id is None and (
+            self.declared_obligation_count != "0" or self.no_obligations_reason is not None
+        ):
+            raise ValueError("compact_no_plan_scope_mismatch")
+        if not unknown:
+            declared = int(cast(str, self.declared_obligation_count))
+            opened = int(cast(str, self.open_obligation_count))
+            if opened > declared or len(self.open_obligations) > opened:
+                raise ValueError("compact_obligation_count_mismatch")
+            if self.no_obligations_reason is not None and declared != 0:
+                raise ValueError("compact_no_obligations_reason_mismatch")
         return self
 
 
@@ -2434,6 +2463,15 @@ class StatusClosureReadinessModel(_ClosedModel):
     of discovering it afterwards from the receipt.
     """
 
+    declared_obligation_count: CanonicalUInt64Wire | None
+    no_obligations_reason: (
+        Literal[
+            "no_material_change",
+            "single_atomic_change",
+            "exploratory_scope_unknown",
+        ]
+        | None
+    )
     open_obligation_count: CanonicalUInt64Wire | None
     unresolved_finding_count: CanonicalUInt64Wire | None
     blocking_conditions: tuple[
@@ -2441,6 +2479,7 @@ class StatusClosureReadinessModel(_ClosedModel):
             "obligations_open",
             "findings_unresolved",
             "no_plan_published",
+            "no_obligations_declared",
             "projection_stale",
             "coverage_gaps_declared",
             "readiness_unknown",
@@ -2454,13 +2493,39 @@ class StatusClosureReadinessModel(_ClosedModel):
         # Absent counts mean the compact singleton could not be read (an unreadable task title
         # omits it). Reporting zero there would assert "nothing is open" from missing data, so
         # unknown must be null and must say so rather than look like a clean record.
-        unknown = self.open_obligation_count is None or self.unresolved_finding_count is None
+        counts = (
+            self.declared_obligation_count,
+            self.open_obligation_count,
+            self.unresolved_finding_count,
+        )
+        unknown = any(value is None for value in counts)
         if unknown != ("readiness_unknown" in self.blocking_conditions):
             raise ValueError("closure_readiness_unknown_mismatch")
-        if unknown and self.open_obligation_count != self.unresolved_finding_count:
+        if unknown and any(value is not None for value in counts):
             raise ValueError("closure_readiness_partial_unknown")
+        if unknown and self.no_obligations_reason is not None:
+            raise ValueError("closure_readiness_unknown_reason")
         if unknown and set(self.blocking_conditions) != {"readiness_unknown"}:
             raise ValueError("closure_readiness_unknown_not_exclusive")
+        if not unknown:
+            declared = int(cast(str, self.declared_obligation_count))
+            opened = int(cast(str, self.open_obligation_count))
+            if opened > declared:
+                raise ValueError("closure_readiness_obligation_count_mismatch")
+            if self.no_obligations_reason is not None and declared != 0:
+                raise ValueError("closure_readiness_no_obligations_reason_mismatch")
+            if (opened > 0) != ("obligations_open" in self.blocking_conditions):
+                raise ValueError("closure_readiness_open_blocker_mismatch")
+            no_plan = "no_plan_published" in self.blocking_conditions
+            expected_empty_scope_blocker = (
+                not no_plan and declared == 0 and self.no_obligations_reason is None
+            )
+            if (
+                "no_obligations_declared" in self.blocking_conditions
+            ) != expected_empty_scope_blocker:
+                raise ValueError("closure_readiness_empty_scope_blocker_mismatch")
+            if no_plan and (declared != 0 or self.no_obligations_reason is not None):
+                raise ValueError("closure_readiness_no_plan_blocker_mismatch")
         return self
 
 
@@ -3194,6 +3259,8 @@ _STATUS_COMMON_STRUCTURAL_POINTERS: Final = (
         "/closure_readiness",
         (
             "blocking_conditions/*",
+            "declared_obligation_count",
+            "no_obligations_reason",
             "open_obligation_count",
             "unresolved_finding_count",
         ),
@@ -3257,8 +3324,10 @@ _STATUS_COMPACT_STRUCTURAL_POINTERS: Final = (
         "/page/items/*",
         (
             "current_plan_event_id",
+            "declared_obligation_count",
             "freshness",
             "gaps/*",
+            "no_obligations_reason",
             "open_obligation_count",
             "session_id",
             "task_id",
@@ -3686,7 +3755,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 758:
+    if len(result) != 762:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

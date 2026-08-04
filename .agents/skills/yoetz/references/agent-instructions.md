@@ -14,7 +14,7 @@ Yoetz is not an enforcement system, observer, authorship proof, transcript recor
 
 # How often to call each operation
 
-- `start` — once per task, before substantive work. On resume, attach to the existing task instead of starting a second one.
+- `start` — once per task, before substantive work. On resume (same or fresh conversation), `mode=create_or_attach` with the same `workspace_ref` + `external_ref` pair and no `session_id`; do not start a second task and do not send bare `task_id`.
 - `publish_work` — one batch per material transition, usually one to eight events; a batch admits up to 100, so keep one transition in one batch rather than splitting it. A normal session is a handful of batches, never one per file, tool call, or message.
 - `status` — after resume, compaction, or delegate handoff, and before any completion claim. Not between routine tool calls.
 - `check` — after publishing the completion claim and its evidence, and again after any material edit, new evidence, or finding response. A check with no new events since the last one adds nothing.
@@ -66,3 +66,4 @@ Only operations explicitly listed in `catalog.default_safe` are default-safe. Fo
 - `yoetz://guidance/workflow.md` - read before your first `start`: the cooperative workflow, cadence, resume behavior, and final response.
 - `yoetz://guidance/coverage-and-receipts.md` - read before your first `check`: coverage, findings, freshness, and receipt wording.
 - `yoetz://guidance/publication-policy.md` - read before your first `publish_work`: what is material and safe to publish.
+- `yoetz://guidance/request-templates.md` - complete fallback request bodies for all six operations and all nine ordinary publication families; replace every illustrative value before use.

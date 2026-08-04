@@ -9,8 +9,6 @@ from yoetz.domain.events import (
     ClaimKind,
     ObligationChangeKind,
     ObligationStatus,
-    PlanPublishedPayload,
-    PlanRevisedPayload,
     ResponseDisposition,
     ResultOutcome,
 )
@@ -34,6 +32,7 @@ from yoetz.kernel.deterministic_checks import (
     policy_public_root,
     policy_source_availability,
 )
+from yoetz.kernel.plan_scope import current_plan_scope
 
 __all__ = [
     "WORK_INTEGRITY_FACT_CODES",
@@ -161,22 +160,16 @@ def _claim_support_is_admissible(
 
 
 def _active_requested_obligations(case: DeterministicCase) -> frozenset[ObligationId]:
-    ever_planned: set[ObligationId] = set()
-    for plan in case.projection.plans.values():
-        payload = plan.payload
-        if payload is None:
-            continue
-        if type(payload) is PlanPublishedPayload:
-            ever_planned.update(payload.obligation_refs)
-        elif type(payload) is PlanRevisedPayload:
-            for change in payload.obligation_changes:
-                ever_planned.update(change.replacement_obligation_ids)
+    scope = current_plan_scope(case.projection.plans, case.projection.coverage_gaps)
+    if scope.effective_obligation_refs is None:
+        # The frozen case already carries the plan redaction/unknown-event gap. Do not invent a
+        # partial obligation set from whichever readable plan fragments happen to remain.
+        return frozenset()
     return frozenset(
         obligation
-        for obligation in ever_planned
+        for obligation in scope.effective_obligation_refs
         if (record := case.projection.obligations.get(obligation)) is not None
         and record.payload is not None
-        and record.plan_change not in {ObligationChangeKind.SUPERSEDED, ObligationChangeKind.WAIVED}
     )
 
 

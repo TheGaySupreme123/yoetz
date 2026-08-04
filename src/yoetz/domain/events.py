@@ -120,11 +120,14 @@ __all__ = [
     "LedgerRecord",
     "ObligationChange",
     "ObligationChangeKind",
+    "NoObligationsReason",
+    "NoObligationsReasonMismatch",
     "ObligationPublishedPayload",
     "ObligationResolutionMismatch",
     "ObligationStatus",
     "obligation_meaning_field_diffs",
     "public_error_for_obligation_resolution_mismatch",
+    "public_error_for_no_obligations_reason_mismatch",
     "PayloadRef",
     "PlanPublishedPayload",
     "PlanRevisedPayload",
@@ -215,6 +218,12 @@ class RequestedItemKind(str, Enum):  # noqa: UP042 - exact wire enum base
 class ObligationStatus(str, Enum):  # noqa: UP042 - exact wire enum base
     OPEN = "open"
     RESOLVED = "resolved"
+
+
+class NoObligationsReason(str, Enum):  # noqa: UP042 - exact wire enum base
+    NO_MATERIAL_CHANGE = "no_material_change"
+    SINGLE_ATOMIC_CHANGE = "single_atomic_change"
+    EXPLORATORY_SCOPE_UNKNOWN = "exploratory_scope_unknown"
 
 
 class WritePolicy(str, Enum):  # noqa: UP042 - exact wire enum base
@@ -711,6 +720,7 @@ class PlanPublishedPayload:
     summary: str
     obligation_refs: tuple[ObligationId, ...]
     scope_exclusions: tuple[str, ...] = ()
+    no_obligations_reason: NoObligationsReason | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -729,6 +739,12 @@ class PlanPublishedPayload:
             "scope_exclusions",
             _text_tuple(self.scope_exclusions, MAX_ALTERNATIVES, MAX_LABEL_BYTES),
         )
+        if self.no_obligations_reason is not None:
+            object.__setattr__(
+                self,
+                "no_obligations_reason",
+                _exact_enum(self.no_obligations_reason, NoObligationsReason),
+            )
 
 
 # Schema-owned obligation meaning fields that must repeat byte-for-byte on resolution.
@@ -786,6 +802,51 @@ class ObligationResolutionMismatch(ValueError):
 
 
 _MAX_EVENTS_PER_BATCH_FOR_POINTER: Final = 100
+
+
+@dataclass(frozen=True, slots=True)
+class NoObligationsReasonMismatch(ValueError):
+    """Typed rejection for a no-obligations reason on non-empty or unreadable scope.
+
+    The exception carries only the accepted event identity. The caller-supplied summary, revision
+    reason, and obligation identifiers never enter the public error, so dry-run and durable append
+    can return the same bounded diagnostic without reflecting submitted content.
+    """
+
+    event_id: EventId | None = None
+
+    def __post_init__(self) -> None:
+        if self.event_id is not None:
+            object.__setattr__(self, "event_id", event_id(self.event_id))
+        ValueError.__init__(self, "no_obligations_reason_conflict")
+
+    @property
+    def reason_code(self) -> str:
+        return "no_obligations_reason_conflict"
+
+
+def public_error_for_no_obligations_reason_mismatch(
+    mismatch: NoObligationsReasonMismatch,
+    *,
+    event_index: int | None = None,
+) -> PublicOperationError:
+    """Project the typed declaration contradiction identically on every publication path."""
+
+    if type(mismatch) is not NoObligationsReasonMismatch:
+        raise TypeError("no_obligations_reason_mismatch_wrong_type")
+    details: dict[str, str] = {"reason_code": mismatch.reason_code}
+    if type(event_index) is int and 0 <= event_index < _MAX_EVENTS_PER_BATCH_FOR_POINTER:
+        details["field"] = f"/event_drafts/{event_index}/payload/no_obligations_reason"
+    return PublicOperationError(
+        PublicErrorCode.EVENT_INVALID,
+        (
+            "The event batch is invalid. no_obligations_reason requires a readable effective "
+            "current plan with zero obligation_refs. Remove no_obligations_reason or revise the "
+            "plan declaration before retrying."
+        ),
+        False,
+        safe_details=details,
+    )
 
 
 def public_error_for_obligation_resolution_mismatch(
@@ -1139,6 +1200,7 @@ class PlanRevisedPayload:
     reason: str
     summary: str
     obligation_changes: tuple[ObligationChange, ...]
+    no_obligations_reason: NoObligationsReason | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1160,6 +1222,12 @@ class PlanRevisedPayload:
         if len(typed_changes) != len(set(typed_changes)):
             raise ProtocolValueError("duplicate_set_member")
         object.__setattr__(self, "obligation_changes", typed_changes)
+        if self.no_obligations_reason is not None:
+            object.__setattr__(
+                self,
+                "no_obligations_reason",
+                _exact_enum(self.no_obligations_reason, NoObligationsReason),
+            )
 
 
 FindingRecordedPayload = Finding
@@ -1604,7 +1672,7 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
         ),
         "plan_published": (
             frozenset({"plan_version", "summary", "obligation_refs"}),
-            frozenset({"scope_exclusions"}),
+            frozenset({"scope_exclusions", "no_obligations_reason"}),
         ),
         "obligation_published": (
             frozenset({"obligation_id", "description", "evidence_expectation", "status"}),
@@ -1659,7 +1727,7 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
                     "obligation_changes",
                 }
             ),
-            frozenset(),
+            frozenset({"no_obligations_reason"}),
         ),
         "response_recorded": (
             frozenset({"finding_id", "finding_frontier", "disposition"}),
@@ -1734,6 +1802,7 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
         return _decode_session_resumed(source)
     if schema.name == "plan_published":
         exclusions = _optional(source, "scope_exclusions")
+        no_obligations_reason = _optional(source, "no_obligations_reason")
         return PlanPublishedPayload(
             plan_version=cast(int, _field(source, "plan_version")),
             summary=cast(str, _field(source, "summary")),
@@ -1742,6 +1811,11 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
             ),
             scope_exclusions=(
                 () if exclusions is None else cast(tuple[str, ...], tuple(_array(exclusions)))
+            ),
+            no_obligations_reason=(
+                None
+                if no_obligations_reason is None
+                else _enum_from_json(no_obligations_reason, NoObligationsReason)
             ),
         )
     if schema.name == "obligation_published":
@@ -1881,6 +1955,7 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
             ),
         )
     if schema.name == "plan_revised":
+        no_obligations_reason = _optional(source, "no_obligations_reason")
         return PlanRevisedPayload(
             plan_version=cast(int, _field(source, "plan_version")),
             supersedes_plan_version=cast(int, _field(source, "supersedes_plan_version")),
@@ -1889,6 +1964,11 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
             obligation_changes=tuple(
                 _decode_obligation_change(item)
                 for item in _array(_field(source, "obligation_changes"))
+            ),
+            no_obligations_reason=(
+                None
+                if no_obligations_reason is None
+                else _enum_from_json(no_obligations_reason, NoObligationsReason)
             ),
         )
     if schema.name == "response_recorded":
@@ -2030,6 +2110,11 @@ def encode_payload(payload: EventPayload) -> JsonValue:
         _optional_tuple(
             result, "scope_exclusions", cast(tuple[object, ...], value.scope_exclusions)
         )
+        _optional_value(
+            result,
+            "no_obligations_reason",
+            None if value.no_obligations_reason is None else value.no_obligations_reason.value,
+        )
         return _json_object(result)
     if payload_type is ObligationPublishedPayload:
         value = cast(ObligationPublishedPayload, payload)
@@ -2159,15 +2244,19 @@ def encode_payload(payload: EventPayload) -> JsonValue:
                 cast(tuple[object, ...], change.replacement_obligation_ids),
             )
             changes.append(item)
-        return _json_object(
-            {
-                "plan_version": value.plan_version,
-                "supersedes_plan_version": value.supersedes_plan_version,
-                "reason": value.reason,
-                "summary": value.summary,
-                "obligation_changes": tuple(changes),
-            }
+        result = {
+            "plan_version": value.plan_version,
+            "supersedes_plan_version": value.supersedes_plan_version,
+            "reason": value.reason,
+            "summary": value.summary,
+            "obligation_changes": tuple(changes),
+        }
+        _optional_value(
+            result,
+            "no_obligations_reason",
+            None if value.no_obligations_reason is None else value.no_obligations_reason.value,
         )
+        return _json_object(result)
     if payload_type is ResponseRecordedPayload:
         value = cast(ResponseRecordedPayload, payload)
         result = {

@@ -111,6 +111,7 @@ lone_surrogate
 malformed_json
 missing_payload_field
 nesting_too_deep
+no_obligations_reason_conflict
 noncanonical_integer_string
 not_an_accepted_envelope
 nul_byte_forbidden
@@ -336,7 +337,7 @@ def test_public_error_code_membership() -> None:
 def test_protocol_reason_registry_is_exact_and_import_order_independent() -> None:
     source_values = cast(tuple[str, ...], getattr(errors_module, "_PROTOCOL_REASON_CODE_VALUES"))
     assert source_values == _EXPECTED_REASON_CODES
-    assert len(source_values) == 139
+    assert len(source_values) == 140
     assert source_values == tuple(sorted(source_values, key=str.encode))
     assert len(source_values) == len(set(source_values))
     assert PROTOCOL_REASON_CODES == frozenset(_EXPECTED_REASON_CODES)

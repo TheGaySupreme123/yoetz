@@ -388,6 +388,102 @@ def _start_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     properties["next_request_template"] = {"$ref": "#/$defs/start_next_request_template"}
     if "next_request_template" not in required:
         required.append("next_request_template")
+    compact_view = cast(dict[str, JsonValue], definitions["compact_view"])
+    compact_properties = cast(dict[str, JsonValue], compact_view["properties"])
+    compact_properties["open_obligation_count"] = {
+        "oneOf": [
+            {"$ref": "#/$defs/safe_count"},
+            {"type": "null"},
+        ]
+    }
+    return document
+
+
+def _plan_payload_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Add the typed empty-scope declaration to the reviewed plan payload contract.
+
+    The reviewed schemas carry identifier, collection, and conditional constraints that generic
+    Pydantic introspection cannot reproduce. Preserve those constraints and make only the additive
+    pre-release correction owned by the domain model.
+    """
+
+    source = Path(__file__).resolve().parent.parent / "schemas" / entry.relative_path
+    try:
+        document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+        definitions = cast(dict[str, JsonValue], document.setdefault("$defs", {}))
+        properties = cast(dict[str, JsonValue], document["properties"])
+    except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
+        raise SchemaGenerationError(
+            "plan_payload_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+
+    definitions["no_obligations_reason"] = {
+        "enum": [
+            "no_material_change",
+            "single_atomic_change",
+            "exploratory_scope_unknown",
+        ],
+        "type": "string",
+    }
+    properties["no_obligations_reason"] = {"$ref": "#/$defs/no_obligations_reason"}
+    return document
+
+
+def _status_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Extend the reviewed status result with the model-owned completion-scope leaves."""
+
+    source = Path(__file__).resolve().parent.parent / "schemas" / entry.relative_path
+    try:
+        document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+        definitions = cast(dict[str, JsonValue], document["$defs"])
+        compact = cast(dict[str, JsonValue], definitions["compact_item"])
+        compact_properties = cast(dict[str, JsonValue], compact["properties"])
+        compact_required = cast(list[JsonValue], compact["required"])
+        readiness = cast(dict[str, JsonValue], definitions["closure_readiness"])
+        readiness_properties = cast(dict[str, JsonValue], readiness["properties"])
+        readiness_required = cast(list[JsonValue], readiness["required"])
+        blocking = cast(dict[str, JsonValue], readiness_properties["blocking_conditions"])
+        blocking_items = cast(dict[str, JsonValue], blocking["items"])
+        blocker_values = cast(list[JsonValue], blocking_items["enum"])
+    except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
+        raise SchemaGenerationError(
+            "status_result_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+
+    definitions["no_obligations_reason"] = {
+        "enum": [
+            "no_material_change",
+            "single_atomic_change",
+            "exploratory_scope_unknown",
+        ],
+        "type": "string",
+    }
+    nullable_count: dict[str, JsonValue] = {
+        "oneOf": [
+            {"$ref": "#/$defs/canonical_uint"},
+            {"type": "null"},
+        ]
+    }
+    nullable_reason: dict[str, JsonValue] = {
+        "oneOf": [
+            {"$ref": "#/$defs/no_obligations_reason"},
+            {"type": "null"},
+        ]
+    }
+    compact_properties["declared_obligation_count"] = nullable_count
+    compact_properties["no_obligations_reason"] = nullable_reason
+    compact_properties["open_obligation_count"] = nullable_count
+    readiness_properties["declared_obligation_count"] = nullable_count
+    readiness_properties["no_obligations_reason"] = nullable_reason
+    for required, names in (
+        (compact_required, ("declared_obligation_count", "no_obligations_reason")),
+        (readiness_required, ("declared_obligation_count", "no_obligations_reason")),
+    ):
+        for name in names:
+            if name not in required:
+                required.append(name)
+    if "no_obligations_declared" not in blocker_values:
+        blocker_values.append("no_obligations_declared")
     return document
 
 
@@ -1179,8 +1275,15 @@ def build_schema_documents(
         seen_paths.add(entry.relative_path)
 
         assert entry.loader is not None  # narrowed by the pending-check above
-        if entry.relative_path == "operations/start-result-1.0.0.schema.json":
+        if entry.relative_path in {
+            "events/plan-published-1.0.0.schema.json",
+            "events/plan-revised-1.0.0.schema.json",
+        }:
+            normalized = _plan_payload_schema(entry)
+        elif entry.relative_path == "operations/start-result-1.0.0.schema.json":
             normalized = _start_result_schema(entry)
+        elif entry.relative_path == "operations/status-result-1.0.0.schema.json":
+            normalized = _status_result_schema(entry)
         elif entry.relative_path == "version/version-manifest-1.0.0.schema.json":
             normalized = _version_manifest_schema(entry)
         else:

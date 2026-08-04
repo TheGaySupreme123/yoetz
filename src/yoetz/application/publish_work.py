@@ -24,6 +24,7 @@ from yoetz.domain.events import (
     FindingRecordedPayload,
     LedgerChain,
     LedgerRecord,
+    NoObligationsReasonMismatch,
     ObligationPublishedPayload,
     ObligationResolutionMismatch,
     PayloadRef,
@@ -39,6 +40,7 @@ from yoetz.domain.events import (
     decode_payload,
     encode_payload,
     media_type_for,
+    public_error_for_no_obligations_reason_mismatch,
     public_error_for_obligation_resolution_mismatch,
 )
 from yoetz.domain.values import (
@@ -1140,6 +1142,16 @@ async def _preflight_dry_run_feasibility(
                     draft_index = index
                     break
         raise public_error_for_obligation_resolution_mismatch(
+            exc, event_index=draft_index
+        ) from None
+    except NoObligationsReasonMismatch as exc:
+        draft_index = None
+        if exc.event_id is not None:
+            for index, item in enumerate(prepared.drafts):
+                if item.draft.event_id == exc.event_id:
+                    draft_index = index
+                    break
+        raise public_error_for_no_obligations_reason_mismatch(
             exc, event_index=draft_index
         ) from None
     except (

@@ -17,6 +17,7 @@ from yoetz.domain.events import (
     EvidenceRecordedPayload,
     FindingRecordedPayload,
     LedgerRecord,
+    NoObligationsReasonMismatch,
     ObligationPublishedPayload,
     ObligationResolutionMismatch,
     ObligationStatus,
@@ -49,6 +50,7 @@ from yoetz.domain.values import (
     result_id,
     validate_sha256_digest,
 )
+from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import (
     ContradictionKey,
     ContradictionRecord,
@@ -752,6 +754,14 @@ def reduce_event(
                     source_event_id=accepted.event_id,
                     source_frontier=accepted.ledger.ingestion_sequence,
                 )
+                typed_plan = cast(PlanPublishedPayload | PlanRevisedPayload, payload)
+                if typed_plan.no_obligations_reason is not None:
+                    scope = current_plan_scope(
+                        plans,
+                        tuple(sorted(gaps, key=_ascii_key)),
+                    )
+                    if not scope.readable or scope.declared_obligation_count != 0:
+                        raise NoObligationsReasonMismatch(event_id=accepted.event_id)
         elif family == "obligation_published":
             _apply_obligation(obligations, accepted)
         elif family == "assignment_recorded":

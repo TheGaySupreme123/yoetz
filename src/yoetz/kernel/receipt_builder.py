@@ -10,10 +10,9 @@ from typing import Final, cast
 from yoetz.domain.events import (
     CheckRecordedPayload,
     ClaimKind,
+    NoObligationsReason,
     ObligationChangeKind,
     ObligationStatus,
-    PlanPublishedPayload,
-    PlanRevisedPayload,
 )
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
@@ -24,6 +23,8 @@ from yoetz.domain.findings import (
     rank_key,
 )
 from yoetz.domain.receipts import (
+    COMPLETION_SCOPE_DECLARED_NONE_GAP,
+    COMPLETION_SCOPE_UNDECLARED_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
@@ -55,6 +56,7 @@ from yoetz.domain.values import (
     finding_id,
 )
 from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts, CaseGap
+from yoetz.kernel.plan_scope import CurrentPlanScope, current_plan_scope
 from yoetz.kernel.projections import ObligationProjectionRecord, ProjectionRecord, ProjectionState
 from yoetz.protocol.coverage import LEDGER_FRESHNESS_ORDER, Coverage, weakest
 from yoetz.protocol.models import ReceiptInclude, ReceiptRedactionProfile
@@ -68,6 +70,9 @@ __all__ = [
 _CONTEXT_INVALID: Final = "receipt_build_context_invalid"
 _CHECK_ABSENCE_GAPS: Final = frozenset(
     {"check_not_recorded", "check_not_applicable", "check_payload_unavailable"}
+)
+_COMPLETION_SCOPE_GAPS: Final = frozenset(
+    {COMPLETION_SCOPE_DECLARED_NONE_GAP, COMPLETION_SCOPE_UNDECLARED_GAP}
 )
 _SECTION_TITLES: Final = {
     ReceiptSectionKey.SUMMARY: "Summary",
@@ -303,37 +308,6 @@ class ReceiptBuildContext:
         _validate_applicable_check(self)
 
 
-def _current_plan_obligation_ids(projection: ProjectionState) -> set[ObligationId]:
-    published = sorted(
-        (
-            record
-            for record in projection.plans.values()
-            if type(record.payload) is PlanPublishedPayload
-        ),
-        key=lambda record: (record.source_frontier, _ascii_key(record.source_event_id)),
-    )
-    if not published:
-        return set()
-    current = set(cast(PlanPublishedPayload, published[0].payload).obligation_refs)
-    revisions = sorted(
-        (
-            record
-            for record in projection.plans.values()
-            if type(record.payload) is PlanRevisedPayload
-        ),
-        key=lambda record: (record.source_frontier, _ascii_key(record.source_event_id)),
-    )
-    for record in revisions:
-        payload = cast(PlanRevisedPayload, record.payload)
-        for change in payload.obligation_changes:
-            if change.change is ObligationChangeKind.SUPERSEDED:
-                current.discard(change.obligation_id)
-                current.update(change.replacement_obligation_ids)
-            else:
-                current.add(change.obligation_id)
-    return current
-
-
 def _receipt_obligation_status(record: ObligationProjectionRecord) -> ReceiptObligationStatus:
     if record.payload is None:
         raise ValueError(_CONTEXT_INVALID)
@@ -350,7 +324,11 @@ def _select_obligations(
     context: ReceiptBuildContext,
     findings: tuple[Finding, ...],
 ) -> tuple[ReceiptObligation, ...]:
-    selected = _current_plan_obligation_ids(context.projection)
+    plan_scope = current_plan_scope(
+        context.projection.plans,
+        context.projection.coverage_gaps,
+    )
+    selected = set(plan_scope.effective_obligation_refs or ())
     for finding in findings:
         selected.update(
             cast(ObligationId, ref) for ref in finding.subject_refs if ref.startswith("obl_")
@@ -505,8 +483,21 @@ def _select_responses(
 
 
 def _select_gaps(context: ReceiptBuildContext) -> tuple[ReceiptGap, ...]:
+    plan_scope = current_plan_scope(
+        context.projection.plans,
+        context.projection.coverage_gaps,
+    )
     values = tuple(
-        ReceiptGap(code=gap.code, subject_refs=gap.subject_refs)
+        ReceiptGap(
+            code=gap.code,
+            subject_refs=gap.subject_refs,
+            detail=(
+                plan_scope.no_obligations_reason.value
+                if gap.code == COMPLETION_SCOPE_DECLARED_NONE_GAP
+                and plan_scope.no_obligations_reason is not None
+                else None
+            ),
+        )
         for gap in sorted(
             context.gaps,
             key=lambda gap: (
@@ -608,12 +599,26 @@ def _apply_profile(
         retained_obligations = tuple(
             replace(obligation, summary=None) for obligation in obligations
         )
-        cleared_gaps = sum(gap.detail is not None for gap in gaps)
+
+        def retain_closed_scope_reason(gap: ReceiptGap) -> bool:
+            if gap.code != COMPLETION_SCOPE_DECLARED_NONE_GAP or gap.detail is None:
+                return False
+            try:
+                NoObligationsReason(gap.detail)
+            except ValueError:
+                return False
+            return True
+
+        cleared_gaps = sum(
+            gap.detail is not None and not retain_closed_scope_reason(gap) for gap in gaps
+        )
         if cleared_gaps:
             counts[
                 (ReceiptRedactionCategory.FINDING_DETAIL, ReceiptRedactionReason.POLICY_REDACTED)
             ] += cleared_gaps
-        retained_gaps = tuple(replace(gap, detail=None) for gap in gaps)
+        retained_gaps = tuple(
+            gap if retain_closed_scope_reason(gap) else replace(gap, detail=None) for gap in gaps
+        )
 
     if profile is ReceiptRedactionProfile.REDACTED_SHARE:
         semantic_count = sum(
@@ -667,6 +672,10 @@ def _conclusion(
     context: ReceiptBuildContext,
     unresolved_actionable: tuple[Finding, ...],
 ) -> ReceiptConclusion:
+    if _COMPLETION_SCOPE_GAPS & set(context.coverage.known_gaps):
+        # These two closed gaps bound completion itself. Findings remain visible and actionable,
+        # but they cannot make an empty completion scope read as sufficiently covered.
+        return ReceiptConclusion.INSUFFICIENT_COVERAGE
     if unresolved_actionable:
         return ReceiptConclusion.UNRESOLVED_FINDINGS_REMAIN
     check = context.applicable_check
@@ -743,13 +752,9 @@ def _sections(
     evidence_refs: tuple[EvidenceId, ...],
     coverage: Coverage,
     redactions: tuple[ReceiptRedaction, ...],
+    plan_scope: CurrentPlanScope,
     tested_subject_sequence: str | None = None,
 ) -> tuple[ReceiptSection, ...]:
-    open_obligations = tuple(
-        obligation
-        for obligation in obligations
-        if obligation.status is ReceiptObligationStatus.OPEN
-    )
     gap_codes = coverage.known_gaps
     bodies: dict[ReceiptSectionKey, str] = {}
     items: dict[ReceiptSectionKey, tuple[str, ...]] = {}
@@ -771,15 +776,66 @@ def _sections(
         )
     items[ReceiptSectionKey.SUMMARY] = ()
 
-    open_count = len(open_obligations)
-    if open_count == 0:
+    effective_ids = frozenset(plan_scope.effective_obligation_refs or ())
+    current_obligations = tuple(
+        obligation for obligation in obligations if obligation.obligation_id in effective_ids
+    )
+    open_current = tuple(
+        obligation
+        for obligation in current_obligations
+        if obligation.status is ReceiptObligationStatus.OPEN
+    )
+    open_count = len(open_current)
+    if not plan_scope.has_plan:
+        bodies[ReceiptSectionKey.OUTSTANDING_WORK] = (
+            "No plan is recorded; completion scope is unknown."
+        )
+    elif not plan_scope.readable:
+        bodies[ReceiptSectionKey.OUTSTANDING_WORK] = (
+            "The current plan scope is unreadable; open obligations are unknown."
+        )
+    elif (
+        plan_scope.has_plan
+        and plan_scope.declared_obligation_count == 0
+        and plan_scope.no_obligations_reason is None
+    ):
+        bodies[ReceiptSectionKey.OUTSTANDING_WORK] = "Completion scope was never declared."
+    elif (
+        plan_scope.has_plan
+        and plan_scope.declared_obligation_count == 0
+        and plan_scope.no_obligations_reason is not None
+    ):
+        bodies[ReceiptSectionKey.OUTSTANDING_WORK] = (
+            f"The plan declared none, reason: {plan_scope.no_obligations_reason.value}."
+        )
+    elif (
+        plan_scope.has_plan
+        and plan_scope.declared_obligation_count is not None
+        and plan_scope.declared_obligation_count > 0
+        and len(current_obligations) != plan_scope.declared_obligation_count
+    ):
+        bodies[ReceiptSectionKey.OUTSTANDING_WORK] = (
+            "Declared obligation status is unavailable; open obligations are unknown."
+        )
+    elif (
+        plan_scope.has_plan
+        and plan_scope.declared_obligation_count is not None
+        and plan_scope.declared_obligation_count > 0
+        and len(current_obligations) == plan_scope.declared_obligation_count
+        and all(
+            obligation.status is ReceiptObligationStatus.RESOLVED
+            for obligation in current_obligations
+        )
+    ):
+        bodies[ReceiptSectionKey.OUTSTANDING_WORK] = "Declared obligations are all resolved."
+    elif open_count == 0:
         bodies[ReceiptSectionKey.OUTSTANDING_WORK] = "No open obligations are recorded."
     elif open_count == 1:
         bodies[ReceiptSectionKey.OUTSTANDING_WORK] = "One obligation remains open."
     else:
         bodies[ReceiptSectionKey.OUTSTANDING_WORK] = f"{open_count} obligations remain open."
     items[ReceiptSectionKey.OUTSTANDING_WORK] = tuple(
-        obligation.obligation_id for obligation in open_obligations
+        obligation.obligation_id for obligation in open_current
     )
 
     actionable_count = unresolved_actionable_count
@@ -928,6 +984,10 @@ def build_receipt(
         evidence_refs=evidence_refs,
         coverage=context.coverage,
         redactions=redactions,
+        plan_scope=current_plan_scope(
+            context.projection.plans,
+            context.projection.coverage_gaps,
+        ),
         tested_subject_sequence=(
             None
             if context.projection.latest_tested_state is None

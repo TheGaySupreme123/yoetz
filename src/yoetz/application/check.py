@@ -19,6 +19,8 @@ from yoetz.domain.findings import (
     semantic_provenance_to_json,
 )
 from yoetz.domain.receipts import (
+    COMPLETION_SCOPE_DECLARED_NONE_GAP,
+    COMPLETION_SCOPE_UNDECLARED_GAP,
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
     SEMANTIC_CHALLENGES_REJECTED_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
@@ -1252,7 +1254,16 @@ async def execute_check_commit(
                 ledger_freshness=freshness,
                 known_gaps=tuple(sorted(gaps, key=str.encode)),
             )
-        if policy_failed or (request.mode == "semantic_required" and semantic_failed):
+        completion_scope_incomplete = bool(
+            {COMPLETION_SCOPE_DECLARED_NONE_GAP, COMPLETION_SCOPE_UNDECLARED_GAP}
+            & set(coverage.known_gaps)
+        )
+        if completion_scope_incomplete:
+            # Completion scope is the subject-level boundary named by ADR-019. Even a separately
+            # incomplete required semantic attempt cannot turn either closed scope gap into the
+            # broader incomplete-check verdict.
+            completeness = CheckCompleteness.COVERAGE_INCOMPLETE
+        elif policy_failed or (request.mode == "semantic_required" and semantic_failed):
             completeness = CheckCompleteness.REQUIRED_INCOMPLETE
         elif coverage.known_gaps or semantic_failed:
             completeness = CheckCompleteness.COVERAGE_INCOMPLETE

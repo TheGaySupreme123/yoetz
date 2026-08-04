@@ -35,6 +35,26 @@ These are not publishable transitions: reading or searching, running a command w
 
 An obligation names what must be satisfied. Evidence is a bounded, provenance-labeled reason to believe something about it. A claim states a conclusion. Link them explicitly; do not substitute a file list for an obligation or a claim for evidence.
 
+## Declare completion scope in the plan
+
+The effective current plan must distinguish obligations from an intentional empty scope. Normally,
+publish sorted-unique `obligation_refs`. If none apply, set `no_obligations_reason` to exactly one
+closed value:
+
+- `no_material_change` — the work makes no material change;
+- `single_atomic_change` — one atomic change has no independently useful obligation split;
+- `exploratory_scope_unknown` — exploration cannot yet declare material obligations.
+
+Do not send a reason beside effective obligation refs. A `plan_revised` event restates the current
+declaration: include the current reason when the revised effective ref set is empty, or omit it to
+clear an earlier reason. Yoetz never infers obligations from prompts, source code, workspace state,
+or plan prose.
+
+An empty-scope reason clears the `no_obligations_declared` readiness blocker, but it does not buy a
+clean completion check. A completion claim over zero declared obligations remains
+coverage-incomplete: `completion_scope_undeclared` without a reason or
+`completion_scope_declared_none` with one.
+
 ## Obligation resolution
 
 <a id="obligation-resolution"></a>
@@ -97,7 +117,7 @@ Publish the question, source identities, bounded supported and contradicted clai
 
 ### Plan revision
 
-Publish the original obligation, the material new fact, and one plan revision explaining which outcome or dependency changed. Routine schedule adjustment needs no event.
+Publish the original obligation, the material new fact, and one plan revision explaining which outcome or dependency changed. Restate the current empty-scope reason or omit it to clear the declaration; omission never inherits the prior reason. Routine schedule adjustment needs no event.
 
 ### Large generated inventory
 

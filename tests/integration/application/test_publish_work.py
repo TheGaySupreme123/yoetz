@@ -17,8 +17,10 @@ from yoetz.application.publish_work import Application, execute_publish_work
 from yoetz.application.status import Application as StatusApplication
 from yoetz.application.status import execute_status
 from yoetz.domain.values import Frontier, session_id
+from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
+from yoetz.ports.ledger import ProjectionView
 from yoetz.ports.objects import ObjectStorePort
 from yoetz.ports.runtime import RouteCommand, TaskRuntime
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
@@ -627,6 +629,86 @@ def _evidence_draft(event_tail: int) -> dict[str, object]:
     }
 
 
+def _plan_draft(
+    event_tail: int,
+    *,
+    obligation_refs: list[str],
+    no_obligations_reason: str | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "plan_version": 1,
+        "summary": "Bounded implementation plan.",
+        "obligation_refs": obligation_refs,
+    }
+    if no_obligations_reason is not None:
+        payload["no_obligations_reason"] = no_obligations_reason
+    return {
+        "event_id": f"evt_00000000-0000-4000-8000-{event_tail:012d}",
+        "schema": {"name": "plan_published", "version": "1.0.0"},
+        "occurred_at": "2026-07-19T12:00:00.000Z",
+        "causal_parents": (),
+        "payload": payload,
+        "artifact_refs": (),
+        "evidence_refs": (),
+    }
+
+
+def _plan_revision_draft(
+    event_tail: int,
+    *,
+    obligation_id: str,
+    no_obligations_reason: str,
+) -> dict[str, object]:
+    return {
+        "event_id": f"evt_00000000-0000-4000-8000-{event_tail:012d}",
+        "schema": {"name": "plan_revised", "version": "1.0.0"},
+        "occurred_at": "2026-07-19T12:00:00.000Z",
+        "causal_parents": (),
+        "payload": {
+            "plan_version": 2,
+            "supersedes_plan_version": 1,
+            "reason": "The scope expanded.",
+            "summary": "One obligation now applies.",
+            "obligation_changes": [
+                {
+                    "obligation_id": obligation_id,
+                    "change": "carried",
+                }
+            ],
+            "no_obligations_reason": no_obligations_reason,
+        },
+        "artifact_refs": (),
+        "evidence_refs": (),
+    }
+
+
+def _empty_scope_revision_draft(
+    event_tail: int,
+    *,
+    plan_version: int,
+    supersedes_plan_version: int,
+    no_obligations_reason: str | None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "plan_version": plan_version,
+        "supersedes_plan_version": supersedes_plan_version,
+        "reason": "Restate the current empty completion scope.",
+        "summary": "No effective obligation references.",
+        "obligation_changes": [],
+    }
+    if no_obligations_reason is not None:
+        payload["no_obligations_reason"] = no_obligations_reason
+    return {
+        "event_id": f"evt_00000000-0000-4000-8000-{event_tail:012d}",
+        "schema": {"name": "plan_revised", "version": "1.0.0"},
+        "occurred_at": "2026-07-19T12:00:00.000Z",
+        "causal_parents": (),
+        "payload": payload,
+        "artifact_refs": (),
+        "evidence_refs": (),
+    }
+
+
 async def _publish_open_obligation(app: _Application) -> Frontier:
     request = _request(
         request_tail=701,
@@ -707,6 +789,151 @@ async def test_obligation_resolution_mismatch_is_identical_on_dry_run_and_publis
 
     assert dict(dry.value.safe_details) == dict(durable.value.safe_details)
     assert dry.value.message == durable.value.message
+
+
+async def test_no_obligations_reason_conflict_is_identical_on_dry_run_and_publish() -> None:
+    """A typed empty-scope reason cannot accompany a positive effective declaration."""
+
+    app, _objects = _composition()
+    request = _request(
+        request_tail=712,
+        event_drafts=(
+            _plan_draft(
+                713,
+                obligation_refs=[_OBLIGATION_ID],
+                no_obligations_reason="single_atomic_change",
+            ),
+        ),
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    preview_payload = request.model_dump(mode="json", by_alias=True, exclude_none=True)
+    preview_payload["dry_run"] = True
+    with pytest.raises(PublicOperationError) as dry:
+        await execute_publish_work(
+            cast(Application, app), PublishWorkRequestModel.model_validate(preview_payload)
+        )
+    with pytest.raises(PublicOperationError) as durable:
+        await execute_publish_work(cast(Application, app), request)
+
+    for caught in (dry, durable):
+        error = caught.value
+        assert error.code is PublicErrorCode.EVENT_INVALID
+        assert error.safe_details == {
+            "reason_code": "no_obligations_reason_conflict",
+            "field": "/event_drafts/0/payload/no_obligations_reason",
+        }
+        assert "single_atomic_change" not in error.message
+        assert _OBLIGATION_ID not in error.message
+
+    assert dry.value.message == durable.value.message
+
+
+async def test_revision_reason_conflict_is_identical_on_dry_run_and_publish() -> None:
+    """A revision cannot retain an empty-scope reason while carrying an obligation."""
+
+    app, _objects = _composition()
+    initial = _request(
+        request_tail=714,
+        event_drafts=(
+            _plan_draft(
+                715,
+                obligation_refs=[],
+                no_obligations_reason="exploratory_scope_unknown",
+            ),
+        ),
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    accepted = await execute_publish_work(cast(Application, app), initial)
+    assert accepted.outcome == "accepted"
+    frontier = await app.runtime.task.ledger.load_frontier()
+
+    revision = _request(
+        request_tail=716,
+        event_drafts=(
+            _plan_revision_draft(
+                717,
+                obligation_id=_OBLIGATION_ID,
+                no_obligations_reason="exploratory_scope_unknown",
+            ),
+        ),
+        expected_frontier={
+            "sequence": str(frontier.sequence),
+            "head_digest": frontier.head_digest,
+        },
+    )
+    preview_payload = revision.model_dump(mode="json", by_alias=True, exclude_none=True)
+    preview_payload["dry_run"] = True
+    with pytest.raises(PublicOperationError) as dry:
+        await execute_publish_work(
+            cast(Application, app), PublishWorkRequestModel.model_validate(preview_payload)
+        )
+    with pytest.raises(PublicOperationError) as durable:
+        await execute_publish_work(cast(Application, app), revision)
+
+    for caught in (dry, durable):
+        error = caught.value
+        assert error.code is PublicErrorCode.EVENT_INVALID
+        assert error.safe_details == {
+            "reason_code": "no_obligations_reason_conflict",
+            "field": "/event_drafts/0/payload/no_obligations_reason",
+        }
+        assert "exploratory_scope_unknown" not in error.message
+        assert _OBLIGATION_ID not in error.message
+
+    assert dry.value.message == durable.value.message
+
+
+async def test_durable_revisions_add_replace_and_clear_empty_scope_declaration() -> None:
+    app, _objects = _composition()
+    initial = await execute_publish_work(
+        cast(Application, app),
+        _request(
+            request_tail=718,
+            event_drafts=(_plan_draft(719, obligation_refs=[]),),
+            expected_frontier={"sequence": "0", "head_digest": "genesis"},
+        ),
+    )
+    assert initial.outcome == "accepted"
+
+    transitions = (
+        (2, "no_material_change", 720, 721),
+        (3, "single_atomic_change", 722, 723),
+        (4, None, 724, 725),
+    )
+    for plan_version, reason, request_tail, event_tail in transitions:
+        frontier = await app.runtime.task.ledger.load_frontier()
+        published = await execute_publish_work(
+            cast(Application, app),
+            _request(
+                request_tail=request_tail,
+                event_drafts=(
+                    _empty_scope_revision_draft(
+                        event_tail,
+                        plan_version=plan_version,
+                        supersedes_plan_version=plan_version - 1,
+                        no_obligations_reason=reason,
+                    ),
+                ),
+                expected_frontier={
+                    "sequence": str(frontier.sequence),
+                    "head_digest": frontier.head_digest,
+                },
+            ),
+        )
+        assert published.outcome == "accepted"
+
+        stored = await app.runtime.task.ledger.load_projection(
+            app.runtime.task.session_id,
+            ProjectionView.CANDIDATE_FINDINGS,
+        )
+        assert stored is not None
+        projection = stored.state
+        assert not isinstance(projection, tuple)
+        scope = current_plan_scope(projection.plans, projection.coverage_gaps)
+        assert scope.declared_obligation_count == 0
+        assert (
+            None if scope.no_obligations_reason is None else scope.no_obligations_reason.value
+        ) == reason
 
 
 async def test_obligation_resolution_omitting_only_acceptance_criteria_names_that_field() -> None:

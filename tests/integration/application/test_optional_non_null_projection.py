@@ -244,20 +244,38 @@ async def _publish_obligation(
     *,
     acceptance_criteria: str | None,
     evidence_subject_state: Mapping[str, str] | None = None,
+    declare_in_plan: bool = False,
 ) -> tuple[Application, str, str]:
-    """Start a task and publish one obligation (optionally plus evidence with subject state)."""
+    """Start a task and publish one obligation (optionally declared by a plan, plus evidence)."""
 
     app, _policy = await build_projection_application(seed=seed)
     started = await app.start(start_request(seed + 1, title="Optional non-null projection"))
     obligation_id = protocol_id("obl_", seed + 2)
     event_id = protocol_id("evt_", seed + 3)
-    drafts: list[JsonValue] = [
+    drafts: list[JsonValue] = []
+    if declare_in_plan:
+        drafts.append(
+            {
+                "event_id": protocol_id("evt_", seed + 7),
+                "schema": {"name": "plan_published", "version": "1.0.0"},
+                "occurred_at": "2026-07-28T11:59:59.000Z",
+                "causal_parents": [],
+                "payload": {
+                    "plan_version": 1,
+                    "summary": "Declare the obligation projected by the compact status view.",
+                    "obligation_refs": [obligation_id],
+                },
+                "artifact_refs": [],
+                "evidence_refs": [],
+            }
+        )
+    drafts.append(
         _obligation_draft(
             event_id=event_id,
             obligation_id=obligation_id,
             acceptance_criteria=acceptance_criteria,
         )
-    ]
+    )
     if evidence_subject_state is not None:
         drafts.append(
             {
@@ -333,7 +351,11 @@ def _obligation_from_projected(
 async def test_obligation_without_acceptance_criteria_projects(view: str) -> None:
     """An obligation published without acceptance_criteria projects on both status views."""
 
-    app, session_id, writer_id = await _publish_obligation(2100, acceptance_criteria=None)
+    app, session_id, writer_id = await _publish_obligation(
+        2100,
+        acceptance_criteria=None,
+        declare_in_plan=view == "compact",
+    )
     projected = await _project_status(
         app, session_id=session_id, writer_id=writer_id, view=view, seed=2110
     )
@@ -354,7 +376,11 @@ async def test_obligation_with_acceptance_criteria_keeps_text(view: str) -> None
     """When acceptance_criteria is set, the text survives projection intact."""
 
     text = "A linked issue exists and is referenced from the result."
-    app, session_id, writer_id = await _publish_obligation(2200, acceptance_criteria=text)
+    app, session_id, writer_id = await _publish_obligation(
+        2200,
+        acceptance_criteria=text,
+        declare_in_plan=view == "compact",
+    )
     projected = await _project_status(
         app, session_id=session_id, writer_id=writer_id, view=view, seed=2210
     )
@@ -368,7 +394,11 @@ async def test_obligation_acceptance_criteria_policy_omission_is_distinct(view: 
     """Policy-omitted acceptance_criteria is an omission marker — not absence and not null."""
 
     text = "Criteria present so disclosure has a real leaf to omit."
-    app, session_id, writer_id = await _publish_obligation(2300, acceptance_criteria=text)
+    app, session_id, writer_id = await _publish_obligation(
+        2300,
+        acceptance_criteria=text,
+        declare_in_plan=view == "compact",
+    )
     object.__setattr__(app, "privacy", _BlockEverything())
 
     status_body: dict[str, JsonValue] = {

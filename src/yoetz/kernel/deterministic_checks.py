@@ -12,6 +12,7 @@ from typing import Final, Literal, cast
 from yoetz.domain.events import (
     MAX_REF_LIST,
     AcceptedEvent,
+    ClaimKind,
     EventSchema,
     LedgerRecord,
     RedactionState,
@@ -24,6 +25,10 @@ from yoetz.domain.findings import (
     CandidateFinding,
     FindingKind,
     FindingOrigin,
+)
+from yoetz.domain.receipts import (
+    COMPLETION_SCOPE_DECLARED_NONE_GAP,
+    COMPLETION_SCOPE_UNDECLARED_GAP,
 )
 from yoetz.domain.values import (
     ActionId,
@@ -49,6 +54,7 @@ from yoetz.domain.values import (
     timestamp_from_string,
     validate_sha256_digest,
 )
+from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import (
     ProjectionRecord,
     ProjectionState,
@@ -1208,6 +1214,35 @@ def _validate_availability(
             raise _invalid_case()
 
 
+def completion_scope_gap(projection: ProjectionState) -> CaseGap | None:
+    """Return the one plan-bound completion-scope gap for a readable case, if applicable."""
+
+    completion_claim_present = any(
+        record.payload is not None and record.payload.claim_kind is ClaimKind.COMPLETION
+        for record in projection.claims.values()
+    )
+    plan_scope = current_plan_scope(projection.plans, projection.coverage_gaps)
+    if not (
+        completion_claim_present
+        and plan_scope.has_plan
+        and plan_scope.readable
+        and plan_scope.declared_obligation_count == 0
+    ):
+        return None
+    code = (
+        COMPLETION_SCOPE_UNDECLARED_GAP
+        if plan_scope.no_obligations_reason is None
+        else COMPLETION_SCOPE_DECLARED_NONE_GAP
+    )
+    source_event = plan_scope.current_plan_event_id
+    if source_event is None:  # pragma: no cover - readable plan state owns its source event
+        raise _invalid_case()
+    # Keep the marker bound to the declaration event for deterministic identity, but do not make
+    # the plan event a finding subject. This is a coverage limitation, not ledger-staleness and
+    # deliberately does not create a FindingKind.
+    return CaseGap(f"{code}:{source_event}", code, ())
+
+
 def build_deterministic_case(
     projection: ProjectionState,
     records: Iterable[LedgerRecord],
@@ -1246,6 +1281,15 @@ def build_deterministic_case(
             missing_sources.add(event_id(gap.subject_refs[0]))
         elif gap.code == "unknown_event":
             unknown_events.add(event_id(gap.subject_refs[0]))
+
+    scope_gap = completion_scope_gap(projection)
+    if scope_gap is not None:
+        _add_gap(
+            gaps,
+            scope_gap.marker,
+            scope_gap.code,
+            scope_gap.subject_refs,
+        )
 
     current_sources = {record.source_event_id for record in _projection_records(projection)}
     envelope_redacted_events: set[EventId] = set()

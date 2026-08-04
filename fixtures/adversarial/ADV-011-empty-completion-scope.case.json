@@ -1,0 +1,346 @@
+{
+  "controls": {
+    "clock": "fixture_supplied",
+    "environment": {
+      "locale": "C",
+      "python_hash_seeds": [
+        "0",
+        "1",
+        "4294967295"
+      ],
+      "timezone": "UTC"
+    },
+    "external_io": "forbidden",
+    "ids": "fixture_supplied",
+    "network": "forbidden",
+    "randomness": "forbidden"
+  },
+  "expected": {
+    "relationships": [
+      {
+        "assertion": "recording a typed reason distinguishes declared-none scope from undeclared scope but remains insufficient coverage",
+        "from": "undeclared_trigger",
+        "to": "declared_none_at_publication"
+      },
+      {
+        "assertion": "a revision can repair the readiness declaration without rewriting the original plan and produces the same bounded declared-none gap",
+        "from": "undeclared_trigger",
+        "to": "declared_none_by_revision"
+      },
+      {
+        "assertion": "declaring and resolving a positive obligation is the only repaired variant here that clears the completion-scope coverage gap",
+        "from": "declared_none_at_publication",
+        "to": "declared_and_resolved"
+      }
+    ],
+    "variants": {
+      "declared_and_resolved": {
+        "blocking_conditions": [],
+        "completeness": "complete",
+        "coverage": {
+          "artifact_observation": "published_only",
+          "authorship_assurance": "self_asserted",
+          "check_types": [
+            "deterministic"
+          ],
+          "evidence_immutability": "content_digest",
+          "known_gaps": [],
+          "ledger_freshness": "current",
+          "publication_channels": [
+            "cooperative_mcp",
+            "engine_derived"
+          ]
+        },
+        "declared_obligation_count": "1",
+        "finding_kinds": [],
+        "findings": [],
+        "no_obligations_reason": null,
+        "receipt_scope_wording": "declared obligations are all resolved",
+        "verdict": "no_issue_detected"
+      },
+      "declared_none_at_publication": {
+        "blocking_conditions": [],
+        "completeness": "coverage_incomplete",
+        "coverage": {
+          "artifact_observation": "published_only",
+          "authorship_assurance": "self_asserted",
+          "check_types": [
+            "deterministic"
+          ],
+          "evidence_immutability": "metadata_only",
+          "known_gaps": [
+            "completion_scope_declared_none"
+          ],
+          "ledger_freshness": "current",
+          "publication_channels": [
+            "cooperative_mcp",
+            "engine_derived"
+          ]
+        },
+        "declared_obligation_count": "0",
+        "finding_kinds": [],
+        "findings": [],
+        "no_obligations_reason": "single_atomic_change",
+        "receipt_scope_wording": "the plan declared none, reason: single_atomic_change",
+        "verdict": "insufficient_coverage"
+      },
+      "declared_none_by_revision": {
+        "blocking_conditions": [],
+        "completeness": "coverage_incomplete",
+        "coverage": {
+          "artifact_observation": "published_only",
+          "authorship_assurance": "self_asserted",
+          "check_types": [
+            "deterministic"
+          ],
+          "evidence_immutability": "metadata_only",
+          "known_gaps": [
+            "completion_scope_declared_none"
+          ],
+          "ledger_freshness": "current",
+          "publication_channels": [
+            "cooperative_mcp",
+            "engine_derived"
+          ]
+        },
+        "declared_obligation_count": "0",
+        "finding_kinds": [],
+        "findings": [],
+        "no_obligations_reason": "no_material_change",
+        "receipt_scope_wording": "the plan declared none, reason: no_material_change",
+        "verdict": "insufficient_coverage"
+      },
+      "undeclared_trigger": {
+        "blocking_conditions": [
+          "no_obligations_declared"
+        ],
+        "completeness": "coverage_incomplete",
+        "coverage": {
+          "artifact_observation": "published_only",
+          "authorship_assurance": "self_asserted",
+          "check_types": [
+            "deterministic"
+          ],
+          "evidence_immutability": "metadata_only",
+          "known_gaps": [
+            "completion_scope_undeclared"
+          ],
+          "ledger_freshness": "current",
+          "publication_channels": [
+            "cooperative_mcp",
+            "engine_derived"
+          ]
+        },
+        "declared_obligation_count": "0",
+        "finding_kinds": [],
+        "findings": [],
+        "no_obligations_reason": null,
+        "receipt_scope_wording": "scope was never declared",
+        "verdict": "insufficient_coverage"
+      }
+    }
+  },
+  "fixture_id": "ADV-011",
+  "fixture_schema": "yoetz.fixture-case/1.0.0",
+  "fixture_version": "1.0.0",
+  "input": {
+    "variants": {
+      "declared_and_resolved": {
+        "events": [
+          {
+            "event_id": "evt_00000000-0000-4000-8000-000000000111",
+            "payload": {
+              "obligation_refs": [
+                "obl_00000000-0000-4000-8000-000000000111"
+              ],
+              "plan_version": 1,
+              "summary": "One declared fixture obligation"
+            },
+            "schema": {
+              "name": "plan_published",
+              "version": "1.0.0"
+            }
+          },
+          {
+            "event_id": "evt_00000000-0000-4000-8000-000000000112",
+            "payload": {
+              "description": "Exercise declared completion scope",
+              "evidence_expectation": "Fixture evidence",
+              "obligation_id": "obl_00000000-0000-4000-8000-000000000111",
+              "status": "open"
+            },
+            "schema": {
+              "name": "obligation_published",
+              "version": "1.0.0"
+            }
+          },
+          {
+            "event_id": "evt_00000000-0000-4000-8000-000000000115",
+            "payload": {
+              "content_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+              "description": "Fixture evidence for the declared obligation",
+              "evidence_id": "evd_00000000-0000-4000-8000-000000000111",
+              "evidence_kind": "test_result",
+              "observed_at": "2026-01-01T00:00:00.000Z",
+              "strength": "content_digest"
+            },
+            "schema": {
+              "name": "evidence_recorded",
+              "version": "1.0.0"
+            }
+          },
+          {
+            "event_id": "evt_00000000-0000-4000-8000-000000000113",
+            "payload": {
+              "description": "Exercise declared completion scope",
+              "evidence_expectation": "Fixture evidence",
+              "obligation_id": "obl_00000000-0000-4000-8000-000000000111",
+              "resolution_evidence_refs": [
+                "evd_00000000-0000-4000-8000-000000000111"
+              ],
+              "status": "resolved"
+            },
+            "schema": {
+              "name": "obligation_published",
+              "version": "1.0.0"
+            }
+          },
+          {
+            "event_id": "evt_00000000-0000-4000-8000-000000000114",
+            "payload": {
+              "claim_id": "clm_00000000-0000-4000-8000-000000000111",
+              "claim_kind": "completion",
+              "obligation_refs": [
+                "obl_00000000-0000-4000-8000-000000000111"
+              ],
+              "statement": "Declared fixture obligation is resolved",
+              "supporting_refs": [
+                "evd_00000000-0000-4000-8000-000000000111",
+                "obl_00000000-0000-4000-8000-000000000111"
+              ]
+            },
+            "schema": {
+              "name": "claim_recorded",
+              "version": "1.0.0"
+            }
+          }
+        ]
+      },
+      "declared_none_at_publication": {
+        "events": [
+          {
+            "event_id": "evt_00000000-0000-4000-8000-000000000121",
+            "payload": {
+              "no_obligations_reason": "single_atomic_change",
+              "obligation_refs": [],
+              "plan_version": 1,
+              "summary": "One atomic fixture change"
+            },
+            "schema": {
+              "name": "plan_published",
+              "version": "1.0.0"
+            }
+          },
+          {
+            "event_id": "evt_00000000-0000-4000-8000-000000000122",
+            "payload": {
+              "claim_id": "clm_00000000-0000-4000-8000-000000000121",
+              "claim_kind": "completion",
+              "statement": "Atomic fixture change is complete",
+              "supporting_refs": []
+            },
+            "schema": {
+              "name": "claim_recorded",
+              "version": "1.0.0"
+            }
+          }
+        ]
+      },
+      "declared_none_by_revision": {
+        "events": [
+          {
+            "event_id": "evt_00000000-0000-4000-8000-000000000131",
+            "payload": {
+              "obligation_refs": [],
+              "plan_version": 1,
+              "summary": "Initial undeclared fixture scope"
+            },
+            "schema": {
+              "name": "plan_published",
+              "version": "1.0.0"
+            }
+          },
+          {
+            "event_id": "evt_00000000-0000-4000-8000-000000000132",
+            "payload": {
+              "no_obligations_reason": "no_material_change",
+              "obligation_changes": [],
+              "plan_version": 2,
+              "reason": "The exploration established that no material change was needed",
+              "summary": "Revised fixture scope declaration",
+              "supersedes_plan_version": 1
+            },
+            "schema": {
+              "name": "plan_revised",
+              "version": "1.0.0"
+            }
+          },
+          {
+            "event_id": "evt_00000000-0000-4000-8000-000000000133",
+            "payload": {
+              "claim_id": "clm_00000000-0000-4000-8000-000000000131",
+              "claim_kind": "completion",
+              "statement": "No material fixture change was required",
+              "supporting_refs": []
+            },
+            "schema": {
+              "name": "claim_recorded",
+              "version": "1.0.0"
+            }
+          }
+        ]
+      },
+      "undeclared_trigger": {
+        "events": [
+          {
+            "event_id": "evt_00000000-0000-4000-8000-000000000101",
+            "payload": {
+              "obligation_refs": [],
+              "plan_version": 1,
+              "summary": "Fixture plan with undeclared completion scope"
+            },
+            "schema": {
+              "name": "plan_published",
+              "version": "1.0.0"
+            }
+          },
+          {
+            "event_id": "evt_00000000-0000-4000-8000-000000000102",
+            "payload": {
+              "claim_id": "clm_00000000-0000-4000-8000-000000000101",
+              "claim_kind": "completion",
+              "statement": "Fixture task is complete",
+              "supporting_refs": []
+            },
+            "schema": {
+              "name": "claim_recorded",
+              "version": "1.0.0"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "minimum_versions": {
+    "engine": "0.1.0",
+    "fixture_contract": "1.0.0",
+    "protocol": "0.1",
+    "work_integrity_policy": "0.1.0"
+  },
+  "owns_requirements": [
+    "ADR-019/declared-completion-scope",
+    "CHECK/completion-scope-gap",
+    "STATUS/no-obligations-declared"
+  ],
+  "purpose": "Distinguish undeclared empty completion scope, typed declared-none scope, and declared obligations that are all resolved."
+}

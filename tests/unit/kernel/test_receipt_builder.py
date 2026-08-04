@@ -10,6 +10,10 @@ import pytest
 from yoetz.domain.events import (
     CheckMode,
     CheckRecordedPayload,
+    NoObligationsReason,
+    ObligationPublishedPayload,
+    ObligationStatus,
+    PlanPublishedPayload,
     PolicyVersion,
     ResponseRecordedPayload,
     encode_payload,
@@ -23,14 +27,18 @@ from yoetz.domain.findings import (
     ResponseDisposition,
 )
 from yoetz.domain.receipts import (
+    COMPLETION_SCOPE_DECLARED_NONE_GAP,
+    COMPLETION_SCOPE_UNDECLARED_GAP,
     PolicyVersionEntry,
     ReceiptConclusion,
+    ReceiptObligationStatus,
     ReceiptRedactionCategory,
     ReceiptRedactionReason,
     ReceiptSectionKey,
     ReceiptVersionSlice,
     SchemaVersionEntry,
     receipt_document_to_json,
+    render_receipt_compact,
 )
 from yoetz.domain.values import (
     FindingId,
@@ -40,6 +48,7 @@ from yoetz.domain.values import (
     freeze_json,
     obligation_id,
     receipt_id,
+    result_id,
     session_id,
     task_id,
     timestamp_from_string,
@@ -47,6 +56,8 @@ from yoetz.domain.values import (
 from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts, CaseGap
 from yoetz.kernel.projections import (
     LatestTestedState,
+    ObligationProjectionRecord,
+    PlanProjectionRecord,
     ProjectionRecord,
     ProjectionState,
     empty_projection_state,
@@ -149,6 +160,10 @@ def _projection(
     response: ResponseRecordedPayload | None = None,
     check: CheckRecordedPayload | None = None,
     coverage_gaps: tuple[str, ...] = (),
+    plan: PlanPublishedPayload | None = None,
+    obligation: ObligationPublishedPayload | None = None,
+    plan_redacted: bool = False,
+    obligation_redacted: bool = False,
 ) -> object:
     findings: dict[object, object] = {}
     if finding is not None:
@@ -178,10 +193,30 @@ def _projection(
             suppressed_count=check.suppressed_count,
             coverage=check.coverage,
         )
+    plans = {}
+    if plan is not None:
+        plans[plan.plan_version] = PlanProjectionRecord(
+            payload=None if plan_redacted else plan,
+            payload_digest=canonical_digest(encode_payload(plan)),
+            redacted=plan_redacted,
+            source_event_id=event_id("evt_00000000-0000-4000-8000-000000000010"),
+            source_frontier=1,
+        )
+    obligations = {}
+    if obligation is not None:
+        obligations[obligation.obligation_id] = ObligationProjectionRecord(
+            payload=None if obligation_redacted else obligation,
+            payload_digest=canonical_digest(encode_payload(obligation)),
+            redacted=obligation_redacted,
+            source_event_id=event_id("evt_00000000-0000-4000-8000-000000000011"),
+            source_frontier=1,
+        )
     return replace(
         empty_projection_state(),
         frontier=2,
         head_digest=_HEAD,
+        plans=plans,
+        obligations=obligations,
         findings=findings,
         responses=responses,
         latest_tested_state=latest,
@@ -217,6 +252,10 @@ def _context(
     check: CheckRecordedPayload | None = None,
     coverage: Coverage | None = None,
     gaps: tuple[CaseGap, ...] = (),
+    plan: PlanPublishedPayload | None = None,
+    obligation: ObligationPublishedPayload | None = None,
+    plan_redacted: bool = False,
+    obligation_redacted: bool = False,
 ) -> ReceiptBuildContext:
     actual_coverage = _coverage() if coverage is None else coverage
     projection = _projection(
@@ -224,6 +263,10 @@ def _context(
         response=response,
         check=check,
         coverage_gaps=(),
+        plan=plan,
+        obligation=obligation,
+        plan_redacted=plan_redacted,
+        obligation_redacted=obligation_redacted,
     )
     return ReceiptBuildContext(
         projection=cast("ProjectionState", projection),
@@ -480,3 +523,238 @@ def test_semantic_review_not_configured_limitations_state_not_run() -> None:
     rendered = render_receipt_compact(receipt)
     assert "semantic relevance review was not run" in rendered
     assert "optional semantic review was blocked" not in rendered
+
+
+@pytest.mark.parametrize("profile", tuple(ReceiptRedactionProfile))
+@pytest.mark.parametrize("reason", tuple(NoObligationsReason))
+def test_empty_completion_scope_wording_is_bounded_and_survives_profiles(
+    profile: ReceiptRedactionProfile,
+    reason: NoObligationsReason,
+) -> None:
+    plan = PlanPublishedPayload(1, "Atomic task", (), ())
+    undeclared_gap = CaseGap(
+        "completion_scope_undeclared:plan",
+        COMPLETION_SCOPE_UNDECLARED_GAP,
+        (),
+    )
+    undeclared_coverage = _coverage(gaps=(COMPLETION_SCOPE_UNDECLARED_GAP,))
+    undeclared = _build(
+        _context(
+            check=_check(CheckVerdict.INSUFFICIENT_COVERAGE, undeclared_coverage),
+            coverage=undeclared_coverage,
+            gaps=(undeclared_gap,),
+            plan=plan,
+        ),
+        profile=profile,
+    )
+    assert undeclared.conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE
+    outstanding = next(
+        section
+        for section in undeclared.sections
+        if section.key is ReceiptSectionKey.OUTSTANDING_WORK
+    )
+    assert outstanding.body == "Completion scope was never declared."
+    assert "completion scope was never declared" in render_receipt_compact(undeclared)
+
+    typed_plan = replace(
+        plan,
+        no_obligations_reason=reason,
+    )
+    declared_gap = CaseGap(
+        "completion_scope_declared_none:plan",
+        COMPLETION_SCOPE_DECLARED_NONE_GAP,
+        (),
+    )
+    declared_coverage = _coverage(gaps=(COMPLETION_SCOPE_DECLARED_NONE_GAP,))
+    declared = _build(
+        _context(
+            check=_check(CheckVerdict.INSUFFICIENT_COVERAGE, declared_coverage),
+            coverage=declared_coverage,
+            gaps=(declared_gap,),
+            plan=typed_plan,
+        ),
+        profile=profile,
+    )
+    assert declared.conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE
+    outstanding = next(
+        section
+        for section in declared.sections
+        if section.key is ReceiptSectionKey.OUTSTANDING_WORK
+    )
+    assert outstanding.body == f"The plan declared none, reason: {reason.value}."
+    assert declared.gaps[0].detail == reason.value
+    assert f"the plan declared none, reason: {reason.value}" in render_receipt_compact(declared)
+    assert "Atomic task" not in render_receipt_compact(declared)
+
+
+@pytest.mark.parametrize(
+    "gap_code",
+    (COMPLETION_SCOPE_UNDECLARED_GAP, COMPLETION_SCOPE_DECLARED_NONE_GAP),
+)
+def test_empty_completion_scope_gap_dominates_unresolved_actionable_finding(
+    gap_code: str,
+) -> None:
+    finding = _finding()
+    gap = CaseGap(f"{gap_code}:plan", gap_code, ())
+    coverage = _coverage(gaps=(gap_code,))
+    reason = (
+        NoObligationsReason.SINGLE_ATOMIC_CHANGE
+        if gap_code == COMPLETION_SCOPE_DECLARED_NONE_GAP
+        else None
+    )
+    plan = PlanPublishedPayload(1, "Atomic task", (), (), reason)
+    receipt = _build(
+        _context(
+            finding=finding,
+            check=_check(
+                CheckVerdict.INSUFFICIENT_COVERAGE,
+                coverage,
+                returned=(finding.finding_id,),
+            ),
+            coverage=coverage,
+            gaps=(gap,),
+            plan=plan,
+        )
+    )
+
+    assert receipt.findings == (finding,)
+    assert receipt.conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE
+
+
+def test_declared_resolved_scope_has_distinct_clean_wording() -> None:
+    obligation = ObligationPublishedPayload(
+        obligation_id("obl_00000000-0000-4000-8000-000000000020"),
+        "Run focused verification",
+        "Recorded successful result",
+        ObligationStatus.RESOLVED,
+        resolution_evidence_refs=(result_id("res_00000000-0000-4000-8000-000000000020"),),
+    )
+    plan = PlanPublishedPayload(1, "Verified task", (obligation.obligation_id,), ())
+    receipt = _build(
+        _context(
+            check=_check(CheckVerdict.NO_ISSUE_DETECTED, _coverage()),
+            plan=plan,
+            obligation=obligation,
+        )
+    )
+    outstanding = next(
+        section for section in receipt.sections if section.key is ReceiptSectionKey.OUTSTANDING_WORK
+    )
+    assert receipt.conclusion is ReceiptConclusion.NO_UNRESOLVED_DETERMINISTIC_FINDINGS
+    assert outstanding.body == "Declared obligations are all resolved."
+    assert "declared obligations are all resolved" in render_receipt_compact(receipt)
+
+
+def test_compact_resolved_wording_ignores_out_of_scope_open_finding_obligation() -> None:
+    effective = ObligationPublishedPayload(
+        obligation_id("obl_00000000-0000-4000-8000-000000000020"),
+        "Run focused verification",
+        "Recorded successful result",
+        ObligationStatus.RESOLVED,
+        resolution_evidence_refs=(result_id("res_00000000-0000-4000-8000-000000000020"),),
+    )
+    historical = ObligationPublishedPayload(
+        obligation_id("obl_00000000-0000-4000-8000-000000000001"),
+        "Historical finding subject",
+        "Historical acceptance criterion",
+        ObligationStatus.OPEN,
+    )
+    finding = _finding()
+    plan = PlanPublishedPayload(1, "Verified task", (effective.obligation_id,), ())
+    base = _context(
+        finding=finding,
+        resolved=True,
+        check=_check(CheckVerdict.NO_ISSUE_DETECTED, _coverage()),
+        plan=plan,
+        obligation=effective,
+    )
+    projection = replace(
+        base.projection,
+        obligations={
+            **base.projection.obligations,
+            historical.obligation_id: ObligationProjectionRecord(
+                payload=historical,
+                payload_digest=canonical_digest(encode_payload(historical)),
+                redacted=False,
+                source_event_id=event_id("evt_00000000-0000-4000-8000-000000000012"),
+                source_frontier=1,
+            ),
+        },
+    )
+    context = replace(base, projection=projection)
+
+    receipt = _build(context)
+
+    assert tuple(item.status for item in receipt.obligations) == (
+        ReceiptObligationStatus.OPEN,
+        ReceiptObligationStatus.RESOLVED,
+    )
+    outstanding = next(
+        section for section in receipt.sections if section.key is ReceiptSectionKey.OUTSTANDING_WORK
+    )
+    assert outstanding.body == "Declared obligations are all resolved."
+    assert "declared obligations are all resolved" in render_receipt_compact(receipt)
+
+
+@pytest.mark.parametrize("state", ("missing", "redacted", "unreadable_plan"))
+def test_unknown_effective_obligation_scope_never_renders_as_zero(state: str) -> None:
+    obligation = ObligationPublishedPayload(
+        obligation_id("obl_00000000-0000-4000-8000-000000000030"),
+        "Inspect declared work",
+        "Recorded result",
+        ObligationStatus.OPEN,
+    )
+    plan = PlanPublishedPayload(1, "Declared scope", (obligation.obligation_id,), ())
+    gap_code = "missing_ref" if state == "missing" else "redacted_event"
+    gap = CaseGap(f"{gap_code}:scope", gap_code, ())
+    coverage = _coverage(gaps=(gap_code,))
+    receipt = _build(
+        _context(
+            check=_check(CheckVerdict.INSUFFICIENT_COVERAGE, coverage),
+            coverage=coverage,
+            gaps=(gap,),
+            plan=plan,
+            obligation=None if state == "missing" else obligation,
+            plan_redacted=state == "unreadable_plan",
+            obligation_redacted=state == "redacted",
+        )
+    )
+    outstanding = next(
+        section for section in receipt.sections if section.key is ReceiptSectionKey.OUTSTANDING_WORK
+    )
+    assert receipt.conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE
+    assert "unknown" in outstanding.body
+    assert "No open obligations are recorded" not in outstanding.body
+    assert "all resolved" not in outstanding.body
+
+
+def test_no_plan_receipt_does_not_infer_zero_obligations() -> None:
+    receipt = _build(_context(check=_check(CheckVerdict.NO_ISSUE_DETECTED, _coverage())))
+    outstanding = next(
+        section for section in receipt.sections if section.key is ReceiptSectionKey.OUTSTANDING_WORK
+    )
+    assert outstanding.body == "No plan is recorded; completion scope is unknown."
+
+
+def test_compact_renderer_never_echoes_unrecognized_scope_reason_detail() -> None:
+    plan = PlanPublishedPayload(
+        1,
+        "Caller-controlled plan prose must not render",
+        (),
+        (),
+        NoObligationsReason.NO_MATERIAL_CHANGE,
+    )
+    gap = CaseGap("completion_scope_declared_none:plan", COMPLETION_SCOPE_DECLARED_NONE_GAP, ())
+    coverage = _coverage(gaps=(COMPLETION_SCOPE_DECLARED_NONE_GAP,))
+    receipt = _build(
+        _context(
+            check=_check(CheckVerdict.INSUFFICIENT_COVERAGE, coverage),
+            coverage=coverage,
+            gaps=(gap,),
+            plan=plan,
+        )
+    )
+    tampered = replace(receipt, gaps=(replace(receipt.gaps[0], detail="CALLER SECRET"),))
+    rendered = render_receipt_compact(tampered)
+    assert "CALLER SECRET" not in rendered
+    assert "closed reason is unavailable" in rendered

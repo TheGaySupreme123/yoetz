@@ -318,6 +318,22 @@ def test_work_detail_shows_every_layer_a_receipt_would_report(
         assert any(line.startswith(label) or line == label for line in lines), label
 
 
+def test_work_detail_renders_unknown_count_without_inventing_zero() -> None:
+    detail = build.work_detail()
+    detail = type(detail)(
+        item=detail.item,
+        claims=detail.claims,
+        evidence_count=None,
+        checks=detail.checks,
+        coverage=detail.coverage,
+        findings=detail.findings,
+        limitations=detail.limitations,
+        receipt_available=detail.receipt_available,
+    )
+
+    assert "Evidence             unknown" in render_work_detail(detail, 100)
+
+
 def test_receipt_foregrounds_the_verdict_and_what_was_not_verified(
     assert_snapshot: Snapshot,
 ) -> None:

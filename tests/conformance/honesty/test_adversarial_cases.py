@@ -17,7 +17,7 @@ from yoetz.domain.findings import Finding, FindingKind, finding_from_json
 from yoetz.domain.values import freeze_json
 
 # The exhaustive public policy-rule mapping frozen in fixtures/README.md. Every one of the 14 registered FindingKind values is owned by exactly
-# one of these seven adversarial cases; ADV-005/007/010 exist but are deliberately excluded from
+# one of these seven adversarial cases; ADV-005/007/010/011 exist but are deliberately excluded from
 # this mapping (they exercise plan-revision honesty, crash/retry idempotency, and cross-channel
 # import comparison -- not a new FindingKind of their own).
 _ADV_KIND_MAP: dict[str, frozenset[FindingKind]] = {
@@ -52,7 +52,7 @@ _ADV_KIND_MAP: dict[str, frozenset[FindingKind]] = {
     ),
 }
 
-# All ten adversarial cases, including the three excluded from the kind-ownership mapping above.
+# All eleven adversarial cases, including the four excluded from the kind-ownership mapping above.
 _ALL_ADV_IDS = (
     "ADV-001-abandoned-obligation",
     "ADV-002-omitted-failed-test",
@@ -64,6 +64,7 @@ _ALL_ADV_IDS = (
     "ADV-008-stale-redacted-ledger",
     "ADV-009-wrong-semantic-finding-rejected",
     "ADV-010-import-detects-missing-publication",
+    "ADV-011-empty-completion-scope",
 )
 
 
@@ -232,6 +233,64 @@ def test_counterexample_shrinks_to_named_claim(fixture_loader: FixtureLoader) ->
                     source_kinds,
                     target_kinds,
                 )
+
+
+def test_empty_completion_scope_fixture_keeps_declared_none_coverage_incomplete(
+    fixture_loader: FixtureLoader,
+) -> None:
+    """ADV-011 distinguishes readiness repair from completion-coverage sufficiency."""
+
+    fixture = cast(
+        dict[str, object],
+        fixture_loader.load_json(_fixture_path("ADV-011-empty-completion-scope")),
+    )
+    variants = _variants(cast(dict[str, object], fixture["expected"]))
+    undeclared = variants["undeclared_trigger"]
+    declared_at_publication = variants["declared_none_at_publication"]
+    declared_by_revision = variants["declared_none_by_revision"]
+    declared_and_resolved = variants["declared_and_resolved"]
+
+    assert undeclared["blocking_conditions"] == ["no_obligations_declared"]
+    assert undeclared["no_obligations_reason"] is None
+    assert cast(dict[str, object], undeclared["coverage"])["known_gaps"] == [
+        "completion_scope_undeclared"
+    ]
+    assert undeclared["receipt_scope_wording"] == "scope was never declared"
+
+    for variant, reason in (
+        (declared_at_publication, "single_atomic_change"),
+        (declared_by_revision, "no_material_change"),
+    ):
+        assert variant["blocking_conditions"] == []
+        assert variant["declared_obligation_count"] == "0"
+        assert variant["no_obligations_reason"] == reason
+        assert variant["completeness"] == "coverage_incomplete"
+        assert variant["verdict"] == "insufficient_coverage"
+        assert cast(dict[str, object], variant["coverage"])["known_gaps"] == [
+            "completion_scope_declared_none"
+        ]
+        assert variant["receipt_scope_wording"] == f"the plan declared none, reason: {reason}"
+
+    assert declared_and_resolved["declared_obligation_count"] == "1"
+    assert declared_and_resolved["no_obligations_reason"] is None
+    assert cast(dict[str, object], declared_and_resolved["coverage"])["known_gaps"] == []
+    assert declared_and_resolved["receipt_scope_wording"] == (
+        "declared obligations are all resolved"
+    )
+
+    input_variants = cast(dict[str, object], cast(dict[str, object], fixture["input"])["variants"])
+    resolved_events = cast(
+        list[dict[str, object]],
+        cast(dict[str, object], input_variants["declared_and_resolved"])["events"],
+    )
+    completion = next(
+        event
+        for event in resolved_events
+        if cast(dict[str, object], event["schema"])["name"] == "claim_recorded"
+    )
+    assert cast(dict[str, object], completion["payload"])["obligation_refs"] == [
+        "obl_00000000-0000-4000-8000-000000000111"
+    ]
 
 
 def test_semantic_packet_and_challenge_fixtures_are_exact(fixture_loader: FixtureLoader) -> None:

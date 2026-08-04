@@ -417,12 +417,26 @@ def _event_drafts(seed: int, obligation_event_id: str, obligation_id: str) -> li
     action_event_id = protocol_id("evt_", seed + 13)
     result_event_id = protocol_id("evt_", seed + 14)
     evidence_event_id = protocol_id("evt_", seed + 15)
+    plan_event_id = protocol_id("evt_", seed + 19)
     return [
+        {
+            "event_id": plan_event_id,
+            "schema": {"name": "plan_published", "version": "1.0.0"},
+            "occurred_at": "2026-07-28T11:59:59.000Z",
+            "causal_parents": [],
+            "payload": {
+                "plan_version": 1,
+                "summary": "Exercise every public result projection.",
+                "obligation_refs": [obligation_id],
+            },
+            "artifact_refs": [],
+            "evidence_refs": [],
+        },
         {
             "event_id": obligation_event_id,
             "schema": {"name": "obligation_published", "version": "1.0.0"},
             "occurred_at": "2026-07-28T12:00:00.000Z",
-            "causal_parents": [],
+            "causal_parents": [plan_event_id],
             "payload": {
                 "obligation_id": obligation_id,
                 "description": "Publish a result for the projection sweep.",

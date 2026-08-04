@@ -14,7 +14,7 @@ Use Yoetz for material multi-step work, multiple requested outcomes, delegation,
 
 | Operation | How often |
 | --- | --- |
-| `start` | Once per task, before substantive work. On resume, attach to the existing task instead of starting a second one. |
+| `start` | Once per task, before substantive work. On resume (same or fresh conversation), `mode=create_or_attach` with the same `workspace_ref` + `external_ref` pair and no `session_id`; attach selectors are `session_id` or the ref pair, never bare `task_id`. |
 | `publish_work` | One batch per material transition, usually one to eight events; a batch admits up to 100, so keep one transition in one batch rather than splitting it. A normal session is a handful of batches, never one per file, tool call, or message. |
 | `status` | After resume, compaction, or delegate handoff, and before any completion claim. Not between routine tool calls. |
 | `check` | After publishing the completion claim and its evidence, and again after any material edit, new evidence, or finding response. A check with no new events since the last one adds nothing. |
@@ -36,15 +36,19 @@ Under-publishing hides the work; over-publishing buries it. The test is whether 
 
 Tell the user briefly that Yoetz is being used as a local work ledger and verifier. Do not imply initialization succeeded before `start` returns. If the optional service is unavailable, continue unless the user or host requires it, disclose that no live ledger or receipt will exist, and invent no state.
 
+If the host drops schema examples or renders required fields as unknown, read
+`yoetz://guidance/request-templates.md` and replace every illustrative value in the complete request
+body. Never inspect product source to reconstruct a request.
+
 ## The ten steps
 
 1. Decide whether the task is material enough for Yoetz.
 2. Start or attach with stable request identity and the intended create or attach semantics.
-3. Publish a bounded plan, requested outcomes, acceptance evidence, and assignments. Group large inventories into independently reviewable work packages; files are leaf evidence, not automatic obligations.
+3. Publish a bounded plan, requested outcomes, acceptance evidence, and assignments. Declare completion scope with obligation refs, or — only when the effective ref set is empty — one typed `no_obligations_reason`: `no_material_change`, `single_atomic_change`, or `exploratory_scope_unknown`. Group large inventories into independently reviewable work packages; files are leaf evidence, not automatic obligations.
 4. Delegate with the session, task, distinct logical writer, and bounded assignment context. Do not send or publish full transcripts.
 5. Publish material work-package transitions: assignment, decision, blocked attempt, independently useful result, completion, or revision. Omit routine reads, searches, formatting, and per-file mechanics.
 6. Stay next to the record. After resume, compaction, handoff, or uncertainty about what is already done or committed, call `status`. `view=candidate_findings` is an advisory read: it creates no verdict, IDs, receipt, or event.
-7. Before completion, publish the intended material completion claim and current evidence, then call `check`. Read `closure_readiness` on any `status` result first: it names the open obligations, unresolved findings, and declared gaps that currently bound a conclusion. Spending a check or receipt while those stand returns a predictably insufficient result; resolve or explicitly record them instead. Choose mode deliberately: `semantic_if_configured` for most material implementation/review claims; `semantic_required` when completion depends on qualitative correctness, design conformance, security/privacy reasoning, interoperability, or whether the code satisfies the ask; `deterministic_only` only for explicitly local/structural checks, semantic-disabled policy, or a deliberate no-egress choice — and disclose that limitation. Publish the smallest state-bound diff/symbol and the directly relevant test or failure excerpt; never rely on self-asserted completion prose alone.
+7. Before completion, publish the intended material completion claim and current evidence, then call `check`. Read `declared_obligation_count`, `no_obligations_reason`, and `closure_readiness` on `status` first. A readable plan with zero declared obligations and no reason is blocked by `no_obligations_declared`; add effective obligations or revise the plan with a typed reason. The reason clears readiness but a completion claim over zero obligations still yields an insufficient-coverage gap. Spending a check or receipt while readiness blockers stand returns a predictably insufficient result; resolve or explicitly record them instead. Choose mode deliberately: `semantic_if_configured` for most material implementation/review claims; `semantic_required` when completion depends on qualitative correctness, design conformance, security/privacy reasoning, interoperability, or whether the code satisfies the ask; `deterministic_only` only for explicitly local/structural checks, semantic-disabled policy, or a deliberate no-egress choice — and disclose that limitation. Publish the smallest state-bound diff/symbol and the directly relevant test or failure excerpt; never rely on self-asserted completion prose alone.
 8. Respond to each challenge by accepting and acting, supplying evidence, revising the claim, disputing with evidence, or stating an unresolved limitation. A response does not erase a finding: whichever disposition you record, every actionable finding recorded in the task keeps the receipt conclusion at `unresolved_findings_remain`. Repair the record anyway — it stops the next check from firing the same rule and it shows the reader what you did — but do not expect a later receipt to come back clean, and do not describe an acknowledged finding as resolved.
 9. Recheck after any material edit, evidence change, plan change, or finding response.
 10. Request a receipt and keep the final answer no stronger than its weakest material coverage, freshness, unresolved findings, and limitations. All receipt formats (`json`, `markdown`, `text`) project under default policy; if a stricter owner policy blocks `json`, re-request `markdown` or `text`.
@@ -67,11 +71,25 @@ The parent publishes assignments and gives each delegate a distinct logical writ
 
 On resume, attach to the existing task and read status before reconstructing work from memory. Preserve request and writer sequences and do not duplicate a prior publication. A trigger, when an exact capability profile proves one, may prompt the same bounded re-grounding; it observes nothing and changes no coverage.
 
+### Workspace grouping and attach selectors
+
+`start` resumes by one of two selectors (never by bare `task_id`):
+
+1. `session_id` — continue the exact session you already hold.
+2. `workspace_ref` + `external_ref` as a pair — resolve the durable task for that project work item without a `session_id`. Under `mode=create_or_attach`, the same pair creates on first use and attaches on every later conversation.
+
+Convention:
+
+- `workspace_ref` = stable project identity (repository remote URL, or absolute repository root when there is no remote).
+- `external_ref` = stable task identity within that project (branch name, issue reference, or plan slug).
+
+Same conversation resuming, or a fresh conversation continuing the same work → `mode=create_or_attach` with the same pair and no `session_id`. Sibling work in the same project → same `workspace_ref`, different `external_ref`. Both refs are one-shot redacted values: only installation-keyed HMAC commitments are persisted, so a repository path or remote URL never lands in durable state — do not self-censor into unstable refs.
+
 ## Findings and recheck
 
 Candidate findings are what deterministic packs currently say about the record. They carry no verdict and cannot be cited as a check. An empty candidate list means only that no rule fired in that advisory read. Only a recorded check can support receipt-bounded completion wording.
 
-The cheapest finding is the one that never fires. Before the first `check`, confirm that every requested item has an exact `attempted_items` entry, every claim has linked evidence, and every open obligation is either resolved or deliberately left open with a stated reason. That pre-flight costs one `status` read; an actionable finding costs the receipt for the rest of the task.
+The cheapest finding is the one that never fires. Before the first `check`, confirm that completion scope is declared, every requested item has an exact `attempted_items` entry, every claim has linked evidence, and every declared obligation is resolved or deliberately left open with a stated reason. A typed empty-scope declaration still produces `completion_scope_declared_none` when a completion claim exists; it records the scope decision rather than proving it. That pre-flight costs one `status` read; an actionable finding costs the receipt for the rest of the task.
 
 ## Degraded and unavailable behavior
 

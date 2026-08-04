@@ -11,13 +11,23 @@ Yoetz is a local work ledger and deterministic checker. It records only what par
 
 ## Step 0: read the guidance before the first call
 
-Read these with the MCP `resources/read` request for the exact URI. They are served by the `yoetz` server itself, so they resolve without any repository checkout. After install they are also on disk beside this file as `references/workflow.md`, `references/coverage-and-receipts.md`, `references/publication-policy.md`, and `references/agent-instructions.md`.
+Read these with the MCP `resources/read` request for the exact URI. They are served by the `yoetz`
+server itself, so they resolve without any repository checkout. After install they are also on disk
+beside this file as `references/workflow.md`, `references/coverage-and-receipts.md`,
+`references/publication-policy.md`, `references/request-templates.md`, and
+`references/agent-instructions.md`.
 
 - Before the first `start`: `yoetz://guidance/workflow.md` (the ten steps, cadence, resume behavior) and `yoetz://guidance/coverage-and-receipts.md` (coverage, findings, receipt wording).
 - Before the first `publish_work`: `yoetz://guidance/publication-policy.md` (what is material and safe to publish).
+- When schema metadata is missing or a request is rejected:
+  `yoetz://guidance/request-templates.md` (complete bodies for all six operations and all nine
+  ordinary publish families; replace every illustrative value before use).
 - `yoetz://guidance/agent-instructions.md` is the non-negotiable safety floor. It is already delivered as the server's initialize instructions; re-read it if that text is not in context.
 
-Author each request from its tool input schema plus this guidance, never from memory or from product source. The schema is authority for field shapes; the guidance is authority for which call to make and when. `start` takes `mode` as exactly one of `create`, `attach`, or `create_or_attach`.
+Author each request from its tool input schema plus this guidance, never from memory or from product
+source. If the host drops schema metadata, use the request templates resource rather than reading
+product source. The schema is authority for field shapes; the guidance is authority for which call
+to make and when. `start` takes `mode` as exactly one of `create`, `attach`, or `create_or_attach`.
 
 ## When to activate
 
@@ -29,7 +39,7 @@ Tell the user briefly that you are using Yoetz as a local work ledger and verifi
 
 | Operation | How often |
 | --- | --- |
-| `start` | Once per task, before substantive work. On resume, attach to the existing task instead of starting a second one. |
+| `start` | Once per task, before substantive work. On resume (same or fresh conversation), `mode=create_or_attach` with the same `workspace_ref` (project remote URL or absolute root) + `external_ref` (branch/issue/plan slug) pair and no `session_id`. Sibling work: same workspace, different external_ref. Attach selectors are `session_id` or the ref pair — never bare `task_id`. |
 | `publish_work` | One batch per material transition, usually one to eight events; a batch admits up to 100, so keep one transition in one batch rather than splitting it. A normal session is a handful of batches, never one per file, tool call, or message. Set `dry_run: true` first for an unfamiliar batch shape. |
 | `status` | After resume, compaction, or delegate handoff, and before any completion claim. Not between routine tool calls. |
 | `check` | After publishing the completion claim and its evidence, and again after any material edit, new evidence, or finding response. A check with no new events since the last one adds nothing. |
@@ -44,7 +54,7 @@ Copy this and check items off as you go:
 
 ```
 - [ ] Read workflow.md and coverage-and-receipts.md
-- [ ] start (stable request identity, create or attach)
+- [ ] start (stable request identity; create_or_attach with workspace_ref + external_ref, or attach via session_id)
 - [ ] publish the plan, requested outcomes, acceptance evidence, assignments
 - [ ] publish each material transition as it happens
 - [ ] status before closing: read closure_readiness for open obligations and gaps

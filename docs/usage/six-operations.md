@@ -46,6 +46,11 @@ actions, results, evidence. Publish material transitions — an assignment, a de
 attempt, an independently useful result, a completion, a revision. Skip routine reads, searches,
 formatting, and per-file mechanics.
 
+A plan must make completion scope inspectable. Normally, list its obligation refs. If no
+obligations apply, record `no_obligations_reason` as exactly `no_material_change`,
+`single_atomic_change`, or `exploratory_scope_unknown`; the reason is invalid beside effective
+obligation refs. A revision restates the declaration, so omission clears an earlier reason.
+
 Set `dry_run: true` to validate a batch and preview what would be accepted without appending. The
 preview is not evidential and is not citable as a check, publication, or coverage source. Reuse the
 same `request_id` for the real publish after the preview succeeds.
@@ -85,6 +90,11 @@ a check and cannot be cited as one. After any ambiguous write, prefer `view=oper
 for the authenticated writer without requiring a byte-identical replay body. Stored outcome,
 frontiers, and accepted event ids are present only when the operation is a complete
 `publish_work`; other states omit them rather than invent detail.
+
+Before completion, read `declared_obligation_count`, `no_obligations_reason`, and
+`closure_readiness`. An empty readable plan without a typed reason is blocked by
+`no_obligations_declared`; a typed reason clears that readiness blocker but remains visible. If the
+plan scope is unreadable, readiness is unknown rather than zero.
 
 ### `receipt`
 Projects the honest summary of what was checked, at what coverage, and what remains open. Formats:

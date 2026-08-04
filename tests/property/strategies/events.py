@@ -29,6 +29,7 @@ from yoetz.domain.events import (
     EvidenceRecordedPayload,
     IntegrationKind,
     LedgerChain,
+    NoObligationsReason,
     ObligationPublishedPayload,
     ObligationStatus,
     PlanPublishedPayload,
@@ -318,10 +319,12 @@ def _session_resumed(draw: st.DrawFn) -> SessionResumedPayload:
 
 @st.composite
 def _plan_published(draw: st.DrawFn) -> PlanPublishedPayload:
+    no_obligations_reason = draw(st.none() | st.sampled_from(list(NoObligationsReason)))
     return PlanPublishedPayload(
         plan_version=draw(st.integers(min_value=1, max_value=1_000)),
         summary=draw(_short_text(1, 64)),
-        obligation_refs=(draw(_obligation_ids),),
+        obligation_refs=(draw(_obligation_ids),) if no_obligations_reason is None else (),
+        no_obligations_reason=no_obligations_reason,
     )
 
 

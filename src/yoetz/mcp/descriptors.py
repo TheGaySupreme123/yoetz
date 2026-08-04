@@ -288,8 +288,9 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                         "plan_published",
                         {
                             "plan_version": 1,
-                            "summary": "Initial plan",
+                            "summary": "One atomic change with no independent obligation split.",
                             "obligation_refs": [],
+                            "no_obligations_reason": "single_atomic_change",
                         },
                     )
                 ],

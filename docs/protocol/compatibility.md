@@ -75,6 +75,18 @@ bytes; otherwise it requires a new schema version. A new event family requires a
 registry, schema, reducer, unknown-gap handling, fixture, skill, and documentation update — it never
 ships as a silent addition.
 
+The declared-completion-scope change is an explicit pre-release 0.1 correction under that optional
+field rule. `plan_published` and `plan_revised` remain event schema `1.0.0`, and status remains
+request/result schema `1.0.0`. Existing plan events omit `no_obligations_reason` and retain their
+byte-identical canonical encoding. Omission means no typed empty-scope declaration; on a revision it
+also clears any earlier declaration. A present value is one of the three closed reasons and is
+admitted only when the effective current plan has zero obligation refs. Older readers that preserve
+the exact event bytes remain safe; no storage migration or reinterpretation of old bytes is needed.
+Because `start` reuses the compact projection on attach, its existing `open_obligation_count` also
+admits `null` when current plan scope is unreadable; this prevents a redacted plan from being
+reported as zero or making the task unattachable. The start result schema remains `1.0.0` under the
+same pre-release correction.
+
 Golden vectors are retained for every released version under `fixtures/`. Reducers, checks, and
 receipts always name the engine/policy version that produced them and never reinterpret old bytes
 under a newer policy silently. Unknown or redacted data always weakens coverage and receipt

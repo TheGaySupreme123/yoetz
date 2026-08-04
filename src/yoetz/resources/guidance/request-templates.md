@@ -107,6 +107,44 @@ The two drafts above cover `plan_published` and `obligation_published`. The next
 show the remaining ordinary families. Replace the frontier in each; the genesis values only keep
 each standalone example schema-valid.
 
+### Alternate `plan_published`: explicitly no obligations
+
+Use this shape only when the effective plan genuinely has no obligation refs. The typed reason
+clears the readiness blocker but a later completion claim still receives
+`completion_scope_declared_none`; it is a declaration, not clean-coverage evidence. Never send the
+reason beside nonempty `obligation_refs`.
+
+```json
+{
+  "protocol_version": "0.1",
+  "schema_version": "1.0.0",
+  "request_id": "req_00000000-0000-4000-8000-000000000015",
+  "session_id": "ses_00000000-0000-4000-8000-000000000001",
+  "writer_id": "wri_00000000-0000-4000-8000-000000000001",
+  "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
+  "event_drafts": [{
+    "event_id": "evt_00000000-0000-4000-8000-000000000015",
+    "schema": {"name": "plan_published", "version": "1.0.0"},
+    "occurred_at": "2026-01-01T00:00:00.000Z",
+    "causal_parents": [],
+    "payload": {
+      "plan_version": 1,
+      "summary": "Replace with the bounded obligation-free plan",
+      "obligation_refs": [],
+      "no_obligations_reason": "single_atomic_change"
+    },
+    "artifact_refs": [],
+    "evidence_refs": []
+  }],
+  "actor": {"actor_id": "harness:mcp-template", "actor_type": "harness"},
+  "client": {
+    "kind": "cooperative_agent",
+    "version": "0.1.0",
+    "integration": "cooperative_mcp"
+  }
+}
+```
+
 ## `publish_work`: assignment
 
 ```json
@@ -260,6 +298,10 @@ each standalone example schema-valid.
 ```
 
 ## `publish_work`: revised plan
+
+This example carries an obligation and therefore omits `no_obligations_reason`; omission clears any
+earlier empty-scope reason. For a revised effective plan with zero obligation refs, include one
+current closed reason. A revision never inherits an earlier reason by omission.
 
 ```json
 {
