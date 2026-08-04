@@ -26,7 +26,12 @@ partway through has no single claim it can make.
 
 ### Profile A — strict / local-only
 
-**Precondition:** `registered_profile == "strict"`.
+**Preconditions:** `mcp_route.observed == true` **and** `registered_profile == "strict"`.
+
+Both halves are required. An unread route (`observed: false`) reports `registered_profile: null`,
+which is *unknown*, not *strict* — it is no basis for a zero-egress claim. Observation is also what
+separates a strict route from `absent` or `foreign_present`, which report `registered_profile: null`
+with `observed: true` and are likewise not Profile A.
 
 Claims this run may make:
 
@@ -81,10 +86,12 @@ Fields to record from `yoetz provider status --json`:
 
 `registered_profile != configured_profile` is registration drift: the registered entry no longer
 matches what this installation's configuration would produce. Record it and resolve it before
-starting, through a fresh digest-bound re-registration (ADR-018 decision 7). Do not assume the
-configured value is what the agent will get.
+starting, through a fresh digest-bound re-registration — `yoetz integrate codex mcp preview`, then
+`yoetz integrate codex mcp install --accept --preview-digest <digest>` (ADR-018 decision 7). Do not
+assume the configured value is what the agent will get.
 
-`mcp_route.observed: false` is disqualifying for Profile B. An unread route is not a policy route.
+`mcp_route.observed: false` is disqualifying for **both** profiles. An unread route is not a policy
+route, and it is not a strict route either — it is no route at all until it is read.
 
 `yoetz integrate codex mcp status --json` reports `route_profile` for the same reason, and is the
 narrower check when you only need the route.
@@ -93,8 +100,13 @@ narrower check when you only need the route.
 
 Whether a run may score semantic usefulness is derived from the check result, never asserted from
 configuration. The rule is protocol-enforced by `validate_semantic_provenance_binding`
-(`src/yoetz/protocol/models.py`) and its totality is locked by test, so
-`semantic_provenance == null` reliably means *no provider attempt was made*.
+(`src/yoetz/protocol/models.py`) and its totality is locked by test.
+
+**Read provenance together with `semantic_status` and `semantic_reason` — never alone.** Null
+provenance means *no provider attempt was made* only on the branches where the protocol forbids
+provenance (rows 1 and 3 below). `failed` is unconstrained: it may carry provenance or not, and
+either way the attempt is indeterminate. Nor does the converse hold — provenance being *present*
+proves an attempt happened, not that it was useful.
 
 | `semantic_status` | `semantic_provenance` | May score semantic usefulness |
 |---|---|---|

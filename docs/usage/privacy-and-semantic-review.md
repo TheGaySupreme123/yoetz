@@ -133,8 +133,13 @@ evidence, and they are on your machine.
 
 When you are auditing a run rather than the installation, the
 [semantic dogfood runbook](../runbooks/semantic-dogfood.md) gives the preflight and the provenance
-gate: which route the agent actually got, and how to read `semantic_provenance` to tell "no provider
-attempt was made" apart from "an attempt was made and produced nothing useful".
+gate: which route the agent actually got, and how to read `semantic_provenance`.
+
+Read `semantic_provenance` together with `semantic_status` and `semantic_reason`, never on its own.
+The outcome is three-way, not two-way: on the statuses where the protocol forbids provenance, null
+means **no provider attempt was made**; where it requires provenance, an attempt happened (which is
+not the same as it being useful); and `failed`/`coordinator_failure` is unconstrained, so it is
+**indeterminate** — never read it as "not attempted".
 
 If you believe Yoetz disclosed, retained, or logged something these commitments forbid, treat it as
 a security report: [`SECURITY.md`](../../SECURITY.md), not a public issue.

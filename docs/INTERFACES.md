@@ -2257,9 +2257,15 @@ non-substitutable verdicts. `semantic_ready` is installation-local and unchanged
 service ready and unlocked, `verification.semantic` not `disabled`, an endpoint bound, the bound
 provider's credential connected, and the `llm_inference` channel enabled. `agent_route_semantic_ready`
 is `semantic_ready` **and** `mcp_route.registered_profile == "policy"`, and describes only the
-registered Codex MCP route. The `mcp_route` object carries `registration_state`,
-`registered_profile`, `configured_profile`, and `observed`; `observed: false` means the route was
-not read, not that none is registered. A strict registered route adds a `mcp_route_profile` blocker
+registered Codex MCP route; an unread route makes it `false`, because `registered_profile` is then
+`null` and an unobserved route is never treated as a policy route. The `mcp_route` object carries
+`registration_state`, `registered_profile`, `configured_profile`, and `observed`. `observed: false`
+means the route was not read, not that none is registered, and is the single reported state for
+every read failure — empty Codex discovery, any `McpRegistrationError` (`harness_unavailable`,
+`parse_failed`, `timeout`), and any `OSError`; `registration_state` and `registered_profile` are
+both `null` there. `registered_profile: null` with `observed: true` is the different fact that no
+Yoetz route is registered (`registration_state` is `absent` or `foreign_present`).
+A strict registered route adds a `mcp_route_profile` blocker
 with `scope: "agent_route"` and never moves `semantic_ready` or the exit code, because ADR-018
 decision 2 makes the route ceiling process-local — CLI and terminal checks still dispatch. Route
 observation is fail-soft by contract: no discovery failure, registration error, or unreadable entry

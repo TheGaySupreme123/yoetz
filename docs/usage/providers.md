@@ -163,12 +163,20 @@ registration state alone cannot tell them apart. The report therefore names the 
 "agent_route_semantic_ready": false
 ```
 
-- `registered_profile` — what is actually registered: `policy`, `strict`, or `null` when unread.
-- `configured_profile` — what setup would register now. A mismatch is registration drift; fix it
-  with a fresh digest-bound re-registration (`yoetz integrate codex mcp preview`).
+- `registered_profile` — the observed Yoetz route: `policy`, `strict`, or `null`. **`null` has two
+  different meanings**, and `registration_state` plus `observed` are what tell them apart: with
+  `observed: true` it means no Yoetz route is registered (`registration_state` is `absent` or
+  `foreign_present`); with `observed: false` it means the route could not be read. Do not read a
+  missing or foreign registration as a probe failure.
+- `configured_profile` — what setup would register now. A mismatch is registration drift. Fixing it
+  takes both steps of the digest-bound ceremony: `yoetz integrate codex mcp preview` produces the
+  digest, then `yoetz integrate codex mcp install --accept --preview-digest <digest>` applies it.
+  Preview alone changes nothing.
 - `observed: false` — the route could not be read. That is *unknown*, not *absent*, and it is never
   reported as a blocker.
-- `agent_route_semantic_ready` — `semantic_ready` **and** `registered_profile == "policy"`.
+- `agent_route_semantic_ready` — `semantic_ready` **and** `registered_profile == "policy"`. An
+  unread route therefore makes it `false`: `registered_profile` is `null`, so an unobserved route
+  is never treated as a policy route.
 
 **A strict registration does not make this installation not-ready.** The strict route is a
 process-local ceiling (ADR-018): it stops that one MCP process from requesting semantic review. A
