@@ -123,12 +123,17 @@ def test_template_rejects_tampered_result_bindings(field: str, replacement: Json
         StartSuccessModel.model_validate(wire)
 
 
-def test_template_rejects_non_placeholder_content_and_extra_fields() -> None:
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [("request_id", _REQUEST_ID), ("unexpected", True)],
+)
+def test_template_rejects_non_placeholder_content_and_extra_fields(
+    field: str, replacement: JsonValue
+) -> None:
     wire = deepcopy(_public_wire())
     template = cast(dict[str, JsonValue], wire["next_request_template"])
     arguments = cast(dict[str, JsonValue], template["arguments"])
-    arguments["request_id"] = _REQUEST_ID
-    arguments["unexpected"] = True
+    arguments[field] = replacement
 
     with pytest.raises(ValidationError):
         StartSuccessModel.model_validate(wire)

@@ -15,9 +15,16 @@ import queue
 import subprocess
 import threading
 from pathlib import Path
-from typing import TextIO, cast
+from typing import BinaryIO, cast
 
 _TIMEOUT_SECONDS = 30.0
+_READ_CHUNK_BYTES = 65_536
+_MAX_STDOUT_BYTES = 8_000_000
+_MAX_STDOUT_MESSAGES = 10_000
+_MAX_STDERR_BYTES = 262_144
+_MAX_JSON_MESSAGE_BYTES = 4_000_000
+_MAX_OUTPUT_BYTES = 8_000_000
+type _StreamItem = bytes | RuntimeError | None
 
 
 def _parse_args() -> argparse.Namespace:
@@ -28,36 +35,75 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _drain_lines(stream: TextIO, sink: queue.Queue[str | None]) -> None:
+def _put_message(sink: queue.Queue[_StreamItem], message: bytes, message_count: int) -> int:
+    if not message:
+        return message_count
+    message_count += 1
+    if message_count > _MAX_STDOUT_MESSAGES:
+        raise RuntimeError("codex_app_server_stdout_message_budget_exceeded")
+    if len(message) > _MAX_JSON_MESSAGE_BYTES:
+        raise RuntimeError("codex_app_server_json_message_budget_exceeded")
+    sink.put(message)
+    return message_count
+
+
+def _drain_stdout(stream: BinaryIO, sink: queue.Queue[_StreamItem]) -> None:
+    """Frame bounded JSONL messages without retaining an unbounded line or stream."""
+
+    total_bytes = 0
+    message_count = 0
+    pending = bytearray()
     try:
-        for line in stream:
-            sink.put(line)
+        while chunk := os.read(stream.fileno(), _READ_CHUNK_BYTES):
+            total_bytes += len(chunk)
+            if total_bytes > _MAX_STDOUT_BYTES:
+                raise RuntimeError("codex_app_server_stdout_byte_budget_exceeded")
+            pending.extend(chunk)
+            while (newline := pending.find(b"\n")) >= 0:
+                message = bytes(pending[:newline])
+                del pending[: newline + 1]
+                message_count = _put_message(sink, message, message_count)
+            if len(pending) > _MAX_JSON_MESSAGE_BYTES:
+                raise RuntimeError("codex_app_server_json_message_budget_exceeded")
+        _put_message(sink, bytes(pending), message_count)
+    except RuntimeError as exc:
+        sink.put(exc)
     finally:
         sink.put(None)
 
 
-def _send(stream: TextIO, message: dict[str, object]) -> None:
-    stream.write(json.dumps(message, ensure_ascii=True, separators=(",", ":")) + "\n")
+def _drain_stderr(stream: BinaryIO, failures: queue.Queue[_StreamItem]) -> None:
+    """Discard bounded diagnostics and signal immediately if the child exceeds the budget."""
+
+    total_bytes = 0
+    while chunk := os.read(stream.fileno(), _READ_CHUNK_BYTES):
+        total_bytes += len(chunk)
+        if total_bytes > _MAX_STDERR_BYTES:
+            failures.put(RuntimeError("codex_app_server_stderr_byte_budget_exceeded"))
+            return
+
+
+def _send(stream: BinaryIO, message: dict[str, object]) -> None:
+    stream.write(
+        json.dumps(message, ensure_ascii=True, separators=(",", ":")).encode("ascii") + b"\n"
+    )
     stream.flush()
 
 
-def _read_response(
-    lines: queue.Queue[str | None], request_id: int, stderr_lines: list[str]
-) -> dict[str, object]:
+def _read_response(lines: queue.Queue[_StreamItem], request_id: int) -> dict[str, object]:
     while True:
         try:
             line = lines.get(timeout=_TIMEOUT_SECONDS)
         except queue.Empty as exc:
-            raise RuntimeError(
-                f"codex_app_server_response_timeout:{request_id}:" + "".join(stderr_lines[-20:])
-            ) from exc
+            raise RuntimeError(f"codex_app_server_response_timeout:{request_id}") from exc
+        if isinstance(line, RuntimeError):
+            raise line
         if line is None:
-            raise RuntimeError(
-                f"codex_app_server_closed:{request_id}:" + "".join(stderr_lines[-20:])
-            )
-        message = json.loads(line)
-        if not isinstance(message, dict):
+            raise RuntimeError(f"codex_app_server_closed:{request_id}")
+        parsed = cast(object, json.loads(line))
+        if type(parsed) is not dict:
             continue
+        message = cast(dict[object, object], parsed)
         if message.get("id") == request_id:
             return cast(dict[str, object], message)
 
@@ -79,28 +125,29 @@ def main() -> int:
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
         env=environment,
     )
     if process.stdin is None or process.stdout is None or process.stderr is None:
         process.kill()
         raise RuntimeError("codex_app_server_pipe_unavailable")
+    process_stdin = cast(BinaryIO, process.stdin)
+    process_stdout = cast(BinaryIO, process.stdout)
+    process_stderr = cast(BinaryIO, process.stderr)
 
-    stdout_lines: queue.Queue[str | None] = queue.Queue()
-    stderr_lines: list[str] = []
+    stdout_lines: queue.Queue[_StreamItem] = queue.Queue()
     threading.Thread(
-        target=_drain_lines,
-        args=(process.stdout, stdout_lines),
+        target=_drain_stdout,
+        args=(process_stdout, stdout_lines),
         daemon=True,
     ).start()
-
-    def drain_stderr() -> None:
-        stderr_lines.extend(process.stderr)
-
-    threading.Thread(target=drain_stderr, daemon=True).start()
+    threading.Thread(
+        target=_drain_stderr,
+        args=(process_stderr, stdout_lines),
+        daemon=True,
+    ).start()
     try:
         _send(
-            process.stdin,
+            process_stdin,
             {
                 "method": "initialize",
                 "id": 1,
@@ -118,27 +165,30 @@ def main() -> int:
                 },
             },
         )
-        initialize = _read_response(stdout_lines, 1, stderr_lines)
+        initialize = _read_response(stdout_lines, 1)
         _send(
-            process.stdin,
+            process_stdin,
             {
                 "method": "mcpServerStatus/list",
                 "id": 2,
                 "params": {"detail": "full", "limit": 10},
             },
         )
-        inventory = _read_response(stdout_lines, 2, stderr_lines)
+        inventory = _read_response(stdout_lines, 2)
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(
+        capture_bytes = (
             json.dumps(
                 {"initialize": initialize, "inventory": inventory},
                 ensure_ascii=True,
                 indent=2,
                 sort_keys=True,
             )
-            + "\n",
-            encoding="utf-8",
+            + "\n"
         )
+        encoded_capture = capture_bytes.encode("utf-8")
+        if len(encoded_capture) > _MAX_OUTPUT_BYTES:
+            raise RuntimeError("codex_capture_output_byte_budget_exceeded")
+        output.write_bytes(encoded_capture)
     finally:
         process.terminate()
         try:
