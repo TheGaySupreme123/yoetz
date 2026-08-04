@@ -66,3 +66,4 @@ Only operations explicitly listed in `catalog.default_safe` are default-safe. Fo
 - `yoetz://guidance/workflow.md` - read before your first `start`: the cooperative workflow, cadence, resume behavior, and final response.
 - `yoetz://guidance/coverage-and-receipts.md` - read before your first `check`: coverage, findings, freshness, and receipt wording.
 - `yoetz://guidance/publication-policy.md` - read before your first `publish_work`: what is material and safe to publish.
+- `yoetz://guidance/request-templates.md` - complete fallback request bodies for all six operations and all nine ordinary publication families; replace every illustrative value before use.

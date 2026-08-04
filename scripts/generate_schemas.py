@@ -204,6 +204,193 @@ def _version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return document
 
 
+def _start_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Extend the reviewed start-result schema with its model-owned authoring scaffold.
+
+    The start result deliberately uses shared external references and finite reviewed value
+    shapes that Pydantic's generic projection does not preserve.  Keep that public contract as
+    the template, while regenerating the additive projection-only scaffold here so ``--write``
+    cannot replace the curated wire shape with framework-specific definitions.
+    """
+
+    source = Path(__file__).resolve().parent.parent / "schemas" / entry.relative_path
+    try:
+        document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+        definitions = cast(dict[str, JsonValue], document["$defs"])
+        success = cast(dict[str, JsonValue], definitions["success"])
+        properties = cast(dict[str, JsonValue], success["properties"])
+        required = cast(list[JsonValue], success["required"])
+        if not all(name in definitions for name in ("compact_view", "version_slice")):
+            raise TypeError
+    except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
+        raise SchemaGenerationError(
+            "start_result_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+
+    empty_array: dict[str, JsonValue] = {
+        "items": {"const": "", "type": "string"},
+        "maxItems": 0,
+        "type": "array",
+    }
+
+    def event_draft_template(schema_name: str, payload_ref: str) -> dict[str, JsonValue]:
+        return {
+            "additionalProperties": False,
+            "properties": {
+                "artifact_refs": dict(empty_array),
+                "causal_parents": dict(empty_array),
+                "event_id": {"const": "", "type": "string"},
+                "evidence_refs": dict(empty_array),
+                "occurred_at": {"const": "", "type": "string"},
+                "payload": {"$ref": payload_ref},
+                "schema": {
+                    "additionalProperties": False,
+                    "properties": {
+                        "name": {"const": schema_name, "type": "string"},
+                        "version": {"const": "1.0.0", "type": "string"},
+                    },
+                    "required": ["name", "version"],
+                    "type": "object",
+                },
+            },
+            "required": [
+                "artifact_refs",
+                "causal_parents",
+                "event_id",
+                "evidence_refs",
+                "occurred_at",
+                "payload",
+                "schema",
+            ],
+            "type": "object",
+        }
+
+    definitions.update(
+        cast(
+            dict[str, JsonValue],
+            {
+                "start_next_request_actor_template": {
+                    "additionalProperties": False,
+                    "properties": {
+                        "actor_id": {"const": "", "type": "string"},
+                        "actor_type": {"const": "", "type": "string"},
+                    },
+                    "required": ["actor_id", "actor_type"],
+                    "type": "object",
+                },
+                "start_next_request_client_template": {
+                    "additionalProperties": False,
+                    "properties": {
+                        "integration": {"const": "", "type": "string"},
+                        "kind": {"const": "", "type": "string"},
+                        "version": {"const": "", "type": "string"},
+                    },
+                    "required": ["integration", "kind", "version"],
+                    "type": "object",
+                },
+                "start_next_request_plan_payload_template": {
+                    "additionalProperties": False,
+                    "properties": {
+                        "obligation_refs": {
+                            "items": {"const": "", "type": "string"},
+                            "maxItems": 1,
+                            "minItems": 1,
+                            "type": "array",
+                        },
+                        "plan_version": {"const": 1, "type": "integer"},
+                        "summary": {"const": "", "type": "string"},
+                    },
+                    "required": ["obligation_refs", "plan_version", "summary"],
+                    "type": "object",
+                },
+                "start_next_request_obligation_payload_template": {
+                    "additionalProperties": False,
+                    "properties": {
+                        "acceptance_criteria": {"const": "", "type": "string"},
+                        "description": {"const": "", "type": "string"},
+                        "evidence_expectation": {"const": "", "type": "string"},
+                        "obligation_id": {"const": "", "type": "string"},
+                        "status": {"const": "open", "type": "string"},
+                    },
+                    "required": [
+                        "acceptance_criteria",
+                        "description",
+                        "evidence_expectation",
+                        "obligation_id",
+                        "status",
+                    ],
+                    "type": "object",
+                },
+                "start_next_request_plan_event_draft_template": event_draft_template(
+                    "plan_published",
+                    "#/$defs/start_next_request_plan_payload_template",
+                ),
+                "start_next_request_obligation_event_draft_template": event_draft_template(
+                    "obligation_published",
+                    "#/$defs/start_next_request_obligation_payload_template",
+                ),
+                "start_publish_work_request_template": {
+                    "additionalProperties": False,
+                    "properties": {
+                        "actor": {"$ref": "#/$defs/start_next_request_actor_template"},
+                        "client": {"$ref": "#/$defs/start_next_request_client_template"},
+                        "event_drafts": {
+                            "items": False,
+                            "maxItems": 2,
+                            "minItems": 2,
+                            "prefixItems": [
+                                {"$ref": ("#/$defs/start_next_request_plan_event_draft_template")},
+                                {
+                                    "$ref": (
+                                        "#/$defs/start_next_request_obligation_event_draft_template"
+                                    )
+                                },
+                            ],
+                            "type": "array",
+                        },
+                        "expected_frontier": {
+                            "$ref": (
+                                "https://schemas.yoetz.dev/0.1/common/frontier-1.0.0.schema.json"
+                            )
+                        },
+                        "protocol_version": {"const": "0.1", "type": "string"},
+                        "request_id": {"const": "", "type": "string"},
+                        "schema_version": {"const": "1.0.0", "type": "string"},
+                        "session_id": {"$ref": "#/$defs/session_id"},
+                        "writer_id": {"$ref": "#/$defs/writer_id"},
+                    },
+                    "required": [
+                        "actor",
+                        "client",
+                        "event_drafts",
+                        "expected_frontier",
+                        "protocol_version",
+                        "request_id",
+                        "schema_version",
+                        "session_id",
+                        "writer_id",
+                    ],
+                    "type": "object",
+                },
+                "start_next_request_template": {
+                    "additionalProperties": False,
+                    "properties": {
+                        "arguments": {"$ref": "#/$defs/start_publish_work_request_template"},
+                        "evidential": {"const": False, "type": "boolean"},
+                        "operation": {"const": "publish_work", "type": "string"},
+                    },
+                    "required": ["arguments", "evidential", "operation"],
+                    "type": "object",
+                },
+            },
+        )
+    )
+    properties["next_request_template"] = {"$ref": "#/$defs/start_next_request_template"}
+    if "next_request_template" not in required:
+        required.append("next_request_template")
+    return document
+
+
 _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
     _RegistryEntry(
         "common/actor-assertion-1.0.0.schema.json",
@@ -992,7 +1179,9 @@ def build_schema_documents(
         seen_paths.add(entry.relative_path)
 
         assert entry.loader is not None  # narrowed by the pending-check above
-        if entry.relative_path == "version/version-manifest-1.0.0.schema.json":
+        if entry.relative_path == "operations/start-result-1.0.0.schema.json":
+            normalized = _start_result_schema(entry)
+        elif entry.relative_path == "version/version-manifest-1.0.0.schema.json":
             normalized = _version_manifest_schema(entry)
         else:
             try:
