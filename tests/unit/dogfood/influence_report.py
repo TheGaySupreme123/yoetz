@@ -390,11 +390,16 @@ def classify_influence_report(timeline: InfluenceTimeline) -> InfluenceReport:
         stream_a = "pass" if ops_ok else "fail"
 
     # Stream B: early publication gate is the primary offline lock.
+    # Identical structural retries are a UX failure signal even when the early-publication
+    # gate is not_applicable (terminal-review-only design per runbook §2 Stream B / §3.4).
+    retries = _nonneg_int(timeline.get("identical_structural_retries"), 0)
     if gate == "failed":
         stream_b: StreamScore = "fail"
     elif gate == "passed":
-        retries = _nonneg_int(timeline.get("identical_structural_retries"), 0)
         stream_b = "fail" if retries > 3 else "pass"
+    elif retries > 3:
+        # not_applicable (or other non-pass/fail gate): still fail on retry thrash.
+        stream_b = "fail"
     else:
         stream_b = "not_tested"
 

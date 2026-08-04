@@ -127,6 +127,40 @@ def test_plan_after_first_edit_fails_early_publication_gate() -> None:
     assert report["stream_b"] == "fail"
 
 
+def test_terminal_review_only_not_applicable_gate_is_not_tested_without_retry_thrash() -> None:
+    """Terminal-review-only: gate N/A; Stream B stays not_tested when retries are low."""
+
+    report = classify_influence_report(
+        {
+            "activation": "session_ops",
+            "experiment_profile": "strict",
+            "ops_completed_honestly": True,
+            "terminal_review_only": True,
+            "identical_structural_retries": 2,
+            "final_prose": "terminal-review-only; early gate not applicable",
+        }
+    )
+    assert report["authoring_early_publication_gate"] == "not_applicable"
+    assert report["stream_b"] == "not_tested"
+
+
+def test_terminal_review_only_not_applicable_gate_fails_on_identical_retry_thrash() -> None:
+    """Terminal-review-only still fails Stream B when identical structural retries > 3."""
+
+    report = classify_influence_report(
+        {
+            "activation": "session_ops",
+            "experiment_profile": "strict",
+            "ops_completed_honestly": True,
+            "terminal_review_only": True,
+            "identical_structural_retries": 4,
+            "final_prose": "terminal-review-only but agent thrashed on structural rejects",
+        }
+    )
+    assert report["authoring_early_publication_gate"] == "not_applicable"
+    assert report["stream_b"] == "fail"
+
+
 def test_finding_revision_recheck_demonstrates_influence() -> None:
     attribution: AttributionRecord = {
         "yoetz_output_ref": "finding_det_1",
