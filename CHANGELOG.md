@@ -157,6 +157,13 @@ describes behavior intended for the first release rather than a change from a pr
   declares which claim a run may make, and a provenance gate that refuses to score semantic quality
   when no provider attempt happened.
 
+- **Influence dogfood protocol (docs/test-only).** A new
+  [influence dogfood runbook](docs/runbooks/influence-dogfood.md) measures Yoetz-to-agent intervention
+  without conflating operational health, authoring UX, semantic quality, and work-product influence.
+  Offline unit tests lock classification rules (activation vs registration, strict-route Stream C as
+  `not_tested`, early publication gate, miss taxonomy, honesty vs work-product influence, forbidden
+  summary). No protocol, privacy, storage, or MCP surface change.
+
 ### Documentation and repository
 
 - User documentation: `docs/architecture.md` (topology, module map, honesty rules), `docs/usage/`

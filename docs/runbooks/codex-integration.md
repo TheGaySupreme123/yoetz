@@ -116,7 +116,9 @@ route from `yoetz integrate codex mcp status --json` (`route_profile`) or from
 `yoetz provider status --json` (`mcp_route.registered_profile`). Before running a session that will
 report a finding about Yoetz's semantic behaviour, walk the
 [semantic dogfood runbook](semantic-dogfood.md) — it declares up front which claim the run is
-allowed to make, and refuses to score semantic quality when no provider attempt happened.
+allowed to make, and refuses to score semantic quality when no provider attempt happened. To measure
+whether feedback **changed the work product** (not merely whether Yoetz was healthy or authorable),
+use the [influence dogfood runbook](influence-dogfood.md).
 
 If the host is configured with Yoetz as an optional server and it is unavailable, Codex work
 continues and the skill discloses no live ledger/check/receipt data. If configured as required,

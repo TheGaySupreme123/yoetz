@@ -128,7 +128,10 @@ the result says whether one *happened*.
 - It does not prove the implementation under review is correct. A clean semantic judgment is one
   observation, not a verdict.
 - It does not measure whether feedback changed the agent's behaviour. Influence measurement is
-  [issue #133](https://github.com/TheGaySupreme123/yoetz/issues/133) and is out of scope here.
+  governed by the [influence dogfood runbook](influence-dogfood.md) (issue
+  [#133](https://github.com/TheGaySupreme123/yoetz/issues/133)): four separate evidence streams,
+  seeded-defect and miss taxonomy, and a forbidden-summary rule so zero influence cannot be sold as
+  improvement.
 
 ## 5. Report hygiene
 
