@@ -131,5 +131,10 @@ catalog keeps encrypted proposal objects and their structural sidecars enumerabl
 No control surface is required to trust a summary — the receipts, catalog, and policy file are the
 evidence, and they are on your machine.
 
+When you are auditing a run rather than the installation, the
+[semantic dogfood runbook](../runbooks/semantic-dogfood.md) gives the preflight and the provenance
+gate: which route the agent actually got, and how to read `semantic_provenance` to tell "no provider
+attempt was made" apart from "an attempt was made and produced nothing useful".
+
 If you believe Yoetz disclosed, retained, or logged something these commitments forbid, treat it as
 a security report: [`SECURITY.md`](../../SECURITY.md), not a public issue.

@@ -22,6 +22,7 @@ __all__ = [
     "McpRegistrationAction",
     "McpRegistrationCommand",
     "McpRegistrationError",
+    "McpRegistrationObservation",
     "McpRegistrationPreview",
     "McpRegistrationReason",
     "McpRegistrationResult",
@@ -142,6 +143,34 @@ class McpRegistrationPreview:
 
 
 @dataclass(frozen=True, slots=True)
+class McpRegistrationObservation:
+    """One read-only registration probe, including *which* Yoetz route is registered.
+
+    ``status_registration`` answers only "is this entry ours", which reads identically for a
+    policy and a strict registration. Reporting a route posture requires the extra fact, so it
+    is carried here rather than by widening the state enum. ``route_profile`` is non-null only
+    when the entry is Yoetz-owned; a foreign or absent entry has no Yoetz route to describe.
+    """
+
+    harness_id: HarnessId
+    state: McpRegistrationState
+    route_profile: Literal["policy", "strict"] | None
+
+    def __post_init__(self) -> None:
+        if type(self.harness_id) is not HarnessId:
+            raise _port_error("integration_harness_invalid")
+        if type(self.state) is not McpRegistrationState:
+            raise _port_error("integration_state_invalid")
+        if self.route_profile is None:
+            return
+        if (
+            self.route_profile not in {"policy", "strict"}
+            or self.state is not McpRegistrationState.YOETZ_OWNED
+        ):
+            raise _port_error("integration_value_invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class McpRegistrationCommand:
     preview_digest: str
     explicitly_accepted: bool
@@ -197,6 +226,8 @@ class McpRegistrationError(Exception):
 
 class HarnessMcpPort(Protocol):
     async def status_registration(self, binary: HarnessBinary) -> McpRegistrationState: ...
+
+    async def observe_registration(self, binary: HarnessBinary) -> McpRegistrationObservation: ...
 
     async def preview_registration(self, binary: HarnessBinary) -> McpRegistrationPreview: ...
 

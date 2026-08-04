@@ -1,7 +1,9 @@
 """Read-only semantic readiness report for operator surfaces.
 
-Reports the four conditions that must all hold before external semantic review can
-dispatch, without claiming a live provider smoke or writing any state.
+Reports the installation-local conditions that must all hold before external semantic review can
+dispatch, without claiming a live provider smoke or writing any state. It separately reports the
+registered Codex MCP route, because a strict agent route cannot dispatch semantic review even
+when every installation condition holds.
 """
 
 from __future__ import annotations
@@ -56,6 +58,15 @@ def _emit(value: Mapping[str, JsonValue], *, json_output: bool) -> None:
     print(f"credential: {credential_human_display(value.get('credential_connected'))}")
     print(f"llm_inference_enabled: {value.get('llm_inference_enabled')}")
     print(f"semantic_ready: {value.get('semantic_ready')}")
+    route = value.get("mcp_route")
+    if isinstance(route, Mapping):
+        print(
+            "mcp_route: "
+            f"registered={route.get('registered_profile')} "
+            f"configured={route.get('configured_profile')} "
+            f"observed={route.get('observed')}"
+        )
+    print(f"agent_route_semantic_ready: {value.get('agent_route_semantic_ready')}")
     blockers = value.get("blockers")
     if isinstance(blockers, list | tuple) and blockers:
         print("blockers:")
@@ -119,6 +130,55 @@ def _mcp_local_composition(service_state: str | None, *, service_observed: bool)
     if service_state in {None, "service_unavailable"}:
         return "starts_on_demand"
     return "unknown"
+
+
+async def _mcp_route_observation() -> dict[str, JsonValue]:
+    """Report which Codex MCP route is registered, or say plainly that it was not read.
+
+    A strict registration and a policy registration are both ``yoetz_owned``, so registration
+    state alone cannot tell an operator whether the agent route can dispatch semantic review at
+    all. This probe adds the missing fact.
+
+    Fail-soft is deliberate and load-bearing: this report exists to stay readable when the
+    installation is broken, so an absent Codex, an unreadable entry, or any registration error
+    degrades to ``observed: false`` — the module's existing "unknown means unread" convention —
+    rather than raising or moving the exit code.
+    """
+
+    # Imported here: `yoetz.cli.setup` imports this module lazily, and the discovery/adapter
+    # stack is only needed on this one path.
+    from yoetz.adapters.integrations.codex_discovery import discover_codex_binaries
+    from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter
+    from yoetz.application.harness_mcp import HarnessMcpService
+    from yoetz.cli import setup as cli_setup
+
+    try:
+        # Sibling-module private on purpose: the registration-time authority stays owned by
+        # `setup`, so this reads it rather than growing a second answer to the same question.
+        configured: JsonValue = (
+            cli_setup._configured_mcp_route_profile()  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        )
+    except Exception:
+        configured = None
+    unread: dict[str, JsonValue] = {
+        "registration_state": None,
+        "registered_profile": None,
+        "configured_profile": configured,
+        "observed": False,
+    }
+    try:
+        binaries = discover_codex_binaries()
+        if not binaries:
+            return unread
+        observation = await HarnessMcpService(CodexMcpAdapter()).observe(binaries[0])
+    except Exception:
+        return unread
+    return {
+        "registration_state": observation.state.value,
+        "registered_profile": observation.route_profile,
+        "configured_profile": configured,
+        "observed": True,
+    }
 
 
 def machine_scope_request() -> JsonObject:
@@ -199,6 +259,9 @@ async def provider_status_report() -> dict[str, JsonValue]:
         credential_connected = None
         llm_inference_enabled = None
 
+    mcp_route = await _mcp_route_observation()
+    registered_profile = mcp_route["registered_profile"]
+
     blockers: list[dict[str, JsonValue]] = []
     if service_state != "ready":
         if service_state_reason in {"auto_unlock_rejected", "auto_unlock_stale"}:
@@ -261,6 +324,18 @@ async def provider_status_report() -> dict[str, JsonValue]:
                 "next_command": "yoetz --privacy",
             }
         )
+    if registered_profile == "strict":
+        # Scoped to the agent route on purpose. ADR-018 decision 2 makes the route ceiling
+        # process-local, so a strict Codex registration does not stop a CLI or terminal check
+        # from dispatching semantic review — it is not an installation blocker.
+        blockers.append(
+            {
+                "condition": "mcp_route_profile",
+                "state": "strict",
+                "scope": "agent_route",
+                "next_command": "yoetz integrate codex mcp preview",
+            }
+        )
 
     readiness_determinable = (
         service_state == "ready"
@@ -293,6 +368,8 @@ async def provider_status_report() -> dict[str, JsonValue]:
         "service_state_reason": service_state_reason,
         "readiness_determinable": readiness_determinable,
         "semantic_ready": semantic_ready,
+        "mcp_route": mcp_route,
+        "agent_route_semantic_ready": semantic_ready and registered_profile == "policy",
         "blockers": tuple(blockers),
         "next_commands": next_commands,
         "notes": (
@@ -300,6 +377,11 @@ async def provider_status_report() -> dict[str, JsonValue]:
             "credential_connected reports the configured provider's credential, not any provider.",
             "A credential for a different provider than the bound endpoint does not count.",
             "unknown means the service could not be read, not that the step is incomplete.",
+            "agent_route_semantic_ready describes the registered Codex MCP route only; "
+            "semantic_ready describes this installation. Neither substitutes for the other.",
+            "A strict registered route does not make this installation not-ready: CLI and "
+            "terminal checks still dispatch, only the strict agent route cannot.",
+            "mcp_route.observed false means the route was not read, not that none is registered.",
         ),
     }
 

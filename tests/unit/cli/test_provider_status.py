@@ -17,10 +17,15 @@ from typing import Any, cast
 import pytest
 
 from yoetz.cli import provider_status as module
+from yoetz.cli import setup as cli_setup
 from yoetz.config.models import ProviderProfileConfig, VerificationConfig, YoetzConfig
 from yoetz.ports.control import ControlError
+from yoetz.ports.harness_mcp import McpRegistrationError, McpRegistrationReason
 
 pytestmark = pytest.mark.anyio
+
+# Captured before any test patches it, so the fail-soft test can exercise the real probe.
+_REAL_ROUTE_OBSERVATION = module._mcp_route_observation  # pyright: ignore[reportPrivateUsage]
 
 
 def _provider(provider_id: str = "openai") -> ProviderProfileConfig:
@@ -97,6 +102,7 @@ def _install(
     installation_state: str | None = None,
     service_state: str = "ready",
     service_state_reason: str = "none",
+    mcp_route: dict[str, object] | None = None,
 ) -> _Client:
     config = YoetzConfig(
         profile="strict-local" if provider is None else "local-openai",
@@ -129,7 +135,39 @@ def _install(
     if installation_state:
         (state / "installation-state.json").write_text(installation_state)
     monkeypatch.setattr(module, "state_dir", lambda: state)
+
+    # The route probe shells out to a discovered `codex`, so leaving it unpatched would make
+    # every test in this module depend on the developer's own registration. The default is the
+    # "could not read" answer, which is what a host without Codex actually produces.
+    observation = _UNREAD_ROUTE if mcp_route is None else mcp_route
+
+    async def _observe() -> dict[str, object]:
+        return dict(observation)
+
+    monkeypatch.setattr(module, "_mcp_route_observation", _observe)
     return client
+
+
+_UNREAD_ROUTE: dict[str, object] = {
+    "registration_state": None,
+    "registered_profile": None,
+    "configured_profile": None,
+    "observed": False,
+}
+
+
+def _route(
+    registered: str | None,
+    *,
+    configured: str | None = None,
+    state: str = "yoetz_owned",
+) -> dict[str, object]:
+    return {
+        "registration_state": state,
+        "registered_profile": registered,
+        "configured_profile": registered if configured is None else configured,
+        "observed": True,
+    }
 
 
 async def test_all_four_conditions_met_reports_ready(
@@ -371,6 +409,158 @@ async def test_rejected_auto_unlock_points_to_repair_first(
     blockers = cast(tuple[dict[str, object], ...], report["blockers"])
     assert blockers[0]["next_command"] == "yoetz service auto-unlock repair"
     assert report["next_commands"] == ("yoetz service auto-unlock repair",)
+
+
+async def test_strict_registered_route_is_not_ready_for_the_agent_but_leaves_the_install_ready(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The exact conflation #132 names: registration is not activation.
+
+    A strict Codex registration cannot dispatch semantic review, but ADR-018 decision 2 makes
+    that ceiling process-local — CLI and terminal checks on the same installation still can. So
+    the agent-route verdict flips and ``semantic_ready`` must not.
+    """
+
+    _install(monkeypatch, tmp_path, provider=_provider(), mcp_route=_route("strict"))
+
+    report = await module.provider_status_report()
+
+    assert report["semantic_ready"] is True
+    assert report["agent_route_semantic_ready"] is False
+    assert report["mcp_route"] == _route("strict")
+    blockers = cast(tuple[dict[str, object], ...], report["blockers"])
+    route = [item for item in blockers if item.get("condition") == "mcp_route_profile"]
+    assert len(route) == 1
+    assert route[0]["state"] == "strict"
+    # The scope marks this as an agent-route blocker, not an installation blocker.
+    assert route[0]["scope"] == "agent_route"
+    assert route[0]["next_command"] == "yoetz integrate codex mcp preview"
+
+
+async def test_strict_registered_route_does_not_change_the_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Exit code stays driven by installation readiness, so existing callers keep their contract."""
+
+    _install(monkeypatch, tmp_path, provider=_provider(), mcp_route=_route("strict"))
+
+    assert await module.run_provider_status(json_output=True) == 0
+
+
+async def test_policy_registered_route_makes_both_verdicts_true(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch, tmp_path, provider=_provider(), mcp_route=_route("policy"))
+
+    report = await module.provider_status_report()
+
+    assert report["semantic_ready"] is True
+    assert report["agent_route_semantic_ready"] is True
+    blockers = cast(tuple[dict[str, object], ...], report["blockers"])
+    assert [item for item in blockers if item.get("condition") == "mcp_route_profile"] == []
+
+
+async def test_a_policy_route_on_an_unready_installation_is_not_agent_route_ready(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The agent-route verdict is a conjunction; a policy route alone never grants it."""
+
+    _install(
+        monkeypatch,
+        tmp_path,
+        provider=_provider(),
+        capabilities=(),
+        mcp_route=_route("policy"),
+    )
+
+    report = await module.provider_status_report()
+
+    assert report["semantic_ready"] is False
+    assert report["agent_route_semantic_ready"] is False
+
+
+async def test_unread_route_is_unknown_and_never_a_blocker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unobservable route reads as unread, matching how an unreadable credential is handled.
+
+    Failing soft here is the point: this report has to stay readable on a host with no Codex, a
+    broken Codex, or an unparseable registration entry.
+    """
+
+    _install(monkeypatch, tmp_path, provider=_provider())
+
+    report = await module.provider_status_report()
+
+    assert report["mcp_route"] == _UNREAD_ROUTE
+    assert report["agent_route_semantic_ready"] is False
+    assert report["semantic_ready"] is True
+    assert report["blockers"] == ()
+    assert await module.run_provider_status(json_output=True) == 0
+
+
+async def test_route_probe_failure_degrades_instead_of_raising(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The real probe, not a stub: discovery and registration errors must not reach the caller."""
+
+    _install(monkeypatch, tmp_path, provider=_provider())
+    monkeypatch.setattr(module, "_mcp_route_observation", _REAL_ROUTE_OBSERVATION)
+
+    def _explode() -> tuple[object, ...]:
+        raise McpRegistrationError(McpRegistrationReason.HARNESS_UNAVAILABLE, {})
+
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.codex_discovery.discover_codex_binaries", _explode
+    )
+    monkeypatch.setattr(cli_setup, "_configured_mcp_route_profile", lambda: "policy")
+
+    report = await module.provider_status_report()
+
+    assert report["mcp_route"] == {
+        "registration_state": None,
+        "registered_profile": None,
+        # Configured profile is config-local, so it survives a failed probe.
+        "configured_profile": "policy",
+        "observed": False,
+    }
+    assert report["agent_route_semantic_ready"] is False
+
+
+async def test_registration_drift_from_configuration_is_visible(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`registered_profile != configured_profile` is the drift signal the runbook reads.
+
+    Setup would register a policy route now, but the live agent is still on the strict one. Only
+    reporting both facts makes that difference observable.
+    """
+
+    _install(
+        monkeypatch,
+        tmp_path,
+        provider=_provider(),
+        mcp_route=_route("strict", configured="policy"),
+    )
+
+    report = await module.provider_status_report()
+
+    route = cast(dict[str, object], report["mcp_route"])
+    assert route["registered_profile"] == "strict"
+    assert route["configured_profile"] == "policy"
+    assert report["agent_route_semantic_ready"] is False
+
+
+async def test_the_two_readiness_verdicts_are_documented_as_non_substitutable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch, tmp_path, provider=_provider(), mcp_route=_route("strict"))
+
+    report = await module.provider_status_report()
+
+    notes = " ".join(cast(tuple[str, ...], report["notes"]))
+    assert "Neither substitutes for the other." in notes
+    assert "does not make this installation not-ready" in notes
 
 
 async def test_uninitialized_vault_points_to_guided_setup(

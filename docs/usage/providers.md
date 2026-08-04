@@ -120,7 +120,8 @@ Before spending a run on semantic review, ask whether the five structural condit
 yoetz provider status --json
 ```
 
-The report names each condition and the exact next command when one is known to be unmet:
+The report names each condition and the exact next command when one is known to be unmet. Five of
+them are **installation** conditions; a sixth verdict describes the Codex agent route separately.
 
 1. the local service is running and unlocked
 2. `verification.semantic` is not `disabled`
@@ -143,6 +144,42 @@ or rejected, use `yoetz service auto-unlock repair`. The JSON field `readiness_d
 distinguishes a known not-ready state from one that cannot yet be read.
 
 `semantic_ready: true` is structural readiness only. It does not prove live provider dispatch.
+
+### The agent route is a separate verdict
+
+`semantic_ready` covers the five conditions above and nothing else. It says this **installation**
+can dispatch semantic review. It does not say the Codex agent gets a route that will.
+
+Yoetz registers Codex with one of two serve commands, and both classify as `yoetz_owned` — so
+registration state alone cannot tell them apart. The report therefore names the route directly:
+
+```json
+"mcp_route": {
+  "registration_state": "yoetz_owned",
+  "registered_profile": "strict",
+  "configured_profile": "policy",
+  "observed": true
+},
+"agent_route_semantic_ready": false
+```
+
+- `registered_profile` — what is actually registered: `policy`, `strict`, or `null` when unread.
+- `configured_profile` — what setup would register now. A mismatch is registration drift; fix it
+  with a fresh digest-bound re-registration (`yoetz integrate codex mcp preview`).
+- `observed: false` — the route could not be read. That is *unknown*, not *absent*, and it is never
+  reported as a blocker.
+- `agent_route_semantic_ready` — `semantic_ready` **and** `registered_profile == "policy"`.
+
+**A strict registration does not make this installation not-ready.** The strict route is a
+process-local ceiling (ADR-018): it stops that one MCP process from requesting semantic review. A
+`yoetz check` from the CLI, or a check from the terminal interface, still dispatches normally. So
+`semantic_ready: true` alongside a strict route is not a contradiction — it means CLI and terminal
+checks can dispatch while the Codex agent route cannot. A strict route adds a `mcp_route_profile`
+blocker marked `scope: "agent_route"`, and leaves the exit code alone.
+
+Neither verdict substitutes for the other. Reading `semantic_ready: true` and expecting semantic
+review through a strict agent route is exactly the conflation this field exists to prevent; see the
+[semantic dogfood runbook](../runbooks/semantic-dogfood.md) for the preflight that consumes it.
 
 ## The credential ceremony
 

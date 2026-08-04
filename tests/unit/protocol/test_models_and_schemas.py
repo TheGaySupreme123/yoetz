@@ -1536,6 +1536,81 @@ def test_check_semantic_status_reason_and_provenance_matrix() -> None:
     _assert_reason(exc_info, "invalid_semantic_provenance")
 
 
+def _binding_accepts(models: Any, status: Any, reason: Any, *, provenance: bool) -> bool:
+    try:
+        models.validate_semantic_provenance_binding(
+            status,
+            reason,
+            status if provenance else None,
+            reason if provenance else None,
+        )
+    except ProtocolValueError:
+        return False
+    return True
+
+
+def test_semantic_provenance_partition_is_total_over_every_status_and_reason() -> None:
+    """Every status/reason pair must land in exactly one provenance branch.
+
+    Reading ``semantic_provenance == null`` as "no provider attempt was made" is only sound
+    while the partition is total. A status added later that fell through every branch would
+    make null ambiguous and silently break that inference — which is the one fact the semantic
+    dogfood gate is built on (``docs/runbooks/semantic-dogfood.md``, issue #132).
+    """
+
+    models = _models_module()
+    classification: dict[tuple[Any, Any], str] = {}
+    for status in models.SemanticStatus:
+        reasons = models.VALID_SEMANTIC_REASONS[status]
+        assert reasons, f"{status.value} has no valid reason"
+        for reason in reasons:
+            absent_ok = _binding_accepts(models, status, reason, provenance=False)
+            present_ok = _binding_accepts(models, status, reason, provenance=True)
+            # Rejecting both forms means the pair fell out of the partition entirely.
+            assert absent_ok or present_ok, (status.value, reason.value)
+            classification[(status, reason)] = (
+                "unconstrained"
+                if absent_ok and present_ok
+                else ("forbidden" if absent_ok else "required")
+            )
+
+    unconstrained = {
+        status.value for (status, _), kind in classification.items() if kind == "unconstrained"
+    }
+    # `failed` is the one status where provenance presence proves nothing either way, so a
+    # dogfood run must record it as "attempt indeterminate", never as "not attempted".
+    assert unconstrained == {"failed"}
+
+    # A pre-dispatch block returns before any provider capability check, so provenance is
+    # forbidden — this is exactly the receipt the strict-route dogfood session produced.
+    assert (
+        classification[
+            (
+                models.SemanticStatus.BLOCKED_BY_POLICY,
+                models.SemanticReason.ROUTE_SEMANTIC_CEILING,
+            )
+        ]
+        == "forbidden"
+    )
+
+    unavailable = {
+        reason.value: kind
+        for (status, reason), kind in classification.items()
+        if status is models.SemanticStatus.UNAVAILABLE
+    }
+    # `unavailable` is the one status that splits on its reason, so each reason has to be
+    # classified individually and none may be left unconstrained.
+    assert set(unavailable.values()) <= {"required", "forbidden"}
+    assert {reason for reason, kind in unavailable.items() if kind == "required"} == {
+        "transport_unavailable",
+        "provider_rate_limited",
+        "provider_quota_exhausted",
+    }
+    assert set(unavailable) == {
+        reason.value for reason in models.VALID_SEMANTIC_REASONS[models.SemanticStatus.UNAVAILABLE]
+    }
+
+
 def test_frontier_model_enforces_genesis_cross_field_identity() -> None:
     models = _models_module()
     genesis = models.FrontierModel.model_validate({"sequence": "0", "head_digest": "genesis"})

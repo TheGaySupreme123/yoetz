@@ -11,6 +11,7 @@ from yoetz.ports.harness_mcp import (
     HarnessMcpPort,
     McpRegistrationCommand,
     McpRegistrationError,
+    McpRegistrationObservation,
     McpRegistrationPreview,
     McpRegistrationReason,
     McpRegistrationResult,
@@ -121,6 +122,37 @@ class HarnessMcpService:
             )
         )
         return state
+
+    async def observe(self, binary: HarnessBinary) -> McpRegistrationObservation:
+        """Read registration state *and* the registered route profile in one probe.
+
+        Shares the ``status`` phase because it reads exactly what ``status`` reads and mutates
+        nothing; the diagnostic shape is unchanged.
+        """
+
+        if type(binary) is not HarnessBinary:
+            raise _invalid("integration_request_invalid")
+        try:
+            observation = await self._port.observe_registration(binary)
+        except McpRegistrationError as exc:
+            self._diagnostics.record_mcp_registration(
+                McpRegistrationDiagnostic(
+                    binary.harness_id, "status", "failed", None, None, None, exc.reason
+                )
+            )
+            raise
+        self._diagnostics.record_mcp_registration(
+            McpRegistrationDiagnostic(
+                binary.harness_id,
+                "status",
+                "success",
+                observation.state,
+                observation.state,
+                None,
+                None,
+            )
+        )
+        return observation
 
     async def preview(self, binary: HarnessBinary) -> McpRegistrationPreview:
         if type(binary) is not HarnessBinary:

@@ -11,6 +11,7 @@ import json
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Final, Literal, cast
 
 from yoetz.ports.harness_mcp import (
@@ -21,6 +22,7 @@ from yoetz.ports.harness_mcp import (
     McpRegistrationAction,
     McpRegistrationCommand,
     McpRegistrationError,
+    McpRegistrationObservation,
     McpRegistrationPreview,
     McpRegistrationReason,
     McpRegistrationResult,
@@ -36,6 +38,10 @@ __all__ = [
 
 _COMMAND_TIMEOUT_SECONDS: Final = 10.0
 _OUTPUT_LIMIT_BYTES: Final = 65_536
+# The registered argv is the only durable evidence of which route the agent actually gets.
+_ROUTE_PROFILE_BY_COMMAND: Final[Mapping[tuple[str, ...], Literal["policy", "strict"]]] = (
+    MappingProxyType({MCP_SERVE_COMMAND: "policy", MCP_STRICT_SERVE_COMMAND: "strict"})
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,7 +136,9 @@ class CodexMcpAdapter:
         tokens = _entry_command_tokens(entry)
         for command in (MCP_STRICT_SERVE_COMMAND, MCP_SERVE_COMMAND):
             if tokens == command:
-                return McpRegistrationState.YOETZ_OWNED, tokens
+                # Return the matched constant, not the parsed tokens, so the route mapping below
+                # reads off one source of truth instead of re-comparing the argv.
+                return McpRegistrationState.YOETZ_OWNED, command
         # An unreadable or different command is preserved, never replaced.
         return McpRegistrationState.FOREIGN_PRESENT, None
 
@@ -139,6 +147,14 @@ class CodexMcpAdapter:
         return self._classify_get(
             self._run((binary.executable_path, "mcp", "get", MCP_SERVER_NAME, "--json"))
         )[0]
+
+    async def observe_registration(self, binary: HarnessBinary) -> McpRegistrationObservation:
+        self._require_codex(binary)
+        state, command = self._classify_get(
+            self._run((binary.executable_path, "mcp", "get", MCP_SERVER_NAME, "--json"))
+        )
+        route_profile = None if command is None else _ROUTE_PROFILE_BY_COMMAND.get(command)
+        return McpRegistrationObservation(binary.harness_id, state, route_profile)
 
     @staticmethod
     def _require_codex(binary: HarnessBinary) -> None:

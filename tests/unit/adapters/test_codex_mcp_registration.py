@@ -91,6 +91,63 @@ def test_status_foreign_on_different_or_unreadable_command() -> None:
         assert state is McpRegistrationState.FOREIGN_PRESENT, payload
 
 
+def test_observe_reports_which_route_is_registered() -> None:
+    """`yoetz_owned` alone cannot answer "can the agent get semantic review".
+
+    Both serve commands classify as owned, so an operator reading only registration state sees a
+    strict route and a policy route as the same thing. The observation carries the difference.
+    """
+
+    for strict, expected in ((False, "policy"), (True, "strict")):
+        runner = _Runner([CommandOutput(0, _yoetz_entry(strict=strict))])
+        observation = anyio.run(lambda: CodexMcpAdapter(runner).observe_registration(_BINARY))
+        assert observation.state is McpRegistrationState.YOETZ_OWNED
+        assert observation.route_profile == expected
+        assert observation.harness_id is HarnessId.CODEX
+
+
+def test_observe_reports_no_route_when_the_entry_is_not_ours() -> None:
+    absent = anyio.run(
+        lambda: CodexMcpAdapter(_Runner([CommandOutput(1, b"")])).observe_registration(_BINARY)
+    )
+    assert absent.state is McpRegistrationState.ABSENT
+    assert absent.route_profile is None
+
+    foreign_output = CommandOutput(0, json.dumps({"command": "other-server"}).encode("utf-8"))
+    foreign = anyio.run(
+        lambda: CodexMcpAdapter(_Runner([foreign_output])).observe_registration(_BINARY)
+    )
+    assert foreign.state is McpRegistrationState.FOREIGN_PRESENT
+    assert foreign.route_profile is None
+
+
+def test_observe_does_not_depend_on_the_adapter_route_profile() -> None:
+    """The observation reports what is registered, never what this adapter would register."""
+
+    runner = _Runner([CommandOutput(0, _yoetz_entry(strict=True))])
+    observation = anyio.run(
+        lambda: CodexMcpAdapter(runner, route_profile="policy").observe_registration(_BINARY)
+    )
+    assert observation.route_profile == "strict"
+
+
+def test_observe_parse_failure_is_a_typed_error() -> None:
+    runner = _Runner([CommandOutput(0, b"not json")])
+    with pytest.raises(McpRegistrationError) as caught:
+        anyio.run(lambda: CodexMcpAdapter(runner).observe_registration(_BINARY))
+    assert caught.value.reason is McpRegistrationReason.PARSE_FAILED
+
+
+def test_observe_rejects_a_non_codex_binary() -> None:
+    with pytest.raises(McpRegistrationError) as caught:
+        anyio.run(
+            lambda: CodexMcpAdapter(_Runner([])).observe_registration(
+                object()  # type: ignore[arg-type]
+            )
+        )
+    assert caught.value.reason is McpRegistrationReason.HARNESS_UNAVAILABLE
+
+
 def test_status_parse_failure_is_a_typed_error() -> None:
     for stdout in (b"not json", b"[1,2]", b"\xff\xfe"):
         runner = _Runner([CommandOutput(0, stdout)])
