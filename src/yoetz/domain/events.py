@@ -2356,28 +2356,31 @@ def _validate_envelope_ref_mirrors(
     evidence_refs: tuple[EvidenceId | ResultId, ...],
     locator: ProjectionLocator | None = None,
 ) -> None:
+    # The mismatched envelope field name is the whole repair, and it is a frozen schema name, not
+    # a caller-supplied key. Carrying it lets the application layer point at the exact list instead
+    # of leaving the caller to re-derive which of the two reference lists broke the mirror.
     if schema.name == "result_recorded":
         if (
             payload is not None
             and evidence_refs != cast(ResultRecordedPayload, payload).evidence_refs
         ):
-            raise ProtocolValueError("ref_mirror_mismatch")
+            raise ProtocolValueError("ref_mirror_mismatch", field="evidence_refs")
     elif schema.name == "response_recorded":
         if (
             payload is not None
             and evidence_refs != cast(ResponseRecordedPayload, payload).evidence_refs
         ):
-            raise ProtocolValueError("ref_mirror_mismatch")
+            raise ProtocolValueError("ref_mirror_mismatch", field="evidence_refs")
 
     if schema.name == "evidence_recorded":
         if payload is None:
             if len(artifact_refs) > 1:
-                raise ProtocolValueError("ref_mirror_mismatch")
+                raise ProtocolValueError("ref_mirror_mismatch", field="artifact_refs")
         else:
             captured = cast(EvidenceRecordedPayload, payload).captured_object_id
             expected = () if captured is None else (captured,)
             if artifact_refs != expected:
-                raise ProtocolValueError("ref_mirror_mismatch")
+                raise ProtocolValueError("ref_mirror_mismatch", field="artifact_refs")
     elif schema.name == "redaction_recorded":
         if payload is not None:
             expected = cast(RedactionRecordedPayload, payload).target_object_ids
@@ -2386,13 +2389,13 @@ def _validate_envelope_ref_mirrors(
         else:
             expected = ()
         if artifact_refs != expected:
-            raise ProtocolValueError("ref_mirror_mismatch")
+            raise ProtocolValueError("ref_mirror_mismatch", field="artifact_refs")
     elif schema.name == "receipt_recorded":
         if payload is None:
             if len(artifact_refs) != 1:
-                raise ProtocolValueError("ref_mirror_mismatch")
+                raise ProtocolValueError("ref_mirror_mismatch", field="artifact_refs")
         elif artifact_refs != (cast(ReceiptRecordedPayload, payload).receipt_object_id,):
-            raise ProtocolValueError("ref_mirror_mismatch")
+            raise ProtocolValueError("ref_mirror_mismatch", field="artifact_refs")
 
 
 # Public draft-schema description for caller-asserted event time. Owned here so schema generation

@@ -22,6 +22,10 @@ __all__ = [
     "tool_error_envelope",
 ]
 
+# Every name here is a frozen presentation-schema property name, never a caller-controlled key, so
+# naming one leaks nothing the caller did not already send. The import-time gate at the bottom of
+# this module keeps the set complete: a `required` name that is missing from here projects to its
+# allowlisted parent, and the caller is told the parent is `missing` when it is present and valid.
 _SAFE_LOCATION_SEGMENTS: Final = frozenset(
     {
         "actor",
@@ -36,15 +40,19 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "assignee_actor_id",
         "at_frontier",
         "authority",
+        "captured_object_id",
         "causal_parents",
         "change",
         "claim_id",
+        "claim_ids",
         "claim_kind",
         "client",
         "command",
         "content_digest",
         "cursor",
+        "described_state",
         "description",
+        "diff_digest",
         "disposition",
         "display_name",
         "dry_run",
@@ -65,6 +73,7 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "head_digest",
         "include",
         "integration",
+        "item_kind",
         "kind",
         "limit",
         "max_findings",
@@ -86,8 +95,11 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "rationale",
         "reason",
         "redaction_profile",
+        "reference",
+        "replacement_obligation_ids",
         "request_id",
         "requested_view",
+        "resolution_evidence_refs",
         "result_id",
         "schema",
         "schema_name",
@@ -105,6 +117,8 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "supporting_refs",
         "task_id",
         "task_title",
+        "tree_digest",
+        "value",
         "version",
         "view",
         "waiver_expiry",
@@ -113,6 +127,9 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "writer_id",
     }
 )
+# The reviewed escape hatch for the gate below. Empty today: no frozen `required` name has been
+# judged unsafe to name. Adding one is an explicit review decision, not silent drift.
+_DELIBERATELY_UNLOCATABLE: Final[frozenset[str]] = frozenset()
 _SAFE_VALIDATION_REASONS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "missing": "missing",
@@ -134,6 +151,35 @@ _SAFE_VALIDATION_REASONS: Final[Mapping[str, str]] = MappingProxyType(
 # may replace the generic value_error reason; never trust free-form exception text.
 _SAFE_VALUE_ERROR_REASON_TOKENS: Final = frozenset(
     {"paired_field_required", "conditional_field_required"}
+)
+# A closed registry of checked-in corrective sentences for facts that are true of the contract but
+# are not expressible as a JSON Schema keyword, so no hint built from the schema alone can state
+# them. Keys are `(tool, pointer, reason)`; nothing here is derived from a caller value, and the
+# import-time gate below checks every field name each sentence mentions against that tool's frozen
+# presentation schema so the registry cannot drift away from the contract it describes.
+_CHECK_SCOPE_CORRECTION: Final = (
+    "omit scope for the whole case, or send both claim_ids and obligation_ids as arrays of "
+    "unique ids, where two empty arrays also mean the whole case"
+)
+_CORRECTIVE_HINTS: Final[Mapping[tuple[str, str, str], tuple[str, tuple[str, ...]]]] = (
+    MappingProxyType(
+        {
+            # `scope` is optional, so a partial scope object reports its own required members as
+            # missing and never says that dropping the whole object is the third admitted repair.
+            ("check", "/scope", "missing"): (
+                _CHECK_SCOPE_CORRECTION,
+                ("scope", "claim_ids", "obligation_ids"),
+            ),
+            ("check", "/scope/claim_ids", "missing"): (
+                _CHECK_SCOPE_CORRECTION,
+                ("scope", "claim_ids", "obligation_ids"),
+            ),
+            ("check", "/scope/obligation_ids", "missing"): (
+                _CHECK_SCOPE_CORRECTION,
+                ("scope", "claim_ids", "obligation_ids"),
+            ),
+        }
+    )
 )
 _MAX_VALIDATION_LOCATIONS: Final = 8
 # Bounded so the hint stays a hint: a long enum dump would bury the field locations it explains.
@@ -222,36 +268,49 @@ def safe_validation_locations(exc: object) -> tuple[dict[str, str], ...]:
     return tuple(projected)
 
 
-def authoring_hint(schema: object, locations: Sequence[Mapping[str, str]]) -> str:
+def authoring_hint(
+    schema: object, locations: Sequence[Mapping[str, str]], *, tool: str | None = None
+) -> str:
     """Name the admitted values for rejected fields, from the frozen presentation schema.
 
     An agent that cannot author `start` cannot use the product at all, and the 2026-07-27 dogfood
     burned two calls plus a source-reading detour on exactly that: an empty object, then a guessed
     request-id shape and a mode that is not an admitted value. Field locations alone did not close
     the gap because they say where, not what. Nested `/event_drafts/N` failures need the same:
-    walk local ``$defs`` so payload enums such as `action_kind` are named.
+    walk local ``$defs`` so payload enums such as `action_kind` are named. The 2026-08-03 dogfood
+    then showed that naming the admitted event families is still not enough to author a draft,
+    because nothing said which key carries the family or what else the envelope requires.
 
     Root-level object rules (``dependentRequired``, attach ``if/then``) name the required peer or
     safe alternative from schema metadata only — never from submitted values.
 
+    ``tool`` selects the closed corrective registry in this module, which supplies checked-in
+    sentences for contract facts no JSON Schema keyword can express. It is optional so a caller
+    holding only a schema still gets every schema-derived part.
+
     Every character comes from the checked-in presentation schema — enum members, consts, bounded
-    patterns, pairing maps, and the worked example's own keys — so no caller-controlled text can
-    reach the message.
+    patterns, pairing maps, required lists, and the worked example's own keys — or from the closed
+    corrective registry in this module, so no caller-controlled text can reach the message.
     """
 
     if not isinstance(schema, Mapping):
         return ""
     document = cast(Mapping[str, JsonValue], schema)
-    properties = document.get("properties")
-    if not isinstance(properties, Mapping):
-        return ""
     parts: list[str] = []
     seen: set[tuple[str, str]] = set()
     example_families: list[str] = []
     try:
-        object_rule_parts = _object_rule_hint_parts(document, locations)
-        for text in object_rule_parts:
-            key = (text, "")
+        if not isinstance(document.get("properties"), Mapping):
+            return ""
+        # Fixed order, least specific last, so truncation at _MAX_HINT_FIELDS always keeps the
+        # part that names the most about how to author the next request.
+        keyed_parts: list[tuple[str, tuple[str, str]]] = [
+            *((text, (text, "")) for text in _object_rule_hint_parts(document, locations)),
+            *_event_draft_hint_parts(document, locations),
+            *((text, (text, "")) for text in _corrective_hint_parts(tool, locations)),
+            *((text, (text, "")) for text in _required_peer_hint_parts(document, locations)),
+        ]
+        for text, key in keyed_parts:
             if key in seen:
                 continue
             seen.add(key)
@@ -331,6 +390,137 @@ def _object_rule_hint_parts(
         parts.extend(_paired_field_hint_parts(document, paired_fields))
     if conditional_fields:
         parts.extend(_conditional_field_hint_parts(document, conditional_fields))
+    return parts
+
+
+def _event_draft_hint_parts(
+    document: Mapping[str, JsonValue], locations: Sequence[Mapping[str, str]]
+) -> list[tuple[str, tuple[str, str]]]:
+    """Name the draft envelope keys and the key that carries the family, for `/event_drafts/<int>`.
+
+    The 2026-08-03 dogfood agent already knew the admitted family values and still guessed four
+    different top-level keys for the discriminator, because nothing named `schema.name` or said
+    what else an envelope must carry. Both facts are read from the frozen presentation schema.
+
+    Each part carries the dedupe key the generic pointer loop would use, so the union's admitted
+    families are stated once under the label that says where they go.
+    """
+
+    if not any(_is_event_draft_index_pointer(location) for location in locations):
+        return []
+    properties = document.get("properties")
+    if not isinstance(properties, Mapping):
+        return []
+    drafts = _resolve_local(document, cast(Mapping[str, JsonValue], properties).get("event_drafts"))
+    if not isinstance(drafts, Mapping):
+        return []
+    items = _resolve_local(document, cast(Mapping[str, JsonValue], drafts).get("items"))
+    if not isinstance(items, Mapping):
+        return []
+    node = cast(Mapping[str, JsonValue], items)
+    item_properties = node.get("properties")
+    if not isinstance(item_properties, Mapping):
+        return []
+    parts: list[tuple[str, tuple[str, str]]] = []
+    required = _format_required_list(
+        node.get("required"), cast(Mapping[str, JsonValue], item_properties)
+    )
+    if required:
+        text = f"each event_drafts entry requires {required}"
+        parts.append((text, (text, "")))
+    admitted = _union_schema_names(document, node)
+    if admitted:
+        parts.append((f"schema.name admits {admitted}", ("schema.name", admitted)))
+    return parts
+
+
+def _is_event_draft_index_pointer(location: Mapping[str, str]) -> bool:
+    """Match a whole rejected draft, or the payload the family discriminator selects.
+
+    `/event_drafts/N/payload` is included because the generic pointer loop can name nothing there:
+    the payload node is a union of family shapes with no enum, const, or pattern of its own, so
+    that pointer reaches the caller today as a bare template fallback. Deeper payload pointers
+    (`/event_drafts/N/payload/<enum>`) already name their admitted members and are left alone.
+    """
+
+    pointer = location.get("field", "")
+    if type(pointer) is not str or not pointer.startswith("/"):
+        return False
+    segments = pointer.removeprefix("/").split("/")
+    if not segments or segments[0] != "event_drafts":
+        return False
+    if len(segments) == 2 and segments[1].isdigit():
+        return True
+    return len(segments) == 3 and segments[1].isdigit() and segments[2] == "payload"
+
+
+def _corrective_hint_parts(tool: str | None, locations: Sequence[Mapping[str, str]]) -> list[str]:
+    """Return checked-in corrective sentences registered for this tool's rejected locations."""
+
+    if type(tool) is not str:
+        return []
+    parts: list[str] = []
+    for location in locations:
+        pointer = location.get("field", "")
+        reason = location.get("reason", "")
+        if type(pointer) is not str or type(reason) is not str:
+            continue
+        entry = _CORRECTIVE_HINTS.get((tool, pointer, reason))
+        if entry is None:
+            continue
+        text = entry[0]
+        if text not in parts:
+            parts.append(text)
+        if len(parts) == _MAX_HINT_FIELDS:
+            break
+    return parts
+
+
+def _required_peer_hint_parts(
+    document: Mapping[str, JsonValue], locations: Sequence[Mapping[str, str]]
+) -> list[str]:
+    """Name every required member of an object one of whose members is reported ``missing``.
+
+    A nested `missing` names one absent member and says nothing about the rest, so an agent that
+    sends half of a required pair learns only half the repair. Names come from the parent object's
+    own ``required`` list, and only when it declares two or more, so the part adds something the
+    location itself did not already say.
+    """
+
+    parts: list[str] = []
+    for location in locations:
+        pointer = location.get("field", "")
+        if location.get("reason", "") != "missing":
+            continue
+        if type(pointer) is not str or not pointer.startswith("/"):
+            continue
+        segments = pointer.removeprefix("/").split("/")
+        if len(segments) != 2 or segments[1].isdigit():
+            continue
+        parent = segments[0]
+        if parent not in _SAFE_LOCATION_SEGMENTS:
+            continue
+        properties = document.get("properties")
+        if not isinstance(properties, Mapping):
+            continue
+        node = _resolve_local(document, cast(Mapping[str, JsonValue], properties).get(parent))
+        if not isinstance(node, Mapping):
+            continue
+        parent_node = cast(Mapping[str, JsonValue], node)
+        parent_properties = parent_node.get("properties")
+        if not isinstance(parent_properties, Mapping):
+            continue
+        required = parent_node.get("required")
+        if not isinstance(required, list) or len(cast(list[object], required)) < 2:
+            continue
+        names = _format_required_list(required, cast(Mapping[str, JsonValue], parent_properties))
+        if not names:
+            continue
+        text = f"{parent} requires {names}"
+        if text not in parts:
+            parts.append(text)
+        if len(parts) == _MAX_HINT_FIELDS:
+            break
     return parts
 
 
@@ -546,10 +736,11 @@ def _hint_for_pointer(
         node = fields[segment]
     node = _resolve_local(document, node)
     leaf = raw_segments[-1]
-    # An array-item pointer (/event_drafts/N) names the admitted event families.
+    # An array-item pointer (/event_drafts/N) names the admitted families under the key that
+    # carries them; the label is the missing information, so it must not read as a bare "family".
     if leaf.isdigit():
         admitted = _union_schema_names(document, node)
-        return ("event family", admitted, family) if admitted else ("", "", None)
+        return ("schema.name", admitted, family) if admitted else ("", "", None)
     admitted = _admitted_values(node)
     if not admitted and isinstance(node, Mapping):
         admitted = _union_schema_names(document, node)
@@ -828,3 +1019,54 @@ if not set(FRONTIER_LEAVES) <= _SAFE_LOCATION_SEGMENTS:
     raise RuntimeError("safe_location_segments_missing_frontier_leaf")
 if not set(FRONTIER_LEAVES) <= set(SAFE_DETAIL_KEYS):
     raise RuntimeError("safe_detail_keys_missing_frontier_leaf")
+
+
+def _schema_names(node: JsonValue, required: set[str], declared: set[str]) -> None:
+    """Collect every ``required`` name and every declared property name, walking ``$defs`` too."""
+
+    if isinstance(node, Mapping):
+        source = cast(Mapping[str, JsonValue], node)
+        names = source.get("required")
+        if isinstance(names, list):
+            required.update(item for item in cast(list[object], names) if type(item) is str)
+        properties = source.get("properties")
+        if isinstance(properties, Mapping):
+            declared.update(
+                key for key in cast(Mapping[object, object], properties) if type(key) is str
+            )
+        for value in source.values():
+            _schema_names(value, required, declared)
+    elif isinstance(node, list):
+        for value in cast(list[JsonValue], node):
+            _schema_names(value, required, declared)
+
+
+def _check_locatable_required_names() -> None:
+    """Fail startup if a frozen required property name cannot be located in a public error.
+
+    A `required` name absent from the allowlist does not merely lose detail: the location projects
+    to its allowlisted parent, so the caller is told the parent is `missing` when the parent was
+    sent and only an interior member was wrong. That is worse than silence, and the 2026-08-03
+    dogfood spent four guesses against exactly that shape of report.
+
+    The same pass keeps the corrective registry honest: every field name a checked-in sentence
+    mentions must still be declared by that tool's presentation schema.
+    """
+
+    from yoetz.mcp.descriptors import descriptor_for
+
+    for tool in ("start", "publish_work", "check", "respond", "status", "receipt"):
+        required: set[str] = set()
+        declared: set[str] = set()
+        _schema_names(cast(JsonValue, descriptor_for(tool).input_schema), required, declared)
+        if required - _SAFE_LOCATION_SEGMENTS - _DELIBERATELY_UNLOCATABLE:
+            raise RuntimeError("safe_location_segments_missing_required_field")
+        for (registered_tool, _, _), (_, fields) in _CORRECTIVE_HINTS.items():
+            if registered_tool == tool and not set(fields) <= declared:
+                raise RuntimeError("corrective_hint_names_unknown_field")
+    registered_tools = {tool for tool, _, _ in _CORRECTIVE_HINTS}
+    if not registered_tools <= {"start", "publish_work", "check", "respond", "status", "receipt"}:
+        raise RuntimeError("corrective_hint_names_unknown_tool")
+
+
+_check_locatable_required_names()

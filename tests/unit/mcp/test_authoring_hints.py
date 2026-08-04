@@ -119,10 +119,38 @@ def test_every_workflow_tool_can_produce_a_hint() -> None:
 def test_event_draft_index_names_admitted_families_not_bare_fallback() -> None:
     # Run-3 failures #4/#6/#7 landed on /event_drafts/N with only a generic fallback.
     hint = authoring_hint(_PUBLISH_SCHEMA, _locations("/event_drafts/2"))
-    assert "event family admits" in hint
+    # The 2026-08-03 dogfood knew the family values and still guessed the key, so the label names
+    # where the discriminator goes rather than calling it an unplaced "event family".
+    assert "schema.name admits" in hint
+    assert "event family admits" not in hint
     for family in sorted(ORDINARY_MCP_PUBLISH_EVENT_FAMILIES):
         assert family in hint
     assert hint != (" Hint: see yoetz://guidance/request-templates.md for a complete request.")
+
+
+def test_event_draft_index_names_the_required_envelope_keys() -> None:
+    # Naming the admitted families is not enough to author a draft: the agent also needs the
+    # seven keys an envelope must carry, and nothing in the rejection said them.
+    hint = authoring_hint(_PUBLISH_SCHEMA, _locations("/event_drafts/2"))
+    assert "each event_drafts entry requires" in hint
+    for key in (
+        "event_id",
+        "schema",
+        "occurred_at",
+        "causal_parents",
+        "payload",
+        "artifact_refs",
+        "evidence_refs",
+    ):
+        assert key in hint
+
+
+def test_event_draft_payload_union_falls_back_to_the_envelope_hint() -> None:
+    # The payload node is a union of family shapes with no enum, const, or pattern of its own,
+    # so this pointer reached the caller as a bare template fallback before.
+    hint = authoring_hint(_PUBLISH_SCHEMA, _locations("/event_drafts/0/payload"))
+    assert "each event_drafts entry requires" in hint
+    assert "schema.name admits" in hint
 
 
 @pytest.mark.parametrize(("pointer", "label", "member"), _NESTED_ENUM_CASES)
@@ -160,6 +188,98 @@ def test_hint_construction_failure_degrades_to_template_fallback() -> None:
     schema: Mapping[str, JsonValue] = _Boom(_PUBLISH_SCHEMA)
     hint = authoring_hint(schema, _locations("/event_drafts/0/payload/action_kind"))
     assert hint == (" Hint: see yoetz://guidance/request-templates.md for a complete request.")
+
+
+def test_envelope_hint_construction_failure_degrades_to_template_fallback() -> None:
+    # Same guarantee for the new builders: a forced failure inside them must not raise.
+    class _Boom(dict[str, JsonValue]):
+        def get(  # type: ignore[override]
+            self, key: object, default: object = None
+        ) -> object:
+            if key == "properties":
+                raise RuntimeError("forced_hint_failure")
+            return super().get(key, default)  # type: ignore[arg-type]
+
+    schema: Mapping[str, JsonValue] = _Boom(_PUBLISH_SCHEMA)
+    assert authoring_hint(schema, _locations("/event_drafts/0")) in {
+        "",
+        " Hint: see yoetz://guidance/request-templates.md for a complete request.",
+    }
+
+
+def test_the_corrective_registry_stays_closed_over_tools_and_pointers() -> None:
+    # A registry that fired on any tool, or on a pointer it was never reviewed for, would be a
+    # second uncontrolled prose channel rather than a closed set of checked-in sentences.
+    scope_missing = ({"field": "/scope", "reason": "missing"},)
+    check_schema = descriptor_for("check").input_schema
+    assert "omit scope for the whole case" in authoring_hint(
+        check_schema, scope_missing, tool="check"
+    )
+    # Unregistered tool, unregistered pointer, and unregistered reason each keep it silent.
+    assert "omit scope" not in authoring_hint(_START_SCHEMA, scope_missing, tool="start")
+    assert "omit scope" not in authoring_hint(
+        check_schema, ({"field": "/mode", "reason": "missing"},), tool="check"
+    )
+    assert "omit scope" not in authoring_hint(
+        check_schema, ({"field": "/scope", "reason": "invalid_value"},), tool="check"
+    )
+    # No tool at all means no registry lookup, and every schema-derived part still arrives.
+    assert "omit scope" not in authoring_hint(check_schema, scope_missing)
+    assert "scope requires claim_ids and obligation_ids" in authoring_hint(
+        check_schema, ({"field": "/scope/claim_ids", "reason": "missing"},)
+    )
+
+
+def test_a_required_peer_hint_never_names_an_unallowlisted_parent() -> None:
+    secret = "hostile_parent_key"
+    hint = authoring_hint(
+        _START_SCHEMA, ({"field": f"/{secret}/leaf", "reason": "missing"},), tool="start"
+    )
+    assert secret not in hint
+
+
+def test_no_caller_value_reaches_the_new_hint_parts() -> None:
+    secret = "never-echo-this-corrective-value-4c1d"
+    hint = authoring_hint(
+        descriptor_for("check").input_schema,
+        (
+            {"field": "/scope/claim_ids", "reason": "missing"},
+            {"field": secret, "reason": "missing"},
+            {"field": f"/scope/{secret}", "reason": "missing"},
+        ),
+        tool="check",
+    )
+    assert secret not in hint
+    assert "scope requires claim_ids and obligation_ids" in hint
+
+
+def test_every_required_schema_name_can_be_located_in_a_public_error() -> None:
+    """A required name outside the allowlist reports its parent as missing when it was sent."""
+
+    from yoetz.mcp.errors import (
+        _DELIBERATELY_UNLOCATABLE,  # pyright: ignore[reportPrivateUsage]
+        _SAFE_LOCATION_SEGMENTS,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    def walk(node: object, found: set[str]) -> None:
+        if isinstance(node, Mapping):
+            source = cast(Mapping[str, Any], node)
+            required = source.get("required")
+            if isinstance(required, list):
+                found.update(item for item in cast(list[object], required) if type(item) is str)
+            for value in source.values():
+                walk(value, found)
+        elif isinstance(node, list):
+            for value in cast(list[object], node):
+                walk(value, found)
+
+    found: set[str] = set()
+    for name in ("start", "publish_work", "check", "respond", "status", "receipt"):
+        walk(descriptor_for(name).input_schema, found)
+    assert found
+    assert not found - _SAFE_LOCATION_SEGMENTS - _DELIBERATELY_UNLOCATABLE
+    # The escape hatch stays a reviewed decision rather than a growing exemption list.
+    assert _DELIBERATELY_UNLOCATABLE == frozenset()
 
 
 def test_publish_work_examples_cover_ordinary_families_and_cross_refs() -> None:

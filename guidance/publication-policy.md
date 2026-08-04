@@ -91,6 +91,48 @@ action/result/evidence/claim batch — live in the `publish_work` tool input sch
 and as complete fallback bodies at `yoetz://guidance/request-templates.md`. Example `occurred_at`
 values are illustrative shape only; do not copy them into live drafts.
 
+### Event draft skeleton
+
+<a id="event-draft-skeleton"></a>
+
+A host may drop the tool schema `examples` entry, so the envelope shape is restated here. Every
+draft carries exactly these seven keys, and nothing else:
+
+```json
+{
+  "event_id": "evt_<uuid4>",
+  "schema": { "name": "<family>", "version": "1.0.0" },
+  "occurred_at": "<RFC 3339 UTC, millisecond precision>",
+  "causal_parents": [],
+  "payload": {},
+  "artifact_refs": [],
+  "evidence_refs": []
+}
+```
+
+`schema.name` is the family discriminator and selects the payload shape. There is no top-level
+`event_type`, `family`, or `type` key. The ordinary publishable families are `plan_published`,
+`plan_revised`, `obligation_published`, `assignment_recorded`, `decision_recorded`,
+`action_recorded`, `result_recorded`, `evidence_recorded`, and `claim_recorded`.
+
+The illustrative `event_id` and `occurred_at` above are shape only: mint a real UUIDv4 and use the
+best real time available, exactly as for the schema examples.
+
+### Reference mirrors
+
+<a id="reference-mirrors"></a>
+
+Some families mirror a payload reference into the draft envelope, and the two must match exactly —
+the same ids in the same ascending ASCII order, with no extra and no omitted member. A mismatch is
+rejected with reason `ref_mirror_mismatch`, and the public error names the envelope field:
+
+- `result_recorded` and `response_recorded`: envelope `evidence_refs` equals the payload's own
+  `evidence_refs`, or both are empty.
+- `evidence_recorded`: envelope `artifact_refs` is exactly `[captured_object_id]`, or empty when
+  the payload declares no captured object.
+- `receipt_recorded`: envelope `artifact_refs` is exactly the payload's `receipt_object_id`.
+- `redaction_recorded`: envelope `artifact_refs` equals the payload's own `target_object_ids`.
+
 ## Event time claims
 
 `occurred_at` is a caller assertion of when the event happened. Use the best real RFC 3339 millisecond UTC time available. If the exact time is unknown, use an honest bounded approximation and understand that it remains a claim — the service does not check outside clocks and does not reject far-past, future, or out-of-order caller times.
