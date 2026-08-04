@@ -142,6 +142,21 @@ describes behavior intended for the first release rather than a change from a pr
 - Public protocol documentation under [`docs/protocol/`](docs/protocol/) and the evidence-bound
   claim map at [`docs/public-claims.json`](docs/public-claims.json).
 
+- **The registered MCP route is now observable.** Both Yoetz-owned Codex serve commands classify as
+  `yoetz_owned`, so registration state alone reported a strict registration and a policy
+  registration identically — and `yoetz provider status` never looked at the route at all, letting
+  `semantic_ready: true` be read as "semantic review will run" on an agent route that cannot
+  dispatch it. `yoetz provider status` now also reports `mcp_route` (registered profile, configured
+  profile, and whether it was read) and a second, narrower `agent_route_semantic_ready` verdict;
+  `yoetz integrate codex mcp status` reports `route_profile`, and `yoetz setup status` rows carry
+  `registered_route_profile`. `semantic_ready` keeps its existing installation-local meaning and
+  the exit code is unchanged: a strict route is a process-local ceiling (ADR-018), so CLI and
+  terminal checks still dispatch, and it is reported as a blocker scoped to the agent route only.
+  Route observation is fail-soft and never changes the exit code. A new
+  [semantic dogfood runbook](docs/runbooks/semantic-dogfood.md) turns this into a preflight that
+  declares which claim a run may make, and a provenance gate that refuses to score semantic quality
+  when no provider attempt happened.
+
 ### Documentation and repository
 
 - User documentation: `docs/architecture.md` (topology, module map, honesty rules), `docs/usage/`

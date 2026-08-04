@@ -2220,8 +2220,8 @@ the whole apply before a file is written. Setup separately reports
 `project_skill_installation`, structural plugin-source installation, MCP registration,
 hooks/consent, service routing, and semantic readiness; none of those fields implies another.
 MCP server registration is a sibling port, never an `IntegrationsPort` overload (ADR-012).
-`HarnessMcpPort` methods are `status_registration`, `preview_registration`, and
-`apply_registration`, each taking a `HarnessBinary` (harness ID, redacted-repr executable path,
+`HarnessMcpPort` methods are `status_registration`, `observe_registration`, `preview_registration`,
+and `apply_registration`, each taking a `HarnessBinary` (harness ID, redacted-repr executable path,
 optional reported version, `supported|untested` compatibility). Shared names are
 `MCP_SERVER_NAME` (exactly `yoetz`), `MCP_SERVE_COMMAND` (exactly `("yoetz", "mcp", "serve")`),
 `MCP_STRICT_SERVE_COMMAND` (exactly
@@ -2229,8 +2229,15 @@ optional reported version, `supported|untested` compatibility). Shared names are
 `McpRegistrationState` (`absent|yoetz_owned|foreign_present`), `McpRegistrationAction`
 (`register|reregister|noop`), `McpRegistrationReason` (`confirmation_required|preview_stale|
 harness_unavailable|parse_failed|timeout|registration_failed|foreign_entry_present`),
-`McpRegistrationPreview`, `McpRegistrationCommand`, `McpRegistrationResult`, and
-`McpRegistrationError`. `HarnessMcpService` owns confirmation
+`McpRegistrationPreview`, `McpRegistrationObservation`, `McpRegistrationCommand`,
+`McpRegistrationResult`, and
+`McpRegistrationError`. `McpRegistrationObservation` carries `harness_id`, `state`, and
+`route_profile` (`policy|strict|null`); `route_profile` is non-null only when the state is
+`yoetz_owned`, because a foreign or absent entry has no Yoetz route to describe.
+`observe_registration` reads exactly what `status_registration` reads, mutates nothing, and shares
+its `status` diagnostic phase — it exists because both owned serve commands classify as
+`yoetz_owned`, so state alone cannot distinguish a strict registration from a policy one.
+`HarnessMcpService` owns confirmation
 (`McpRegistrationConfirmation` with channel exactly `interactive|noninteractive_flag`) and
 diagnostics (`McpRegistrationDiagnostic`, `HarnessMcpDiagnosticSink`); every registration
 mutation is digest-bound to a freshly recomputed preview, a foreign same-name entry is
@@ -2242,6 +2249,27 @@ schema tokens are `yoetz.setup-wizard-marker/1`, `yoetz.setup-wizard-report/1`,
 `yoetz.setup-status/1`, and `yoetz.mcp-registration-preview/1`; the marker lives at
 `state_dir()/setup-wizard.json` via `config.paths.setup_marker_path`. The CLI surfaces are
 `yoetz setup run|status` and `yoetz integrate <harness> mcp status|preview|install` (ADR-012).
+`setup status` rows carry `registration_state` and `registered_route_profile`; the
+`integrate <harness> mcp status` body carries `state` and `route_profile`.
+
+`yoetz provider status` emits the read-only `yoetz.provider-status/1` schema token. It reports two
+non-substitutable verdicts. `semantic_ready` is installation-local and unchanged by route posture:
+service ready and unlocked, `verification.semantic` not `disabled`, an endpoint bound, the bound
+provider's credential connected, and the `llm_inference` channel enabled. `agent_route_semantic_ready`
+is `semantic_ready` **and** `mcp_route.registered_profile == "policy"`, and describes only the
+registered Codex MCP route; an unread route makes it `false`, because `registered_profile` is then
+`null` and an unobserved route is never treated as a policy route. The `mcp_route` object carries
+`registration_state`, `registered_profile`, `configured_profile`, and `observed`. `observed: false`
+means the route was not read, not that none is registered, and is the single reported state for
+every read failure — empty Codex discovery, any `McpRegistrationError` (`harness_unavailable`,
+`parse_failed`, `timeout`), and any `OSError`; `registration_state` and `registered_profile` are
+both `null` there. `registered_profile: null` with `observed: true` is the different fact that no
+Yoetz route is registered (`registration_state` is `absent` or `foreign_present`).
+A strict registered route adds a `mcp_route_profile` blocker
+with `scope: "agent_route"` and never moves `semantic_ready` or the exit code, because ADR-018
+decision 2 makes the route ceiling process-local — CLI and terminal checks still dispatch. Route
+observation is fail-soft by contract: no discovery failure, registration error, or unreadable entry
+may raise or change the exit code.
 
 Every `integration_preview` preview/status body and every `integration_execute` body carries an
 explicit required `harness` discriminator. Its frozen v0.1 schema value is exactly `codex`; omission,

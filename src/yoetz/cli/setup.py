@@ -1815,10 +1815,13 @@ async def setup_status(*, json_output: bool) -> int:
     for binary in binaries:
         row = _binary_row(binary)
         try:
-            state = await HarnessMcpService(service_port).status(binary)
-            row["registration_state"] = state.value
+            observation = await HarnessMcpService(service_port).observe(binary)
+            row["registration_state"] = observation.state.value
+            # A strict and a policy registration are both yoetz_owned; only this distinguishes them.
+            row["registered_route_profile"] = observation.route_profile
         except McpRegistrationError as error:
             row["registration_state"] = None
+            row["registered_route_profile"] = None
             row["registration_error"] = error.reason.value
         rows.append(row)
     report: dict[str, JsonValue] = {
@@ -1867,8 +1870,15 @@ async def integrate_mcp(
     service = HarnessMcpService(_mcp_adapter())
     try:
         if action == "status":
-            state = await service.status(chosen)
-            _emit({"harness": harness, "state": state.value}, json_output=json_output)
+            observation = await service.observe(chosen)
+            _emit(
+                {
+                    "harness": harness,
+                    "route_profile": observation.route_profile,
+                    "state": observation.state.value,
+                },
+                json_output=json_output,
+            )
             return 0
         preview = await service.preview(chosen)
         if action == "preview":

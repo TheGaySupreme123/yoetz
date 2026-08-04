@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import anyio
 import pytest
 
@@ -15,6 +17,7 @@ from yoetz.ports.harness_mcp import (
     McpRegistrationAction,
     McpRegistrationCommand,
     McpRegistrationError,
+    McpRegistrationObservation,
     McpRegistrationPreview,
     McpRegistrationReason,
     McpRegistrationResult,
@@ -55,6 +58,14 @@ class _Port:
             raise McpRegistrationError(self.fail_with, {})
         return self.state
 
+    async def observe_registration(self, binary: HarnessBinary) -> McpRegistrationObservation:
+        if self.fail_with is not None:
+            raise McpRegistrationError(self.fail_with, {})
+        route_profile: Literal["policy", "strict"] | None = (
+            "strict" if self.state is McpRegistrationState.YOETZ_OWNED else None
+        )
+        return McpRegistrationObservation(binary.harness_id, self.state, route_profile)
+
     async def preview_registration(self, binary: HarnessBinary) -> McpRegistrationPreview:
         if self.fail_with is not None:
             raise McpRegistrationError(self.fail_with, {})
@@ -91,6 +102,44 @@ def test_status_and_preview_record_success_diagnostics() -> None:
     assert preview.preview_digest == _DIGEST
     assert [record.phase for record in sink.records] == ["status", "preview"]
     assert all(record.outcome == "success" for record in sink.records)
+
+
+def test_observe_records_a_status_phase_diagnostic_and_carries_the_route() -> None:
+    sink = _Sink()
+    service = HarnessMcpService(_Port(McpRegistrationState.YOETZ_OWNED), sink)
+    observation = anyio.run(lambda: service.observe(_BINARY))
+    assert observation.state is McpRegistrationState.YOETZ_OWNED
+    assert observation.route_profile == "strict"
+    # Observing reads exactly what status reads, so it shares the phase; the diagnostic shape
+    # is unchanged.
+    assert sink.records[-1].phase == "status"
+    assert sink.records[-1].outcome == "success"
+    assert sink.records[-1].state_before is McpRegistrationState.YOETZ_OWNED
+
+
+def test_observe_failure_is_recorded_and_reraised() -> None:
+    sink = _Sink()
+    service = HarnessMcpService(_Port(fail_with=McpRegistrationReason.PARSE_FAILED), sink)
+    with pytest.raises(McpRegistrationError):
+        anyio.run(lambda: service.observe(_BINARY))
+    assert sink.records[-1].phase == "status"
+    assert sink.records[-1].outcome == "failed"
+    assert sink.records[-1].reason is McpRegistrationReason.PARSE_FAILED
+
+
+def test_observe_rejects_an_invalid_binary() -> None:
+    service = HarnessMcpService(_Port())
+    with pytest.raises(ValueError):
+        anyio.run(lambda: service.observe(object()))  # type: ignore[arg-type]
+
+
+def test_a_route_profile_is_only_meaningful_for_a_yoetz_owned_entry() -> None:
+    """A foreign or absent entry has no Yoetz route, so claiming one is a construction error."""
+
+    with pytest.raises(ValueError):
+        McpRegistrationObservation(HarnessId.CODEX, McpRegistrationState.ABSENT, "policy")
+    with pytest.raises(ValueError):
+        McpRegistrationObservation(HarnessId.CODEX, McpRegistrationState.FOREIGN_PRESENT, "strict")
 
 
 def test_register_requires_explicit_acceptance() -> None:

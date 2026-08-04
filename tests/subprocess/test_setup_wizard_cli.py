@@ -469,6 +469,8 @@ def test_setup_status_is_read_only(wizard_env: dict[str, object]) -> None:
     report = json.loads(result.stdout)
     assert report["schema"] == "yoetz.setup-status/1"
     assert report["discovered"][0]["registration_state"] == "yoetz_owned"
+    # `yoetz_owned` reads the same for both serve commands, so the row has to name the route.
+    assert report["discovered"][0]["registered_route_profile"] == "strict"
     assert report["marker_present"] is False
     assert report["service"]["reachable"] is False
     assert report["integration"] == {
@@ -533,7 +535,10 @@ def test_integrate_mcp_status_preview_install(wizard_env: dict[str, object]) -> 
     wizard_env["outputs"] = [CommandOutput(1, b"")]
     status = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "status", "--json"])
     assert status.exit_code == 0
-    assert json.loads(status.stdout)["state"] == "absent"
+    absent_status = json.loads(status.stdout)
+    assert absent_status["state"] == "absent"
+    # An absent entry has no Yoetz route to describe; the field is present and null, never guessed.
+    assert absent_status["route_profile"] is None
 
     wizard_env["outputs"] = [CommandOutput(1, b"")]
     preview = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "preview", "--json"])
@@ -563,6 +568,24 @@ def test_integrate_mcp_status_preview_install(wizard_env: dict[str, object]) -> 
     )
     assert install.exit_code == 0
     assert json.loads(install.stdout)["state_after"] == "yoetz_owned"
+
+
+def test_integrate_mcp_status_names_the_registered_route(
+    wizard_env: dict[str, object],
+) -> None:
+    """Status has to distinguish the two owned registrations, or #132's conflation stays.
+
+    Both serve commands classify as ``yoetz_owned``, so an operator reading only the state
+    cannot tell whether the agent route can request semantic review at all.
+    """
+
+    for route_profile in ("strict", "policy"):
+        wizard_env["outputs"] = [_yoetz_entry(route_profile)]
+        result = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "status", "--json"])
+        assert result.exit_code == 0
+        body = json.loads(result.stdout)
+        assert body["state"] == "yoetz_owned"
+        assert body["route_profile"] == route_profile
 
 
 def test_integrate_mcp_install_without_accept_fails_closed(

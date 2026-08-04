@@ -110,6 +110,14 @@ that Codex activated a plugin. Current Codex plugin activation has its own marke
 add trust flow; setup deliberately does not mutate that global surface. This distinction is why a
 successful setup report includes both project-skill presence and plugin-source presence.
 
+Registration also decides *which* route the agent gets. Both owned serve commands classify as
+`yoetz_owned`, so the state alone cannot tell a strict registration from a policy one. Read the
+route from `yoetz integrate codex mcp status --json` (`route_profile`) or from
+`yoetz provider status --json` (`mcp_route.registered_profile`). Before running a session that will
+report a finding about Yoetz's semantic behaviour, walk the
+[semantic dogfood runbook](semantic-dogfood.md) — it declares up front which claim the run is
+allowed to make, and refuses to score semantic quality when no provider attempt happened.
+
 If the host is configured with Yoetz as an optional server and it is unavailable, Codex work
 continues and the skill discloses no live ledger/check/receipt data. If configured as required,
 server failure blocks only the Codex surfaces that the tested capability profile proves are
