@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -39,6 +40,12 @@ _ENVELOPE_FIELDS = {
 _DROPPED_METADATA_KEYS = frozenset({"$defs", "enum", "examples", "oneOf"})
 _JSON_FENCE_RE = re.compile(r"```json\n(?P<body>.*?)\n```", re.DOTALL)
 _REQUEST_TEMPLATE_URI = "yoetz://guidance/request-templates.md"
+_OBSERVATION_FIXTURE = (
+    Path(__file__).resolve().parents[3]
+    / "fixtures"
+    / "codex-tool-boundary"
+    / "codex-testing-0.147.0-alpha.1.observation.json"
+)
 
 
 def _lower_observed_host_shape(schema: Mapping[str, JsonValue]) -> dict[str, Any] | str:
@@ -239,3 +246,30 @@ def test_degraded_surface_templates_remain_authorable(profile: str) -> None:
     assert operations == {"start", "publish_work", "status", "check", "respond", "receipt"}
     assert families == ORDINARY_MCP_PUBLISH_EVENT_FAMILIES
     assert check_scopes == {"whole", "scoped"}
+
+
+def test_recorded_codex_consumer_observation_is_bounded_and_honest() -> None:
+    observation = cast(dict[str, Any], json.loads(_OBSERVATION_FIXTURE.read_bytes()))
+
+    assert observation["record_schema"] == "yoetz.codex-tool-boundary-observation/1.0.0"
+    assert observation["classification"] == "observation_record"
+    assert observation["consumer"]["version"] == "0.147.0-alpha.1"
+    assert "does not run or certify Codex" in observation["ci_claim"]
+
+    baseline = observation["baseline"]
+    assert baseline["producer_commit"] == "959f20c36b0d50b21a482b85035adbe5fc8848d4"
+    assert len(baseline["model_visible_declaration"]) == 7
+    assert baseline["operations"] == {"attempted": 17, "rejected": 9}
+
+    post_fix = observation["post_fix"]
+    assert post_fix["producer_commit"] == "23ff890835c53ba1e015e20f1b56aaad0f8fd5d7"
+    raw = post_fix["raw_inventory"]
+    assert raw["tool_count"] == 6
+    assert raw["start_root_type"] == "object"
+    assert raw["publish_event_drafts_items_type"] == "object"
+    assert set(raw["publish_envelope_fields"]) == _ENVELOPE_FIELDS
+    assert set(raw["publish_schema_name_families"]) == ORDINARY_MCP_PUBLISH_EVENT_FAMILIES
+    assert raw["request_id_type"] == "string"
+    assert raw["check_expected_frontier_type"] == "object"
+    assert raw["check_scope_type"] == "object"
+    assert post_fix["fresh_model_visible_probe"]["status"] == "unavailable"
