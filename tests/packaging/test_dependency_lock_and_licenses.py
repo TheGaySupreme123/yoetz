@@ -202,7 +202,7 @@ def test_optional_extra_dependencies_resolve_to_their_exact_pinned_lock_version(
 def test_native_component_identities_are_pinned_exactly() -> None:
     packages = _uv_lock_packages()
     assert str(packages["apsw"]["version"]) == "3.53.3.1"
-    assert str(packages["cryptography"]["version"]) == "49.0.0"
+    assert str(packages["cryptography"]["version"]) == "50.0.0"
 
 
 # --------------------------------------------------------------------------
