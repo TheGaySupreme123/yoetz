@@ -42,8 +42,7 @@ The through-line is that "Codex is first" had been encoded as "Codex is the only
 ## Decisions
 
 1. **The guidance core is owned once, harness-neutrally, under `guidance/`.** It owns
-   `agent-instructions.md`, `workflow.md`, `publication-policy.md`, `coverage-and-receipts.md`, and
-   `request-templates.md`,
+   `agent-instructions.md`, `workflow.md`, `publication-policy.md`, and `coverage-and-receipts.md`,
    packaged byte-identically under `src/yoetz/resources/guidance/`. Exactly one packaged copy exists
    regardless of how many harnesses ship, which makes drift structurally impossible rather than
    merely tested. A harness adapter may choose layout, filename, and header; it may not vary a byte.
@@ -68,7 +67,7 @@ The through-line is that "Codex is first" had been encoded as "Codex is the only
 
 4. **Three delivery tiers, with tier 0 self-sufficient.** Tier 0 is
    `guidance/agent-instructions.md`, served verbatim as the MCP initialize `instructions` string, and
-   reaches every host unconditionally. Tier 1 exposes the five documents as
+   reaches every host unconditionally. Tier 1 exposes the four documents as
    `yoetz://guidance/<name>` MCP resources for hosts that read them. Tier 2 installs them on disk
    for a first-party harness. Because tier 0 is the only tier guaranteed to arrive, it must carry
    every rule whose absence would cause harm, rather than summarizing and deferring.
@@ -177,9 +176,7 @@ edits no port, no registry, no guidance, and no schema. That is the property thi
 guarantee, and it follows from the ports/adapters pattern the rest of the tree already uses.
 
 Any MCP host works on day one with no integration, no skill, and no configuration: six tools, the
-tier-0 instructions, and five fetchable guidance documents. The request-template resource keeps
-all six requests and all nine ordinary publication families authorable when a host drops schema
-metadata; the catalog schema remains admission authority. The host earns `cooperative_mcp` with
+tier-0 instructions, and four fetchable guidance documents. It earns `cooperative_mcp` with
 `self_asserted` authorship and `published_only` artifact observation — the weakest honest coverage,
 which the coverage vector already expresses precisely. That is not a degraded mode needing a warning
 label; it is an accurate one.
@@ -196,7 +193,7 @@ adapter silently edits host configuration. The exact support cell must prove eac
 through the reviewed host mechanism, or select `None` / empty `observation_events` and retain the
 honest weaker coverage.
 
-The cost is one extra indirection for the single harness that exists today, and five guidance files
+The cost is one extra indirection for the single harness that exists today, and four guidance files
 whose ownership must be respected: a harness restating a shared rule instead of linking to it is a
 drift failure, enforced at build.
 

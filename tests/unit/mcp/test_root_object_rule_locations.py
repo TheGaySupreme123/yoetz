@@ -53,7 +53,7 @@ def test_workspace_ref_without_external_ref_names_both_fields_and_pairing_rule()
     assert "workspace_ref requires external_ref" in hint
     message = invalid_request_message("start", locations)
     assert "workspace_ref requires external_ref" in message
-    assert "yoetz://guidance/request-templates.md" in message
+    assert "yoetz://guidance/workflow.md" in message
 
 
 def test_external_ref_without_workspace_ref_is_equally_actionable() -> None:
@@ -139,10 +139,10 @@ def test_hostile_unknown_property_never_reaches_message_or_details() -> None:
 
 
 def test_unrecognized_root_rule_degrades_to_bounded_generic_error() -> None:
-    # Empty locations still produce a bounded public message (template + guidance), never raise.
+    # Empty locations still produce a bounded public message (examples + guidance), never raise.
     message = invalid_request_message("start", ())
     assert message.startswith("The tool arguments are invalid.")
-    assert "yoetz://guidance/request-templates.md" in message
+    assert "yoetz://guidance/workflow.md" in message
     assert authoring_hint(_START_SCHEMA, ()) != ""
 
 

@@ -13,7 +13,6 @@ content projecting to omission markers for the exact view from that run.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from copy import deepcopy
 from datetime import UTC, datetime
 from typing import cast
 
@@ -318,68 +317,6 @@ async def _project(
 def _omission_categories(projected: Mapping[str, JsonValue]) -> set[str]:
     projection = cast(Mapping[str, JsonValue], projected["privacy_projection"])
     return set(cast(list[str], projection["blocked_categories"]))
-
-
-async def test_start_projection_adds_bound_non_evidential_template_on_fresh_and_replay() -> None:
-    app, privacy = _application()
-    request = start_request(900, title="Bound start template")
-
-    started = await app.start(request)
-    fresh_wire = await _project(
-        app,
-        ControlMethod.START,
-        public_model_to_wire(request),
-        started,
-        901,
-    )
-    fillable = cast(
-        dict[str, JsonValue],
-        deepcopy(cast(Mapping[str, JsonValue], fresh_wire["next_request_template"])["arguments"]),
-    )
-    fillable["request_id"] = protocol_id("req_", 905)
-    fillable["actor"] = {"actor_id": "harness:test", "actor_type": "harness"}
-    fillable["client"] = {
-        "kind": "test_client",
-        "version": "0.1.0",
-        "integration": "local_cli",
-    }
-    drafts = cast(list[dict[str, JsonValue]], fillable["event_drafts"])
-    obligation_id = protocol_id("obl_", 906)
-    drafts[0]["event_id"] = protocol_id("evt_", 907)
-    drafts[0]["occurred_at"] = "2026-08-04T12:00:00.000Z"
-    plan_payload = cast(dict[str, JsonValue], drafts[0]["payload"])
-    plan_payload["summary"] = "Publish the bounded plan and obligation."
-    plan_payload["obligation_refs"] = [obligation_id]
-    drafts[1]["event_id"] = protocol_id("evt_", 908)
-    drafts[1]["occurred_at"] = "2026-08-04T12:00:00.000Z"
-    obligation_payload = cast(dict[str, JsonValue], drafts[1]["payload"])
-    obligation_payload["obligation_id"] = obligation_id
-    obligation_payload["description"] = "Deliver the bounded change."
-    obligation_payload["acceptance_criteria"] = "The focused tests pass."
-    obligation_payload["evidence_expectation"] = "A named focused test run."
-    published = await app.publish_work(PublishWorkRequest.model_validate(fillable))
-
-    replayed = await app.start(request)
-    replay_wire = await _project(
-        app,
-        ControlMethod.START,
-        public_model_to_wire(request),
-        replayed,
-        903,
-    )
-
-    template = cast(Mapping[str, JsonValue], fresh_wire["next_request_template"])
-    arguments = cast(Mapping[str, JsonValue], template["arguments"])
-    assert template["evidential"] is False
-    assert template["operation"] == "publish_work"
-    assert arguments["protocol_version"] == started.protocol_version
-    assert arguments["schema_version"] == started.schema_version
-    assert arguments["session_id"] == started.session_id
-    assert arguments["writer_id"] == started.writer_id
-    assert arguments["expected_frontier"] == _frontier(started.frontier)
-    assert replay_wire["next_request_template"] == template
-    assert published.result_frontier != started.frontier
-    assert privacy.blocked_categories == set()
 
 
 async def test_blocked_content_projects_for_every_event_family_and_the_compact_view() -> None:

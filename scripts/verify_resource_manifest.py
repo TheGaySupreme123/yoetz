@@ -162,7 +162,6 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ("guidance/agent-instructions.md", "guidance", "text/markdown", True),
     ("guidance/coverage-and-receipts.md", "guidance", "text/markdown", True),
     ("guidance/publication-policy.md", "guidance", "text/markdown", True),
-    ("guidance/request-templates.md", "guidance", "text/markdown", True),
     ("guidance/workflow.md", "guidance", "text/markdown", True),
     ("migrations/bundle/0001.sql", "migration", "application/sql", True),
     ("migrations/bundle/0002.sql", "migration", "application/sql", True),

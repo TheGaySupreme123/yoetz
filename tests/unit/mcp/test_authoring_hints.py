@@ -5,7 +5,7 @@ from the frozen presentation schema, but the response named only field locations
 read product source and conformance tests to author a request instead.
 
 Nested `/event_drafts/N` failures from the same dogfood must name payload enums (and event
-families) rather than falling back to a bare request-template hint.
+families) rather than falling back to a bare "see the examples entry" hint.
 """
 
 from __future__ import annotations
@@ -51,13 +51,13 @@ def test_a_guessed_request_id_is_answered_with_the_required_shape() -> None:
     assert "^req_" in hint
 
 
-def test_an_empty_request_names_the_constant_versions_and_the_template() -> None:
+def test_an_empty_request_names_the_constant_versions_and_the_example() -> None:
     hint = authoring_hint(
         _START_SCHEMA, _locations("/protocol_version", "/schema_version", "/mode")
     )
     assert "protocol_version admits 0.1" in hint
     assert "schema_version admits 1.0.0" in hint
-    assert "yoetz://guidance/request-templates.md" in hint
+    assert "examples entry" in hint
 
 
 def test_the_hint_is_bounded() -> None:
@@ -87,8 +87,8 @@ def test_a_malformed_schema_yields_no_hint_rather_than_raising(schema: object) -
     assert authoring_hint(schema, _locations("/mode")) == ""
 
 
-def test_no_locations_still_points_at_the_template() -> None:
-    assert "yoetz://guidance/request-templates.md" in authoring_hint(_START_SCHEMA, ())
+def test_no_locations_still_points_at_the_example() -> None:
+    assert "examples entry" in authoring_hint(_START_SCHEMA, ())
 
 
 def test_a_schema_without_an_example_stays_silent_when_nothing_is_admitted() -> None:
@@ -113,16 +113,18 @@ def test_every_workflow_tool_can_produce_a_hint() -> None:
     # same bare "arguments are invalid" the dogfood got.
     for name in ("start", "publish_work", "check", "respond", "status", "receipt"):
         schema = cast(dict[str, Any], descriptor_for(name).input_schema)
-        assert "yoetz://guidance/request-templates.md" in authoring_hint(schema, ()), name
+        assert "examples entry" in authoring_hint(schema, ()), name
 
 
 def test_event_draft_index_names_admitted_families_not_bare_fallback() -> None:
-    # Run-3 failures #4/#6/#7 landed on /event_drafts/N with only a generic fallback.
+    # Run-3 failures #4/#6/#7 landed on /event_drafts/N with only "see the examples entry".
     hint = authoring_hint(_PUBLISH_SCHEMA, _locations("/event_drafts/2"))
     assert "event family admits" in hint
     for family in sorted(ORDINARY_MCP_PUBLISH_EVENT_FAMILIES):
         assert family in hint
-    assert hint != (" Hint: see yoetz://guidance/request-templates.md for a complete request.")
+    assert hint != (
+        " Hint: see the examples entry in this tool's input schema for a complete request."
+    )
 
 
 @pytest.mark.parametrize(("pointer", "label", "member"), _NESTED_ENUM_CASES)
@@ -130,7 +132,7 @@ def test_nested_payload_enums_name_admitted_members(pointer: str, label: str, me
     hint = authoring_hint(_PUBLISH_SCHEMA, _locations(pointer))
     assert f"{label} admits" in hint
     assert member in hint
-    assert "yoetz://guidance/request-templates.md" in hint
+    assert "see the examples entry for" in hint
 
 
 def test_hostile_payload_values_never_appear_in_hints() -> None:
@@ -147,7 +149,7 @@ def test_hostile_payload_values_never_appear_in_hints() -> None:
     assert "action_kind admits" in hint
 
 
-def test_hint_construction_failure_degrades_to_template_fallback() -> None:
+def test_hint_construction_failure_degrades_to_example_fallback() -> None:
     # A hint must never turn a clear validation error into an internal error.
     class _Boom(dict[str, JsonValue]):
         def get(  # type: ignore[override]
@@ -159,7 +161,9 @@ def test_hint_construction_failure_degrades_to_template_fallback() -> None:
 
     schema: Mapping[str, JsonValue] = _Boom(_PUBLISH_SCHEMA)
     hint = authoring_hint(schema, _locations("/event_drafts/0/payload/action_kind"))
-    assert hint == (" Hint: see yoetz://guidance/request-templates.md for a complete request.")
+    assert hint == (
+        " Hint: see the examples entry in this tool's input schema for a complete request."
+    )
 
 
 def test_publish_work_examples_cover_ordinary_families_and_cross_refs() -> None:
@@ -287,6 +291,6 @@ def test_invalid_request_message_names_registered_guidance() -> None:
         "publish_work", _locations("/event_drafts/0/payload/action_kind")
     )
     assert "action_kind admits" in publish_message
-    assert "yoetz://guidance/request-templates.md" in publish_message
+    assert "yoetz://guidance/publication-policy.md" in publish_message
     start_message = invalid_request_message("start", _locations("/mode"))
-    assert "yoetz://guidance/request-templates.md" in start_message
+    assert "yoetz://guidance/workflow.md" in start_message

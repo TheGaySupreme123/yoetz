@@ -307,7 +307,7 @@ _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
     ("publish_work", None): 57,
     ("receipt", None): 155,
     ("respond", None): 53,
-    ("start", None): 64,
+    ("start", None): 35,
     ("status", None): 44,
     ("status", "advice"): 17,
     ("status", "assignment"): 6,
@@ -533,9 +533,6 @@ def _start_request_wire() -> dict[str, JsonValue]:
 
 
 def _start_result_wire() -> dict[str, JsonValue]:
-    session_id = _test_id("ses_")
-    writer_id = _test_id("wri_")
-    frontier: dict[str, JsonValue] = {"sequence": "0", "head_digest": "genesis"}
     return {
         "protocol_version": "0.1",
         "schema_version": "1.0.0",
@@ -543,9 +540,9 @@ def _start_result_wire() -> dict[str, JsonValue]:
         "ok": True,
         "outcome": "created",
         "task_id": _test_id("tsk_"),
-        "session_id": session_id,
-        "writer_id": writer_id,
-        "frontier": frontier,
+        "session_id": _test_id("ses_"),
+        "writer_id": _test_id("wri_"),
+        "frontier": {"sequence": "0", "head_digest": "genesis"},
         "compact": {
             "open_obligation_count": "0",
             "unresolved_finding_count": "0",
@@ -558,50 +555,6 @@ def _start_result_wire() -> dict[str, JsonValue]:
             "engine_version": "0.1.0",
             "projection_version": "0.1.0",
             "policy_packs": [],
-        },
-        "next_request_template": {
-            "evidential": False,
-            "operation": "publish_work",
-            "arguments": {
-                "protocol_version": "0.1",
-                "schema_version": "1.0.0",
-                "request_id": "",
-                "actor": {"actor_id": "", "actor_type": ""},
-                "client": {"kind": "", "version": "", "integration": ""},
-                "session_id": session_id,
-                "writer_id": writer_id,
-                "expected_frontier": frontier,
-                "event_drafts": [
-                    {
-                        "event_id": "",
-                        "schema": {"name": "plan_published", "version": "1.0.0"},
-                        "occurred_at": "",
-                        "causal_parents": [],
-                        "payload": {
-                            "plan_version": 1,
-                            "summary": "",
-                            "obligation_refs": [""],
-                        },
-                        "artifact_refs": [],
-                        "evidence_refs": [],
-                    },
-                    {
-                        "event_id": "",
-                        "schema": {"name": "obligation_published", "version": "1.0.0"},
-                        "occurred_at": "",
-                        "causal_parents": [],
-                        "payload": {
-                            "obligation_id": "",
-                            "description": "",
-                            "acceptance_criteria": "",
-                            "evidence_expectation": "",
-                            "status": "open",
-                        },
-                        "artifact_refs": [],
-                        "evidence_refs": [],
-                    },
-                ],
-            },
         },
         "privacy_projection": _privacy_projection_wire(),
     }
@@ -1772,7 +1725,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     rules = cast(tuple[Any, ...], getattr(models, "_RESULT_LEAF_RULES"))
 
     derived_patterns = _derived_result_success_patterns(catalog)
-    assert len(derived_patterns) == 742
+    assert len(derived_patterns) == 713
 
     derived_counts = {
         context: sum(1 for method, view, _ in derived_patterns if (method, view) == context)
@@ -1781,7 +1734,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert derived_counts == _EXPECTED_RESULT_PATTERN_COUNTS
 
     assert type(rules) is tuple
-    assert len(rules) == 758
+    assert len(rules) == 729
     assert rules == tuple(sorted(rules, key=_test_rule_sort_key))
 
     rule_keys = {
@@ -1790,7 +1743,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert len(rule_keys) == len(rules)
 
     registry_patterns = {(rule.method, rule.status_view, rule.segments) for rule in rules}
-    assert len(registry_patterns) == 742
+    assert len(registry_patterns) == 713
     assert registry_patterns == derived_patterns
 
     content_rules = _expected_nonpublish_content_rules(models)
@@ -2421,7 +2374,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 1_424
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 1_410
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:

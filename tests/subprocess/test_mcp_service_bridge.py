@@ -287,7 +287,7 @@ async def test_locked_error_is_structured_and_resources_never_connect(
     runtime = bridge.build_bridge_runtime()
 
     resources = await bridge.list_resources()
-    assert len(resources) == 5
+    assert len(resources) == 4
     assert len(remaining) == 1
 
     result = await bridge.dispatch_start(_requests()["start"], runtime)

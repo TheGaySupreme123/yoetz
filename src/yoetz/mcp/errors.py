@@ -281,10 +281,13 @@ def authoring_hint(schema: object, locations: Sequence[Mapping[str, str]]) -> st
             if example_families:
                 named = ", ".join(example_families[:_MAX_HINT_FIELDS])
                 parts.append(
-                    f"see yoetz://guidance/request-templates.md for a complete {named} request"
+                    f"see the examples entry for {named} in this tool's input schema "
+                    "for a complete request"
                 )
             else:
-                parts.append("see yoetz://guidance/request-templates.md for a complete request")
+                parts.append(
+                    "see the examples entry in this tool's input schema for a complete request"
+                )
     except Exception:
         # A hint must never turn a clear validation error into an internal error — including when
         # even the example probe fails. Prefer the checked-in fallback text over silence or raise.
@@ -293,7 +296,7 @@ def authoring_hint(schema: object, locations: Sequence[Mapping[str, str]]) -> st
         except Exception:
             has_example = True
         return (
-            " Hint: see yoetz://guidance/request-templates.md for a complete request."
+            " Hint: see the examples entry in this tool's input schema for a complete request."
             if has_example
             else ""
         )
@@ -375,7 +378,7 @@ def _paired_field_hint_parts(document: Mapping[str, JsonValue], fields: Sequence
 def _conditional_field_hint_parts(
     document: Mapping[str, JsonValue], fields: Sequence[str]
 ) -> list[str]:
-    """Name safe required alternatives from conditions or a bounded property description."""
+    """Name safe required alternatives activated by a root-level ``if/then`` rule."""
 
     del fields  # Field list confirms a conditional failure; alternatives come from the schema.
     properties = document.get("properties")
@@ -384,17 +387,6 @@ def _conditional_field_hint_parts(
     prop_names = cast(Mapping[str, JsonValue], properties)
     all_of = document.get("allOf")
     if not isinstance(all_of, list):
-        mode = prop_names.get("mode")
-        if not isinstance(mode, Mapping):
-            return []
-        description = cast(Mapping[str, JsonValue], mode).get("description")
-        if (
-            type(description) is str
-            and description.isascii()
-            and 1 <= len(description) <= 256
-            and description.startswith("mode attach requires ")
-        ):
-            return [description]
         return []
     for branch in cast(list[JsonValue], all_of):
         if not isinstance(branch, Mapping):

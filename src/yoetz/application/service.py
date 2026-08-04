@@ -263,11 +263,7 @@ from yoetz.application.publish_work import (  # noqa: E402
 )
 from yoetz.application.receipt import ReceiptInternalResult, execute_receipt  # noqa: E402
 from yoetz.application.respond import RespondInternalResult, execute_respond  # noqa: E402
-from yoetz.application.start import (  # noqa: E402
-    StartInternalResult,
-    execute_start,
-    start_projection_wire,
-)
+from yoetz.application.start import StartInternalResult, execute_start  # noqa: E402
 from yoetz.application.status import StatusInternalResult, execute_status  # noqa: E402
 from yoetz.domain.findings import (  # noqa: E402
     Finding,
@@ -402,14 +398,6 @@ def _internal_json(result: UnprojectedControlBody) -> dict[str, JsonValue]:
     if type(result) is JsonObject:
         return dict(result.items())
     raise TypeError("unprojected_control_body_invalid")
-
-
-def _projection_json(result: UnprojectedControlBody) -> dict[str, JsonValue]:
-    """Return the client-facing pre-privacy shape without changing durable result bytes."""
-
-    if type(result) is StartInternalResult:
-        return start_projection_wire(result)
-    return _internal_json(result)
 
 
 def internal_control_json(result: UnprojectedControlBody) -> dict[str, JsonValue]:
@@ -548,12 +536,7 @@ def _public_model(method: ControlMethod, value: Mapping[str, JsonValue]) -> Proj
     # also exclude any remaining nulls as belt-and-suspenders for their internal builders.
     exclude_none = method in {ControlMethod.RESPOND, ControlMethod.PUBLISH_WORK}
     return result_type.model_validate(
-        success.model_dump(
-            mode="json",
-            by_alias=True,
-            exclude_unset=True,
-            exclude_none=exclude_none,
-        )
+        success.model_dump(mode="json", exclude_unset=True, exclude_none=exclude_none)
     )
 
 
@@ -904,7 +887,7 @@ class Application:
         binding: ControlProjectionBinding,
         result: UnprojectedControlBody,
     ) -> ProjectedControlBody:
-        source = _projection_json(result)
+        source = _internal_json(result)
         method = binding.method
         if "privacy_projection" in source or (
             method in _WORKFLOW_METHODS and source.get("ok") is not True

@@ -63,7 +63,6 @@ _EXPECTED_PACKAGE_PATHS: Mapping[str, str] = {
     "references/agent-instructions.md": "guidance/agent-instructions.md",
     "references/coverage-and-receipts.md": "guidance/coverage-and-receipts.md",
     "references/publication-policy.md": "guidance/publication-policy.md",
-    "references/request-templates.md": "guidance/request-templates.md",
     "references/workflow.md": "guidance/workflow.md",
 }
 _LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")

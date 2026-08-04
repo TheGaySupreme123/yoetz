@@ -20,5 +20,4 @@ the decisions behind it see [`docs/adr/`](../adr/).
 
 Agent-facing guidance is separate and lives in [`guidance/`](../../guidance/). It ships
 byte-identically to every harness and over MCP, so it is the authority for how an agent should
-behave. Its `request-templates.md` fallback keeps requests authorable when a host drops schema
-metadata; these pages are for the human operating the installation.
+behave; these pages are for the human operating the installation.

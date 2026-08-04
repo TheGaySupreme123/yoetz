@@ -128,15 +128,16 @@ _OPERATION_RECOVERY_UNAVAILABLE_MESSAGE: Final = (
     "correct the named authoring fields and resubmit with the intended request identity."
 )
 _OPERATION_RECOVERY_UNAVAILABLE_DETAILS: Final = {"reason_code": "operation_recovery_unavailable"}
-_REQUEST_TEMPLATES_GUIDANCE_URI: Final = "yoetz://guidance/request-templates.md"
+_PUBLICATION_GUIDANCE_URI: Final = "yoetz://guidance/publication-policy.md"
+_WORKFLOW_GUIDANCE_URI: Final = "yoetz://guidance/workflow.md"
 _GUIDANCE_BY_OPERATION: Final = MappingProxyType(
     {
-        "start": _REQUEST_TEMPLATES_GUIDANCE_URI,
-        "publish_work": _REQUEST_TEMPLATES_GUIDANCE_URI,
-        "check": _REQUEST_TEMPLATES_GUIDANCE_URI,
-        "respond": _REQUEST_TEMPLATES_GUIDANCE_URI,
-        "status": _REQUEST_TEMPLATES_GUIDANCE_URI,
-        "receipt": _REQUEST_TEMPLATES_GUIDANCE_URI,
+        "start": _WORKFLOW_GUIDANCE_URI,
+        "publish_work": _PUBLICATION_GUIDANCE_URI,
+        "check": "yoetz://guidance/coverage-and-receipts.md",
+        "respond": _PUBLICATION_GUIDANCE_URI,
+        "status": _WORKFLOW_GUIDANCE_URI,
+        "receipt": "yoetz://guidance/coverage-and-receipts.md",
     }
 )
 

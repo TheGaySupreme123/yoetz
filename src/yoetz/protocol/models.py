@@ -1393,101 +1393,6 @@ class StartVersionSliceModel(_ClosedModel):
         return self
 
 
-class StartNextRequestActorTemplateModel(_ClosedModel):
-    """Caller-owned actor fields that must be filled before publication."""
-
-    actor_id: Literal[""]
-    actor_type: Literal[""]
-
-
-class StartNextRequestClientTemplateModel(_ClosedModel):
-    """Caller-owned client fields that must be filled before publication."""
-
-    kind: Literal[""]
-    version: Literal[""]
-    integration: Literal[""]
-
-
-class StartNextRequestEventSchemaTemplateModel(_ClosedModel):
-    name: Literal["plan_published", "obligation_published"]
-    version: Literal["1.0.0"]
-
-
-class StartNextRequestPlanPayloadTemplateModel(_ClosedModel):
-    plan_version: Literal[1]
-    summary: Literal[""]
-    obligation_refs: tuple[Literal[""], ...]
-
-    @model_validator(mode="after")
-    def _validate_plan_template(self) -> StartNextRequestPlanPayloadTemplateModel:
-        if self.obligation_refs != ("",):
-            raise ValueError("invalid_start_next_request_template")
-        return self
-
-
-class StartNextRequestObligationPayloadTemplateModel(_ClosedModel):
-    obligation_id: Literal[""]
-    description: Literal[""]
-    acceptance_criteria: Literal[""]
-    evidence_expectation: Literal[""]
-    status: Literal["open"]
-
-
-class StartNextRequestEventDraftTemplateModel(_ClosedModel):
-    event_id: Literal[""]
-    event_schema: StartNextRequestEventSchemaTemplateModel = Field(alias="schema")
-    occurred_at: Literal[""]
-    causal_parents: tuple[Literal[""], ...]
-    payload: (
-        StartNextRequestPlanPayloadTemplateModel | StartNextRequestObligationPayloadTemplateModel
-    )
-    artifact_refs: tuple[Literal[""], ...]
-    evidence_refs: tuple[Literal[""], ...]
-
-    @model_validator(mode="after")
-    def _validate_event_template(self) -> StartNextRequestEventDraftTemplateModel:
-        if self.causal_parents or self.artifact_refs or self.evidence_refs:
-            raise ValueError("invalid_start_next_request_template")
-        expected_name = (
-            "plan_published"
-            if type(self.payload) is StartNextRequestPlanPayloadTemplateModel
-            else "obligation_published"
-        )
-        if self.event_schema.name != expected_name:
-            raise ValueError("invalid_start_next_request_template")
-        return self
-
-
-class StartPublishWorkRequestTemplateModel(_ClosedModel):
-    protocol_version: Literal["0.1"]
-    schema_version: Literal["1.0.0"]
-    request_id: Literal[""]
-    actor: StartNextRequestActorTemplateModel
-    client: StartNextRequestClientTemplateModel
-    session_id: SessionIdWire
-    writer_id: WriterIdWire
-    expected_frontier: FrontierModel
-    event_drafts: tuple[StartNextRequestEventDraftTemplateModel, ...]
-
-    @model_validator(mode="after")
-    def _validate_event_pair(self) -> StartPublishWorkRequestTemplateModel:
-        if (
-            len(self.event_drafts) != 2
-            or self.event_drafts[0].event_schema.name != "plan_published"
-            or self.event_drafts[1].event_schema.name != "obligation_published"
-        ):
-            raise ValueError("invalid_start_next_request_template")
-        return self
-
-
-class StartNextRequestTemplateModel(_ClosedModel):
-    """Non-evidential, projection-only authoring scaffold for the first publication."""
-
-    evidential: Literal[False]
-    operation: Literal["publish_work"]
-    arguments: StartPublishWorkRequestTemplateModel
-
-
 class StartSuccessModel(_ClosedModel):
     protocol_version: Literal["0.1"]
     schema_version: Literal["1.0.0"]
@@ -1500,20 +1405,10 @@ class StartSuccessModel(_ClosedModel):
     frontier: FrontierModel
     compact: StartCompactViewModel
     versions: StartVersionSliceModel
-    next_request_template: StartNextRequestTemplateModel
     privacy_projection: PrivacyProjectionModel
 
     @model_validator(mode="after")
     def _validate_start_success(self) -> StartSuccessModel:
-        request = self.next_request_template.arguments
-        if (
-            request.protocol_version != self.protocol_version
-            or request.schema_version != self.schema_version
-            or request.session_id != self.session_id
-            or request.writer_id != self.writer_id
-            or request.expected_frontier != self.frontier
-        ):
-            raise ValueError("start_next_request_binding_mismatch")
         _validate_model_against_schema(self, "start-result")
         return self
 
@@ -3018,37 +2913,6 @@ _START_STRUCTURAL_POINTERS: Final = (
     )
     + _prefix_leaf_patterns("/privacy_projection", _PRIVACY_PROJECTION_LEAVES)
     + _prefix_leaf_patterns("/versions", _BASIC_VERSION_LEAVES)
-    + (
-        "/next_request_template/evidential",
-        "/next_request_template/operation",
-        "/next_request_template/arguments/protocol_version",
-        "/next_request_template/arguments/schema_version",
-        "/next_request_template/arguments/request_id",
-        "/next_request_template/arguments/actor/actor_id",
-        "/next_request_template/arguments/actor/actor_type",
-        "/next_request_template/arguments/client/kind",
-        "/next_request_template/arguments/client/version",
-        "/next_request_template/arguments/client/integration",
-        "/next_request_template/arguments/session_id",
-        "/next_request_template/arguments/writer_id",
-        "/next_request_template/arguments/expected_frontier/sequence",
-        "/next_request_template/arguments/expected_frontier/head_digest",
-        "/next_request_template/arguments/event_drafts/*/event_id",
-        "/next_request_template/arguments/event_drafts/*/schema/name",
-        "/next_request_template/arguments/event_drafts/*/schema/version",
-        "/next_request_template/arguments/event_drafts/*/occurred_at",
-        "/next_request_template/arguments/event_drafts/*/causal_parents/*",
-        "/next_request_template/arguments/event_drafts/*/payload/plan_version",
-        "/next_request_template/arguments/event_drafts/*/payload/summary",
-        "/next_request_template/arguments/event_drafts/*/payload/obligation_refs/*",
-        "/next_request_template/arguments/event_drafts/*/payload/obligation_id",
-        "/next_request_template/arguments/event_drafts/*/payload/description",
-        "/next_request_template/arguments/event_drafts/*/payload/acceptance_criteria",
-        "/next_request_template/arguments/event_drafts/*/payload/evidence_expectation",
-        "/next_request_template/arguments/event_drafts/*/payload/status",
-        "/next_request_template/arguments/event_drafts/*/artifact_refs/*",
-        "/next_request_template/arguments/event_drafts/*/evidence_refs/*",
-    )
 )
 
 _PUBLISH_STRUCTURAL_POINTERS: Final = (
@@ -3686,7 +3550,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 758:
+    if len(result) != 729:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

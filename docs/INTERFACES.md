@@ -169,14 +169,11 @@ When a non-publish write surfaces `response_projection_failed` and the committed
 the control error also carries `sequence`, `head_digest`, and `count` in `accepted_state` /
 `safe_details`.
 
-MCP resource discovery: `resources/list` serves the five `yoetz://guidance/*.md` entries and
+MCP resource discovery: `resources/list` serves the four `yoetz://guidance/*.md` entries and
 validates against the MCP `ListResourcesResult` schema (`tests/subprocess/test_mcp_resource_discovery.py`).
 `resources/templates/list` answers method-not-found because no templates are declared and the
 capability is not advertised — that pairing is conformant and is asserted, not "fixed". Guidance
-must not present MCP resource-template discovery as a recovery path. The static
-`yoetz://guidance/request-templates.md` resource is an ordinary guidance resource: it carries
-complete, schema-valid fallback request bodies for the six operations and all nine ordinary
-publication families. It does not weaken catalog admission or add an MCP resource template.
+must not present template discovery as a recovery path.
 Internal-only value error: `ProtocolValueError(reason_code: str)` — bounded reason codes, never
 free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from codes in
 `cli/exits.py` only.
@@ -2402,9 +2399,8 @@ facade and are never MCP tools.
   the exact sufficient coverage.
 - `mcp/resources.py`: exposes the packaged harness-neutral guidance documents as MCP resources under
   stable `yoetz://guidance/<name>` URIs, so a host with no first-party integration can still fetch
-  the publication policy, coverage rules, and schema-valid request templates on demand. Resources
-  are static reviewed product bytes read through `importlib.resources` and digest-checked against
-  the resource manifest; the registry
+  the publication policy and coverage rules on demand. Resources are static reviewed product bytes
+  read through `importlib.resources` and digest-checked against the resource manifest; the registry
   is read-only, closed, and contains no ledger, task, projection, or user content. It is therefore
   not a `LocalDisclosureSink` and creates no disclosure receipt.
 - `cli/app.py`: Typer client surface with the six operations and registered support/service/privacy

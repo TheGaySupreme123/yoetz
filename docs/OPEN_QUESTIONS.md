@@ -264,10 +264,7 @@ that evidence.
 - **F-016:** Any MCP host is supported with no integration. `guidance/agent-instructions.md` is
   served verbatim as the initialize `instructions` string to every host and must carry every rule
   whose absence would cause harm, because it is the only tier guaranteed to arrive; the four
-  core guidance documents plus `request-templates.md` are also exposed as read-only
-  `yoetz://guidance/<name>` resources. The templates keep all six operations and all nine ordinary
-  publication families authorable when a host drops schema metadata, without changing catalog
-  admission authority. MCP declares
+  guidance documents are also exposed as read-only `yoetz://guidance/<name>` resources. MCP declares
   tools and resources only. `mcp/descriptors.py` owns every agent-read string, loads it from verified
   packaged resources with no runtime composition or fallback, and is bound by the guidance wording
   lint. An unprofiled host therefore earns `cooperative_mcp`/`self_asserted`/`published_only` — the

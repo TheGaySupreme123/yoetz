@@ -28,7 +28,7 @@ from yoetz.adapters.objects.envelope import decode_object_envelope
 from yoetz.adapters.sqlite.migrations import initialize_bundle, initialize_catalog
 from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.adapters.sqlite.start_catalog import SqliteStartCatalog
-from yoetz.application.start import execute_start, start_projection_wire
+from yoetz.application.start import execute_start
 from yoetz.domain.values import Frontier
 from yoetz.ports.importer import ImporterPort
 from yoetz.ports.keys import BundleKeys, WrappedDek
@@ -345,16 +345,6 @@ async def test_create_replays_exact_result_without_reopening_runtime() -> None:
     replayed = await execute_start(app, request)
 
     assert replayed == created
-    assert start_projection_wire(replayed) == start_projection_wire(created)
-    assert "next_request_template" not in created.as_wire()
-    projected = start_projection_wire(created)
-    template = cast(dict[str, JsonValue], projected["next_request_template"])
-    arguments = cast(dict[str, JsonValue], template["arguments"])
-    assert template["evidential"] is False
-    assert template["operation"] == "publish_work"
-    assert arguments["session_id"] == created.session_id
-    assert arguments["writer_id"] == created.writer_id
-    assert arguments["expected_frontier"] == created.frontier.model_dump(mode="json")
     assert created.ok is True
     assert created.outcome == "created"
     assert created.frontier.sequence == "1"

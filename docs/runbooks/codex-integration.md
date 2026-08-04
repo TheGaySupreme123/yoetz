@@ -126,36 +126,6 @@ only from real observation evidence. `AdviceSnapshot` surfaces via nonblocking h
 path fails, use the ordinary manual resume/compaction procedure and cooperative publication; do not
 infer support from a different Codex version.
 
-### Capture and compare the live tool boundary
-
-When a supported Codex build renders a Yoetz argument as `unknown`, capture the client inventory
-before reading implementation source or changing a schema. Use a new scratch testing home; the
-`codex-testing` launcher derives its real `CODEX_HOME` from `CODEX_TESTING_HOME`, so setting only
-`CODEX_HOME` is not isolation.
-
-```text
-YOETZ_CODEX_SCRATCH="$(mktemp -d /private/tmp/yoetz-codex-boundary.XXXXXX)"
-
-CODEX_TESTING_HOME="$YOETZ_CODEX_SCRATCH" codex-testing mcp add \
-  --env UV_CACHE_DIR="$YOETZ_CODEX_SCRATCH/uv-cache" \
-  yoetz -- uv --directory /absolute/path/to/yoetz-core run yoetz mcp serve --semantic off
-
-CODEX_TESTING_HOME="$YOETZ_CODEX_SCRATCH" codex-testing mcp get yoetz
-
-python scripts/capture_codex_mcp_surface.py \
-  --codex-binary /absolute/path/to/codex-testing \
-  --codex-testing-home "$YOETZ_CODEX_SCRATCH" \
-  --output "$YOETZ_CODEX_SCRATCH/mcp-server-status.json"
-```
-
-Confirm `mcp get` names only the scratch registration before capturing. Record the exact Codex
-build, Yoetz commit or artifact digest, route profile, capture digest, and whether the evidence is
-raw `mcpServerStatus` inventory, a declaration actually delivered to a model, or both. Compare
-`start`, `publish_work`, and `check` for local references, union-only array items, and conditionals
-in object-shape position. A raw inventory proves what Codex received from Yoetz; it does not by
-itself prove what a model was shown. Keep before and after captures side by side and state that
-evidence boundary explicitly.
-
 ## 8. Remove
 
 ```text

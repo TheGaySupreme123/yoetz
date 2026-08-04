@@ -53,8 +53,8 @@ Only `status` and `resolution_evidence_refs` may differ. Changing meaning fields
 `resolved → open` is rejected with reason `obligation_resolution_mismatch` and invariant
 `meaning_fields_must_repeat` (or `open_to_resolved_only` for an invalid status transition). The
 public error names the mismatched schema field names only — never their values. A worked open +
-resolution pair lives in the `publish_work` tool input schema `examples` entry. Complete request
-bodies remain available at `yoetz://guidance/request-templates.md` if a host drops schema examples.
+resolution pair lives in the `publish_work` tool input schema `examples` entry for
+`obligation_published`.
 
 ## Subject state and freshness
 
@@ -66,10 +66,7 @@ Batch facts that belong to one material transition. Preserve writer sequence and
 
 Before a material publish over MCP, set `dry_run: true` to validate the batch and preview accepted event ids and coverage without appending. The dry-run result is not evidential and must not be cited as a check, publication, or coverage source. When the preview is acceptable, publish with the same `request_id` and `dry_run` omitted or false.
 
-Worked examples for each ordinary publishable family — and a cross-linked
-action/result/evidence/claim batch — live in the `publish_work` tool input schema `examples` entry
-and as complete fallback bodies at `yoetz://guidance/request-templates.md`. Example `occurred_at`
-values are illustrative shape only; do not copy them into live drafts.
+Worked examples for each ordinary publishable family — and a cross-linked action/result/evidence/claim batch — live in the `publish_work` tool input schema `examples` entry. Example `occurred_at` values are illustrative shape only; do not copy them into live drafts.
 
 ## Event time claims
 

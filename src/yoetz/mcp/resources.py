@@ -99,18 +99,6 @@ GUIDANCE_RESOURCES: Final = (
         ),
         annotations=GuidanceResourceAnnotations(audience=("assistant",), priority=0.8),
     ),
-    GuidanceResource(
-        uri="yoetz://guidance/request-templates.md",
-        logical_name="guidance/request-templates.md",
-        name="request-templates.md",
-        title="Yoetz request templates",
-        description=(
-            "Read when a host drops schema metadata or after an invalid request. Complete "
-            "copy-ready bodies for all six operations and all nine ordinary publication "
-            "families, with explicit placeholder replacement rules."
-        ),
-        annotations=GuidanceResourceAnnotations(audience=("assistant",), priority=0.7),
-    ),
 )
 
 _RESOURCE_BY_URI: Final = MappingProxyType(

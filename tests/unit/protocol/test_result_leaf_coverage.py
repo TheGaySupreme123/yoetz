@@ -63,8 +63,7 @@ def _leaf_patterns(
     if _is_model(annotation):
         model_fields = cast(dict[str, FieldInfo], getattr(annotation, "model_fields"))
         for name, field in model_fields.items():
-            wire_name = field.serialization_alias or name
-            _leaf_patterns(field.annotation, (*path, wire_name), collected, depth + 1)
+            _leaf_patterns(field.annotation, (*path, name), collected, depth + 1)
         return
     collected.add(path)
 
