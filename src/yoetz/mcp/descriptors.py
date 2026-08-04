@@ -1236,8 +1236,9 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "security or privacy reasoning, interoperability, or whether the code satisfies the ask; "
         "deterministic_only only for explicitly local or structural checks, a semantic-disabled "
         "policy, or a deliberate no-egress choice, and then disclose that limitation. Omitting "
-        "mode resolves through the configured verification policy. When scope is present, send "
-        "both claim_ids and obligation_ids; two empty arrays mean the whole case. Call it after "
+        "mode resolves through the configured verification policy. Omit scope for the whole case, "
+        "or send both claim_ids and obligation_ids as arrays of unique ids; two empty arrays also "
+        "mean the whole case, and sending only one of the two keys is rejected. Call it after "
         "publishing the completion claim and its evidence, and again after any material edit, "
         "new evidence, or "
         "finding response; a check with no new events since the last one adds nothing. Semantic "
@@ -1346,7 +1347,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
             {
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
                 "publish_work": "sha256:e29c8b514d8eeab7efdc4d7b16181f766d45824f91b6960eb6c93ff0a9071d34",
-                "check": "sha256:234755325ef81caff5142ee582377b5e582e3fd9777fafd23fb36f2885d3af7a",
+                "check": "sha256:5dbc5e12638e1c288f7c9c34d362ca9f82bb7240944befe99ebc3dfed2a0f296",
                 "respond": "sha256:7af2775e5204a902a116eefb24e4588eb66645df39f6748f22975ba44a7896e6",
                 "status": "sha256:f50314514f180a19f912662e191fec7880e2e41a6fc8dd475a063c2263eafa61",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
@@ -1356,7 +1357,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
             {
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
                 "publish_work": "sha256:e29c8b514d8eeab7efdc4d7b16181f766d45824f91b6960eb6c93ff0a9071d34",
-                "check": "sha256:3b3da8c11d4c4a5e5c17cf1adec3c092093597dda70b2c8d923ab6448ce8b4ba",
+                "check": "sha256:b01b5c0b599274f322415a14ce662a3cbde40ccc8edcba33cc2cb79981ecb634",
                 "respond": "sha256:7af2775e5204a902a116eefb24e4588eb66645df39f6748f22975ba44a7896e6",
                 "status": "sha256:f50314514f180a19f912662e191fec7880e2e41a6fc8dd475a063c2263eafa61",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
@@ -1366,8 +1367,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:49ceddbf698e8371741b454952d4afc05d79c803acc038586b03a5f2d2dd2203",
-        "strict": "sha256:8bf731d8f45de9036552517b4ef1894115e0c1b05044906e735fe6238fd28a87",
+        "policy": "sha256:b450ca481af7a0c1ca1746652810e344fb8d1cf1222b8eedfe2c5668d2dfda86",
+        "strict": "sha256:7ae0f5b97cc165a72b526cbecb7b0a995fff7ae4ba68b96fc33ca97f19b292b0",
     }
 )
 

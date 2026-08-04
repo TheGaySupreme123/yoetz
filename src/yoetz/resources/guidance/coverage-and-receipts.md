@@ -54,6 +54,16 @@ A non-succeeding `semantic_status` is a coverage gap, not a failure to retry awa
 
 When a second job in one session again returns no judgment, stop requesting semantic review: run `deterministic_only` and say in the final answer that semantic review was requested and did not run, naming the recorded `semantic_status` and `semantic_reason`. A terminal reason such as `retry_budget_exhausted` describes the retry outcome, not the initiating cause; do not present it as a diagnosis.
 
+## Check scope
+
+<a id="check-scope"></a>
+
+`scope` is optional and has exactly two admitted shapes. Omit it to check the whole case, or send
+both `claim_ids` and `obligation_ids` together as arrays of unique ids. Two empty arrays also mean
+the whole case, so `{"claim_ids": [], "obligation_ids": []}` and an omitted `scope` are the same
+request. Sending only one of the two keys is rejected: the other is reported as missing, and the
+repair is to add it or to drop `scope` entirely.
+
 ## Receipt format
 
 Default agent-context policy can project verification output (findings, obligations, receipt sections) so `json`, `markdown`, and `text` receipts work for the requesting agent. Under a deliberately stricter owner policy, digest-bound `json` may fail closed with `PRIVACY_AUTHORITY_REQUIRED` (`receipt_json_projection_blocked`); re-request `markdown` or `text`, or widen agent-context policy from a local terminal. The durable receipt is still recorded when projection is blocked.

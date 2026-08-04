@@ -324,6 +324,97 @@ async def test_public_operation_error_keeps_event_invalid_not_internal_error(
     await bridge.close_bridge_runtime(runtime)
 
 
+def _reference_mirror_error() -> PublicOperationError:
+    """Build the real reference-mirror rejection the publish application produces.
+
+    Hand-writing the message here would let the bridge case pass while the production text drifted,
+    so the case rides on whatever `prepare_publication` actually raises.
+    """
+
+    from typing import cast as _cast
+
+    from builders.replay import replay_records
+    from yoetz.application.publish_work import Application, prepare_publication
+    from yoetz.domain.events import EventPayload, LedgerRecord, encode_payload
+    from yoetz.protocol.coverage import PublicationChannel
+    from yoetz.protocol.models import PublishWorkRequestModel
+
+    class _App:
+        def authorizes_import_publication(self, request: PublishWorkRequest) -> bool:
+            del request
+            return False
+
+    def draft(family: str) -> tuple[dict[str, JsonValue], LedgerRecord]:
+        record = next(
+            row for row in replay_records("all-event-families") if row.schema.name == family
+        )
+        assert record.payload is not None
+        return {
+            "event_id": record.event_id,
+            "schema": {"name": record.schema.name, "version": record.schema.version},
+            "occurred_at": record.occurred_at.wire,
+            "causal_parents": list(record.causal_parents),
+            "payload": encode_payload(_cast(EventPayload, record.payload)),
+            "artifact_refs": list(record.artifact_refs),
+            "evidence_refs": list(record.evidence_refs),
+        }, record
+
+    broken, record = draft("result_recorded")
+    mirrored = cast(list[JsonValue], broken["evidence_refs"])
+    # Break the mirror in whichever direction the recorded draft leaves available.
+    broken["evidence_refs"] = [] if mirrored else ["evd_00000000-0000-4000-8000-0000000000ff"]
+    request = PublishWorkRequestModel.model_validate(
+        {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "request_id": _id("request", 2),
+            "session_id": record.session_id,
+            "writer_id": record.writer.writer_id,
+            "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
+            "event_drafts": (broken,),
+            "actor": {"actor_id": "harness:mcp", "actor_type": "harness"},
+            "client": {
+                "kind": "cooperative_agent",
+                "version": "0.1.0",
+                "integration": "cooperative_mcp",
+            },
+        }
+    )
+    with pytest.raises(PublicOperationError) as captured:
+        prepare_publication(
+            request,
+            channel=PublicationChannel.LOCAL_CLI,
+            app=cast(Application, _App()),
+        )
+    return captured.value
+
+
+@pytest.mark.anyio
+async def test_reference_mirror_correction_survives_the_bridge_round_trip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The corrective sentence only helps if it reaches the wire, not just the application layer."""
+
+    failure = _reference_mirror_error()
+    _install_clients(monkeypatch, [_FakeClient(failure)])
+    runtime = bridge.build_bridge_runtime()
+
+    result = await bridge.dispatch_publish_work(_requests()["publish_work"], runtime)
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    error = cast(dict[str, JsonValue], result.structuredContent["error"])
+    assert error["code"] == "EVENT_INVALID"
+    assert error["code"] != "INTERNAL_ERROR"
+    details = cast(dict[str, JsonValue], error["safe_details"])
+    assert details["reason_code"] == "ref_mirror_mismatch"
+    assert details["field"] == "/event_drafts/0/evidence_refs"
+    message = cast(str, error["message"])
+    assert "evidence_refs" in message
+    assert "yoetz://guidance/publication-policy.md" in message
+    await bridge.close_bridge_runtime(runtime)
+
+
 @pytest.mark.anyio
 async def test_unexpected_bridge_error_logs_public_correlation_id(
     monkeypatch: pytest.MonkeyPatch,

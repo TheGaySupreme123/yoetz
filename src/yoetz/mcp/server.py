@@ -145,7 +145,7 @@ def _authoring_hint_for(operation: str, locations: Sequence[Mapping[str, str]]) 
     """Look up the frozen presentation schema for one tool and hint from it, or say nothing."""
 
     try:
-        hint = authoring_hint(descriptor_for(operation).input_schema, locations)
+        hint = authoring_hint(descriptor_for(operation).input_schema, locations, tool=operation)
     except Exception:
         # A hint is a convenience. Never let building one turn a clear validation error into an
         # internal error.

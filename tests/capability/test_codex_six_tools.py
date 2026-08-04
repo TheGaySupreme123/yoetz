@@ -44,6 +44,14 @@ _DEGRADED_CODES = frozenset(
         PublicErrorCode.VAULT_LOCKED.value,
     }
 )
+# Codes a rejected-but-hinted call may carry: a plain argument rejection, or the same-ID recovery
+# answer a publish body gets when no local service can say whether the operation already landed.
+_REJECTION_CODES = frozenset(
+    {
+        PublicErrorCode.INVALID_REQUEST.value,
+        PublicErrorCode.OPERATION_PENDING.value,
+    }
+)
 
 
 def _serve_parameters(tmp_path: Path) -> StdioServerParameters:
@@ -288,6 +296,99 @@ async def test_mcp_stdio_six_tool_dispatch_without_claiming_codex_activation(
             Observation("mcp_stdio_dispatch", boolean_value=True),
             Observation("six_tools_called", integer_value=6),
             Observation("structured_result_shape", boolean_value=True),
+        ),
+        EvidenceOutcome.PASS,
+        output_root=evidence_root,
+    )
+    assert evidence.outcome is EvidenceOutcome.PASS
+
+
+def _rejected_tool_arguments() -> dict[str, dict[str, JsonValue]]:
+    """Two rejections the 2026-08-03 dogfood actually produced, in their own shapes.
+
+    `publish_work` puts the family value on a guessed top-level key; `check` sends half a scope.
+    Both were rejected safely before, and both left the agent with nothing to author from.
+    """
+
+    valid = _schema_valid_tool_arguments()
+    publish = dict(valid["publish_work"])
+    drafts = cast(list[JsonValue], publish["event_drafts"])
+    draft = dict(cast(Mapping[str, JsonValue], drafts[0]))
+    schema = cast(Mapping[str, JsonValue], draft.pop("schema"))
+    draft["event_type"] = schema["name"]
+    publish["event_drafts"] = [draft]
+    check: dict[str, JsonValue] = {
+        **valid["check"],
+        "scope": cast(JsonValue, {"obligation_ids": []}),
+    }
+    return {"publish_work": publish, "check": check}
+
+
+@pytest.mark.anyio
+async def test_rejected_arguments_carry_corrective_text_over_the_wire(tmp_path: Path) -> None:
+    """Corrective text that never leaves the process repairs nothing.
+
+    The dogfood host degraded the tool schema, so the error message and the guidance resources were
+    the only surfaces that reached the agent. These two calls assert the repair information arrives
+    over real MCP stdio rather than only in a unit-level hint.
+    """
+
+    evidence_root = capability_evidence_output_root(tmp_path)
+    arguments = _rejected_tool_arguments()
+    messages: dict[str, str] = {}
+    params = _serve_parameters(tmp_path)
+    async with stdio_client(params) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            for name, payload in arguments.items():
+                result = await session.call_tool(name, cast(dict[str, object], payload))
+                assert result.isError is True
+                assert result.structuredContent is not None
+                structured = cast(dict[str, object], result.structuredContent)
+                error = cast(dict[str, object], structured["error"])
+                # An unvalidatable publish body first consults same-ID recovery, and with no local
+                # service reachable that answers OPERATION_PENDING while still carrying the
+                # authoring hint. Either code is a rejection; the corrective text is the claim.
+                assert error["code"] in _REJECTION_CODES
+                messages[name] = cast(str, error["message"])
+
+    # The draft envelope: which key carries the family, and what else the envelope must carry.
+    assert "schema.name admits" in messages["publish_work"]
+    assert "each event_drafts entry requires" in messages["publish_work"]
+    for key in ("event_id", "occurred_at", "causal_parents", "artifact_refs", "evidence_refs"):
+        assert key in messages["publish_work"]
+    # Check scope: the missing peer and the omit-the-whole-object alternative.
+    assert "claim_ids" in messages["check"]
+    assert "omit scope for the whole case" in messages["check"]
+
+    context = runtime_capability_context(
+        fixture_digest=bytes_digest(b"mcp-stdio-corrective-authoring"),
+        test_revision=_TEST_REVISION,
+        config_profile_digest=canonical_digest({"profile": "mcp_stdio_corrective"}),
+        external_tool="mcp",
+        external_version="1.28.1",
+        integration_channel="mcp_stdio",
+        protocol_version="2025-11-25",
+        sdk_version="1.28.1",
+    )
+    evidence = record_and_write(
+        CapabilityCase(
+            case_id="SIX-003",
+            requirement_id="ADR-005.six-tools",
+            claim_id="E-002.six-tools-corrective-authoring",
+            capability_family="codex_six_tools",
+            required_observation_codes=frozenset(
+                {"corrective_messages_observed", "rejected_calls", "invalid_request_code"}
+            ),
+            allowed_observation_codes=frozenset(
+                {"corrective_messages_observed", "rejected_calls", "invalid_request_code"}
+            ),
+        ),
+        context,
+        (
+            Observation("corrective_messages_observed", boolean_value=True),
+            Observation("invalid_request_code", boolean_value=True),
+            Observation("rejected_calls", integer_value=len(messages)),
         ),
         EvidenceOutcome.PASS,
         output_root=evidence_root,

@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import Final, Literal, Protocol, cast
 
 from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
@@ -327,12 +328,97 @@ def _payload_field_of(exc: BaseException) -> str | None:
     return field if type(field) is str else None
 
 
+def _draft_subfield_of(exc: BaseException) -> str | None:
+    """Read the owning draft envelope field a protocol rejection carried, if it named one.
+
+    ``ProtocolValueError.field`` documents that consumers must re-check it against their own
+    allowlist, so anything that is not a frozen draft envelope name is discarded here rather than
+    handed to ``_draft_pointer``, which would drop the draft ordinal along with it.
+    """
+
+    field = getattr(exc, "field", None)
+    return field if type(field) is str and field in _LOCATABLE_DRAFT_SUBFIELDS else None
+
+
+_REGISTERED_EVENT_FAMILIES: Final = frozenset(schema.name for schema in PAYLOAD_TYPES)
+
+
+def _declared_schema_name(value: JsonValue) -> str | None:
+    """Return the draft's declared family, but only when it is a registered frozen name.
+
+    The rule that repairs a reference-mirror rejection differs per family, so the message needs to
+    know which one was declared. A caller-supplied string is never carried: an unregistered name
+    returns None and the generic message stands.
+    """
+
+    if not isinstance(value, Mapping):
+        return None
+    schema = cast(Mapping[str, JsonValue], value).get("schema")
+    if not isinstance(schema, Mapping):
+        return None
+    name = cast(Mapping[str, JsonValue], schema).get("name")
+    return name if type(name) is str and name in _REGISTERED_EVENT_FAMILIES else None
+
+
+# Corrective sentences for reason codes whose repair is an exact rule the caller cannot infer from
+# the generic "correct the payload" message. Keyed by reason code and, where the rule differs per
+# event family, by the frozen family name. Every character is checked in here: no caller value, no
+# submitted identifier, and no count derived from the rejected request reaches these strings.
+_REF_MIRROR_EVIDENCE_RULE: Final = (
+    "The event batch is invalid. The draft envelope evidence_refs must repeat the payload "
+    "evidence_refs exactly: the same ids in the same ascending order, or both empty. See "
+    "yoetz://guidance/publication-policy.md section reference mirrors. Correct the event payload "
+    "before retrying."
+)
+_REF_MIRROR_CORRECTIONS: Final[Mapping[str, Mapping[str, str]]] = MappingProxyType(
+    {
+        "ref_mirror_mismatch": MappingProxyType(
+            {
+                "result_recorded": _REF_MIRROR_EVIDENCE_RULE,
+                "response_recorded": _REF_MIRROR_EVIDENCE_RULE,
+                "evidence_recorded": (
+                    "The event batch is invalid. The draft envelope artifact_refs must be exactly "
+                    "the payload captured_object_id, or empty when the payload declares no "
+                    "captured object. See yoetz://guidance/publication-policy.md section "
+                    "reference mirrors. Correct the event payload before retrying."
+                ),
+                "receipt_recorded": (
+                    "The event batch is invalid. The draft envelope artifact_refs must be exactly "
+                    "the payload receipt_object_id. See yoetz://guidance/publication-policy.md "
+                    "section reference mirrors. Correct the event payload before retrying."
+                ),
+                "redaction_recorded": (
+                    "The event batch is invalid. The draft envelope artifact_refs must repeat the "
+                    "payload target_object_ids exactly: the same ids in the same ascending order, "
+                    "or both empty. See yoetz://guidance/publication-policy.md section reference "
+                    "mirrors. Correct the event payload before retrying."
+                ),
+            }
+        )
+    }
+)
+
+
+def _corrective_message(reason_code: str, schema_name: str | None) -> str | None:
+    """Return the checked-in corrective message for one reason code and family, if registered."""
+
+    families = _REF_MIRROR_CORRECTIONS.get(reason_code)
+    if families is None or type(schema_name) is not str:
+        return None
+    # The family must be one the domain already registers; an unregistered name falls through to
+    # the generic message rather than reaching the caller or raising.
+    if schema_name not in _REGISTERED_EVENT_FAMILIES:
+        return None
+    return families.get(schema_name)
+
+
 def _event_invalid(
     reason_code: str = "invalid_event_value_type",
     *,
     event_index: int | None = None,
     subfield: str | None = None,
     payload_field: str | None = None,
+    schema_name: str | None = None,
 ) -> PublicOperationError:
     # Only a stale frontier is fixed by rereading status; every other reason needs the event
     # payload corrected first, and retrying it unchanged would fail the same way.
@@ -342,7 +428,12 @@ def _event_invalid(
             "idempotently with the same request_id."
         )
     else:
-        message = "The event batch is invalid. Correct the event payload before retrying."
+        # An EVENT_INVALID reaches MCP through the success branch of the dispatcher, so the bridge
+        # cannot append a hint the way it does for INVALID_REQUEST. Stating the rule here is what
+        # keeps the CLI and MCP surfaces identical and the failure repairable in one retry.
+        message = _corrective_message(reason_code, schema_name) or (
+            "The event batch is invalid. Correct the event payload before retrying."
+        )
     details: dict[str, str] = {"reason_code": reason_code}
     if event_index is not None:
         pointer = _draft_pointer(event_index, subfield, payload_field)
@@ -525,8 +616,15 @@ def prepare_publication(
             raise
         except (TypeError, ValueError) as exc:
             # Anything not already attributed to a field still names its draft, so the caller
-            # never has to re-derive which member of the batch was rejected.
-            raise _event_invalid(_reason_code_of(exc), event_index=index) from exc
+            # never has to re-derive which member of the batch was rejected. Envelope-level
+            # invariants such as the reference mirrors fail while the draft itself is being
+            # constructed, outside any `_locate` wrapper, so the owning field is read here.
+            raise _event_invalid(
+                _reason_code_of(exc),
+                event_index=index,
+                subfield=_draft_subfield_of(exc),
+                schema_name=_declared_schema_name(value),
+            ) from exc
     drafts = tuple(decoded)
     try:
         _validate_order(drafts)
