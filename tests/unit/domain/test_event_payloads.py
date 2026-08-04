@@ -41,10 +41,12 @@ from yoetz.domain.events import (
     FindingRecordedPayload,
     IntegrationKind,
     LedgerChain,
+    NoObligationsReason,
     ObligationChange,
     ObligationChangeKind,
     ObligationStatus,
     PayloadRef,
+    PlanPublishedPayload,
     PlanRevisedPayload,
     PolicyVersion,
     ProjectionLocator,
@@ -311,10 +313,65 @@ def test_boundary_model_conversion_normalizes_optional_fields() -> None:
     assert normalize_payload_json(schema, normalized) == normalized
 
 
+@pytest.mark.parametrize("reason", tuple(NoObligationsReason))
+@pytest.mark.parametrize("family", ("plan_published", "plan_revised"))
+def test_no_obligations_reason_values_round_trip(
+    family: str,
+    reason: NoObligationsReason,
+) -> None:
+    row = _ROW_BY_FAMILY[family]
+    wire = deepcopy(cast(dict[str, Any], row["payload"]))
+    if family == "plan_published":
+        wire["obligation_refs"] = []
+    else:
+        wire["obligation_changes"] = []
+    wire["no_obligations_reason"] = reason.value
+
+    payload = decode_payload(_schema_for(row), freeze_json(wire))
+    assert isinstance(payload, PlanPublishedPayload | PlanRevisedPayload)
+    assert payload.no_obligations_reason is reason
+    encoded = encode_payload(payload)
+    assert cast(Mapping[str, object], encoded)["no_obligations_reason"] == reason.value
+    assert decode_payload(_schema_for(row), encoded) == payload
+
+
+@pytest.mark.parametrize("family", ("plan_published", "plan_revised"))
+def test_unknown_no_obligations_reason_fails_closed(family: str) -> None:
+    row = _ROW_BY_FAMILY[family]
+    wire = deepcopy(cast(dict[str, Any], row["payload"]))
+    wire["no_obligations_reason"] = "caller_controlled_reason"
+    _assert_reason(
+        "invalid_event_enum",
+        lambda: decode_payload(_schema_for(row), freeze_json(wire)),
+    )
+
+
+def test_omitted_no_obligations_reason_preserves_existing_canonical_event_bytes() -> None:
+    for family in ("plan_published", "plan_revised"):
+        row = _ROW_BY_FAMILY[family]
+        original = freeze_json(row["payload"])
+        payload = decode_payload(_schema_for(row), original)
+        assert isinstance(payload, PlanPublishedPayload | PlanRevisedPayload)
+        assert payload.no_obligations_reason is None
+        assert canonical_encode(encode_payload(payload)) == canonical_encode(original)
+
+        record = _accepted_from_row(row)
+        original_envelope = freeze_json(row["envelope"])
+        assert canonical_encode(accepted_record_to_json(record)) == canonical_encode(
+            original_envelope
+        )
+        original_preimage = dict(cast(Mapping[str, Any], row["envelope"]))
+        original_preimage.pop("entry_digest")
+        assert canonical_encode(accepted_record_digest_preimage(record)) == canonical_encode(
+            freeze_json(original_preimage)
+        )
+
+
 _OPTIONAL_FIELDS: Final = (
     ("session_opened", "external_ref"),
     ("session_opened", "workspace_ref"),
     ("plan_published", "scope_exclusions"),
+    ("plan_published", "no_obligations_reason"),
     ("obligation_published", "acceptance_criteria"),
     ("obligation_published", "requested_items"),
     ("obligation_published", "source_refs"),
@@ -340,6 +397,7 @@ _OPTIONAL_FIELDS: Final = (
     ("claim_recorded", "subject_state"),
     ("claim_recorded", "obligation_refs"),
     ("claim_recorded", "disputes_refs"),
+    ("plan_revised", "no_obligations_reason"),
     ("response_recorded", "reason"),
     ("response_recorded", "waiver_scope"),
     ("response_recorded", "waiver_expiry"),
@@ -430,6 +488,11 @@ def test_support_types_and_client_enum_identity_are_exact() -> None:
         "source",
     )
     expected_enum_values = {
+        NoObligationsReason: (
+            "no_material_change",
+            "single_atomic_change",
+            "exploratory_scope_unknown",
+        ),
         ObligationStatus: ("open", "resolved"),
         WritePolicy: ("read_only", "writes_allowed"),
         ActionKind: ("command", "edit", "research", "review", "other"),

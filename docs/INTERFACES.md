@@ -377,6 +377,10 @@ handles and unknown-only adjacent metadata appear in neither JSON view.
 
 Key payload fields (minimum; full shapes in `src/yoetz/domain/events.py`):
 
+- `plan_published`: `plan_version`, `summary`, sorted-unique `obligation_refs`, optional
+  `scope_exclusions`, and optional `no_obligations_reason`
+  (`no_material_change|single_atomic_change|exploratory_scope_unknown`). The reason is valid only
+  when `obligation_refs` is empty.
 - `obligation_published`: `obligation_id`, `description`, `evidence_expectation`, optional
   `acceptance_criteria`, `source_refs`.
 - `action_recorded`: `action_id`, `action_kind` (`command`|`edit`|`research`|`review`|`other`),
@@ -387,6 +391,10 @@ Key payload fields (minimum; full shapes in `src/yoetz/domain/events.py`):
   (mutable ref) and/or `captured_object_id` + `content_digest`, `observed_at`, `evidence_kind`.
 - `claim_recorded`: `claim_id`, `claim_kind` (`completion`|`material`), `statement`,
   `supporting_refs` (evidence/result/obligation IDs), optional `subject_state`.
+- `plan_revised`: `plan_version`, `supersedes_plan_version`, `reason`, `summary`,
+  `obligation_changes`, and optional `no_obligations_reason` using the same closed values. A
+  revision restates the effective current declaration: omission clears an earlier reason, and a
+  present reason is valid only when applying the revision leaves zero effective obligation refs.
 - `response_recorded`: `finding_id`, `finding_frontier`, `disposition`
   (`acknowledged`|`rejected`|`waived`), optional `reason`, optional `waiver_scope`, `waiver_expiry`,
   `evidence_refs`.
@@ -578,9 +586,9 @@ Verdict enum (`CheckVerdict`): `action_required`, `no_issue_detected`, `insuffic
 coverage: Coverage)`. `findings` is the ordered selected set after the optional one-slot semantic
 diversity rule, not necessarily the ordinary top-N prefix. `coverage` is always the full
 `RankingContext.coverage`; suppression or slot replacement never strengthens it. Verdict
-precedence is `required_incomplete -> incomplete_check`, else any selected actionable finding ->
-`action_required`, else `coverage_incomplete -> insufficient_coverage`, else
-`no_issue_detected` with an empty selection.
+precedence is `required_incomplete -> incomplete_check`, else either closed completion-scope gap ->
+`insufficient_coverage`, else any selected actionable finding -> `action_required`, else
+`coverage_incomplete -> insufficient_coverage`, else `no_issue_detected` with an empty selection.
 
 `ReceiptConclusion`, owned by `domain/receipts.py`, is exactly
 `no_unresolved_deterministic_findings`, `unresolved_findings_remain`, or
@@ -590,9 +598,10 @@ subject frontier the required correspondence is `action_required -> unresolved_f
 `no_issue_detected -> no_unresolved_deterministic_findings`, and
 `insufficient_coverage -> insufficient_coverage`; `incomplete_check` maps to
 `unresolved_findings_remain` when any actionable finding remains unresolved at that frontier,
-otherwise to `insufficient_coverage`. An `insufficient_coverage` check has no selected actionable
-finding by the registered verdict precedence, so the receipt builder's actionable-first rule does
-not conflict with this correspondence.
+otherwise to `insufficient_coverage`. Ordinarily an `insufficient_coverage` check has no selected
+actionable finding. The two closed completion-scope gaps are the narrow exception: selected findings
+remain visible, but the gap dominates both the check verdict and receipt conclusion because empty
+completion scope cannot support an action-required completion verdict.
 
 `domain/receipts.py` owns the exact schema-shaped `ReceiptDocument`, `ReceiptVersionSlice`,
 policy/schema version entries, obligation/response/gap/redaction records, and canonical sections.
@@ -613,6 +622,17 @@ Shared structural gap codes for optional semantic relevance review (distinct fam
 - `semantic_review_not_configured` — evaluator/provider not configured;
 - `semantic_relevance_review_not_run` — evaluation failed/timed out/unavailable without a clean pass;
 - `semantic_review_not_requested` — deterministic-only check; semantic review was never requested.
+
+Completion-scope gaps are a separate deterministic case family. When a completion claim exists and
+the readable effective current plan declares zero obligations, exactly one applies:
+
+- `completion_scope_undeclared` — the effective plan has no obligation refs and no typed
+  `no_obligations_reason`;
+- `completion_scope_declared_none` — the effective plan has no obligation refs and carries a typed
+  reason.
+
+Both force `coverage_incomplete`, `insufficient_coverage`, and an insufficient-coverage receipt.
+The typed declaration records the participant's scope decision but never purchases a clean verdict.
 
 Two further codes describe a review that did run but could not deliver everything it produced:
 
@@ -669,6 +689,16 @@ the frontier merely advanced.
   `latest_tested_state` is exactly the source check event ID, subject frontier, verdict,
   `returned_finding_ids`, `suppressed_count`, and recorded coverage. Suppression is durable
   structural uncertainty: it is never reconstructed from visible finding IDs.
+  `CurrentPlanScope` and `current_plan_scope`, owned by `kernel/plan_scope.py`, are the one shared
+  readable-plan-chain derivation consumed by status, check, and receipt: effective obligation refs,
+  their declared count, and the current `no_obligations_reason`. A revision applies its obligation
+  changes and restates the reason;
+  omission clears it. The derivation reads no prompt, source code, workspace state, or prose. If a
+  plan-chain payload is redacted or otherwise unreadable, or an unknown plan-family event prevents
+  interpreting the chain, scope remains unknown and never becomes an empty tuple or zero count. By
+  contrast, an obligation ID in a readable plan remains a known declared ref when its obligation
+  row is missing or redacted; it is counted, treated conservatively open, and carries the existing
+  missing/redaction gap.
   `ProjectionRecord.redacted` is the generation-1 historical name for the common null-payload
   tombstone bit: it is true exactly when that record's event payload is unavailable. It is not by
   itself proof that a `redaction_recorded` event exists. An accepted-envelope state of
@@ -799,6 +829,10 @@ the frontier merely advanced.
   profile/include transform that changes selected fields or sections changes the canonical
   document and digest; it is not a render-only rewrite. Conclusion, subject frontier, suppression,
   weakest coverage, and material gap codes are invariant and may only stay equal or weaken.
+  Receipt completion-scope wording is selected only from the shared current-plan scope state and
+  fixed templates: “scope was never declared”; “the plan declared none, reason:
+  `<no_obligations_reason>`”; or “declared obligations are all resolved.” The interpolation is the
+  bounded closed enum value, never caller-controlled plan summary, revision reason, or other prose.
 - `PolicyPack` is the frozen data-only selector `(policy_id, policy_version)`; it contains no
   callback or dynamic rule source. Its ids are `work-integrity/0.1.0`,
   `research-evidence/0.1.0`
@@ -2247,17 +2281,24 @@ per operation: `start`, `publish_work`, `check`, `respond`, `status`, `receipt`,
 `PublicOperationError`.
 
 Every `status` success carries `closure_readiness(open_obligation_count,
-unresolved_finding_count, blocking_conditions)` beside `import_status`, on every view. Its
+unresolved_finding_count, declared_obligation_count, no_obligations_reason,
+blocking_conditions)` beside `import_status`, on every view. The compact singleton carries the same
+two completion-scope fields beside its current plan locator and counters. Its
 `blocking_conditions` are exactly
-`obligations_open|findings_unresolved|no_plan_published|projection_stale|coverage_gaps_declared|
-readiness_unknown`. It is derived per request from the compact projection: reading it records
+`obligations_open|findings_unresolved|no_plan_published|no_obligations_declared|projection_stale|
+coverage_gaps_declared|readiness_unknown`. It is derived per request from the compact projection:
+reading it records
 nothing, creates no verdict or IDs, and never strengthens coverage. It exists so a check or receipt
 is not spent before the record can support a conclusion.
 
-Compact omits its singleton when the task title is unreadable. Readiness never fills that gap with
-zeros, which would assert a clean record from missing data: both counts are then `null` and
-`blocking_conditions` is exactly `("readiness_unknown",)`. Unknown is a bounded state, not a
-default.
+No plan yields `no_plan_published`. A readable effective plan with declared count zero and no reason
+yields `no_obligations_declared`; the same count with a typed reason clears that blocker while the
+reason remains visible. A positive declared count has no completion-scope blocker when all effective
+obligations are resolved. Compact omits its singleton when the task title is unreadable. Readiness
+never fills an unreadable scope or count with zeros: all three counts and the reason are then `null`,
+and `blocking_conditions` is exactly `("readiness_unknown",)`. Unknown is a bounded state, not a
+default. Existing stale, unknown-event, missing-reference, redaction, and coverage-gap blockers
+remain conservative.
 
 Only `ServiceDaemon` constructs and calls this facade after lifecycle/vault
 readiness and control admission; CLI, MCP, and UI call `ServiceClient` instead and cannot import

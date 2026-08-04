@@ -9,9 +9,20 @@ from typing import Any, cast
 
 import pytest
 
+from builders.policy_cases import clm, evt, make_case, obl, plan_record, record
 from builders.replay import replay_records
-from yoetz.domain.events import AcceptedEvent
+from yoetz.domain.events import (
+    AcceptedEvent,
+    ClaimKind,
+    ClaimRecordedPayload,
+    NoObligationsReason,
+    PlanPublishedPayload,
+)
 from yoetz.domain.findings import FindingKind, FindingOrigin
+from yoetz.domain.receipts import (
+    COMPLETION_SCOPE_DECLARED_NONE_GAP,
+    COMPLETION_SCOPE_UNDECLARED_GAP,
+)
 from yoetz.domain.values import claim_id, object_id, obligation_id
 from yoetz.kernel import deterministic_checks
 from yoetz.kernel.deterministic_checks import (
@@ -48,6 +59,46 @@ def test_genesis_case_is_exact_and_immutable() -> None:
     assert case.gaps == ()
     with pytest.raises(TypeError):
         case.coverage_by_ref["evt_00000000-0000-4000-8000-000000000001"] = None  # type: ignore[index, assignment]
+
+
+def test_completion_scope_case_gap_distinguishes_undeclared_declared_none_and_unknown() -> None:
+    claim = ClaimRecordedPayload(clm(1), ClaimKind.COMPLETION, "Complete", (), obligation_refs=())
+    empty_plan = PlanPublishedPayload(1, "Atomic scope", (), ())
+    undeclared = make_case(
+        plans={1: plan_record(empty_plan, 1)},
+        claims={clm(1): record(claim, 2)},
+    )
+    gap = deterministic_checks.completion_scope_gap(undeclared.projection)
+    assert gap is not None
+    assert gap.code == COMPLETION_SCOPE_UNDECLARED_GAP
+    assert gap.marker == f"{COMPLETION_SCOPE_UNDECLARED_GAP}:{evt(1)}"
+    assert gap.subject_refs == ()
+
+    for reason in NoObligationsReason:
+        declared_plan = replace(empty_plan, no_obligations_reason=reason)
+        declared = make_case(
+            plans={1: plan_record(declared_plan, 1)},
+            claims={clm(1): record(claim, 2)},
+        )
+        declared_gap = deterministic_checks.completion_scope_gap(declared.projection)
+        assert declared_gap is not None
+        assert declared_gap.code == COMPLETION_SCOPE_DECLARED_NONE_GAP
+
+    no_plan = make_case(claims={clm(1): record(claim, 2)})
+    assert deterministic_checks.completion_scope_gap(no_plan.projection) is None
+
+    redacted_plan = replace(plan_record(empty_plan, 1), payload=None, redacted=True)
+    unreadable = make_case(
+        plans={1: redacted_plan},
+        claims={clm(1): record(claim, 2)},
+    )
+    assert deterministic_checks.completion_scope_gap(unreadable.projection) is None
+
+    declared_positive = make_case(
+        plans={1: plan_record(PlanPublishedPayload(1, "Declared", (obl(1),), ()), 1)},
+        claims={clm(1): record(claim, 2)},
+    )
+    assert deterministic_checks.completion_scope_gap(declared_positive.projection) is None
 
 
 def test_deterministic_case_codec_round_trips_canonical_bytes() -> None:
@@ -142,6 +193,10 @@ def test_replay_redaction_gaps_keep_typed_roots_and_caps() -> None:
     case = build_deterministic_case(replay(records), records, CaseAvailabilityFacts())
     gaps = {(gap.code, gap.subject_refs) for gap in case.gaps}
     assert gaps == {
+        (
+            COMPLETION_SCOPE_UNDECLARED_GAP,
+            (),
+        ),
         (
             "redacted_event",
             ("evt_20000002-0000-4000-8000-000000000008",),

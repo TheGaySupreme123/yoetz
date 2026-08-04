@@ -375,6 +375,10 @@ def test_presentation_examples_admit_under_catalog_models() -> None:
     assert isinstance(schema, dict)
     # The first example stays the smallest possible starting publication.
     assert schema["name"] == "plan_published"
+    first_payload = first_draft["payload"]
+    assert isinstance(first_payload, dict)
+    assert first_payload["obligation_refs"] == []
+    assert first_payload["no_obligations_reason"] == "single_atomic_change"
 
     # Every ordinary publishable family carries a worked example, and each one is a request an
     # agent could send unchanged. Copying a valid shape is the whole point of shipping these.

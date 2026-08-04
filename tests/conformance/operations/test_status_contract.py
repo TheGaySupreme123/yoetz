@@ -6,6 +6,7 @@ and filter/derivation defaults.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
 
@@ -27,7 +28,8 @@ from yoetz.application.service import (
     VerificationPolicy,
 )
 from yoetz.application.start import StartInternalResult
-from yoetz.domain.events import RuntimeProfile
+from yoetz.application.status import StatusInternalResult
+from yoetz.domain.events import AcceptedEvent, RuntimeProfile
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
@@ -43,6 +45,7 @@ from yoetz.domain.privacy import (
 )
 from yoetz.domain.receipts import PolicyVersionEntry, ReceiptVersionSlice, SchemaVersionEntry
 from yoetz.domain.values import Frontier, session_id
+from yoetz.kernel.reducers import replay
 from yoetz.ports.control import ControlClientKind, ControlMethod
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
@@ -57,6 +60,7 @@ from yoetz.protocol.models import (
     PublishWorkRequest,
     RespondRequest,
     StatusCandidateFindingsPageModel,
+    StatusCompactPageModel,
     StatusFindingsPageModel,
     StatusObligationsPageModel,
     StatusRequest,
@@ -73,6 +77,25 @@ _POLICY_PACKS = ("research-evidence/0.1.0", "work-integrity/0.1.0")
 class _IdleImporter:
     async def status(self, session: str) -> ImportStatusSnapshot:
         return ImportStatusSnapshot(session_id(session), 0, 0, (), ())
+
+
+class _Reservation:
+    source_identity_digest = _DIGEST
+    publication_ordinal = 0
+
+
+class _ReservedImportState:
+    """Minimal already-verified reservation seam used by the memory ledger import path."""
+
+    jobs: dict[str, object] = {}
+
+    def has_pending_import(self, session: str) -> bool:
+        del session
+        return False
+
+    def publication_reservation(self, writer: str, request: str) -> _Reservation:
+        del writer, request
+        return _Reservation()
 
 
 class _WorkflowRuntime(MemoryStartRuntime):
@@ -215,7 +238,9 @@ def _frontier(value: Frontier | FrontierModel) -> JsonValue:
     return cast(JsonValue, value.model_dump(mode="json"))
 
 
-def _build_app(*, seed_offset: int = 0) -> tuple[Application, _WorkflowRuntime, _ProjectionSpy]:
+def _build_app(
+    *, seed_offset: int = 0, trusted_import: bool = False
+) -> tuple[Application, _WorkflowRuntime, _ProjectionSpy]:
     start_app, start_runtime, clock, catalog = start_composition()
     projection = _ProjectionSpy()
     ids = start_runtime.ids
@@ -234,7 +259,7 @@ def _build_app(*, seed_offset: int = 0) -> tuple[Application, _WorkflowRuntime, 
         disclosure_scope_for=_scope,
         receipt_version_resolver=lambda _: _versions(),
         waiver_authorizer=lambda _: False,
-        import_publication_authorizer=lambda _: False,
+        import_publication_authorizer=lambda _: trusted_import,
         profile=RuntimeProfile.TEST_FAKE,
         policy_packs=_POLICY_PACKS,
         version_manifest=start_app.version_manifest,
@@ -332,6 +357,39 @@ def _cli_binding(rpc_seed: int, facts: object) -> ControlProjectionBinding:
     )
 
 
+async def _assert_mcp_scope_projection(
+    app: Application,
+    request: StatusRequest,
+    status: StatusInternalResult,
+    *,
+    seed: int,
+    declared: str | None,
+    opened: str | None,
+    reason: str | None,
+    blockers: tuple[str, ...],
+) -> None:
+    source = cast(
+        dict[str, JsonValue], request.model_dump(mode="json", by_alias=True, exclude_none=True)
+    )
+    facts = await app.projection_binding_facts(ControlMethod.STATUS, source, status)
+    projected = await app.project_result_for_client(
+        ClientProjectionContext(
+            ControlClientKind.MCP_BRIDGE,
+            ProjectionRenderMode.MACHINE_READABLE,
+            False,
+        ),
+        _cli_binding(seed, facts),
+        status,
+    )
+    assert isinstance(projected, StatusResultModel)
+    assert projected.root.ok is True
+    page = cast(StatusCompactPageModel, projected.root.page)
+    assert page.items[0].declared_obligation_count == declared
+    assert page.items[0].open_obligation_count == opened
+    assert page.items[0].no_obligations_reason == reason
+    assert projected.root.closure_readiness.blocking_conditions == blockers
+
+
 async def test_status_request_result_parity() -> None:
     """The same status result, projected for CLI and MCP-bridge surfaces, carries the same
     public page content everywhere; only the trusted per-surface disclosure sink differs."""
@@ -373,6 +431,659 @@ async def test_status_request_result_parity() -> None:
     assert cli_projected.root.privacy_projection.sink == "local_human_view"
     assert mcp_projected.root.privacy_projection.sink == "agent_context"
     assert len(projection.candidates) == 2
+
+
+@pytest.mark.parametrize(
+    "reason",
+    (
+        None,
+        "no_material_change",
+        "single_atomic_change",
+        "exploratory_scope_unknown",
+    ),
+)
+async def test_status_distinguishes_undeclared_and_declared_empty_scope(
+    reason: str | None,
+) -> None:
+    seed = (
+        500
+        if reason is None
+        else 510
+        + (
+            "no_material_change",
+            "single_atomic_change",
+            "exploratory_scope_unknown",
+        ).index(reason)
+    )
+    app, _runtime, _projection = _build_app(seed_offset=seed)
+    started = await app.start(start_request(seed, title="Declared completion scope"))
+
+    before = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 1)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "compact",
+                "limit": "10",
+            }
+        )
+    )
+    before_page = cast(StatusCompactPageModel, before.page)
+    assert before_page.items[0].declared_obligation_count == "0"
+    assert before_page.items[0].no_obligations_reason is None
+    assert before.closure_readiness.blocking_conditions == ("no_plan_published",)
+
+    payload: dict[str, JsonValue] = {
+        "plan_version": 1,
+        "summary": "Record the effective completion scope.",
+        "obligation_refs": [],
+    }
+    if reason is not None:
+        payload["no_obligations_reason"] = reason
+    published = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 2)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(started.frontier),
+                "event_drafts": [
+                    {
+                        "event_id": protocol_id("evt_", seed + 3),
+                        "schema": {"name": "plan_published", "version": "1.0.0"},
+                        "occurred_at": "2026-08-04T12:00:00.000Z",
+                        "causal_parents": [],
+                        "payload": payload,
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    }
+                ],
+            }
+        )
+    )
+    status_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", seed + 4)),
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "view": "compact",
+        "limit": "10",
+        "at_frontier": str(published.result_frontier.sequence),
+    }
+    status = await app.status(StatusRequest.model_validate(status_wire))
+    page = cast(StatusCompactPageModel, status.page)
+    item = page.items[0]
+    assert item.declared_obligation_count == "0"
+    assert item.no_obligations_reason == reason
+    assert item.open_obligation_count == "0"
+    assert status.closure_readiness.declared_obligation_count == "0"
+    assert status.closure_readiness.no_obligations_reason == reason
+    assert status.closure_readiness.blocking_conditions == (
+        ("no_obligations_declared",) if reason is None else ()
+    )
+
+    facts = await app.projection_binding_facts(ControlMethod.STATUS, status_wire, status)
+    projected = await app.project_result_for_client(
+        ClientProjectionContext(
+            ControlClientKind.MCP_BRIDGE,
+            ProjectionRenderMode.MACHINE_READABLE,
+            False,
+        ),
+        _cli_binding(seed + 5, facts),
+        status,
+    )
+    assert isinstance(projected, StatusResultModel)
+    assert projected.root.ok is True
+    projected_success = projected.root
+    projected_page = cast(StatusCompactPageModel, projected_success.page)
+    assert projected_page.items[0].no_obligations_reason == reason
+    assert projected_success.closure_readiness.blocking_conditions == (
+        ("no_obligations_declared",) if reason is None else ()
+    )
+
+
+async def test_status_distinguishes_open_and_resolved_declared_obligations() -> None:
+    seed = 540
+    app, _runtime, _projection = _build_app(seed_offset=seed)
+    started = await app.start(start_request(seed, title="Declared obligation lifecycle"))
+    obligation_id = protocol_id("obl_", seed + 1)
+    obligation_event_id = protocol_id("evt_", seed + 2)
+    plan_event_id = protocol_id("evt_", seed + 3)
+    meaning: dict[str, JsonValue] = {
+        "obligation_id": obligation_id,
+        "description": "Prove the declared status lifecycle.",
+        "acceptance_criteria": "The declared obligation resolves with evidence.",
+        "evidence_expectation": "A focused deterministic test result.",
+    }
+    published = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 4)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(started.frontier),
+                "event_drafts": [
+                    {
+                        "event_id": obligation_event_id,
+                        "schema": {"name": "obligation_published", "version": "1.0.0"},
+                        "occurred_at": "2026-08-04T12:00:00.000Z",
+                        "causal_parents": [],
+                        "payload": {**meaning, "status": "open"},
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    },
+                    {
+                        "event_id": plan_event_id,
+                        "schema": {"name": "plan_published", "version": "1.0.0"},
+                        "occurred_at": "2026-08-04T12:00:01.000Z",
+                        "causal_parents": [obligation_event_id],
+                        "payload": {
+                            "plan_version": 1,
+                            "summary": "Declare the obligation status lifecycle.",
+                            "obligation_refs": [obligation_id],
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    },
+                ],
+            }
+        )
+    )
+
+    open_request = StatusRequest.model_validate(
+        {
+            **_request_base(protocol_id("req_", seed + 5)),
+            "session_id": started.session_id,
+            "writer_id": started.writer_id,
+            "view": "compact",
+            "limit": "10",
+            "at_frontier": str(published.result_frontier.sequence),
+        }
+    )
+    open_status = await app.status(open_request)
+    open_item = cast(StatusCompactPageModel, open_status.page).items[0]
+    assert open_item.declared_obligation_count == "1"
+    assert open_item.open_obligation_count == "1"
+    assert open_item.no_obligations_reason is None
+    assert open_status.closure_readiness.blocking_conditions == ("obligations_open",)
+    await _assert_mcp_scope_projection(
+        app,
+        open_request,
+        open_status,
+        seed=seed + 50,
+        declared="1",
+        opened="1",
+        reason=None,
+        blockers=("obligations_open",),
+    )
+
+    evidence_id = protocol_id("evd_", seed + 6)
+    resolved = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 7)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(published.result_frontier),
+                "event_drafts": [
+                    {
+                        "event_id": protocol_id("evt_", seed + 8),
+                        "schema": {"name": "evidence_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-08-04T12:00:02.000Z",
+                        "causal_parents": [plan_event_id],
+                        "payload": {
+                            "evidence_id": evidence_id,
+                            "evidence_kind": "test_result",
+                            "strength": "content_digest",
+                            "content_digest": "sha256:" + "1" * 64,
+                            "observed_at": "2026-08-04T12:00:02.000Z",
+                            "description": "The focused declared-scope test passed.",
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    },
+                    {
+                        "event_id": protocol_id("evt_", seed + 9),
+                        "schema": {"name": "obligation_published", "version": "1.0.0"},
+                        "occurred_at": "2026-08-04T12:00:03.000Z",
+                        "causal_parents": [protocol_id("evt_", seed + 8)],
+                        "payload": {
+                            **meaning,
+                            "status": "resolved",
+                            "resolution_evidence_refs": [evidence_id],
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [evidence_id],
+                    },
+                ],
+            }
+        )
+    )
+    resolved_request = StatusRequest.model_validate(
+        {
+            **_request_base(protocol_id("req_", seed + 10)),
+            "session_id": started.session_id,
+            "writer_id": started.writer_id,
+            "view": "compact",
+            "limit": "10",
+            "at_frontier": str(resolved.result_frontier.sequence),
+        }
+    )
+    resolved_status = await app.status(resolved_request)
+    resolved_item = cast(StatusCompactPageModel, resolved_status.page).items[0]
+    assert resolved_item.declared_obligation_count == "1"
+    assert resolved_item.open_obligation_count == "0"
+    assert resolved_status.closure_readiness.blocking_conditions == ()
+    await _assert_mcp_scope_projection(
+        app,
+        resolved_request,
+        resolved_status,
+        seed=seed + 52,
+        declared="1",
+        opened="0",
+        reason=None,
+        blockers=(),
+    )
+
+
+async def test_status_revision_repairs_undeclared_empty_scope() -> None:
+    seed = 560
+    app, _runtime, _projection = _build_app(seed_offset=seed)
+    started = await app.start(start_request(seed, title="Repair declared empty scope"))
+    first_event_id = protocol_id("evt_", seed + 1)
+    first = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 2)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(started.frontier),
+                "event_drafts": [
+                    {
+                        "event_id": first_event_id,
+                        "schema": {"name": "plan_published", "version": "1.0.0"},
+                        "occurred_at": "2026-08-04T12:00:00.000Z",
+                        "causal_parents": [],
+                        "payload": {
+                            "plan_version": 1,
+                            "summary": "Initially omit the empty-scope declaration.",
+                            "obligation_refs": [],
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    }
+                ],
+            }
+        )
+    )
+    before = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 3)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "compact",
+                "limit": "10",
+                "at_frontier": str(first.result_frontier.sequence),
+            }
+        )
+    )
+    assert before.closure_readiness.blocking_conditions == ("no_obligations_declared",)
+
+    revised = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 4)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(first.result_frontier),
+                "event_drafts": [
+                    {
+                        "event_id": protocol_id("evt_", seed + 5),
+                        "schema": {"name": "plan_revised", "version": "1.0.0"},
+                        "occurred_at": "2026-08-04T12:00:01.000Z",
+                        "causal_parents": [first_event_id],
+                        "payload": {
+                            "plan_version": 2,
+                            "supersedes_plan_version": 1,
+                            "reason": "Record the explicit empty-scope declaration.",
+                            "summary": "No material change applies.",
+                            "obligation_changes": [],
+                            "no_obligations_reason": "no_material_change",
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    }
+                ],
+            }
+        )
+    )
+    after_request = StatusRequest.model_validate(
+        {
+            **_request_base(protocol_id("req_", seed + 6)),
+            "session_id": started.session_id,
+            "writer_id": started.writer_id,
+            "view": "compact",
+            "limit": "10",
+            "at_frontier": str(revised.result_frontier.sequence),
+        }
+    )
+    after = await app.status(after_request)
+    after_item = cast(StatusCompactPageModel, after.page).items[0]
+    assert after_item.declared_obligation_count == "0"
+    assert after_item.no_obligations_reason == "no_material_change"
+    assert after.closure_readiness.blocking_conditions == ()
+    await _assert_mcp_scope_projection(
+        app,
+        after_request,
+        after,
+        seed=seed + 50,
+        declared="0",
+        opened="0",
+        reason="no_material_change",
+        blockers=(),
+    )
+
+
+async def test_status_missing_declared_reference_stays_conservatively_open() -> None:
+    seed = 580
+    app, _runtime, _projection = _build_app(seed_offset=seed)
+    started = await app.start(start_request(seed, title="Missing declared reference"))
+    missing_obligation = protocol_id("obl_", seed + 1)
+    published = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 2)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(started.frontier),
+                "event_drafts": [
+                    {
+                        "event_id": protocol_id("evt_", seed + 3),
+                        "schema": {"name": "plan_published", "version": "1.0.0"},
+                        "occurred_at": "2026-08-04T12:00:00.000Z",
+                        "causal_parents": [],
+                        "payload": {
+                            "plan_version": 1,
+                            "summary": "Retain the declared missing reference.",
+                            "obligation_refs": [missing_obligation],
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    }
+                ],
+            }
+        )
+    )
+    status_request = StatusRequest.model_validate(
+        {
+            **_request_base(protocol_id("req_", seed + 4)),
+            "session_id": started.session_id,
+            "writer_id": started.writer_id,
+            "view": "compact",
+            "limit": "10",
+            "at_frontier": str(published.result_frontier.sequence),
+        }
+    )
+    status = await app.status(status_request)
+    item = cast(StatusCompactPageModel, status.page).items[0]
+    assert item.declared_obligation_count == "1"
+    assert item.open_obligation_count == "1"
+    assert item.open_obligations == ()
+    assert "missing_ref" in item.gaps
+    assert status.closure_readiness.blocking_conditions == (
+        "obligations_open",
+        "coverage_gaps_declared",
+    )
+    await _assert_mcp_scope_projection(
+        app,
+        status_request,
+        status,
+        seed=seed + 50,
+        declared="1",
+        opened="1",
+        reason=None,
+        blockers=("obligations_open", "coverage_gaps_declared"),
+    )
+
+
+async def test_unreadable_plan_scope_is_unknown_in_status_and_attach() -> None:
+    seed = 600
+    app, runtime, _projection = _build_app(seed_offset=seed)
+    title = "Redacted declared scope"
+    started = await app.start(start_request(seed, title=title))
+    plan_event_id = protocol_id("evt_", seed + 1)
+    plan = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 2)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(started.frontier),
+                "event_drafts": [
+                    {
+                        "event_id": plan_event_id,
+                        "schema": {"name": "plan_published", "version": "1.0.0"},
+                        "occurred_at": "2026-08-04T12:00:00.000Z",
+                        "causal_parents": [],
+                        "payload": {
+                            "plan_version": 1,
+                            "summary": "Declare an empty scope before redaction.",
+                            "obligation_refs": [],
+                            "no_obligations_reason": "single_atomic_change",
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    }
+                ],
+            }
+        )
+    )
+    ledger, _objects = runtime.resources[started.task_id]
+    unreadable_records = tuple(
+        replace(record, payload=None)
+        if type(record) is AcceptedEvent and record.event_id == plan_event_id
+        else record
+        for record in ledger._state.records  # pyright: ignore[reportPrivateUsage]
+    )
+    ledger._state.records = unreadable_records  # pyright: ignore[reportPrivateUsage]
+    ledger._state.projection = replay(unreadable_records)  # pyright: ignore[reportPrivateUsage]
+    status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 5)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "compact",
+                "limit": "10",
+                "at_frontier": str(plan.result_frontier.sequence),
+            }
+        )
+    )
+    item = cast(StatusCompactPageModel, status.page).items[0]
+    assert item.current_plan_event_id == plan_event_id
+    assert item.declared_obligation_count is None
+    assert item.open_obligation_count is None
+    assert item.no_obligations_reason is None
+    assert status.closure_readiness.declared_obligation_count is None
+    assert status.closure_readiness.blocking_conditions == ("readiness_unknown",)
+
+    attached = await app.start(
+        start_request(
+            seed + 6,
+            mode="attach",
+            title=title,
+            session_id=started.session_id,
+        )
+    )
+    assert attached.compact.open_obligation_count is None
+
+
+async def test_redacted_declared_obligation_stays_conservatively_open() -> None:
+    seed = 620
+    app, runtime, _projection = _build_app(seed_offset=seed)
+    started = await app.start(start_request(seed, title="Redacted declared obligation"))
+    obligation_id = protocol_id("obl_", seed + 1)
+    obligation_event_id = protocol_id("evt_", seed + 2)
+    await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 3)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(started.frontier),
+                "event_drafts": [
+                    {
+                        "event_id": obligation_event_id,
+                        "schema": {"name": "obligation_published", "version": "1.0.0"},
+                        "occurred_at": "2026-08-04T12:00:00.000Z",
+                        "causal_parents": [],
+                        "payload": {
+                            "obligation_id": obligation_id,
+                            "description": "Keep a redacted declared row conservative.",
+                            "acceptance_criteria": "Status never reports the row resolved.",
+                            "evidence_expectation": "A readable obligation payload.",
+                            "status": "open",
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    },
+                    {
+                        "event_id": protocol_id("evt_", seed + 4),
+                        "schema": {"name": "plan_published", "version": "1.0.0"},
+                        "occurred_at": "2026-08-04T12:00:01.000Z",
+                        "causal_parents": [obligation_event_id],
+                        "payload": {
+                            "plan_version": 1,
+                            "summary": "Declare the row before its payload becomes unreadable.",
+                            "obligation_refs": [obligation_id],
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    },
+                ],
+            }
+        )
+    )
+    ledger, _objects = runtime.resources[started.task_id]
+    redacted_records = tuple(
+        replace(record, payload=None)
+        if type(record) is AcceptedEvent and record.event_id == obligation_event_id
+        else record
+        for record in ledger._state.records  # pyright: ignore[reportPrivateUsage]
+    )
+    ledger._state.records = redacted_records  # pyright: ignore[reportPrivateUsage]
+    ledger._state.projection = replay(redacted_records)  # pyright: ignore[reportPrivateUsage]
+    request = StatusRequest.model_validate(
+        {
+            **_request_base(protocol_id("req_", seed + 5)),
+            "session_id": started.session_id,
+            "writer_id": started.writer_id,
+            "view": "compact",
+            "limit": "10",
+        }
+    )
+    status = await app.status(request)
+    item = cast(StatusCompactPageModel, status.page).items[0]
+    assert item.declared_obligation_count == "1"
+    assert item.open_obligation_count == "1"
+    assert item.open_obligations == ()
+    assert status.closure_readiness.blocking_conditions == ("obligations_open",)
+    await _assert_mcp_scope_projection(
+        app,
+        request,
+        status,
+        seed=seed + 50,
+        declared="1",
+        opened="1",
+        reason=None,
+        blockers=("obligations_open",),
+    )
+
+
+async def test_unknown_plan_family_event_makes_scope_unknown() -> None:
+    seed = 640
+    app, runtime, _projection = _build_app(seed_offset=seed, trusted_import=True)
+    started = await app.start(start_request(seed, title="Unknown future plan event"))
+    published = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 1)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(started.frontier),
+                "event_drafts": [
+                    {
+                        "event_id": protocol_id("evt_", seed + 2),
+                        "schema": {"name": "plan_published", "version": "1.0.0"},
+                        "occurred_at": "2026-08-04T12:00:00.000Z",
+                        "causal_parents": [],
+                        "payload": {
+                            "plan_version": 1,
+                            "summary": "Known plan before a future plan-family event.",
+                            "obligation_refs": [],
+                            "no_obligations_reason": "exploratory_scope_unknown",
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    }
+                ],
+            }
+        )
+    )
+    unknown_event_id = protocol_id("evt_", seed + 3)
+    ledger, _objects = runtime.resources[started.task_id]
+    ledger._import_state = _ReservedImportState()  # pyright: ignore[reportPrivateUsage]
+    unknown = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 4), actor_type="importer"),
+                "client": _client("codex_jsonl_import"),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(published.result_frontier),
+                "event_drafts": [
+                    {
+                        "event_id": unknown_event_id,
+                        "schema": {"name": "plan_revised", "version": "2.0.0"},
+                        "occurred_at": "2026-08-04T12:00:01.000Z",
+                        "causal_parents": [protocol_id("evt_", seed + 2)],
+                        "payload": {"opaque": "future plan scope"},
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    }
+                ],
+            }
+        )
+    )
+    request = StatusRequest.model_validate(
+        {
+            **_request_base(protocol_id("req_", seed + 5)),
+            "session_id": started.session_id,
+            "writer_id": started.writer_id,
+            "view": "compact",
+            "limit": "10",
+            "at_frontier": str(unknown.result_frontier.sequence),
+        }
+    )
+    status = await app.status(request)
+    item = cast(StatusCompactPageModel, status.page).items[0]
+    assert item.current_plan_event_id == unknown_event_id
+    assert item.declared_obligation_count is None
+    assert item.open_obligation_count is None
+    assert item.no_obligations_reason is None
+    assert "unknown_event" in item.gaps
+    assert status.closure_readiness.blocking_conditions == ("readiness_unknown",)
+    await _assert_mcp_scope_projection(
+        app,
+        request,
+        status,
+        seed=seed + 50,
+        declared=None,
+        opened=None,
+        reason=None,
+        blockers=("readiness_unknown",),
+    )
 
 
 async def test_status_is_task_state_read_only_and_projection_receipted() -> None:

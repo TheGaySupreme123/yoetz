@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from builders.tui_runtime import CLI, DESKTOP
 from yoetz.tui.models import HarnessOption
-from yoetz.tui.runtime import YoetzRuntime
+from yoetz.tui.runtime import YoetzRuntime, _WorkSession  # pyright: ignore[reportPrivateUsage]
 
 pytestmark = pytest.mark.anyio
 
@@ -41,3 +42,27 @@ async def test_detect_reports_connected_when_the_second_installation_is_owned(
     detection = await runtime.detect()
 
     assert detection.already_connected is True
+
+
+def test_work_detail_preserves_unknown_open_obligation_count(tmp_path: Path) -> None:
+    runtime = YoetzRuntime(cwd=tmp_path)
+    session = _WorkSession(
+        task_id="tsk_00000000-0000-4000-8000-000000000001",
+        session_id="ses_00000000-0000-4000-8000-000000000002",
+        writer_id="wri_00000000-0000-4000-8000-000000000003",
+        frontier=SimpleNamespace(sequence="2"),
+    )
+    compact = SimpleNamespace(
+        coverage=SimpleNamespace(known_gaps=("redacted_event",)),
+        gaps=("readiness_unknown",),
+        ledger_freshness="redacted_gap",
+        open_obligation_count=None,
+        unresolved_finding_count="0",
+    )
+
+    detail = runtime._work_detail(  # pyright: ignore[reportPrivateUsage]
+        "Unreadable plan scope", session, compact
+    )
+
+    assert detail.evidence_count is None
+    assert detail.coverage == ("redacted_event",)

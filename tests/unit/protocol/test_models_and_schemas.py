@@ -308,11 +308,11 @@ _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
     ("receipt", None): 155,
     ("respond", None): 53,
     ("start", None): 64,
-    ("status", None): 44,
+    ("status", None): 46,
     ("status", "advice"): 17,
     ("status", "assignment"): 6,
     ("status", "candidate_findings"): 32,
-    ("status", "compact"): 43,
+    ("status", "compact"): 45,
     ("status", "evidence"): 18,
     ("status", "findings"): 66,
     ("status", "history"): 11,
@@ -729,9 +729,11 @@ def _status_result_wire() -> dict[str, JsonValue]:
             "source_identity_digest": None,
         },
         "closure_readiness": {
+            "declared_obligation_count": "0",
+            "no_obligations_reason": None,
             "open_obligation_count": "0",
             "unresolved_finding_count": "0",
-            "blocking_conditions": [],
+            "blocking_conditions": ["no_obligations_declared"],
         },
         "privacy_projection": _privacy_projection_wire(),
     }
@@ -1172,6 +1174,8 @@ def test_closure_readiness_never_reports_unknown_state_as_a_clean_record() -> No
 
     unknown = model.model_validate(
         {
+            "declared_obligation_count": None,
+            "no_obligations_reason": None,
             "open_obligation_count": None,
             "unresolved_finding_count": None,
             "blocking_conditions": ["readiness_unknown"],
@@ -1184,6 +1188,8 @@ def test_closure_readiness_never_reports_unknown_state_as_a_clean_record() -> No
     with pytest.raises(ValidationError):
         model.model_validate(
             {
+                "declared_obligation_count": None,
+                "no_obligations_reason": None,
                 "open_obligation_count": None,
                 "unresolved_finding_count": None,
                 "blocking_conditions": [],
@@ -1193,6 +1199,8 @@ def test_closure_readiness_never_reports_unknown_state_as_a_clean_record() -> No
     with pytest.raises(ValidationError):
         model.model_validate(
             {
+                "declared_obligation_count": "0",
+                "no_obligations_reason": None,
                 "open_obligation_count": "0",
                 "unresolved_finding_count": "0",
                 "blocking_conditions": ["readiness_unknown"],
@@ -1202,6 +1210,8 @@ def test_closure_readiness_never_reports_unknown_state_as_a_clean_record() -> No
     with pytest.raises(ValidationError):
         model.model_validate(
             {
+                "declared_obligation_count": "2",
+                "no_obligations_reason": None,
                 "open_obligation_count": "2",
                 "unresolved_finding_count": None,
                 "blocking_conditions": ["readiness_unknown"],
@@ -1211,11 +1221,105 @@ def test_closure_readiness_never_reports_unknown_state_as_a_clean_record() -> No
     with pytest.raises(ValidationError):
         model.model_validate(
             {
+                "declared_obligation_count": None,
+                "no_obligations_reason": None,
                 "open_obligation_count": None,
                 "unresolved_finding_count": None,
                 "blocking_conditions": ["readiness_unknown", "no_plan_published"],
             }
         )
+
+    no_plan = model.model_validate(
+        {
+            "declared_obligation_count": "0",
+            "no_obligations_reason": None,
+            "open_obligation_count": "0",
+            "unresolved_finding_count": "0",
+            "blocking_conditions": ["no_plan_published"],
+        }
+    )
+    assert no_plan.blocking_conditions == ("no_plan_published",)
+
+    undeclared = model.model_validate(
+        {
+            "declared_obligation_count": "0",
+            "no_obligations_reason": None,
+            "open_obligation_count": "0",
+            "unresolved_finding_count": "0",
+            "blocking_conditions": ["no_obligations_declared"],
+        }
+    )
+    assert undeclared.blocking_conditions == ("no_obligations_declared",)
+
+    declared_none = model.model_validate(
+        {
+            "declared_obligation_count": "0",
+            "no_obligations_reason": "single_atomic_change",
+            "open_obligation_count": "0",
+            "unresolved_finding_count": "0",
+            "blocking_conditions": [],
+        }
+    )
+    assert declared_none.no_obligations_reason == "single_atomic_change"
+
+    with pytest.raises(ValidationError):
+        model.model_validate(
+            {
+                "declared_obligation_count": "0",
+                "no_obligations_reason": None,
+                "open_obligation_count": "0",
+                "unresolved_finding_count": "0",
+                "blocking_conditions": [],
+            }
+        )
+
+
+def test_compact_scope_counts_preserve_known_no_plan_and_unknown_plan() -> None:
+    models = _models_module()
+    model = models.StatusCompactItemModel
+    base: dict[str, JsonValue] = {
+        "task_id": _test_id("tsk_"),
+        "session_id": _test_id("ses_"),
+        "task_title": "Scope model",
+        "current_plan_event_id": None,
+        "declared_obligation_count": "0",
+        "no_obligations_reason": None,
+        "open_obligation_count": "0",
+        "unresolved_finding_count": "0",
+        "open_obligations": [],
+        "unresolved_findings": [],
+        "freshness": "current",
+        "coverage": _coverage_wire(),
+        "gaps": [],
+    }
+
+    no_plan = model.model_validate(base)
+    assert no_plan.current_plan_event_id is None
+    assert no_plan.declared_obligation_count == "0"
+
+    unknown = model.model_validate(
+        {
+            **base,
+            "current_plan_event_id": _test_id("evt_"),
+            "declared_obligation_count": None,
+            "open_obligation_count": None,
+        }
+    )
+    assert unknown.declared_obligation_count is None
+    assert unknown.open_obligation_count is None
+
+    for invalid in (
+        {**base, "declared_obligation_count": None},
+        {**base, "no_obligations_reason": "single_atomic_change"},
+        {
+            **base,
+            "current_plan_event_id": _test_id("evt_"),
+            "declared_obligation_count": "1",
+            "no_obligations_reason": "single_atomic_change",
+        },
+    ):
+        with pytest.raises(ValidationError):
+            model.model_validate(invalid)
 
 
 def test_unknown_fields_and_result_discriminator_are_strict() -> None:
@@ -1772,7 +1876,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     rules = cast(tuple[Any, ...], getattr(models, "_RESULT_LEAF_RULES"))
 
     derived_patterns = _derived_result_success_patterns(catalog)
-    assert len(derived_patterns) == 742
+    assert len(derived_patterns) == 746
 
     derived_counts = {
         context: sum(1 for method, view, _ in derived_patterns if (method, view) == context)
@@ -1781,7 +1885,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert derived_counts == _EXPECTED_RESULT_PATTERN_COUNTS
 
     assert type(rules) is tuple
-    assert len(rules) == 758
+    assert len(rules) == 762
     assert rules == tuple(sorted(rules, key=_test_rule_sort_key))
 
     rule_keys = {
@@ -1790,7 +1894,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert len(rule_keys) == len(rules)
 
     registry_patterns = {(rule.method, rule.status_view, rule.segments) for rule in rules}
-    assert len(registry_patterns) == 742
+    assert len(registry_patterns) == 746
     assert registry_patterns == derived_patterns
 
     content_rules = _expected_nonpublish_content_rules(models)
@@ -2421,7 +2525,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 1_424
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 1_430
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:

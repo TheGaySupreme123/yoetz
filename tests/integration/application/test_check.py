@@ -12,10 +12,31 @@ import pytest
 import yoetz.application.check as check_module
 import yoetz.observability.diagnostics as diagnostics_module
 from builders.ledger_adapters import FixedClock, MemoryObjects
-from builders.policy_cases import FRONTIER, clm, make_case, record
+from builders.policy_cases import (
+    FRONTIER,
+    act,
+    clm,
+    make_case,
+    obl,
+    obligation_record,
+    plan_record,
+    record,
+    res,
+)
 from yoetz.application.check import FinalSemanticEvaluation, execute_check, execute_check_commit
 from yoetz.application.service import VerificationPolicy
-from yoetz.domain.events import ClaimKind, ClaimRecordedPayload
+from yoetz.domain.events import (
+    ActionKind,
+    ActionRecordedPayload,
+    ClaimKind,
+    ClaimRecordedPayload,
+    NoObligationsReason,
+    ObligationPublishedPayload,
+    ObligationStatus,
+    PlanPublishedPayload,
+    ResultOutcome,
+    ResultRecordedPayload,
+)
 from yoetz.domain.findings import (
     Finding,
     FindingKind,
@@ -23,7 +44,12 @@ from yoetz.domain.findings import (
     SemanticDispatchKind,
     SemanticProvenance,
 )
+from yoetz.domain.receipts import (
+    COMPLETION_SCOPE_DECLARED_NONE_GAP,
+    COMPLETION_SCOPE_UNDECLARED_GAP,
+)
 from yoetz.domain.values import Frontier
+from yoetz.kernel import deterministic_checks as deterministic_checks_module
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
@@ -316,6 +342,148 @@ async def test_deterministic_check_freezes_ranks_commits_and_releases() -> None:
         (CheckPhase.LOCAL_READY, CheckPhase.READY_TO_FINALIZE),
     ]
     assert cast(_Runtime, app.runtime).release_count == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ("deterministic_only", "semantic_required"))
+@pytest.mark.parametrize(
+    ("reason", "expected_gap"),
+    (
+        (None, COMPLETION_SCOPE_UNDECLARED_GAP),
+        (NoObligationsReason.SINGLE_ATOMIC_CHANGE, COMPLETION_SCOPE_DECLARED_NONE_GAP),
+    ),
+)
+async def test_empty_completion_scope_gap_reaches_check_verdict(
+    mode: str,
+    reason: NoObligationsReason | None,
+    expected_gap: str,
+) -> None:
+    action = ActionRecordedPayload(
+        act(1),
+        ActionKind.COMMAND,
+        "Run the atomic change",
+        command="true",
+    )
+    result = ResultRecordedPayload(res(1), act(1), ResultOutcome.SUCCESS, exit_status=0)
+    claim = ClaimRecordedPayload(
+        clm(1),
+        ClaimKind.COMPLETION,
+        "The atomic change is complete.",
+        (res(1),),
+    )
+    plan = PlanPublishedPayload(1, "Atomic change", (), (), reason)
+    base = make_case(
+        plans={1: plan_record(plan, 1)},
+        actions={act(1): record(action, 2)},
+        results={res(1): record(result, 3)},
+        claims={clm(1): record(claim, 4)},
+    )
+    gap = deterministic_checks_module.completion_scope_gap(base.projection)
+    assert gap is not None
+    case = replace(base, gaps=(gap,))
+    app = _App(semantic=mode == "semantic_required")
+    app.ledger.frozen = FrozenCase(case, app.ledger.frozen.lease)
+
+    checked = await execute_check_commit(app, _request(mode))
+
+    assert checked.findings == ()
+    assert checked.verdict.value == "insufficient_coverage"
+    assert expected_gap in checked.coverage.known_gaps
+    assert checked.policy_executions == (
+        CheckPolicyExecution("research-evidence", "0.1.0", "run", "completed"),
+        CheckPolicyExecution("work-integrity", "0.1.0", "run", "completed"),
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("reason", (None, NoObligationsReason.SINGLE_ATOMIC_CHANGE))
+async def test_empty_completion_scope_gap_dominates_mixed_actionable_finding(
+    reason: NoObligationsReason | None,
+) -> None:
+    action = ActionRecordedPayload(
+        act(1),
+        ActionKind.COMMAND,
+        "Run the atomic change",
+        command="true",
+    )
+    result = ResultRecordedPayload(res(1), act(1), ResultOutcome.SUCCESS, exit_status=0)
+    obligation = ObligationPublishedPayload(
+        obl(1),
+        "Resolve the undeclared obligation",
+        "Recorded resolution evidence",
+        ObligationStatus.OPEN,
+    )
+    claim = ClaimRecordedPayload(
+        clm(1),
+        ClaimKind.COMPLETION,
+        "The atomic change is complete.",
+        (res(1),),
+        obligation_refs=(obl(1),),
+    )
+    plan = PlanPublishedPayload(1, "Atomic change", (), (), reason)
+    base = make_case(
+        plans={1: plan_record(plan, 1)},
+        obligations={obl(1): obligation_record(obligation, 2)},
+        actions={act(1): record(action, 3)},
+        results={res(1): record(result, 4)},
+        claims={clm(1): record(claim, 5)},
+    )
+    gap = deterministic_checks_module.completion_scope_gap(base.projection)
+    assert gap is not None
+    app = _App()
+    app.ledger.frozen = FrozenCase(replace(base, gaps=(gap,)), app.ledger.frozen.lease)
+
+    checked = await execute_check_commit(app, _request())
+
+    assert tuple(finding.kind for finding in checked.findings) == (
+        FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS,
+    )
+    assert checked.verdict.value == "insufficient_coverage"
+    assert gap.code in checked.coverage.known_gaps
+
+
+@pytest.mark.anyio
+async def test_resolved_declared_scope_reaches_clean_check_verdict() -> None:
+    action = ActionRecordedPayload(
+        act(1),
+        ActionKind.COMMAND,
+        "Run the declared change",
+        obligation_refs=(obl(1),),
+        command="true",
+    )
+    result = ResultRecordedPayload(res(1), act(1), ResultOutcome.SUCCESS, exit_status=0)
+    obligation = ObligationPublishedPayload(
+        obl(1),
+        "Complete the declared change",
+        "A successful recorded result",
+        ObligationStatus.RESOLVED,
+        resolution_evidence_refs=(res(1),),
+    )
+    claim = ClaimRecordedPayload(
+        clm(1),
+        ClaimKind.COMPLETION,
+        "The declared change is complete.",
+        (res(1),),
+        obligation_refs=(obl(1),),
+    )
+    plan = PlanPublishedPayload(1, "Declared change", (obl(1),), ())
+    case = make_case(
+        plans={1: plan_record(plan, 1)},
+        obligations={obl(1): obligation_record(obligation, 2)},
+        actions={act(1): record(action, 3)},
+        results={res(1): record(result, 4)},
+        claims={clm(1): record(claim, 5)},
+    )
+    assert deterministic_checks_module.completion_scope_gap(case.projection) is None
+    app = _App(semantic=True)
+    app.semantic_result = _succeeded(SemanticJudgment("no_material_discrepancy", ()))
+    app.ledger.frozen = FrozenCase(case, app.ledger.frozen.lease)
+
+    checked = await execute_check_commit(app, _request("semantic_if_configured"))
+
+    assert checked.findings == ()
+    assert checked.coverage.known_gaps == ()
+    assert checked.verdict.value == "no_issue_detected"
 
 
 @pytest.mark.anyio

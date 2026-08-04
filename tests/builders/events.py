@@ -59,7 +59,10 @@ _EVENT_SHAPES: Final[dict[EventFamily, _EventShape]] = {
             "resumed_frontier",
         }
     ),
-    "plan_published": _shape({"plan_version", "summary", "obligation_refs"}, {"scope_exclusions"}),
+    "plan_published": _shape(
+        {"plan_version", "summary", "obligation_refs"},
+        {"scope_exclusions", "no_obligations_reason"},
+    ),
     "obligation_published": _shape(
         {"obligation_id", "description", "evidence_expectation", "status"},
         {
@@ -106,7 +109,8 @@ _EVENT_SHAPES: Final[dict[EventFamily, _EventShape]] = {
             "reason",
             "summary",
             "obligation_changes",
-        }
+        },
+        {"no_obligations_reason"},
     ),
     "finding_recorded": _shape(
         {

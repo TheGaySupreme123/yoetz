@@ -53,6 +53,8 @@ from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.models import ReceiptRedactionProfile
 
 __all__ = [
+    "COMPLETION_SCOPE_DECLARED_NONE_GAP",
+    "COMPLETION_SCOPE_UNDECLARED_GAP",
     "OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP",
     "PolicyVersionEntry",
     "ReceiptConclusion",
@@ -79,6 +81,17 @@ __all__ = [
     "receipt_weakest_coverage",
     "render_receipt_compact",
 ]
+
+# Structural completion-scope gaps. These are case-coverage facts, not policy findings: an
+# explicit declaration that no obligations apply makes status authorable, but it cannot purchase
+# a clean completion verdict.
+COMPLETION_SCOPE_UNDECLARED_GAP: Final = "completion_scope_undeclared"
+COMPLETION_SCOPE_DECLARED_NONE_GAP: Final = "completion_scope_declared_none"
+# Kept local to avoid the events -> receipts import cycle. These values exactly mirror the closed
+# NoObligationsReason enum and are used only as a non-echoing render allowlist.
+_NO_OBLIGATIONS_REASON_VALUES: Final = frozenset(
+    {"exploratory_scope_unknown", "no_material_change", "single_atomic_change"}
+)
 
 # Structural receipt/check coverage gap codes for optional semantic relevance review.
 # Distinct from policy-block; not-configured and evaluator failure share honest not-run wording.
@@ -1016,6 +1029,18 @@ def _waiver_for_render(document: ReceiptDocument) -> ReceiptResponse | None:
     return None
 
 
+def _declared_none_reason_for_render(document: ReceiptDocument) -> str | None:
+    """Return a closed empty-scope reason, never arbitrary receipt detail."""
+
+    for gap in document.gaps:
+        if (
+            gap.code == COMPLETION_SCOPE_DECLARED_NONE_GAP
+            and gap.detail in _NO_OBLIGATIONS_REASON_VALUES
+        ):
+            return gap.detail
+    return None
+
+
 def render_receipt_compact(document: ReceiptDocument) -> str:
     """Render the bounded, newline-free compact receipt sentence frozen by v0.1 fixtures."""
 
@@ -1035,6 +1060,19 @@ def render_receipt_compact(document: ReceiptDocument) -> str:
         return (
             prefix + "coverage is insufficient because a referenced object was redacted. "
             "No payload content is shown."
+        )
+    if COMPLETION_SCOPE_UNDECLARED_GAP in gap_codes:
+        return prefix + "coverage is insufficient because completion scope was never declared."
+    if COMPLETION_SCOPE_DECLARED_NONE_GAP in gap_codes:
+        reason = _declared_none_reason_for_render(document)
+        if reason is None:
+            return (
+                prefix
+                + "coverage is insufficient because the plan declared none; its closed reason "
+                "is unavailable."
+            )
+        return (
+            prefix + f"coverage is insufficient because the plan declared none, reason: {reason}."
         )
     if OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP in gap_codes:
         return (
@@ -1112,6 +1150,21 @@ def render_receipt_compact(document: ReceiptDocument) -> str:
         return prefix + f"{count} unresolved {noun} {verb}."
     if document.conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE:
         return prefix + "coverage is insufficient. Declared gaps bound this receipt's conclusion."
+
+    outstanding_work = next(
+        (
+            section.body
+            for section in document.sections
+            if section.key is ReceiptSectionKey.OUTSTANDING_WORK
+        ),
+        None,
+    )
+    if outstanding_work == "Declared obligations are all resolved.":
+        return (
+            prefix
+            + "declared obligations are all resolved. No unresolved deterministic findings were "
+            "recorded; this is not proof of correctness."
+        )
 
     limitations = next(
         (

@@ -706,6 +706,8 @@ def _unknown_structural_coverage() -> Coverage:
 
 def _readiness_unknown() -> StatusClosureReadinessModel:
     return StatusClosureReadinessModel(
+        declared_obligation_count=None,
+        no_obligations_reason=None,
         open_obligation_count=None,
         unresolved_finding_count=None,
         blocking_conditions=("readiness_unknown",),
@@ -760,9 +762,13 @@ async def _closure_readiness(
             # Compact omits its singleton when the task title is unreadable. Counting that as
             # zero open obligations would manufacture a clean record out of missing data.
             return _readiness_unknown()
+        if item.declared_obligation_count is None or item.open_obligation_count is None:
+            return _readiness_unknown()
+        declared_obligations = int(item.declared_obligation_count)
         open_obligations = int(item.open_obligation_count)
         unresolved_findings = int(item.unresolved_finding_count)
         has_plan = item.current_plan_event_id is not None
+        no_obligations_reason = item.no_obligations_reason
         stale = page.rebuild_state != "current" or bool(page.lag)
         declared_gaps = bool(page.gaps)
     except (AttributeError, IndexError, TypeError, ValueError) as exc:
@@ -780,11 +786,15 @@ async def _closure_readiness(
         blocking.append("findings_unresolved")
     if not has_plan:
         blocking.append("no_plan_published")
+    elif declared_obligations == 0 and no_obligations_reason is None:
+        blocking.append("no_obligations_declared")
     if stale:
         blocking.append("projection_stale")
     if declared_gaps:
         blocking.append("coverage_gaps_declared")
     return StatusClosureReadinessModel(
+        declared_obligation_count=str(declared_obligations),
+        no_obligations_reason=no_obligations_reason,
         open_obligation_count=str(open_obligations),
         unresolved_finding_count=str(unresolved_findings),
         blocking_conditions=cast(
@@ -793,6 +803,7 @@ async def _closure_readiness(
                     "obligations_open",
                     "findings_unresolved",
                     "no_plan_published",
+                    "no_obligations_declared",
                     "readiness_unknown",
                     "projection_stale",
                     "coverage_gaps_declared",

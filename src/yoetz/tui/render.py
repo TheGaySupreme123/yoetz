@@ -527,7 +527,10 @@ def render_work_detail(detail: WorkDetail, width: int) -> tuple[str, ...]:
         _labelled(
             (
                 ("State", detail.item.state),
-                ("Evidence", str(detail.evidence_count)),
+                (
+                    "Evidence",
+                    "unknown" if detail.evidence_count is None else str(detail.evidence_count),
+                ),
                 ("Open findings", str(detail.item.open_findings)),
                 ("Last check", detail.item.last_check),
                 ("Frontier sequence", detail.item.updated),

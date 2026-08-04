@@ -1007,6 +1007,7 @@ class YoetzRuntime:
     def _work_detail(self, title: str, session: _WorkSession, compact: object) -> WorkDetail:
         coverage = getattr(compact, "coverage", None)
         gaps = tuple(str(item) for item in getattr(coverage, "known_gaps", ()) or ())
+        open_obligation_count = getattr(compact, "open_obligation_count", None)
         item = WorkItem(
             subject_id=session.task_id,
             title=title,
@@ -1017,7 +1018,7 @@ class YoetzRuntime:
         )
         return WorkDetail(
             item=item,
-            evidence_count=int(getattr(compact, "open_obligation_count", 0)),
+            evidence_count=(None if open_obligation_count is None else int(open_obligation_count)),
             coverage=gaps or ("no gaps recorded",),
             limitations=tuple(str(code) for code in getattr(compact, "gaps", ()) or ()),
             receipt_available=False,

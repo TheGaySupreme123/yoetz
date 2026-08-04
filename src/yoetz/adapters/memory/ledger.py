@@ -25,6 +25,7 @@ from yoetz.domain.events import (
     FindingRecordedPayload,
     LedgerChain,
     LedgerRecord,
+    NoObligationsReasonMismatch,
     ObligationPublishedPayload,
     ObligationResolutionMismatch,
     PayloadRef,
@@ -41,6 +42,7 @@ from yoetz.domain.events import (
     WriterChain,
     encode_payload,
     media_type_for,
+    public_error_for_no_obligations_reason_mismatch,
     public_error_for_obligation_resolution_mismatch,
 )
 from yoetz.domain.findings import (
@@ -74,6 +76,7 @@ from yoetz.kernel.deterministic_checks import (
     deterministic_case_from_json,
     deterministic_case_to_json,
 )
+from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import (
     PROJECTION_VERSION,
     ProjectionState,
@@ -924,12 +927,18 @@ def _projection_items(
         )
         if opened is None:
             return ()
-        open_obligations = tuple(
-            _compact_obligation_item(key, value)
-            for key, value in sorted(
-                projection.obligations.items(), key=lambda item: item[0].encode()
+        scope = current_plan_scope(projection.plans, projection.coverage_gaps)
+        scope_refs = scope.effective_obligation_refs
+        open_obligations = (
+            ()
+            if scope_refs is None
+            else tuple(
+                _compact_obligation_item(key, record)
+                for key in scope_refs
+                if (record := projection.obligations.get(key)) is not None
+                and record.payload is not None
+                and record.payload.status.value == "open"
             )
-            if value.payload is not None and value.payload.status.value == "open"
         )
         unresolved_findings = tuple(
             StatusCompactFindingModel(
@@ -948,21 +957,34 @@ def _projection_items(
                 key=rank_key,
             )
         )
-        current_plan = max(projection.plans, default=None)
+        declared_count = (
+            None
+            if scope_refs is None
+            else (0 if not scope.has_plan else scope.declared_obligation_count)
+        )
+        open_count = (
+            None
+            if scope_refs is None
+            else sum(
+                (record := projection.obligations.get(obligation)) is None
+                or record.payload is None
+                or record.payload.status.value == "open"
+                for obligation in scope_refs
+            )
+        )
         return (
             StatusCompactItemModel(
                 task_id=task,
                 session_id=session,
                 task_title=opened.task_title,
-                current_plan_event_id=(
-                    None if current_plan is None else projection.plans[current_plan].source_event_id
+                current_plan_event_id=scope.current_plan_event_id,
+                declared_obligation_count=(None if declared_count is None else str(declared_count)),
+                no_obligations_reason=(
+                    None
+                    if scope.no_obligations_reason is None
+                    else scope.no_obligations_reason.value
                 ),
-                open_obligation_count=str(
-                    sum(
-                        value.payload is None or value.payload.status.value == "open"
-                        for value in projection.obligations.values()
-                    )
-                ),
+                open_obligation_count=None if open_count is None else str(open_count),
                 unresolved_finding_count=str(len(projection.findings)),
                 open_obligations=open_obligations[:10],
                 unresolved_findings=unresolved_findings[:10],
@@ -1221,6 +1243,16 @@ class MemoryLedgerAdapter:
         proposed = snapshot_records + tuple(new_records)
         try:
             projection = replay(proposed)
+        except NoObligationsReasonMismatch as exc:
+            draft_index: int | None = None
+            if exc.event_id is not None:
+                for index, item in enumerate(command.entries):
+                    if item.draft.event_id == exc.event_id:
+                        draft_index = index
+                        break
+            raise public_error_for_no_obligations_reason_mismatch(
+                exc, event_index=draft_index
+            ) from exc
         except ObligationResolutionMismatch as exc:
             draft_index: int | None = None
             if exc.event_id is not None:

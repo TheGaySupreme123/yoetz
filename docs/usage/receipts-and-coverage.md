@@ -62,6 +62,22 @@ reads `no_issue_detected`.
 Prefer `semantic_if_configured` for material claims. Reserve `deterministic_only` for genuinely
 structural checks, and disclose the limitation when you use it.
 
+## Completion scope is declared, not inferred
+
+Yoetz reads completion scope only from the effective plan chain. It never invents obligations from
+the prompt, source tree, workspace, or completion prose.
+
+When a completion claim exists and the effective plan has zero declared obligations, the check is
+coverage-incomplete in both cases:
+
+- no typed reason: `completion_scope_undeclared` — the receipt says scope was never declared;
+- a typed reason: `completion_scope_declared_none` — the receipt says the plan declared none and
+  names only the closed reason value.
+
+The typed declaration clears the status readiness blocker; it does not buy a clean verdict. A
+positive declared count whose obligations are all resolved is the distinct resolved-scope state.
+Redacted or unreadable scope remains unknown and never becomes zero.
+
 ## Candidate findings are not a check
 
 `status` with `view=candidate_findings` is an advisory read. No verdict, no IDs, no receipt, and the

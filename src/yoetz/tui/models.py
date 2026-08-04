@@ -375,7 +375,7 @@ class WorkDetail:
 
     item: WorkItem
     claims: tuple[str, ...] = ()
-    evidence_count: int = 0
+    evidence_count: int | None = 0
     checks: tuple[str, ...] = ()
     coverage: tuple[str, ...] = ()
     findings: tuple[str, ...] = ()

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from builders.policy_cases import BASE_COVERAGE, clm, make_case, record
@@ -12,7 +14,11 @@ from yoetz.application.check import (
 )
 from yoetz.domain.events import ClaimKind, ClaimRecordedPayload
 from yoetz.domain.findings import CheckVerdict
-from yoetz.kernel.deterministic_checks import DeterministicCase
+from yoetz.domain.receipts import (
+    COMPLETION_SCOPE_DECLARED_NONE_GAP,
+    COMPLETION_SCOPE_UNDECLARED_GAP,
+)
+from yoetz.kernel.deterministic_checks import CaseGap, DeterministicCase
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
 from yoetz.protocol.ids import IdKind
 from yoetz.protocol.models import SemanticReason, SemanticStatus
@@ -132,8 +138,6 @@ def test_deterministic_only_marks_semantic_not_requested_gap_without_verdict_cha
     # Simulate check merge: add gap, CURRENT -> PARTIAL, COVERAGE_INCOMPLETE
     gaps = set(coverage.known_gaps)
     gaps.add(gap)
-    from dataclasses import replace
-
     from yoetz.protocol.coverage import LedgerFreshness as LF
 
     freshness = coverage.ledger_freshness
@@ -152,3 +156,38 @@ def test_deterministic_only_marks_semantic_not_requested_gap_without_verdict_cha
     assert ranked.verdict is CheckVerdict.ACTION_REQUIRED
     assert SEMANTIC_REVIEW_NOT_REQUESTED_GAP in coverage.known_gaps
     assert coverage.ledger_freshness is LF.PARTIAL
+
+
+@pytest.mark.parametrize(
+    "gap_code",
+    (COMPLETION_SCOPE_UNDECLARED_GAP, COMPLETION_SCOPE_DECLARED_NONE_GAP),
+)
+@pytest.mark.parametrize(
+    "completeness",
+    (CheckCompleteness.COVERAGE_INCOMPLETE, CheckCompleteness.REQUIRED_INCOMPLETE),
+)
+def test_completion_scope_gaps_dominate_an_actionable_finding(
+    gap_code: str,
+    completeness: CheckCompleteness,
+) -> None:
+    case = replace(
+        _unsupported_claim_case(),
+        gaps=(CaseGap(gap_code, gap_code, ()),),
+    )
+    assessments, _executions = run_deterministic_policies(
+        case,
+        CheckScope((), ()),
+        ("research-evidence/0.1.0", "work-integrity/0.1.0"),
+    )
+    findings = allocate_findings(_Ids(), tuple(item.candidate for item in assessments))
+    coverage = case_coverage(case)
+    ranked = rank_findings(
+        findings,
+        (),
+        RankingContext(coverage, completeness),
+        3,
+    )
+
+    assert coverage.known_gaps == (gap_code,)
+    assert ranked.findings
+    assert ranked.verdict is CheckVerdict.INSUFFICIENT_COVERAGE

@@ -25,10 +25,12 @@ from yoetz.domain.events import (
     ClaimRecordedPayload,
     EvidenceKind,
     EvidenceRecordedPayload,
+    ObligationChange,
     ObligationChangeKind,
     ObligationPublishedPayload,
     ObligationStatus,
     PlanPublishedPayload,
+    PlanRevisedPayload,
     RequestedItem,
     RequestedItemKind,
     ResponseDisposition,
@@ -163,6 +165,24 @@ def test_requested_item_never_attempted_and_exact_attempt_nontrigger() -> None:
         actions={act(1): record(_action(1, 1), 3)},
     )
     assert FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED not in _kinds(attempted)
+
+
+def test_requested_item_on_carried_revision_uses_effective_plan_scope() -> None:
+    obligation = _open_obligation(2, requested="item-2")
+    initial = PlanPublishedPayload(1, "Initial plan", ())
+    revision = PlanRevisedPayload(
+        2,
+        1,
+        "Carry newly declared work.",
+        "Expanded plan.",
+        (ObligationChange(obl(2), ObligationChangeKind.CARRIED),),
+    )
+    case = make_case(
+        plans={1: plan_record(initial, 1), 2: plan_record(revision, 2)},
+        obligations={obl(2): obligation_record(obligation, 3)},
+    )
+
+    assert FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED in _kinds(case)
 
 
 def test_failed_work_omitted_and_exact_disclosure_nontrigger() -> None:

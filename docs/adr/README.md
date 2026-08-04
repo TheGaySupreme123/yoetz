@@ -23,6 +23,7 @@ ADR wins; when an ADR and the code disagree, that is a bug in one of them and wo
 | [016](ADR-016-human-review-non-default-actions.md) | Human review for non-default actions |
 | [017](ADR-017-full-screen-terminal-interface.md) | Full-screen terminal interface |
 | [018](ADR-018-host-declared-mcp-route-egress-ceiling.md) | Host-declared MCP route egress ceiling |
+| [019](ADR-019-declared-completion-scope.md) | Declared completion scope |
 
 Unresolved gates are centralized in [`docs/OPEN_QUESTIONS.md`](../OPEN_QUESTIONS.md), not scattered
 through individual ADRs.

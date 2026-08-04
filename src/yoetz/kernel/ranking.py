@@ -14,6 +14,10 @@ from yoetz.domain.findings import (
     RankedFindings,
     rank_key,
 )
+from yoetz.domain.receipts import (
+    COMPLETION_SCOPE_DECLARED_NONE_GAP,
+    COMPLETION_SCOPE_UNDECLARED_GAP,
+)
 from yoetz.protocol.coverage import Coverage, weakest
 from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.models import MAX_FINDINGS_LIMIT
@@ -25,6 +29,9 @@ __all__ = [
 ]
 
 _MATERIAL_CHALLENGE_PRIORITIES: Final = frozenset({1, 2})
+_COMPLETION_SCOPE_GAPS: Final = frozenset(
+    {COMPLETION_SCOPE_DECLARED_NONE_GAP, COMPLETION_SCOPE_UNDECLARED_GAP}
+)
 
 
 class CheckCompleteness(str, Enum):  # noqa: UP042 - exact internal contract token
@@ -120,6 +127,11 @@ def _verdict(
     selected: tuple[Finding, ...],
     context: RankingContext,
 ) -> CheckVerdict:
+    if _COMPLETION_SCOPE_GAPS & set(context.coverage.known_gaps):
+        # Empty completion scope is a verdict-level coverage boundary, not a policy finding.
+        # Preserve selected findings for disposition, but never let one upgrade either closed
+        # scope gap into an action-required completion verdict.
+        return CheckVerdict.INSUFFICIENT_COVERAGE
     if context.completeness is CheckCompleteness.REQUIRED_INCOMPLETE:
         return CheckVerdict.INCOMPLETE_CHECK
     if any(FINDING_KIND_TRAITS[finding.kind][1] for finding in selected):
