@@ -1,6 +1,6 @@
 """Reviewed/source/embedded/installed resource byte equality.
 
-Proves each of the 81 manifest-declared runtime resources is the exact reviewed byte set in the
+Proves each of the 82 manifest-declared runtime resources is the exact reviewed byte set in the
 root canonical source tree, the ``src/yoetz/resources`` package tree, the built wheel, and a clean
 offline install; that the nine canonical fixtures are the only ``fixtures/`` corpus shipped; and
 that corruption/missing/extra resource drift is detected before decode/use, both at the source
