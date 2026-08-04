@@ -28,6 +28,12 @@ Field-level shapes live in [`docs/INTERFACES.md`](../INTERFACES.md); the JSON Sc
 [`schemas/`](../../schemas/) and the golden vectors under [`fixtures/`](../../fixtures/) are the
 exact wire authority.
 
+If an MCP host drops schema examples or renders required fields as unknown, read the ordinary
+guidance resource `yoetz://guidance/request-templates.md`. It contains complete bodies for all six
+operations and all nine ordinary publication families. Replace every illustrative identifier,
+timestamp, frontier, digest, and content string before use; the resource is an authoring fallback,
+not a second wire authority.
+
 ## What each one is for
 
 ### `start`
@@ -47,7 +53,7 @@ same `request_id` for the real publish after the preview succeeds.
 Yoetz does not watch your workspace. What is published is what exists.
 
 Authoring help for MCP: tool descriptions name `yoetz://guidance/publication-policy.md`; invalid
-requests include that URI and nested field hints from the presentation schema.
+requests include nested field hints plus `yoetz://guidance/request-templates.md`.
 
 ### `check`
 Runs the deterministic policy packs over the recorded state and returns findings with an exact

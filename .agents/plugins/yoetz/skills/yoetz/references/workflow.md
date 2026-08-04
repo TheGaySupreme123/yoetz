@@ -36,6 +36,10 @@ Under-publishing hides the work; over-publishing buries it. The test is whether 
 
 Tell the user briefly that Yoetz is being used as a local work ledger and verifier. Do not imply initialization succeeded before `start` returns. If the optional service is unavailable, continue unless the user or host requires it, disclose that no live ledger or receipt will exist, and invent no state.
 
+If the host drops schema examples or renders required fields as unknown, read
+`yoetz://guidance/request-templates.md` and replace every illustrative value in the complete request
+body. Never inspect product source to reconstruct a request.
+
 ## The ten steps
 
 1. Decide whether the task is material enough for Yoetz.

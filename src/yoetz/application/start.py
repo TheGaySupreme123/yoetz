@@ -83,7 +83,7 @@ from yoetz.protocol.models import (
     StatusCompactItemModel,
 )
 
-__all__ = ["StartInternalResult", "execute_start"]
+__all__ = ["StartInternalResult", "execute_start", "start_projection_wire"]
 
 _START_RESULT_MEDIA_TYPE = "application/vnd.yoetz.start_result+json"
 _ENGINE_ACTOR_ID = "yoetz.engine"
@@ -144,6 +144,68 @@ class StartInternalResult:
             "versions": cast(JsonValue, self.versions.model_dump(mode="json")),
             "writer_id": self.writer_id,
         }
+
+
+def start_projection_wire(result: StartInternalResult) -> dict[str, JsonValue]:
+    """Add the bound authoring scaffold only at the public projection boundary.
+
+    The durable start-result object intentionally retains its established byte shape. Replays
+    decode that legacy object and derive this deterministic scaffold from the same committed
+    session, writer, and frontier bindings as a fresh result.
+    """
+
+    if type(result) is not StartInternalResult:
+        raise TypeError("start_internal_result_invalid")
+
+    def empty_draft_spine() -> dict[str, JsonValue]:
+        return {
+            "event_id": "",
+            "occurred_at": "",
+            "causal_parents": [],
+            "artifact_refs": [],
+            "evidence_refs": [],
+        }
+
+    request: dict[str, JsonValue] = {
+        "protocol_version": result.protocol_version,
+        "schema_version": result.schema_version,
+        "request_id": "",
+        "actor": {"actor_id": "", "actor_type": ""},
+        "client": {"kind": "", "version": "", "integration": ""},
+        "session_id": result.session_id,
+        "writer_id": result.writer_id,
+        "expected_frontier": cast(JsonValue, result.frontier.model_dump(mode="json")),
+        "event_drafts": [
+            {
+                **empty_draft_spine(),
+                "schema": {"name": "plan_published", "version": "1.0.0"},
+                "payload": {
+                    "plan_version": 1,
+                    "summary": "",
+                    "obligation_refs": [""],
+                },
+            },
+            {
+                **empty_draft_spine(),
+                "schema": {"name": "obligation_published", "version": "1.0.0"},
+                "payload": {
+                    "obligation_id": "",
+                    "description": "",
+                    "acceptance_criteria": "",
+                    "evidence_expectation": "",
+                    "status": "open",
+                },
+            },
+        ],
+    }
+    return {
+        **result.as_wire(),
+        "next_request_template": {
+            "evidential": False,
+            "operation": "publish_work",
+            "arguments": request,
+        },
+    }
 
 
 class _StartContradiction(Exception):

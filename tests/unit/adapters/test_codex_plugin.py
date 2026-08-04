@@ -66,6 +66,7 @@ def _resources() -> _Resources:
         "guidance/agent-instructions.md": b"# Agent instructions\n",
         "guidance/coverage-and-receipts.md": b"# Coverage and receipts\n",
         "guidance/publication-policy.md": b"# Publication policy\n",
+        "guidance/request-templates.md": b"# Request templates\n",
         "guidance/workflow.md": b"# Workflow\n",
     }
     entries: list[JsonValue] = []

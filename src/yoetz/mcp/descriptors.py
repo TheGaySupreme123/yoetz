@@ -79,6 +79,8 @@ PRESENTATION_INPUT_SCHEMA_BUDGETS: Final[Mapping[str, Mapping[str, int]]] = Mapp
             {
                 "max_oneof_nodes": 0,
                 "max_oneof_branches": 0,
+                "max_ref_nodes": 0,
+                "max_conditional_nodes": 0,
                 "max_defs_count": 8,
                 "max_defs_nest_depth": 1,
                 "max_encoded_bytes": 4_000,
@@ -88,6 +90,8 @@ PRESENTATION_INPUT_SCHEMA_BUDGETS: Final[Mapping[str, Mapping[str, int]]] = Mapp
             {
                 "max_oneof_nodes": 8,
                 "max_oneof_branches": 28,
+                "max_ref_nodes": 0,
+                "max_conditional_nodes": 0,
                 "max_defs_count": 20,
                 "max_defs_nest_depth": 1,
                 "max_encoded_bytes": 28_000,
@@ -97,6 +101,8 @@ PRESENTATION_INPUT_SCHEMA_BUDGETS: Final[Mapping[str, Mapping[str, int]]] = Mapp
             {
                 "max_oneof_nodes": 0,
                 "max_oneof_branches": 0,
+                "max_ref_nodes": 0,
+                "max_conditional_nodes": 0,
                 "max_defs_count": 12,
                 "max_defs_nest_depth": 1,
                 "max_encoded_bytes": 8_000,
@@ -106,6 +112,8 @@ PRESENTATION_INPUT_SCHEMA_BUDGETS: Final[Mapping[str, Mapping[str, int]]] = Mapp
             {
                 "max_oneof_nodes": 0,
                 "max_oneof_branches": 0,
+                "max_ref_nodes": 0,
+                "max_conditional_nodes": 0,
                 "max_defs_count": 12,
                 "max_defs_nest_depth": 1,
                 "max_encoded_bytes": 8_000,
@@ -115,6 +123,8 @@ PRESENTATION_INPUT_SCHEMA_BUDGETS: Final[Mapping[str, Mapping[str, int]]] = Mapp
             {
                 "max_oneof_nodes": 4,
                 "max_oneof_branches": 8,
+                "max_ref_nodes": 0,
+                "max_conditional_nodes": 0,
                 "max_defs_count": 20,
                 "max_defs_nest_depth": 1,
                 "max_encoded_bytes": 10_000,
@@ -124,6 +134,8 @@ PRESENTATION_INPUT_SCHEMA_BUDGETS: Final[Mapping[str, Mapping[str, int]]] = Mapp
             {
                 "max_oneof_nodes": 0,
                 "max_oneof_branches": 0,
+                "max_ref_nodes": 0,
+                "max_conditional_nodes": 0,
                 "max_defs_count": 12,
                 "max_defs_nest_depth": 1,
                 "max_encoded_bytes": 6_000,
@@ -655,17 +667,23 @@ def _inline_nested_local_defs(parent_key: str, body: JsonValue) -> JsonValue:
         if isinstance(candidate, Mapping):
             mapping = cast(Mapping[str, JsonValue], candidate)
             ref = mapping.get("$ref")
-            if (
-                type(ref) is str
-                and ref.startswith(prefix)
-                and set(mapping.keys()) == {"$ref"}
-                and "/" not in ref[len(prefix) :]
-            ):
+            if type(ref) is str and ref.startswith(prefix) and "/" not in ref[len(prefix) :]:
                 child_key = ref[len(prefix) :]
                 target = nested_defs.get(child_key)
                 if target is None:
                     raise RuntimeError("mcp_schema_nested_def_missing")
-                return resolve(_mutable_json(target))
+                resolved_target = resolve(_mutable_json(target))
+                if not isinstance(resolved_target, Mapping):
+                    raise RuntimeError("mcp_schema_nested_def_invalid")
+                merged = dict(cast(Mapping[str, JsonValue], resolved_target))
+                for key, item in mapping.items():
+                    if key == "$ref":
+                        continue
+                    resolved_item = resolve(item)
+                    if key in merged and merged[key] != resolved_item:
+                        raise RuntimeError("mcp_schema_ref_sibling_conflict")
+                    merged[key] = resolved_item
+                return merged
             return {key: resolve(item) for key, item in mapping.items() if key != "$defs"}
         if isinstance(candidate, tuple | list):
             sequence = cast(tuple[JsonValue, ...] | list[JsonValue], candidate)
@@ -673,6 +691,216 @@ def _inline_nested_local_defs(parent_key: str, body: JsonValue) -> JsonValue:
         return candidate
 
     return resolve(source)
+
+
+def _local_def_key(ref: JsonValue) -> str | None:
+    if type(ref) is not str or not ref.startswith("#/$defs/"):
+        return None
+    remainder = ref[len("#/$defs/") :]
+    if not remainder or "/" in remainder:
+        return None
+    return remainder
+
+
+def _event_payload_definitions(
+    definitions: Mapping[str, JsonValue],
+) -> frozenset[str]:
+    """Return event payload definitions and their shared definition dependencies."""
+
+    event_body = definitions.get(_bundle_key(_EVENT_DRAFT_SCHEMA_ID))
+    if not isinstance(event_body, Mapping):
+        return frozenset()
+    one_of = cast(Mapping[str, JsonValue], event_body).get("oneOf")
+    if not isinstance(one_of, list):
+        raise RuntimeError("mcp_event_draft_projection_invalid")
+    roots: set[str] = set()
+    for branch in cast(list[JsonValue], one_of):
+        if not isinstance(branch, Mapping):
+            raise RuntimeError("mcp_event_draft_projection_invalid")
+        properties = cast(Mapping[str, JsonValue], branch).get("properties")
+        if not isinstance(properties, Mapping):
+            raise RuntimeError("mcp_event_draft_projection_invalid")
+        payload = cast(Mapping[str, JsonValue], properties).get("payload")
+        if not isinstance(payload, Mapping):
+            raise RuntimeError("mcp_event_draft_projection_invalid")
+        key = _local_def_key(cast(Mapping[str, JsonValue], payload).get("$ref"))
+        if key is None:
+            raise RuntimeError("mcp_event_draft_projection_invalid")
+        roots.add(key)
+
+    retained = set(roots)
+    pending = list(roots)
+    while pending:
+        key = pending.pop()
+        body = definitions.get(key)
+        if body is None:
+            raise RuntimeError("mcp_schema_reference_unknown")
+        for dependency in _referenced_top_level_defs(body):
+            if dependency not in retained:
+                retained.add(dependency)
+                pending.append(dependency)
+    return frozenset(retained)
+
+
+def _inline_presentation_refs(schema: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Inline local presentation refs except the bounded event-payload definition graph."""
+
+    raw_definitions = schema.get("$defs")
+    if not isinstance(raw_definitions, Mapping):
+        raise RuntimeError("mcp_schema_invalid")
+    definitions = cast(Mapping[str, JsonValue], raw_definitions)
+    retained = _event_payload_definitions(definitions)
+    resolving: set[str] = set()
+
+    def resolve(candidate: JsonValue) -> JsonValue:
+        if isinstance(candidate, Mapping):
+            mapping = cast(Mapping[str, JsonValue], candidate)
+            key = _local_def_key(mapping.get("$ref"))
+            if key is not None and key not in retained:
+                if key in resolving:
+                    raise RuntimeError("mcp_schema_reference_cycle")
+                target = definitions.get(key)
+                if target is None:
+                    raise RuntimeError("mcp_schema_reference_unknown")
+                resolving.add(key)
+                try:
+                    resolved_target = resolve(_mutable_json(target))
+                finally:
+                    resolving.remove(key)
+                if not isinstance(resolved_target, Mapping):
+                    raise RuntimeError("mcp_schema_def_invalid")
+                merged = dict(cast(Mapping[str, JsonValue], resolved_target))
+                for sibling_key, item in mapping.items():
+                    if sibling_key == "$ref":
+                        continue
+                    resolved_item = resolve(item)
+                    if sibling_key in merged and merged[sibling_key] != resolved_item:
+                        raise RuntimeError("mcp_schema_ref_sibling_conflict")
+                    merged[sibling_key] = resolved_item
+                return merged
+            return {
+                item_key: resolve(item) for item_key, item in mapping.items() if item_key != "$defs"
+            }
+        if isinstance(candidate, tuple | list):
+            sequence = cast(tuple[JsonValue, ...] | list[JsonValue], candidate)
+            return [resolve(item) for item in sequence]
+        return candidate
+
+    resolved = resolve(schema)
+    if not isinstance(resolved, dict):
+        raise RuntimeError("mcp_schema_invalid")
+    if retained:
+        resolved["$defs"] = {
+            key: _mutable_json(definitions[key]) for key in definitions if key in retained
+        }
+    return resolved
+
+
+def _flatten_frontier_conditions(candidate: JsonValue) -> JsonValue:
+    """Keep a host-authorable frontier shape while catalog admission retains exact coupling."""
+
+    if isinstance(candidate, Mapping):
+        mapping = {
+            key: (_mutable_json(item) if key == "$defs" else _flatten_frontier_conditions(item))
+            for key, item in cast(Mapping[str, JsonValue], candidate).items()
+        }
+        properties = mapping.get("properties")
+        required = mapping.get("required")
+        if (
+            isinstance(properties, dict)
+            and {"sequence", "head_digest"}.issubset(properties)
+            and isinstance(required, list)
+            and {"sequence", "head_digest"}.issubset(required)
+            and "allOf" in mapping
+        ):
+            mapping.pop("allOf")
+            head_digest = properties.get("head_digest")
+            if not isinstance(head_digest, dict):
+                raise RuntimeError("mcp_frontier_projection_invalid")
+            head_digest["pattern"] = "^(genesis|sha256:[0-9a-f]{64})$"
+            head_digest["description"] = "Genesis is valid only with sequence 0."
+        return mapping
+    if isinstance(candidate, tuple | list):
+        sequence = cast(tuple[JsonValue, ...] | list[JsonValue], candidate)
+        return [_flatten_frontier_conditions(item) for item in sequence]
+    return candidate
+
+
+def _describe_presentation_schema(name: str, schema: dict[str, JsonValue]) -> None:
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        raise RuntimeError("mcp_schema_invalid")
+
+    request_id = properties.get("request_id")
+    if isinstance(request_id, dict):
+        request_id["description"] = "Use a fresh req_ prefixed random UUID for each request."
+
+    expected_frontier = properties.get("expected_frontier")
+    if isinstance(expected_frontier, dict):
+        expected_frontier["description"] = (
+            "Use the sequence and head digest returned by status. Genesis is valid only with "
+            "sequence 0."
+        )
+
+    if name == "start-request":
+        mode = properties.get("mode")
+        if isinstance(mode, dict):
+            mode["description"] = (
+                "mode attach requires session_id, or both workspace_ref and external_ref with no "
+                "session_id."
+            )
+    elif name == "publish-work-request":
+        event_drafts = properties.get("event_drafts")
+        if not isinstance(event_drafts, dict):
+            raise RuntimeError("mcp_event_draft_projection_invalid")
+        event_drafts["description"] = (
+            "Send one bounded batch per material transition. Each schema.name selects the "
+            "payload shape."
+        )
+        items = event_drafts.get("items")
+        if not isinstance(items, dict):
+            raise RuntimeError("mcp_event_draft_projection_invalid")
+        item_properties = items.get("properties")
+        if not isinstance(item_properties, dict):
+            raise RuntimeError("mcp_event_draft_projection_invalid")
+        schema_property = item_properties.get("schema")
+        if not isinstance(schema_property, dict):
+            raise RuntimeError("mcp_event_draft_projection_invalid")
+        schema_properties = schema_property.get("properties")
+        if not isinstance(schema_properties, dict):
+            raise RuntimeError("mcp_event_draft_projection_invalid")
+        family_name = schema_properties.get("name")
+        if not isinstance(family_name, dict):
+            raise RuntimeError("mcp_event_draft_projection_invalid")
+        family_name["enum"] = cast(list[JsonValue], sorted(ORDINARY_MCP_PUBLISH_EVENT_FAMILIES))
+        family_name["description"] = "Selects the event family and its payload fields."
+        payload = item_properties.get("payload")
+        if not isinstance(payload, dict):
+            raise RuntimeError("mcp_event_draft_projection_invalid")
+        payload["type"] = "object"
+        payload["description"] = (
+            "Fields depend on schema.name; use the matching event family template."
+        )
+    elif name == "check-request":
+        scope = properties.get("scope")
+        if isinstance(scope, dict):
+            scope["description"] = (
+                "Omit for the whole case, or send both claim_ids and obligation_ids. Two empty "
+                "arrays also mean the whole case."
+            )
+    elif name == "respond-request":
+        disposition = properties.get("disposition")
+        if isinstance(disposition, dict):
+            disposition["description"] = (
+                "Acknowledged accepts no waiver fields. Rejected requires reason and accepts no "
+                "waiver fields. Waived requires reason and waiver_scope."
+            )
+    elif name == "status-request":
+        filter_property = properties.get("filter")
+        if isinstance(filter_property, dict):
+            filter_property["description"] = (
+                "Fields must match the selected view; omit filter when that view accepts none."
+            )
 
 
 def _referenced_top_level_defs(value: JsonValue) -> set[str]:
@@ -694,19 +922,6 @@ def _referenced_top_level_defs(value: JsonValue) -> set[str]:
 
     visit(value)
     return found
-
-
-def _prune_unreferenced_defs(schema: dict[str, JsonValue]) -> None:
-    definitions = schema.get("$defs")
-    if not isinstance(definitions, dict):
-        return
-    while True:
-        referenced = _referenced_top_level_defs(schema)
-        unused = [key for key in definitions if key not in referenced]
-        if not unused:
-            return
-        for key in unused:
-            del definitions[key]
 
 
 @cache
@@ -779,7 +994,14 @@ def _mcp_presentation_schema(name: str, version: str) -> Mapping[str, JsonValue]
         )
     for key, body in list(definitions.items()):
         definitions[key] = _inline_nested_local_defs(key, body)
-    _prune_unreferenced_defs(bundled_dict)
+    bundled_dict = _inline_presentation_refs(bundled_dict)
+    if name in {"start-request", "respond-request", "status-request"}:
+        bundled_dict.pop("allOf", None)
+    flattened = _flatten_frontier_conditions(bundled_dict)
+    if not isinstance(flattened, dict):
+        raise RuntimeError("mcp_schema_invalid")
+    bundled_dict = flattened
+    _describe_presentation_schema(name, bundled_dict)
     examples = _INPUT_SCHEMA_EXAMPLES.get(name)
     if examples is not None:
         bundled_dict["examples"] = [_mutable_json(item) for item in examples]
@@ -791,12 +1013,33 @@ def presentation_schema_metrics(schema: Mapping[str, JsonValue]) -> dict[str, in
 
     oneof_nodes = 0
     oneof_branches = 0
+    ref_nodes = 0
+    conditional_nodes = 0
+    top_level_definitions = schema.get("$defs")
+    retained_payload_defs: frozenset[str]
+    if isinstance(top_level_definitions, Mapping):
+        retained_payload_defs = frozenset(
+            cast(Mapping[str, JsonValue], top_level_definitions).keys()
+        )
+    else:
+        retained_payload_defs = frozenset()
 
-    def visit(candidate: JsonValue) -> int:
-        nonlocal oneof_nodes, oneof_branches
+    def visit(candidate: JsonValue, *, inside_payload_defs: bool = False) -> int:
+        nonlocal conditional_nodes, oneof_nodes, oneof_branches, ref_nodes
         nest = 0
         if isinstance(candidate, Mapping):
             mapping = cast(Mapping[str, JsonValue], candidate)
+            ref_key = _local_def_key(mapping.get("$ref"))
+            if (
+                "$ref" in mapping
+                and not inside_payload_defs
+                and ref_key not in retained_payload_defs
+            ):
+                ref_nodes += 1
+            if not inside_payload_defs:
+                conditional_nodes += sum(
+                    keyword in mapping for keyword in ("allOf", "if", "then", "else")
+                )
             one_of = mapping.get("oneOf")
             if isinstance(one_of, list):
                 oneof_nodes += 1
@@ -805,17 +1048,21 @@ def presentation_schema_metrics(schema: Mapping[str, JsonValue]) -> dict[str, in
             child_nest = 0
             if isinstance(defs, Mapping):
                 child_nest = max(
-                    visit(item) for item in cast(Mapping[str, JsonValue], defs).values()
+                    visit(item, inside_payload_defs=True)
+                    for item in cast(Mapping[str, JsonValue], defs).values()
                 )
                 nest = max(nest, child_nest + 1)
             for key, item in mapping.items():
                 if key != "$defs":
-                    nest = max(nest, visit(item))
+                    nest = max(
+                        nest,
+                        visit(item, inside_payload_defs=inside_payload_defs),
+                    )
             return nest
         if isinstance(candidate, tuple | list):
             sequence = cast(tuple[JsonValue, ...] | list[JsonValue], candidate)
             for item in sequence:
-                nest = max(nest, visit(item))
+                nest = max(nest, visit(item, inside_payload_defs=inside_payload_defs))
             return nest
         return 0
 
@@ -826,6 +1073,8 @@ def presentation_schema_metrics(schema: Mapping[str, JsonValue]) -> dict[str, in
     return {
         "oneof_nodes": oneof_nodes,
         "oneof_branches": oneof_branches,
+        "ref_nodes": ref_nodes,
+        "conditional_nodes": conditional_nodes,
         "defs_count": defs_count,
         "defs_nest_depth": defs_nest_depth,
         "encoded_bytes": len(encoded.encode("utf-8")),
@@ -838,21 +1087,25 @@ def ordinary_publish_families_in_presentation(
     """Return event family names advertised in a publish_work presentation schema."""
 
     families: set[str] = set()
-    definitions = schema.get("$defs")
-    if not isinstance(definitions, Mapping):
-        return frozenset()
-    for body in cast(Mapping[str, JsonValue], definitions).values():
-        if not isinstance(body, Mapping):
-            continue
-        one_of = cast(Mapping[str, JsonValue], body).get("oneOf")
-        if not isinstance(one_of, list):
-            continue
-        for branch in cast(list[JsonValue], one_of):
-            if not isinstance(branch, Mapping):
-                continue
-            family = _event_family_from_draft_branch(cast(Mapping[str, JsonValue], branch))
-            if family is not None:
-                families.add(family)
+
+    def visit(candidate: JsonValue) -> None:
+        if isinstance(candidate, Mapping):
+            mapping = cast(Mapping[str, JsonValue], candidate)
+            one_of = mapping.get("oneOf")
+            if isinstance(one_of, list):
+                for branch in cast(list[JsonValue], one_of):
+                    if not isinstance(branch, Mapping):
+                        continue
+                    family = _event_family_from_draft_branch(cast(Mapping[str, JsonValue], branch))
+                    if family is not None:
+                        families.add(family)
+            for item in mapping.values():
+                visit(item)
+        elif isinstance(candidate, tuple | list):
+            for item in cast(tuple[JsonValue, ...] | list[JsonValue], candidate):
+                visit(item)
+
+    visit(schema)
     return frozenset(families)
 
 
@@ -937,7 +1190,8 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "session and returns its compact record. It does not show that work outside the published "
         "record occurred. Every request_id across these tools is a fresh req_ prefixed random "
         "UUID, and workspace_ref and external_ref are admitted only as a pair. Call it once per "
-        "task. Attach selectors are exactly one of: (1) session_id for the session you hold, or "
+        "task. task_title and requested_view are required. Attach selectors are exactly one of: "
+        "(1) session_id for the session you hold, or "
         "(2) workspace_ref + external_ref as a pair with no session_id — mode=create_or_attach "
         "creates on first use and attaches on later conversations. task_id is not an accepted "
         "field. workspace_ref is the stable project identity (remote URL or absolute repository "
@@ -981,8 +1235,10 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "security or privacy reasoning, interoperability, or whether the code satisfies the ask; "
         "deterministic_only only for explicitly local or structural checks, a semantic-disabled "
         "policy, or a deliberate no-egress choice, and then disclose that limitation. Omitting "
-        "mode resolves through the configured verification policy. Call it after publishing the "
-        "completion claim and its evidence, and again after any material edit, new evidence, or "
+        "mode resolves through the configured verification policy. When scope is present, send "
+        "both claim_ids and obligation_ids; two empty arrays mean the whole case. Call it after "
+        "publishing the completion claim and its evidence, and again after any material edit, "
+        "new evidence, or "
         "finding response; a check with no new events since the last one adds nothing. Semantic "
         "review that does not succeed is a coverage gap rather than a retry problem: "
         "not_configured, blocked_by_policy, and human_denied will not change without owner "
@@ -1087,9 +1343,9 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
     {
         "policy": MappingProxyType(
             {
-                "start": "sha256:16d55b682045b1b3a04364152414441054ff431b1f5af92bcd544fe2132664a2",
+                "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
                 "publish_work": "sha256:e29c8b514d8eeab7efdc4d7b16181f766d45824f91b6960eb6c93ff0a9071d34",
-                "check": "sha256:b2022458a7093d94d749ee80eb066adfec9945638aacda60f82aaba9c749e86b",
+                "check": "sha256:234755325ef81caff5142ee582377b5e582e3fd9777fafd23fb36f2885d3af7a",
                 "respond": "sha256:7af2775e5204a902a116eefb24e4588eb66645df39f6748f22975ba44a7896e6",
                 "status": "sha256:f50314514f180a19f912662e191fec7880e2e41a6fc8dd475a063c2263eafa61",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
@@ -1097,9 +1353,9 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         ),
         "strict": MappingProxyType(
             {
-                "start": "sha256:16d55b682045b1b3a04364152414441054ff431b1f5af92bcd544fe2132664a2",
+                "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
                 "publish_work": "sha256:e29c8b514d8eeab7efdc4d7b16181f766d45824f91b6960eb6c93ff0a9071d34",
-                "check": "sha256:f1e27bafa93a25e16fe235cf5126b13b718fbf54eb4c2b4eb781bb79ed32de1a",
+                "check": "sha256:3b3da8c11d4c4a5e5c17cf1adec3c092093597dda70b2c8d923ab6448ce8b4ba",
                 "respond": "sha256:7af2775e5204a902a116eefb24e4588eb66645df39f6748f22975ba44a7896e6",
                 "status": "sha256:f50314514f180a19f912662e191fec7880e2e41a6fc8dd475a063c2263eafa61",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
@@ -1109,10 +1365,29 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:e4b7b646f501cca5f934503d6a368d1fb833d9751b8eb925456f8e4f775fb093",
-        "strict": "sha256:76f954dbec3570a9bfb3e579d0e56f0fb5e9e0dde2151a3e37cd09dce76569b4",
+        "policy": "sha256:49ceddbf698e8371741b454952d4afc05d79c803acc038586b03a5f2d2dd2203",
+        "strict": "sha256:8bf731d8f45de9036552517b4ef1894115e0c1b05044906e735fe6238fd28a87",
     }
 )
+
+
+def _presentation_description_strings(schema: Mapping[str, JsonValue]) -> tuple[str, ...]:
+    found: list[str] = []
+
+    def visit(candidate: JsonValue) -> None:
+        if isinstance(candidate, Mapping):
+            mapping = cast(Mapping[str, JsonValue], candidate)
+            description = mapping.get("description")
+            if type(description) is str:
+                found.append(description)
+            for item in mapping.values():
+                visit(item)
+        elif isinstance(candidate, tuple | list):
+            for item in cast(tuple[JsonValue, ...] | list[JsonValue], candidate):
+                visit(item)
+
+    visit(schema)
+    return tuple(found)
 
 
 def _lint_descriptor_sets() -> None:
@@ -1131,6 +1406,12 @@ def _lint_descriptor_sets() -> None:
             without_guidance = _GUIDANCE_URI.sub("yoetz-guidance-resource", descriptor.description)
             if _BOUNDARY_TERMS.search(without_guidance) is not None:
                 raise RuntimeError("descriptor_boundary_lint_failed")
+            for schema_description in _presentation_description_strings(descriptor.input_schema):
+                if _FORBIDDEN_CLAIMS.search(schema_description) is not None:
+                    raise RuntimeError("descriptor_honesty_lint_failed")
+                without_guidance = _GUIDANCE_URI.sub("yoetz-guidance-resource", schema_description)
+                if _BOUNDARY_TERMS.search(without_guidance) is not None:
+                    raise RuntimeError("descriptor_boundary_lint_failed")
             if _digest_descriptor(descriptor) != TOOL_DESCRIPTOR_DIGESTS[profile][descriptor.name]:
                 raise RuntimeError("descriptor_digest_mismatch")
         set_bytes = b"\n".join(_canonical_descriptor_bytes(item) for item in descriptors)

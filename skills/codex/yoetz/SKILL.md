@@ -11,13 +11,23 @@ Yoetz is a local work ledger and deterministic checker. It records only what par
 
 ## Step 0: read the guidance before the first call
 
-Read these with the MCP `resources/read` request for the exact URI. They are served by the `yoetz` server itself, so they resolve without any repository checkout. After install they are also on disk beside this file as `references/workflow.md`, `references/coverage-and-receipts.md`, `references/publication-policy.md`, and `references/agent-instructions.md`.
+Read these with the MCP `resources/read` request for the exact URI. They are served by the `yoetz`
+server itself, so they resolve without any repository checkout. After install they are also on disk
+beside this file as `references/workflow.md`, `references/coverage-and-receipts.md`,
+`references/publication-policy.md`, `references/request-templates.md`, and
+`references/agent-instructions.md`.
 
 - Before the first `start`: `yoetz://guidance/workflow.md` (the ten steps, cadence, resume behavior) and `yoetz://guidance/coverage-and-receipts.md` (coverage, findings, receipt wording).
 - Before the first `publish_work`: `yoetz://guidance/publication-policy.md` (what is material and safe to publish).
+- When schema metadata is missing or a request is rejected:
+  `yoetz://guidance/request-templates.md` (complete bodies for all six operations and all nine
+  ordinary publish families; replace every illustrative value before use).
 - `yoetz://guidance/agent-instructions.md` is the non-negotiable safety floor. It is already delivered as the server's initialize instructions; re-read it if that text is not in context.
 
-Author each request from its tool input schema plus this guidance, never from memory or from product source. The schema is authority for field shapes; the guidance is authority for which call to make and when. `start` takes `mode` as exactly one of `create`, `attach`, or `create_or_attach`.
+Author each request from its tool input schema plus this guidance, never from memory or from product
+source. If the host drops schema metadata, use the request templates resource rather than reading
+product source. The schema is authority for field shapes; the guidance is authority for which call
+to make and when. `start` takes `mode` as exactly one of `create`, `attach`, or `create_or_attach`.
 
 ## When to activate
 

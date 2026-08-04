@@ -48,6 +48,7 @@ _EXPECTED_RESOURCE_URIS = (
     "yoetz://guidance/workflow.md",
     "yoetz://guidance/publication-policy.md",
     "yoetz://guidance/coverage-and-receipts.md",
+    "yoetz://guidance/request-templates.md",
 )
 _FORBIDDEN_DESCRIPTOR_CLAIMS = re.compile(
     r"\b(?:authenticated|enforces?|gates?|observes?|proved|proves?|verified)\b",
@@ -219,8 +220,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:e4b7b646f501cca5f934503d6a368d1fb833d9751b8eb925456f8e4f775fb093",
-        "strict": "sha256:76f954dbec3570a9bfb3e579d0e56f0fb5e9e0dde2151a3e37cd09dce76569b4",
+        "policy": "sha256:49ceddbf698e8371741b454952d4afc05d79c803acc038586b03a5f2d2dd2203",
+        "strict": "sha256:8bf731d8f45de9036552517b4ef1894115e0c1b05044906e735fe6238fd28a87",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -299,6 +300,7 @@ def test_guidance_resources_are_exact_and_static() -> None:
     assert GUIDANCE_RESOURCES[1].annotations.priority == 0.9
     assert all(item.annotations.priority <= 0.9 for item in GUIDANCE_RESOURCES[1:])
     assert GUIDANCE_RESOURCES[2].annotations.priority == GUIDANCE_RESOURCES[3].annotations.priority
+    assert GUIDANCE_RESOURCES[4].annotations.priority <= 0.9
 
 
 def test_resource_uri_is_a_key_not_a_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -329,6 +331,8 @@ def test_advertised_input_schemas_honor_presentation_keyword_budgets() -> None:
         budget = PRESENTATION_INPUT_SCHEMA_BUDGETS[schema_name]
         assert metrics["oneof_nodes"] <= budget["max_oneof_nodes"]
         assert metrics["oneof_branches"] <= budget["max_oneof_branches"]
+        assert metrics["ref_nodes"] <= budget["max_ref_nodes"]
+        assert metrics["conditional_nodes"] <= budget["max_conditional_nodes"]
         assert metrics["defs_count"] <= budget["max_defs_count"]
         assert metrics["defs_nest_depth"] <= budget["max_defs_nest_depth"]
         assert metrics["encoded_bytes"] <= budget["max_encoded_bytes"]
