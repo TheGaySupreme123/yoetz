@@ -119,6 +119,7 @@ from yoetz.ports.ledger import (
     SelectedAttempt,
     SemanticAttemptHandle,
     SemanticAttemptRecord,
+    SemanticDisclosureWait,
     SemanticJobRecord,
     StoredProjection,
 )
@@ -251,6 +252,8 @@ class MemoryLedgerState:
     jobs: dict[str, SemanticJobRecord] = field(default_factory=lambda: {})
     job_by_case: dict[tuple[str, str, str], str] = field(default_factory=lambda: {})
     attempts: dict[str, _AttemptState] = field(default_factory=lambda: {})
+    # Keyed by job_id: at most one disclosure wait per semantic job.
+    disclosure_waits: dict[str, SemanticDisclosureWait] = field(default_factory=lambda: {})
     object_refs: dict[str, ObjectRef] = field(default_factory=lambda: {})
 
     def restore_writer(
@@ -1847,6 +1850,26 @@ class MemoryLedgerAdapter:
             ):
                 raise _error(PublicErrorCode.INVALID_REQUEST)
             now = _now(self._clock)
+            # A live disclosure wait suspends the lease clock. The human may take longer than a
+            # lease TTL to answer, and the reclaim path below would expire the started attempt and
+            # mint a new provider request id — changing the prepared bytes the human approved and
+            # silently orphaning their decision. The bound on this wait is the proposal's own
+            # expiry, which the resume path checks before dispatching anything.
+            wait = self._state.disclosure_waits.get(job_id)
+            if (
+                wait is not None
+                and wait.state == "awaiting"
+                and job.active_attempt_id is not None
+                and wait.attempt_id == job.active_attempt_id
+            ):
+                attempt = self._state.attempts.get(job.active_attempt_id)
+                if attempt is not None and attempt.state == "started":
+                    self._state.jobs[job_id] = replace(
+                        job,
+                        lease_owner_id=lease.lease_owner_id,
+                        lease_expires_at=min(lease.lease_expires_at, now + timedelta(seconds=60)),
+                    )
+                    return attempt.handle
             if (
                 job.state == "leased"
                 and job.lease_expires_at is not None
@@ -2076,6 +2099,70 @@ class MemoryLedgerAdapter:
             ]
             rows.sort(key=lambda item: item.attempt_ordinal)
             return tuple(rows)
+
+    async def record_disclosure_wait(
+        self,
+        handle: SemanticAttemptHandle,
+        pending_id: str,
+        pending_expires_at: datetime,
+    ) -> SemanticDisclosureWait:
+        async with self._lock:
+            attempt = self._state.attempts.get(handle.attempt_id)
+            if attempt is None or attempt.handle != handle or attempt.state != "started":
+                raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+            job = self._state.jobs.get(handle.job_id)
+            if job is None or job.active_attempt_id != handle.attempt_id:
+                raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+            existing = self._state.disclosure_waits.get(handle.job_id)
+            if existing is not None:
+                # A second proposal on the same job means a fresh physical attempt asked for a
+                # fresh decision. Re-recording over a live wait would let one decision authorize
+                # bytes it never saw.
+                if existing.state == "awaiting" and existing.attempt_id == handle.attempt_id:
+                    return existing
+                if existing.attempt_id == handle.attempt_id:
+                    raise _error(PublicErrorCode.INVALID_REQUEST)
+            wait = SemanticDisclosureWait(
+                handle.job_id,
+                handle.attempt_id,
+                handle.writer_id,
+                handle.operation_id,
+                pending_id,
+                pending_expires_at,
+                "awaiting",
+                None,
+            )
+            self._state.disclosure_waits[handle.job_id] = wait
+            return wait
+
+    async def load_disclosure_wait(
+        self, writer_id: str, operation_id: str
+    ) -> SemanticDisclosureWait | None:
+        async with self._lock:
+            matches = tuple(
+                wait
+                for wait in self._state.disclosure_waits.values()
+                if wait.writer_id == writer_id and wait.operation_id == operation_id
+            )
+            if not matches:
+                return None
+            live = tuple(wait for wait in matches if wait.state == "awaiting")
+            if live:
+                return max(live, key=lambda item: item.job_id)
+            return max(matches, key=lambda item: item.job_id)
+
+    async def resolve_disclosure_wait(self, job_id: str) -> SemanticDisclosureWait:
+        async with self._lock:
+            wait = self._state.disclosure_waits.get(job_id)
+            if wait is None:
+                raise _error(PublicErrorCode.INVALID_REQUEST)
+            # One-use. A denial or expiry resumes exactly once; a second attempt to consume the
+            # same decision is a protocol error, not a silent replay.
+            if wait.state != "awaiting":
+                raise _error(PublicErrorCode.INVALID_REQUEST)
+            resolved = replace(wait, state="resolved", resolved_at=_now(self._clock))
+            self._state.disclosure_waits[job_id] = resolved
+            return resolved
 
     async def renew_leases(self, lease: OperationLease) -> OperationLease:
         async with self._lock:

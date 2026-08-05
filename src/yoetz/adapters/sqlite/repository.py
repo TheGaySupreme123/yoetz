@@ -79,6 +79,7 @@ from yoetz.ports.ledger import (
     SelectedAttempt,
     SemanticAttemptHandle,
     SemanticAttemptRecord,
+    SemanticDisclosureWait,
     SemanticJobRecord,
     StoredProjection,
 )
@@ -853,6 +854,30 @@ class SqliteLedger:
                     now if attempt.state in {"selected", "failed", "expired", "late"} else None,
                 ),
             )
+        for wait in self._state.disclosure_waits.values():
+            # created_at is preserved on conflict for the same reason job/attempt timestamps are:
+            # a wait that appears to have been created after it resolved cannot be used to
+            # reconstruct how long a decision actually took.
+            self._db.execute(
+                "INSERT INTO semantic_disclosure_waits(job_id,attempt_id,writer_id,"
+                "operation_id,pending_id,pending_expires_at,state,resolved_at,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(job_id) DO UPDATE SET "
+                "state=excluded.state,"
+                "resolved_at=COALESCE(semantic_disclosure_waits.resolved_at,"
+                "excluded.resolved_at)",
+                (
+                    wait.job_id,
+                    wait.attempt_id,
+                    wait.writer_id,
+                    wait.operation_id,
+                    wait.pending_id,
+                    format_rfc3339_millis(wait.pending_expires_at),
+                    wait.state,
+                    None if wait.resolved_at is None else format_rfc3339_millis(wait.resolved_at),
+                    now,
+                ),
+            )
 
     def _verify_owner(self) -> None:
         rows = dict(
@@ -1434,6 +1459,29 @@ class SqliteLedger:
     async def list_semantic_attempts(self, job_id: str) -> tuple[SemanticAttemptRecord, ...]:
         await self._ensure_recovered()
         return await self._oracle().list_semantic_attempts(job_id)
+
+    async def record_disclosure_wait(
+        self,
+        handle: SemanticAttemptHandle,
+        pending_id: str,
+        pending_expires_at: datetime,
+    ) -> SemanticDisclosureWait:
+        await self._ensure_recovered()
+        result = await self._oracle().record_disclosure_wait(handle, pending_id, pending_expires_at)
+        await self._sync_after_mutation()
+        return result
+
+    async def load_disclosure_wait(
+        self, writer_id: str, operation_id: str
+    ) -> SemanticDisclosureWait | None:
+        await self._ensure_recovered()
+        return await self._oracle().load_disclosure_wait(writer_id, operation_id)
+
+    async def resolve_disclosure_wait(self, job_id: str) -> SemanticDisclosureWait:
+        await self._ensure_recovered()
+        result = await self._oracle().resolve_disclosure_wait(job_id)
+        await self._sync_after_mutation()
+        return result
 
     async def renew_leases(self, lease: OperationLease) -> OperationLease:
         await self._ensure_recovered()

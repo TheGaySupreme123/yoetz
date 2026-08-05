@@ -83,6 +83,7 @@ __all__ = [
     "SelectedAttempt",
     "SemanticAttemptHandle",
     "SemanticAttemptRecord",
+    "SemanticDisclosureWait",
     "SemanticJobRecord",
     "StoredProjection",
 ]
@@ -886,6 +887,43 @@ class SemanticAttemptRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class SemanticDisclosureWait:
+    """One suspended semantic attempt awaiting a local disclosure decision.
+
+    Structural only: an opaque proposal identifier and its expiry. No proposal content,
+    prepared bytes, destination, or credential material is durable here.
+    """
+
+    job_id: str
+    attempt_id: str
+    writer_id: str
+    operation_id: str
+    pending_id: str
+    pending_expires_at: datetime
+    state: Literal["awaiting", "resolved"]
+    resolved_at: datetime | None
+
+    def __post_init__(self) -> None:
+        _id(IdKind.SEMANTIC_JOB, self.job_id)
+        _id(IdKind.SEMANTIC_ATTEMPT, self.attempt_id)
+        _id(IdKind.WRITER, self.writer_id)
+        _id(IdKind.REQUEST, self.operation_id)
+        _id(IdKind.PRIVACY_PROPOSAL, self.pending_id)
+        _utc(self.pending_expires_at)
+        if type(self.state) is not str or self.state not in {"awaiting", "resolved"}:
+            raise _invalid()
+        # One-use: a resolved wait carries its consumption time so a second resume cannot
+        # replay the same decision.
+        if self.state == "awaiting":
+            if self.resolved_at is not None:
+                raise _invalid()
+        elif self.resolved_at is None:
+            raise _invalid()
+        else:
+            _utc(self.resolved_at)
+
+
+@dataclass(frozen=True, slots=True)
 class PendingVerdict:
     kind: PendingVerdictKind
     operation: OperationRecord | None
@@ -1390,6 +1428,19 @@ class LedgerPort(Protocol):
     ) -> SemanticJobRecord | None: ...
 
     async def list_semantic_attempts(self, job_id: str) -> tuple[SemanticAttemptRecord, ...]: ...
+
+    async def record_disclosure_wait(
+        self,
+        handle: SemanticAttemptHandle,
+        pending_id: str,
+        pending_expires_at: datetime,
+    ) -> SemanticDisclosureWait: ...
+
+    async def load_disclosure_wait(
+        self, writer_id: str, operation_id: str
+    ) -> SemanticDisclosureWait | None: ...
+
+    async def resolve_disclosure_wait(self, job_id: str) -> SemanticDisclosureWait: ...
 
     async def renew_leases(self, lease: OperationLease) -> OperationLease: ...
 
