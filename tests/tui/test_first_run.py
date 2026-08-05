@@ -50,8 +50,8 @@ async def answer_review(pilot: object, mode: str = "local") -> None:
     """
 
     press = getattr(pilot, "press")
-    if mode == "local":
-        await press("enter")
+    if mode == "semantic":
+        await press("enter")  # first row, where the cursor rests
     else:
         await press("down", "enter")
     await getattr(pilot, "pause")()
@@ -371,6 +371,35 @@ async def test_setup_finishes_with_an_honest_summary_and_records_the_marker(
         assert "Yoetz is ready" in text
         assert "Nothing is being sent to an external review model." in text
         assert app.markers_written == ["registered"]  # type: ignore[attr-defined]
+
+
+async def test_semantic_review_is_the_recommended_answer_and_where_the_cursor_rests(
+    make_app: MakeApp,
+) -> None:
+    """The recommendation is a property of this question, not of what an install seeds.
+
+    Pressing enter here chooses a wizard branch. It binds no provider, stores no credential,
+    and commits no policy -- each of those is a separate step with its own gate -- so the
+    seeded zero-egress ``local_only`` policy is unaffected by which row the cursor starts on.
+    """
+
+    runtime = FakeRuntime()
+    app = make_app(first_run=True, runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")  # connect
+        await pilot.pause()
+        await pilot.press("enter")  # trust
+        await pilot.pause()
+        view = app.open_view
+        assert view is not None
+        assert view.view_name == "review-mode"
+        assert [option.label for option in _options(view)] == [
+            "Add semantic review",
+            "Local only",
+        ]
+        assert _selected(view).key == "semantic"
+        assert "Recommended." in _selected(view).description
 
 
 async def test_the_review_answer_decides_the_route_and_both_halves_use_it(

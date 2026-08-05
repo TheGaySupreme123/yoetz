@@ -216,18 +216,25 @@ def _is_interactive_terminal() -> bool:
 
 
 def _choose_review_mode() -> Literal["local_only", "semantic"]:
-    """Let first run choose its complete privacy posture before registration."""
+    """Let first run choose its complete privacy posture before registration.
+
+    Semantic review is offered first and is the default answer. That is a choice about this
+    prompt, not about what an installation seeds: the durable policy is still ``local_only``,
+    and this branch only leads to the provider binding, credential, and separately
+    reauthenticated policy commit that egress actually requires. Accepting it here configures
+    nothing on its own.
+    """
 
     typer.echo("")
     typer.echo("Choose how Yoetz should review work:")
-    typer.echo("  1. Local only — deterministic checks; nothing leaves this computer")
-    typer.echo("  2. Semantic review — configure a provider, API key, and privacy policy")
+    typer.echo("  1. Semantic review (recommended) — configure a provider, API key, and policy")
+    typer.echo("  2. Local only — deterministic checks; nothing leaves this computer")
     while True:
         raw = typer.prompt("Review mode", default="1").strip()
         if raw == "1":
-            return "local_only"
-        if raw == "2":
             return "semantic"
+        if raw == "2":
+            return "local_only"
         typer.echo("Please enter 1 or 2.")
 
 

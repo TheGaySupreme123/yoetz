@@ -431,7 +431,13 @@ class YoetzTui(App[int]):
         await self._run_initial_review(review, connected=True, option=option)
 
     async def _ask_review_mode(self) -> str | None:
-        """Ask the posture question only; applying the answer belongs to the caller."""
+        """Ask the posture question only; applying the answer belongs to the caller.
+
+        Semantic review is listed first, so it is where the cursor rests. That is a choice
+        about this question, not about what an installation seeds: the durable policy is still
+        ``local_only``, and this answer only leads to the provider binding, credential, and
+        separately reauthenticated policy commit that egress actually requires.
+        """
 
         return await self.ask(
             SelectionView(
@@ -439,14 +445,15 @@ class YoetzTui(App[int]):
                 title="How should Yoetz review work?",
                 options=[
                     Option(
+                        "semantic",
+                        "Add semantic review",
+                        "Recommended. Configure a provider, API key, and explicit privacy "
+                        "boundary.",
+                    ),
+                    Option(
                         "local",
                         "Local only",
                         "Deterministic checks; nothing leaves this computer.",
-                    ),
-                    Option(
-                        "semantic",
-                        "Add semantic review",
-                        "Configure a provider, API key, and explicit privacy boundary.",
                     ),
                 ],
                 hint="enter to choose",

@@ -29,7 +29,18 @@ exactly those contracts and connects the steps without weakening any existing tr
    hand: Codex discovery, the runbook's check-then-add MCP registration behind
    preview→confirm→execute, a service reachability check, and the existing privacy and
    provider-credential ceremonies. Founder-authorized amendment (2026-08-04): before registration,
-   interactive first run chooses a complete `local_only` path or a semantic-review path. The latter
+   interactive first run chooses a complete `local_only` path or a semantic-review path.
+   Founder-authorized amendment (2026-08-05): the semantic-review path is offered first and is the
+   pre-selected answer in both the prompt-loop wizard and the terminal interface. This is a
+   property of that question only. It changes no seeded state: the durable policy an installation
+   starts with is still `local_only`, the answer binds no provider, stores no credential, and
+   commits no policy, and local-only remains one keystroke away. The reason for the
+   recommendation is that an installation that never reaches the semantic path can only ever
+   report deterministic coverage, and a first-run default that quietly guarantees that outcome
+   under-serves the operator who came for review. The same amendment requires that the answer be
+   taken *before* the MCP registration it determines, and that the registered route follow from it
+   — registering first and asking after is how a semantic install ends up ceilinged on the strict
+   route. The latter path
    registers the policy route, configures the provider and credential, then renders one exact
    recommended `assisted_review` policy only when the exact provider route has current reviewed
    no-training evidence and retention no longer than 30 days; otherwise it recommends `private`.

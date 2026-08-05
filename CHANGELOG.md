@@ -35,12 +35,17 @@ describes behavior intended for the first release rather than a change from a pr
   destination, disclosed information, confirmation, authorization scope, limits, and local
   visibility — derived from the same comparison that classifies the change as a widening. The diff
   digest is shown as integrity evidence and labelled as such rather than as the description.
-- Privacy setup opens on one recommended policy — Private with no external provider configured,
-  Metadata only with per-request confirmation when one is — with its trade-off stated. Accepting it
-  asks nothing further; declining opens the named recipes (Private, Metadata only, Assisted review,
-  Expanded review, Custom), and only Custom configures individual settings, in five grouped
-  sections. The terminal interface's `/privacy` uses the same rule and the same recipe names, and
-  selects rather than authorizes.
+- Privacy setup opens on one recommended policy — Assisted review for an exact provider route with
+  current reviewed no-training evidence and retention no longer than 30 days, Private otherwise —
+  with its trade-off stated. Accepting it asks nothing further; declining opens the named recipes
+  (Private, Metadata only, Assisted review, Expanded review, Custom), and only Custom configures
+  individual settings, in five grouped sections. The terminal interface's `/privacy` uses the same
+  rule and the same recipe names, and selects rather than authorizes.
+- First run offers semantic review first and pre-selects it, in both the prompt-loop wizard and the
+  terminal interface. This is a recommendation about that question only: every installation still
+  seeds zero-egress `local_only`, the answer binds no provider and commits no policy, and local-only
+  remains one keystroke away. The answer is now taken before the Codex MCP registration, and decides
+  which route is registered.
 - An optional, privacy-gated semantic review path behind the same gateway, with a reviewed OpenAI
   Responses adapter, a local-model AF_UNIX profile, and a scripted fake provider for testing.
 - Codex integration as the first-party harness adapter: an explicit trusted-project skill
@@ -291,6 +296,16 @@ carried them; they are listed because each one describes the behavior that now s
   included; see [`docs/protocol/local-service-security.md`](docs/protocol/local-service-security.md).
 - The advertised platform matrix is macOS 11.0+ arm64 and glibc 2.28+ x86-64 only; other platforms
   are untested.
+
+### Fixed
+
+- The terminal interface previewed the Codex integration on one MCP route and applied it on
+  another, so on a fresh installation the approved preview digest never matched and first run's
+  Codex connection failed as `preview_stale`. The route now travels on the approved plan, and the
+  approval screen shows the exact serve command that route registers rather than a fixed string.
+- Abandoning the provider step during first-run semantic setup left the policy route registered
+  with no provider behind it and no setup marker written. It now offers a local-only finish that
+  re-registers the strict route through the same preview and approval.
 
 ### Security
 

@@ -93,9 +93,14 @@ trust flow, which setup does not perform silently. MCP `registered` proves only 
 entry. A stopped service can prevent a later MCP call, but it cannot explain a session that never
 discovered the skill or attempted a Yoetz tool.
 
-Local-only remains the safe default and needs no provider. Semantic review is available from the
-same first-run flow when selected; setup is not marked complete if its provider credential or
-privacy decision is incomplete.
+Two different things are called a default here, and only one of them is a policy. The **seeded
+policy** is `local_only`: every installation starts zero-egress, and nothing moves it without a
+provider binding, a stored credential, and a separately reauthenticated policy commit. The
+**recommended answer** to first run's "How should Yoetz review work?" is semantic review, because
+an installation that never reaches it can only ever report deterministic coverage. Accepting the
+recommendation opens those steps; it does not perform them, and local-only needs no provider and
+stays one keystroke away. Setup is not marked complete if a chosen semantic path's provider
+credential or privacy decision is incomplete.
 
 The official Codex App exists on macOS and Windows. Linux setup uses the same flow for the
 standalone Codex CLI and does not fabricate an app installation that OpenAI does not publish.

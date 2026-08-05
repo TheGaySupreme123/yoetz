@@ -418,7 +418,8 @@ def test_interactive_wizard_selects_harness_then_installation_and_requires_y_or_
     monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)
     monkeypatch.setattr(provider_binding, "prompt_provider_endpoint_binding", lambda: None)
 
-    result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\n2\n1\nmaybe\nY\n")
+    # harness 1, installation 2, review mode 2 (local only), a rejected y/n, then confirm.
+    result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\n2\n2\nmaybe\nY\n")
 
     assert result.exit_code == 0
     assert "Automatically detected harnesses:" in result.stdout
@@ -518,7 +519,8 @@ def test_semantic_first_run_suggests_and_selects_assisted_privacy_draft(
     monkeypatch.setattr(privacy_setup_module, "run_privacy_setup", privacy_setup)
     monkeypatch.setattr(provider_status_module, "provider_status_report", provider_status)
 
-    result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\n2\nY\n")
+    # harness 1, review mode 1 (semantic review, the recommended answer), then confirm.
+    result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\n1\nY\n")
 
     assert result.exit_code == 0
     assert privacy_calls == [("assisted_review", True)]
