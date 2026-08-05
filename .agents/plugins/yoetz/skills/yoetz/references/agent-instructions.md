@@ -55,10 +55,12 @@ The result carries a `continuation` with the `pending_id`, its `expires_at`, and
 run.
 
 Show the user that command verbatim. Do not create a new check request — a fresh request abandons the
-proposal being decided; after the decision, replay the same request with the same `request_id`. Do not
-read Yoetz's databases, catalog files, or source to recover the pending id; `status` with
-`view=operation` returns the same continuation. Do not request a receipt and do not tell the user the
-task is done until that same request reaches a terminal result.
+proposal being decided; after the decision, replay the exact same `check` request with the same
+`request_id`. Do not read Yoetz's databases, catalog files, or source to recover the pending id:
+`status` with `view=operation` returns the same continuation while the durable record of the wait is
+available, and returns none once it is not — in which case run the check again rather than guessing.
+Do not request a receipt and do not tell the user the task is done until that same request reaches a
+terminal result.
 
 # Publishing a completion claim is an assertion, not a conclusion
 

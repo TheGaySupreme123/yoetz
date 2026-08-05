@@ -685,6 +685,39 @@ class SqliteLedger:
                 )
                 if check_result is not None:
                     self._state.check_results[(writer_value, operation_value)] = check_result
+            # Disclosure waits are durable but the oracle is in-memory, so a restart would
+            # otherwise answer "no continuation" for a check that is genuinely still suspended —
+            # exactly the unrecoverable state this work exists to remove.
+            for wait_row in self._db.execute(
+                "SELECT job_id,attempt_id,writer_id,operation_id,pending_id,"
+                "pending_expires_at,state,resolved_at FROM semantic_disclosure_waits"
+            ):
+                (
+                    job_value,
+                    attempt_value,
+                    wait_writer,
+                    wait_operation,
+                    pending_value,
+                    pending_expires,
+                    wait_state,
+                    resolved_at,
+                ) = wait_row
+                try:
+                    wait = SemanticDisclosureWait(
+                        cast(str, job_value),
+                        cast(str, attempt_value),
+                        cast(str, wait_writer),
+                        cast(str, wait_operation),
+                        cast(str, pending_value),
+                        parse_rfc3339_millis(cast(str, pending_expires)),
+                        cast(Literal["awaiting", "resolved"], wait_state),
+                        None
+                        if resolved_at is None
+                        else parse_rfc3339_millis(cast(str, resolved_at)),
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
+                self._state.disclosure_waits[wait.job_id] = wait
             self._requires_recovery = False
 
     def _inventory_object(self, ref: ObjectRef) -> None:
@@ -863,9 +896,17 @@ class SqliteLedger:
                 "operation_id,pending_id,pending_expires_at,state,resolved_at,created_at) "
                 "VALUES(?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(job_id) DO UPDATE SET "
+                # A fresh physical attempt supersedes a resolved wait on the same job, so every
+                # identity and pending field is replaced. Carrying the old resolved_at forward
+                # through COALESCE would write state='awaiting' beside a non-null resolved_at,
+                # which the table CHECK rejects. Only created_at survives.
+                "attempt_id=excluded.attempt_id,"
+                "writer_id=excluded.writer_id,"
+                "operation_id=excluded.operation_id,"
+                "pending_id=excluded.pending_id,"
+                "pending_expires_at=excluded.pending_expires_at,"
                 "state=excluded.state,"
-                "resolved_at=COALESCE(semantic_disclosure_waits.resolved_at,"
-                "excluded.resolved_at)",
+                "resolved_at=excluded.resolved_at",
                 (
                     wait.job_id,
                     wait.attempt_id,

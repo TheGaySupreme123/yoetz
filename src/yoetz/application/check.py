@@ -29,6 +29,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
 )
 from yoetz.domain.values import (
+    DISCLOSURE_CONTINUATION_INSTRUCTION,
     Frontier,
     SemanticContinuation,
     claim_id,
@@ -252,12 +253,7 @@ def check_awaiting_human_json(result: CheckAwaitingHuman) -> dict[str, JsonValue
             "expires_at": result.continuation.expires_at.wire,
             "command": result.continuation.command,
             "replay_request_id": result.continuation.request_id,
-            "instruction": (
-                "A local disclosure decision is required before this check can dispatch. Run the "
-                "command above, then replay this exact check request with the same request_id. Do "
-                "not create a new check request and do not request a receipt until this request "
-                "reaches a terminal result."
-            ),
+            "instruction": DISCLOSURE_CONTINUATION_INSTRUCTION,
         },
         "versions": {
             "protocol_version": result.versions.protocol_version,

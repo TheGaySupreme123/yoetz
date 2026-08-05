@@ -22,6 +22,7 @@ from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.ids import IdKind, validate_actor_id, validate_id
 
 __all__ = [
+    "DISCLOSURE_CONTINUATION_INSTRUCTION",
     "DISCLOSURE_CONTINUATION_KIND",
     "GENESIS_DIGEST",
     "ActionId",
@@ -601,6 +602,14 @@ def subject_state_relation(
 
 
 DISCLOSURE_CONTINUATION_KIND: Final = "privacy_disclosure_decision"
+
+# The check result and the status recovery query must return the *same* continuation. Two copies
+# of this prose would eventually disagree, and the caller has no way to tell which one is current.
+DISCLOSURE_CONTINUATION_INSTRUCTION: Final = (
+    "A local disclosure decision is required before this check can dispatch. Run the command "
+    "above, then replay this exact check request with the same request_id. Do not create a new "
+    "check request and do not request a receipt until this request reaches a terminal result."
+)
 
 
 @dataclass(frozen=True, slots=True)

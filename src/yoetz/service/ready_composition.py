@@ -1519,6 +1519,7 @@ def _map_egress_to_final(
     ids: IdPort | None = None,
     *,
     attempt_id: str | None = None,
+    operation_request_id: str | None = None,
 ) -> FinalSemanticEvaluation:
     """Map privacy egress outcomes to check FinalSemanticEvaluation without inventing findings.
 
@@ -1552,13 +1553,19 @@ def _map_egress_to_final(
     if type(result) is SemanticEgressAwaitingHuman:
         # The proposal id and its expiry are the only things that make this branch recoverable.
         # Dropping them is what turned "a human must approve" into an unanswerable instruction.
+        #
+        # The continuation names the request the *caller* replays, which is the check operation —
+        # not ``result.request_id``, which on the durable path is the per-attempt provider request
+        # id. Telling a caller to replay a provider request id would name a request it never sent.
         return FinalSemanticEvaluation(
             SemanticStatus.AWAITING_HUMAN,
             SemanticReason.HUMAN_APPROVAL_REQUIRED,
             continuation=disclosure_continuation(
                 pending_id=result.privacy_proposal_id,
                 expires_at=result.expires_at,
-                request_id=result.request_id,
+                request_id=(
+                    result.request_id if operation_request_id is None else operation_request_id
+                ),
             ),
         )
     if type(result) is SemanticEgressBlocked:
@@ -1970,7 +1977,12 @@ def _privacy_gated_semantic_evaluator(
                     provider_binding=provider,
                 )
                 result = await privacy.evaluate_semantic(candidate, attempt_deadline)
-                return _map_egress_to_final(result, ids, attempt_id=handle.attempt_id)
+                return _map_egress_to_final(
+                    result,
+                    ids,
+                    attempt_id=handle.attempt_id,
+                    operation_request_id=frozen.lease.operation_id,
+                )
 
             async def _publish_success(handle: object, evaluation: object) -> ObjectRef:
                 from yoetz.ports.ledger import SemanticAttemptHandle as _Handle

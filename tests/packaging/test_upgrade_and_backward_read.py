@@ -27,6 +27,8 @@ from typing import Final
 
 import pytest
 
+from yoetz.adapters.sqlite.migrations import BUNDLE_MIGRATIONS, CATALOG_MIGRATIONS
+
 _REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 
 
@@ -114,9 +116,12 @@ def test_compatibility_doc_names_only_the_current_release_axes() -> None:
 
 
 def test_root_and_installed_migration_trees_are_byte_identical() -> None:
+    # Enumerated from the registry rather than hand-listed: the previous literal stopped at
+    # bundle 0003, so 0004 and 0005 could drift between the root and packaged trees without any
+    # test noticing.
     for family, versions in (
-        ("catalog", ("0001", "0002")),
-        ("bundle", ("0001", "0002", "0003")),
+        ("catalog", tuple(item.version for item in CATALOG_MIGRATIONS)),
+        ("bundle", tuple(item.version for item in BUNDLE_MIGRATIONS)),
     ):
         for version in versions:
             root_file = _REPO_ROOT / "migrations" / family / f"{version}.sql"

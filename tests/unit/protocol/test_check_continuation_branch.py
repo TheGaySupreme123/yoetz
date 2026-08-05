@@ -28,6 +28,22 @@ _REQUEST: Final = f"req_{uuid.uuid4()}"
 _INSTRUCTION: Final = "Run the command, then replay this exact check request with the same id."
 
 
+def _privacy_projection() -> dict[str, Any]:
+    """Every projected success body carries one, including this nonterminal branch."""
+
+    return {
+        "sink": "agent_context",
+        "local_disclosure_receipt_id": f"egr_{uuid.uuid4()}",
+        "policy_id": f"pvy_{uuid.uuid4()}",
+        "policy_version": "1",
+        "policy_digest": "sha256:" + "0" * 64,
+        "included_categories": [],
+        "blocked_categories": [],
+        "omitted_pointers": [],
+        "projection_commitment": "hmac-sha256:" + "1" * 64,
+    }
+
+
 def _frontier() -> dict[str, Any]:
     return {"sequence": "4", "head_digest": "sha256:" + "2" * 64}
 
@@ -60,6 +76,7 @@ def _awaiting(**overrides: Any) -> dict[str, Any]:
         "semantic_status": "awaiting_human",
         "semantic_reason": "human_approval_required",
         "continuation": _continuation(),
+        "privacy_projection": _privacy_projection(),
         "versions": {
             "protocol_version": "0.1",
             "engine_version": "0.1.0",
@@ -97,6 +114,8 @@ def test_the_branch_returns_no_verdict_and_no_coverage() -> None:
     result = CheckResultModel.model_validate(_awaiting())
     root = result.root
 
+    # privacy_projection is deliberately not in this list: it describes how this body was
+    # disclosed, not what the check concluded.
     for field in ("verdict", "findings", "coverage", "semantic_provenance", "suppressed_count"):
         assert not hasattr(root, field), f"{field} must not appear on a suspended check"
 

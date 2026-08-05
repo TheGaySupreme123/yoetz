@@ -14,7 +14,11 @@ from pydantic import BaseModel
 from yoetz.application.check import CheckScope, run_deterministic_policies
 from yoetz.domain.findings import FINDING_KIND_TRAITS, FindingOrigin
 from yoetz.domain.observation import AdviceSnapshot
-from yoetz.domain.values import Frontier, disclosure_continuation
+from yoetz.domain.values import (
+    DISCLOSURE_CONTINUATION_INSTRUCTION,
+    Frontier,
+    disclosure_continuation,
+)
 from yoetz.kernel.deterministic_checks import (
     DeterministicAssessment,
     build_deterministic_case,
@@ -444,12 +448,7 @@ async def _disclosure_continuation(
         "expires_at": continuation.expires_at.wire,
         "command": continuation.command,
         "replay_request_id": continuation.request_id,
-        "instruction": (
-            "A local disclosure decision is required before this check can dispatch. Run the "
-            "command above, then replay this exact check request with the same request_id. Do "
-            "not create a new check request and do not request a receipt until this request "
-            "reaches a terminal result."
-        ),
+        "instruction": DISCLOSURE_CONTINUATION_INSTRUCTION,
     }
 
 

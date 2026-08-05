@@ -62,7 +62,7 @@ Copy this and check items off as you go:
 - [ ] status before closing: read closure_readiness for open obligations and gaps
 - [ ] publish the completion claim and its evidence (an assertion, not a conclusion)
 - [ ] check (choose mode deliberately)
-- [ ] if awaiting_human: show the supplied command, wait, then replay the same request_id
+- [ ] if awaiting_human: show the supplied command, wait, then replay the exact same `check` request with the same `request_id`
 - [ ] respond to each finding, then recheck
 - [ ] receipt
 - [ ] final answer no stronger than the receipt's weakest coverage
@@ -104,8 +104,10 @@ Do exactly this:
   request id, which abandons the proposal the user is being asked to approve. After they decide,
   replay the *exact same* `check` request with the *same* `request_id`.
 - **Do not inspect the Yoetz database, catalog files, or product source** to find the pending id or
-  work out what happened. Everything you need is in the result; if you lost it, read `status` with
-  `view=operation` for that `operation_request_id` and it returns the same continuation.
+  work out what happened. Everything you need is in the result. If you lost it, read `status` with
+  `view=operation` for that `operation_request_id`: it returns the same continuation when the
+  durable record of the wait is still available. If it comes back without one, the decision window
+  is gone — run the check again rather than guessing an id.
 - **Do not request a receipt yet, and do not tell the user the task is done.** The check has not
   reached a terminal result, so there is no verdict, no coverage, and nothing to conclude from.
 

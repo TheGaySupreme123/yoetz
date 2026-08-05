@@ -2335,6 +2335,11 @@ def _human_error_code(exc: Exception) -> str:
         if reason in {
             "binding_expired",
             "cancelled",
+            # Without these three the mapper collapses them to internal_error, and the bounded
+            # ceremony reasons never reach the client that has to act on them.
+            "ceremony_unsupported",
+            "pending_not_actionable",
+            "pending_unavailable",
             "kind_forbidden",
             "phase_invalid",
             "presence_unavailable",

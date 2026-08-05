@@ -1984,6 +1984,9 @@ class CheckAwaitingHumanModel(_ClosedModel):
     semantic_reason: Literal["human_approval_required"]
     continuation: CheckContinuationModel
     versions: CheckVersionSliceModel
+    # Every projected success body carries its disclosure projection; the nonterminal branch is
+    # projected through the same path and must not be an exception to that invariant.
+    privacy_projection: PrivacyProjectionModel
 
     @model_validator(mode="after")
     def _validate_awaiting_human(self) -> CheckAwaitingHumanModel:
