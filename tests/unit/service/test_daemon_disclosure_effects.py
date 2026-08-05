@@ -12,7 +12,7 @@ import pytest
 
 from builders.privacy_policies import minimal_external_policy
 from yoetz.application.privacy_policy import PrivacyPolicyApplication
-from yoetz.domain.privacy import DisclosureProposal, HumanPrivacyDecision
+from yoetz.domain.privacy import DisclosureProposal, HumanPrivacyDecision, LocalDisclosureSink
 from yoetz.ports.privacy import EffectivePrivacyPolicy
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.models import DataCategory
@@ -24,6 +24,7 @@ from yoetz.service.confidential_protocol import (
     PrivacyPendingTarget,
 )
 from yoetz.service.daemon import _LockedHumanEffects, _PrivacyPolicyAppRelay
+from yoetz.service.human_control import HumanControlError
 
 _NOW = datetime(2026, 8, 5, 12, tzinfo=UTC)
 _REQUEST_ID = "req_30000000-0000-4000-8000-000000000001"
@@ -77,7 +78,9 @@ class _Vault:
         return _Mac()
 
 
-def _effects() -> tuple[_LockedHumanEffects, _Audit]:
+def _effects(
+    *, local_sink: LocalDisclosureSink | None = None
+) -> tuple[_LockedHumanEffects, _Audit]:
     store = _PolicyStore()
     policy = store.effective.policy
     binding = next(
@@ -86,25 +89,25 @@ def _effects() -> tuple[_LockedHumanEffects, _Audit]:
         if channel.provider_binding is not None
     )
     proposal = DisclosureProposal(
-        _PROPOSAL_ID,
-        _REQUEST_ID,
-        _TASK_ID,
-        (),
-        b'{"claim":"bounded"}',
-        (DataCategory.CLAIM_TEXT,),
-        (),
-        (),
-        _CASE_DIGEST,
-        binding,
-        None,
-        "semantic-review",
-        policy.effective_scope,
-        policy.version,
-        policy.policy_digest,
-        19,
-        5,
-        _NOW + timedelta(minutes=5),
-        _COMMITMENT,
+        privacy_proposal_id=_PROPOSAL_ID,
+        request_id=_REQUEST_ID,
+        task_id=_TASK_ID,
+        source_item_digests=(),
+        prepared_bytes=b'{"claim":"bounded"}',
+        approved_categories=(DataCategory.CLAIM_TEXT,),
+        blocked_categories=(),
+        transformation_summary=(),
+        prepared_case_digest=_CASE_DIGEST,
+        provider_binding=binding if local_sink is None else None,
+        local_sink=local_sink,
+        purpose="semantic-review",
+        scope=policy.effective_scope,
+        policy_version=policy.version,
+        policy_digest=policy.policy_digest,
+        max_bytes=19,
+        max_tokens=5,
+        expires_at=_NOW + timedelta(minutes=5),
+        proposal_commitment=_COMMITMENT,
     )
     audit = _Audit(proposal)
     app = PrivacyPolicyApplication(
@@ -150,3 +153,103 @@ async def test_disclosure_preview_and_approval_use_the_durable_proposal() -> Non
     assert len(audit.decisions) == 1
     assert audit.decisions[0].approved is True
     assert audit.decisions[0].accepted_diff_digest == _CASE_DIGEST
+
+
+@pytest.mark.anyio
+async def test_expired_disclosure_is_stale_and_cannot_open_a_ceremony() -> None:
+    effects, audit = _effects()
+    object.__setattr__(audit.proposal, "expires_at", _NOW - timedelta(seconds=1))
+    target = PrivacyPendingTarget("disclosure", _PROPOSAL_ID)
+
+    result = await effects.decide_privacy(target, "approve", None, 1.0)
+
+    assert result.status == "stale"
+    assert audit.decisions == []
+    with pytest.raises(HumanControlError, match="target_invalid"):
+        await effects.prepare(
+            ClientOpenEnvelope(
+                "1" * 64,
+                HumanCeremonyKind.PRIVACY_DISCLOSURE_DECISION,
+                target,
+            )
+        )
+
+
+@pytest.mark.anyio
+async def test_policy_drift_makes_the_disclosure_stale() -> None:
+    effects, audit = _effects()
+    object.__setattr__(audit.proposal, "policy_digest", "sha256:" + "f" * 64)
+    target = PrivacyPendingTarget("disclosure", _PROPOSAL_ID)
+
+    result = await effects.decide_privacy(target, "approve", None, 1.0)
+
+    assert result == PrivacyDecisionResult("stale", _CASE_DIGEST)
+    assert audit.decisions == []
+
+
+@pytest.mark.anyio
+async def test_disclosure_denial_records_an_unapproved_decision() -> None:
+    effects, audit = _effects()
+    target = PrivacyPendingTarget("disclosure", _PROPOSAL_ID)
+
+    result = await effects.decide_privacy(target, "deny", None, 1.0)
+
+    assert result == PrivacyDecisionResult("denied", _CASE_DIGEST)
+    assert len(audit.decisions) == 1
+    assert audit.decisions[0].approved is False
+    assert audit.decisions[0].expires_at is None
+
+
+@pytest.mark.anyio
+async def test_local_sink_disclosure_preview_commits_to_its_destination() -> None:
+    effects, _audit = _effects(local_sink=LocalDisclosureSink.AGENT_CONTEXT)
+    target = PrivacyPendingTarget("disclosure", _PROPOSAL_ID)
+
+    preview, _target_digest, _generation = await effects.prepare(
+        ClientOpenEnvelope(
+            "1" * 64,
+            HumanCeremonyKind.PRIVACY_DISCLOSURE_DECISION,
+            target,
+        )
+    )
+
+    assert type(preview) is PrivacyDisclosureDecisionPreview
+    assert preview.destination_commitment == canonical_digest(
+        {"local_sink": LocalDisclosureSink.AGENT_CONTEXT.value}
+    )
+
+
+@pytest.mark.anyio
+async def test_missing_disclosure_destination_fails_closed() -> None:
+    effects, audit = _effects(local_sink=LocalDisclosureSink.AGENT_CONTEXT)
+    object.__setattr__(audit.proposal, "local_sink", None)
+    target = PrivacyPendingTarget("disclosure", _PROPOSAL_ID)
+
+    with pytest.raises(HumanControlError, match="target_invalid"):
+        await effects.prepare(
+            ClientOpenEnvelope(
+                "1" * 64,
+                HumanCeremonyKind.PRIVACY_DISCLOSURE_DECISION,
+                target,
+            )
+        )
+
+
+@pytest.mark.anyio
+async def test_disclosure_excerpt_drops_only_a_trailing_partial_utf8_sequence() -> None:
+    effects, audit = _effects()
+    object.__setattr__(audit.proposal, "prepared_bytes", b"a" * 4_095 + "é".encode())
+    target = PrivacyPendingTarget("disclosure", _PROPOSAL_ID)
+
+    preview, _target_digest, _generation = await effects.prepare(
+        ClientOpenEnvelope(
+            "1" * 64,
+            HumanCeremonyKind.PRIVACY_DISCLOSURE_DECISION,
+            target,
+        )
+    )
+
+    assert type(preview) is PrivacyDisclosureDecisionPreview
+    assert preview.excerpt_preview == "a" * 4_095
+    assert "�" not in preview.excerpt_preview
+    assert preview.byte_count == 4_097

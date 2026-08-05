@@ -8,6 +8,7 @@ from yoetz.adapters.providers.data_use_catalog import (
     data_use_record_for_endpoint,
     endpoint_profile_data_use_recommendation_eligible,
 )
+from yoetz.protocol.canonical import canonical_digest
 
 
 def test_openai_record_is_route_specific_and_has_fixed_evidence_lifetime() -> None:
@@ -60,4 +61,45 @@ def test_all_exposed_ambiguous_routes_have_explicit_conservative_records() -> No
         assert record.profile.data_use_profile_id != "unreviewed-provider-route"
         assert not endpoint_profile_data_use_recommendation_eligible(
             endpoint_profile_id, now=datetime(2026, 8, 5, tzinfo=UTC)
+        )
+
+
+def test_unrecognized_endpoint_returns_the_conservative_unknown_record() -> None:
+    record = data_use_record_for_endpoint("not-a-packaged-endpoint")
+
+    assert record.profile.data_use_profile_id == "unreviewed-provider-route"
+    assert record.official_source_urls == ()
+    assert not endpoint_profile_data_use_recommendation_eligible(
+        "not-a-packaged-endpoint", now=datetime(2026, 8, 5, tzinfo=UTC)
+    )
+
+
+def test_evidence_digest_commits_to_the_exact_displayed_route_facts() -> None:
+    for endpoint_profile_id in (
+        "openai-responses",
+        "anthropic-openai-chat-completions",
+        "fireworks-responses",
+        "xai-openai-chat-completions",
+        "google-gemini-openai-chat-completions",
+        "openrouter-openai-chat-completions",
+        "vercel-ai-gateway-openai-responses",
+        "owner-declared-openai-responses",
+        "not-a-packaged-endpoint",
+    ):
+        record = data_use_record_for_endpoint(endpoint_profile_id)
+        profile = record.profile
+
+        assert profile.evidence_digest == canonical_digest(
+            {
+                "profile": profile.data_use_profile_id,
+                "reviewed_at": profile.reviewed_at.isoformat(),
+                "expires_at": profile.expires_at.isoformat(),
+                "customer_content_training": profile.customer_content_training,
+                "retention": profile.retention,
+                "retention_days_ceiling": profile.retention_days_ceiling,
+                "provider_human_access": profile.provider_human_access,
+                "route_qualifier": record.route_qualifier,
+                "caveats": list(record.caveats),
+                "sources": list(record.official_source_urls),
+            }
         )

@@ -224,8 +224,11 @@ def test_bundled_provider_preset_dispatches_and_awaits_live_evidence(
     profile = getattr(builder(), "profile")
     assert profile.host == host
     assert profile.path == path
-    # This cell's frozen clock predates the packaged review records, so none can claim current
-    # recommendation evidence here. Live dispatch remains separately unclaimed until authorized.
+    # This cell's frozen clock predates the packaged review records, so the lower-bound reason is
+    # explicit rather than accidentally shared with a conservative provider posture. Live dispatch
+    # remains separately unclaimed until authorized.
+    assert profile.data_use_profile.reviewed_at is not None
+    assert profile.data_use_profile.reviewed_at > _NOW
     assert not profile.data_use_profile.recommendation_eligible(_NOW)
 
     context = runtime_capability_context(

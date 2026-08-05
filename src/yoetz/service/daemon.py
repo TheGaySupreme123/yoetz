@@ -1678,12 +1678,17 @@ class _LockedHumanEffects:
                         "provider_id": binding.provider_id,
                         "transport": binding.transport,
                     }
-                else:
-                    assert proposal.local_sink is not None
+                elif proposal.local_sink is not None:
                     destination = {"local_sink": proposal.local_sink.value}
-                excerpt = proposal.prepared_bytes[:4_096].decode("utf-8", errors="replace")
-                while len(excerpt.encode("utf-8")) > 4_096:
-                    excerpt = excerpt[:-1]
+                else:
+                    raise HumanControlError("target_invalid")
+                excerpt_bytes = proposal.prepared_bytes[:4_096]
+                try:
+                    excerpt = excerpt_bytes.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    if len(proposal.prepared_bytes) <= 4_096 or exc.end != len(excerpt_bytes):
+                        raise HumanControlError("target_invalid") from exc
+                    excerpt = excerpt_bytes[: exc.start].decode("utf-8")
                 category = (
                     proposal.approved_categories[0].value.replace("_", "-")
                     if len(proposal.approved_categories) == 1

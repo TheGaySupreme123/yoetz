@@ -110,9 +110,11 @@ Sensitive and confidential content is off. The never-send set remains absolute. 
 packet built from the ledger, not a handle on your repository — composition passes bundled provider
 adapters no repository, storage, environment, or transcript handles.
 
-The recipe is only recommended for an exact endpoint profile with a current data-use record stating
-training `prohibited`, retention `none|bounded`, and provider human access `prohibited|restricted`.
-Known-broad, unknown, or stale posture removes the recommendation.
+The recipe is only recommended for an exact endpoint profile with a data-use record satisfying
+`reviewed_at <= now < expires_at`, training `prohibited`, retention `none|bounded`, and a bounded
+ceiling no greater than 30 days. Provider human-access facts remain prominent disclosure
+information, but are not a separate recommendation threshold. Known-broad, unknown, or stale
+posture removes the recommendation.
 
 ## How review comes back
 

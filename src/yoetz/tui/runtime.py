@@ -325,7 +325,8 @@ class YoetzRuntime:
             )
         return PrivacyRecommendation(
             recipe,
-            "No external provider is configured, so this keeps network egress off entirely.",
+            "No current eligible exact provider route is configured, so this keeps network "
+            "egress off entirely.",
             "In exchange, there is no external semantic review at all.",
         )
 
