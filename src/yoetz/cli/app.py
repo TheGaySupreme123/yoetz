@@ -17,7 +17,7 @@ import typer
 from pydantic import BaseModel, ValidationError
 
 from yoetz import __version__
-from yoetz.cli.exits import exit_code_for
+from yoetz.cli.exits import ceremony_refusal_message, exit_code_for
 from yoetz.cli.render import (
     render_human_check,
     render_human_error,
@@ -935,6 +935,10 @@ def _trusted_exception_failure(error: Exception) -> int | None:
         if reason == "cancelled":
             _stderr("cancelled")
             return exit_code_for("cancelled")
+        ceremony_refusal = ceremony_refusal_message(reason)
+        if ceremony_refusal is not None:
+            _stderr(ceremony_refusal)
+            return exit_code_for(PublicErrorCode.INVALID_REQUEST)
         _stderr("service_unavailable: the confidential ceremony could not be completed")
         return exit_code_for(PublicErrorCode.SERVICE_UNAVAILABLE)
     return None
