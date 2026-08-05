@@ -146,6 +146,12 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    effective permission requires a locally authenticated human on a trusted control surface,
    reauthentication, an exact diff, and a durable decision; MCP/agent/LLM calls can request more
    context but cannot approve or persist the expansion.
+   Answering a `confirm_every_request` disclosure is deliberately *not* one of these loosening
+   operations and does not require passphrase mode or strong reauthentication: it decides one exact
+   prepared case already bounded by the committed policy, and it can neither widen the policy nor
+   authorize any other case. It requires a ready vault and the trusted foreground surface, nothing
+   more. Requiring passphrase mode made the decision unreachable on a keyring installation, which
+   is the ordinary configuration, so the posture existed with no way to answer it.
    Policy commit and external/local consumption share one generation-CAS linearization point.
    Tightening-first prevents I/O and closes the unconsumed branch with a no-dispatch receipt;
    consume-first admits one attempt that may send, must be best-effort closed/nonselectable, and
@@ -334,7 +340,7 @@ case → single-use authorization → bounded gateway → bound sink/provider �
 | First `assisted` policy commit, later wider provider/category/class/scope, or credential set/rotate | yes | Exact trusted-local diff/credential ceremony |
 | Ordinary check, automatic retry inside the confirmed policy, reviewer challenge, agent response, or recheck | no | Direct agent-to-agent path with a fresh authorization and receipt per physical attempt |
 | Tightening policy | no | May apply immediately after the service proves it cannot widen |
-| `confirm_every_request` physical attempt | yes | Exact prepared-case foreground decision for that one attempt |
+| `confirm_every_request` physical attempt | yes | Exact prepared-case foreground decision for that one attempt, on any ready vault |
 | Finding waiver | yes | Existing interactive-human `finding_only` authority |
 | Never-send match or out-of-scope content | impossible to approve | Fail closed under every profile and fork claiming upstream conformance |
 

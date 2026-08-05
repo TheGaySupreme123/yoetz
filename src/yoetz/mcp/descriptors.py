@@ -1236,12 +1236,20 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "security or privacy reasoning, interoperability, or whether the code satisfies the ask; "
         "deterministic_only only for explicitly local or structural checks, a semantic-disabled "
         "policy, or a deliberate no-egress choice, and then disclose that limitation. Omitting "
-        "mode resolves through the configured verification policy. Omit scope for the whole case, "
+        "mode resolves through the configured verification policy. This call cannot widen privacy "
+        "authority: an active semantic route was selected by the owner during setup as a bounded "
+        "standing policy, and check cannot change its route, workspace, scope, categories, "
+        "retention ceiling, or credential authority. Whether a case is dispatched stays enforced "
+        "by the installed route binding and privacy policy. Omit scope for the whole case, "
         "or send both claim_ids and obligation_ids as arrays of unique ids; two empty arrays also "
         "mean the whole case, and sending only one of the two keys is rejected. Call it after "
         "publishing the completion claim and its evidence, and again after any material edit, "
         "new evidence, or "
-        "finding response; a check with no new events since the last one adds nothing. Semantic "
+        "finding response; a check with no new events since the last one adds nothing. "
+        "awaiting_human is the one nonterminal result: it carries a continuation with the pending "
+        "id, its expiry, and the exact command to run. Show that command, do not create a new "
+        "check request, do not inspect Yoetz storage or source, and replay this same request with "
+        "the same request_id after the decision. Semantic "
         "review that does not succeed is a coverage gap rather than a retry problem: "
         "not_configured, blocked_by_policy, and human_denied will not change without owner "
         "action; unavailable and timeout already spent that job's own attempt budget; refused, "
@@ -1347,7 +1355,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
             {
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
                 "publish_work": "sha256:e29c8b514d8eeab7efdc4d7b16181f766d45824f91b6960eb6c93ff0a9071d34",
-                "check": "sha256:5dbc5e12638e1c288f7c9c34d362ca9f82bb7240944befe99ebc3dfed2a0f296",
+                "check": "sha256:cdd4c9e9910ee1cb43f98620bc6ae01b900cc19adca141ad8692e5338e545769",
                 "respond": "sha256:7af2775e5204a902a116eefb24e4588eb66645df39f6748f22975ba44a7896e6",
                 "status": "sha256:f50314514f180a19f912662e191fec7880e2e41a6fc8dd475a063c2263eafa61",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
@@ -1357,7 +1365,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
             {
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
                 "publish_work": "sha256:e29c8b514d8eeab7efdc4d7b16181f766d45824f91b6960eb6c93ff0a9071d34",
-                "check": "sha256:b01b5c0b599274f322415a14ce662a3cbde40ccc8edcba33cc2cb79981ecb634",
+                "check": "sha256:bbec4681f3ec06f5e44b81a9cc3f0f6a089bc2ff39c610928b40f7153ea93db4",
                 "respond": "sha256:7af2775e5204a902a116eefb24e4588eb66645df39f6748f22975ba44a7896e6",
                 "status": "sha256:f50314514f180a19f912662e191fec7880e2e41a6fc8dd475a063c2263eafa61",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
@@ -1367,8 +1375,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:b450ca481af7a0c1ca1746652810e344fb8d1cf1222b8eedfe2c5668d2dfda86",
-        "strict": "sha256:7ae0f5b97cc165a72b526cbecb7b0a995fff7ae4ba68b96fc33ca97f19b292b0",
+        "policy": "sha256:ff9b2dc64ccb6d3a0a12119688d3a447b11b22db9fe4fa5655e4e723017ec1c8",
+        "strict": "sha256:35f00bbf132d2e85b042b53969c326684746dd1efa99dd70d122f21cc30bf007",
     }
 )
 

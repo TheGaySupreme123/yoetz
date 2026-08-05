@@ -431,6 +431,16 @@ attempt returned after it lost lease/deadline authority;
 `stale` means a once-valid result no longer matches the frozen frontier/dependency digest. These
 states are distinct and there is no second `completed` spelling.
 
+`awaiting_human` is the one **nonterminal** semantic status. It means one exact prepared case is
+waiting on a local disclosure decision under the per-request confirmation posture: the check
+operation, its semantic job, and its physical attempt all stay open, no provider was reached, and no
+verdict or completion-grade coverage exists yet. It must not be recorded as a failed attempt or
+committed as a terminal check result — approval resumes the *same* request, attempt, provider
+request id, proposal, and case digest, because the provider request id is part of the prepared bytes
+the human approved. The durable suspension lives in `semantic_disclosure_waits` (bundle schema 5),
+which is one-use: denial or expiry resumes exactly once and commits the corresponding terminal
+result, and a transient provider retry creates a fresh proposal requiring a fresh decision.
+
 Every status is paired with one required closed `SemanticReason`, never prose or a renderer guess:
 `deterministic_mode`, `no_material_semantic_case`, `provider_not_configured`,
 `local_model_not_configured`, `network_egress_denied`, `channel_disabled`,
