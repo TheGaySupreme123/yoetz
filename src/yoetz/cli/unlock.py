@@ -899,12 +899,51 @@ async def initialize_passphrase_vault(passphrase: bytearray | None = None) -> Va
     return cast(VaultStateResult, result)
 
 
+def _load_scoped_auto_unlock_passphrase() -> bytearray | None:
+    """Load the bundle-scoped platform entry when present; never invent a secret."""
+
+    import os
+
+    from yoetz.adapters.keys.os_keyring import AutoUnlockPassphraseStore
+    from yoetz.config.load import load_config
+    from yoetz.config.paths import bundle_root
+
+    config = load_config({}, os.environ, None)
+    return AutoUnlockPassphraseStore(bundle_root(_data_dir=config.storage.data_dir)).load()
+
+
 async def unlock_vault(passphrase: bytearray | None = None) -> VaultStateResult:
-    result = await run_human_ceremony(
-        HumanCeremonyKind.VAULT_UNLOCK,
-        EmptyVaultTarget(expected_mode="passphrase"),
-        passphrase=passphrase,
-    )
+    """Unlock the passphrase vault, preferring the scoped platform entry when available.
+
+    Setup often provisions a generated passphrase the human never types. When that entry
+    is present, submit it through the ordinary confidential ceremony with no TTY prompt.
+    Only fall back to interactive entry when no usable entry exists or silent unlock fails.
+    """
+
+    target = EmptyVaultTarget(expected_mode="passphrase")
+    if passphrase is not None:
+        result = await run_human_ceremony(
+            HumanCeremonyKind.VAULT_UNLOCK,
+            target,
+            passphrase=passphrase,
+        )
+        return cast(VaultStateResult, result)
+    stored = _load_scoped_auto_unlock_passphrase()
+    if stored is not None:
+        try:
+            result = cast(
+                VaultStateResult,
+                await run_human_ceremony(
+                    HumanCeremonyKind.VAULT_UNLOCK,
+                    target,
+                    passphrase=stored,
+                ),
+            )
+            if getattr(result, "state", None) == "ready":
+                return result
+        except HumanCeremonyCliError:
+            pass
+    result = await run_human_ceremony(HumanCeremonyKind.VAULT_UNLOCK, target)
     return cast(VaultStateResult, result)
 
 

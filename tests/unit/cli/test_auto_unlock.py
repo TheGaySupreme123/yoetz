@@ -226,5 +226,58 @@ def test_foreground_terminal_accepts_macos_controlling_tty_alias(
     assert closed == [9]
 
 
+@pytest.mark.anyio
+async def test_unlock_vault_prefers_scoped_platform_entry_without_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = bytearray(b"correct horse battery staple!!")
+    seen: list[bytearray | None] = []
+
+    async def ceremony(
+        kind: object,
+        target: object,
+        passphrase: bytearray | None = None,
+        **_kwargs: object,
+    ) -> Any:
+        del kind, target
+        seen.append(None if passphrase is None else bytearray(passphrase))
+        return SimpleNamespace(state="ready")
+
+    monkeypatch.setattr(
+        unlock_module,
+        "_load_scoped_auto_unlock_passphrase",
+        lambda: secret,
+    )
+    monkeypatch.setattr(unlock_module, "run_human_ceremony", ceremony)
+
+    result = await unlock_module.unlock_vault()
+    assert result.state == "ready"
+    assert seen == [bytearray(b"correct horse battery staple!!")]
+
+
+@pytest.mark.anyio
+async def test_unlock_vault_falls_back_to_interactive_when_store_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[bool] = []
+
+    async def ceremony(
+        kind: object,
+        target: object,
+        passphrase: bytearray | None = None,
+        **_kwargs: object,
+    ) -> Any:
+        del kind, target
+        seen.append(passphrase is None)
+        return SimpleNamespace(state="ready")
+
+    monkeypatch.setattr(unlock_module, "_load_scoped_auto_unlock_passphrase", lambda: None)
+    monkeypatch.setattr(unlock_module, "run_human_ceremony", ceremony)
+
+    result = await unlock_module.unlock_vault()
+    assert result.state == "ready"
+    assert seen == [True]
+
+
 async def _async_value(value: Any) -> Any:
     return value

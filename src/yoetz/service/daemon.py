@@ -175,6 +175,16 @@ _CONTROL_HANDSHAKE_DEADLINE_SECONDS: Final = 5.0
 # After handshake, a session with no active calls may stay silent for at most this long
 # before the stream is closed and the listener admission slot is released.
 _CONTROL_INACTIVE_SESSION_DEADLINE_SECONDS: Final = 300.0
+# Soft locks may re-apply the same scoped auto-unlock / keyring load the service already uses at
+# restart. Explicit human lock and hard unlock failures stay locked until a trusted ceremony.
+_SOFT_LOCK_AUTO_READY_REASONS: Final = frozenset(
+    {
+        "idle_relock",
+        "user_session_locked",
+        "system_suspend",
+        "monitor_lost",
+    }
+)
 # Response-frame send must complete within this wall-clock window. A stalled peer that stops
 # reading cannot retain an in-flight entry in ``calls`` (and thus the inactive-session exemption)
 # indefinitely via write backpressure on sock_sendall.
@@ -468,6 +478,7 @@ class ServiceComposition:
     ready_close_relay: _ReadyCloseRelay | None = None
     privacy_policy_app_relay: _PrivacyPolicyAppRelay | None = None
     auto_unlock_reason: str = "none"
+    auto_unlock_bundle: Path | None = None
 
     def __repr__(self) -> str:
         return "ServiceComposition(<redacted>)"
@@ -500,6 +511,9 @@ class ServiceDaemon:
         self._closed = False
         self._stopping = False
         self._state_reason = "none"
+        # Composition is frozen; keep the live auto-unlock reason on the daemon so soft-lock
+        # re-ready can update it without replacing the composition object.
+        self._auto_unlock_reason = _composition.auto_unlock_reason
         self._monitor_state = "unavailable"
         self._stop_event = asyncio.Event()
         self._start_lock = asyncio.Lock()
@@ -568,60 +582,68 @@ class ServiceDaemon:
     ) -> None:
         """Construct and publish one generation-bound ready application."""
 
-        partial: _ReadyApplication | None = None
         async with self._activation_lock:
-            lifecycle = self._composition.lifecycle
-            try:
-                if (
-                    type(service_generation) is not int
-                    or type(vault_generation) is not int
-                    or service_generation <= 0
-                    or vault_generation <= 0
-                    or lifecycle.state is not ServiceState.UNLOCKING
-                    or lifecycle.instance.generation != service_generation
-                    or not self._composition.vault.ready
-                    or self._composition.vault.generation != vault_generation
-                    or self._application is not None
-                ):
-                    raise LifecycleError("invalid_transition")
-                factory = self._composition.ready_application_factory
-                if factory is None:
-                    raise LifecycleError("invalid_transition")
-                partial = await factory(service_generation, vault_generation)
-                if not _is_ready_application(partial):
-                    raise TypeError("ready_application_invalid")
-                if (
-                    lifecycle.state is not ServiceState.UNLOCKING
-                    or lifecycle.instance.generation != service_generation
-                    or not self._composition.vault.ready
-                    or self._composition.vault.generation != vault_generation
-                ):
-                    raise LifecycleError("invalid_transition")
-                self._application = partial
-                await lifecycle.transition(
-                    ServiceState.READY,
-                    vault_generation=vault_generation,
-                )
-                self._state_reason = "none"
-            except BaseException:
-                if self._application is partial:
-                    self._application = None
-                if partial is not None:
-                    try:
-                        await partial.close()
-                    except Exception:
-                        pass
+            await self._activate_ready_application_locked(service_generation, vault_generation)
+
+    async def _activate_ready_application_locked(
+        self, service_generation: int, vault_generation: int
+    ) -> None:
+        """Install ready composition while the caller already holds ``_activation_lock``."""
+
+        partial: _ReadyApplication | None = None
+        lifecycle = self._composition.lifecycle
+        try:
+            if (
+                type(service_generation) is not int
+                or type(vault_generation) is not int
+                or service_generation <= 0
+                or vault_generation <= 0
+                or lifecycle.state is not ServiceState.UNLOCKING
+                or lifecycle.instance.generation != service_generation
+                or not self._composition.vault.ready
+                or self._composition.vault.generation != vault_generation
+                or self._application is not None
+            ):
+                raise LifecycleError("invalid_transition")
+            factory = self._composition.ready_application_factory
+            if factory is None:
+                raise LifecycleError("invalid_transition")
+            partial = await factory(service_generation, vault_generation)
+            if not _is_ready_application(partial):
+                raise TypeError("ready_application_invalid")
+            if (
+                lifecycle.state is not ServiceState.UNLOCKING
+                or lifecycle.instance.generation != service_generation
+                or not self._composition.vault.ready
+                or self._composition.vault.generation != vault_generation
+            ):
+                raise LifecycleError("invalid_transition")
+            self._application = partial
+            await lifecycle.transition(
+                ServiceState.READY,
+                vault_generation=vault_generation,
+            )
+            self._state_reason = "none"
+            self._auto_unlock_reason = "none"
+        except BaseException:
+            if self._application is partial:
+                self._application = None
+            if partial is not None:
                 try:
-                    await self._composition.vault.lock()
+                    await partial.close()
                 except Exception:
                     pass
-                if lifecycle.state is ServiceState.UNLOCKING:
-                    try:
-                        await lifecycle.transition(ServiceState.LOCKED)
-                    except Exception:
-                        pass
-                self._state_reason = "unlock_failed"
-                raise
+            try:
+                await self._composition.vault.lock()
+            except Exception:
+                pass
+            if lifecycle.state is ServiceState.UNLOCKING:
+                try:
+                    await lifecycle.transition(ServiceState.LOCKED)
+                except Exception:
+                    pass
+            self._state_reason = "unlock_failed"
+            raise
 
     async def serve(self) -> None:
         """Serve authenticated ordinary and human-control clients in foreground."""
@@ -829,6 +851,9 @@ class ServiceDaemon:
         self, projection_context: ClientProjectionContext, request: ControlCallRequest
     ) -> object:
         application = self._application
+        if application is None:
+            if await self._try_soft_lock_auto_ready():
+                application = self._application
         if application is None:
             raise ControlError("vault_locked", retryable=True)
         admission: Admission | None = None
@@ -1230,11 +1255,155 @@ class ServiceDaemon:
             await self._close_ready_locked()
 
     async def _close_ready_locked(self) -> None:
+        # Lifecycle idle drain closes ready without calling ``daemon.lock``, so publish the
+        # soft-lock reason here when no stronger reason was already set.
+        if self._application is not None and self._state_reason == "none":
+            self._state_reason = "idle_relock"
         application, self._application = self._application, None
         if application is not None:
             await application.close()
         if self._composition.vault.ready:
             await self._composition.vault.lock()
+
+    async def _try_soft_lock_auto_ready(self) -> bool:
+        """Re-apply scoped auto-unlock after idle/session soft lock; never after explicit lock."""
+
+        if self._application is not None or not self._started or self._closed:
+            return self._application is not None
+        if self._state_reason not in _SOFT_LOCK_AUTO_READY_REASONS:
+            return False
+        lifecycle = self._composition.lifecycle
+        if lifecycle.state is not ServiceState.LOCKED:
+            return False
+        async with self._activation_lock:
+            if self._application is not None:
+                return True
+            if (
+                self._state_reason not in _SOFT_LOCK_AUTO_READY_REASONS
+                or lifecycle.state is not ServiceState.LOCKED
+            ):
+                return False
+            vault = self._composition.vault
+            mode = getattr(vault.mode, "value", vault.mode)
+            try:
+                await lifecycle.transition(ServiceState.UNLOCKING)
+            except LifecycleError:
+                return False
+            unlocked = False
+            try:
+                if mode == "passphrase":
+                    unlocked = await self._soft_unlock_passphrase_locked()
+                elif mode == "os_keyring":
+                    await cast(VaultService, vault).retry_keyring(None)
+                    unlocked = vault.ready
+                    if not unlocked:
+                        self._state_reason = "keyring_locked"
+                else:
+                    unlocked = False
+                if not unlocked:
+                    await self._return_to_locked_after_soft_unlock()
+                    return False
+                await self._activate_ready_application_locked(
+                    lifecycle.instance.generation,
+                    vault.generation,
+                )
+            except Exception:
+                get_logger("service.daemon").warning(
+                    "auto_unlock",
+                    outcome="failed",
+                    reason="unlock_failed",
+                )
+                try:
+                    if vault.ready:
+                        await vault.lock()
+                except Exception:
+                    pass
+                await self._return_to_locked_after_soft_unlock()
+                if (
+                    self._state_reason in _SOFT_LOCK_AUTO_READY_REASONS
+                    or self._state_reason == "none"
+                ):
+                    self._state_reason = "unlock_failed"
+                return False
+            return self._application is not None
+
+    async def _return_to_locked_after_soft_unlock(self) -> None:
+        """Best-effort LOCKED transition after a failed soft auto-ready attempt."""
+
+        lifecycle = self._composition.lifecycle
+        try:
+            if lifecycle.state is ServiceState.UNLOCKING:
+                await lifecycle.transition(ServiceState.LOCKED)
+        except LifecycleError:
+            pass
+
+    async def _soft_unlock_passphrase_locked(self) -> bool:
+        """Unlock passphrase vault from the bundle-scoped platform entry under activation lock."""
+
+        bundle = self._composition.auto_unlock_bundle
+        memory = self._composition.secret_memory
+        vault = cast(VaultService, self._composition.vault)
+        if bundle is None or memory is None or not hasattr(memory, "capture"):
+            self._state_reason = "auto_unlock_backend_unavailable"
+            self._auto_unlock_reason = "auto_unlock_backend_unavailable"
+            return False
+        auto_passphrase, load_reason = AutoUnlockPassphraseStore(bundle).load_with_reason()
+        if auto_passphrase is None:
+            reason = (
+                "passphrase_required"
+                if load_reason == "auto_unlock_absent"
+                else load_reason
+                if load_reason
+                in {
+                    "auto_unlock_backend_unavailable",
+                    "auto_unlock_rejected",
+                }
+                else "passphrase_required"
+            )
+            self._state_reason = reason
+            self._auto_unlock_reason = load_reason
+            get_logger("service.daemon").warning(
+                "auto_unlock",
+                outcome="skipped" if load_reason == "auto_unlock_absent" else "failed",
+                reason=load_reason,
+            )
+            return False
+        try:
+            handle = cast(LocalSecretMemory, memory).capture(
+                SecretPurpose.VAULT_UNLOCK, auto_passphrase
+            )
+            await vault.unlock(handle)
+        except VaultError:
+            self._state_reason = "auto_unlock_stale"
+            self._auto_unlock_reason = "auto_unlock_stale"
+            get_logger("service.daemon").warning(
+                "auto_unlock",
+                outcome="failed",
+                reason="auto_unlock_stale",
+            )
+            return False
+        except Exception:
+            self._state_reason = "auto_unlock_rejected"
+            self._auto_unlock_reason = "auto_unlock_rejected"
+            get_logger("service.daemon").warning(
+                "auto_unlock",
+                outcome="failed",
+                reason="auto_unlock_rejected",
+            )
+            return False
+        finally:
+            for index in range(len(auto_passphrase)):
+                auto_passphrase[index] = 0
+        if not vault.ready:
+            self._state_reason = "unlock_failed"
+            return False
+        self._auto_unlock_reason = "none"
+        get_logger("service.daemon").info(
+            "auto_unlock",
+            outcome="succeeded",
+            reason="soft_lock_reready",
+        )
+        return True
 
     async def _close_components(self) -> None:
         await self._close_ready()
@@ -1282,7 +1451,7 @@ class ServiceDaemon:
             return "vault_uninitialized"
         if mode == "os_keyring":
             return "keyring_locked"
-        reason = self._composition.auto_unlock_reason
+        reason = self._auto_unlock_reason
         if reason in {
             "auto_unlock_backend_unavailable",
             "auto_unlock_rejected",
@@ -2217,6 +2386,7 @@ async def _production_composition(
             ready_close_relay=ready_close_relay,
             privacy_policy_app_relay=privacy_relay,
             auto_unlock_reason=auto_unlock_reason,
+            auto_unlock_bundle=paths.bundle,
         )
     except BaseException:
         await listeners.close()

@@ -86,6 +86,19 @@ remain locked and surface bounded `passphrase_required`,
 service logs one structural outcome/reason and never the entry, bundle path, or derived material.
 Foreign bundle entries are neither read nor deleted.
 
+**2026-08 soft-lock re-ready amendment.** The same trusted-service-only auto-unlock path may run
+again after a *soft* lock that cleared in-process keys but did not revoke the installation's
+scoped platform entry: `idle_relock`, `user_session_locked`, `system_suspend`, and `monitor_lost`.
+On the next ordinary control admission while still locked for one of those reasons, the service
+attempts one scoped passphrase load (or OS-keyring retry) and, on success, rebuilds the ready
+generation. This keeps MCP/CLI usable after idle or session soft locks without a human prompt when
+setup already provisioned auto-unlock. It does **not** unlock after `explicit_lock`, does not run
+for hard reasons (`passphrase_required`, `auto_unlock_*`, `vault_uninitialized`, `unlock_failed`,
+`keyring_locked` when the backend will not load), and never accepts a secret from MCP, ordinary
+control, argv, env, config, or stdin. The trusted foreground helper may also submit the scoped
+entry through the existing unlock ceremony so `yoetz service unlock` stays silent when that entry
+is valid.
+
 For an existing human-passphrase vault, `service auto-unlock enable|repair` requires the ordinary
 trusted foreground-TTY unlock ceremony first. Only the exact passphrase that successfully unlocks
 the current envelope is then saved under the scoped platform entry, and every mutable helper buffer
@@ -308,7 +321,10 @@ vault before first release is the one materially stronger containment choice sti
   admitted shielded database commits reach a definite bounded outcome, closes provider and
   decrypted-state handles, and returns to `locked`. MCP does not expose this method.
 - An advertised platform session-lock or system-suspend event takes the same path. Wake or user
-  session unlock never changes the service to `ready`; the human/keyring ceremony runs again.
+  session unlock never itself flips the service to `ready`. After those soft locks (and idle
+  relock), the service may re-apply the scoped auto-unlock or OS-keyring load on the next ordinary
+  control admission, or the human may run the unlock ceremony; explicit lock still requires the
+  human/keyring ceremony.
 - Idle relock is enabled by default only when there are no connected clients, in-flight requests,
   queued commits, leases, or provider calls for the complete configured interval. It never counts
   a long-running operation as idle. The default is 900 seconds. The only v0.1 mutation path is a
@@ -324,9 +340,10 @@ vault before first release is the one materially stronger containment choice sti
   bound to the exact proposed policy digest and expiry. MCP/LLMs may request more context but
   cannot mint or relay that proof.
 - If the service is absent, normal CLI reports `service_unavailable` and MCP returns a sanitized
-  structured unavailability result; neither starts a hidden runtime. If it is locked, both report
-  `vault_locked` and direct the local human to the separate unlock surface without accepting a
-  secret.
+  structured unavailability result; neither starts a hidden runtime. If it is soft-locked and
+  scoped auto-unlock (or keyring load) succeeds, ordinary methods proceed without a human prompt.
+  If it remains hard-locked, both report `vault_locked` and direct the local human to the separate
+  unlock surface without accepting a secret.
 
 ## Consequences
 
@@ -334,7 +351,8 @@ Persistent local service, control protocol, client library, vault state machine,
 and their crash/secret-boundary tests move into v0.1. Native launchd/systemd-user convenience and a
 generic passphrase transport remain separate future decisions; neither may be approximated by
 client-side direct access or a secret in argv/env/config/stdin. The reviewed bundle-scoped platform
-auto-unlock exception above is the only passphrase restart path.
+auto-unlock exception above is the only passphrase path that may open the vault without a human
+ceremony (restart and soft-lock re-ready).
 The v0.1 helper also owns the explicit first-install passphrase initialization ceremony: two local
 no-echo entries, one transmitted `vault_initialize` secret, atomic vault commit, and fail-closed
 crash recovery.

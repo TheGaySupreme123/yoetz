@@ -323,10 +323,13 @@ def _control_error_result(
         return structured_error_result(
             PublicErrorCode.VAULT_LOCKED,
             (
-                "The local service vault is locked or uninitialized. Unlock from a local "
-                "terminal (`yoetz service unlock`). If the vault is still uninitialized and no "
-                "user-owned TTY is available, prepare `vault_initialize` via "
-                "`yoetz consent catalog` / `prepare` (ADR-015); never send secrets over MCP."
+                "The local service vault is locked or uninitialized. After trusted setup with "
+                "platform auto-unlock, soft locks (idle/session) re-open automatically; this "
+                "error means a hard lock or missing setup. On a local terminal run "
+                "`yoetz service unlock` (uses the platform credential store when provisioned) "
+                "or `yoetz service auto-unlock repair` if that entry is stale. If still "
+                "uninitialized, run `yoetz setup` or prepare `vault_initialize` via "
+                "`yoetz consent catalog` / `prepare` (ADR-015). Never send secrets over MCP."
             ),
             request_id=request_id,
             correlation_id=service_correlation_id,

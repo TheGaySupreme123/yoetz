@@ -51,7 +51,8 @@ def _control_guidance(error: ControlError) -> str:
     return {
         PublicErrorCode.VAULT_LOCKED: (
             "vault_locked: unlock from this menu (Service -> Unlock vault) "
-            "or run 'yoetz service unlock'"
+            "or run 'yoetz service unlock' "
+            "(uses the platform credential store when auto-unlock is provisioned)"
         ),
         PublicErrorCode.SERVICE_UNAVAILABLE: (
             "service_unavailable: run 'yoetz service run' under your selected user supervisor"
