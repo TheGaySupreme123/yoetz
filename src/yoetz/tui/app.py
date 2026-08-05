@@ -411,6 +411,9 @@ class YoetzTui(App[int]):
             return
         if choice == "local":
             review = await self._ask_review_mode()
+            if review is None:
+                self.say(Level.OPTIONAL, "Setup stopped. Nothing was changed.")
+                return
             await self._choose_storage(detection)
             await self._run_initial_review(review, connected=False)
             return
@@ -425,6 +428,9 @@ class YoetzTui(App[int]):
         # registration -- and before the approval screen that shows that command. Registering
         # first and asking after is how a semantic install ends up on the strict route.
         review = await self._ask_review_mode()
+        if review is None:
+            self.say(Level.OPTIONAL, "Setup stopped. Nothing was changed.")
+            return
         if not await self._connect(option, "policy" if review == "semantic" else "strict"):
             return
         await self._choose_storage(detection)
@@ -467,8 +473,12 @@ class YoetzTui(App[int]):
         connected: bool,
         option: HarnessOption | None = None,
     ) -> None:
-        if choice != "semantic":
+        # Only an explicit local answer finishes as local-only. Dismiss (None) is handled by
+        # the first-run callers before storage or registration, so it must not fall through here.
+        if choice == "local":
             await self._finish_setup(connected=connected)
+            return
+        if choice != "semantic":
             return
         await self.command_provider()
         provider = await self.runtime.provider_posture()

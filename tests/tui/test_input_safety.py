@@ -75,6 +75,48 @@ async def test_escape_on_the_trust_question_does_not_grant_trust(
         assert "This project was not changed." in transcript(app)
 
 
+async def test_escape_on_review_mode_during_connect_does_not_register(
+    make_app: MakeApp,
+) -> None:
+    """Dismissing review mode must stop before MCP registration or a setup marker."""
+
+    runtime = FakeRuntime()
+    app = make_app(first_run=True, runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")  # connect
+        await pilot.pause()
+        await pilot.press("enter")  # trust
+        await pilot.pause()
+        assert app.open_view is not None
+        assert app.open_view.view_name == "review-mode"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert runtime.applied == []
+        assert app.markers_written == []  # type: ignore[attr-defined]
+        assert "Setup stopped. Nothing was changed." in transcript(app)
+
+
+async def test_escape_on_review_mode_during_local_setup_does_not_finish(
+    make_app: MakeApp,
+) -> None:
+    """Dismissing review mode on the no-Codex path must not write a local-only marker."""
+
+    runtime = FakeRuntime()
+    app = make_app(first_run=True, runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await pilot.press("down", "enter")  # "Set up Yoetz without Codex"
+        await pilot.pause()
+        assert app.open_view is not None
+        assert app.open_view.view_name == "review-mode"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert runtime.applied == []
+        assert app.markers_written == []  # type: ignore[attr-defined]
+        assert "Setup stopped. Nothing was changed." in transcript(app)
+
+
 async def test_escape_on_a_stop_the_service_confirmation_leaves_it_running(
     make_app: MakeApp,
 ) -> None:
