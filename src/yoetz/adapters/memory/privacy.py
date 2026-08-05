@@ -39,6 +39,8 @@ from yoetz.ports.privacy import (
     EffectivePrivacyPolicy,
     HumanPolicyDecision,
     LocalDisclosureReceiptView,
+    PendingDisclosureEntry,
+    PendingDisclosurePage,
     PolicyCommitResult,
     PolicyOverlay,
     PolicyTransitionProposal,
@@ -481,6 +483,27 @@ class MemoryPrivacyAudit:
             if type(row.receipt) is LocalDisclosureReceipt and row.receipt.receipt_id == receipt_id:
                 return LocalDisclosureReceiptView("local_disclosure", row.receipt)
         return None
+
+    async def list_pending_disclosures(
+        self, audience: PrivacyReceiptAudience
+    ) -> PendingDisclosurePage:
+        if audience is not PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL:
+            raise ValueError("privacy_receipt_audience_invalid")
+        async with self._lock:
+            now = self._clock.now_utc()
+            entries = tuple(
+                PendingDisclosureEntry(
+                    row.subject.privacy_proposal_id,
+                    row.subject.task_id,
+                    row.subject.expires_at,
+                )
+                for row in self._state.audit.values()
+                if type(row.subject) is DisclosureProposal
+                and row.status in {"awaiting_human", "reserved"}
+                and row.subject.expires_at > now
+            )
+        ordered = tuple(sorted(entries, key=lambda entry: (entry.expires_at, entry.pending_id)))
+        return PendingDisclosurePage(len(self._state.audit) + 1, ordered[:100])
 
     async def list_receipts(
         self, query: PrivacyReceiptQuery, audience: PrivacyReceiptAudience

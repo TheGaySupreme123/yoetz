@@ -94,6 +94,7 @@ def test_privacy_command_and_recipe_matrix() -> None:
         ["privacy", "show", "--help"],
         ["privacy", "propose", "--help"],
         ["privacy", "tighten", "--help"],
+        ["privacy", "pending", "--help"],
         ["privacy", "receipts", "list", "--help"],
         ["privacy", "receipts", "get", "--help"],
     ):

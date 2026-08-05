@@ -41,6 +41,10 @@ describes behavior intended for the first release rather than a change from a pr
   (Private, Metadata only, Assisted review, Expanded review, Custom), and only Custom configures
   individual settings, in five grouped sections. The terminal interface's `/privacy` uses the same
   rule and the same recipe names, and selects rather than authorizes.
+- `yoetz privacy pending` lists the disclosure decisions awaiting a local human, with their expiry
+  and nothing about what they would disclose. `privacy decide-disclosure` needs an exact pending id
+  that normally arrives in the check result waiting on it; this is how that ceremony is found again
+  when the id is lost. It is a CLI/UI-only ordinary control method and is not reachable over MCP.
 - First run offers semantic review first and pre-selects it, in both the prompt-loop wizard and the
   terminal interface. This is a recommendation about that question only: every installation still
   seeds zero-egress `local_only`, the answer binds no provider and commits no policy, and local-only

@@ -90,6 +90,9 @@ def test_read_only_methods_are_exactly_the_non_appending_ones() -> None:
     assert _READ_ONLY_METHODS == frozenset(
         {
             ControlMethod.STATUS,
+            # Names the disclosure proposals awaiting a decision; deciding one is a separate
+            # confidential ceremony, so listing them appends nothing.
+            ControlMethod.PRIVACY_PENDING_LIST,
             ControlMethod.PRIVACY_RECEIPTS_LIST,
             ControlMethod.PRIVACY_RECEIPTS_GET,
         }

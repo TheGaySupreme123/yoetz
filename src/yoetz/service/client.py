@@ -969,6 +969,17 @@ class ServiceClient(ControlClientPort):
             ControlMethod.PRIVACY_TIGHTEN_POLICY, request, deadline_ms=deadline_ms
         )
 
+    async def privacy_pending_list(self, *, deadline_ms: int | None = None) -> JsonObject:
+        """List disclosure proposals awaiting a local decision.
+
+        Returns the wire object unchanged: it carries only ids, task, and expiry, so there is no
+        richer local type for it to become and nothing here to hide.
+        """
+
+        return await self._support(
+            ControlMethod.PRIVACY_PENDING_LIST, JsonObject({}), deadline_ms=deadline_ms
+        )
+
     async def privacy_receipts_list(
         self,
         request: ListPrivacyReceiptsRequest,

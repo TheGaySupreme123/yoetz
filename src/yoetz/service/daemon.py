@@ -214,6 +214,7 @@ _STRUCTURAL_METHODS = frozenset(
     }
 )
 _PROJECTION_EXEMPT_METHODS = _STRUCTURAL_METHODS | {
+    ControlMethod.PRIVACY_PENDING_LIST,
     ControlMethod.PRIVACY_RECEIPTS_LIST,
     ControlMethod.PRIVACY_RECEIPTS_GET,
 }
@@ -222,6 +223,7 @@ _PROJECTION_EXEMPT_METHODS = _STRUCTURAL_METHODS | {
 _READ_ONLY_METHODS: Final[frozenset[ControlMethod]] = frozenset(
     {
         ControlMethod.STATUS,
+        ControlMethod.PRIVACY_PENDING_LIST,
         ControlMethod.PRIVACY_RECEIPTS_LIST,
         ControlMethod.PRIVACY_RECEIPTS_GET,
     }

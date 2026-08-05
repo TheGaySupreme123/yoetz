@@ -91,6 +91,7 @@ class ControlMethod(str, Enum):  # noqa: UP042 - exact wire enum base
     PRIVACY_GET_EFFECTIVE = "privacy_get_effective"
     PRIVACY_PROPOSE_POLICY = "privacy_propose_policy"
     PRIVACY_TIGHTEN_POLICY = "privacy_tighten_policy"
+    PRIVACY_PENDING_LIST = "privacy_pending_list"
     PRIVACY_RECEIPTS_LIST = "privacy_receipts_list"
     PRIVACY_RECEIPTS_GET = "privacy_receipts_get"
 

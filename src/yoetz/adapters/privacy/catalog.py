@@ -57,6 +57,8 @@ from yoetz.ports.privacy import (
     EffectivePrivacyPolicy,
     HumanPolicyDecision,
     LocalDisclosureReceiptView,
+    PendingDisclosureEntry,
+    PendingDisclosurePage,
     PolicyCommitResult,
     PolicyOverlay,
     PolicyTransitionProposal,
@@ -1517,6 +1519,46 @@ class CatalogPrivacyAudit:
         return LocalDisclosureReceiptView(
             "local_disclosure", _local_receipt_from_bytes(cast(bytes, row[1]))
         )
+
+    async def list_pending_disclosures(
+        self, audience: PrivacyReceiptAudience
+    ) -> PendingDisclosurePage:
+        """Name the disclosure proposals a local human can still decide, and nothing more.
+
+        Selects only ids, task, and expiry: an operator who lost the pending id needs to find
+        the ceremony, not to read what it would disclose. Expired rows are excluded because a
+        proposal past ``expires_at`` is refused by the decision path anyway, so listing it would
+        offer a ceremony that cannot succeed.
+        """
+
+        if audience is not PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL:
+            raise ValueError("privacy_receipt_audience_invalid")
+        now = format_rfc3339_millis(self._clock.now_utc())
+        count_row = self._db.execute("SELECT COUNT(*) + 1 FROM privacy_audit_records").fetchone()
+        if count_row is None or type(count_row[0]) is not int:
+            raise ValueError("privacy_audit_generation_unavailable")
+        rows = self._db.execute(
+            """SELECT proposal_id, task_id, expires_at
+               FROM privacy_audit_records
+               WHERE subject_kind = 'disclosure'
+                 AND state IN ('awaiting_human', 'reserved')
+                 AND expires_at > ?
+               ORDER BY expires_at ASC, proposal_id ASC
+               LIMIT 100""",
+            (now,),
+        ).fetchall()
+        entries: list[PendingDisclosureEntry] = []
+        for row in rows:
+            if type(row[0]) is not str or type(row[2]) is not str:
+                continue
+            entries.append(
+                PendingDisclosureEntry(
+                    row[0],
+                    row[1] if type(row[1]) is str else None,
+                    parse_rfc3339_millis(row[2]),
+                )
+            )
+        return PendingDisclosurePage(cast(int, count_row[0]), tuple(entries))
 
     async def list_receipts(
         self, query: PrivacyReceiptQuery, audience: PrivacyReceiptAudience

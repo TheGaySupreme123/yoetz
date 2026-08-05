@@ -1206,10 +1206,10 @@ encoding, length prefix, hash prepass, normalization, or delimiter.
 CLI/UI-only `lock`/`stop`, and `close`. Shared closed types are `ControlClientKind`
 (`cli|mcp_bridge|ui`), `ControlMethod`, `ControlRequest`, `ControlResult`, `ServiceState`
 (`starting|locked|unlocking|ready|draining|failed`), and `ServiceStatus`. The method registry has
-exactly thirty calls: the six workflow operations plus twenty-four support/preview/execute,
+exactly thirty-one calls: the six workflow operations plus twenty-five support/preview/execute,
 lifecycle, observation-control, and CLI/UI-only methods. The privacy subset is exactly
 `privacy_get_setup|privacy_get_effective|privacy_propose_policy|privacy_tighten_policy|
-privacy_receipts_list|privacy_receipts_get`. The observation subset is exactly
+privacy_pending_list|privacy_receipts_list|privacy_receipts_get`. The observation subset is exactly
 `observation_ingest|observation_status|observation_pause|observation_resume|observation_revoke`
 (local CLI/UI only; never MCP tools — the public MCP surface remains six tools).
 It has no privacy decision, unlock, secret, credential, key-handle, decrypted-object,
@@ -1619,7 +1619,14 @@ atomically consumes/completes receipt-bound local disclosures. Agent projection 
 only installation-keyed result/projection commitments and field decisions, never copied plaintext.
 Internal `PrivacyAuditPort.get_receipt`/`list_receipts` queries project bounded structural views
 only through the ordinary CLI/UI control methods `privacy_receipts_get` and
-`privacy_receipts_list`; the port names are not wire aliases and MCP has no access. Initial
+`privacy_receipts_list`; the port names are not wire aliases and MCP has no access.
+`PrivacyAuditPort.list_pending_disclosures(audience) -> PendingDisclosurePage` projects only
+`PendingDisclosureEntry(pending_id, task_id, expires_at)` for proposals in `awaiting_human` or
+`reserved` whose `expires_at` has not passed, over the ordinary CLI/UI control method
+`privacy_pending_list` (schema token `yoetz.privacy-pending-page/1`). It names which decisions a
+local human can still make and never the destination, categories, digests, or prepared bytes of
+any of them: that content belongs to the confidential decision preview, which is bound to the
+exact prepared case. MCP has no access. Initial
 reservation failure is the sole no-receipt exception and occurs before prompt/authorization/
 dispatch; `awaiting_human`, `approved`, and `receipt_pending` are nonterminal
 `PrivacyAuditState.status` values rather than receipt outcomes.

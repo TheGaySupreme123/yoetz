@@ -56,20 +56,31 @@ yoetz privacy tighten           # tighten (proceeds through gates)
 yoetz privacy propose           # propose a change for decision
 yoetz privacy export-desired    # effective nonsecret policy as desired-state TOML (never secrets)
 yoetz privacy apply-desired     # apply desired-state TOML; tighten may proceed, widen never silent
+yoetz privacy pending           # list disclosure decisions waiting for you
 yoetz privacy receipts          # inspect bounded structural egress receipts
 ```
+
+`privacy pending` exists for one situation: `privacy decide-disclosure` needs an exact pending id,
+which normally arrives in the check result that is waiting on it, and that id can be lost — a
+closed terminal, an agent that did not relay it. The listing names the decisions you can still
+make and their expiry, and nothing about what any of them would disclose. Destination, categories,
+and prepared bytes belong to the decision preview, which is bound to the exact prepared case and
+is the only surface that renders them.
 
 `export-desired` / `apply-desired` are the reviewable path for version-controlling policy. The
 asymmetry is the point: tightening can flow through gates, widening always requires a human.
 
-The CLI recommends **Metadata only** as the privacy-first semantic starting point: public
-structural metadata and declared file types, task scope, and a foreground approval before every
-provider request. Its advantage is minimal disclosure; its tradeoff is less problem-specific
-feedback. Accepting the displayed exact policy asks nothing further. Declining it opens Private,
-Metadata only, Assisted review, Expanded review, and Custom; a named recipe goes straight to the
-exact review, and only **Custom** opens the underlying settings, grouped into five sections. When
-no external provider is configured, the recommendation is Private instead. The final trusted
-widening decision is never skipped.
+The CLI recommends **Assisted review** when the exact configured provider route has a current
+reviewed data-use record stating no default training and retention no longer than 30 days, and
+**Private** otherwise. Assisted review is workspace-scoped and problem-local, and does not prompt
+before each request once its policy is committed; its tradeoff is that selected ordinary user
+content may be sent. **Metadata only** remains available as the minimal-disclosure option —
+public structural metadata and declared file types, task scope, and a foreground approval before
+every provider request — and is the profile that makes `privacy pending` matter. Accepting the
+displayed exact policy asks nothing further. Declining it opens Private, Metadata only, Assisted
+review, Expanded review, and Custom; a named recipe goes straight to the exact review, and only
+**Custom** opens the underlying settings, grouped into five sections. The final trusted widening
+decision is never skipped.
 
 ### `/privacy` in the terminal interface
 
