@@ -843,6 +843,13 @@ _SERVER_ERROR_CODES: Final = frozenset(
         "frame_too_large",
         "peer_untrusted",
         "kind_forbidden",
+        # Bounded structural outcomes for a disclosure decision that cannot proceed. They say
+        # what the caller can do next without revealing proposal content or reflecting input:
+        # the proposal is gone/expired, it is not in a decidable state, or this build cannot
+        # run the ceremony at all.
+        "pending_unavailable",
+        "pending_not_actionable",
+        "ceremony_unsupported",
         "target_invalid",
         "state_forbidden",
         "stale_generation",
