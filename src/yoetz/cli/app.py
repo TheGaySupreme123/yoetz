@@ -250,9 +250,11 @@ def _control_failure(error: ControlError) -> int:
     code = public_error_code_for_control_reason(error.reason)
     guidance = {
         PublicErrorCode.VAULT_LOCKED: (
-            "vault_locked: unlock from a local terminal "
-            "(`yoetz service unlock`); if uninitialized with no TTY, "
-            "prepare `vault_initialize`, then run `yoetz consent review` on a trusted console"
+            "vault_locked: run `yoetz service unlock` on a local terminal "
+            "(uses the platform credential store when setup provisioned auto-unlock); "
+            "if auto-unlock is stale, run `yoetz service auto-unlock repair`; "
+            "if uninitialized with no TTY, prepare `vault_initialize`, then "
+            "`yoetz consent review` on a trusted console"
         ),
         PublicErrorCode.SERVICE_UNAVAILABLE: (
             "service_unavailable: run 'yoetz service run' under your selected user supervisor"

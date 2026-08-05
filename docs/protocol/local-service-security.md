@@ -87,8 +87,11 @@ The service relocks on an explicit `service lock`, an advertised platform sessio
 system-suspend event, and on idle timeout. The default idle-relock interval is 900 seconds and
 applies only when there are no connected clients, in-flight requests, queued commits, leases, or
 provider calls for the complete interval — a long-running operation is never counted as idle. Wake
-or session unlock never itself changes the service back to `ready`; the human/keyring ceremony runs
-again.
+or session unlock never itself changes the service back to `ready`. After idle, session-lock,
+suspend, or monitor-loss soft locks, the trusted service may re-apply the same scoped platform
+auto-unlock entry (passphrase mode) or OS-keyring load that restart uses, on the next ordinary
+control admission. Explicit `service lock` and hard unlock failures still require the human/keyring
+ceremony (`yoetz service unlock`), which prefers the scoped platform entry when provisioned.
 
 The **only** way to change the idle interval (to 60–86400 seconds) or disable it entirely is an
 exact, foreground `idle_relock_policy_change` ceremony over the human-control channel, followed by
@@ -157,8 +160,9 @@ policy — it is not a logging or support-bundle mode that exists today.
 |---|---|---|---|
 | Fresh install stays locked with setup required | `human_authority_unavailable` | Keyring works but presence evidence is missing/stale/unavailable | Not keyring corruption; not a bug |
 | Existing vault reachable without presence prompt | (no error — `ready`, activation fenced) | Existing keyring data may load for local work | Not full external authority |
-| Vault locked after restart | (expected) | No valid scoped auto-unlock entry was available; keyring mode retries automatically | MCP cannot unlock it for you |
-| Idle-relocked mid-session | (expected) | Default 900s idle timer elapsed with no active work | Not a crash |
+| Vault locked after restart | (expected) | No valid scoped auto-unlock entry was available; keyring mode loads at restart when usable | MCP cannot unlock it for you |
+| Idle-relocked mid-session | (expected) | Default 900s idle timer elapsed with no active work; next ordinary call re-applies scoped auto-unlock when provisioned | Not a crash; not a permanent lock when auto-unlock is healthy |
+| Hard-locked after soft lock | `passphrase_required` / `auto_unlock_*` / `keyring_locked` / `explicit_lock` | Auto-unlock missing, stale, keyring load refused, or human locked the service | Run `yoetz service unlock` or `yoetz service auto-unlock repair` on a local terminal |
 
 Troubleshooting always uses these bounded reason codes — never a raw file path, account name, or
 internal exception string.
