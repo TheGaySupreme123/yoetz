@@ -88,7 +88,7 @@ Foreign bundle entries are neither read nor deleted.
 
 **2026-08 soft-lock re-ready amendment.** The same trusted-service-only auto-unlock path may run
 again after a *soft* lock that cleared in-process keys but did not revoke the installation's
-scoped platform entry: `idle_relock`, `user_session_locked`, `system_suspend`, and `monitor_lost`.
+scoped platform entry: `idle_relock`, `user_session_locked`, and `system_suspend`.
 On the next ordinary control admission while still locked for one of those reasons, the service
 attempts one scoped passphrase load (or OS-keyring retry) and, on success, rebuilds the ready
 generation. This keeps MCP/CLI usable after idle or session soft locks without a human prompt when
@@ -98,6 +98,14 @@ for hard reasons (`passphrase_required`, `auto_unlock_*`, `vault_uninitialized`,
 control, argv, env, config, or stdin. The trusted foreground helper may also submit the scoped
 entry through the existing unlock ceremony so `yoetz service unlock` stays silent when that entry
 is valid.
+
+`monitor_lost` is deliberately excluded (2026-08-05 correction). The three reasons above describe
+conditions the service can observe recovering from, so re-readying restores a state it can keep
+watching. Losing the session monitor removes the capability that produces session-lock and suspend
+events for the life of the process: auto-re-ready there would make the lock momentary and then run
+on with the session-lock relock in this decision silently no longer applying, while
+`ServiceStatus` still reported `ready`. A monitor-loss lock therefore holds until a trusted
+ceremony, and `session_monitor=lost` remains observable in status either way.
 
 For an existing human-passphrase vault, `service auto-unlock enable|repair` requires the ordinary
 trusted foreground-TTY unlock ceremony first. Only the exact passphrase that successfully unlocks

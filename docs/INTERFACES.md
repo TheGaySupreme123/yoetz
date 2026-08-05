@@ -1328,10 +1328,10 @@ Passphrase startup with no scoped entry reports `passphrase_required`; a validly
 does not authenticate the current envelope reports `auto_unlock_stale`; structural platform access
 or entry failures use the two other `auto_unlock_*` reasons. None reveals entry bytes, paths, or
 credential/policy state.
-After a soft lock (`idle_relock`, `user_session_locked`, `system_suspend`, `monitor_lost`), the
+After a soft lock (`idle_relock`, `user_session_locked`, `system_suspend`), the
 service may re-read the same scoped entry (or retry OS keyring) once before denying ordinary
-control with `vault_locked`. `explicit_lock` and hard `auto_unlock_*` / `passphrase_required`
-reasons do not take that path. The trusted unlock helper may submit the scoped entry through the
+control with `vault_locked`. `explicit_lock`, `monitor_lost`, and hard `auto_unlock_*` /
+`passphrase_required` reasons do not take that path. The trusted unlock helper may submit the scoped entry through the
 confidential unlock ceremony without a TTY prompt when the entry is present.
 `ServiceStatus.state_reason=human_authority_unavailable` has exactly two valid combinations:
 `state=locked,vault_mode=uninitialized` when pristine setup was blocked before keyring mutation,

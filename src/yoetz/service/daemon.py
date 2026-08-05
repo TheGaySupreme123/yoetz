@@ -177,12 +177,18 @@ _CONTROL_HANDSHAKE_DEADLINE_SECONDS: Final = 5.0
 _CONTROL_INACTIVE_SESSION_DEADLINE_SECONDS: Final = 300.0
 # Soft locks may re-apply the same scoped auto-unlock / keyring load the service already uses at
 # restart. Explicit human lock and hard unlock failures stay locked until a trusted ceremony.
+#
+# ``monitor_lost`` is deliberately absent. Idle, session lock, and suspend all describe conditions
+# the service can observe recovering from, so re-readying restores a state it can keep watching.
+# Losing the session monitor is different: the capability that produces those events is gone for
+# the life of the process, so auto-re-ready would make that lock momentary and then run on with
+# session-lock relock silently no longer applying. Requiring a ceremony there keeps the containment
+# ADR-008 describes from disappearing without anyone being told.
 _SOFT_LOCK_AUTO_READY_REASONS: Final = frozenset(
     {
         "idle_relock",
         "user_session_locked",
         "system_suspend",
-        "monitor_lost",
     }
 )
 # Response-frame send must complete within this wall-clock window. A stalled peer that stops

@@ -314,5 +314,10 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Security
 
+- Losing the session-event monitor no longer auto-re-opens the vault on the next ordinary call.
+  Idle, session-lock, and suspend locks describe conditions the service can watch recover; monitor
+  loss removes the capability that produces those events for the life of the process, so
+  auto-re-ready made that lock momentary and left the service running with session-lock relock
+  silently no longer applying. A monitor-loss lock now holds until a trusted unlock ceremony.
 - This is the first public release; see [`SECURITY.md`](SECURITY.md) for how to report a
   vulnerability. There is no prior version to carry a security fix forward from.
