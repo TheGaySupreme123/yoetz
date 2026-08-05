@@ -12,7 +12,12 @@ import pytest
 
 from builders.privacy_policies import minimal_external_policy
 from yoetz.application.privacy_policy import PrivacyPolicyApplication
-from yoetz.domain.privacy import DisclosureProposal, HumanPrivacyDecision, LocalDisclosureSink
+from yoetz.domain.privacy import (
+    ConsentSource,
+    DisclosureProposal,
+    HumanPrivacyDecision,
+    LocalDisclosureSink,
+)
 from yoetz.ports.privacy import EffectivePrivacyPolicy
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.models import DataCategory
@@ -70,8 +75,13 @@ class _Mac:
 
 
 class _Vault:
-    ready = True
-    mode = SimpleNamespace(value="passphrase")
+    def __setattr__(self, name: str, value: object) -> None:
+        object.__setattr__(self, name, value)
+
+    ready: bool = True
+
+    def __init__(self, mode: str = "passphrase") -> None:
+        self.mode = SimpleNamespace(value=mode)
 
     def installation_mac_handle(self, purpose: object) -> _Mac:
         del purpose
@@ -79,7 +89,9 @@ class _Vault:
 
 
 def _effects(
-    *, local_sink: LocalDisclosureSink | None = None
+    *,
+    local_sink: LocalDisclosureSink | None = None,
+    vault_mode: str = "passphrase",
 ) -> tuple[_LockedHumanEffects, _Audit]:
     store = _PolicyStore()
     policy = store.effective.policy
@@ -121,7 +133,7 @@ def _effects(
     relay = _PrivacyPolicyAppRelay()
     relay.bind(lambda: app)
     return _LockedHumanEffects(
-        cast(object, SimpleNamespace()), cast(object, _Vault()), relay
+        cast(object, SimpleNamespace()), cast(object, _Vault(vault_mode)), relay
     ), audit
 
 
@@ -165,7 +177,7 @@ async def test_expired_disclosure_is_stale_and_cannot_open_a_ceremony() -> None:
 
     assert result.status == "stale"
     assert audit.decisions == []
-    with pytest.raises(HumanControlError, match="target_invalid"):
+    with pytest.raises(HumanControlError, match="pending_unavailable"):
         await effects.prepare(
             ClientOpenEnvelope(
                 "1" * 64,
@@ -225,7 +237,7 @@ async def test_missing_disclosure_destination_fails_closed() -> None:
     object.__setattr__(audit.proposal, "local_sink", None)
     target = PrivacyPendingTarget("disclosure", _PROPOSAL_ID)
 
-    with pytest.raises(HumanControlError, match="target_invalid"):
+    with pytest.raises(HumanControlError, match="pending_not_actionable"):
         await effects.prepare(
             ClientOpenEnvelope(
                 "1" * 64,
@@ -253,3 +265,55 @@ async def test_disclosure_excerpt_drops_only_a_trailing_partial_utf8_sequence() 
     assert preview.excerpt_preview == "a" * 4_095
     assert "�" not in preview.excerpt_preview
     assert preview.byte_count == 4_097
+
+
+@pytest.mark.anyio
+async def test_keyring_mode_can_preview_and_decide_a_bounded_disclosure() -> None:
+    """Keyring is the ordinary production vault mode.
+
+    The passphrase gate made `yoetz privacy decide-disclosure` return kind_forbidden on
+    every keyring installation, so the confirm_every_request posture had no way to be
+    answered at all. Recording an already-bounded disclosure grants no new authority.
+    """
+
+    effects, audit = _effects(vault_mode="keyring")
+    target = PrivacyPendingTarget("disclosure", _PROPOSAL_ID)
+
+    preview, _target_digest, generation = await effects.prepare(
+        ClientOpenEnvelope(
+            "1" * 64,
+            HumanCeremonyKind.PRIVACY_DISCLOSURE_DECISION,
+            target,
+        )
+    )
+    assert type(preview) is PrivacyDisclosureDecisionPreview
+    assert generation == 7
+
+    result = await effects.decide_privacy(target, "approve", None, 1.0)
+
+    assert result == PrivacyDecisionResult("committed", _CASE_DIGEST)
+    assert len(audit.decisions) == 1
+    # Resuming an approved proposal must carry per-request local human consent, never a
+    # rewrite to baseline policy consent.
+    assert audit.decisions[0].consent_source is ConsentSource.PER_REQUEST_LOCAL_HUMAN
+
+
+@pytest.mark.anyio
+async def test_keyring_mode_still_refuses_a_policy_decision() -> None:
+    """Policy widening keeps its stronger authority requirement."""
+
+    effects, _audit = _effects(vault_mode="keyring")
+    target = PrivacyPendingTarget("policy", _PROPOSAL_ID)
+
+    with pytest.raises(HumanControlError, match="kind_forbidden"):
+        await effects.decide_privacy(target, "approve", None, 1.0)
+
+
+@pytest.mark.anyio
+async def test_locked_vault_refuses_a_disclosure_decision() -> None:
+    effects, _audit = _effects(vault_mode="keyring")
+    cast(_Vault, effects._vault).ready = False
+    target = PrivacyPendingTarget("disclosure", _PROPOSAL_ID)
+
+    with pytest.raises(HumanControlError, match="state_forbidden"):
+        await effects.decide_privacy(target, "approve", None, 1.0)

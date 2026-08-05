@@ -65,6 +65,7 @@ from yoetz.domain.values import Frontier
 from yoetz.ports.control import ControlClientKind, ControlMethod
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
+from yoetz.ports.ledger import CheckCommitResult
 from yoetz.ports.objects import ObjectStorePort
 from yoetz.ports.publish_response_catalog import PublishResponseCatalogPort
 from yoetz.ports.runtime import BundleRuntimePort, RouteCommand, TaskRuntime
@@ -567,6 +568,9 @@ async def run_projection_workflow(
         "max_findings": str(max_findings),
     }
     checked = await app.check(CheckRequest.model_validate(check_body))
+    # This sweep drives a terminal check; a suspension here is a fixture bug, not a branch to
+    # handle, so narrow once rather than at every attribute read below.
+    assert type(checked) is CheckCommitResult, f"unexpected nonterminal check: {type(checked)}"
     assert checked.findings, "the sweep workflow must produce at least one finding"
     cases.append(ProjectionCase("check", ControlMethod.CHECK, check_body, checked))
 

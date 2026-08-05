@@ -94,8 +94,15 @@ _ERROR_REASONS: Final = frozenset(
     {
         "ambiguous",
         "cancelled",
+        # Structural ceremony refusals. They are deliberately distinct from
+        # "service_unavailable": the service answered and declined, and collapsing them told
+        # the operator to restart a service that was running fine.
+        "ceremony_unsupported",
         "correlation_mismatch",
+        "kind_forbidden",
         "peer_untrusted",
+        "pending_not_actionable",
+        "pending_unavailable",
         "protocol_error",
         "response_bytes",
         "secret_rejected",
@@ -103,7 +110,20 @@ _ERROR_REASONS: Final = frozenset(
         "session_busy",
         "session_closed",
         "stale_generation",
+        "state_forbidden",
         "timeout",
+    }
+)
+
+# Server codes that name an actionable, bounded ceremony outcome and must reach the operator
+# intact rather than degrading to a generic transport failure.
+_PASS_THROUGH_SERVER_CODES: Final = frozenset(
+    {
+        "ceremony_unsupported",
+        "kind_forbidden",
+        "pending_not_actionable",
+        "pending_unavailable",
+        "state_forbidden",
     }
 )
 
@@ -429,6 +449,8 @@ class HumanControlSession:
             self._replace_token(None)
             close_outcome = "cancelled" if frame.code == "cancelled" else "failed"
             await self._require_close(close_outcome)
+            if frame.code in _PASS_THROUGH_SERVER_CODES:
+                raise ConfidentialClientError(frame.code)
             reason = {
                 "binding_expired": "timeout",
                 "cancelled": "cancelled",

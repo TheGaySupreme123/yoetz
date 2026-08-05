@@ -29,15 +29,15 @@ def test_development_manifest_is_truthful_and_complete() -> None:
     )
     assert len(manifest.request_result_schema_versions) == 37
     assert len(manifest.event_schema_versions) == 16
-    assert len(manifest.resources) == 82
+    assert len(manifest.resources) == 83
     assert dict(manifest.resource_counts) == {
         "canonical_vectors": "9",
         "guidance_resources": "5",
-        "migrations": "6",
+        "migrations": "7",
         "runtime_support_resources": "1",
         "schema_resources": "59",
         "skill_resources": "2",
-        "total": "82",
+        "total": "83",
     }
 
 
@@ -57,7 +57,7 @@ def test_resource_manifest_verifies_every_installed_member() -> None:
 
     assert len(result) == 1
     assert result[0].outcome is StartupCheckOutcome.OK
-    assert result[0].safe_details["resource_count"] == 82
+    assert result[0].safe_details["resource_count"] == 83
 
 
 def test_guidance_and_skill_source_package_bytes_are_identical() -> None:

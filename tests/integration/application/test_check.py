@@ -5,7 +5,7 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -23,7 +23,9 @@ from builders.policy_cases import (
     record,
     res,
 )
-from yoetz.application.check import FinalSemanticEvaluation, execute_check, execute_check_commit
+from yoetz.application.check import FinalSemanticEvaluation
+from yoetz.application.check import execute_check as _execute_check
+from yoetz.application.check import execute_check_commit as _execute_check_commit
 from yoetz.application.service import VerificationPolicy
 from yoetz.domain.events import (
     ActionKind,
@@ -88,6 +90,27 @@ class _Ids:
         assert kind is IdKind.OBJECT
         self.object_count += 1
         return f"obj_30000000-0000-4000-8000-{self.object_count:012x}"
+
+
+async def execute_check(*args: Any, **kwargs: Any) -> CheckCommitResult:
+    """Narrow to the committed branch.
+
+    execute_check also returns CheckAwaitingHuman when a check suspends on a local disclosure
+    decision. Every test here drives a terminal outcome, so a suspension is a test-setup bug and
+    should fail loudly rather than surface as an attribute error 140 lines later.
+    """
+
+    result = await _execute_check(*args, **kwargs)
+    assert type(result) is CheckCommitResult, f"unexpected nonterminal check: {type(result)}"
+    return result
+
+
+async def execute_check_commit(*args: Any, **kwargs: Any) -> CheckCommitResult:
+    """Narrow to the committed branch; see execute_check above."""
+
+    result = await _execute_check_commit(*args, **kwargs)
+    assert type(result) is CheckCommitResult, f"unexpected nonterminal check: {type(result)}"
+    return result
 
 
 def _case() -> FrozenCase:

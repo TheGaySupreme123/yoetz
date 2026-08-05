@@ -7,7 +7,12 @@ from typing import Final, Literal
 
 from yoetz.protocol.errors import PublicErrorCode
 
-__all__ = ["PUBLIC_EXIT_CODES", "exit_code_for"]
+__all__ = [
+    "CEREMONY_REFUSAL_MESSAGES",
+    "PUBLIC_EXIT_CODES",
+    "ceremony_refusal_message",
+    "exit_code_for",
+]
 
 PUBLIC_EXIT_CODES: Final = MappingProxyType(
     {
@@ -51,3 +56,37 @@ def exit_code_for(outcome: PublicErrorCode | Literal["success", "cancelled"]) ->
     if type(outcome) is not PublicErrorCode:
         raise TypeError("public_outcome_invalid")
     return PUBLIC_EXIT_CODES[outcome]
+
+
+# A confidential ceremony the service answered and *declined* is not an unavailable service.
+# Reporting every refusal as service_unavailable sent operators to restart a healthy daemon and
+# hid the one fact that told them what to do next.
+CEREMONY_REFUSAL_MESSAGES: Final = MappingProxyType(
+    {
+        "pending_unavailable": (
+            "pending_unavailable: that pending decision no longer exists or has expired; "
+            "run the check again to get a current one"
+        ),
+        "pending_not_actionable": (
+            "pending_not_actionable: that pending decision cannot be decided as prepared, "
+            "usually because the policy changed after it was created; run the check again"
+        ),
+        "ceremony_unsupported": (
+            "ceremony_unsupported: this installation cannot run that confidential ceremony"
+        ),
+        "kind_forbidden": (
+            "kind_forbidden: that ceremony is not permitted for this target in the current "
+            "vault mode"
+        ),
+        "state_forbidden": (
+            "state_forbidden: the vault must be unlocked before this ceremony; "
+            "run 'yoetz service unlock'"
+        ),
+    }
+)
+
+
+def ceremony_refusal_message(reason: str) -> str | None:
+    """Return the operator-facing line for a structural ceremony refusal, or None."""
+
+    return CEREMONY_REFUSAL_MESSAGES.get(reason)

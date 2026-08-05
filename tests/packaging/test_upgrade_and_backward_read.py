@@ -27,6 +27,8 @@ from typing import Final
 
 import pytest
 
+from yoetz.adapters.sqlite.migrations import BUNDLE_MIGRATIONS, CATALOG_MIGRATIONS
+
 _REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 
 
@@ -114,9 +116,12 @@ def test_compatibility_doc_names_only_the_current_release_axes() -> None:
 
 
 def test_root_and_installed_migration_trees_are_byte_identical() -> None:
+    # Enumerated from the registry rather than hand-listed: the previous literal stopped at
+    # bundle 0003, so 0004 and 0005 could drift between the root and packaged trees without any
+    # test noticing.
     for family, versions in (
-        ("catalog", ("0001", "0002")),
-        ("bundle", ("0001", "0002", "0003")),
+        ("catalog", tuple(item.version for item in CATALOG_MIGRATIONS)),
+        ("bundle", tuple(item.version for item in BUNDLE_MIGRATIONS)),
     ):
         for version in versions:
             root_file = _REPO_ROOT / "migrations" / family / f"{version}.sql"
@@ -146,15 +151,15 @@ def test_each_migration_family_has_contiguous_versions(installed: _Installed) ->
     )
     payload = _run_probe(installed, probe)
     assert payload["catalog_versions"] == ["0001", "0002"]
-    assert payload["bundle_versions"] == ["0001", "0002", "0003", "0004"]
+    assert payload["bundle_versions"] == ["0001", "0002", "0003", "0004", "0005"]
     assert payload["catalog_current"] == 2
-    assert payload["bundle_current"] == 4
+    assert payload["bundle_current"] == 5
 
 
 def test_migration_ddl_contains_no_destructive_statement(installed: _Installed) -> None:
     for family, versions in (
         ("catalog", ("0001", "0002")),
-        ("bundle", ("0001", "0002", "0003", "0004")),
+        ("bundle", ("0001", "0002", "0003", "0004", "0005")),
     ):
         for version in versions:
             text = (
@@ -201,7 +206,7 @@ def test_fresh_catalog_and_bundle_initialize_at_current_schema_version(
         "catalog_state": "current",
         "catalog_version": 2,
         "bundle_state": "current",
-        "bundle_version": 4,
+        "bundle_version": 5,
     }
 
 

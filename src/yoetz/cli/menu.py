@@ -23,6 +23,7 @@ import typer
 from pydantic import BaseModel
 
 from yoetz import __version__
+from yoetz.cli.exits import ceremony_refusal_message
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import ControlError
 from yoetz.protocol.canonical import JsonValue
@@ -123,8 +124,10 @@ def _run_ceremony(operation: Callable[[], Awaitable[object]]) -> None:
             if error.reason == "cancelled":
                 typer.echo("cancelled", err=True)
             else:
+                refusal = ceremony_refusal_message(error.reason)
                 typer.echo(
-                    "service_unavailable: the confidential ceremony could not be completed",
+                    refusal
+                    or "service_unavailable: the confidential ceremony could not be completed",
                     err=True,
                 )
         return 0

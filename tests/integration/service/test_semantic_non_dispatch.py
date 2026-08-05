@@ -133,7 +133,7 @@ class _Privacy:
         request_id = cast(str, getattr(candidate, "request_id"))
         return SemanticEgressAwaitingHuman(
             request_id,
-            "pvp_53000000-0000-4000-8000-000000000001",
+            "ppr_53000000-0000-4000-8000-000000000001",
             "sha256:" + "a" * 64,
             datetime(2030, 1, 1, tzinfo=UTC),
         )

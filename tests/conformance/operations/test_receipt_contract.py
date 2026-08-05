@@ -385,6 +385,7 @@ async def _bootstrap_finding(
         "max_findings": "3",
     }
     checked = await app.check(CheckRequest.model_validate(check_wire))
+    assert type(checked) is CheckCommitResult, f"unexpected nonterminal check: {type(checked)}"
     assert checked.findings, "the seeded scenario must always yield one actionable finding"
     return started, checked, obligation_id
 

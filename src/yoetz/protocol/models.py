@@ -574,6 +574,10 @@ def _privacy_policy_id_wire(value: object) -> str:
     return _validate_id_wire(IdKind.PRIVACY_POLICY, value)
 
 
+def _privacy_proposal_id_wire(value: object) -> str:
+    return _validate_id_wire(IdKind.PRIVACY_PROPOSAL, value)
+
+
 def _egress_receipt_id_wire(value: object) -> str:
     return _validate_id_wire(IdKind.EGRESS_RECEIPT, value)
 
@@ -689,6 +693,7 @@ ReceiptIdWire = Annotated[str, BeforeValidator(_receipt_id_wire)]
 EvidenceOrResultIdWire = Annotated[str, BeforeValidator(_evidence_or_result_id_wire)]
 CorrelationIdWire = Annotated[str, BeforeValidator(_correlation_id_wire)]
 PrivacyPolicyIdWire = Annotated[str, BeforeValidator(_privacy_policy_id_wire)]
+PrivacyProposalIdWire = Annotated[str, BeforeValidator(_privacy_proposal_id_wire)]
 EgressReceiptIdWire = Annotated[str, BeforeValidator(_egress_receipt_id_wire)]
 CanonicalUInt64Wire = Annotated[str, BeforeValidator(_canonical_uint_wire)]
 CanonicalPositiveUInt64Wire = Annotated[str, BeforeValidator(_canonical_positive_uint_wire)]
@@ -1933,11 +1938,70 @@ def _semantic_provenance_identity(
     return status, reason
 
 
+class CheckContinuationModel(_ClosedModel):
+    """What the caller must do to resume one suspended check.
+
+    The command is fixed by the service rather than assembled by the caller: an agent told only
+    that a human must approve has no supported way to learn *what* to approve, which is what
+    drives it to read the catalog database or product source instead.
+    """
+
+    kind: Literal["privacy_disclosure_decision"]
+    pending_id: PrivacyProposalIdWire
+    expires_at: TimestampWire
+    command: tuple[String1To256, ...]
+    replay_request_id: RequestIdWire
+    instruction: String1To4096
+
+    @model_validator(mode="after")
+    def _validate_continuation(self) -> CheckContinuationModel:
+        if len(self.command) != 4:
+            raise ValueError("check_continuation_command_invalid")
+        head = ("yoetz", "privacy", "decide-disclosure")
+        if tuple(self.command[:3]) != head or self.command[3] != self.pending_id:
+            raise ValueError("check_continuation_command_invalid")
+        return self
+
+
+class CheckAwaitingHumanModel(_ClosedModel):
+    """The nonterminal CHECK branch: suspended on a local disclosure decision.
+
+    Carries no verdict, findings, coverage, or semantic provenance. A completion-grade shape here
+    would let a caller conclude from a check that never ran.
+    """
+
+    protocol_version: Literal["0.1"]
+    schema_version: Literal["1.0.0"]
+    request_id: RequestIdWire
+    ok: Literal[True]
+    state: Literal["awaiting_human"]
+    task_id: TaskIdWire
+    session_id: SessionIdWire
+    writer_id: WriterIdWire
+    subject_frontier: FrontierModel
+    result_frontier: FrontierModel
+    semantic_status: Literal["awaiting_human"]
+    semantic_reason: Literal["human_approval_required"]
+    continuation: CheckContinuationModel
+    versions: CheckVersionSliceModel
+    # Every projected success body carries its disclosure projection; the nonterminal branch is
+    # projected through the same path and must not be an exception to that invariant.
+    privacy_projection: PrivacyProjectionModel
+
+    @model_validator(mode="after")
+    def _validate_awaiting_human(self) -> CheckAwaitingHumanModel:
+        if self.continuation.replay_request_id != self.request_id:
+            raise ValueError("check_continuation_request_mismatch")
+        _validate_model_against_schema(self, "check-result")
+        return self
+
+
 class CheckSuccessModel(_ClosedModel):
     protocol_version: Literal["0.1"]
     schema_version: Literal["1.0.0"]
     request_id: RequestIdWire
     ok: Literal[True]
+    state: Literal["complete"]
     task_id: TaskIdWire
     session_id: SessionIdWire
     writer_id: WriterIdWire
@@ -1988,8 +2052,11 @@ class CheckSuccessModel(_ClosedModel):
         return self
 
 
+type CheckSuccessBranch = Annotated[
+    CheckSuccessModel | CheckAwaitingHumanModel, Field(discriminator="state")
+]
 type CheckResultBranch = Annotated[
-    CheckSuccessModel | OperationFailureModel, Field(discriminator="ok")
+    CheckSuccessBranch | OperationFailureModel, Field(discriminator="ok")
 ]
 
 
@@ -2648,10 +2715,18 @@ class StatusOperationPageModel(_ClosedModel):
     subject_frontier: FrontierModel | None = None
     result_frontier: FrontierModel | None = None
     accepted_events: tuple[StatusOperationAcceptedEventModel, ...] = ()
+    # Recovery after lost output or compaction: a pending check suspended on a local disclosure
+    # decision returns the same continuation its check result carried. Every other operation
+    # state returns null, so its presence is never ambiguous.
+    continuation: CheckContinuationModel | None = None
     next_cursor: None = None
 
     @model_validator(mode="after")
     def _validate_operation_page(self) -> StatusOperationPageModel:
+        if self.continuation is not None and not (
+            self.state == "pending" and self.operation_kind == "check"
+        ):
+            raise ValueError("status_operation_page_invalid")
         if self.state == "absent":
             if (
                 self.found
@@ -3170,6 +3245,16 @@ _CHECK_STRUCTURAL_POINTERS: Final = (
         "/semantic_provenance",
         "/semantic_reason",
         "/semantic_status",
+        # Every continuation leaf is service-authored: an opaque proposal id, its expiry, the
+        # fixed argv, the request id to replay, and fixed instruction prose. None of it carries
+        # case content, so all of it is structural.
+        "/state",
+        "/continuation/expires_at",
+        "/continuation/instruction",
+        "/continuation/kind",
+        "/continuation/pending_id",
+        "/continuation/replay_request_id",
+        "/continuation/command/*",
         "/suppressed_count",
         "/verdict",
         "/writer_id",
@@ -3454,6 +3539,15 @@ _STATUS_OPERATION_STRUCTURAL_POINTERS: Final = (
         "/page/accepted_events/*/ingestion_sequence",
         "/page/accepted_events/*/projection_status",
         "/page/accepted_events/*/writer_sequence",
+        # Nullable continuation object: a leaf when null, expands when a check is suspended.
+        # Every field is service-authored, so all of it is structural.
+        "/page/continuation",
+        "/page/continuation/command/*",
+        "/page/continuation/expires_at",
+        "/page/continuation/instruction",
+        "/page/continuation/kind",
+        "/page/continuation/pending_id",
+        "/page/continuation/replay_request_id",
         "/page/found",
         "/page/next_cursor",
         "/page/operation_kind",
@@ -3755,7 +3849,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 762:
+    if len(result) != 776:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

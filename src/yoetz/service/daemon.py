@@ -1644,7 +1644,14 @@ class _LockedHumanEffects:
                 preview = ProviderCredentialRotatePreview(target)
             return preview, digest, None
         if type(target) is PrivacyPendingTarget:
-            if not self._vault.ready or mode != "passphrase":
+            # Recording an already-bounded disclosure decision does not widen policy, change a
+            # credential, or grant new authority — it answers a proposal the running policy
+            # already scoped. Requiring passphrase mode here made the ceremony unreachable on a
+            # keyring installation, which is the ordinary production configuration. Policy
+            # decisions keep the stronger requirement below.
+            if not self._vault.ready:
+                raise HumanControlError("state_forbidden")
+            if target.decision_kind != "disclosure" and mode != "passphrase":
                 raise HumanControlError("kind_forbidden")
             expected_kind = (
                 HumanCeremonyKind.PRIVACY_POLICY_DECISION
@@ -1658,16 +1665,23 @@ class _LockedHumanEffects:
 
                 app = self._privacy_app()
                 if type(app) is not PrivacyPolicyApplication:
-                    raise HumanControlError("kind_forbidden")
+                    # This build cannot run the ceremony at all — distinct from a proposal
+                    # problem, and the caller cannot fix it by supplying a different id.
+                    raise HumanControlError("ceremony_unsupported")
                 proposal = await app.audit.load_disclosure_proposal(target.pending_id)
                 if proposal is None or proposal.expires_at <= app.clock.now_utc():
-                    raise HumanControlError("target_invalid")
+                    # Absent and expired are deliberately one reason: distinguishing them would
+                    # confirm whether an unknown id ever existed.
+                    raise HumanControlError("pending_unavailable")
                 effective = await app.policy_store.effective_policy(proposal.scope)
                 if (
                     effective.policy.version != proposal.policy_version
                     or effective.effective_digest != proposal.policy_digest
                 ):
-                    raise HumanControlError("target_invalid")
+                    # The policy moved under the proposal: it can no longer be decided as
+                    # prepared, and approving it would authorize bytes against a policy the
+                    # user never saw.
+                    raise HumanControlError("pending_not_actionable")
                 destination: JsonValue
                 if proposal.provider_binding is not None:
                     binding = proposal.provider_binding
@@ -1681,13 +1695,14 @@ class _LockedHumanEffects:
                 elif proposal.local_sink is not None:
                     destination = {"local_sink": proposal.local_sink.value}
                 else:
-                    raise HumanControlError("target_invalid")
+                    # A proposal with no committed destination cannot be previewed honestly.
+                    raise HumanControlError("pending_not_actionable")
                 excerpt_bytes = proposal.prepared_bytes[:4_096]
                 try:
                     excerpt = excerpt_bytes.decode("utf-8")
                 except UnicodeDecodeError as exc:
                     if len(proposal.prepared_bytes) <= 4_096 or exc.end != len(excerpt_bytes):
-                        raise HumanControlError("target_invalid") from exc
+                        raise HumanControlError("pending_not_actionable") from exc
                     excerpt = excerpt_bytes[: exc.start].decode("utf-8")
                 category = (
                     proposal.approved_categories[0].value.replace("_", "-")
@@ -1713,7 +1728,7 @@ class _LockedHumanEffects:
                         proposal.policy_digest,
                     )
                 except (TypeError, ValueError) as exc:
-                    raise HumanControlError("target_invalid") from exc
+                    raise HumanControlError("pending_not_actionable") from exc
                 return preview_disclosure, digest, effective.generation
             from yoetz.application.privacy_policy import privacy_policy_changes
 
@@ -1797,11 +1812,16 @@ class _LockedHumanEffects:
         )
         from yoetz.ports.privacy import HumanAuthorityCapability, HumanPolicyDecision
 
-        if not self._vault.ready or self._vault.mode.value != "passphrase":
+        # Mirrors `prepare`: a bounded disclosure decision needs a ready vault, not passphrase
+        # mode. Policy widening, credential changes, and every other elevated operation keep
+        # their stronger authority requirement.
+        if not self._vault.ready:
+            raise HumanControlError("state_forbidden")
+        if target.decision_kind != "disclosure" and self._vault.mode.value != "passphrase":
             raise HumanControlError("kind_forbidden")
         app = self._privacy_app()
         if type(app) is not PrivacyPolicyApplication:
-            raise HumanControlError("kind_forbidden")
+            raise HumanControlError("ceremony_unsupported")
         if target.decision_kind == "disclosure":
             from yoetz.domain.privacy import ConsentSource, HumanPrivacyDecision
 
@@ -1817,6 +1837,13 @@ class _LockedHumanEffects:
                 or effective.effective_digest != proposal.policy_digest
             ):
                 return PrivacyDecisionResult("stale", proposal.prepared_case_digest)
+            # The proposal must still commit to exactly one destination and to the prepared
+            # case the preview bound. Approving one that no longer does would authorize bytes
+            # against a destination the user was never shown.
+            if proposal.provider_binding is None and proposal.local_sink is None:
+                raise HumanControlError("pending_not_actionable")
+            if not proposal.prepared_case_digest:
+                raise HumanControlError("pending_not_actionable")
             try:
                 authority_commitment = self._vault.installation_mac_handle(
                     MacKeyPurpose.PRIVACY_AUDIT
@@ -1835,7 +1862,11 @@ class _LockedHumanEffects:
                 )
                 await app.audit.record_human_decision(target.pending_id, human_decision)
             except ValueError as exc:
-                raise HumanControlError("target_invalid") from exc
+                # The audit record enforces one-use: it accepts a decision only from
+                # awaiting_human/reserved, and checks the proposal commitment. A second
+                # decision on the same proposal lands here and must not read as a new failure
+                # mode — it is a proposal that is no longer decidable.
+                raise HumanControlError("pending_not_actionable") from exc
             return PrivacyDecisionResult(
                 "committed" if decision == "approve" else "denied",
                 proposal.prepared_case_digest,
@@ -2304,6 +2335,11 @@ def _human_error_code(exc: Exception) -> str:
         if reason in {
             "binding_expired",
             "cancelled",
+            # Without these three the mapper collapses them to internal_error, and the bounded
+            # ceremony reasons never reach the client that has to act on them.
+            "ceremony_unsupported",
+            "pending_not_actionable",
+            "pending_unavailable",
             "kind_forbidden",
             "phase_invalid",
             "presence_unavailable",

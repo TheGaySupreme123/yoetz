@@ -792,6 +792,14 @@ async def execute_review(app: Application, request: ReviewRequest) -> ReviewInte
         await app.runtime.release(runtime)
 
     check_result = await execute_check(cast(CheckApplication, app), check_request)
+    # A review summarizes a completed check. A check suspended on a local disclosure decision has
+    # no verdict or coverage to summarize, and inventing one would report a review that never ran.
+    if type(check_result) is not CheckCommitResult:
+        raise PublicOperationError(
+            PublicErrorCode.OPERATION_PENDING,
+            "The review's check is awaiting a local disclosure decision.",
+            True,
+        )
     return ReviewInternal(
         _SCHEMA_VERSION,
         request.request_id,

@@ -17,8 +17,9 @@ import typer
 from pydantic import BaseModel, ValidationError
 
 from yoetz import __version__
-from yoetz.cli.exits import exit_code_for
+from yoetz.cli.exits import ceremony_refusal_message, exit_code_for
 from yoetz.cli.render import (
+    render_human_awaiting_human,
     render_human_check,
     render_human_error,
     render_human_receipt,
@@ -29,6 +30,7 @@ from yoetz.ports.control import ControlClientKind, ControlError
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
 from yoetz.protocol.models import (
+    CheckAwaitingHumanModel,
     CheckRequest,
     CheckResult,
     CheckSuccessModel,
@@ -297,6 +299,8 @@ async def _call_workflow(
             _stderr(render_human_error(branch.error))
         elif isinstance(branch, CheckSuccessModel):
             typer.echo(render_human_check(branch))
+        elif isinstance(branch, CheckAwaitingHumanModel):
+            typer.echo(render_human_awaiting_human(branch))
         elif isinstance(branch, StatusSuccessModel):
             typer.echo(render_human_status(branch))
         elif isinstance(branch, ReceiptSuccessModel):
@@ -935,6 +939,10 @@ def _trusted_exception_failure(error: Exception) -> int | None:
         if reason == "cancelled":
             _stderr("cancelled")
             return exit_code_for("cancelled")
+        ceremony_refusal = ceremony_refusal_message(reason)
+        if ceremony_refusal is not None:
+            _stderr(ceremony_refusal)
+            return exit_code_for(PublicErrorCode.INVALID_REQUEST)
         _stderr("service_unavailable: the confidential ceremony could not be completed")
         return exit_code_for(PublicErrorCode.SERVICE_UNAVAILABLE)
     return None

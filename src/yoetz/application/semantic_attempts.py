@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Final, Literal, Protocol
 
 from yoetz.observability.logging import record_unexpected_exception_without_raising
@@ -266,6 +267,13 @@ class _SemanticAttemptLedger(Protocol):
     ) -> SemanticJobRecord | None: ...
 
     async def list_semantic_attempts(self, job_id: str) -> tuple[SemanticAttemptRecord, ...]: ...
+
+    async def record_disclosure_wait(
+        self,
+        handle: SemanticAttemptHandle,
+        pending_id: str,
+        pending_expires_at: datetime,
+    ) -> object: ...
 
     async def renew_leases(self, lease: OperationLease) -> OperationLease: ...
 
@@ -610,6 +618,42 @@ async def run_durable_semantic_attempts(
             accounting = await _accounting_for(
                 ledger, current_lease, job.job_id, max_retries=max_retries
             )
+            return build_final(evaluation.status, evaluation.reason, evaluation, accounting)
+
+        # awaiting_human is the one nonterminal dispatch outcome. It is not a failure and not a
+        # retry: no provider was reached, the case was never sent, and the same attempt must be
+        # resumable once the human answers. Falling through to the exhaustion path below would
+        # write the attempt FAILED, terminalize the job, and commit a terminal check result —
+        # leaving an approved decision with nothing left to resume.
+        if evaluation.status is SemanticStatus.AWAITING_HUMAN:
+            continuation = getattr(evaluation, "continuation", None)
+            if continuation is None:
+                # Without a pending id the caller cannot act and the job cannot be resumed;
+                # that is a coordinator failure, not a wait.
+                accounting = await _terminalize_after_failure(
+                    ledger=ledger,
+                    renew=_renew,
+                    lease_holder=lambda: current_lease,
+                    job_id=job.job_id,
+                    handle=handle,
+                    max_retries=max_retries,
+                )
+                return build_final(
+                    SemanticStatus.FAILED,
+                    SemanticReason.COORDINATOR_FAILURE,
+                    None,
+                    accounting,
+                )
+            await ledger.record_disclosure_wait(
+                handle,
+                continuation.pending_id,
+                continuation.expires_at.as_datetime(),
+            )
+            accounting = await _accounting_for(
+                ledger, current_lease, job.job_id, max_retries=max_retries
+            )
+            # The attempt stays `started` and the job stays `leased` on purpose: this is the
+            # durable record that the check is open, not finished.
             return build_final(evaluation.status, evaluation.reason, evaluation, accounting)
 
         can_retry = should_retry_after(

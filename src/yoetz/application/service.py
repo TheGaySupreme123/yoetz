@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Literal, Protocol, cast
 
+from pydantic import BaseModel
+
 from yoetz.application.egress import PrivacyCoordinator
 from yoetz.application.observation_verification import ObservationVerificationSupervisor
 from yoetz.application.unit_of_work import run_publish_response_commit
@@ -35,7 +37,7 @@ from yoetz.domain.values import (
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.control import ControlClientKind, ControlError, ControlMethod
 from yoetz.ports.ids import IdPort
-from yoetz.ports.ledger import CheckCommitResult, FrozenCase
+from yoetz.ports.ledger import CheckAwaitingHuman, CheckCommitResult, FrozenCase
 from yoetz.ports.publish_response_catalog import (
     PublishResponseCatalogPort,
     PublishResponseKey,
@@ -53,6 +55,7 @@ from yoetz.protocol.canonical import (
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, validate_id
 from yoetz.protocol.models import (
+    CheckAwaitingHumanModel,
     CheckRequest,
     CheckResult,
     CheckResultModel,
@@ -248,7 +251,10 @@ type ProjectedControlBody = (
 
 # These imports intentionally follow ``VerificationPolicy``: check.py consumes that immutable
 # configuration type, while the facade owns the closed union of all use-case internal results.
-from yoetz.application.check import check_internal_json  # noqa: E402
+from yoetz.application.check import (  # noqa: E402
+    check_awaiting_human_json,
+    check_internal_json,
+)
 from yoetz.application.import_review import (  # noqa: E402
     ImportCodexJsonlRequest,
     ImportReportInternal,
@@ -277,6 +283,7 @@ type UnprojectedControlBody = (
     StartInternalResult
     | PublishWorkInternalResult
     | CheckCommitResult
+    | CheckAwaitingHuman
     | RespondInternalResult
     | StatusInternalResult
     | ReceiptInternalResult
@@ -389,6 +396,8 @@ def _internal_json(result: UnprojectedControlBody) -> dict[str, JsonValue]:
         return result.as_json()
     if type(result) is CheckCommitResult:
         return dict(check_internal_json(result).items())
+    if type(result) is CheckAwaitingHuman:
+        return dict(check_awaiting_human_json(result).items())
     if type(result) is RespondInternalResult:
         return result.as_json()
     if type(result) is StatusInternalResult:
@@ -526,10 +535,15 @@ def _plain_nested_mappings(value: JsonValue, depth: int = 0) -> JsonValue:
 def _public_model(method: ControlMethod, value: Mapping[str, JsonValue]) -> ProjectedControlBody:
     """Validate and normalize one projected success body for its public result model."""
 
-    model = {
+    # CHECK has two success shapes. The nonterminal one carries no verdict or coverage, so it
+    # cannot validate against the terminal model; pick the branch the body actually declares.
+    check_success: type[BaseModel] = (
+        CheckAwaitingHumanModel if value.get("state") == "awaiting_human" else CheckSuccessModel
+    )
+    model: tuple[type[BaseModel], type[BaseModel]] | None = {
         ControlMethod.START: (StartSuccessModel, StartResultModel),
         ControlMethod.PUBLISH_WORK: (PublishWorkSuccessModel, PublishWorkResultModel),
-        ControlMethod.CHECK: (CheckSuccessModel, CheckResultModel),
+        ControlMethod.CHECK: (check_success, CheckResultModel),
         ControlMethod.RESPOND: (RespondSuccessModel, RespondResultModel),
         ControlMethod.STATUS: (StatusSuccessModel, StatusResultModel),
         ControlMethod.RECEIPT: (ReceiptSuccessModel, ReceiptResultModel),
@@ -738,7 +752,7 @@ class Application:
         request: CheckRequest,
         *,
         route_profile: Literal["policy", "strict"] = "policy",
-    ) -> CheckCommitResult:
+    ) -> CheckCommitResult | CheckAwaitingHuman:
         from yoetz.application.check import execute_check
 
         # Resolve omitted mode via policy so recorded check events carry the resolved value.

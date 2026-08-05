@@ -58,9 +58,12 @@ _HUMAN_CONTROL_REASONS: Final = frozenset(
     {
         "binding_expired",
         "cancelled",
+        "ceremony_unsupported",
         "closed",
         "internal_error",
         "kind_forbidden",
+        "pending_not_actionable",
+        "pending_unavailable",
         "phase_invalid",
         "presence_unavailable",
         "reauthentication_unavailable",

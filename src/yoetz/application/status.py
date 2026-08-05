@@ -14,7 +14,11 @@ from pydantic import BaseModel
 from yoetz.application.check import CheckScope, run_deterministic_policies
 from yoetz.domain.findings import FINDING_KIND_TRAITS, FindingOrigin
 from yoetz.domain.observation import AdviceSnapshot
-from yoetz.domain.values import Frontier
+from yoetz.domain.values import (
+    DISCLOSURE_CONTINUATION_INSTRUCTION,
+    Frontier,
+    disclosure_continuation,
+)
 from yoetz.kernel.deterministic_checks import (
     DeterministicAssessment,
     build_deterministic_case,
@@ -407,9 +411,51 @@ def _mapping(value: JsonValue) -> dict[str, JsonValue]:
     return cast(dict[str, JsonValue], source)
 
 
+async def _disclosure_continuation(
+    runtime: object,
+    writer_id: str,
+    operation_request_id: str,
+) -> dict[str, JsonValue] | None:
+    """Rebuild the continuation for one suspended check from durable state.
+
+    Recovery must never depend on the caller having kept the original result, and it must never
+    require reading Yoetz's storage by hand. A ledger without the wait API, or any fault reading
+    it, simply yields no continuation: recovery is best-effort enrichment and must not turn a
+    readable operation page into an error.
+    """
+
+    ledger = getattr(runtime, "ledger", None)
+    load = getattr(ledger, "load_disclosure_wait", None)
+    if load is None:
+        return None
+    try:
+        wait = await load(writer_id, operation_request_id)
+    except Exception:
+        return None
+    if wait is None or getattr(wait, "state", None) != "awaiting":
+        return None
+    try:
+        continuation = disclosure_continuation(
+            pending_id=wait.pending_id,
+            expires_at=wait.pending_expires_at,
+            request_id=operation_request_id,
+        )
+    except TypeError, ValueError:
+        return None
+    return {
+        "kind": continuation.kind,
+        "pending_id": continuation.pending_id,
+        "expires_at": continuation.expires_at.wire,
+        "command": continuation.command,
+        "replay_request_id": continuation.request_id,
+        "instruction": DISCLOSURE_CONTINUATION_INSTRUCTION,
+    }
+
+
 def _operation_page_from_record(
     operation_request_id: str,
     operation: object | None,
+    continuation: Mapping[str, JsonValue] | None = None,
 ) -> StatusOperationPageModel:
     """Project one operation record into the recovery page, or a bounded not-found page.
 
@@ -434,14 +480,17 @@ def _operation_page_from_record(
         record = operation
         kind = record.operation_kind.value
         if record.state is OperationState.PENDING:
-            return StatusOperationPageModel.model_validate(
-                {
-                    "operation_request_id": operation_request_id,
-                    "found": True,
-                    "state": "pending",
-                    "operation_kind": kind,
-                }
-            )
+            pending: dict[str, JsonValue] = {
+                "operation_request_id": operation_request_id,
+                "found": True,
+                "state": "pending",
+                "operation_kind": kind,
+            }
+            # Only a suspended check has one; it is what makes recovery possible after the
+            # original result scrolled away or the context was compacted.
+            if continuation is not None and kind == "check":
+                pending["continuation"] = cast(JsonValue, dict(continuation))
+            return StatusOperationPageModel.model_validate(pending)
         if record.state is OperationState.QUARANTINED:
             return StatusOperationPageModel.model_validate(
                 {
@@ -863,8 +912,13 @@ async def execute_status(
             operation = await runtime.ledger.lookup_operation(
                 request.writer_id, request.filter.operation_request_id
             )
+            continuation = await _disclosure_continuation(
+                runtime, request.writer_id, request.filter.operation_request_id
+            )
             try:
-                page = _operation_page_from_record(request.filter.operation_request_id, operation)
+                page = _operation_page_from_record(
+                    request.filter.operation_request_id, operation, continuation
+                )
             except (AttributeError, TypeError, ValueError) as exc:
                 raise _error(
                     PublicErrorCode.STORAGE_CORRUPT, "The stored operation result is invalid."

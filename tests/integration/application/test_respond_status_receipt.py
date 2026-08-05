@@ -307,6 +307,7 @@ async def _bootstrap_finding(
         "max_findings": "3",
     }
     checked = await app.check(CheckRequest.model_validate(check_wire))
+    assert type(checked) is CheckCommitResult, f"unexpected nonterminal check: {type(checked)}"
     assert checked.findings, "the seeded scenario must always yield one actionable finding"
     return started, checked, obligation_id
 
@@ -632,6 +633,7 @@ async def test_reviewer_challenge_response_paths_use_existing_protocol() -> None
         "max_findings": "3",
     }
     rechecked = await app.check(CheckRequest.model_validate(recheck_wire))
+    assert type(rechecked) is CheckCommitResult, f"unexpected nonterminal check: {type(rechecked)}"
     assert rechecked.subject_frontier == responded.result_frontier
 
 
@@ -667,6 +669,7 @@ async def test_response_and_waiver_never_resolve_finding() -> None:
         "max_findings": "3",
     }
     rechecked = await app.check(CheckRequest.model_validate(recheck_wire))
+    assert type(rechecked) is CheckCommitResult, f"unexpected nonterminal check: {type(rechecked)}"
 
     # Neither the disposition nor an already-expired waiver resolved the issue: the very same
     # issue (kind/policy/subject) is still reported, with a fresh finding_id.
@@ -709,6 +712,9 @@ async def test_scoped_check_applicability_is_durable() -> None:
         "max_findings": "3",
     }
     first_recheck = await app.check(CheckRequest.model_validate(first_recheck_wire))
+    assert type(first_recheck) is CheckCommitResult, (
+        f"unexpected nonterminal check: {type(first_recheck)}"
+    )
     second_recheck_wire: dict[str, JsonValue] = {
         **_request_base(protocol_id("req_", 812)),
         "session_id": started.session_id,
@@ -718,6 +724,9 @@ async def test_scoped_check_applicability_is_durable() -> None:
         "max_findings": "3",
     }
     second_recheck = await app.check(CheckRequest.model_validate(second_recheck_wire))
+    assert type(second_recheck) is CheckCommitResult, (
+        f"unexpected nonterminal check: {type(second_recheck)}"
+    )
 
     for outcome in (first_recheck, second_recheck):
         assert outcome.findings

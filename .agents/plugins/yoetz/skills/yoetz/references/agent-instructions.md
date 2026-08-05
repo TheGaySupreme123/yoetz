@@ -35,7 +35,43 @@ For `check` mode: use `semantic_if_configured` for most material implementation/
 
 `respond` records your disposition and links your evidence; it does not clear the finding. Every actionable finding recorded in a task keeps the receipt conclusion at `unresolved_findings_remain`, whichever disposition you record. Publish exactly the first time — an exact `attempted_items` entry for every requested item, evidence for every claim — because a finding cannot be un-fired. Repairing the record is still worth doing: it stops the next check from firing again and it shows the reader what you did.
 
+# Semantic review runs on authority the user already gave
+
+Your host's authorization to call `check` and a Yoetz disclosure decision are different things.
+Getting the first never grants the second.
+
+Ordinary `check` is default-safe. When a provider route is active the user selected it explicitly
+during setup and committed a bounded standing policy — exact provider, model, endpoint profile,
+workspace, purpose, categories, retention ceiling, and credential authority. `check` cannot widen any
+of it, and actual dispatch stays enforced by the installed provider binding and privacy policy rather
+than by anything in your request. Calling `check` is therefore a request to run the review the user
+already authorized, not a request for new permission.
+
+# A check awaiting a local decision is not finished
+
+`semantic_status: awaiting_human` with `semantic_reason: human_approval_required` is the one
+nonterminal check outcome: the operation, its semantic job, and its physical attempt all stay open.
+The result carries a `continuation` with the `pending_id`, its `expires_at`, and the exact command to
+run.
+
+Show the user that command verbatim. Do not create a new check request — a fresh request abandons the
+proposal being decided; after the decision, replay the exact same `check` request with the same
+`request_id`. Do not read Yoetz's databases, catalog files, or source to recover the pending id:
+`status` with `view=operation` returns the same continuation while the durable record of the wait is
+available, and returns none once it is not — in which case run the check again rather than guessing.
+Do not request a receipt and do not tell the user the task is done until that same request reaches a
+terminal result.
+
+# Publishing a completion claim is an assertion, not a conclusion
+
+A published completion claim is the input to a check, not the output of one. It does not license
+telling the user the work is finished. Publish the claim and its evidence, run `check`, disposition
+findings and recheck, take a `receipt`, and only then answer.
+
 # When to stop retrying
+
+`awaiting_human` is outside this section entirely: it is nonterminal, so it is neither a gap to
+disclose nor a retry to spend. Follow its continuation.
 
 Semantic review that does not succeed is a coverage gap, not a retry problem. `not_configured`, `blocked_by_policy`, and `human_denied` will not change without owner action; take the first answer. `unavailable` and `timeout` already spent that job's own attempt budget. `refused`, `invalid`, and `failed` are not retried inside the job at all. When a second job in one session again returns no judgment, stop requesting semantic review, run `deterministic_only`, and disclose the gap naming the recorded `semantic_status` and `semantic_reason`.
 

@@ -26,7 +26,9 @@ beside this file as `references/workflow.md`, `references/coverage-and-receipts.
 
 Author each request from its tool input schema plus this guidance, never from memory or from product
 source. If the host drops schema metadata, use the request templates resource rather than reading
-product source. The schema is authority for field shapes; the guidance is authority for which call
+product source. This holds when something goes wrong too: Yoetz's own SQLite databases, catalog
+files, and source tree are never the way to work out what a result meant. Every recoverable fact is
+reachable through `status`. The schema is authority for field shapes; the guidance is authority for which call
 to make and when. `start` takes `mode` as exactly one of `create`, `attach`, or `create_or_attach`.
 
 ## When to activate
@@ -58,14 +60,69 @@ Copy this and check items off as you go:
 - [ ] publish the plan, requested outcomes, acceptance evidence, assignments
 - [ ] publish each material transition as it happens
 - [ ] status before closing: read closure_readiness for open obligations and gaps
-- [ ] publish the completion claim and its evidence
+- [ ] publish the completion claim and its evidence (an assertion, not a conclusion)
 - [ ] check (choose mode deliberately)
+- [ ] if awaiting_human: show the supplied command, wait, then replay the exact same `check` request with the same `request_id`
 - [ ] respond to each finding, then recheck
 - [ ] receipt
 - [ ] final answer no stronger than the receipt's weakest coverage
 ```
 
+## Semantic review authority: who already decided what
+
+Two different permissions are in play, and confusing them is what strands a check.
+
+**Your host's authorization** is Codex deciding whether you may call the `check` tool at all. **A
+Yoetz disclosure decision** is the machine owner deciding whether one exact prepared case may leave
+the machine. Getting the first never grants the second, and needing the second does not mean the
+first was wrong.
+
+Ordinary `check` is default-safe. If a provider route is active, the user selected it explicitly
+during setup and committed a bounded standing policy: an exact provider, model, endpoint profile,
+workspace, purpose, category set, retention ceiling, and credential authority. `check` **cannot
+widen any of that**. It cannot change the provider, reach a different workspace, add a category,
+raise a limit, or reuse a credential for anything else. Whether a case is actually dispatched stays
+enforced at runtime by the installed provider binding and privacy policy, not by the wording of your
+request or by anything you can set on the call.
+
+So calling `check` is not a request for new permission. It is a request to run the review the user
+already authorized. Do not ask the user to re-approve a route they configured, and do not describe
+an ordinary check as if it were an egress decision.
+
+## When a check is waiting on a local decision
+
+If a check returns `semantic_status: awaiting_human` with `semantic_reason:
+human_approval_required`, the result carries a `continuation` with a `pending_id`, an `expires_at`,
+and the exact command to run. The user has chosen the per-request confirmation posture; nothing is
+wrong.
+
+Do exactly this:
+
+- **Show the user the supplied command verbatim** — it is `yoetz privacy decide-disclosure <pending_id>`
+  with the real id filled in. Do not retype it from memory or reconstruct it.
+- **Do not create a new check request.** A fresh request builds a fresh case with a fresh provider
+  request id, which abandons the proposal the user is being asked to approve. After they decide,
+  replay the *exact same* `check` request with the *same* `request_id`.
+- **Do not inspect the Yoetz database, catalog files, or product source** to find the pending id or
+  work out what happened. Everything you need is in the result. If you lost it, read `status` with
+  `view=operation` for that `operation_request_id`: it returns the same continuation when the
+  durable record of the wait is still available. If it comes back without one, the decision window
+  is gone — run the check again rather than guessing an id.
+- **Do not request a receipt yet, and do not tell the user the task is done.** The check has not
+  reached a terminal result, so there is no verdict, no coverage, and nothing to conclude from.
+
+`awaiting_human` is not a coverage gap and not a failure. It is the one nonterminal check outcome:
+the operation, its semantic job, and its physical attempt are all still open, waiting on the user.
+Denial or expiry resolves it once and produces a terminal result you can then read normally. A
+provider retry creates a fresh proposal and needs its own decision.
+
 ## Before you claim done
+
+Publishing a completion claim records an **assertion awaiting verification**. It is the input to a
+check, not the output of one, and it is not permission to tell the user the work is finished. The
+sequence is: publish the claim and its evidence → `check` → respond and recheck if there are
+findings → `receipt` → then answer. Announcing completion after the publish step — or after a check
+that never reached a terminal result — states as settled something the record does not yet support.
 
 Read `closure_readiness` on any `status` result first: it names the open obligations, unresolved findings, and declared gaps that currently bound a conclusion. Spending a check or receipt while those stand returns a predictably insufficient result. Publish the smallest state-bound diff or symbol and the directly relevant test or failure excerpt; never rely on self-asserted completion prose alone.
 
@@ -81,6 +138,7 @@ Publish exactly the first time: an exact `attempted_items` entry for every reque
 
 ## When to stop retrying
 
+- `awaiting_human` is the exception to everything in this section: it is nonterminal, so it is neither a gap to disclose nor a retry to spend. Follow the continuation instead — see "When a check is waiting on a local decision" above.
 - Semantic review that does not succeed is a coverage gap, not a retry problem. `not_configured`, `blocked_by_policy`, and `human_denied` will not change without owner action — take the first answer. `unavailable` and `timeout` already spent that job's own attempt budget. `refused`, `invalid`, and `failed` are not retried inside the job at all, so a fresh request is a fresh gamble.
 - When a second job in one session again returns no judgment, stop: run `deterministic_only`, disclose the gap naming the recorded `semantic_status` and `semantic_reason`, and do not spend a third job.
 - On `OPERATION_PENDING`, read `status` with `view=operation` once and replay the same `request_id` once. If it is still pending, continue with a new deterministic-only request and say the earlier operation never reached a terminal result.

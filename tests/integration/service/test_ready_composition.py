@@ -31,6 +31,7 @@ from yoetz.ports.control import (
     ServiceState,
 )
 from yoetz.ports.diagnostics import StartupCheckResult
+from yoetz.ports.ledger import CheckCommitResult
 from yoetz.ports.privacy import (
     EffectivePrivacyPolicy,
     HumanAuthorityCapability,
@@ -42,6 +43,7 @@ from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import (
     CheckRequest,
     CheckResult,
+    CheckSuccessModel,
     PublishWorkRequest,
     StartRequest,
     StartResult,
@@ -876,6 +878,7 @@ async def test_ready_factory_completes_and_projects_deterministic_check(tmp_path
             }
         )
         checked = await app.check(check_request)
+        assert type(checked) is CheckCommitResult, f"unexpected nonterminal check: {type(checked)}"
         assert checked.outcome == "committed"
         assert checked.verdict.value in {
             "action_required",
@@ -910,6 +913,7 @@ async def test_ready_factory_completes_and_projects_deterministic_check(tmp_path
             projected.model_dump(mode="json", by_alias=True, exclude_unset=True)
         )
         assert validated.root.ok is True
+        assert type(validated.root) is CheckSuccessModel
         assert validated.root.verdict == checked.verdict.value
     finally:
         if app is not None:
@@ -1126,6 +1130,7 @@ async def test_ready_factory_deterministic_check_records_semantic_not_requested_
                 }
             )
         )
+        assert type(checked) is CheckCommitResult, f"unexpected nonterminal check: {type(checked)}"
         assert checked.outcome == "committed"
         assert "semantic_review_not_requested" in checked.coverage.known_gaps
         assert checked.semantic_status.value == "not_requested"
@@ -1151,6 +1156,9 @@ async def test_ready_factory_deterministic_check_records_semantic_not_requested_
                     "policy_packs": ["work-integrity/0.1.0"],
                 }
             )
+        )
+        assert type(resolved) is CheckCommitResult, (
+            f"unexpected nonterminal check: {type(resolved)}"
         )
         assert resolved.outcome == "committed"
         assert resolved.semantic_status.value == "not_configured"
@@ -1178,6 +1186,9 @@ async def test_ready_factory_deterministic_check_records_semantic_not_requested_
                     "policy_packs": ["work-integrity/0.1.0"],
                 }
             )
+        )
+        assert type(required) is CheckCommitResult, (
+            f"unexpected nonterminal check: {type(required)}"
         )
         assert required.outcome == "committed"
         assert required.semantic_status.value == "not_configured"
@@ -1271,6 +1282,7 @@ async def test_ready_check_re_resolves_provider_activated_after_composition(
                 }
             )
         )
+        assert type(first) is CheckCommitResult, f"unexpected nonterminal check: {type(first)}"
         assert first.semantic_status.value == "unavailable"
         assert first.semantic_reason.value == "credential_unavailable"
 
@@ -1336,6 +1348,7 @@ async def test_ready_check_re_resolves_provider_activated_after_composition(
                 }
             )
         )
+        assert type(second) is CheckCommitResult, f"unexpected nonterminal check: {type(second)}"
 
         assert app.semantic_evaluator is evaluator
         # The unchanged durable LOCAL_ONLY policy now supplies the next fence. Reaching this exact
