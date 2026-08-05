@@ -414,10 +414,16 @@ class ProviderDataUseProfile:
     def recommendation_eligible(self, now: datetime) -> bool:
         _time(now)
         return (
-            now < self.expires_at
+            self.reviewed_at <= now < self.expires_at
             and self.customer_content_training == "prohibited"
-            and self.retention in {"none", "bounded"}
-            and self.provider_human_access in {"prohibited", "restricted"}
+            and (
+                self.retention == "none"
+                or (
+                    self.retention == "bounded"
+                    and self.retention_days_ceiling is not None
+                    and self.retention_days_ceiling <= 30
+                )
+            )
         )
 
 

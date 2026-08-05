@@ -537,7 +537,7 @@ def _build_body_object(case: ApprovedOutboundCase) -> dict[str, JsonValue]:
         payload_value = strict_json_parse(case.payload)
     except Exception as exc:
         raise ValueError("openai_case_payload_invalid") from exc
-    return {
+    body: dict[str, JsonValue] = {
         "model": case.provider_binding.model_id,
         "input": [
             {"role": "system", "content": _SYSTEM_INSTRUCTION},
@@ -553,6 +553,12 @@ def _build_body_object(case: ApprovedOutboundCase) -> dict[str, JsonValue]:
             }
         },
     }
+    # Fireworks otherwise retains complete Responses conversations for 30 days; OpenAI Responses
+    # otherwise stores application state. This exact opt-out is part of the committed request body,
+    # while each provider's separately documented abuse-monitoring retention may still apply.
+    if case.provider_binding.endpoint_profile_id in {"fireworks-responses", "openai-responses"}:
+        body["store"] = False
+    return body
 
 
 _PROMPT_DIGEST: Final = "sha256:" + hashlib.sha256(_SYSTEM_INSTRUCTION.encode("utf-8")).hexdigest()

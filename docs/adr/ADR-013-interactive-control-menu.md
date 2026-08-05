@@ -32,7 +32,8 @@ the privacy posture, unlock or stop the service) had to reassemble the correct s
 2. **`yoetz menu` is a new top-level command** that opens the same menu explicitly. On a
    non-TTY it fails closed with a usage error (exit 2) and never prompts.
    Founder-authorized amendment (2026-07-29): `yoetz --privacy` is a direct root shortcut to the
-   trusted privacy ceremony. It first renders the exact recommended `metadata_only` draft and its
+   trusted privacy ceremony. It first renders the exact recommended `assisted_review` draft only
+   for a current, exact-route eligible provider record, and otherwise renders `private`, with its
    tradeoffs; only declining that draft opens the detailed one-by-one questions. The shortcut
    cannot be combined with a subcommand or provider-setup flags.
 

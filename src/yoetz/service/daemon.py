@@ -121,6 +121,7 @@ from yoetz.service.confidential_protocol import (
     PortableRecoveryResult,
     PortableRecoveryTarget,
     PrivacyDecisionResult,
+    PrivacyDisclosureDecisionPreview,
     PrivacyPendingTarget,
     PrivacyPolicyDecisionPreview,
     ProviderCredentialResult,
@@ -1645,11 +1646,75 @@ class _LockedHumanEffects:
         if type(target) is PrivacyPendingTarget:
             if not self._vault.ready or mode != "passphrase":
                 raise HumanControlError("kind_forbidden")
-            if (
-                request.ceremony_kind is not HumanCeremonyKind.PRIVACY_POLICY_DECISION
-                or target.decision_kind != "policy"
-            ):
+            expected_kind = (
+                HumanCeremonyKind.PRIVACY_POLICY_DECISION
+                if target.decision_kind == "policy"
+                else HumanCeremonyKind.PRIVACY_DISCLOSURE_DECISION
+            )
+            if request.ceremony_kind is not expected_kind:
                 raise HumanControlError("kind_forbidden")
+            if target.decision_kind == "disclosure":
+                from yoetz.application.privacy_policy import PrivacyPolicyApplication
+
+                app = self._privacy_app()
+                if type(app) is not PrivacyPolicyApplication:
+                    raise HumanControlError("kind_forbidden")
+                proposal = await app.audit.load_disclosure_proposal(target.pending_id)
+                if proposal is None or proposal.expires_at <= app.clock.now_utc():
+                    raise HumanControlError("target_invalid")
+                effective = await app.policy_store.effective_policy(proposal.scope)
+                if (
+                    effective.policy.version != proposal.policy_version
+                    or effective.effective_digest != proposal.policy_digest
+                ):
+                    raise HumanControlError("target_invalid")
+                destination: JsonValue
+                if proposal.provider_binding is not None:
+                    binding = proposal.provider_binding
+                    destination = {
+                        "endpoint_profile_id": binding.endpoint_profile_id,
+                        "endpoint_profile_version": binding.endpoint_profile_version,
+                        "model_id": binding.model_id,
+                        "provider_id": binding.provider_id,
+                        "transport": binding.transport,
+                    }
+                elif proposal.local_sink is not None:
+                    destination = {"local_sink": proposal.local_sink.value}
+                else:
+                    raise HumanControlError("target_invalid")
+                excerpt_bytes = proposal.prepared_bytes[:4_096]
+                try:
+                    excerpt = excerpt_bytes.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    if len(proposal.prepared_bytes) <= 4_096 or exc.end != len(excerpt_bytes):
+                        raise HumanControlError("target_invalid") from exc
+                    excerpt = excerpt_bytes[: exc.start].decode("utf-8")
+                category = (
+                    proposal.approved_categories[0].value.replace("_", "-")
+                    if len(proposal.approved_categories) == 1
+                    else "mixed"
+                )
+                digest = canonical_digest(
+                    {
+                        "decision_kind": target.decision_kind,
+                        "kind": target.kind,
+                        "pending_id": target.pending_id,
+                    }
+                )
+                try:
+                    preview_disclosure = PrivacyDisclosureDecisionPreview(
+                        target.pending_id,
+                        excerpt,
+                        proposal.prepared_case_digest,
+                        category,
+                        canonical_digest(destination),
+                        len(proposal.prepared_bytes),
+                        proposal.max_tokens,
+                        proposal.policy_digest,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise HumanControlError("target_invalid") from exc
+                return preview_disclosure, digest, effective.generation
             from yoetz.application.privacy_policy import privacy_policy_changes
 
             app = self._privacy_app()
@@ -1732,12 +1797,50 @@ class _LockedHumanEffects:
         )
         from yoetz.ports.privacy import HumanAuthorityCapability, HumanPolicyDecision
 
-        if target.decision_kind != "policy":
-            raise HumanControlError("kind_forbidden")
         if not self._vault.ready or self._vault.mode.value != "passphrase":
             raise HumanControlError("kind_forbidden")
         app = self._privacy_app()
         if type(app) is not PrivacyPolicyApplication:
+            raise HumanControlError("kind_forbidden")
+        if target.decision_kind == "disclosure":
+            from yoetz.domain.privacy import ConsentSource, HumanPrivacyDecision
+
+            proposal = await app.audit.load_disclosure_proposal(target.pending_id)
+            now = app.clock.now_utc()
+            if proposal is None or proposal.expires_at <= now:
+                return PrivacyDecisionResult(
+                    "stale", canonical_digest({"pending_id": target.pending_id})
+                )
+            effective = await app.policy_store.effective_policy(proposal.scope)
+            if (
+                effective.policy.version != proposal.policy_version
+                or effective.effective_digest != proposal.policy_digest
+            ):
+                return PrivacyDecisionResult("stale", proposal.prepared_case_digest)
+            try:
+                authority_commitment = self._vault.installation_mac_handle(
+                    MacKeyPurpose.PRIVACY_AUDIT
+                ).mac(
+                    b"yoetz/privacy-audit/local-approval/v1\x00",
+                    proposal.prepared_case_digest.encode("ascii"),
+                )
+                human_decision = HumanPrivacyDecision(
+                    proposal.proposal_commitment,
+                    decision == "approve",
+                    ConsentSource.PER_REQUEST_LOCAL_HUMAN,
+                    now,
+                    proposal.expires_at if decision == "approve" else None,
+                    proposal.prepared_case_digest,
+                    authority_commitment,
+                )
+                await app.audit.record_human_decision(target.pending_id, human_decision)
+            except ValueError as exc:
+                raise HumanControlError("target_invalid") from exc
+            return PrivacyDecisionResult(
+                "committed" if decision == "approve" else "denied",
+                proposal.prepared_case_digest,
+            )
+        if target.decision_kind != "policy":
             raise HumanControlError("kind_forbidden")
         try:
             prepared = await app.policy_store.load_pending_transition(target.pending_id)

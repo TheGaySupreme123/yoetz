@@ -49,8 +49,10 @@ Setup is a linear path inside the interface, each finished step collapsing into 
 6. **Secure storage** — the system keyring, or a Yoetz passphrase.
 7. **Review mode** — finish in complete local-only mode, or configure semantic review.
 8. **Semantic setup, when selected** — provider/model, hidden API-key entry, then one exact
-   recommended privacy policy. **Metadata only** sends public structural metadata and declared file
-   types, asks before every provider request, and uses task scope. Accepting it asks nothing
+   recommended privacy policy. **Assisted review** is recommended only for an exact provider route
+   with current reviewed no-training evidence and retention no longer than 30 days; it is bounded
+   to the current workspace and does not re-prompt for ordinary attempts after approval. Otherwise
+   **Private** is recommended. Accepting it asks nothing
    further; declining it opens the named recipes, and only **Custom** opens the settings
    themselves, in five grouped sections. The exact disclosure and separately reauthenticated
    widening decision remain mandatory.

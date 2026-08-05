@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -168,6 +169,29 @@ def _profile() -> OpenAIProfile:
         host="api.fireworks.ai",
         base_path_prefix="/inference/v1",
     )
+
+
+def test_fireworks_responses_body_disables_conversation_storage() -> None:
+    body = cast(dict[str, Any], strict_json_parse(render_case(_case()).body))
+
+    assert body["store"] is False
+
+
+def test_openai_responses_body_disables_application_state_storage() -> None:
+    case = replace(
+        _case(),
+        provider_binding=ProviderBinding(
+            "openai",
+            "gpt-5",
+            "openai-responses",
+            "1.0.0",
+            "external",
+        ),
+    )
+
+    body = cast(dict[str, Any], strict_json_parse(render_case(case).body))
+
+    assert body["store"] is False
 
 
 def _binding(rendered_body_sha256: str) -> ProviderAttemptAuthBinding:

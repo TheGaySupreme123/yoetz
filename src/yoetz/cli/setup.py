@@ -1307,7 +1307,7 @@ def _semantic_openai_extra_state() -> str:
     return "present (importable; wire dispatch not demonstrated)"
 
 
-def _emit_provider_setup_layer_report() -> None:
+def _emit_provider_setup_layer_report(*, privacy_outcome: str) -> None:
     """Honestly separate binding/credential storage from undemonstrated runtime layers."""
 
     typer.echo("Provider binding and vault credential storage succeeded; that layer is supported.")
@@ -1317,7 +1317,7 @@ def _emit_provider_setup_layer_report() -> None:
         "  Semantic evaluator: not composed "
         "(_semantic_not_configured in ready composition; not demonstrated)"
     )
-    typer.echo("  Privacy policy: not demonstrated")
+    typer.echo(f"  Privacy policy: {privacy_outcome}")
     typer.echo("  Transport probe: not demonstrated")
     typer.echo("  Installed artifact evidence: not demonstrated")
     typer.echo(
@@ -1377,7 +1377,30 @@ async def run_provider_setup(
         if type(reason) is str:
             typer.echo(f"Reason: {reason}")
         return 20
-    _emit_provider_setup_layer_report()
+    from yoetz.cli.privacy_setup import run_privacy_setup
+    from yoetz.cli.unlock import HumanCeremonyCliError
+    from yoetz.ports.control import ControlError
+
+    typer.echo("")
+    typer.echo("Provider credential stored. Now choose the exact disclosure policy it may use.")
+    try:
+        privacy = await run_privacy_setup(
+            recipe_hint="assisted_review",
+            offer_recommended=True,
+        )
+    except (ControlError, HumanCeremonyCliError, OSError, ValueError) as error:
+        typer.echo(
+            f"privacy_setup_failed: {type(error).__name__}; the credential remains stored but inert",
+            err=True,
+        )
+        return 20
+    if privacy.outcome in {"cancelled", "failed"}:
+        typer.echo(
+            "No standing disclosure policy was approved; the credential remains stored but inert."
+        )
+    _emit_provider_setup_layer_report(privacy_outcome=privacy.outcome)
+    if privacy.outcome == "failed":
+        return 20
     typer.echo(
         "Preview Codex MCP registration again to review the policy route command now that "
         "semantic configuration changed."
@@ -1548,7 +1571,7 @@ async def run_setup_wizard(
 
             try:
                 privacy_result = await run_privacy_setup(
-                    recipe_hint="metadata_only",
+                    recipe_hint="assisted_review",
                     offer_recommended=True,
                 )
             except (ControlError, HumanCeremonyCliError, OSError, ValueError) as error:

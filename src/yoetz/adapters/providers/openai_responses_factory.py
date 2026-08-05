@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Final
+from datetime import datetime
 
 from yoetz.adapters.privacy.gateway import ExternalProviderFactory
+from yoetz.adapters.providers.data_use_catalog import (
+    data_use_record_for_endpoint,
+    endpoint_profile_data_use_recommendation_eligible,
+)
 from yoetz.adapters.providers.openai_responses import (
     OneAttemptCredentialTransport,
     OpenAIProfile,
     OpenAIResponsesEvaluator,
     RenderedOpenAIRequest,
-    owner_declared_data_use_profile,
     render_case,
 )
 from yoetz.config.models import (
@@ -21,11 +23,10 @@ from yoetz.config.models import (
     ProviderProfileConfig,
     parse_https_origin,
 )
-from yoetz.domain.privacy import ApprovedOutboundCase, ProviderBinding, ProviderDataUseProfile
+from yoetz.domain.privacy import ApprovedOutboundCase, ProviderBinding
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.secret_memory import ProviderAttemptAuthBinding, ProviderCredentialHandle
 from yoetz.ports.semantic import SemanticEvaluatorPort
-from yoetz.protocol.canonical import canonical_digest
 
 __all__ = [
     "OpenAIResponsesExternalFactory",
@@ -35,15 +36,8 @@ __all__ = [
     "provider_binding_from_config",
 ]
 
-# Exactly one shipped endpoint profile carries reviewed data-use facts. Every other profile —
-# fireworks, the Vercel gateway, and any owner-declared HTTPS origin — gets
-# ``owner_declared_data_use_profile``, whose facts are ``unknown`` and therefore never
-# ``recommendation_eligible``. Keep this in step with openai_profile_from_provider_config and
-# chat_completions_profile_from_provider_config.
-_REVIEWED_DATA_USE_ENDPOINT_PROFILE_IDS: Final = frozenset({OFFICIAL_OPENAI_ENDPOINT_PROFILE_ID})
 
-
-def endpoint_profile_data_use_reviewed(endpoint_profile_id: str) -> bool:
+def endpoint_profile_data_use_reviewed(endpoint_profile_id: str, *, now: datetime) -> bool:
     """True when this endpoint profile ships recommendation-eligible provider data-use evidence.
 
     A policy that sets ``require_current_provider_data_use_evidence`` against a profile this
@@ -51,7 +45,7 @@ def endpoint_profile_data_use_reviewed(endpoint_profile_id: str) -> bool:
     pairing before the operator commits it rather than at first dispatch.
     """
 
-    return endpoint_profile_id in _REVIEWED_DATA_USE_ENDPOINT_PROFILE_IDS
+    return endpoint_profile_data_use_recommendation_eligible(endpoint_profile_id, now=now)
 
 
 def provider_binding_from_config(provider: ProviderProfileConfig) -> ProviderBinding:
@@ -61,22 +55,6 @@ def provider_binding_from_config(provider: ProviderProfileConfig) -> ProviderBin
         provider.endpoint_profile_id,
         provider.endpoint_profile_version,
         "external",
-    )
-
-
-def _official_data_use(now: datetime) -> ProviderDataUseProfile:
-    return ProviderDataUseProfile(
-        data_use_profile_id="openai-api-data-use",
-        data_use_profile_version="1.0.0",
-        customer_content_training="prohibited",
-        retention="bounded",
-        retention_days_ceiling=30,
-        provider_human_access="restricted",
-        reviewed_at=now,
-        expires_at=now + timedelta(days=365),
-        evidence_digest=canonical_digest(
-            {"profile": "openai-api-data-use", "schema": "yoetz.provider-data-use/1"}
-        ),
     )
 
 
@@ -94,7 +72,7 @@ def openai_profile_from_provider_config(
             endpoint_profile_version=provider.endpoint_profile_version,
             timeout_seconds=timeout,
             supports_structured_outputs=True,
-            data_use_profile=_official_data_use(now),
+            data_use_profile=data_use_record_for_endpoint(provider.endpoint_profile_id).profile,
         )
     if provider.endpoint_profile_id == "fireworks-responses":
         return OpenAIProfile(
@@ -104,13 +82,7 @@ def openai_profile_from_provider_config(
             endpoint_profile_version=provider.endpoint_profile_version,
             timeout_seconds=timeout,
             supports_structured_outputs=True,
-            data_use_profile=owner_declared_data_use_profile(
-                reviewed_at=now,
-                expires_at=now + timedelta(days=30),
-                evidence_digest=canonical_digest(
-                    {"profile": "fireworks-responses", "schema": "yoetz.provider-data-use/1"}
-                ),
-            ),
+            data_use_profile=data_use_record_for_endpoint(provider.endpoint_profile_id).profile,
             host="api.fireworks.ai",
             base_path_prefix="/inference/v1",
         )
@@ -124,16 +96,7 @@ def openai_profile_from_provider_config(
             endpoint_profile_version=provider.endpoint_profile_version,
             timeout_seconds=timeout,
             supports_structured_outputs=True,
-            data_use_profile=owner_declared_data_use_profile(
-                reviewed_at=now,
-                expires_at=now + timedelta(days=30),
-                evidence_digest=canonical_digest(
-                    {
-                        "profile": "vercel-ai-gateway-openai-responses",
-                        "schema": "yoetz.provider-data-use/1",
-                    }
-                ),
-            ),
+            data_use_profile=data_use_record_for_endpoint(provider.endpoint_profile_id).profile,
             host="ai-gateway.vercel.sh",
             base_path_prefix="/v1",
         )
@@ -148,18 +111,7 @@ def openai_profile_from_provider_config(
             endpoint_profile_version=provider.endpoint_profile_version,
             timeout_seconds=timeout,
             supports_structured_outputs=True,
-            data_use_profile=owner_declared_data_use_profile(
-                reviewed_at=now,
-                expires_at=now + timedelta(days=30),
-                evidence_digest=canonical_digest(
-                    {
-                        "host": host,
-                        "port": port,
-                        "profile": "owner-declared-openai-responses",
-                        "schema": "yoetz.provider-data-use/1",
-                    }
-                ),
-            ),
+            data_use_profile=data_use_record_for_endpoint(provider.endpoint_profile_id).profile,
             host=host,
             port=port,
             base_path_prefix="/v1",

@@ -73,7 +73,8 @@ LOCAL_ONLY = PrivacyPosture(profile="local_only", llm_inference_enabled=False, r
 # `yoetz.cli.privacy_setup.recommended_privacy_recipe` applies.
 RECOMMEND_PRIVATE = PrivacyRecommendation(
     "private",
-    "No external provider is configured, so this keeps network egress off entirely.",
+    "No current eligible exact provider route is configured, so this keeps network egress off "
+    "entirely.",
     "In exchange, there is no external semantic review at all.",
 )
 # Verbatim from `YoetzRuntime.privacy_recommendation`. A fake that paraphrases lets a test

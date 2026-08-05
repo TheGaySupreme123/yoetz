@@ -28,10 +28,12 @@ exactly those contracts and connects the steps without weakening any existing tr
    (read-only posture). The wizard orchestrates only operations a local human could already run by
    hand: Codex discovery, the runbook's check-then-add MCP registration behind
    preview→confirm→execute, a service reachability check, and the existing privacy and
-   provider-credential ceremonies. Founder-authorized amendment (2026-07-29): before registration,
+   provider-credential ceremonies. Founder-authorized amendment (2026-08-04): before registration,
    interactive first run chooses a complete `local_only` path or a semantic-review path. The latter
    registers the policy route, configures the provider and credential, then renders one exact
-   recommended `metadata_only` policy. Accepting that exact draft asks nothing further; declining
+   recommended `assisted_review` policy only when the exact provider route has current reviewed
+   no-training evidence and retention no longer than 30 days; otherwise it recommends `private`.
+   Accepting that exact draft asks nothing further; declining
    it opens the named recipes, which materialize directly into a draft, with only `custom`
    reaching field-level configuration in five grouped sections. Both paths propose
    the reviewed exact disclosure and hand widening to the separately reauthenticated trusted
@@ -39,10 +41,11 @@ exactly those contracts and connects the steps without weakening any existing tr
    already-reviewed hidden-input vault initialize/unlock and credential ceremony; it adds no
    secret field to wizard arguments, configuration, reports, MCP, or agent context. Noninteractive
    setup remains a report plus explicit follow-up commands and never chooses egress. The semantic
-   first-run recommendation permits only public structural metadata and declared file types at task
-   scope, with a foreground confirmation before every provider request. It is a starting draft,
-   not consent or a provider-data-use recommendation. `private` remains the fail-safe no-egress
-   choice, while assisted, expanded, and custom policies remain explicit. `yoetz --privacy` enters
+   `assisted_review` is workspace-scoped, problem-local, and does not require recurring prompts
+   after its trusted policy commit. Unknown, stale, broad, or account-unqualified evidence never
+   earns the recommendation and remains an informed explicit choice only. It is a starting draft,
+   not consent. `private` remains the fail-safe no-egress choice, while Metadata only, expanded,
+   and custom policies remain explicit. `yoetz --privacy` enters
    the same short recommended-first ceremony at any later time. The setup update advisory's version
    parser is a declared, exactly pinned core dependency; a clean installed-artifact gate imports
    and enters `setup run` so development-only transitive packages cannot hide a missing runtime
