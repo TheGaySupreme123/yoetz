@@ -53,8 +53,20 @@ if TYPE_CHECKING:  # Runtime imports stay lazy; annotations still type-check.
 __all__ = ["RuntimeError_", "YoetzRuntime", "project_detection"]
 
 _MCP_SERVER_NAME: Final = "yoetz"
-_MCP_COMMAND: Final = "yoetz mcp serve"
 _HARNESS: Final = "codex"
+
+
+def _serve_command_display(route_profile: Literal["policy", "strict"]) -> str:
+    """Render the exact argv this route registers, for the screen that asks for approval.
+
+    A fixed string here would show ``yoetz mcp serve`` while registering the strict command,
+    which is the one line on that screen the human is being asked to approve.
+    """
+
+    # Local import: the ports module stays off the TUI's startup path.
+    from yoetz.ports.harness_mcp import MCP_SERVE_COMMAND, MCP_STRICT_SERVE_COMMAND
+
+    return " ".join(MCP_STRICT_SERVE_COMMAND if route_profile == "strict" else MCP_SERVE_COMMAND)
 
 
 def _mapping(value: object) -> Mapping[str, object]:
@@ -332,20 +344,36 @@ class YoetzRuntime:
 
     # -- integration ----------------------------------------------------
 
-    async def integration_plan(self, option: HarnessOption) -> IntegrationPlan:
-        """Build the exact proposed change, previewing through the owning services."""
+    async def integration_plan(
+        self,
+        option: HarnessOption,
+        route_profile: Literal["policy", "strict"] | None = None,
+    ) -> IntegrationPlan:
+        """Build the exact proposed change, previewing through the owning services.
+
+        ``route_profile`` is the answer the human just gave to "how should Yoetz review work?".
+        Omit it only where nothing was asked -- post-setup ``/connect`` -- and the configured
+        posture is then the authority.
+        """
 
         from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter
         from yoetz.application.codex_plugin import CodexPluginService
         from yoetz.application.harness_mcp import HarnessMcpService
-        from yoetz.cli.setup import check_policy_preview, project_skill_preview
+        from yoetz.cli.setup import (
+            check_policy_preview,
+            configured_mcp_route_profile,
+            project_skill_preview,
+        )
         from yoetz.ports.harness_mcp import McpRegistrationError, McpRegistrationState
         from yoetz.ports.integrations import IntegrationScope, IntegrationTarget
 
         binary = self._binary_for(option)
         root = self.project_root()
+        route = configured_mcp_route_profile() if route_profile is None else route_profile
         try:
-            mcp_preview = await HarnessMcpService(CodexMcpAdapter()).preview(binary)
+            mcp_preview = await HarnessMcpService(CodexMcpAdapter(route_profile=route)).preview(
+                binary
+            )
         except McpRegistrationError as error:
             raise RuntimeError_(error.reason.value, "the Codex registration could not be previewed")
         target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(root))
@@ -359,7 +387,8 @@ class YoetzRuntime:
             executable_path=option.executable_path,
             reported_version=option.reported_version,
             project_root=str(root),
-            mcp_command=_MCP_COMMAND,
+            route_profile=route,
+            mcp_command=_serve_command_display(route),
             mcp_server_name=_MCP_SERVER_NAME,
             policy_digest=digest if isinstance(digest, str) else None,
             planned_check_ids=tuple(str(item) for item in checks)
@@ -389,12 +418,16 @@ class YoetzRuntime:
         and refuses when either has moved since the approval screen was drawn,
         which is the same staleness gate ``integrate mcp install
         --preview-digest`` already enforces.
+
+        The route travels on the plan for the same reason: it is inside the preview digest, so
+        resolving it a second time here could only ever disagree with what was approved.
         """
 
         from yoetz.cli.setup import apply_codex_integration
 
         report = await apply_codex_integration(
             self._binary_for(option),
+            route_profile=plan.route_profile,
             workspace=self.project_root(),
             approved_preview_digest=plan.preview_digest,
             approved_skill_preview_digest=plan.skill_preview_digest,

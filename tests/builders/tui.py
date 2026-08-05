@@ -59,6 +59,7 @@ _PLAN = IntegrationPlan(
     executable_path="/Applications/Codex.app/Contents/MacOS/codex",
     reported_version="0.44",
     project_root="/srv/yoetz",
+    route_profile="policy",
     mcp_command="yoetz mcp serve",
     mcp_server_name="yoetz",
     policy_digest="7f8a92bd",

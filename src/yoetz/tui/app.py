@@ -21,7 +21,7 @@ import asyncio
 import os
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
-from typing import Any, ClassVar, Final
+from typing import Any, ClassVar, Final, Literal
 
 from textual import events, on
 from textual.app import App, ComposeResult, SuspendNotSupported
@@ -410,8 +410,9 @@ class YoetzTui(App[int]):
             self.exit(0)
             return
         if choice == "local":
+            review = await self._ask_review_mode()
             await self._choose_storage(detection)
-            await self._choose_initial_review(connected=False)
+            await self._run_initial_review(review, connected=False)
             return
 
         option = await self._choose_harness(detection.harnesses)
@@ -420,13 +421,19 @@ class YoetzTui(App[int]):
             return
         if not await self._confirm_project_trust(detection):
             return
-        if not await self._connect(option):
+        # The review answer decides which MCP command is registered, so it is asked before the
+        # registration -- and before the approval screen that shows that command. Registering
+        # first and asking after is how a semantic install ends up on the strict route.
+        review = await self._ask_review_mode()
+        if not await self._connect(option, "policy" if review == "semantic" else "strict"):
             return
         await self._choose_storage(detection)
-        await self._choose_initial_review(connected=True)
+        await self._run_initial_review(review, connected=True, option=option)
 
-    async def _choose_initial_review(self, *, connected: bool) -> None:
-        choice = await self.ask(
+    async def _ask_review_mode(self) -> str | None:
+        """Ask the posture question only; applying the answer belongs to the caller."""
+
+        return await self.ask(
             SelectionView(
                 name="review-mode",
                 title="How should Yoetz review work?",
@@ -445,6 +452,14 @@ class YoetzTui(App[int]):
                 hint="enter to choose",
             )
         )
+
+    async def _run_initial_review(
+        self,
+        choice: str | None,
+        *,
+        connected: bool,
+        option: HarnessOption | None = None,
+    ) -> None:
         if choice != "semantic":
             await self._finish_setup(connected=connected)
             return
@@ -454,11 +469,9 @@ class YoetzTui(App[int]):
             self.say(
                 Level.BLOCKED,
                 "Semantic setup is not complete",
-                (
-                    "A provider binding and stored credential are required.",
-                    "You can choose Local only or rerun setup.",
-                ),
+                ("A provider binding and stored credential are required.",),
             )
+            await self._offer_local_only_finish(option, connected=connected)
             return
         try:
             # First run gets the same recommendation-first screen as `yoetz --privacy`.
@@ -469,11 +482,13 @@ class YoetzTui(App[int]):
             self.say(
                 Level.UNPROVEN,
                 "This terminal cannot open the trusted privacy ceremony",
-                ("Run 'yoetz privacy setup' from your shell. Setup was not marked complete.",),
+                ("Run 'yoetz privacy setup' from your shell.",),
             )
+            await self._offer_local_only_finish(option, connected=connected)
             return
         except RuntimeError_ as error:
             self._report(error)
+            await self._offer_local_only_finish(option, connected=connected)
             return
         if getattr(report, "outcome", "failed") not in {"configured", "unchanged"}:
             self.say(
@@ -481,6 +496,53 @@ class YoetzTui(App[int]):
                 "Semantic privacy setup is not complete",
                 (f"Reason: {getattr(report, 'reason', 'privacy_setup_failed')}",),
             )
+            await self._offer_local_only_finish(option, connected=connected)
+            return
+        await self._finish_setup(connected=connected)
+
+    async def _offer_local_only_finish(
+        self, option: HarnessOption | None, *, connected: bool
+    ) -> None:
+        """Leave a coherent installation when semantic setup does not complete.
+
+        Semantic review was chosen, so the policy route is already registered. Returning here
+        without a decision leaves that route registered with no provider behind it and no setup
+        marker written -- an install that is neither local-only nor semantic. Offer the finish
+        that makes it one of the two.
+        """
+
+        choice = await self.ask(
+            SelectionView(
+                name="semantic-incomplete",
+                title="Finish as local only instead?",
+                options=[
+                    Option(
+                        "local",
+                        "Yes, finish as local only",
+                        "Registers the local-only command and completes setup.",
+                    ),
+                    Option(
+                        "leave",
+                        "No, leave setup unfinished",
+                        "Change nothing further; rerun 'yoetz setup' when ready.",
+                    ),
+                ],
+                hint="enter to choose",
+            )
+        )
+        if choice != "local":
+            self.say(
+                Level.OPTIONAL,
+                "Setup was not completed.",
+                (
+                    "Rerun 'yoetz setup' to finish, or 'yoetz provider status' to see what "
+                    "is still missing.",
+                ),
+            )
+            return
+        # Re-registering the other route is a change to the project, so it goes through the
+        # same preview and approval as the first registration -- never a silent mutation.
+        if connected and option is not None and not await self._connect(option, "strict"):
             return
         await self._finish_setup(connected=connected)
 
@@ -546,9 +608,13 @@ class YoetzTui(App[int]):
             return False
         return True
 
-    async def _connect(self, option: HarnessOption) -> bool:
+    async def _connect(
+        self,
+        option: HarnessOption,
+        route_profile: Literal["policy", "strict"] | None = None,
+    ) -> bool:
         try:
-            plan = await self.runtime.integration_plan(option)
+            plan = await self.runtime.integration_plan(option, route_profile)
         except RuntimeError_ as error:
             self._report(error)
             return False

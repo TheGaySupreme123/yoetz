@@ -316,6 +316,81 @@ async def test_tui_apply_refuses_a_skill_preview_digest_not_shown_to_the_user(
     assert not (workspace / ".agents").exists()
 
 
+@pytest.mark.anyio
+async def test_a_preview_and_apply_that_disagree_on_the_route_refuse_as_stale(
+    wizard_env: dict[str, object],
+) -> None:
+    """The terminal interface previews and applies in two calls, so the route must survive both.
+
+    This is the shape of a defect the terminal interface used to have: it previewed with the
+    adapter default (``policy``) and applied on the configured route, which resolves ``strict``
+    with no provider bound, so first run's first action failed as stale. The route now travels
+    on the approved plan, and this pins the gate that made the mismatch visible rather than
+    silent. Only the route differs here -- the skill digest is the real one, so nothing else
+    can explain the refusal.
+    """
+
+    import yoetz.cli.setup as setup_module
+
+    workspace = cast(Path, wizard_env["marker"]).parent
+    skill_preview = await setup_module.project_skill_preview(workspace)
+
+    # Exactly what the TUI does today: no route_profile, so the class default (policy) applies.
+    preview_runner = _ScriptedRunner([CommandOutput(1, b"")])
+    mcp_preview = await HarnessMcpService(CodexMcpAdapter(preview_runner)).preview(_binary())
+
+    # And exactly what apply does today: the configured route, strict with no provider bound.
+    wizard_env["outputs"] = [CommandOutput(1, b"")]
+    report = await setup_module.apply_codex_integration(
+        _binary(),
+        workspace=workspace,
+        approved_preview_digest=mcp_preview.preview_digest,
+        approved_skill_preview_digest=skill_preview.preview_digest,
+    )
+
+    assert report["outcome"] == "failed"
+    assert report["reason"] == "preview_stale"
+    assert not (workspace / ".agents").exists()
+
+
+@pytest.mark.anyio
+async def test_a_preview_and_apply_on_the_same_route_register(
+    wizard_env: dict[str, object],
+) -> None:
+    """Control for the refusal above: the route is the cause, not the skill or plugin previews.
+
+    Identical to that case in every input except the previewing adapter's route, which here
+    matches what apply resolves. Without this, a refusal for some unrelated reason would read
+    as proof of a route problem.
+    """
+
+    import yoetz.cli.setup as setup_module
+
+    workspace = cast(Path, wizard_env["marker"]).parent
+    skill_preview = await setup_module.project_skill_preview(workspace)
+
+    preview_runner = _ScriptedRunner([CommandOutput(1, b"")])
+    mcp_preview = await HarnessMcpService(
+        CodexMcpAdapter(preview_runner, route_profile="strict")
+    ).preview(_binary())
+
+    wizard_env["outputs"] = [
+        CommandOutput(1, b""),  # step preview get: absent
+        CommandOutput(1, b""),  # adapter install re-preview get: absent
+        CommandOutput(0, b""),  # add
+        _yoetz_entry("strict"),  # verify get
+    ]
+    report = await setup_module.apply_codex_integration(
+        _binary(),
+        workspace=workspace,
+        approved_preview_digest=mcp_preview.preview_digest,
+        approved_skill_preview_digest=skill_preview.preview_digest,
+    )
+
+    assert report["reason"] is None
+    assert report["outcome"] == "registered"
+
+
 def test_multiple_candidates_fail_closed_non_interactively(
     wizard_env: dict[str, object],
 ) -> None:

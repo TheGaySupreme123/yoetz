@@ -153,11 +153,9 @@ async def _mcp_route_observation() -> dict[str, JsonValue]:
     from yoetz.cli import setup as cli_setup
 
     try:
-        # Sibling-module private on purpose: the registration-time authority stays owned by
-        # `setup`, so this reads it rather than growing a second answer to the same question.
-        configured: JsonValue = (
-            cli_setup._configured_mcp_route_profile()  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
-        )
+        # The registration-time authority stays owned by `setup`, so this reads it rather than
+        # growing a second answer to the same question.
+        configured: JsonValue = cli_setup.configured_mcp_route_profile()
     except Exception:
         configured = None
     unread: dict[str, JsonValue] = {

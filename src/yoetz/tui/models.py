@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Final
+from typing import Final, Literal
 
 from yoetz.tui.symbols import Level
 
@@ -121,6 +121,9 @@ class IntegrationPlan:
     executable_path: str
     reported_version: str | None
     project_root: str
+    # The route this plan was previewed on. It is inside ``preview_digest``, so applying on any
+    # other route is refused as stale; carrying it here is what keeps preview and apply agreeing.
+    route_profile: Literal["policy", "strict"]
     mcp_command: str
     mcp_server_name: str
     policy_digest: str | None

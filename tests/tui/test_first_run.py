@@ -42,6 +42,21 @@ def transcript(app: YoetzTui) -> str:
     return "\n".join("\n".join((event.title, *event.body)) for event in app.transcript.events)
 
 
+async def answer_review(pilot: object, mode: str = "local") -> None:
+    """Answer the review-mode question, which now precedes any registration.
+
+    Kept in one place because it encodes the option order: moving the recommendation changes
+    which keystroke means which posture, and every caller should follow automatically.
+    """
+
+    press = getattr(pilot, "press")
+    if mode == "local":
+        await press("enter")
+    else:
+        await press("down", "enter")
+    await getattr(pilot, "pause")()
+
+
 async def test_welcome_shows_detection_and_offers_the_recommended_path(
     make_app: MakeApp,
 ) -> None:
@@ -112,6 +127,7 @@ async def test_multiple_installations_ask_which_one_before_previewing(
         await pilot.pause()
         await pilot.press("enter")  # trust
         await pilot.pause()
+        await answer_review(pilot)
         view = app.open_view
         assert view is not None
         assert view.view_name == "integration"
@@ -178,6 +194,7 @@ async def test_the_integration_preview_is_shown_before_anything_is_applied(
         await pilot.pause()
         await pilot.press("enter")  # trust
         await pilot.pause()
+        await answer_review(pilot)
         view = app.open_view
         assert view is not None
         assert view.view_name == "integration"
@@ -195,6 +212,7 @@ async def test_approving_the_preview_applies_exactly_the_digests_that_were_shown
         await pilot.pause()
         await pilot.press("enter")  # trust
         await pilot.pause()
+        await answer_review(pilot)
         await pilot.press("enter")  # approve the preview
         await pilot.pause()
         assert runtime.applied == [("sha256:abc123", "7f8a92bd")]
@@ -211,6 +229,7 @@ async def test_declining_the_preview_leaves_the_project_unchanged(
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
+        await answer_review(pilot)
         await pilot.press("down", "enter")  # "No, keep this project unchanged"
         await pilot.pause()
         assert runtime.applied == []
@@ -232,6 +251,7 @@ async def test_a_foreign_mcp_entry_blocks_and_never_offers_to_replace_it(
         await pilot.pause()
         await pilot.press("enter")  # trust
         await pilot.pause()
+        await answer_review(pilot)
         assert runtime.applied == []
         assert "Could not register Yoetz with Codex" in transcript(app)
         view = app.open_view
@@ -260,6 +280,7 @@ async def test_a_failed_registration_is_reported_as_a_failure(make_app: MakeApp)
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
+        await answer_review(pilot)
         await pilot.press("enter")
         await pilot.pause()
         text = transcript(app)
@@ -278,6 +299,7 @@ async def test_a_preview_failure_reports_the_reason_and_stops(make_app: MakeApp)
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
+        await answer_review(pilot)
         assert runtime.applied == []
         assert "codex_unavailable" in transcript(app)
 
@@ -293,6 +315,7 @@ async def test_keychain_unavailable_disables_system_storage_but_offers_a_passphr
         await pilot.pause()
         await pilot.press("enter")  # trust
         await pilot.pause()
+        await answer_review(pilot)
         await pilot.press("enter")  # approve
         await pilot.pause()
         view = app.open_view
@@ -317,6 +340,7 @@ async def test_system_storage_selection_initializes_keyring_not_passphrase(
         await pilot.pause()
         await pilot.press("enter")  # trust
         await pilot.pause()
+        await answer_review(pilot)
         await pilot.press("enter")  # approve
         await pilot.pause()
         await pilot.press("enter")  # system secure storage
@@ -338,16 +362,126 @@ async def test_setup_finishes_with_an_honest_summary_and_records_the_marker(
         await pilot.pause()
         await pilot.press("enter")  # trust
         await pilot.pause()
+        await answer_review(pilot)
         await pilot.press("enter")  # approve
         await pilot.pause()
         await pilot.press("escape")  # skip storage
-        await pilot.pause()
-        await pilot.press("enter")  # local-only review
         await pilot.pause()
         text = transcript(app)
         assert "Yoetz is ready" in text
         assert "Nothing is being sent to an external review model." in text
         assert app.markers_written == ["registered"]  # type: ignore[attr-defined]
+
+
+async def test_the_review_answer_decides_the_route_and_both_halves_use_it(
+    make_app: MakeApp,
+) -> None:
+    """Preview and apply must ask for the same route, and it must be the one chosen.
+
+    The serve command is inside the preview digest, so a preview on one route and an apply on
+    another is refused as stale -- first run's very first action failing. Asserting the two
+    halves agree is what keeps the question and the registration connected.
+    """
+
+    for mode, expected in (("semantic", "policy"), ("local", "strict")):
+        runtime = FakeRuntime()
+        app = make_app(first_run=True, runtime=runtime)
+        async with app.run_test(size=WIDE) as pilot:
+            await pilot.pause()
+            await pilot.press("enter")  # connect
+            await pilot.pause()
+            await pilot.press("enter")  # trust
+            await pilot.pause()
+            await answer_review(pilot, mode)
+            view = app.open_view
+            assert view is not None
+            assert view.view_name == "integration"
+            # The approval screen names the argv that will actually be registered.
+            assert runtime.planned_routes == [expected]
+            await pilot.press("enter")  # approve
+            await pilot.pause()
+            assert runtime.applied_routes == [expected]
+
+
+async def test_abandoning_semantic_setup_offers_a_coherent_local_only_finish(
+    make_app: MakeApp,
+) -> None:
+    """Backing out of the provider step must not leave a half-configured install.
+
+    Semantic was chosen, so the policy route is already registered. Without this the flow
+    returns with that route in place, no provider behind it, and no marker written -- an
+    install that is neither local-only nor semantic, and says so nowhere.
+    """
+
+    runtime = FakeRuntime()
+    app = make_app(first_run=True, runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")  # connect
+        await pilot.pause()
+        await pilot.press("enter")  # trust
+        await pilot.pause()
+        await answer_review(pilot, "semantic")
+        await pilot.press("enter")  # approve the policy-route registration
+        await pilot.pause()
+        await pilot.press("escape")  # skip storage
+        await pilot.pause()
+        await pilot.press("escape")  # abandon the provider choice
+        await pilot.pause()
+        view = app.open_view
+        assert view is not None
+        assert view.view_name == "semantic-incomplete"
+        await pilot.press("enter")  # "Yes, finish as local only"
+        await pilot.pause()
+        await pilot.press("enter")  # approve the strict re-registration
+        await pilot.pause()
+        # The install ends on the route it actually has, and setup is marked complete.
+        assert runtime.applied_routes == ["policy", "strict"]
+        assert app.markers_written == ["registered"]  # type: ignore[attr-defined]
+
+
+async def test_declining_the_local_only_finish_says_setup_is_unfinished(
+    make_app: MakeApp,
+) -> None:
+    runtime = FakeRuntime()
+    app = make_app(first_run=True, runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")  # connect
+        await pilot.pause()
+        await pilot.press("enter")  # trust
+        await pilot.pause()
+        await answer_review(pilot, "semantic")
+        await pilot.press("enter")  # approve
+        await pilot.pause()
+        await pilot.press("escape")  # skip storage
+        await pilot.pause()
+        await pilot.press("escape")  # abandon the provider choice
+        await pilot.pause()
+        await pilot.press("down", "enter")  # "No, leave setup unfinished"
+        await pilot.pause()
+        assert app.markers_written == []  # type: ignore[attr-defined]
+        assert "Setup was not completed." in transcript(app)
+
+
+async def test_the_approval_screen_shows_the_local_only_serve_command(
+    make_app: MakeApp,
+) -> None:
+    """Choosing local only must not show the command that permits semantic review."""
+
+    runtime = FakeRuntime()
+    app = make_app(first_run=True, runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")  # connect
+        await pilot.pause()
+        await pilot.press("enter")  # trust
+        await pilot.pause()
+        await answer_review(pilot, "local")
+        view = app.open_view
+        assert view is not None
+        details = "\n".join(view.technical_details)
+        assert "yoetz mcp serve --semantic off" in details
 
 
 async def test_choosing_local_only_setup_never_touches_the_project(
@@ -359,9 +493,8 @@ async def test_choosing_local_only_setup_never_touches_the_project(
         await pilot.pause()
         await pilot.press("down", "enter")  # "Set up Yoetz without Codex"
         await pilot.pause()
+        await answer_review(pilot)
         await pilot.press("escape")  # skip storage
-        await pilot.pause()
-        await pilot.press("enter")  # local-only review
         await pilot.pause()
         assert runtime.applied == []
         assert app.markers_written == ["local_only"]  # type: ignore[attr-defined]
