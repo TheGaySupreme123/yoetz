@@ -243,6 +243,10 @@ async def test_unlock_vault_prefers_scoped_platform_entry_without_prompt(
         seen.append(None if passphrase is None else bytearray(passphrase))
         return SimpleNamespace(state="ready")
 
+    async def not_stale() -> bool:
+        return False
+
+    monkeypatch.setattr(unlock_module, "_service_reports_unusable_auto_unlock", not_stale)
     monkeypatch.setattr(
         unlock_module,
         "_load_scoped_auto_unlock_passphrase",
@@ -271,11 +275,84 @@ async def test_unlock_vault_falls_back_to_interactive_when_store_absent(
         seen.append(passphrase is None)
         return SimpleNamespace(state="ready")
 
+    async def not_stale() -> bool:
+        return False
+
+    monkeypatch.setattr(unlock_module, "_service_reports_unusable_auto_unlock", not_stale)
     monkeypatch.setattr(unlock_module, "_load_scoped_auto_unlock_passphrase", lambda: None)
     monkeypatch.setattr(unlock_module, "run_human_ceremony", ceremony)
 
     result = await unlock_module.unlock_vault()
     assert result.state == "ready"
+    assert seen == [True]
+
+
+@pytest.mark.anyio
+async def test_unlock_vault_falls_back_when_silent_ceremony_stays_locked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = bytearray(b"correct horse battery staple!!")
+    seen: list[bool] = []
+    calls = 0
+
+    async def ceremony(
+        kind: object,
+        target: object,
+        passphrase: bytearray | None = None,
+        **_kwargs: object,
+    ) -> Any:
+        del kind, target
+        nonlocal calls
+        calls += 1
+        seen.append(passphrase is None)
+        if calls == 1:
+            return SimpleNamespace(state="locked")
+        return SimpleNamespace(state="ready")
+
+    async def not_stale() -> bool:
+        return False
+
+    monkeypatch.setattr(unlock_module, "_service_reports_unusable_auto_unlock", not_stale)
+    monkeypatch.setattr(unlock_module, "_load_scoped_auto_unlock_passphrase", lambda: secret)
+    monkeypatch.setattr(unlock_module, "run_human_ceremony", ceremony)
+
+    result = await unlock_module.unlock_vault()
+    assert result.state == "ready"
+    assert seen == [False, True]
+
+
+@pytest.mark.anyio
+async def test_unlock_vault_skips_stored_entry_when_service_reports_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[bool] = []
+    loads = 0
+
+    async def ceremony(
+        kind: object,
+        target: object,
+        passphrase: bytearray | None = None,
+        **_kwargs: object,
+    ) -> Any:
+        del kind, target
+        seen.append(passphrase is None)
+        return SimpleNamespace(state="ready")
+
+    async def stale() -> bool:
+        return True
+
+    def load() -> bytearray | None:
+        nonlocal loads
+        loads += 1
+        return bytearray(b"correct horse battery staple!!")
+
+    monkeypatch.setattr(unlock_module, "_service_reports_unusable_auto_unlock", stale)
+    monkeypatch.setattr(unlock_module, "_load_scoped_auto_unlock_passphrase", load)
+    monkeypatch.setattr(unlock_module, "run_human_ceremony", ceremony)
+
+    result = await unlock_module.unlock_vault()
+    assert result.state == "ready"
+    assert loads == 0
     assert seen == [True]
 
 

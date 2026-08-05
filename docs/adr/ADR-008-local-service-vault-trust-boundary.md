@@ -352,7 +352,7 @@ and their crash/secret-boundary tests move into v0.1. Native launchd/systemd-use
 generic passphrase transport remain separate future decisions; neither may be approximated by
 client-side direct access or a secret in argv/env/config/stdin. The reviewed bundle-scoped platform
 auto-unlock exception above is the only passphrase path that may open the vault without a human
-ceremony (restart and soft-lock re-ready).
+ceremony (restart, soft-lock re-ready, and the trusted helper's silent `service unlock`).
 The v0.1 helper also owns the explicit first-install passphrase initialization ceremony: two local
 no-echo entries, one transmitted `vault_initialize` secret, atomic vault commit, and fail-closed
 crash recovery.

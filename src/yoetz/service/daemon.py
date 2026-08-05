@@ -777,14 +777,7 @@ class ServiceDaemon:
             await self._close_ready_locked()
             self._state_reason = (
                 reason
-                if reason
-                in {
-                    "explicit_lock",
-                    "idle_relock",
-                    "user_session_locked",
-                    "system_suspend",
-                    "monitor_lost",
-                }
+                if reason in _SOFT_LOCK_AUTO_READY_REASONS or reason == "explicit_lock"
                 else "explicit_lock"
             )
 
@@ -1314,8 +1307,9 @@ class ServiceDaemon:
                     reason="unlock_failed",
                 )
                 try:
-                    if vault.ready:
-                        await vault.lock()
+                    # Always best-effort lock: unlock may have left transient store state
+                    # even when ready is still false.
+                    await vault.lock()
                 except Exception:
                     pass
                 await self._return_to_locked_after_soft_unlock()
@@ -1347,17 +1341,15 @@ class ServiceDaemon:
             self._state_reason = "auto_unlock_backend_unavailable"
             self._auto_unlock_reason = "auto_unlock_backend_unavailable"
             return False
-        auto_passphrase, load_reason = AutoUnlockPassphraseStore(bundle).load_with_reason()
+
+        def _load_scoped_entry() -> tuple[bytearray | None, str]:
+            return AutoUnlockPassphraseStore(bundle).load_with_reason()
+
+        auto_passphrase, load_reason = await asyncio.to_thread(_load_scoped_entry)
         if auto_passphrase is None:
             reason = (
-                "passphrase_required"
-                if load_reason == "auto_unlock_absent"
-                else load_reason
-                if load_reason
-                in {
-                    "auto_unlock_backend_unavailable",
-                    "auto_unlock_rejected",
-                }
+                load_reason
+                if load_reason in {"auto_unlock_backend_unavailable", "auto_unlock_rejected"}
                 else "passphrase_required"
             )
             self._state_reason = reason

@@ -992,7 +992,8 @@ class _PassphraseVault:
         self._secret = value
 
     async def unlock(self, handle: object) -> None:
-        del handle
+        if self._secret is not None and handle != self._secret:
+            raise AssertionError("unexpected unlock secret")
         self.unlock_count += 1
         self.ready = True
         self.generation += 1
@@ -1015,26 +1016,29 @@ class _SecretMemory:
         return None
 
 
-@pytest.mark.anyio
-async def test_soft_lock_auto_ready_reopens_on_next_ordinary_dispatch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def _patch_auto_unlock_store(
+    monkeypatch: pytest.MonkeyPatch,
+    secret: bytes | None,
+    reason: str = "none",
 ) -> None:
-    application = _Application()
-    vault = _PassphraseVault()
-    secret = b"correct horse battery staple!!"
-    vault.expect_secret(secret)
-
-    async def factory(service_generation: int, vault_generation: int) -> _Application:
-        assert service_generation == 7
-        assert vault_generation == vault.generation
-        return application
-
     class _Store:
         def load_with_reason(self) -> tuple[bytearray | None, str]:
-            return bytearray(secret), "none"
+            if secret is None:
+                return None, reason
+            return bytearray(secret), reason
 
-    monkeypatch.setattr(daemon_module, "AutoUnlockPassphraseStore", lambda _bundle: _Store())
+    def _factory(_bundle: Path) -> _Store:
+        return _Store()
 
+    monkeypatch.setattr(daemon_module, "AutoUnlockPassphraseStore", _factory)
+
+
+def _soft_lock_daemon(
+    tmp_path: Path,
+    *,
+    factory: object,
+    vault: _PassphraseVault,
+) -> ServiceDaemon:
     lifecycle = ServiceLifecycle(
         _Clock(),
         generation_store=_GenerationStore(),
@@ -1054,7 +1058,25 @@ async def test_soft_lock_auto_ready_reopens_on_next_ordinary_dispatch(
         secret_memory=_SecretMemory(),  # pyright: ignore[reportArgumentType]
         auto_unlock_bundle=tmp_path,
     )
-    daemon = ServiceDaemon(_composition=composition)
+    return ServiceDaemon(_composition=composition)
+
+
+@pytest.mark.anyio
+async def test_soft_lock_auto_ready_reopens_on_next_ordinary_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application = _Application()
+    vault = _PassphraseVault()
+    secret = b"correct horse battery staple!!"
+    vault.expect_secret(secret)
+
+    async def factory(service_generation: int, vault_generation: int) -> _Application:
+        assert service_generation == 7
+        assert vault_generation == 4
+        return application
+
+    _patch_auto_unlock_store(monkeypatch, secret)
+    daemon = _soft_lock_daemon(tmp_path, factory=factory, vault=vault)
     await daemon.start()
     assert daemon.status().state is ServiceState.LOCKED
     daemon._state_reason = "idle_relock"  # pyright: ignore[reportPrivateUsage]
@@ -1083,32 +1105,8 @@ async def test_explicit_lock_does_not_auto_ready(
         del service_generation, vault_generation
         return application
 
-    class _Store:
-        def load_with_reason(self) -> tuple[bytearray | None, str]:
-            return bytearray(b"correct horse battery staple!!"), "none"
-
-    monkeypatch.setattr(daemon_module, "AutoUnlockPassphraseStore", lambda _bundle: _Store())
-
-    lifecycle = ServiceLifecycle(
-        _Clock(),
-        generation_store=_GenerationStore(),
-        process_start_identity_commitment="sha256:" + "5" * 64,
-        instance_id=_INSTANCE_ID,
-        singleton_lock_path=tmp_path / "service.lock",
-    )
-    composition = ServiceComposition(
-        lifecycle=lifecycle,
-        control_listener=_Listener(),  # pyright: ignore[reportArgumentType]
-        secret_ingress_listener=None,
-        human_control_listener=None,
-        human_control_service=None,
-        session_monitor=None,
-        vault=vault,  # pyright: ignore[reportArgumentType]
-        ready_application_factory=factory,  # pyright: ignore[reportArgumentType]
-        secret_memory=_SecretMemory(),  # pyright: ignore[reportArgumentType]
-        auto_unlock_bundle=tmp_path,
-    )
-    daemon = ServiceDaemon(_composition=composition)
+    _patch_auto_unlock_store(monkeypatch, b"correct horse battery staple!!")
+    daemon = _soft_lock_daemon(tmp_path, factory=factory, vault=vault)
     await daemon.start()
     daemon._state_reason = "explicit_lock"  # pyright: ignore[reportPrivateUsage]
 
@@ -1122,6 +1120,41 @@ async def test_explicit_lock_does_not_auto_ready(
     assert rejected.body.reason == "vault_locked"
     assert vault.unlock_count == 0
     assert daemon.status().state is ServiceState.LOCKED
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_soft_lock_absent_auto_unlock_stays_hard_locked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application = _Application()
+    vault = _PassphraseVault()
+
+    async def factory(service_generation: int, vault_generation: int) -> _Application:
+        del service_generation, vault_generation
+        return application
+
+    _patch_auto_unlock_store(monkeypatch, None, "auto_unlock_absent")
+    daemon = _soft_lock_daemon(tmp_path, factory=factory, vault=vault)
+    await daemon.start()
+    daemon._state_reason = "idle_relock"  # pyright: ignore[reportPrivateUsage]
+
+    rejected = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.START, _start_body()),
+    )
+    assert rejected.outcome == "error"
+    assert isinstance(rejected.body, ControlError)
+    assert rejected.body.reason == "vault_locked"
+    assert vault.unlock_count == 0
+    assert daemon.status().state_reason == "passphrase_required"
+
+    again = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.START, _start_body()),
+    )
+    assert again.outcome == "error"
+    assert vault.unlock_count == 0
     await daemon.close()
 
 
