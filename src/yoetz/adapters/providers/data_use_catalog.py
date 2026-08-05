@@ -83,9 +83,7 @@ _ANTHROPIC_SOURCES: Final = (
     "https://privacy.claude.com/en/articles/7996868-is-my-data-used-for-model-training",
     "https://privacy.claude.com/en/articles/7996866-how-long-do-you-store-my-organization-s-data",
 )
-_FIREWORKS_SOURCES: Final = (
-    "https://docs.fireworks.ai/guides/security_compliance/data_handling",
-)
+_FIREWORKS_SOURCES: Final = ("https://docs.fireworks.ai/guides/security_compliance/data_handling",)
 _XAI_SOURCES: Final = ("https://docs.x.ai/developers/faq/security",)
 _GEMINI_SOURCES: Final = (
     "https://ai.google.dev/gemini-api/terms",
@@ -336,4 +334,6 @@ def endpoint_profile_data_use_recommendation_eligible(
     """Whether current, route-specific evidence supports Assisted as the recommendation."""
 
     current = now.replace(microsecond=(now.microsecond // 1000) * 1000)
-    return data_use_record_for_endpoint(endpoint_profile_id).profile.recommendation_eligible(current)
+    return data_use_record_for_endpoint(endpoint_profile_id).profile.recommendation_eligible(
+        current
+    )

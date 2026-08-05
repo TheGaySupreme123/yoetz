@@ -1803,7 +1803,9 @@ class _LockedHumanEffects:
             proposal = await app.audit.load_disclosure_proposal(target.pending_id)
             now = app.clock.now_utc()
             if proposal is None or proposal.expires_at <= now:
-                return PrivacyDecisionResult("stale", canonical_digest({"pending_id": target.pending_id}))
+                return PrivacyDecisionResult(
+                    "stale", canonical_digest({"pending_id": target.pending_id})
+                )
             effective = await app.policy_store.effective_policy(proposal.scope)
             if (
                 effective.policy.version != proposal.policy_version

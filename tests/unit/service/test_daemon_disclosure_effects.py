@@ -56,9 +56,7 @@ class _Audit:
     async def load_disclosure_proposal(self, proposal_id: str) -> DisclosureProposal | None:
         return self.proposal if proposal_id == self.proposal.privacy_proposal_id else None
 
-    async def record_human_decision(
-        self, proposal_id: str, decision: HumanPrivacyDecision
-    ) -> None:
+    async def record_human_decision(self, proposal_id: str, decision: HumanPrivacyDecision) -> None:
         assert proposal_id == self.proposal.privacy_proposal_id
         self.decisions.append(decision)
 
@@ -119,7 +117,9 @@ def _effects() -> tuple[_LockedHumanEffects, _Audit]:
     )
     relay = _PrivacyPolicyAppRelay()
     relay.bind(lambda: app)
-    return _LockedHumanEffects(cast(object, SimpleNamespace()), cast(object, _Vault()), relay), audit
+    return _LockedHumanEffects(
+        cast(object, SimpleNamespace()), cast(object, _Vault()), relay
+    ), audit
 
 
 @pytest.mark.anyio

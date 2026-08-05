@@ -45,9 +45,7 @@ def test_fireworks_store_false_and_xai_direct_routes_are_recommendation_eligible
 
     xai = data_use_record_for_endpoint("xai-openai-chat-completions")
     assert xai.profile.retention_days_ceiling == 30
-    assert endpoint_profile_data_use_recommendation_eligible(
-        "xai-openai-chat-completions", now=now
-    )
+    assert endpoint_profile_data_use_recommendation_eligible("xai-openai-chat-completions", now=now)
 
 
 def test_all_exposed_ambiguous_routes_have_explicit_conservative_records() -> None:

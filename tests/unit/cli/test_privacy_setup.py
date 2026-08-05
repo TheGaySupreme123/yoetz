@@ -233,10 +233,7 @@ def test_recommendation_is_private_for_router_without_constrained_downstream() -
         "external",
     )
 
-    assert (
-        recommended_privacy_recipe(binding, now=datetime(2026, 8, 5, tzinfo=UTC))
-        == "private"
-    )
+    assert recommended_privacy_recipe(binding, now=datetime(2026, 8, 5, tzinfo=UTC)) == "private"
 
 
 def test_router_route_cannot_receive_standing_assisted_authority() -> None:
