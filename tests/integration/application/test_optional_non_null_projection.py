@@ -53,6 +53,7 @@ from yoetz.domain.privacy import (
     ReceiptTransformations,
 )
 from yoetz.ports.control import ControlClientKind, ControlMethod
+from yoetz.ports.ledger import CheckCommitResult
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.models import (
     DataCategory,
@@ -554,6 +555,7 @@ async def test_respond_omits_unset_optional_response_fields() -> None:
         "max_findings": "3",
     }
     checked = await app.check(CheckRequest.model_validate(check_body))
+    assert type(checked) is CheckCommitResult, f"unexpected nonterminal check: {type(checked)}"
     assert checked.findings
     respond_body: dict[str, JsonValue] = {
         **request_base(protocol_id("req_", 2531)),

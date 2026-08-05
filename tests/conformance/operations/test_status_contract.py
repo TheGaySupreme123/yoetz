@@ -332,6 +332,7 @@ async def _bootstrap_finding(
         "max_findings": "3",
     }
     checked = await app.check(CheckRequest.model_validate(check_wire))
+    assert type(checked) is CheckCommitResult, f"unexpected nonterminal check: {type(checked)}"
     assert checked.findings, "the seeded scenario must always yield at least one finding"
     return started, checked, obligation_ids
 
@@ -1464,6 +1465,7 @@ async def test_finding_resolution_requires_recorded_applicability() -> None:
         "max_findings": "3",
     }
     rechecked = await app.check(CheckRequest.model_validate(recheck_wire))
+    assert type(rechecked) is CheckCommitResult, f"unexpected nonterminal check: {type(rechecked)}"
     assert rechecked.findings
     rechecked_issue = (
         rechecked.findings[0].kind,

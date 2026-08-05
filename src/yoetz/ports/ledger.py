@@ -20,6 +20,7 @@ from yoetz.domain.findings import (
 from yoetz.domain.values import (
     Actor,
     Frontier,
+    SemanticContinuation,
     format_rfc3339_millis,
     validate_commitment,
     validate_sha256_digest,
@@ -52,6 +53,7 @@ __all__ = [
     "AppendWarning",
     "AssignmentProjectionFilter",
     "AttemptOutcome",
+    "CheckAwaitingHuman",
     "CheckCommitResult",
     "CheckPhase",
     "CheckPolicyExecution",
@@ -83,6 +85,7 @@ __all__ = [
     "SelectedAttempt",
     "SemanticAttemptHandle",
     "SemanticAttemptRecord",
+    "SemanticContinuation",
     "SemanticDisclosureWait",
     "SemanticJobRecord",
     "StoredProjection",
@@ -532,6 +535,45 @@ class CheckCommitResult:
         ):
             raise _invalid()
         if type(self.coverage) is not Coverage or type(self.versions) is not CheckVersionSlice:
+            raise _invalid()
+
+
+@dataclass(frozen=True, slots=True)
+class CheckAwaitingHuman:
+    """One check suspended on a local disclosure decision. Nothing was committed.
+
+    This is deliberately not a ``CheckCommitResult``: there is no verdict, no findings, and no
+    coverage, because no provider was reached and the case was never sent. Returning a commit
+    result here is what made an approved decision useless — the operation was already closed.
+    """
+
+    task_id: str
+    session_id: str
+    writer_id: str
+    request_id: str
+    subject_frontier: Frontier
+    result_frontier: Frontier
+    continuation: SemanticContinuation
+    versions: CheckVersionSlice
+
+    def __post_init__(self) -> None:
+        _id(IdKind.TASK, self.task_id)
+        _id(IdKind.SESSION, self.session_id)
+        _id(IdKind.WRITER, self.writer_id)
+        _id(IdKind.REQUEST, self.request_id)
+        if (
+            type(self.subject_frontier) is not Frontier
+            or type(self.result_frontier) is not Frontier
+        ):
+            raise _invalid()
+        if self.result_frontier < self.subject_frontier:
+            raise _invalid()
+        if type(self.continuation) is not SemanticContinuation:
+            raise _invalid()
+        # The continuation must name the request the caller has to replay, not some other one.
+        if self.continuation.request_id != self.request_id:
+            raise _invalid()
+        if type(self.versions) is not CheckVersionSlice:
             raise _invalid()
 
 

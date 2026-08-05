@@ -46,6 +46,7 @@ from yoetz.kernel.deterministic_checks import (
 )
 from yoetz.kernel.policies.research_evidence import research_evidence_findings
 from yoetz.kernel.policies.work_integrity import work_integrity_findings
+from yoetz.kernel.projections import PROJECTION_VERSION
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
 from yoetz.observability.logging import (
     record_bounded_counts_without_raising,
@@ -55,9 +56,11 @@ from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
+    CheckAwaitingHuman,
     CheckCommitResult,
     CheckPhase,
     CheckPolicyExecution,
+    CheckVersionSlice,
     FrozenCase,
     OperationLease,
     OperationRecord,
@@ -90,6 +93,7 @@ from yoetz.protocol.models import (
     validate_semantic_outcome,
     validate_semantic_provenance_binding,
 )
+from yoetz.version import ENGINE_VERSION
 
 __all__ = [
     "SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM",
@@ -101,6 +105,7 @@ __all__ = [
     "SemanticJudgmentReview",
     "allocate_findings",
     "case_coverage",
+    "check_awaiting_human_json",
     "check_internal_json",
     "execute_check",
     "execute_check_commit",
@@ -221,11 +226,54 @@ def _projected_finding_json(finding: Finding) -> JsonValue:
     return {**dict(encoded.items()), "provenance": None}
 
 
+def check_awaiting_human_json(result: CheckAwaitingHuman) -> dict[str, JsonValue]:
+    """Serialize the nonterminal CHECK branch: a continuation, never a verdict.
+
+    No verdict, findings, coverage, or semantic provenance appear here. Emitting a
+    completion-grade shape for a check that has not run would let a caller conclude from it.
+    """
+
+    return {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": result.request_id,
+        "ok": True,
+        "state": "awaiting_human",
+        "task_id": result.task_id,
+        "session_id": result.session_id,
+        "writer_id": result.writer_id,
+        "subject_frontier": dict(result.subject_frontier.as_wire().items()),
+        "result_frontier": dict(result.result_frontier.as_wire().items()),
+        "semantic_status": SemanticStatus.AWAITING_HUMAN.value,
+        "semantic_reason": SemanticReason.HUMAN_APPROVAL_REQUIRED.value,
+        "continuation": {
+            "kind": result.continuation.kind,
+            "pending_id": result.continuation.pending_id,
+            "expires_at": result.continuation.expires_at.wire,
+            "command": result.continuation.command,
+            "replay_request_id": result.continuation.request_id,
+            "instruction": (
+                "A local disclosure decision is required before this check can dispatch. Run the "
+                "command above, then replay this exact check request with the same request_id. Do "
+                "not create a new check request and do not request a receipt until this request "
+                "reaches a terminal result."
+            ),
+        },
+        "versions": {
+            "protocol_version": result.versions.protocol_version,
+            "engine_version": result.versions.engine_version,
+            "projection_version": result.versions.projection_version,
+            "policy_packs": result.versions.policy_packs,
+        },
+    }
+
+
 def check_internal_json(result: CheckCommitResult) -> dict[str, JsonValue]:
     """Serialize sink-independent CHECK success without a privacy projection."""
 
     return {
         "protocol_version": "0.1",
+        "state": "complete",
         "schema_version": "1.0.0",
         "request_id": result.request_id,
         "ok": True,
@@ -1114,8 +1162,12 @@ async def execute_check_commit(
     request: CheckRequest,
     *,
     route_profile: Literal["policy", "strict"] = "policy",
-) -> CheckCommitResult:
-    """Freeze, evaluate, rank, and atomically commit one check operation."""
+) -> CheckCommitResult | CheckAwaitingHuman:
+    """Freeze, evaluate, rank, and atomically commit one check operation.
+
+    Returns ``CheckAwaitingHuman`` instead when the semantic phase is suspended on a local
+    disclosure decision: nothing is committed and the operation stays resumable.
+    """
 
     if route_profile not in {"policy", "strict"}:
         raise TypeError("check_route_profile_invalid")
@@ -1209,6 +1261,42 @@ async def execute_check_commit(
         # Durable semantic attempts may renew the check lease (TTL 60s vs timeout up to 300s).
         if semantic_result.operation_lease is not None:
             frozen = FrozenCase(frozen.case, semantic_result.operation_lease)
+        # A check waiting on a local disclosure decision returns here, before ranking, phase
+        # advance, or commit. Everything below produces a terminal result, and a terminal result
+        # is exactly what makes the human's later approval useless: the operation is closed, the
+        # attempt is spent, and there is nothing left to resume. The operation stays in
+        # SEMANTIC_WAIT so replaying this same request_id resumes the same attempt.
+        if (
+            semantic_result.status is SemanticStatus.AWAITING_HUMAN
+            and semantic_result.continuation is None
+        ):
+            # A suspension the caller cannot act on is not a suspension. The attempt runner
+            # already terminalizes this case, so reaching here is a coordinator bug: degrade to
+            # the ordinary terminal path rather than stranding the check on an unusable branch.
+            record_bounded_counts_without_raising(
+                component="check",
+                operation="semantic_awaiting_human_without_continuation",
+                outcome="internal_error",
+                counts={"suspensions_without_continuation": 1},
+                request_id=request.request_id,
+            )
+            semantic_result = replace(
+                semantic_result,
+                status=SemanticStatus.FAILED,
+                reason=SemanticReason.COORDINATOR_FAILURE,
+            )
+        if semantic_result.status is SemanticStatus.AWAITING_HUMAN:
+            assert semantic_result.continuation is not None
+            return CheckAwaitingHuman(
+                runtime.task_id,
+                request.session_id,
+                request.writer_id,
+                request.request_id,
+                frozen.case.frontier,
+                frozen.case.frontier,
+                semantic_result.continuation,
+                CheckVersionSlice("0.1", ENGINE_VERSION, PROJECTION_VERSION, packs),
+            )
         review = _EMPTY_SEMANTIC_REVIEW
         if semantic_result.status is SemanticStatus.SUCCEEDED:
             assert semantic_result.judgment is not None
@@ -1330,7 +1418,7 @@ async def execute_check(
     request: CheckRequest,
     *,
     route_profile: Literal["policy", "strict"] = "policy",
-) -> CheckCommitResult:
+) -> CheckCommitResult | CheckAwaitingHuman:
     """Return the closed sink-independent result for the facade's sole projection step."""
 
     # Omitted mode resolves via policy so recorded check events always carry a concrete mode.

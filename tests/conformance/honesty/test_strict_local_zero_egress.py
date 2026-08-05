@@ -229,7 +229,11 @@ async def _run_deterministic_check(app: Application, seed: int) -> CheckCommitRe
         "mode": "deterministic_only",
         "max_findings": "3",
     }
-    return await app.check(CheckRequest.model_validate(check_wire))
+    checked = await app.check(CheckRequest.model_validate(check_wire))
+    # The strict route never reaches a provider, so it can never suspend on a disclosure
+    # decision; a nonterminal result here would mean the ceiling leaked.
+    assert type(checked) is CheckCommitResult, f"unexpected nonterminal check: {type(checked)}"
+    return checked
 
 
 async def _run_route_ceiling_check(
@@ -276,6 +280,7 @@ async def _run_route_ceiling_check(
         ),
         route_profile="strict",
     )
+    assert type(checked) is CheckCommitResult, f"unexpected nonterminal check: {type(checked)}"
     receipt = await app.receipt(
         ReceiptRequest.model_validate(
             {

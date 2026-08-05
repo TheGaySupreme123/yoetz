@@ -46,7 +46,7 @@ from yoetz.domain.values import Frontier, session_id
 from yoetz.ports.control import ControlClientKind, ControlMethod
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
-from yoetz.ports.ledger import CheckPhase, OperationLease
+from yoetz.ports.ledger import CheckCommitResult, CheckPhase, OperationLease
 from yoetz.ports.objects import ObjectKind, ObjectRef
 from yoetz.ports.publish_response_catalog import PublishResponseCatalogPort
 from yoetz.ports.runtime import BundleRuntimePort, RouteCommand, TaskRuntime
@@ -343,6 +343,7 @@ async def test_full_workflow_uses_one_final_client_projection(
     monkeypatch.setattr(ledger, "advance_check_phase", advance)
 
     checked = await app.check(check_request)
+    assert type(checked) is CheckCommitResult, f"unexpected nonterminal check: {type(checked)}"
     assert checked.findings
     assert len(objects.refs_for_kind(ObjectKind.DETERMINISTIC_RESULT)) == 2
     finding = checked.findings[0]
@@ -368,6 +369,7 @@ async def test_full_workflow_uses_one_final_client_projection(
         "max_findings": "3",
     }
     rechecked = await app.check(CheckRequest.model_validate(second_check_wire))
+    assert type(rechecked) is CheckCommitResult, f"unexpected nonterminal check: {type(rechecked)}"
 
     status = await app.status(
         StatusRequest.model_validate(

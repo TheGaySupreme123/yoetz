@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from enum import Enum
 
 from yoetz.protocol.models import (
+    CheckAwaitingHumanModel,
     CheckProjectedFindingModel,
     CheckSuccessModel,
     OmittedContentModel,
@@ -17,6 +18,7 @@ from yoetz.protocol.models import (
 )
 
 __all__ = [
+    "render_human_awaiting_human",
     "render_human_check",
     "render_human_error",
     "render_human_findings",
@@ -136,3 +138,27 @@ def render_human_error(error: PublicErrorModel) -> str:
         raise TypeError("public_error_invalid")
     suffix = " (retryable)" if error.retryable else ""
     return f"{_token(error.code)}: {error.message}{suffix}"
+
+
+def render_human_awaiting_human(result: CheckAwaitingHumanModel) -> str:
+    """Render the nonterminal check branch as an instruction, never as a conclusion.
+
+    No verdict or coverage appears here because none exists yet. Printing this like an ordinary
+    check result is how a suspended check gets mistaken for a completed one.
+    """
+
+    if type(result) is not CheckAwaitingHumanModel:
+        raise TypeError("check_result_invalid")
+    continuation = result.continuation
+    return "\n".join(
+        (
+            "Semantic review: awaiting_human (human_approval_required)",
+            "",
+            "This check is paused for a local disclosure decision. No verdict yet.",
+            "",
+            f"  {' '.join(continuation.command)}",
+            "",
+            f"Expires at: {continuation.expires_at}",
+            f"Then replay the same check with request_id {continuation.replay_request_id}.",
+        )
+    )

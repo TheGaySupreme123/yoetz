@@ -303,7 +303,7 @@ _STATUS_PAGE_DEF_BY_VIEW_FOR_TEST: tuple[tuple[str, str], ...] = (
     ("versions", "versions_page"),
 )
 _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
-    ("check", None): 127,
+    ("check", None): 134,
     ("publish_work", None): 57,
     ("receipt", None): 155,
     ("respond", None): 53,
@@ -317,7 +317,7 @@ _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
     ("status", "findings"): 66,
     ("status", "history"): 11,
     ("status", "obligations"): 19,
-    ("status", "operation"): 17,
+    ("status", "operation"): 24,
     ("status", "versions"): 13,
 }
 
@@ -613,6 +613,7 @@ def _check_result_wire() -> dict[str, JsonValue]:
         "schema_version": "1.0.0",
         "request_id": _test_id("req_"),
         "ok": True,
+        "state": "complete",
         "task_id": _test_id("tsk_"),
         "session_id": _test_id("ses_"),
         "writer_id": _test_id("wri_"),
@@ -1951,7 +1952,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     rules = cast(tuple[Any, ...], getattr(models, "_RESULT_LEAF_RULES"))
 
     derived_patterns = _derived_result_success_patterns(catalog)
-    assert len(derived_patterns) == 746
+    assert len(derived_patterns) == 760
 
     derived_counts = {
         context: sum(1 for method, view, _ in derived_patterns if (method, view) == context)
@@ -1960,7 +1961,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert derived_counts == _EXPECTED_RESULT_PATTERN_COUNTS
 
     assert type(rules) is tuple
-    assert len(rules) == 762
+    assert len(rules) == 776
     assert rules == tuple(sorted(rules, key=_test_rule_sort_key))
 
     rule_keys = {
@@ -1969,7 +1970,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert len(rule_keys) == len(rules)
 
     registry_patterns = {(rule.method, rule.status_view, rule.segments) for rule in rules}
-    assert len(registry_patterns) == 746
+    assert len(registry_patterns) == 760
     assert registry_patterns == derived_patterns
 
     content_rules = _expected_nonpublish_content_rules(models)
@@ -2273,6 +2274,17 @@ def _derived_result_success_patterns(
                 _schema_mapping(dry_run),
             )
             derived.update((method, None, pattern) for pattern in dry_run_patterns)
+        # check admits a second success branch too: the nonterminal awaiting_human result. Its
+        # leaves must classify like any other, or a suspended check would project unclassified
+        # fields to a client sink.
+        awaiting_human = definitions.get("awaiting_human")
+        if awaiting_human is not None:
+            awaiting_patterns = _walk_schema_leaf_patterns(
+                catalog,
+                document,
+                _schema_mapping(awaiting_human),
+            )
+            derived.update((method, None, pattern) for pattern in awaiting_patterns)
 
     status_document = catalog.by_name_version[("status-result", "1.0.0")]
     status_success = _schema_success_definition(status_document)
@@ -2600,7 +2612,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 1_430
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 1_444
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:

@@ -267,6 +267,7 @@ async def _checked(
         "max_findings": str(max_findings),
     }
     checked = await app.check(CheckRequest.model_validate(check_wire))
+    assert type(checked) is CheckCommitResult, f"unexpected nonterminal check: {type(checked)}"
     assert checked.findings
     return app, check_wire, checked, policy
 
@@ -284,6 +285,7 @@ async def _semantic_projected(seed: int) -> Mapping[str, JsonValue]:
         "max_findings": "3",
     }
     checked = await app.check(CheckRequest.model_validate(check_wire))
+    assert type(checked) is CheckCommitResult, f"unexpected nonterminal check: {type(checked)}"
     return await _project(app, check_wire, checked, seed + 7)
 
 
@@ -376,6 +378,7 @@ async def test_semantic_required_non_dispatch_projects_the_exact_reason() -> Non
     }
 
     checked = await app.check(CheckRequest.model_validate(check_wire))
+    assert type(checked) is CheckCommitResult, f"unexpected nonterminal check: {type(checked)}"
     projected = await _project(app, check_wire, checked, seed + 7)
 
     assert projected["ok"] is True
