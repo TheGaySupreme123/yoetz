@@ -56,6 +56,18 @@ _MCP_SERVER_NAME: Final = "yoetz"
 _HARNESS: Final = "codex"
 
 
+def _agent_route_detail(provider: ProviderPosture) -> str:
+    """Explain the agent-route verdict without restating installation readiness."""
+
+    if provider.agent_route_semantic_ready is None:
+        return "the Codex registration could not be read"
+    if provider.agent_route_semantic_ready:
+        return ""
+    if provider.registered_route_profile == "strict":
+        return "registered on the strict route; 'yoetz integrate codex mcp preview' to change it"
+    return "external review is off for this installation"
+
+
 def _serve_command_display(route_profile: Literal["policy", "strict"]) -> str:
     """Render the exact argv this route registers, for the screen that asks for approval.
 
@@ -673,7 +685,13 @@ class YoetzRuntime:
                 row = _mapping(item)
                 if row:
                     blockers.append((str(row.get("condition")), str(row.get("state") or "unknown")))
+        route_map = _mapping(report.get("mcp_route"))
+        raw_agent_ready = report.get("agent_route_semantic_ready")
         return ProviderPosture(
+            agent_route_semantic_ready=(
+                raw_agent_ready if isinstance(raw_agent_ready, bool) else None
+            ),
+            registered_route_profile=cast(str | None, route_map.get("registered_profile")),
             endpoint_bound=report.get("endpoint_bound") is True,
             provider_id=cast(str | None, endpoint_map.get("provider_id")),
             model=cast(str | None, endpoint_map.get("model")),
@@ -1006,6 +1024,21 @@ class YoetzRuntime:
                 "Deeper review ready",
                 LayerState.VERIFIED if provider.semantic_ready else LayerState.NOT_CONFIGURED,
                 detail="" if provider.semantic_ready else "external review is off",
+            ),
+            # Deliberately its own layer rather than folded into the one above: the installation
+            # can be ready while the registered agent route cannot dispatch, and reporting one
+            # verdict for both would make a strict registration read as a broken installation.
+            ReadinessLayer(
+                "agent_route_review_ready",
+                "Codex agent route permits deeper review",
+                LayerState.UNKNOWN
+                if provider.agent_route_semantic_ready is None
+                else (
+                    LayerState.VERIFIED
+                    if provider.agent_route_semantic_ready
+                    else LayerState.NOT_CONFIGURED
+                ),
+                detail=_agent_route_detail(provider),
             ),
         )
 

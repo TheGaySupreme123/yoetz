@@ -306,6 +306,11 @@ carried them; they are listed because each one describes the behavior that now s
 - Abandoning the provider step during first-run semantic setup left the policy route registered
   with no provider behind it and no setup marker written. It now offers a local-only finish that
   re-registers the strict route through the same preview and approval.
+- Changing privacy posture after setup never looked at the Codex registration, so moving to
+  assisted review with an older strict registration in place produced a correct policy and a Codex
+  session where every check returned `blocked_by_policy` / `route_semantic_ceiling` with nothing
+  connecting the two. `yoetz privacy setup` now names the mismatch and the command that fixes it,
+  and the terminal interface reports the agent-route verdict as its own readiness line.
 
 ### Security
 

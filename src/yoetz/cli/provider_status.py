@@ -24,6 +24,7 @@ from yoetz.service.client import connect_service
 __all__ = [
     "credential_human_display",
     "machine_scope_request",
+    "mcp_route_observation",
     "provider_status_report",
     "run_provider_status",
 ]
@@ -132,7 +133,7 @@ def _mcp_local_composition(service_state: str | None, *, service_observed: bool)
     return "unknown"
 
 
-async def _mcp_route_observation() -> dict[str, JsonValue]:
+async def mcp_route_observation() -> dict[str, JsonValue]:
     """Report which Codex MCP route is registered, or say plainly that it was not read.
 
     A strict registration and a policy registration are both ``yoetz_owned``, so registration
@@ -257,7 +258,7 @@ async def provider_status_report() -> dict[str, JsonValue]:
         credential_connected = None
         llm_inference_enabled = None
 
-    mcp_route = await _mcp_route_observation()
+    mcp_route = await mcp_route_observation()
     registered_profile = mcp_route["registered_profile"]
 
     blockers: list[dict[str, JsonValue]] = []

@@ -189,6 +189,25 @@ Neither verdict substitutes for the other. Reading `semantic_ready: true` and ex
 review through a strict agent route is exactly the conflation this field exists to prevent; see the
 [semantic dogfood runbook](../runbooks/semantic-dogfood.md) for the preflight that consumes it.
 
+### Where the route verdict is reported
+
+Both verdicts appear wherever readiness is shown, never merged:
+
+- `yoetz provider status` (human and `--json`).
+- The terminal interface's readiness layers, as a separate `Codex agent route permits deeper
+  review` line beside `Deeper review ready`. An unread registration renders as unknown rather than
+  as a blocker.
+- `yoetz privacy setup` and the terminal interface's `/privacy`: when a committed policy permits
+  external review and the registered route is `strict`, the ceremony names the mismatch and the
+  command that fixes it. That note is advisory — it never fails the ceremony, changes an exit
+  code, or appears when the route cannot be read.
+
+The last one exists because policy and registration are separate facts changed by different
+commands. Moving from local-only to assisted review with an older strict registration in place
+produces a correct policy and a Codex session where every check returns `blocked_by_policy` /
+`route_semantic_ceiling` — accurate, and impossible to act on without being told which of the two
+is the cause.
+
 ## The credential ceremony
 
 ```text

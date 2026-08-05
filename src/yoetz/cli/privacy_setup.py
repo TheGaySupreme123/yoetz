@@ -735,6 +735,51 @@ def _render_data_use_warning(candidate: PrivacyPolicy, llm: ChannelPolicy) -> No
         )
 
 
+def _permits_external_review(policy: PrivacyPolicy) -> bool:
+    """True when this policy would let a check dispatch to an external provider."""
+
+    return policy.network_egress_permitted and any(
+        channel.channel is EgressChannel.LLM_INFERENCE
+        and channel.enabled
+        and channel.provider_binding is not None
+        for channel in policy.channel_policies
+    )
+
+
+async def _warn_if_agent_route_cannot_dispatch(policy: PrivacyPolicy) -> None:
+    """Say so when the committed policy allows external review the agent route cannot reach.
+
+    Policy and registration are separate facts, and only the wizard that changes the first ever
+    looks at the second. Someone who moves from local-only to assisted review here, with a
+    strict registration still in place from an earlier setup, gets a correct policy and a Codex
+    session where every check returns ``blocked_by_policy`` / ``route_semantic_ceiling`` --
+    honest, silent, and indistinguishable from having chosen local only.
+
+    Advisory only: never fails the ceremony, never changes an exit code, and says nothing at all
+    when the route cannot be read.
+    """
+
+    if not _permits_external_review(policy):
+        return
+    from yoetz.cli.provider_status import mcp_route_observation
+
+    try:
+        route = await mcp_route_observation()
+    except Exception:
+        return
+    if route.get("registered_profile") != "strict":
+        return
+    typer.echo("")
+    typer.echo(
+        "  Note: the registered Codex MCP route is 'strict', which ceilings semantic review "
+        "for that process regardless of this policy."
+    )
+    typer.echo(
+        "  Run 'yoetz integrate codex mcp preview' and accept the re-registration to let the "
+        "agent route dispatch the review this policy allows."
+    )
+
+
 def _render_review(candidate: PrivacyPolicy) -> None:
     llm = next(
         policy
@@ -952,12 +997,14 @@ async def run_privacy_setup(
         return PrivacySetupReport("unchanged", current.profile.value)
     proposal_id = await _propose(candidate, current.policy_digest)
     if proposal_id is None:
+        await _warn_if_agent_route_cannot_dispatch(candidate)
         return PrivacySetupReport("configured", candidate.profile.value)
     typer.echo("")
     typer.echo("Final widening decision (trusted local ceremony)")
     decision = await _decide(proposal_id)
     status = getattr(decision, "status", None)
     if status == "committed":
+        await _warn_if_agent_route_cannot_dispatch(candidate)
         return PrivacySetupReport("configured", candidate.profile.value, proposal_id)
     return PrivacySetupReport(
         "cancelled",

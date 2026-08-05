@@ -327,6 +327,11 @@ class ProviderPosture:
     readiness_determinable: bool
     transport_tested: bool = False
     blockers: tuple[tuple[str, str], ...] = ()
+    # The Codex agent route is a separate verdict from installation readiness: a strict
+    # registration ceilings semantic review for that process while CLI and TUI checks can still
+    # dispatch. ``None`` means the registration could not be read, never that it is absent.
+    agent_route_semantic_ready: bool | None = None
+    registered_route_profile: str | None = None
 
 
 class CheckMode(Enum):

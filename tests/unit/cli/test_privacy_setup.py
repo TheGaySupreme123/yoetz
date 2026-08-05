@@ -461,6 +461,131 @@ def _forbid_custom_sections(monkeypatch: pytest.MonkeyPatch, reason: str) -> Non
     monkeypatch.setattr(module, "_ask_custom_answers", forbidden)
 
 
+def _stub_route(monkeypatch: pytest.MonkeyPatch, observation: object) -> list[str]:
+    """Replace the Codex route probe and capture what the ceremony prints about it."""
+
+    import yoetz.cli.privacy_setup as module
+    import yoetz.cli.provider_status as provider_status
+
+    printed: list[str] = []
+
+    async def observe() -> object:
+        if isinstance(observation, Exception):
+            raise observation
+        return observation
+
+    def echo(message: str = "", *_args: object, **_kwargs: object) -> None:
+        printed.append(message)
+
+    monkeypatch.setattr(provider_status, "mcp_route_observation", observe)
+    monkeypatch.setattr(module.typer, "echo", echo)
+    return printed
+
+
+@pytest.mark.anyio
+async def test_a_widening_commit_names_a_strict_route_that_cannot_dispatch_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Committing external review with a strict registration must not pass silently.
+
+    Otherwise the policy is correct, every check in the next Codex session returns
+    ``blocked_by_policy`` / ``route_semantic_ceiling``, and nothing anywhere connects the two.
+    """
+
+    import yoetz.cli.privacy_setup as module
+
+    _install_setup_stubs(
+        monkeypatch,
+        current=local_only_policy(),
+        confirmations=iter((True,)),
+        prompts=[],
+        external=_answers().external_provider,
+    )
+    printed = _stub_route(monkeypatch, {"registered_profile": "strict", "observed": True})
+
+    report = await module.run_privacy_setup(offer_recommended=True)
+
+    assert report.outcome == "configured"
+    assert any("'strict'" in line for line in printed)
+    assert any("yoetz integrate codex mcp preview" in line for line in printed)
+
+
+@pytest.mark.anyio
+async def test_a_policy_route_draws_no_registration_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.cli.privacy_setup as module
+
+    _install_setup_stubs(
+        monkeypatch,
+        current=local_only_policy(),
+        confirmations=iter((True,)),
+        prompts=[],
+        external=_answers().external_provider,
+    )
+    printed = _stub_route(monkeypatch, {"registered_profile": "policy", "observed": True})
+
+    report = await module.run_privacy_setup(offer_recommended=True)
+
+    assert report.outcome == "configured"
+    assert not any("integrate codex mcp preview" in line for line in printed)
+
+
+@pytest.mark.anyio
+async def test_an_unreadable_route_says_nothing_and_changes_no_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The note is advisory: an unobservable route is unknown, never a warning or a failure."""
+
+    import yoetz.cli.privacy_setup as module
+
+    _install_setup_stubs(
+        monkeypatch,
+        current=local_only_policy(),
+        confirmations=iter((True,)),
+        prompts=[],
+        external=_answers().external_provider,
+    )
+    printed = _stub_route(monkeypatch, RuntimeError("codex unreadable"))
+
+    report = await module.run_privacy_setup(offer_recommended=True)
+
+    assert report.outcome == "configured"
+    assert not any("integrate codex mcp preview" in line for line in printed)
+
+
+@pytest.mark.anyio
+async def test_a_local_only_commit_never_mentions_the_agent_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A policy that permits no external review has nothing to say about the route."""
+
+    import yoetz.cli.privacy_setup as module
+
+    _install_setup_stubs(
+        monkeypatch,
+        current=local_only_policy(),
+        confirmations=iter((True,)),
+        prompts=[],
+        external=None,
+    )
+    probed: list[str] = []
+
+    async def observe() -> object:
+        probed.append("observed")
+        return {"registered_profile": "strict", "observed": True}
+
+    import yoetz.cli.provider_status as provider_status
+
+    monkeypatch.setattr(provider_status, "mcp_route_observation", observe)
+
+    report = await module.run_privacy_setup(offer_recommended=True)
+
+    # Guards against passing vacuously: an "unchanged" report would never reach the probe.
+    assert report.outcome == "configured"
+    assert probed == []
+
+
 @pytest.mark.anyio
 async def test_accepting_recommended_policy_asks_nothing_else(
     monkeypatch: pytest.MonkeyPatch,
