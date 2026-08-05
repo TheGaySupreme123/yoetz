@@ -431,6 +431,11 @@ class Timestamp:
     def wire(self) -> str:
         return self._wire
 
+    def as_datetime(self) -> datetime:
+        """Reparse the wire form. Validated in __post_init__, so this cannot fail here."""
+
+        return parse_rfc3339_millis(self._wire)
+
     def __lt__(self, other: object) -> bool | NotImplementedType:
         if type(other) is not Timestamp:
             return NotImplemented

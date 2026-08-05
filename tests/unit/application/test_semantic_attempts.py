@@ -252,8 +252,10 @@ class _FakeLedger:
     attempts: dict[str, SemanticAttemptRecord] | None = None
     renew_count: int = 0
     claim_calls: int = 0
+    disclosure_waits: list[tuple[str, str, datetime]] | None = None
 
     def __post_init__(self) -> None:
+        self.disclosure_waits = []
         self.outcomes = []
         self.dispatches = []
         self.attempt_ids = []
@@ -413,6 +415,16 @@ class _FakeLedger:
         assert job_id == _JOB
         assert self.attempts is not None
         return tuple(sorted(self.attempts.values(), key=lambda item: item.attempt_ordinal))
+
+    async def record_disclosure_wait(
+        self,
+        handle: SemanticAttemptHandle,
+        pending_id: str,
+        pending_expires_at: datetime,
+    ) -> object:
+        assert self.disclosure_waits is not None
+        self.disclosure_waits.append((handle.attempt_id, pending_id, pending_expires_at))
+        return None
 
 
 @pytest.mark.anyio
