@@ -145,7 +145,9 @@ and semantic/privacy capability and conformance tests.
     endpoint profile carries a versioned data-use record stating customer-content training use,
     retention posture, provider-human-access posture, review/expiry times, and an evidence digest.
     The upstream `assisted` badge requires a current record with training `prohibited`, retention
-    `none|bounded`, and provider human access `prohibited|restricted`.
+    `none|bounded` with any bounded ceiling at most 30 days. Provider human-access posture and
+    documented safety, support, legal, and abuse-monitoring exceptions remain mandatory disclosure
+    facts, but do not replace or silently raise that recommendation threshold.
     The recommended recipe also sets an editable
     `require_current_provider_data_use_evidence=true` runtime guard. Yoetz does not technically
     prove provider behavior. Unknown, known-broad, or stale status removes the recommendation badge

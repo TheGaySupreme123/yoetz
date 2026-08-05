@@ -131,17 +131,24 @@ def test_unknown_endpoint_profile_yields_no_builder() -> None:
     assert external_factory_builders_from_config(None, clock=_Clock()) == {}  # pyright: ignore[reportArgumentType]
 
 
-def test_chat_completions_bindings_carry_unknown_data_use_facts() -> None:
-    """No reviewed data-use record exists yet, so these bindings stay assisted-ineligible."""
+def test_chat_completions_bindings_use_exact_profile_data_use_facts() -> None:
+    """Only a route with its own catalog record can carry favorable data-use facts."""
+
+    anthropic = getattr(_built(anthropic_provider(model="claude-sonnet-4-6")), "profile")
+    assert anthropic.data_use_profile.customer_content_training == "prohibited"
+    assert anthropic.data_use_profile.retention_days_ceiling == 30
 
     for provider in (
-        anthropic_provider(model="claude-sonnet-4-6"),
         google_gemini_provider(model="gemini-3.5-flash"),
         openrouter_provider(model="openai/gpt-5.2"),
-        grok_provider(model="grok-4.5"),
     ):
         profile = getattr(_built(provider), "profile")
         data_use = profile.data_use_profile
         assert data_use.customer_content_training == "unknown"
         assert data_use.retention == "unknown"
         assert data_use.provider_human_access == "unknown"
+
+    xai = getattr(_built(grok_provider(model="grok-4.5")), "profile").data_use_profile
+    assert xai.customer_content_training == "prohibited"
+    assert xai.retention_days_ceiling == 30
+    assert xai.provider_human_access == "restricted"

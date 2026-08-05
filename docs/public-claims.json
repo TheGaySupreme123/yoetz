@@ -191,7 +191,7 @@
     },
     {
       "claim_id": "privacy.assisted_review_user_controlled",
-      "statement": "Every installation seeds zero-egress local_only with no human prompt required; only after a technical user deliberately selects and confirms the inspectable assisted_review recipe for an endpoint with a current data-use record stating training prohibited, retention none or bounded, and provider human access prohibited or restricted, do ordinary in-policy checks and retries run without a repeated human prompt, and the data-use record is recommendation evidence, never a technical proof of provider conduct.",
+      "statement": "Every installation seeds zero-egress local_only with no human prompt required; only after a technical user deliberately confirms the inspectable assisted_review recipe for an exact endpoint with a current data-use record stating training prohibited and retention none or bounded to at most 30 days do ordinary in-policy checks and retries run without a repeated human prompt. Provider human-access and exception facts remain visible, and the data-use record is recommendation evidence, never a technical proof of provider conduct.",
       "scope": {
         "profiles": [
           "local_only",

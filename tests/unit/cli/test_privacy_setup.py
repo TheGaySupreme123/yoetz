@@ -194,10 +194,98 @@ def test_listing_the_options_never_reads_configuration(
     )
 
 
-def test_recommendation_is_metadata_only_when_a_provider_is_configured() -> None:
+def test_recommendation_is_assisted_for_fireworks_store_false_route() -> None:
     from yoetz.cli.privacy_setup import recommended_privacy_recipe
 
-    assert recommended_privacy_recipe(_answers().external_provider) == "metadata_only"
+    assert (
+        recommended_privacy_recipe(
+            _answers().external_provider, now=datetime(2026, 8, 5, tzinfo=UTC)
+        )
+        == "assisted_review"
+    )
+
+
+def test_recommendation_is_assisted_for_an_eligible_exact_provider_route() -> None:
+    from yoetz.cli.privacy_setup import recommended_privacy_recipe
+
+    binding = ProviderBinding(
+        "openai",
+        "gpt-5",
+        OFFICIAL_OPENAI_ENDPOINT_PROFILE_ID,
+        "1.0.0",
+        "external",
+    )
+
+    assert (
+        recommended_privacy_recipe(binding, now=datetime(2026, 8, 5, tzinfo=UTC))
+        == "assisted_review"
+    )
+
+
+def test_recommendation_is_private_for_router_without_constrained_downstream() -> None:
+    from yoetz.cli.privacy_setup import recommended_privacy_recipe
+
+    binding = ProviderBinding(
+        "openrouter",
+        "openai/gpt-5",
+        "openrouter-openai-chat-completions",
+        "1.0.0",
+        "external",
+    )
+
+    assert (
+        recommended_privacy_recipe(binding, now=datetime(2026, 8, 5, tzinfo=UTC))
+        == "private"
+    )
+
+
+def test_router_route_cannot_receive_standing_assisted_authority() -> None:
+    with pytest.raises(ValueError, match="privacy_setup_router_route_unconstrained"):
+        build_candidate_policy(
+            local_only_policy(),
+            _answers(
+                external_provider=ProviderBinding(
+                    "openrouter",
+                    "openai/gpt-5",
+                    "openrouter-openai-chat-completions",
+                    "1.0.0",
+                    "external",
+                ),
+                require_current_provider_data_use_evidence=False,
+                request_confirmation=False,
+            ),
+            now=datetime(2026, 8, 5, tzinfo=UTC),
+        )
+
+
+def test_router_route_remains_available_with_per_request_confirmation() -> None:
+    candidate = build_candidate_policy(
+        local_only_policy(),
+        _answers(
+            external_provider=ProviderBinding(
+                "openrouter",
+                "openai/gpt-5",
+                "openrouter-openai-chat-completions",
+                "1.0.0",
+                "external",
+            ),
+            review_context=ReviewContextProfile.STRUCTURAL,
+            content_categories=(
+                DataCategory.BOUNDED_STRUCTURAL_METADATA,
+                DataCategory.DECLARED_FILE_TYPE,
+            ),
+            content_data_classes=(DataClass.PUBLIC_STRUCTURAL,),
+            request_confirmation=True,
+        ),
+        now=datetime(2026, 8, 5, tzinfo=UTC),
+    )
+
+    llm = next(
+        channel
+        for channel in candidate.channel_policies
+        if channel.channel is EgressChannel.LLM_INFERENCE
+    )
+    assert llm.preview_required is True
 
 
 def test_recommendation_is_private_when_no_provider_is_configured(
@@ -432,7 +520,7 @@ async def test_declining_recommended_policy_opens_the_recipe_list(
 
     assert report.outcome == "configured"
     # The declined recommendation is what the recipe list starts on.
-    assert offered == ["metadata_only"]
+    assert offered == ["assisted_review"]
     assert prompts == [
         "Use this recommended privacy policy?",
         "Create this exact privacy proposal (Assisted review)?",
@@ -634,18 +722,23 @@ async def test_widening_reports_configured_only_after_committed_trusted_decision
 def test_review_warns_when_data_use_requirement_cannot_be_satisfied(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """RT-privacy-egress-2 companion: the refusal must be visible before it is committed.
-
-    'fireworks-responses' ships owner-declared data-use, whose facts are unknown and therefore
-    never recommendation-eligible. Paired with the requirement, the runtime guard refuses every
-    external review, so setup has to say so while the operator can still change either side.
-    """
+    """RT-privacy-egress-2 companion: the refusal must be visible before it is committed."""
 
     from yoetz.cli.privacy_setup import _render_review  # pyright: ignore[reportPrivateUsage]
 
     candidate = build_candidate_policy(
         local_only_policy(),
-        _answers(require_current_provider_data_use_evidence=True),
+        _answers(
+            external_provider=ProviderBinding(
+                "openrouter",
+                "openai/gpt-5",
+                "openrouter-openai-chat-completions",
+                "1.0.0",
+                "external",
+            ),
+            require_current_provider_data_use_evidence=True,
+            request_confirmation=True,
+        ),
         now=datetime(2026, 7, 29, tzinfo=UTC),
     )
     assert candidate.require_current_provider_data_use_evidence is True
@@ -653,8 +746,12 @@ def test_review_warns_when_data_use_requirement_cannot_be_satisfied(
     _render_review(candidate)
 
     out = capsys.readouterr().out
-    assert "fireworks-responses" in out
-    assert "no reviewed data-use evidence" in out
+    assert "openrouter-openai-chat-completions" in out
+    assert "downstream provider" in out
+    assert "Customer-content training: unknown" in out
+    assert "Retention: unknown" in out
+    assert "Provider human access: unknown" in out
+    assert "runtime evidence guard is ON" in out
     assert "will be refused" in out
 
 
@@ -685,9 +782,9 @@ def test_assisted_recipe_requires_data_use_only_where_it_can_be_satisfied() -> N
     import yoetz.cli.privacy_setup as module
 
     owner_declared = ProviderBinding(
-        "fireworks",
-        "accounts/fireworks/models/minimax-m3",
-        "fireworks-responses",
+        "openrouter",
+        "openai/gpt-5",
+        "openrouter-openai-chat-completions",
         "1.0.0",
         "external",
     )
@@ -708,3 +805,31 @@ def test_assisted_recipe_requires_data_use_only_where_it_can_be_satisfied() -> N
 
     assert unknown_answers.require_current_provider_data_use_evidence is False
     assert reviewed_answers.require_current_provider_data_use_evidence is True
+
+
+def test_informed_assisted_override_discloses_unknown_facts_and_guard_off(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from yoetz.cli.privacy_setup import _render_review  # pyright: ignore[reportPrivateUsage]
+
+    candidate = build_candidate_policy(
+        local_only_policy(),
+        _answers(
+            external_provider=ProviderBinding(
+                "google_gemini",
+                "gemini-3.5-flash",
+                "google-gemini-openai-chat-completions",
+                "1.0.0",
+                "external",
+            ),
+            require_current_provider_data_use_evidence=False,
+        ),
+        now=datetime(2026, 8, 5, tzinfo=UTC),
+    )
+
+    _render_review(candidate)
+
+    out = capsys.readouterr().out
+    assert "Assisted recommendation eligible now: no" in out
+    assert "runtime evidence guard is OFF" in out
+    assert "informed standing authorization" in out

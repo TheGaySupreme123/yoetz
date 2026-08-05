@@ -639,7 +639,7 @@ async def _run_privacy_setup_command() -> int:
 
     try:
         report = await run_privacy_setup(
-            recipe_hint="metadata_only",
+            recipe_hint="assisted_review",
             offer_recommended=True,
         )
     except ControlError as error:

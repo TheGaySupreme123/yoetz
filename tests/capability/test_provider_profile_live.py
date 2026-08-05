@@ -224,7 +224,8 @@ def test_bundled_provider_preset_dispatches_and_awaits_live_evidence(
     profile = getattr(builder(), "profile")
     assert profile.host == host
     assert profile.path == path
-    # Unknown data-use facts keep every bundled preset out of the assisted-eligible path.
+    # This cell's frozen clock predates the packaged review records, so none can claim current
+    # recommendation evidence here. Live dispatch remains separately unclaimed until authorized.
     assert not profile.data_use_profile.recommendation_eligible(_NOW)
 
     context = runtime_capability_context(

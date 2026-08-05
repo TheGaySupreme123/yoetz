@@ -78,12 +78,16 @@ First run, `yoetz --privacy`, and the terminal interface's `/privacy` all apply 
 one function:
 
 - **No external provider binding configured → `private`.** Network egress stays off entirely.
-- **External provider configured → `metadata_only`, with per-request confirmation.**
+- **Exact route has current evidence of no default training and retention no longer than 30 days
+  → `assisted_review`.** The reviewed draft is workspace-scoped and does not require a prompt for
+  each ordinary request after the trusted widening ceremony commits it.
+- **Unknown, stale, account-unqualified, or router-unconstrained provider posture → `private`.**
+  The user may still choose Assisted once, but the exact review shows the unfavorable or unknown
+  facts and that the runtime evidence guard is off; no reviewed-provider assurance is displayed.
 
 The recommendation is rendered first, as an exact draft, with both what it buys and what it costs.
 Accepting it goes straight to proposal and asks nothing further. Declining it opens the recipe list,
-positioned on the declined recommendation. This recommendation is privacy-first guidance, distinct
-from the conditional provider-data-use recommendation attached to `assisted_review` below.
+positioned on the declined recommendation. Credential possession is never disclosure consent.
 
 A surface must not offer the recommendation as a change when the current policy already matches it.
 
@@ -113,9 +117,19 @@ decision excerpt, evidence excerpt, finding summary, command metadata, diff meta
 excerpt). It excludes `sensitive_confidential`, transcript excerpts, broad source selection, and
 exact command text; it keeps the v0.1 16 KiB/item and 256 KiB/case hard caps. It is displayed as
 recommended only for an exact installed endpoint whose current, versioned data-use record states
-training `prohibited`, retention `none|bounded`, and provider human access `prohibited|restricted`.
-Unknown or stale posture removes the badge; a user can still pick that endpoint through `custom`,
-but the UI must not carry the recommendation's claim into a custom policy.
+training `prohibited` and retention `none|bounded` with a ceiling of at most 30 days. Provider human
+access and safety, legal, support, and abuse-monitoring exceptions remain prominent disclosure
+facts. Unknown or stale posture removes the badge; a user can still pick Assisted or configure the
+route through `custom`, but the UI must not carry the recommendation's claim into that policy.
+
+Existing approved policies are never rewritten by this recommendation. An existing
+`confirm_every_request` user receives an explicit Assisted offer and keeps the current policy until
+the complete trusted before-to-after widening ceremony is approved.
+
+Router profiles whose downstream provider and fallback set are not represented in the binding are
+not exact standing grants. They remain available only with per-request confirmation; Assisted or
+Expanded standing authority fails closed until the binding constrains that set and receipts report
+the actual selected provider route.
 
 ## What each question governs
 

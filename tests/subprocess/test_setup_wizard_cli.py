@@ -391,7 +391,7 @@ def test_interactive_registration_n_declines_without_mutation(
         assert all(call[1:3] == ("mcp", "get") for call in calls)
 
 
-def test_semantic_first_run_suggests_and_selects_metadata_only_privacy_draft(
+def test_semantic_first_run_suggests_and_selects_assisted_privacy_draft(
     wizard_env: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -446,7 +446,7 @@ def test_semantic_first_run_suggests_and_selects_metadata_only_privacy_draft(
     result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\n2\nY\n")
 
     assert result.exit_code == 0
-    assert privacy_calls == [("metadata_only", True)]
+    assert privacy_calls == [("assisted_review", True)]
     assert "Privacy: configured (confirm_every_request)" in result.stdout
 
 
@@ -731,6 +731,7 @@ def test_provider_setup_success_reports_layers_without_ready_overclaim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import yoetz.cli.setup as setup_module
+    from yoetz.cli.privacy_setup import PrivacySetupReport
 
     async def fake_reachability(*, start_if_absent: bool = False) -> dict[str, object]:
         del start_if_absent
@@ -745,9 +746,13 @@ def test_provider_setup_success_reports_layers_without_ready_overclaim(
         del provider_choice, model
         return service, {"binding": "configured", "credential": "stored"}
 
+    async def fake_privacy_setup(**_kwargs: object) -> PrivacySetupReport:
+        return PrivacySetupReport("configured", "trusted_provider")
+
     monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)
     monkeypatch.setattr(setup_module, "_service_reachability", fake_reachability)
     monkeypatch.setattr(setup_module, "_interactive_provider_setup", fake_interactive)
+    monkeypatch.setattr("yoetz.cli.privacy_setup.run_privacy_setup", fake_privacy_setup)
 
     result = _RUNNER.invoke(cli.app, ["--set", "--fireworks", "--model", "m"])
     plain = _plain(result.output)
@@ -756,7 +761,7 @@ def test_provider_setup_success_reports_layers_without_ready_overclaim(
     assert "Provider binding and vault credential storage succeeded" in plain
     assert "SDK extra (semantic-openai):" in plain
     assert "_semantic_not_configured" in plain
-    assert "Privacy policy: not demonstrated" in plain
+    assert "Privacy policy: configured" in plain
     assert "Transport probe: not demonstrated" in plain
     assert "Installed artifact evidence: not demonstrated" in plain
     assert "not proof of live provider dispatch or semantic review" in plain

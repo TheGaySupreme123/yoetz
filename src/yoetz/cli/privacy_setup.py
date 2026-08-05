@@ -1,8 +1,8 @@
 """Trusted interactive privacy setup used by first run and ``privacy setup``.
 
-One recommendation rule decides the first screen everywhere: **Private** with no external
-provider bound, **Metadata only** with per-request confirmation when one is.  Accepting the
-recommendation asks nothing further.  Declining opens the named recipes, which materialize
+One recommendation rule decides the first screen everywhere: **Assisted review** for an exact
+external route with current qualifying data-use evidence, and **Private** otherwise. Accepting the
+recommendation asks nothing further. Declining opens the named recipes, which materialize
 straight into an exact draft; only ``Custom`` opens field-level configuration, and that is
 five grouped sections rather than a flat questionnaire.
 
@@ -28,6 +28,7 @@ from yoetz.adapters.privacy.catalog import (
     encode_privacy_policy_json,
 )
 from yoetz.adapters.privacy.local_enforcer import estimated_token_count
+from yoetz.adapters.providers.data_use_catalog import data_use_record_for_endpoint
 from yoetz.adapters.providers.openai_responses_factory import (
     endpoint_profile_data_use_reviewed,
 )
@@ -77,6 +78,12 @@ _UNSUPPORTED_CHANNELS: Final = (
     EgressChannel.PRODUCT_TELEMETRY,
     EgressChannel.CRASH_DIAGNOSTICS,
     EgressChannel.CAPABILITY_TESTING,
+)
+_UNCONSTRAINED_ROUTER_ENDPOINTS: Final = frozenset(
+    {
+        "openrouter-openai-chat-completions",
+        "vercel-ai-gateway-openai-responses",
+    }
 )
 
 _UPDATE_CHECKS_MAX_BYTES: Final = 4096
@@ -209,6 +216,12 @@ def build_candidate_policy(
     # raise network_egress_permitted without binding a semantic provider.
     if answers.network_egress != (answers.external_provider is not None):
         raise ValueError("privacy_setup_provider_binding_required")
+    if (
+        answers.external_provider is not None
+        and answers.external_provider.endpoint_profile_id in _UNCONSTRAINED_ROUTER_ENDPOINTS
+        and not answers.request_confirmation
+    ):
+        raise ValueError("privacy_setup_router_route_unconstrained")
 
     channels = {channel: _disabled_channel(channel) for channel in EgressChannel}
     channels[EgressChannel.UPDATE_CHECKS] = _update_checks_channel(enabled=answers.updates)
@@ -314,9 +327,11 @@ _RECIPE_LABELS: Final[dict[PrivacyRecipe, str]] = {
 }
 # What accepting the recommendation costs, stated next to what it buys. A recommendation that
 # only lists benefits is advice, not a choice.
-_RECOMMENDATION_TRADEOFF: Final[dict[Literal["private", "metadata_only"], tuple[str, str]]] = {
+_RECOMMENDATION_TRADEOFF: Final[
+    dict[Literal["private", "metadata_only", "assisted_review"], tuple[str, str]]
+] = {
     "private": (
-        "No external provider is configured, so this keeps network egress off entirely.",
+        "No eligible exact provider route is configured, so this keeps external review off.",
         "Trade-off: no external semantic review at all; only local deterministic checks run.",
     ),
     "metadata_only": (
@@ -325,12 +340,20 @@ _RECOMMENDATION_TRADEOFF: Final[dict[Literal["private", "metadata_only"], tuple[
         "Trade-off: the reviewer sees structural metadata and declared file types only, so it "
         "cannot judge whether a claim is actually supported.",
     ),
+    "assisted_review": (
+        "This exact provider route has current reviewed evidence of no default model training "
+        "and retention no longer than 30 days. It enables bounded Assisted review for this workspace.",
+        "Trade-off: selected problem-local ordinary user content may be sent; the policy review "
+        "names provider human-access, safety, legal, and support caveats before approval.",
+    ),
 }
 
 
 def recommended_privacy_recipe(
     external: ProviderBinding | None = None,
-) -> Literal["private", "metadata_only"]:
+    *,
+    now: datetime | None = None,
+) -> Literal["private", "metadata_only", "assisted_review"]:
     """The one recommendation rule, shared by first run, ``--privacy``, and the TUI.
 
     Pass ``external`` to avoid re-reading configuration; omit it to load the configured
@@ -340,7 +363,14 @@ def recommended_privacy_recipe(
 
     if external is None:
         external, _local = _configured_bindings()
-    return "metadata_only" if external is not None else "private"
+    if external is None:
+        return "private"
+    current = datetime.now(UTC) if now is None else now
+    return (
+        "assisted_review"
+        if endpoint_profile_data_use_reviewed(external.endpoint_profile_id, now=current)
+        else "private"
+    )
 
 
 def _render_recipe_options(*, recommended: PrivacyRecipe | None = None) -> None:
@@ -438,7 +468,7 @@ def _recipe_answers(
         recipe == "assisted_review"
         and network
         and external is not None
-        and endpoint_profile_data_use_reviewed(external.endpoint_profile_id)
+        and endpoint_profile_data_use_reviewed(external.endpoint_profile_id, now=datetime.now(UTC))
     )
     return PrivacySetupAnswers(
         network_egress=network,
@@ -668,32 +698,41 @@ def _ask_custom_answers(
 
 
 def _render_data_use_warning(candidate: PrivacyPolicy, llm: ChannelPolicy) -> None:
-    """Warn when this policy requires data-use evidence the bound endpoint cannot supply.
-
-    The pairing is not an error — refusing egress to a provider whose data-use facts are unknown
-    is exactly what the requirement means. But it is enforced at dispatch, so without this the
-    operator commits a policy that looks correct and then sees every semantic review refused with
-    no stated cause. Say it here, while the choice is still in front of them.
-    """
+    """Render the exact route evidence and whether the runtime assurance guard is active."""
 
     binding = llm.provider_binding
-    if not candidate.require_current_provider_data_use_evidence or binding is None:
+    if binding is None:
         return
-    if endpoint_profile_data_use_reviewed(binding.endpoint_profile_id):
-        return
+    record = data_use_record_for_endpoint(binding.endpoint_profile_id)
+    profile = record.profile
+    eligible = endpoint_profile_data_use_reviewed(
+        binding.endpoint_profile_id, now=datetime.now(UTC)
+    )
+    retention = profile.retention
+    if profile.retention_days_ceiling is not None:
+        retention += f" (at most {profile.retention_days_ceiling} days)"
     typer.echo("")
-    typer.echo(
-        f"  Warning: '{binding.endpoint_profile_id}' ships no reviewed data-use evidence, so its "
-        "training, retention, and human-access facts are unknown."
-    )
-    typer.echo(
-        "  This draft requires current provider data-use evidence, so every external semantic "
-        "review will be refused while both hold."
-    )
-    typer.echo(
-        "  Either choose an endpoint with reviewed data-use, or turn the requirement off and "
-        "accept the unknown facts."
-    )
+    typer.echo("  Provider data-use evidence:")
+    typer.echo(f"    Route qualification: {record.route_qualifier}")
+    typer.echo(f"    Customer-content training: {profile.customer_content_training}")
+    typer.echo(f"    Retention: {retention}")
+    typer.echo(f"    Provider human access: {profile.provider_human_access}")
+    typer.echo(f"    Reviewed: {profile.reviewed_at.date()} through {profile.expires_at.date()}")
+    typer.echo(f"    Assisted recommendation eligible now: {'yes' if eligible else 'no'}")
+    if record.official_source_urls:
+        typer.echo("    Official sources: " + ", ".join(record.official_source_urls))
+    for caveat in record.caveats:
+        typer.echo(f"    Caveat: {caveat}")
+    if candidate.require_current_provider_data_use_evidence and not eligible:
+        typer.echo(
+            "  Warning: the runtime evidence guard is ON, so external review will be refused "
+            "while this exact route remains ineligible."
+        )
+    elif not candidate.require_current_provider_data_use_evidence and not eligible:
+        typer.echo(
+            "  Warning: the runtime evidence guard is OFF. Approving this draft is an informed "
+            "standing authorization despite unknown, stale, or route-unqualified provider facts."
+        )
 
 
 def _render_review(candidate: PrivacyPolicy) -> None:

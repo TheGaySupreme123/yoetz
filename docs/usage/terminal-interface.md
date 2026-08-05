@@ -146,8 +146,8 @@ package bits to add a harness.
 
 ### `/privacy`
 
-Shows where privacy stands and the one recommended policy — **Private** when no external provider
-is configured, **Metadata only** when one is — with both what accepting it buys and what it costs.
+Shows where privacy stands and the one recommended policy — **Private** without current eligible
+exact-route provider evidence, **Assisted review** with it — with both what accepting it buys and what it costs.
 Then three choices: **Keep current**, **Review recommended change**, and **Other privacy options**.
 The last lists the same five names the command line uses: Private, Metadata only, Assisted review,
 Expanded review, and Custom. If the current policy already matches the recommendation, it is not

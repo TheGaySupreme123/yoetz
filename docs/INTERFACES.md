@@ -1739,7 +1739,8 @@ Every installed external endpoint profile also carries a nonsecret, versioned
 and an artifact-bound evidence
 digest. It is recommendation metadata, not policy authority or proof of provider behavior. Upstream
 `assisted` recommendation eligibility requires a current record with training `prohibited`,
-retention `none|bounded`, and human access `prohibited|restricted`. The recommended policy's
+retention `none|bounded`, and any bounded ceiling no greater than 30 days. Provider human access
+and documented legal, safety, support, and abuse-monitoring exceptions remain review facts. The recommended policy's
 explicit guard turns currency into a runtime precondition; a custom policy may turn it off through
 a trusted loosening transition and then carries no upstream no-training claim.
 

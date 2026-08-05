@@ -307,6 +307,14 @@ class YoetzRuntime:
             # than propagating: never recommend enabling egress on the strength of a
             # configuration that could not be read.
             recipe = "private"
+        if recipe == "assisted_review":
+            return PrivacyRecommendation(
+                recipe,
+                "This exact provider route has current reviewed no-training and retention evidence, "
+                "so bounded Assisted review is available for this workspace.",
+                "It may disclose selected problem-local ordinary user content; the trusted policy "
+                "review shows the exact boundary and provider caveats before approval.",
+            )
         if recipe == "metadata_only":
             return PrivacyRecommendation(
                 recipe,

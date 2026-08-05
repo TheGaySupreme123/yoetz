@@ -14,11 +14,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from types import MappingProxyType
 from typing import Final
 
 from yoetz.adapters.privacy.gateway import ExternalProviderFactory
+from yoetz.adapters.providers.data_use_catalog import data_use_record_for_endpoint
 from yoetz.adapters.providers.openai_chat_completions import (
     ChatCompletionsEvaluator,
     ChatCompletionsProfile,
@@ -26,10 +27,7 @@ from yoetz.adapters.providers.openai_chat_completions import (
     StructuredOutputEnforcement,
     render_case,
 )
-from yoetz.adapters.providers.openai_responses import (
-    OneAttemptCredentialTransport,
-    owner_declared_data_use_profile,
-)
+from yoetz.adapters.providers.openai_responses import OneAttemptCredentialTransport
 from yoetz.adapters.providers.openai_responses_factory import (
     OpenAIResponsesExternalFactory,
     openai_profile_from_provider_config,
@@ -43,7 +41,6 @@ from yoetz.domain.privacy import ApprovedOutboundCase, ProviderBinding
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.secret_memory import ProviderAttemptAuthBinding, ProviderCredentialHandle
 from yoetz.ports.semantic import SemanticEvaluatorPort
-from yoetz.protocol.canonical import canonical_digest
 
 __all__ = [
     "CHAT_COMPLETIONS_ENDPOINT_PROFILES",
@@ -118,19 +115,7 @@ def chat_completions_profile_from_provider_config(
         endpoint_profile_version=provider.endpoint_profile_version,
         timeout_seconds=provider.timeout_seconds,
         structured_output_enforcement=facts.structured_output_enforcement,
-        # No reviewed data-use record exists for these endpoints yet, so the facts stay unknown
-        # and the binding is never assisted-eligible.
-        data_use_profile=owner_declared_data_use_profile(
-            reviewed_at=now,
-            expires_at=now + timedelta(days=30),
-            evidence_digest=canonical_digest(
-                {
-                    "host": facts.host,
-                    "profile": provider.endpoint_profile_id,
-                    "schema": "yoetz.provider-data-use/1",
-                }
-            ),
-        ),
+        data_use_profile=data_use_record_for_endpoint(provider.endpoint_profile_id).profile,
         host=facts.host,
         base_path_prefix=facts.base_path_prefix,
     )

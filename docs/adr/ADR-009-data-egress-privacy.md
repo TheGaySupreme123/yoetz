@@ -276,7 +276,9 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     remains fail-safe all-denied. When a technical user deliberately runs external semantic setup,
     the upstream CLI recommends the inspectable `assisted` recipe for an exact endpoint profile
     with a current data-use record that states customer-content training `prohibited`, retention
-    `none|bounded`, and provider human access `prohibited|restricted`. Known-broad, unknown, or
+    `none|bounded` with any bounded ceiling at most 30 days. Provider human-access posture and
+    documented safety, support, legal, and abuse-monitoring exceptions remain prominent disclosure
+    facts. Known-broad, unknown, or
     stale posture removes the badge. The recipe sets the editable
     `require_current_provider_data_use_evidence=true` runtime guard. A technical user may turn it
     off only through a trusted loosening/custom transition, after which the policy carries no

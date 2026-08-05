@@ -73,8 +73,9 @@ widening decision is never skipped.
 
 ### `/privacy` in the terminal interface
 
-`/privacy` shows the current posture and the one recommended policy — Private when no external
-provider is configured, Metadata only when one is — with both what accepting it buys and what it
+`/privacy` shows the current posture and the one recommended policy — Private when no exact provider
+route has current reviewed no-training evidence with retention no longer than 30 days, Assisted review
+when one does — with both what accepting it buys and what it
 costs. It then offers exactly three choices: `Keep current`, `Review recommended change`, and
 `Other privacy options`. `Other privacy options` lists the same five recipe names the CLI uses.
 

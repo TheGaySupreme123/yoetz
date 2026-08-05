@@ -179,8 +179,8 @@ system does not have.
   `provider_transport_tested` layer is consequently never verified in this build. This is the
   intended failure mode: a test that cannot run is not a test that succeeded.
 - **Privacy widening is selected here and authorized only in the trusted terminal.** `/privacy`
-  shows the current posture and the one recommended policy — Private with no external provider
-  configured, Metadata only with one — together with what accepting it costs, then offers exactly
+  shows the current posture and the one recommended policy — Private without current eligible
+  exact-route evidence, Assisted review with it — together with what accepting it costs, then offers exactly
   `Keep current`, `Review recommended change`, and `Other privacy options`. Choosing anything but
   `Keep current` suspends the interface and hands the decision to the trusted CLI ceremony, which
   renders the complete `before → after` policy diff, reauthenticates, and commits.
