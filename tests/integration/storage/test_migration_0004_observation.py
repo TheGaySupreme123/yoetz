@@ -6,7 +6,12 @@ from pathlib import Path
 
 import apsw
 
-from yoetz.adapters.sqlite.migrations import BUNDLE_MIGRATIONS, Migration, run_migrations
+from yoetz.adapters.sqlite.migrations import (
+    BUNDLE_MIGRATIONS,
+    Migration,
+    current_schema_version,
+    run_migrations,
+)
 
 
 def _schema_three(path: Path) -> apsw.Connection:
@@ -31,7 +36,7 @@ def test_schema_three_upgrade_applies_0004_tables(tmp_path: Path) -> None:
     db = _schema_three(source)
     assert db.execute("PRAGMA user_version").fetchone() == (3,)
     report = run_migrations(db, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
-    assert report.applied_versions == ("0004",)
+    assert report.applied_versions == ("0004", "0005")
     expected = {
         "observation_inspection_snapshots",
         "observation_workspace_session_routes",
@@ -44,14 +49,14 @@ def test_schema_three_upgrade_applies_0004_tables(tmp_path: Path) -> None:
         )
     }
     assert expected <= actual
-    assert db.execute("PRAGMA user_version").fetchone() == (4,)
+    assert db.execute("PRAGMA user_version").fetchone() == (5,)
     assert db.execute(
         "SELECT value FROM bundle_meta WHERE key='storage_schema_version'"
-    ).fetchone() == ("4",)
+    ).fetchone() == ("5",)
     db.close()
 
     reopened = apsw.Connection(str(source))
-    assert reopened.execute("PRAGMA user_version").fetchone() == (4,)
+    assert reopened.execute("PRAGMA user_version").fetchone() == (5,)
     assert reopened.execute("PRAGMA integrity_check").fetchone() == ("ok",)
     reopened.close()
 
@@ -59,17 +64,20 @@ def test_schema_three_upgrade_applies_0004_tables(tmp_path: Path) -> None:
 def test_failed_followup_migration_after_0004_rolls_back(tmp_path: Path) -> None:
     db = _schema_three(tmp_path / "rollback.sqlite3")
     run_migrations(db, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
-    assert db.execute("PRAGMA user_version").fetchone() == (4,)
+    assert db.execute("PRAGMA user_version").fetchone() == (5,)
+    # The synthetic follow-up must be the version *after* the real registry, so adding a
+    # genuine migration does not turn this into a duplicate-version registry error.
+    next_version = current_schema_version(BUNDLE_MIGRATIONS) + 1
     failing = Migration(
-        "0005",
+        f"{next_version:04d}",
         b"CREATE TABLE must_rollback(value TEXT) STRICT;\n"
         b"INSERT INTO table_that_does_not_exist(value) VALUES('x');\n"
-        b"PRAGMA user_version = 5;\n",
+        + f"PRAGMA user_version = {next_version};\n".encode("ascii"),
     )
     try:
         run_migrations(db, (*BUNDLE_MIGRATIONS, failing), maintenance=None)  # type: ignore[arg-type]
         raise AssertionError("expected failing migration")
     except apsw.SQLError:
         pass
-    assert db.execute("PRAGMA user_version").fetchone() == (4,)
+    assert db.execute("PRAGMA user_version").fetchone() == (5,)
     assert db.execute("SELECT 1 FROM sqlite_schema WHERE name='must_rollback'").fetchone() is None

@@ -30,6 +30,7 @@ from yoetz.domain.receipts import (
 )
 from yoetz.domain.values import (
     Frontier,
+    SemanticContinuation,
     claim_id,
     event_id,
     finding_id,
@@ -317,6 +318,10 @@ class FinalSemanticEvaluation:
     # Categories the review profile selected that the inference channel did not permit. A review
     # can succeed while structurally unable to answer its own question; coverage must say so.
     withheld_review_categories: tuple[str, ...] = ()
+    # Set only on the nonterminal awaiting_human branch: what the caller must do to resume this
+    # exact request. Every terminal outcome leaves it None, so its presence is the signal that the
+    # job, attempt, and check operation are all still open.
+    continuation: SemanticContinuation | None = None
 
     def __post_init__(self) -> None:
         validate_semantic_outcome(self.status, self.reason)
@@ -335,6 +340,13 @@ class FinalSemanticEvaluation:
             raise _invalid("semantic_judgment_invalid")
         if self.operation_lease is not None and type(self.operation_lease) is not OperationLease:
             raise _invalid("operation_lease_invalid")
+        if self.continuation is not None:
+            if type(self.continuation) is not SemanticContinuation:
+                raise _invalid("semantic_continuation_invalid")
+            # A continuation on a terminal outcome would tell the caller to resume a request the
+            # ledger has already closed. Bind it to the one status that keeps the job open.
+            if self.status is not SemanticStatus.AWAITING_HUMAN:
+                raise _invalid("semantic_continuation_invalid")
 
 
 def semantic_coverage_gap_code(status: SemanticStatus, reason: SemanticReason) -> str | None:

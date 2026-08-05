@@ -22,6 +22,7 @@ from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.ids import IdKind, validate_actor_id, validate_id
 
 __all__ = [
+    "DISCLOSURE_CONTINUATION_KIND",
     "GENESIS_DIGEST",
     "ActionId",
     "Actor",
@@ -40,6 +41,7 @@ __all__ = [
     "ReceiptId",
     "RequestId",
     "ResultId",
+    "SemanticContinuation",
     "SessionId",
     "SubjectStateRef",
     "SubjectStateRelation",
@@ -50,6 +52,7 @@ __all__ = [
     "actor_id",
     "add_utc_milliseconds",
     "claim_id",
+    "disclosure_continuation",
     "event_id",
     "evidence_id",
     "finding_id",
@@ -590,6 +593,55 @@ def subject_state_relation(
         if a.diff_digest == b.diff_digest:
             return SubjectStateRelation.SAME
     return SubjectStateRelation.UNKNOWN
+
+
+DISCLOSURE_CONTINUATION_KIND: Final = "privacy_disclosure_decision"
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticContinuation:
+    """What the caller must do to resume one nonterminal check awaiting a local decision.
+
+    The command is fixed rather than caller-supplied: an agent that is told only "a human must
+    approve" has no supported way to learn *what* to approve, which is what drives it to read the
+    catalog database or product source instead. Carrying the exact argv and the original request id
+    keeps recovery inside the protocol.
+    """
+
+    kind: str
+    pending_id: str
+    expires_at: Timestamp
+    request_id: str
+
+    def __post_init__(self) -> None:
+        if self.kind != DISCLOSURE_CONTINUATION_KIND:
+            raise ProtocolValueError("invalid_continuation_kind")
+        _validated_id(IdKind.PRIVACY_PROPOSAL, self.pending_id)
+        _validated_id(IdKind.REQUEST, self.request_id)
+        if type(self.expires_at) is not Timestamp:
+            raise ProtocolValueError("invalid_continuation_expiry")
+
+    @property
+    def command(self) -> tuple[str, ...]:
+        """The exact argv the caller should surface, never a reconstructed or templated one."""
+
+        return ("yoetz", "privacy", "decide-disclosure", self.pending_id)
+
+
+def disclosure_continuation(
+    *,
+    pending_id: str,
+    expires_at: datetime,
+    request_id: str,
+) -> SemanticContinuation:
+    """Build the disclosure continuation for one awaiting-human check request."""
+
+    return SemanticContinuation(
+        DISCLOSURE_CONTINUATION_KIND,
+        pending_id,
+        timestamp_from_datetime(expires_at),
+        request_id,
+    )
 
 
 def parse_wire_sequence(value: str) -> int:

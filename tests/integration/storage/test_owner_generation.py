@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 import apsw
 import pytest
@@ -16,7 +16,12 @@ from yoetz.adapters.sqlite.connection import (
     open_read_only,
     open_writer,
 )
+from yoetz.adapters.sqlite.migrations import BUNDLE_MIGRATIONS, current_schema_version
 from yoetz.ports.runtime import OwnershipFence
+
+# Tracks the migration registry so a new bundle migration does not silently turn this
+# fixture into a "migration_required" database that open_writer refuses.
+_CURRENT_BUNDLE_VERSION: Final = current_schema_version(BUNDLE_MIGRATIONS)
 
 
 def _create_current_bundle(path: Path, *, owner_generation: int, owner_nonce: str) -> None:
@@ -33,10 +38,10 @@ def _create_current_bundle(path: Path, *, owner_generation: int, owner_nonce: st
                 ("owner_generation", str(owner_generation)),
                 ("owner_nonce", owner_nonce),
                 ("protocol_version", "0.1"),
-                ("storage_schema_version", "4"),
+                ("storage_schema_version", str(_CURRENT_BUNDLE_VERSION)),
             ),
         )
-        db.pragma("user_version", 4)
+        db.pragma("user_version", _CURRENT_BUNDLE_VERSION)
     finally:
         db.close()
     path.chmod(0o600)

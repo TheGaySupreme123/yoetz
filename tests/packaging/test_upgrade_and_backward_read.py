@@ -146,15 +146,15 @@ def test_each_migration_family_has_contiguous_versions(installed: _Installed) ->
     )
     payload = _run_probe(installed, probe)
     assert payload["catalog_versions"] == ["0001", "0002"]
-    assert payload["bundle_versions"] == ["0001", "0002", "0003", "0004"]
+    assert payload["bundle_versions"] == ["0001", "0002", "0003", "0004", "0005"]
     assert payload["catalog_current"] == 2
-    assert payload["bundle_current"] == 4
+    assert payload["bundle_current"] == 5
 
 
 def test_migration_ddl_contains_no_destructive_statement(installed: _Installed) -> None:
     for family, versions in (
         ("catalog", ("0001", "0002")),
-        ("bundle", ("0001", "0002", "0003", "0004")),
+        ("bundle", ("0001", "0002", "0003", "0004", "0005")),
     ):
         for version in versions:
             text = (
@@ -201,7 +201,7 @@ def test_fresh_catalog_and_bundle_initialize_at_current_schema_version(
         "catalog_state": "current",
         "catalog_version": 2,
         "bundle_state": "current",
-        "bundle_version": 4,
+        "bundle_version": 5,
     }
 
 

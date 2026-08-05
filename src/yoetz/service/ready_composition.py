@@ -97,6 +97,7 @@ from yoetz.domain.privacy import (
 from yoetz.domain.receipts import PolicyVersionEntry, ReceiptVersionSlice, SchemaVersionEntry
 from yoetz.domain.values import (
     Frontier,
+    disclosure_continuation,
     format_rfc3339_millis,
     session_id,
 )
@@ -1549,8 +1550,16 @@ def _map_egress_to_final(
             provenance=provenance,
         )
     if type(result) is SemanticEgressAwaitingHuman:
+        # The proposal id and its expiry are the only things that make this branch recoverable.
+        # Dropping them is what turned "a human must approve" into an unanswerable instruction.
         return FinalSemanticEvaluation(
-            SemanticStatus.AWAITING_HUMAN, SemanticReason.HUMAN_APPROVAL_REQUIRED
+            SemanticStatus.AWAITING_HUMAN,
+            SemanticReason.HUMAN_APPROVAL_REQUIRED,
+            continuation=disclosure_continuation(
+                pending_id=result.privacy_proposal_id,
+                expires_at=result.expires_at,
+                request_id=result.request_id,
+            ),
         )
     if type(result) is SemanticEgressBlocked:
         return _map_blocked(result.outcome, result.reason)
@@ -1991,6 +2000,7 @@ def _privacy_gated_semantic_evaluator(
             ) -> FinalSemanticEvaluation:
                 judgment = None
                 provenance = None
+                continuation = None
                 if type(evaluation) is FinalSemanticEvaluation:
                     if status is SemanticStatus.SUCCEEDED:
                         judgment = evaluation.judgment
@@ -2001,6 +2011,8 @@ def _privacy_gated_semantic_evaluator(
                         and evaluation.provenance is not None
                     ):
                         provenance = evaluation.provenance
+                    if status is SemanticStatus.AWAITING_HUMAN:
+                        continuation = evaluation.continuation
                 # Terminal recovery of a succeeded job without a recoverable response object
                 # must not invent a judgment; surface an honest coordinator failure instead.
                 if status is SemanticStatus.SUCCEEDED and (judgment is None or provenance is None):
@@ -2019,6 +2031,7 @@ def _privacy_gated_semantic_evaluator(
                     attempt_accounting=accounting,
                     operation_lease=current_lease[0],
                     withheld_review_categories=withheld,
+                    continuation=continuation,
                 )
 
             return cast(
