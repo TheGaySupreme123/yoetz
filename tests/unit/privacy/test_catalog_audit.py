@@ -471,6 +471,99 @@ def test_memory_and_sqlite_content_proposal_root_sets_match() -> None:
     assert sqlite_result[3] == (_OBJECT,)
 
 
+def test_memory_and_sqlite_agree_on_which_disclosures_are_still_decidable() -> None:
+    """Both audit implementations list the same waiting proposals, and exclude expired ones.
+
+    An expired proposal is refused by the decision path, so listing it would advertise a
+    ceremony that cannot succeed -- the opposite of what a caller reaching for this needs.
+    """
+
+    db = _database()
+    db.execute(
+        """INSERT INTO task_routes (
+               task_id, workspace_ref_commitment, external_ref_commitment,
+               active_session_id, bundle_relpath, route_generation,
+               active_route_identity_digest, state, quarantine_code, created_at, updated_at
+           ) VALUES (?, NULL, NULL, ?, ?, 1, ?, 'active', NULL, ?, ?)""",
+        (
+            _TASK,
+            _SESSION,
+            f"tasks/{_TASK}",
+            _ROUTE_DIGEST,
+            _NOW.isoformat().replace("+00:00", "Z"),
+            _NOW.isoformat().replace("+00:00", "Z"),
+        ),
+    )
+    memory_state = MemoryPrivacyCatalogState(routes={_TASK: _ROUTE_DIGEST})
+    sqlite = CatalogPrivacyAudit(db, _Objects(), _Key(), _Clock())  # type: ignore[arg-type]
+    memory = MemoryPrivacyAudit(memory_state, _Objects(), _Key(), _Clock())  # type: ignore[arg-type]
+    prepared = canonical_encode({"items": []})
+    minimized = MinimizedDisclosure(
+        prepared,
+        (),
+        (),
+        (),
+        (),
+        (("removed_items", 0),),
+        len(prepared),
+        0,
+        canonical_digest({"items": []}),
+        "scanner-v1",
+        _DIGEST,
+        (),
+    )
+    live = DisclosureProposalRequest(
+        _PROPOSAL,
+        _REQUEST,
+        _TASK,
+        minimized,
+        None,
+        LocalDisclosureSink.TRUSTED_HUMAN_CONTROL,
+        "trusted-preview",
+        _task_scope(),
+        _POLICY,
+        1,
+        1,
+        _DIGEST,
+        len(prepared),
+        0,
+        _NOW + timedelta(minutes=1),
+    )
+
+    # `_Clock` is fixed at _NOW. A second pair reading five minutes later sees the same stored
+    # proposal past its one-minute expiry, so the clock is the only difference between the two
+    # observations.
+    class _LateClock:
+        def now_utc(self) -> datetime:
+            return _NOW + timedelta(minutes=5)
+
+    late = (
+        CatalogPrivacyAudit(db, _Objects(), _Key(), _LateClock()),  # type: ignore[arg-type]
+        MemoryPrivacyAudit(memory_state, _Objects(), _Key(), _LateClock()),  # type: ignore[arg-type]
+    )
+
+    async def listed(audit: object) -> tuple[str, ...]:
+        page = await cast(CatalogPrivacyAudit, audit).list_pending_disclosures(
+            PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL
+        )
+        return tuple(entry.pending_id for entry in page.pending)
+
+    async def run() -> tuple[tuple[str, ...], ...]:
+        for audit in (sqlite, memory):
+            await audit.prepare_disclosure_proposal(live)
+        return (
+            await listed(sqlite),
+            await listed(memory),
+            await listed(late[0]),
+            await listed(late[1]),
+        )
+
+    sqlite_now, memory_now, sqlite_late, memory_late = asyncio.run(run())
+
+    assert sqlite_now == memory_now == (_PROPOSAL,)
+    assert sqlite_late == memory_late == ()
+
+
 def test_coordinator_empty_client_projection_completes_one_durable_receipt() -> None:
     state = MemoryPrivacyCatalogState()
     policies = MemoryPrivacyPolicyStore(state, _Clock())

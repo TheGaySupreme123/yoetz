@@ -35,12 +35,21 @@ describes behavior intended for the first release rather than a change from a pr
   destination, disclosed information, confirmation, authorization scope, limits, and local
   visibility — derived from the same comparison that classifies the change as a widening. The diff
   digest is shown as integrity evidence and labelled as such rather than as the description.
-- Privacy setup opens on one recommended policy — Private with no external provider configured,
-  Metadata only with per-request confirmation when one is — with its trade-off stated. Accepting it
-  asks nothing further; declining opens the named recipes (Private, Metadata only, Assisted review,
-  Expanded review, Custom), and only Custom configures individual settings, in five grouped
-  sections. The terminal interface's `/privacy` uses the same rule and the same recipe names, and
-  selects rather than authorizes.
+- Privacy setup opens on one recommended policy — Assisted review for an exact provider route with
+  current reviewed no-training evidence and retention no longer than 30 days, Private otherwise —
+  with its trade-off stated. Accepting it asks nothing further; declining opens the named recipes
+  (Private, Metadata only, Assisted review, Expanded review, Custom), and only Custom configures
+  individual settings, in five grouped sections. The terminal interface's `/privacy` uses the same
+  rule and the same recipe names, and selects rather than authorizes.
+- `yoetz privacy pending` lists the disclosure decisions awaiting a local human, with their expiry
+  and nothing about what they would disclose. `privacy decide-disclosure` needs an exact pending id
+  that normally arrives in the check result waiting on it; this is how that ceremony is found again
+  when the id is lost. It is a CLI/UI-only ordinary control method and is not reachable over MCP.
+- First run offers semantic review first and pre-selects it, in both the prompt-loop wizard and the
+  terminal interface. This is a recommendation about that question only: every installation still
+  seeds zero-egress `local_only`, the answer binds no provider and commits no policy, and local-only
+  remains one keystroke away. The answer is now taken before the Codex MCP registration, and decides
+  which route is registered.
 - An optional, privacy-gated semantic review path behind the same gateway, with a reviewed OpenAI
   Responses adapter, a local-model AF_UNIX profile, and a scripted fake provider for testing.
 - Codex integration as the first-party harness adapter: an explicit trusted-project skill
@@ -292,7 +301,27 @@ carried them; they are listed because each one describes the behavior that now s
 - The advertised platform matrix is macOS 11.0+ arm64 and glibc 2.28+ x86-64 only; other platforms
   are untested.
 
+### Fixed
+
+- The terminal interface previewed the Codex integration on one MCP route and applied it on
+  another, so on a fresh installation the approved preview digest never matched and first run's
+  Codex connection failed as `preview_stale`. The route now travels on the approved plan, and the
+  approval screen shows the exact serve command that route registers rather than a fixed string.
+- Abandoning the provider step during first-run semantic setup left the policy route registered
+  with no provider behind it and no setup marker written. It now offers a local-only finish that
+  re-registers the strict route through the same preview and approval.
+- Changing privacy posture after setup never looked at the Codex registration, so moving to
+  assisted review with an older strict registration in place produced a correct policy and a Codex
+  session where every check returned `blocked_by_policy` / `route_semantic_ceiling` with nothing
+  connecting the two. `yoetz privacy setup` now names the mismatch and the command that fixes it,
+  and the terminal interface reports the agent-route verdict as its own readiness line.
+
 ### Security
 
+- Losing the session-event monitor no longer auto-re-opens the vault on the next ordinary call.
+  Idle, session-lock, and suspend locks describe conditions the service can watch recover; monitor
+  loss removes the capability that produces those events for the life of the process, so
+  auto-re-ready made that lock momentary and left the service running with session-lock relock
+  silently no longer applying. A monitor-loss lock now holds until a trusted unlock ceremony.
 - This is the first public release; see [`SECURITY.md`](SECURITY.md) for how to report a
   vulnerability. There is no prior version to carry a security fix forward from.

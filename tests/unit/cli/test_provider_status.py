@@ -25,7 +25,7 @@ from yoetz.ports.harness_mcp import McpRegistrationError, McpRegistrationReason
 pytestmark = pytest.mark.anyio
 
 # Captured before any test patches it, so the fail-soft test can exercise the real probe.
-_REAL_ROUTE_OBSERVATION = module._mcp_route_observation  # pyright: ignore[reportPrivateUsage]
+_REAL_ROUTE_OBSERVATION = module.mcp_route_observation
 
 
 def _provider(provider_id: str = "openai") -> ProviderProfileConfig:
@@ -144,7 +144,7 @@ def _install(
     async def _observe() -> dict[str, object]:
         return dict(observation)
 
-    monkeypatch.setattr(module, "_mcp_route_observation", _observe)
+    monkeypatch.setattr(module, "mcp_route_observation", _observe)
     return client
 
 
@@ -505,7 +505,7 @@ async def test_route_probe_failure_degrades_instead_of_raising(
     """The real probe, not a stub: discovery and registration errors must not reach the caller."""
 
     _install(monkeypatch, tmp_path, provider=_provider())
-    monkeypatch.setattr(module, "_mcp_route_observation", _REAL_ROUTE_OBSERVATION)
+    monkeypatch.setattr(module, "mcp_route_observation", _REAL_ROUTE_OBSERVATION)
 
     def _explode() -> tuple[object, ...]:
         raise McpRegistrationError(McpRegistrationReason.HARNESS_UNAVAILABLE, {})

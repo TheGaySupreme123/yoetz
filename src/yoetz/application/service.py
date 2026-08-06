@@ -805,6 +805,9 @@ class Application:
     async def privacy_tighten_policy(self, request: object) -> JsonObject:
         return await self._support(ControlMethod.PRIVACY_TIGHTEN_POLICY, request)
 
+    async def privacy_pending_list(self, request: object) -> JsonObject:
+        return await self._support(ControlMethod.PRIVACY_PENDING_LIST, request)
+
     async def privacy_receipts_list(self, request: object) -> JsonObject:
         return await self._support(ControlMethod.PRIVACY_RECEIPTS_LIST, request)
 

@@ -17,6 +17,7 @@ from yoetz.application.privacy_policy import (
     ProposePrivacyPolicyRequest,
     TightenPrivacyPolicyRequest,
     privacy_get_effective,
+    privacy_pending_list,
     privacy_propose_policy,
     privacy_tighten_policy,
 )
@@ -218,8 +219,35 @@ def build_privacy_support_handlers(
             raise _policy_rejection() from exc
         return encode_privacy_policy_result(result)
 
+    async def pending_list(request: object) -> JsonObject:
+        # Takes no parameters: a pending decision is open or it is not. Any body is accepted and
+        # ignored rather than rejected, so a future caller adding a field cannot be told its
+        # request was invalid when nothing about the answer would have changed.
+        del request
+        try:
+            page = await privacy_pending_list(app)
+        except ControlError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise _policy_rejection() from exc
+        return JsonObject(
+            {
+                "schema": "yoetz.privacy-pending-page/1",
+                "snapshot_generation": page.snapshot_generation,
+                "pending": [
+                    {
+                        "pending_id": entry.pending_id,
+                        "task_id": entry.task_id,
+                        "expires_at": format_rfc3339_millis(entry.expires_at),
+                    }
+                    for entry in page.pending
+                ],
+            }
+        )
+
     return {
         ControlMethod.PRIVACY_GET_EFFECTIVE: get_effective,
+        ControlMethod.PRIVACY_PENDING_LIST: pending_list,
         ControlMethod.PRIVACY_PROPOSE_POLICY: propose_policy,
         ControlMethod.PRIVACY_TIGHTEN_POLICY: tighten_policy,
     }

@@ -66,6 +66,8 @@ __all__ = [
     "PrivacyClassifierPort",
     "PrivacyPolicyStorePort",
     "PrivacyReceiptAudience",
+    "PendingDisclosureEntry",
+    "PendingDisclosurePage",
     "PrivacyReceiptPage",
     "PrivacyReceiptQuery",
     "PrivacyReceiptView",
@@ -559,6 +561,46 @@ class PrivacyReceiptAudience(str, Enum):  # noqa: UP042 - closed audience enum
 
 
 @dataclass(frozen=True, slots=True)
+class PendingDisclosureEntry:
+    """One disclosure proposal awaiting a local decision, named but not described.
+
+    Deliberately carries no destination, category, excerpt, or case content. Listing exists so a
+    human who lost the id can find the ceremony to run; everything about *what* would be
+    disclosed belongs to the ceremony's own preview, which is bound to the exact prepared case
+    and is the only surface that renders it.
+    """
+
+    pending_id: str
+    # Nullable in the audit table, so nullable here. Dropping a row for a missing task would
+    # silently hide a proposal a human can still decide, which is the exact failure this listing
+    # exists to prevent.
+    task_id: str | None
+    expires_at: datetime
+
+    def __post_init__(self) -> None:
+        if type(self.pending_id) is not str or not self.pending_id:
+            raise _invalid()
+        if self.task_id is not None and (type(self.task_id) is not str or not self.task_id):
+            raise _invalid()
+        _time(self.expires_at)
+
+
+@dataclass(frozen=True, slots=True)
+class PendingDisclosurePage:
+    snapshot_generation: int
+    pending: tuple[PendingDisclosureEntry, ...]
+
+    def __post_init__(self) -> None:
+        _positive(self.snapshot_generation)
+        if type(self.pending) is not tuple or len(self.pending) > 100:
+            raise _invalid()
+        if any(type(entry) is not PendingDisclosureEntry for entry in self.pending):
+            raise _invalid()
+        if len({entry.pending_id for entry in self.pending}) != len(self.pending):
+            raise _invalid()
+
+
+@dataclass(frozen=True, slots=True)
 class PrivacyReceiptQuery:
     receipt_id: str | None = None
     outcome: PrivacyOutcome | None = None
@@ -779,6 +821,10 @@ class PrivacyAuditPort(Protocol):
     async def list_receipts(
         self, query: PrivacyReceiptQuery, audience: PrivacyReceiptAudience
     ) -> PrivacyReceiptPage: ...
+
+    async def list_pending_disclosures(
+        self, audience: PrivacyReceiptAudience
+    ) -> PendingDisclosurePage: ...
 
     async def revoke_policy_generation(self, generation: int, reason: str) -> int: ...
 

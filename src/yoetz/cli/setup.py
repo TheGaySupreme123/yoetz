@@ -60,6 +60,7 @@ __all__ = [
     "SETUP_MARKER_SCHEMA",
     "apply_codex_integration",
     "check_policy_preview",
+    "configured_mcp_route_profile",
     "integrate_mcp",
     "project_skill_preview",
     "run_provider_setup",
@@ -215,18 +216,25 @@ def _is_interactive_terminal() -> bool:
 
 
 def _choose_review_mode() -> Literal["local_only", "semantic"]:
-    """Let first run choose its complete privacy posture before registration."""
+    """Let first run choose its complete privacy posture before registration.
+
+    Semantic review is offered first and is the default answer. That is a choice about this
+    prompt, not about what an installation seeds: the durable policy is still ``local_only``,
+    and this branch only leads to the provider binding, credential, and separately
+    reauthenticated policy commit that egress actually requires. Accepting it here configures
+    nothing on its own.
+    """
 
     typer.echo("")
     typer.echo("Choose how Yoetz should review work:")
-    typer.echo("  1. Local only — deterministic checks; nothing leaves this computer")
-    typer.echo("  2. Semantic review — configure a provider, API key, and privacy policy")
+    typer.echo("  1. Semantic review (recommended) — configure a provider, API key, and policy")
+    typer.echo("  2. Local only — deterministic checks; nothing leaves this computer")
     while True:
         raw = typer.prompt("Review mode", default="1").strip()
         if raw == "1":
-            return "local_only"
-        if raw == "2":
             return "semantic"
+        if raw == "2":
+            return "local_only"
         typer.echo("Please enter 1 or 2.")
 
 
@@ -540,6 +548,17 @@ def _configured_mcp_route_profile() -> Literal["policy", "strict"]:
     if config.verification.semantic == "disabled":
         return "strict"
     return "strict" if config.provider is None and config.local_model is None else "policy"
+
+
+def configured_mcp_route_profile() -> Literal["policy", "strict"]:
+    """Public registration-time route posture for front ends with no answer of their own.
+
+    A caller that has just asked the human which review posture they want passes that answer
+    instead: the reply is the authority, and configuration is only the fallback for surfaces
+    (post-setup ``/connect``, ``integrate codex mcp``) that ask nothing.
+    """
+
+    return _configured_mcp_route_profile()
 
 
 def _mcp_adapter(
@@ -946,6 +965,7 @@ async def _register_step(
 async def apply_codex_integration(
     binary: HarnessBinary,
     *,
+    route_profile: Literal["policy", "strict"] | None = None,
     workspace: Path | None = None,
     approved_preview_digest: str,
     approved_skill_preview_digest: str,
@@ -958,12 +978,19 @@ async def apply_codex_integration(
     intact instead
     of reassembling it. It never prompts, and it refuses rather than proceed when
     the preview it is handed no longer matches what the services would propose.
+
+    ``route_profile`` must be the same one the approved preview was built from. The serve
+    command is inside the preview digest, so a caller that previews on one route and applies
+    on another is refused as stale -- correctly, but with a reason that describes the digest
+    rather than the disagreement underneath it. Pass the route explicitly and the two halves
+    cannot drift.
     """
 
     return await _codex_integration_step(
         binary,
         interactive=False,
         accept=False,
+        route_profile=route_profile,
         workspace=workspace,
         approved_preview_digest=approved_preview_digest,
         approved_skill_preview_digest=approved_skill_preview_digest,

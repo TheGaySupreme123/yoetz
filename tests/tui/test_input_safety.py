@@ -31,9 +31,12 @@ def transcript(app: YoetzTui) -> str:
 
 async def reach_integration_preview(pilot: object, app: YoetzTui) -> None:
     await pilot.pause()  # type: ignore[attr-defined]
-    await pilot.press("enter")  # type: ignore[attr-defined]
+    await pilot.press("enter")  # type: ignore[attr-defined]  # connect
     await pilot.pause()  # type: ignore[attr-defined]
-    await pilot.press("enter")  # type: ignore[attr-defined]
+    await pilot.press("enter")  # type: ignore[attr-defined]  # trust
+    await pilot.pause()  # type: ignore[attr-defined]
+    # The review posture decides which MCP command is previewed, so it is answered first.
+    await pilot.press("enter")  # type: ignore[attr-defined]  # review mode
     await pilot.pause()  # type: ignore[attr-defined]
     assert app.open_view is not None
     assert app.open_view.view_name == "integration"
@@ -70,6 +73,48 @@ async def test_escape_on_the_trust_question_does_not_grant_trust(
         await pilot.pause()
         assert runtime.applied == []
         assert "This project was not changed." in transcript(app)
+
+
+async def test_escape_on_review_mode_during_connect_does_not_register(
+    make_app: MakeApp,
+) -> None:
+    """Dismissing review mode must stop before MCP registration or a setup marker."""
+
+    runtime = FakeRuntime()
+    app = make_app(first_run=True, runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")  # connect
+        await pilot.pause()
+        await pilot.press("enter")  # trust
+        await pilot.pause()
+        assert app.open_view is not None
+        assert app.open_view.view_name == "review-mode"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert runtime.applied == []
+        assert app.markers_written == []  # type: ignore[attr-defined]
+        assert "Setup stopped. Nothing was changed." in transcript(app)
+
+
+async def test_escape_on_review_mode_during_local_setup_does_not_finish(
+    make_app: MakeApp,
+) -> None:
+    """Dismissing review mode on the no-Codex path must not write a local-only marker."""
+
+    runtime = FakeRuntime()
+    app = make_app(first_run=True, runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await pilot.press("down", "enter")  # "Set up Yoetz without Codex"
+        await pilot.pause()
+        assert app.open_view is not None
+        assert app.open_view.view_name == "review-mode"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert runtime.applied == []
+        assert app.markers_written == []  # type: ignore[attr-defined]
+        assert "Setup stopped. Nothing was changed." in transcript(app)
 
 
 async def test_escape_on_a_stop_the_service_confirmation_leaves_it_running(
@@ -110,6 +155,10 @@ async def test_enter_that_closes_one_picker_does_not_confirm_the_next(
         await pilot.press("enter")
         await pilot.pause()
         assert app.open_view is not None
+        assert app.open_view.view_name == "review-mode"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.open_view is not None
         assert app.open_view.view_name == "integration"
         assert runtime.applied == []
 
@@ -121,8 +170,8 @@ async def test_each_view_transition_consumes_its_own_keystroke(
     app = make_app(first_run=True, runtime=runtime)
     async with app.run_test(size=WIDE) as pilot:
         await pilot.pause()
-        # Three deliberate presses reach exactly three steps deep.
-        for expected in ("trust", "integration"):
+        # Each deliberate press reaches exactly one step deeper, and no further.
+        for expected in ("trust", "review-mode", "integration"):
             await pilot.press("enter")
             await pilot.pause()
             assert app.open_view is not None

@@ -1463,6 +1463,49 @@ privacy_app.command("decide-policy")(_privacy_decision_command("policy"))
 privacy_app.command("decide-disclosure")(_privacy_decision_command("disclosure"))
 
 
+async def _privacy_pending(json_output: bool) -> int:
+    try:
+        client = await build_service_client()
+        try:
+            result = await client.privacy_pending_list()
+        finally:
+            await client.close()
+    except ProtocolValueError, ValueError:
+        return _usage_failure()
+    except ControlError as error:
+        return _control_failure(error)
+    if json_output:
+        _human_or_json(result, json_output=True)
+        return 0
+    # Canonical JSON freezes arrays to tuples, so a list-only check would silently report
+    # "nothing waiting" for every populated answer.
+    pending = result.get("pending")
+    rows: tuple[object, ...] = tuple(pending) if isinstance(pending, list | tuple) else ()
+    if not rows:
+        typer.echo("No disclosure decision is waiting.")
+        return 0
+    typer.echo("Disclosure decisions waiting for you:")
+    empty: Mapping[str, object] = {}
+    for row in rows:
+        entry = cast("Mapping[str, object]", row) if isinstance(row, Mapping) else empty
+        typer.echo(f"  {entry.get('pending_id')}  expires {entry.get('expires_at')}")
+    typer.echo("")
+    typer.echo("Decide one with 'yoetz privacy decide-disclosure <pending_id>'.")
+    return 0
+
+
+@privacy_app.command("pending")
+def privacy_pending(json_output: _JSON = False) -> None:
+    """List disclosure decisions awaiting a local human.
+
+    `decide-disclosure` needs an exact id, which normally arrives in a check result. When that
+    is lost -- a closed terminal, an agent that did not relay it -- this is how the ceremony is
+    found again. It names the waiting decisions and nothing about what they would disclose.
+    """
+
+    _finish(run_async(lambda: _privacy_pending(json_output)))
+
+
 async def _privacy_receipts_list(page_size: int, cursor: str | None, json_output: bool) -> int:
     from yoetz.service.client import ListPrivacyReceiptsRequest
 

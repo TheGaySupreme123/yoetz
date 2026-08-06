@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Literal
 
 from yoetz.tui.models import (
     CheckMode,
@@ -52,6 +53,7 @@ PLAN = IntegrationPlan(
     executable_path=DESKTOP.executable_path,
     reported_version="0.44",
     project_root="/tmp/project",
+    route_profile="policy",
     mcp_command="yoetz mcp serve",
     mcp_server_name="yoetz",
     policy_digest="7f8a92bd",
@@ -117,6 +119,9 @@ class FakeRuntime:
     credential_result: str | None = "stored"
 
     applied: list[tuple[str, str | None]] = field(default_factory=lambda: [])
+    # Which route each half of the integration asked for, so a test can assert they agree.
+    planned_routes: list[str | None] = field(default_factory=lambda: [])
+    applied_routes: list[str] = field(default_factory=lambda: [])
     ceremonies: list[str] = field(default_factory=lambda: [])
     bindings: list[tuple[str, str]] = field(default_factory=lambda: [])
     checks: list[tuple[str, CheckMode]] = field(default_factory=lambda: [])
@@ -177,20 +182,34 @@ class FakeRuntime:
     def privacy_recommendation(self) -> PrivacyRecommendation:
         return self.recommendation
 
-    async def integration_plan(self, option: HarnessOption) -> IntegrationPlan:
+    async def integration_plan(
+        self,
+        option: HarnessOption,
+        route_profile: Literal["policy", "strict"] | None = None,
+    ) -> IntegrationPlan:
         if self.plan_error is not None:
             raise self.plan_error
+        # Record the requested route and answer on it. The real runtime puts the route inside
+        # the preview digest, so a fake that ignored it would let the ordering defect this
+        # signature exists to prevent pass unnoticed.
+        self.planned_routes.append(route_profile)
+        route = self.plan.route_profile if route_profile is None else route_profile
         return replace(
             self.plan,
             harness_label=option.label,
             executable_path=option.executable_path,
             reported_version=option.reported_version,
+            route_profile=route,
+            mcp_command=(
+                "yoetz mcp serve --semantic off" if route == "strict" else "yoetz mcp serve"
+            ),
         )
 
     async def apply_integration(
         self, option: HarnessOption, plan: IntegrationPlan
     ) -> IntegrationOutcome:
         self.applied.append((plan.preview_digest, plan.policy_digest))
+        self.applied_routes.append(plan.route_profile)
         if self.apply_result is not None:
             return self.apply_result
         return IntegrationOutcome(

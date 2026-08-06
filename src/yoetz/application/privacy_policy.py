@@ -32,6 +32,7 @@ from yoetz.ports.privacy import (
     HumanAuthorityCapability,
     HumanPolicyDecision,
     OutboundGatewayPort,
+    PendingDisclosurePage,
     PolicyCommitResult,
     PolicyTransitionProposal,
     PreparedPolicyTransition,
@@ -70,6 +71,7 @@ __all__ = [
     "privacy_get_setup",
     "privacy_propose_policy",
     "privacy_receipts_get",
+    "privacy_pending_list",
     "privacy_receipts_list",
     "privacy_tighten_policy",
 ]
@@ -369,6 +371,16 @@ async def privacy_receipts_list(
     return await app.audit.list_receipts(
         request.query, PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL
     )
+
+
+async def privacy_pending_list(app: PrivacyPolicyApplication) -> PendingDisclosurePage:
+    """List the disclosure proposals a local human can still decide.
+
+    Takes no query. A pending decision is either open or it is not, and every filter this could
+    offer would be a way to describe proposals rather than to find one.
+    """
+
+    return await app.audit.list_pending_disclosures(PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL)
 
 
 async def privacy_receipts_get(

@@ -1124,6 +1124,43 @@ async def test_explicit_lock_does_not_auto_ready(
 
 
 @pytest.mark.anyio
+async def test_monitor_loss_does_not_auto_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Losing the session monitor requires a ceremony, unlike the recoverable soft locks.
+
+    Idle, session lock, and suspend all describe conditions the service can watch recover from.
+    Monitor loss removes the capability that produces those events for the life of the process,
+    so auto-re-ready would make the lock momentary and then run on with session-lock relock
+    silently no longer applying -- the containment ADR-008 describes, gone without notice.
+    """
+
+    application = _Application()
+    vault = _PassphraseVault()
+
+    async def factory(service_generation: int, vault_generation: int) -> _Application:
+        del service_generation, vault_generation
+        return application
+
+    _patch_auto_unlock_store(monkeypatch, b"correct horse battery staple!!")
+    daemon = _soft_lock_daemon(tmp_path, factory=factory, vault=vault)
+    await daemon.start()
+    daemon._state_reason = "monitor_lost"  # pyright: ignore[reportPrivateUsage]
+
+    rejected = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.START, _start_body()),
+    )
+
+    assert rejected.outcome == "error"
+    assert isinstance(rejected.body, ControlError)
+    assert rejected.body.reason == "vault_locked"
+    assert vault.unlock_count == 0
+    assert daemon.status().state is ServiceState.LOCKED
+    await daemon.close()
+
+
+@pytest.mark.anyio
 async def test_soft_lock_absent_auto_unlock_stays_hard_locked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
