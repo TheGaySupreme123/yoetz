@@ -170,6 +170,92 @@ async def test_project_trust_precedes_any_integration_preview(make_app: MakeApp)
         assert runtime.applied == []
 
 
+async def test_b_on_the_review_question_returns_to_project_trust(make_app: MakeApp) -> None:
+    runtime = FakeRuntime()
+    app = make_app(first_run=True, runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")  # connect
+        await pilot.pause()
+        await pilot.press("enter")  # trust
+        await pilot.pause()
+        assert app.open_view is not None
+        assert app.open_view.view_name == "review-mode"
+        await pilot.press("b")
+        await pilot.pause()
+        # Back re-asks the previous question rather than cancelling the run.
+        assert app.open_view is not None
+        assert app.open_view.view_name == "trust"
+        assert "Setup stopped" not in transcript(app)
+        assert runtime.applied == []
+
+
+async def test_b_on_project_trust_returns_to_the_installation_picker(
+    make_app: MakeApp,
+) -> None:
+    runtime = FakeRuntime(harnesses=(DESKTOP, CLI))
+    app = make_app(first_run=True, runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")  # connect
+        await pilot.pause()
+        await pilot.press("2")  # Codex CLI
+        await pilot.pause()
+        assert app.open_view is not None
+        assert app.open_view.view_name == "trust"
+        await pilot.press("b")
+        await pilot.pause()
+        assert app.open_view is not None
+        assert app.open_view.view_name == "harness"
+        assert runtime.applied == []
+
+
+async def test_back_never_reaches_a_step_that_already_changed_the_project(
+    make_app: MakeApp,
+) -> None:
+    """Back is offered only on questions; the approval that applies a change is not one."""
+
+    runtime = FakeRuntime()
+    app = make_app(first_run=True, runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")  # connect
+        await pilot.pause()
+        await pilot.press("enter")  # trust
+        await pilot.pause()
+        await answer_review(pilot)
+        view = app.open_view
+        assert view is not None
+        assert view.view_name == "integration"
+        await pilot.press("b")
+        await pilot.pause()
+        # 'b' is inert here: the integration approval stays open and nothing was applied.
+        assert app.open_view is view
+        assert runtime.applied == []
+
+
+async def test_b_typed_into_a_searchable_picker_filters_and_does_not_go_back(
+    make_app: MakeApp,
+) -> None:
+    app = make_app()
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        app.composer.focus_input()
+        app.composer.text = "/provider"
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        view = app.open_view
+        assert view is not None
+        assert view.view_name == "provider"
+        assert view.accepts_printable_shortcuts is False
+        await pilot.press("b")
+        await pilot.pause()
+        # The letter belonged to the query, so the view is still open.
+        assert app.open_view is view
+
+
 async def test_declining_project_trust_changes_nothing(make_app: MakeApp) -> None:
     runtime = FakeRuntime()
     app = make_app(first_run=True, runtime=runtime)

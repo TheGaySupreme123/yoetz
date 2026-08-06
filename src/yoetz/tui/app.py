@@ -64,6 +64,7 @@ from yoetz.tui.text import middle_truncate
 from yoetz.tui.widgets.composer import CommandSubmitted, Composer, Footer
 from yoetz.tui.widgets.history import History, SessionHeader
 from yoetz.tui.widgets.views import (
+    BACK,
     ApprovalView,
     BaseView,
     DetailsRequested,
@@ -411,6 +412,8 @@ class YoetzTui(App[int]):
             return
         if choice == "local":
             review = await self._ask_review_mode()
+            while review == BACK:
+                review = await self._ask_review_mode()
             if review is None:
                 self.say(Level.OPTIONAL, "Setup stopped. Nothing was changed.")
                 return
@@ -418,25 +421,48 @@ class YoetzTui(App[int]):
             await self._run_initial_review(review, connected=False)
             return
 
-        option = await self._choose_harness(detection.harnesses)
-        if option is None:
-            self.say(Level.OPTIONAL, "Setup stopped. Nothing was changed.")
-            return
-        if not await self._confirm_project_trust(detection):
-            return
-        # The review answer decides which MCP command is registered, so it is asked before the
-        # registration -- and before the approval screen that shows that command. Registering
-        # first and asking after is how a semantic install ends up on the strict route.
-        review = await self._ask_review_mode()
-        if review is None:
-            self.say(Level.OPTIONAL, "Setup stopped. Nothing was changed.")
-            return
+        # Each question can send the user back to the one before it, so the answered steps are
+        # walked as a cursor rather than a straight line. Only the questions run in this loop;
+        # once `_connect` applies a change there is nothing to step back to, and the loop ends.
+        option: HarnessOption | None = None
+        review: str | None = None
+        step = 0
+        while step < 3:
+            if step == 0:
+                option = await self._choose_harness(detection.harnesses)
+                if option is None:
+                    self.say(Level.OPTIONAL, "Setup stopped. Nothing was changed.")
+                    return
+                step = 1
+            elif step == 1:
+                trust = await self._confirm_project_trust(detection, allow_back=True)
+                if trust is BACK:
+                    step = 0
+                    continue
+                if not trust:
+                    return
+                step = 2
+            else:
+                # The review answer decides which MCP command is registered, so it is asked
+                # before the registration -- and before the approval screen that shows that
+                # command. Registering first and asking after is how a semantic install ends
+                # up on the strict route.
+                review = await self._ask_review_mode(allow_back=True)
+                if review == BACK:
+                    step = 1
+                    continue
+                if review is None:
+                    self.say(Level.OPTIONAL, "Setup stopped. Nothing was changed.")
+                    return
+                step = 3
+
+        assert option is not None
         if not await self._connect(option, "policy" if review == "semantic" else "strict"):
             return
         await self._choose_storage(detection)
         await self._run_initial_review(review, connected=True, option=option)
 
-    async def _ask_review_mode(self) -> str | None:
+    async def _ask_review_mode(self, *, allow_back: bool = False) -> str | None:
         """Ask the posture question only; applying the answer belongs to the caller.
 
         Semantic review is listed first, so it is where the cursor rests. That is a choice
@@ -462,7 +488,8 @@ class YoetzTui(App[int]):
                         "Deterministic checks; nothing leaves this computer.",
                     ),
                 ],
-                hint="enter to choose",
+                hint="enter to choose · b to go back" if allow_back else "enter to choose",
+                allow_back=allow_back,
             )
         )
 
@@ -609,7 +636,9 @@ class YoetzTui(App[int]):
                 )
         return options[int(chosen)]
 
-    async def _confirm_project_trust(self, detection: Detection) -> bool:
+    async def _confirm_project_trust(
+        self, detection: Detection, *, allow_back: bool = False
+    ) -> bool | str:
         answer = await self.ask(
             ApprovalView(
                 name="trust",
@@ -617,9 +646,16 @@ class YoetzTui(App[int]):
                 body=render_project_trust(detection, self.body_width),
                 approve_label="Yes, continue",
                 decline_label="No, quit",
-                hint="enter to choose · esc to cancel",
+                hint=(
+                    "enter to choose · b to go back · esc to cancel"
+                    if allow_back
+                    else "enter to choose · esc to cancel"
+                ),
+                allow_back=allow_back,
             )
         )
+        if answer == BACK:
+            return BACK
         if answer != "approve":
             self.say(Level.OPTIONAL, "Setup stopped. This project was not changed.")
             return False

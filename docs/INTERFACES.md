@@ -1447,7 +1447,9 @@ monotonic sample with the same floor rule.
 `HumanCeremonyKind` is exactly `vault_initialize`, `vault_unlock`, `keyring_retry`,
 `portable_recovery`, `provider_credential_set`, `provider_credential_rotate`,
 `privacy_policy_decision`, `privacy_disclosure_decision`, and `idle_relock_policy_change`.
-`CEREMONY_EXPIRY_SECONDS = 60` is the one YZH1/YZS1 challenge/binding expiry. The seven fixed
+`CEREMONY_EXPIRY_SECONDS = 300` is the one YZH1/YZS1 challenge/binding expiry. It bounds a whole
+human ceremony, including the trip to a provider console to mint an API key, so it is a five-minute
+span rather than a keystroke timeout. The seven fixed
 `ConfidentialSecretPurpose` wire codes are `1=vault_initialize`, `2=vault_unlock`,
 `3=portable_recovery`, `4=provider_reauthentication`, `5=provider_credential`,
 `6=privacy_reauthentication`, and `7=security_reauthentication`.

@@ -109,7 +109,7 @@ def _append(value: bytes) -> bytes:
 
 
 def test_frozen_constants_and_all_seven_purpose_codes() -> None:
-    assert CEREMONY_EXPIRY_SECONDS == 60
+    assert CEREMONY_EXPIRY_SECONDS == 300
     assert PASSPHRASE_MIN_BYTES == 16
     assert PASSPHRASE_MAX_BYTES == 1_024
     assert PROVIDER_CREDENTIAL_MAX_BYTES == 8_192
@@ -380,7 +380,7 @@ def test_provider_credential_generic_guard_is_opaque_and_rejects_controls() -> N
 
 def test_monotonic_expiry_is_floor_integer_only_and_safe() -> None:
     assert monotonic_milliseconds(1.9999) == 1_999
-    assert new_binding_expiry_ms(1.9999) == 61_999
+    assert new_binding_expiry_ms(1.9999) == 1_999 + CEREMONY_EXPIRY_SECONDS * 1_000
     for value in (cast(float, 1), -0.1, float("nan"), float("inf"), 2**53 / 1_000):
         with pytest.raises(ValueError, match="monotonic_sample_invalid"):
             monotonic_milliseconds(value)
