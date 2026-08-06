@@ -82,4 +82,13 @@ def test_cancellation_is_not_a_refusal(capsys: pytest.CaptureFixture[str]) -> No
 
 def test_unknown_reasons_have_no_refusal_message() -> None:
     assert ceremony_refusal_message("timeout") is None
-    assert ceremony_refusal_message("secret_rejected") is None
+
+
+def test_secret_rejected_names_the_credential_and_the_retry() -> None:
+    """A refused or unusable key must not look like a dead service; name the retry."""
+
+    message = ceremony_refusal_message("secret_rejected")
+
+    assert message is not None
+    assert "not accepted" in message
+    assert "yoetz provider credential set" in message

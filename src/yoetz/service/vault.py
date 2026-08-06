@@ -601,6 +601,34 @@ class VaultService:
                 reason = "record_missing" if exc.reason == "record_missing" else "vault_tampered"
                 raise VaultError(reason) from exc
 
+    async def discard_provider_credential(self, binding: ProviderCredentialBinding) -> None:
+        """Withdraw one exact provider credential record.
+
+        Called when the provider refused the credential during set-up verification. Absence is
+        not an error: the point is that no unusable key remains, and it is already true.
+        """
+
+        if type(binding) is not ProviderCredentialBinding:
+            raise TypeError("provider_credential_binding_invalid")
+        async with self._mutex:
+            store, _generation = self._ready_store()
+            try:
+                current = store.record_generation(
+                    VaultRecordKind.PROVIDER_CREDENTIAL, binding.record_binding()
+                )
+                if current is None:
+                    self._provider_generations.pop(binding, None)
+                    return
+                store.delete_record(
+                    VaultRecordKind.PROVIDER_CREDENTIAL,
+                    binding.record_binding(),
+                    expected_generation=current,
+                )
+            except EncryptedVaultError as exc:
+                reason = "record_missing" if exc.reason == "record_missing" else "vault_tampered"
+                raise VaultError(reason) from exc
+            self._provider_generations.pop(binding, None)
+
     async def has_provider_credential(self, binding: ProviderCredentialBinding) -> bool:
         """Return structural presence for one exact provider profile without reading its secret."""
 

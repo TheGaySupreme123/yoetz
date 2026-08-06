@@ -1965,7 +1965,85 @@ class _LockedHumanEffects:
             target.action, binding, secret, proof, now_monotonic
         )
         generation = self._vault._provider_generations.get(binding, 1)  # pyright: ignore[reportPrivateUsage]
+        # The credential is the one setup answer nothing downstream can infer. Verify it while
+        # the person who can fix it is still here, rather than leaving the first evidence to a
+        # failed check hours later whose public reason cannot name authentication.
+        if await self._provider_credential_refused(target, binding):
+            raise HumanControlError("secret_rejected")
         return ProviderCredentialResult(target.action, generation, "stored")
+
+    async def _provider_credential_refused(
+        self, target: ProviderCredentialTarget, binding: object
+    ) -> bool:
+        """Probe the freshly stored credential; withdraw and report only an outright refusal.
+
+        Returns True only when the provider refused the credential itself. Every other outcome --
+        a timeout, an unreachable host, an outage, a model this profile cannot answer for -- keeps
+        the credential, because none of them establish that the key is wrong and someone setting
+        up on a flaky connection must not lose a good one.
+        """
+
+        import os
+        import time
+        from datetime import UTC, datetime
+
+        from yoetz.adapters.providers.credential_probe import (
+            PROBE_PURPOSE,
+            probe_provider_credential,
+            probe_request_digest,
+        )
+        from yoetz.config.load import load_config
+        from yoetz.observability.logging import record_bounded_event_without_raising
+        from yoetz.ports.secret_memory import ProviderAttemptAuthBinding
+        from yoetz.protocol.ids import IdKind, new_id
+
+        try:
+            provider = load_config({}, os.environ, None).provider
+        except Exception:
+            return False
+        if (
+            provider is None
+            or provider.provider_id != target.provider_id
+            or provider.model != target.model_id
+            or provider.endpoint_profile_id != target.endpoint_profile_id
+            or provider.endpoint_profile_version != target.endpoint_profile_version
+        ):
+            # The credential just stored is not the configured destination. Probing would hit a
+            # different host or model, so leave the key stored and unverified.
+            return False
+        try:
+            attempt = ProviderAttemptAuthBinding(
+                provider_id=target.provider_id,
+                model_id=target.model_id,
+                endpoint_profile_id=target.endpoint_profile_id,
+                endpoint_profile_version=target.endpoint_profile_version,
+                purpose=PROBE_PURPOSE,
+                authorization_scope_digest=target.scope_digest,
+                purpose_digest=canonical_digest({"purpose": PROBE_PURPOSE}),
+                dispatch_id=str(new_id(IdKind.EGRESS_DISPATCH)),
+                request_body_digest=probe_request_digest(provider),
+                service_generation=self._lifecycle.instance.generation,
+                monotonic_deadline=time.monotonic() + 30.0,
+            )
+            handle = await self._vault.provider_credential(attempt)
+            result = await probe_provider_credential(
+                provider, handle, attempt, now=datetime.now(UTC)
+            )
+        except Exception:
+            # A probe must never be why a ceremony fails. An unverified credential is stored.
+            return False
+        record_bounded_event_without_raising(
+            component="provider_credential",
+            operation=f"credential_probe_{result.outcome}",
+            reason="accepted" if result.failure_class is None else result.failure_class.value,
+        )
+        if result.outcome != "rejected":
+            return False
+        from yoetz.service.vault import ProviderCredentialBinding
+
+        if type(binding) is ProviderCredentialBinding:
+            await self._vault.discard_provider_credential(binding)
+        return True
 
     async def decide_privacy(
         self,

@@ -303,6 +303,14 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
+- A provider credential was stored without ever being tried, so a wrong or expired API key looked
+  identical to a working one until a check failed much later with a reason that could not name
+  authentication. Setting a credential now dispatches one minimal authenticated request — a fixed
+  literal body with a one-token ceiling, no task content — through the same hardened one-attempt
+  transport a real review uses. Only the provider refusing the credential (401/403) withdraws it
+  and fails the ceremony with `secret_rejected`; an authenticated rate limit counts as working,
+  and a timeout, unreachable host, outage, or unrecognized model keeps the credential, because
+  none of those establish that the key is wrong.
 - A confidential ceremony expired after 60 seconds, which is a keystroke timeout rather than a
   human one: provisioning a provider credential means leaving the terminal for the provider
   console to mint an API key, and a minute did not cover it. The single

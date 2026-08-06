@@ -1399,6 +1399,12 @@ is the matching `provider_credential_set|provider_credential_rotate`, bound to t
 service/vault generations with no policy generation. The vault consumes the proof in the same
 non-interleavable mutation section as its record-generation CAS. Human control cannot exchange a
 proof for a weaker reusable binding, and no credential record can commit without that exact proof.
+After a successful store, human control may dispatch one minimal `credential-probe` request through
+the same one-attempt credential transport a real inference attempt uses. Only a provider refusal of
+the credential (HTTP 401/403) withdraws the record via
+`VaultService.discard_provider_credential(binding)` and fails the ceremony as `secret_rejected`; a
+rate limit counts as accepted, and timeout, transport failure, outage, or unsupported-profile
+answers leave the stored credential in place as unverified.
 
 Pristine automatic keyring initialization requires both an approved create-if-absent/round-trip
 keyring probe and an installed `UserPresenceCapability` matching an active
