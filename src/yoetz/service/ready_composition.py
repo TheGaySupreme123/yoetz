@@ -1503,6 +1503,17 @@ def _map_provider_outcome(
         elif failure_class is SemanticFailureClass.QUOTA_EXHAUSTED:
             reason = SemanticReason.PROVIDER_QUOTA_EXHAUSTED
         else:
+            # `transport_unavailable` is the public catch-all for every remaining class:
+            # a rejected credential, a forbidden binding, a provider outage, an unsupported
+            # profile, and a genuine socket failure all arrive here and read identically. The
+            # public taxonomy stays closed, but the owner needs the distinction to act, so the
+            # exact class is recorded as a durable owner-only diagnostic. `SemanticFailureClass`
+            # is a closed enum, so this carries no provider-controlled text.
+            record_bounded_event_without_raising(
+                component="semantic_composition",
+                operation="semantic_provider_attempt_unavailable",
+                reason="unclassified" if failure_class is None else failure_class.value,
+            )
             reason = SemanticReason.TRANSPORT_UNAVAILABLE
     else:
         return FinalSemanticEvaluation(SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE)
