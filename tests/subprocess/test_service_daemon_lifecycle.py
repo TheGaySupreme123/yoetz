@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import queue
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -202,15 +204,21 @@ def _run_control_stop(lock_path: Path, runtime_path: Path) -> subprocess.Complet
 
 
 def _readline_bounded(process: subprocess.Popen[str], seconds: float = 10.0) -> str:
-    assert process.stdout is not None
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        line = process.stdout.readline()
-        if line:
-            return line.strip()
-        if process.poll() is not None:
-            break
-        time.sleep(0.01)
+    stdout = process.stdout
+    assert stdout is not None
+    lines: queue.Queue[str] = queue.Queue(maxsize=1)
+    reader = threading.Thread(
+        target=lambda: lines.put(stdout.readline()),
+        name="yoetz-test-daemon-stdout",
+        daemon=True,
+    )
+    reader.start()
+    try:
+        line = lines.get(timeout=seconds)
+    except queue.Empty as exc:
+        raise AssertionError("daemon did not publish bounded startup status") from exc
+    if line:
+        return line.strip()
     raise AssertionError("daemon did not publish bounded startup status")
 
 
