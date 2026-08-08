@@ -137,7 +137,19 @@ def wait_status(
     deadline = time.monotonic() + timeout
     last_stderr = b""
     while time.monotonic() < deadline:
-        observed = run_client(environment, "status")
+        # The endpoint can exist while the daemon is still completing its bounded startup
+        # integrity checks. A probe may therefore connect successfully and then reach its own
+        # deadline before the handshake is served. Treat that like every other not-ready sample
+        # and keep polling within this helper's outer deadline instead of aborting the test on the
+        # first cold-start probe.
+        remaining = deadline - time.monotonic()
+        try:
+            observed = run_client(environment, "status", timeout=remaining)
+        except subprocess.TimeoutExpired:
+            if all(process.poll() is not None for process in processes):
+                break
+            time.sleep(0.02)
+            continue
         if observed.returncode == 0:
             assert observed.stderr == b""
             decoded = json.loads(observed.stdout)
