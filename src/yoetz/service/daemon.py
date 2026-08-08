@@ -1146,7 +1146,10 @@ class ServiceDaemon:
             async with asyncio.timeout(_CONTROL_RESPONSE_WRITE_DEADLINE_SECONDS):
                 await write_control_frame(stream, result)
         if request.method is ControlMethod.SERVICE_STOP and result.outcome == "ok":
-            await self.stop()
+            # The connection owns only response delivery. If it awaits teardown here, peer EOF
+            # makes the connection finalizer cancel this call while singleton release is in flight.
+            # Wake the foreground owner instead so disconnect cleanup cannot interrupt shutdown.
+            self._stop_event.set()
 
     def _result(self, request: ControlCallRequest, body: object) -> ControlResult:
         result = ControlResult(
