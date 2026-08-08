@@ -7,7 +7,7 @@ from typing import cast
 
 import pytest
 
-from builders.privacy_policies import INSTALLATION_ID, minimal_external_policy
+from builders.privacy_policies import INSTALLATION_ID, local_only_policy, minimal_external_policy
 from builders.privacy_widenings import llm_channel, with_llm
 from yoetz.application.egress import PrivacyCoordinator, SemanticEgressBlocked
 from yoetz.domain.privacy import (
@@ -23,6 +23,7 @@ from yoetz.domain.privacy import (
     PrivacyOutcome,
     PrivacyPolicy,
     PrivacyReason,
+    ProviderBinding,
 )
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
@@ -172,7 +173,10 @@ def _policy_with_ceilings(
 
 
 def _candidate(
-    *, scope_kind: AuthorizationScopeKind = AuthorizationScopeKind.TASK
+    *,
+    scope_kind: AuthorizationScopeKind = AuthorizationScopeKind.TASK,
+    purpose: str = "semantic-review",
+    binding: ProviderBinding | None = None,
 ) -> CandidateContext:
     scope = AuthorizationScope(
         scope_kind,
@@ -183,13 +187,13 @@ def _candidate(
         else None,
         _REQUEST if scope_kind is AuthorizationScopeKind.REQUEST else None,
     )
-    binding = llm_channel(minimal_external_policy()).provider_binding
+    binding = binding or llm_channel(minimal_external_policy()).provider_binding
     assert binding is not None
     return CandidateContext(
         _REQUEST,
         EgressChannel.LLM_INFERENCE,
         None,
-        "semantic-review",
+        purpose,
         scope,
         _SUBJECT,
         binding,
@@ -288,6 +292,54 @@ async def test_within_ceilings_stamps_policy_intersect_case_max() -> None:
     request = audit.prepared[0]
     assert request.max_bytes == 100
     assert request.max_tokens == 8
+
+
+@pytest.mark.anyio
+async def test_credential_probe_requires_an_explicit_purpose_and_is_capped_at_one_token() -> None:
+    denied, denied_audit = _coordinator(minimal_external_policy(), byte_count=100, token_count=8)
+    denied_result = await denied.evaluate_semantic(
+        _candidate(purpose="credential-probe"),
+        _deadline(),
+    )
+    assert isinstance(denied_result, SemanticEgressBlocked)
+    assert denied_result.reason is PrivacyReason.PURPOSE_NOT_ALLOWED
+    assert denied_audit.prepared == []
+
+    admitted_policy = with_llm(
+        minimal_external_policy(),
+        allowed_purposes=("credential-probe", "semantic-review"),
+    )
+    admitted, admitted_audit = _coordinator(admitted_policy, byte_count=100, token_count=8)
+    result = await admitted.evaluate_semantic(
+        _candidate(purpose="credential-probe"),
+        _deadline(),
+    )
+    assert admitted_audit.prepared, f"credential probe must reach prepare; got {result!r}"
+    assert admitted_audit.prepared[0].max_tokens == 1
+
+
+@pytest.mark.anyio
+async def test_disabled_llm_policy_still_rejects_a_local_model_unknown_purpose() -> None:
+    """A local transport does not bypass the policy's purpose fence when LLM egress is off."""
+
+    coordinator, audit = _coordinator(local_only_policy(), byte_count=100, token_count=1)
+    result = await coordinator.evaluate_semantic(
+        _candidate(
+            purpose="credential-probe",
+            binding=ProviderBinding(
+                "local-model",
+                "test-model",
+                "local-model-af-unix",
+                "1.0.0",
+                "local_af_unix",
+            ),
+        ),
+        _deadline(),
+    )
+
+    assert isinstance(result, SemanticEgressBlocked)
+    assert result.reason is PrivacyReason.PURPOSE_NOT_ALLOWED
+    assert audit.prepared == []
 
 
 @pytest.mark.anyio

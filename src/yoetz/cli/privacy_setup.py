@@ -133,6 +133,9 @@ class PrivacySetupAnswers:
     updates: bool
     capability_testing: bool
     authorization_scope: AuthorizationScopeKind
+    # This request is distinct from semantic review: it carries only a fixed literal and is
+    # available solely while a person is deliberately setting a provider credential.
+    credential_probe: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +219,8 @@ def build_candidate_policy(
     # raise network_egress_permitted without binding a semantic provider.
     if answers.network_egress != (answers.external_provider is not None):
         raise ValueError("privacy_setup_provider_binding_required")
+    if answers.credential_probe and not answers.network_egress:
+        raise ValueError("privacy_setup_credential_probe_requires_provider")
     if (
         answers.external_provider is not None
         and answers.external_provider.endpoint_profile_id in _UNCONSTRAINED_ROUTER_ENDPOINTS
@@ -242,7 +247,11 @@ def build_candidate_policy(
             answers.content_categories,
             answers.content_data_classes,
             answers.external_provider,
-            ("semantic-review",),
+            tuple(
+                purpose
+                for purpose in ("credential-probe", "semantic-review")
+                if purpose != "credential-probe" or answers.credential_probe
+            ),
             answers.authorization_scope,
             answers.request_confirmation,
             _CASE_MAX_BYTES,
@@ -806,6 +815,7 @@ def _render_review(candidate: PrivacyPolicy) -> None:
         "  Allowed data classes: "
         + (", ".join(item.value for item in llm.allowed_data_classes) or "none")
     )
+    typer.echo("  Allowed purposes: " + (", ".join(llm.allowed_purposes) or "none"))
     typer.echo(f"  Authorization ceiling: {llm.scope_ceiling.value}")
     typer.echo(f"  Per-request confirmation: {'yes' if llm.preview_required else 'no'}")
     typer.echo(
@@ -920,6 +930,7 @@ def _choose_candidate(
     *,
     recipe_hint: PrivacyRecipe | None,
     offer_recommended: bool,
+    credential_probe_authorized: bool,
 ) -> PrivacyPolicy | None:
     """Select the exact candidate policy, or ``None`` when the user declined outright.
 
@@ -938,7 +949,10 @@ def _choose_candidate(
         typer.echo(tradeoff)
         candidate = _confirmed_candidate(
             current,
-            _recipe_answers(recommended, current, external),
+            replace(
+                _recipe_answers(recommended, current, external),
+                credential_probe=credential_probe_authorized,
+            ),
             "Use this recommended privacy policy?",
             default=True,
         )
@@ -954,13 +968,19 @@ def _choose_candidate(
     if recipe == "custom":
         return _confirmed_candidate(
             current,
-            _ask_custom_answers(current, external, local),
+            replace(
+                _ask_custom_answers(current, external, local),
+                credential_probe=credential_probe_authorized,
+            ),
             "Use this exact custom privacy policy?",
             default=False,
         )
     return _confirmed_candidate(
         current,
-        _recipe_answers(recipe, current, external),
+        replace(
+            _recipe_answers(recipe, current, external),
+            credential_probe=credential_probe_authorized,
+        ),
         f"Create this exact privacy proposal ({_RECIPE_LABELS[recipe]})?",
         default=False,
     )
@@ -970,6 +990,7 @@ async def run_privacy_setup(
     *,
     recipe_hint: PrivacyRecipe | None = None,
     offer_recommended: bool = False,
+    credential_probe_authorized: bool = False,
 ) -> PrivacySetupReport:
     """Run the trusted questionnaire and apply only an explicitly approved draft."""
 
@@ -988,6 +1009,7 @@ async def run_privacy_setup(
             local,
             recipe_hint=recipe_hint,
             offer_recommended=offer_recommended,
+            credential_probe_authorized=credential_probe_authorized,
         )
     except ValueError as error:
         return PrivacySetupReport("failed", current.profile.value, reason=str(error))

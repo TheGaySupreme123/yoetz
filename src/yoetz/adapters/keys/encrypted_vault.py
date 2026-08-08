@@ -288,13 +288,19 @@ class EncryptedVaultStore:
         handle = self.load_record(VaultRecordKind.VAULT_SENTINEL, structural_binding)
         handle.consume(SecretConsumer.VAULT_ROOT, lambda view: None)
 
-    def delete_after_migration(
+    def delete_record(
         self,
         kind: VaultRecordKind,
         structural_binding: Mapping[str, str],
         *,
         expected_generation: int,
     ) -> None:
+        """Remove one exact record under compare-and-set on its index generation.
+
+        Used after a proven migration, and to withdraw a provider credential the provider
+        itself refused, so a key that cannot work is never left behind as if it could.
+        """
+
         binding = _validate_binding(kind, structural_binding)
         with self._lock:
             _, locator = self._ready_keys()

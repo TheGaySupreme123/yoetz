@@ -206,6 +206,13 @@ Human presence remains required only for policy widening, credential mutation, a
 `confirm_every_request` attempt, or a finding waiver. Never-send and out-of-scope material cannot be
 approved under any profile.
 
+Provider-credential setup separately asks whether to authorize one `credential-probe` request after
+the secret is stored. The privacy draft names that purpose alongside `semantic-review`; declining
+leaves it out, so the egress gateway blocks verification rather than treating external-review
+consent as an implicit probe grant. The probe body is a fixed bounded structural literal, never the
+credential or task content, and its authorized/blocked/attempted outcome is receipted through the
+ordinary egress path.
+
 ## Errors and edge cases
 
 - Closing, disconnecting, or crashing before `review`/`tighten`/decision commits nothing.

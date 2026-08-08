@@ -303,6 +303,29 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
+- A provider credential was stored without ever being tried, so a wrong or expired API key looked
+  identical to a working one until a check failed much later with a reason that could not name
+  authentication. Setting a credential now dispatches one minimal authenticated request — a fixed
+  literal body with a one-token ceiling, no task content — through the same hardened one-attempt
+  transport a real review uses. Only the provider refusing the credential (401/403) withdraws it
+  and fails the ceremony with `secret_rejected`; an authenticated rate limit counts as working,
+  and a timeout, unreachable host, outage, or unrecognized model keeps the credential, because
+  none of those establish that the key is wrong.
+- A confidential ceremony expired after 60 seconds, which is a keystroke timeout rather than a
+  human one: provisioning a provider credential means leaving the terminal for the provider
+  console to mint an API key, and a minute did not cover it. The single
+  `CEREMONY_EXPIRY_SECONDS` binding/challenge expiry is now five minutes. Foreground-terminal
+  presence, the one-shot challenge, and the service/vault generation binding are unchanged.
+- First run's questions could only be answered or abandoned. `b` now goes back one question from
+  the review-mode and project-trust steps, distinct from `Esc`, which still cancels and changes
+  nothing. Back is offered only on questions: it is inert on the integration approval, which
+  applies a change, and a searchable picker still treats `b` as a query character.
+- Semantic review reported `transport_unavailable` for every unavailable provider class except
+  rate-limit and quota, so a rejected API key, a forbidden binding, a provider outage, and a real
+  socket failure were indistinguishable on every owner-facing surface. The exact
+  `SemanticFailureClass` is recorded as a durable owner-only diagnostic when present;
+  `unclassified` is recorded when no class is available. The public taxonomy is unchanged and the
+  record carries no provider-controlled text.
 - The terminal interface previewed the Codex integration on one MCP route and applied it on
   another, so on a fresh installation the approved preview digest never matched and first run's
   Codex connection failed as `preview_stale`. The route now travels on the approved plan, and the

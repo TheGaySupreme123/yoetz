@@ -1399,6 +1399,16 @@ is the matching `provider_credential_set|provider_credential_rotate`, bound to t
 service/vault generations with no policy generation. The vault consumes the proof in the same
 non-interleavable mutation section as its record-generation CAS. Human control cannot exchange a
 proof for a weaker reusable binding, and no credential record can commit without that exact proof.
+After a successful store, human control may dispatch one minimal `credential-probe` request only
+when the effective `llm_inference` policy explicitly lists that purpose. Provider setup asks for
+that separate authorization, and the resulting policy preview and widening decision show the exact
+allowed-purpose set; enabling external review alone never adds the probe. The probe carries only
+the fixed structural literal and traverses the same authorization, one-attempt credential
+transport, and durable egress-receipt path as inference. Only a provider refusal of the credential
+(HTTP 401/403) withdraws the record via `VaultService.discard_provider_credential(binding)` and
+fails the ceremony as `secret_rejected`; a rate limit counts as accepted, and timeout, transport
+failure, outage, or unsupported-profile answers leave the stored credential in place as
+unverified.
 
 Pristine automatic keyring initialization requires both an approved create-if-absent/round-trip
 keyring probe and an installed `UserPresenceCapability` matching an active
@@ -1447,7 +1457,9 @@ monotonic sample with the same floor rule.
 `HumanCeremonyKind` is exactly `vault_initialize`, `vault_unlock`, `keyring_retry`,
 `portable_recovery`, `provider_credential_set`, `provider_credential_rotate`,
 `privacy_policy_decision`, `privacy_disclosure_decision`, and `idle_relock_policy_change`.
-`CEREMONY_EXPIRY_SECONDS = 60` is the one YZH1/YZS1 challenge/binding expiry. The seven fixed
+`CEREMONY_EXPIRY_SECONDS = 300` is the one YZH1/YZS1 challenge/binding expiry. It bounds a whole
+human ceremony, including the trip to a provider console to mint an API key, so it is a five-minute
+span rather than a keystroke timeout. The seven fixed
 `ConfidentialSecretPurpose` wire codes are `1=vault_initialize`, `2=vault_unlock`,
 `3=portable_recovery`, `4=provider_reauthentication`, `5=provider_credential`,
 `6=privacy_reauthentication`, and `7=security_reauthentication`.

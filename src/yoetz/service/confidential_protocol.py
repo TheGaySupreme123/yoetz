@@ -110,7 +110,12 @@ MAX_SECRET_BINDING_BYTES: Final = 4_096
 PASSPHRASE_MIN_BYTES: Final = 16
 PASSPHRASE_MAX_BYTES: Final = 1_024
 PROVIDER_CREDENTIAL_MAX_BYTES: Final = 8_192
-CEREMONY_EXPIRY_SECONDS: Final = 60
+# One ceremony's whole human span, not one keystroke's. Provisioning a provider credential means
+# leaving the terminal, opening the provider console, minting a key, and coming back; a minute is
+# not enough for that, and the failure it produced was a retry under time pressure rather than a
+# refusal. The window is bounded by foreground-terminal presence, a one-shot challenge, and the
+# service/vault generation binding, none of which this changes.
+CEREMONY_EXPIRY_SECONDS: Final = 300
 # Half the 64 KiB frame ceiling. A policy diff is bounded by the closed field vocabulary, so a
 # preview anywhere near this is malformed rather than merely large, and refusing it here keeps
 # the failure at the protocol boundary instead of at frame encoding.

@@ -82,6 +82,13 @@ CEREMONY_REFUSAL_MESSAGES: Final = MappingProxyType(
             "state_forbidden: the vault must be unlocked before this ceremony; "
             "run 'yoetz service unlock'"
         ),
+        # Covers both a malformed paste and a provider that refused the key. Either way nothing
+        # durable should look "configured" when the credential cannot be used.
+        "secret_rejected": (
+            "secret_rejected: that credential was not accepted, so nothing was saved. "
+            "Check the key is complete, current, and belongs to the configured provider, "
+            "then run 'yoetz provider credential set' again"
+        ),
     }
 )
 

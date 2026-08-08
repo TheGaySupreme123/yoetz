@@ -60,6 +60,7 @@ def _answers(**overrides: object) -> PrivacySetupAnswers:
         "updates": False,
         "capability_testing": False,
         "authorization_scope": AuthorizationScopeKind.TASK,
+        "credential_probe": False,
     }
     values.update(overrides)
     return PrivacySetupAnswers(**values)  # type: ignore[arg-type]
@@ -83,6 +84,7 @@ def test_assisted_review_is_bound_to_one_provider_and_bounded_categories() -> No
     assert llm.provider_binding is not None
     assert llm.provider_binding.provider_id == "fireworks"
     assert llm.scope_ceiling is AuthorizationScopeKind.TASK
+    assert llm.allowed_purposes == ("semantic-review",)
     assert llm.allowed_data_classes == (
         DataClass.ORDINARY_USER_CONTENT,
         DataClass.PUBLIC_STRUCTURAL,
@@ -104,6 +106,27 @@ def test_unavailable_network_channels_fail_closed() -> None:
             _answers(telemetry=True),
             now=datetime(2026, 7, 29, tzinfo=UTC),
         )
+
+
+def test_credential_probe_requires_explicit_provider_authorization() -> None:
+    with pytest.raises(ValueError, match="privacy_setup_credential_probe_requires_provider"):
+        build_candidate_policy(
+            local_only_policy(),
+            _answers(network_egress=False, external_provider=None, credential_probe=True),
+            now=datetime(2026, 7, 29, tzinfo=UTC),
+        )
+
+    candidate = build_candidate_policy(
+        local_only_policy(),
+        _answers(credential_probe=True),
+        now=datetime(2026, 7, 29, tzinfo=UTC),
+    )
+    llm = next(
+        channel
+        for channel in candidate.channel_policies
+        if channel.channel is EgressChannel.LLM_INFERENCE
+    )
+    assert llm.allowed_purposes == ("credential-probe", "semantic-review")
 
 
 def test_update_checks_may_be_enabled_without_llm() -> None:

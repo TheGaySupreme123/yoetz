@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, Final
 
 from rich.text import Text
 from textual import events
@@ -35,6 +35,7 @@ from yoetz.tui.text import truncate, wrap
 from yoetz.tui.widgets.style import styled, styled_line
 
 __all__ = [
+    "BACK",
     "ApprovalView",
     "DetailsView",
     "Option",
@@ -42,6 +43,11 @@ __all__ = [
     "TextEntryView",
     "ViewDismissed",
 ]
+
+# Going back and cancelling are different answers and must not share one. `Esc` still means
+# "stop, change nothing"; this says "re-ask the previous question". The NUL prefix keeps it
+# outside the option-key vocabulary, so no view can offer a row that collides with it.
+BACK: Final = "\x00back"
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +147,7 @@ class SelectionView(BaseView):
         searchable: bool = False,
         hint: str = "",
         search_placeholder: str = "Type to filter",
+        allow_back: bool = False,
     ) -> None:
         super().__init__(name=name, title=title, hint=hint)
         self._all_options = tuple(options)
@@ -149,6 +156,11 @@ class SelectionView(BaseView):
         self._searchable = searchable
         self._placeholder = search_placeholder
         self._cursor = self._first_enabled(self._visible)
+        # A searchable view gives every printable key to the query, so 'b' there is a letter
+        # the user is typing, never a command. Back is offered only where nothing owns input.
+        self._allow_back = allow_back and not searchable
+        if self._allow_back and BACK in {option.key for option in self._all_options}:
+            raise ValueError("view_back_key_reserved")
 
     # -- option state ---------------------------------------------------
 
@@ -338,6 +350,11 @@ class SelectionView(BaseView):
         # Printable shortcuts are only ever read when no field owns the keyboard.
         if not self.accepts_printable_shortcuts:
             return
+        if self._allow_back and key.lower() == "b":
+            event.stop()
+            event.prevent_default()
+            self.dismiss(BACK)
+            return
         if key.isdigit() and key != "0":
             event.stop()
             event.prevent_default()
@@ -365,6 +382,7 @@ class ApprovalView(SelectionView):
         extra: Sequence[Option] = (),
         default_to_safe: bool = False,
         hint: str = "enter to choose · esc to cancel · D for technical details",
+        allow_back: bool = False,
     ) -> None:
         options = [
             Option(approve_key, approve_label),
@@ -372,7 +390,13 @@ class ApprovalView(SelectionView):
             *extra,
         ]
         super().__init__(
-            name=name, title=title, body=body, options=options, searchable=False, hint=hint
+            name=name,
+            title=title,
+            body=body,
+            options=options,
+            searchable=False,
+            hint=hint,
+            allow_back=allow_back,
         )
         if default_to_safe:
             self._cursor = 1

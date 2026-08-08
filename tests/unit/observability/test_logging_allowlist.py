@@ -10,10 +10,12 @@ import pytest
 
 from builders.clock import frozen_clock
 from yoetz.config.models import LoggingConfig
+from yoetz.domain.findings import SemanticFailureClass
 from yoetz.observability.logging import (
     LogMode,
     configure_logging,
     get_logger,
+    record_bounded_event_without_raising,
     record_fatal_exception_without_raising,
     record_unexpected_exception_without_raising,
 )
@@ -99,6 +101,28 @@ def test_allowlisted_fields_are_preserved(capsys: pytest.CaptureFixture[str]) ->
             "sqlite_source_id_hash": _SQLITE_HASH,
         }
     ]
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [*(failure.value for failure in SemanticFailureClass), "unclassified"],
+)
+def test_semantic_provider_unavailable_diagnostic_tokens_are_accepted(
+    reason: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure()
+
+    record_bounded_event_without_raising(
+        component="semantic_composition",
+        operation="semantic_provider_attempt_unavailable",
+        reason=reason,
+    )
+
+    records = _records(capsys.readouterr().err)
+    assert len(records) == 1
+    assert records[0]["operation"] == "semantic_provider_attempt_unavailable"
+    assert records[0]["reason"] == reason
 
 
 def test_payload_and_secret_fields_are_redacted(capsys: pytest.CaptureFixture[str]) -> None:

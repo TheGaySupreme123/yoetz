@@ -537,22 +537,29 @@ def _build_body_object(case: ApprovedOutboundCase) -> dict[str, JsonValue]:
         payload_value = strict_json_parse(case.payload)
     except Exception as exc:
         raise ValueError("openai_case_payload_invalid") from exc
-    body: dict[str, JsonValue] = {
-        "model": case.provider_binding.model_id,
-        "input": [
-            {"role": "system", "content": _SYSTEM_INSTRUCTION},
-            {"role": "user", "content": payload_value},
-        ],
-        "max_output_tokens": OPENAI_MAX_OUTPUT_TOKENS,
-        "text": {
-            "format": {
-                "type": "json_schema",
-                "name": "yoetz_semantic_judgment",
-                "strict": True,
-                "schema": JUDGMENT_JSON_SCHEMA,
-            }
-        },
-    }
+    if case.purpose == "credential-probe":
+        body: dict[str, JsonValue] = {
+            "model": case.provider_binding.model_id,
+            "input": payload_value,
+            "max_output_tokens": 1,
+        }
+    else:
+        body = {
+            "model": case.provider_binding.model_id,
+            "input": [
+                {"role": "system", "content": _SYSTEM_INSTRUCTION},
+                {"role": "user", "content": payload_value},
+            ],
+            "max_output_tokens": OPENAI_MAX_OUTPUT_TOKENS,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "yoetz_semantic_judgment",
+                    "strict": True,
+                    "schema": JUDGMENT_JSON_SCHEMA,
+                }
+            },
+        }
     # Fireworks otherwise retains complete Responses conversations for 30 days; OpenAI Responses
     # otherwise stores application state. This exact opt-out is part of the committed request body,
     # while each provider's separately documented abuse-monitoring retention may still apply.
@@ -585,6 +592,16 @@ def render_case(case: ApprovedOutboundCase) -> RenderedOpenAIRequest:
         raise ValueError("openai_rendered_body_too_large")
     body_digest = "sha256:" + hashlib.sha256(body).hexdigest()
 
+    prompt_digest = (
+        "sha256:" + hashlib.sha256(case.payload).hexdigest()
+        if case.purpose == "credential-probe"
+        else _PROMPT_DIGEST
+    )
+    schema_digest = (
+        canonical_digest({"kind": "credential-probe", "version": 1})
+        if case.purpose == "credential-probe"
+        else _SCHEMA_DIGEST
+    )
     return RenderedOpenAIRequest(
         body=body,
         body_sha256=body_digest,
@@ -592,8 +609,8 @@ def render_case(case: ApprovedOutboundCase) -> RenderedOpenAIRequest:
         model=case.provider_binding.model_id,
         endpoint_profile_id=case.provider_binding.endpoint_profile_id,
         endpoint_profile_version=case.provider_binding.endpoint_profile_version,
-        prompt_digest=_PROMPT_DIGEST,
-        schema_digest=_SCHEMA_DIGEST,
+        prompt_digest=prompt_digest,
+        schema_digest=schema_digest,
     )
 
 

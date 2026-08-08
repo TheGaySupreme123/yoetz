@@ -192,6 +192,42 @@ async def test_provider_credential_is_exact_attempt_bound_and_one_use(tmp_path: 
 
 
 @pytest.mark.anyio
+async def test_discard_provider_credential_withdraws_an_unusable_key(tmp_path: Path) -> None:
+    """A provider that refused the key must leave no stored record that looks configured."""
+
+    memory = LocalSecretMemory()
+    service = _service(tmp_path, memory, _Clock())
+    await _initialize(service, memory)
+    binding = provider_credential_profile_binding(
+        "openai",
+        "gpt-5",
+        "openai-responses",
+        "1",
+    )
+    proof = HumanAuthorizationProof(
+        "proof-test",
+        "provider_credential_set",
+        binding.target_digest("set"),
+        7,
+        service.generation,
+        None,
+        9.0,
+        20.0,
+    )
+    credential = memory.capture(
+        SecretPurpose.PROVIDER_CREDENTIAL, bytearray(b"sk-test-token-value")
+    )
+    await service.store_provider_credential("set", binding, credential, proof, 10.0)
+    assert await service.has_provider_credential(binding) is True
+
+    await service.discard_provider_credential(binding)
+
+    assert await service.has_provider_credential(binding) is False
+    # Idempotent: already-absent is success, not an error.
+    await service.discard_provider_credential(binding)
+
+
+@pytest.mark.anyio
 async def test_uninitialized_keyring_has_no_passphrase_fallback(tmp_path: Path) -> None:
     memory = LocalSecretMemory()
     service = _service(tmp_path, memory, _Clock())

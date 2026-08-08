@@ -15,7 +15,7 @@ import importlib.util
 import io
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, cast
@@ -1081,6 +1081,7 @@ async def _interactive_provider_setup(
     *,
     provider_choice: str | None = None,
     model: str | None = None,
+    before_credential: Callable[[], Awaitable[bool]] | None = None,
 ) -> tuple[dict[str, JsonValue], dict[str, JsonValue]]:
     """Run trusted local setup ceremonies while keeping secrets out of wizard state."""
 
@@ -1222,6 +1223,10 @@ async def _interactive_provider_setup(
     # already has a credential. This also makes a repeated setup run idempotent: an existing
     # credential is shown as present and is never requested again.
     service = await _restart_service_for_semantic_composition()
+    if before_credential is not None and not await before_credential():
+        provider_report["credential_reason"] = "privacy_setup_incomplete"
+        wipe_auto_passphrase()
+        return service, provider_report
     credential_before: bool | None = None
     if service.get("state") == "ready":
         from yoetz.cli.provider_status import provider_status_report
@@ -1382,10 +1387,36 @@ async def run_provider_setup(
     if not service.get("reachable"):
         typer.echo("provider_setup_failed: service_unavailable", err=True)
         return 20
+    privacy_result: object | None = None
+
+    async def authorize_provider_channel() -> bool:
+        nonlocal privacy_result
+        from yoetz.cli.privacy_setup import run_privacy_setup
+        from yoetz.cli.unlock import HumanCeremonyCliError
+        from yoetz.ports.control import ControlError
+
+        typer.echo("")
+        typer.echo("Choose the exact disclosure policy before the API key can be tested.")
+        credential_probe_authorized = typer.confirm(
+            "After storage, permit one fixed, content-free request to verify this API key?",
+            default=True,
+        )
+        try:
+            privacy_result = await run_privacy_setup(
+                recipe_hint="assisted_review",
+                offer_recommended=True,
+                credential_probe_authorized=credential_probe_authorized,
+            )
+        except (ControlError, HumanCeremonyCliError, OSError, ValueError) as error:
+            typer.echo(f"privacy_setup_failed: {type(error).__name__}", err=True)
+            return False
+        return getattr(privacy_result, "outcome", "failed") in {"configured", "unchanged"}
+
     service, provider_report = await _interactive_provider_setup(
         service,
         provider_choice=provider_choice,
         model=model,
+        before_credential=authorize_provider_channel,
     )
     binding = provider_report.get("binding")
     credential = provider_report.get("credential")
@@ -1404,29 +1435,11 @@ async def run_provider_setup(
         if type(reason) is str:
             typer.echo(f"Reason: {reason}")
         return 20
-    from yoetz.cli.privacy_setup import run_privacy_setup
-    from yoetz.cli.unlock import HumanCeremonyCliError
-    from yoetz.ports.control import ControlError
-
-    typer.echo("")
-    typer.echo("Provider credential stored. Now choose the exact disclosure policy it may use.")
-    try:
-        privacy = await run_privacy_setup(
-            recipe_hint="assisted_review",
-            offer_recommended=True,
-        )
-    except (ControlError, HumanCeremonyCliError, OSError, ValueError) as error:
-        typer.echo(
-            f"privacy_setup_failed: {type(error).__name__}; the credential remains stored but inert",
-            err=True,
-        )
-        return 20
-    if privacy.outcome in {"cancelled", "failed"}:
-        typer.echo(
-            "No standing disclosure policy was approved; the credential remains stored but inert."
-        )
-    _emit_provider_setup_layer_report(privacy_outcome=privacy.outcome)
-    if privacy.outcome == "failed":
+    privacy_outcome = (
+        "not_attempted" if privacy_result is None else getattr(privacy_result, "outcome", "failed")
+    )
+    _emit_provider_setup_layer_report(privacy_outcome=privacy_outcome)
+    if privacy_outcome == "failed":
         return 20
     typer.echo(
         "Preview Codex MCP registration again to review the policy route command now that "
@@ -1586,20 +1599,22 @@ async def run_setup_wizard(
     }
     semantic_status: dict[str, JsonValue] | None = None
     if interactive and review_mode == "semantic":
-        service, provider = await _interactive_provider_setup(service)
-        if (
-            service.get("state") == "ready"
-            and provider.get("binding") == "configured"
-            and provider.get("credential") == "stored"
-        ):
+
+        async def authorize_provider_channel() -> bool:
+            nonlocal privacy
             from yoetz.cli.privacy_setup import run_privacy_setup
             from yoetz.cli.unlock import HumanCeremonyCliError
             from yoetz.ports.control import ControlError
 
+            credential_probe_authorized = typer.confirm(
+                "After storage, permit one fixed, content-free request to verify this API key?",
+                default=True,
+            )
             try:
                 privacy_result = await run_privacy_setup(
                     recipe_hint="assisted_review",
                     offer_recommended=True,
+                    credential_probe_authorized=credential_probe_authorized,
                 )
             except (ControlError, HumanCeremonyCliError, OSError, ValueError) as error:
                 reason = getattr(error, "reason", None)
@@ -1615,19 +1630,29 @@ async def run_setup_wizard(
                     "profile": "unknown",
                     "reason": reason if type(reason) is str else "privacy_setup_failed",
                 }
-            else:
-                privacy = {
-                    "outcome": privacy_result.outcome,
-                    "profile": privacy_result.profile,
-                    "proposal_id": privacy_result.proposal_id,
-                    "reason": privacy_result.reason,
-                }
-                if privacy_result.outcome in {"configured", "unchanged"}:
-                    service = await _restart_service_for_semantic_composition()
-                    if service.get("state") == "ready":
-                        from yoetz.cli.provider_status import provider_status_report
+                return False
+            privacy = {
+                "outcome": privacy_result.outcome,
+                "profile": privacy_result.profile,
+                "proposal_id": privacy_result.proposal_id,
+                "reason": privacy_result.reason,
+            }
+            return privacy_result.outcome in {"configured", "unchanged"}
 
-                        semantic_status = await provider_status_report()
+        service, provider = await _interactive_provider_setup(
+            service,
+            before_credential=authorize_provider_channel,
+        )
+        if (
+            service.get("state") == "ready"
+            and provider.get("binding") == "configured"
+            and provider.get("credential") == "stored"
+        ):
+            service = await _restart_service_for_semantic_composition()
+            if service.get("state") == "ready":
+                from yoetz.cli.provider_status import provider_status_report
+
+                semantic_status = await provider_status_report()
         else:
             privacy = {
                 "outcome": "failed",

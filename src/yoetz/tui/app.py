@@ -64,6 +64,7 @@ from yoetz.tui.text import middle_truncate
 from yoetz.tui.widgets.composer import CommandSubmitted, Composer, Footer
 from yoetz.tui.widgets.history import History, SessionHeader
 from yoetz.tui.widgets.views import (
+    BACK,
     ApprovalView,
     BaseView,
     DetailsRequested,
@@ -410,7 +411,9 @@ class YoetzTui(App[int]):
             self.exit(0)
             return
         if choice == "local":
-            review = await self._ask_review_mode()
+            review = await self._ask_review_mode(allow_back=True)
+            while review == BACK:
+                review = await self._ask_review_mode(allow_back=True)
             if review is None:
                 self.say(Level.OPTIONAL, "Setup stopped. Nothing was changed.")
                 return
@@ -418,25 +421,48 @@ class YoetzTui(App[int]):
             await self._run_initial_review(review, connected=False)
             return
 
-        option = await self._choose_harness(detection.harnesses)
-        if option is None:
-            self.say(Level.OPTIONAL, "Setup stopped. Nothing was changed.")
-            return
-        if not await self._confirm_project_trust(detection):
-            return
-        # The review answer decides which MCP command is registered, so it is asked before the
-        # registration -- and before the approval screen that shows that command. Registering
-        # first and asking after is how a semantic install ends up on the strict route.
-        review = await self._ask_review_mode()
-        if review is None:
-            self.say(Level.OPTIONAL, "Setup stopped. Nothing was changed.")
-            return
+        # Each question can send the user back to the one before it, so the answered steps are
+        # walked as a cursor rather than a straight line. Only the questions run in this loop;
+        # once `_connect` applies a change there is nothing to step back to, and the loop ends.
+        option: HarnessOption | None = None
+        review: str | None = None
+        step = 0
+        while step < 3:
+            if step == 0:
+                option = await self._choose_harness(detection.harnesses)
+                if option is None:
+                    self.say(Level.OPTIONAL, "Setup stopped. Nothing was changed.")
+                    return
+                step = 1
+            elif step == 1:
+                trust = await self._confirm_project_trust(detection, allow_back=True)
+                if trust is BACK:
+                    step = 0
+                    continue
+                if not trust:
+                    return
+                step = 2
+            else:
+                # The review answer decides which MCP command is registered, so it is asked
+                # before the registration -- and before the approval screen that shows that
+                # command. Registering first and asking after is how a semantic install ends
+                # up on the strict route.
+                review = await self._ask_review_mode(allow_back=True)
+                if review == BACK:
+                    step = 1
+                    continue
+                if review is None:
+                    self.say(Level.OPTIONAL, "Setup stopped. Nothing was changed.")
+                    return
+                step = 3
+
+        assert option is not None
         if not await self._connect(option, "policy" if review == "semantic" else "strict"):
             return
         await self._choose_storage(detection)
         await self._run_initial_review(review, connected=True, option=option)
 
-    async def _ask_review_mode(self) -> str | None:
+    async def _ask_review_mode(self, *, allow_back: bool = False) -> str | None:
         """Ask the posture question only; applying the answer belongs to the caller.
 
         Semantic review is listed first, so it is where the cursor rests. That is a choice
@@ -462,7 +488,8 @@ class YoetzTui(App[int]):
                         "Deterministic checks; nothing leaves this computer.",
                     ),
                 ],
-                hint="enter to choose",
+                hint="enter to choose · b to go back" if allow_back else "enter to choose",
+                allow_back=allow_back,
             )
         )
 
@@ -482,36 +509,15 @@ class YoetzTui(App[int]):
             return
         await self.command_provider()
         provider = await self.runtime.provider_posture()
-        if not provider.endpoint_bound or provider.credential_connected is not True:
+        if (
+            not provider.endpoint_bound
+            or provider.credential_connected is not True
+            or provider.llm_inference_enabled is not True
+        ):
             self.say(
                 Level.BLOCKED,
                 "Semantic setup is not complete",
-                ("A provider binding and stored credential are required.",),
-            )
-            await self._offer_local_only_finish(option, connected=connected)
-            return
-        try:
-            # First run gets the same recommendation-first screen as `yoetz --privacy`.
-            report = await self.hand_over_terminal(
-                lambda: self.runtime.run_privacy_setup(None, offer_recommended=True)
-            )
-        except SuspendNotSupported:
-            self.say(
-                Level.UNPROVEN,
-                "This terminal cannot open the trusted privacy ceremony",
-                ("Run 'yoetz privacy setup' from your shell.",),
-            )
-            await self._offer_local_only_finish(option, connected=connected)
-            return
-        except RuntimeError_ as error:
-            self._report(error)
-            await self._offer_local_only_finish(option, connected=connected)
-            return
-        if getattr(report, "outcome", "failed") not in {"configured", "unchanged"}:
-            self.say(
-                Level.BLOCKED,
-                "Semantic privacy setup is not complete",
-                (f"Reason: {getattr(report, 'reason', 'privacy_setup_failed')}",),
+                ("A provider binding, privacy policy, and stored credential are required.",),
             )
             await self._offer_local_only_finish(option, connected=connected)
             return
@@ -609,7 +615,9 @@ class YoetzTui(App[int]):
                 )
         return options[int(chosen)]
 
-    async def _confirm_project_trust(self, detection: Detection) -> bool:
+    async def _confirm_project_trust(
+        self, detection: Detection, *, allow_back: bool = False
+    ) -> bool | str:
         answer = await self.ask(
             ApprovalView(
                 name="trust",
@@ -617,9 +625,16 @@ class YoetzTui(App[int]):
                 body=render_project_trust(detection, self.body_width),
                 approve_label="Yes, continue",
                 decline_label="No, quit",
-                hint="enter to choose · esc to cancel",
+                hint=(
+                    "enter to choose · b to go back · esc to cancel"
+                    if allow_back
+                    else "enter to choose · esc to cancel"
+                ),
+                allow_back=allow_back,
             )
         )
+        if answer == BACK:
+            return BACK
         if answer != "approve":
             self.say(Level.OPTIONAL, "Setup stopped. This project was not changed.")
             return False
@@ -1256,6 +1271,28 @@ class YoetzTui(App[int]):
         except RuntimeError_ as error:
             self._report(error)
             return
+        try:
+            # Authorize the exact provider channel before any credential-bearing probe can run.
+            report = await self.hand_over_terminal(
+                lambda: self.runtime.run_privacy_setup(None, offer_recommended=True)
+            )
+        except SuspendNotSupported:
+            self.say(
+                Level.UNPROVEN,
+                "This terminal cannot open the trusted privacy ceremony",
+                ("Run 'yoetz privacy setup' from your shell before storing the API key.",),
+            )
+            return
+        except RuntimeError_ as error:
+            self._report(error)
+            return
+        if getattr(report, "outcome", "failed") not in {"configured", "unchanged"}:
+            self.say(
+                Level.BLOCKED,
+                "Semantic privacy setup is not complete",
+                (f"Reason: {getattr(report, 'reason', 'privacy_setup_failed')}",),
+            )
+            return
         status = await self._run_confidential(
             "Provider API key",
             self.runtime.store_provider_credential,
@@ -1270,39 +1307,6 @@ class YoetzTui(App[int]):
             )
             return
         self.say(Level.ACTIVE, "", render_provider_stored(posture, self.body_width))
-        await self._offer_provider_test()
-
-    async def _offer_provider_test(self) -> None:
-        choice = await self.ask(
-            SelectionView(
-                name="provider-test",
-                title="Test the connection now?",
-                options=[
-                    Option("test", "Run a bounded connection test"),
-                    Option("skip", "Not now", "Local verification is unaffected either way."),
-                ],
-                hint="enter to choose · esc to skip",
-            )
-        )
-        if choice != "test":
-            self.say(
-                Level.UNPROVEN,
-                "The provider connection has not been tested",
-                ("Local deterministic verification is ready regardless.",),
-            )
-            return
-        # No bounded live-probe operation is exposed by the service yet, and a
-        # test that cannot run must never be reported as one that passed.
-        self.say(
-            Level.UNPROVEN,
-            "A live provider test is not available from this build",
-            (
-                "Yoetz will not report a connection as working without probing it.",
-                "Your binding and key are stored; deeper review stays off until",
-                "your privacy choice allows it and a probe succeeds.",
-            ),
-            details=("no bounded provider probe operation is exposed by the local service",),
-        )
 
     async def command_service(self) -> None:
         posture = await self.runtime.vault_posture()
