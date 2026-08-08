@@ -447,7 +447,7 @@ class _ReadyCloseRelay:
 
 
 class _PrivacyPolicyAppRelay:
-    """Late-bound lookup for the ready PrivacyPolicyApplication (human effects)."""
+    """Late-bound lookup for the ready PrivacyCoordinator (human effects)."""
 
     def __init__(self) -> None:
         self._getter: Callable[[], object | None] | None = None
@@ -510,7 +510,7 @@ class ServiceDaemon:
         if privacy_relay is not None:
             privacy_relay.bind(
                 lambda: (
-                    getattr(getattr(self._application, "privacy", None), "policy_application", None)
+                    getattr(self._application, "privacy", None)
                     if self._application is not None
                     else None
                 )
@@ -1761,7 +1761,8 @@ class _LockedHumanEffects:
         self._privacy_relay = privacy_relay
 
     def _privacy_app(self) -> object:
-        app = self._privacy_relay.get()
+        coordinator = self._privacy_relay.get()
+        app = getattr(coordinator, "policy_application", None)
         if app is None:
             raise HumanControlError("kind_forbidden")
         return app
@@ -1984,19 +1985,32 @@ class _LockedHumanEffects:
         """
 
         import os
-        import time
-        from datetime import UTC, datetime
 
-        from yoetz.adapters.providers.credential_probe import (
-            PROBE_PURPOSE,
-            probe_provider_credential,
-            probe_request_digest,
+        from yoetz.adapters.providers.openai_responses_factory import (
+            provider_binding_from_config,
+        )
+        from yoetz.application.egress import (
+            PrivacyCoordinator,
+            SemanticEgressProviderOutcome,
+            SemanticEgressSuccess,
         )
         from yoetz.config.load import load_config
+        from yoetz.domain.privacy import (
+            AuthorizationScope,
+            AuthorizationScopeKind,
+            CandidateContext,
+            CandidateContextItem,
+            DataCategory,
+            EgressChannel,
+        )
+        from yoetz.domain.findings import SemanticFailureClass
         from yoetz.observability.logging import record_bounded_event_without_raising
-        from yoetz.ports.secret_memory import ProviderAttemptAuthBinding
+        from yoetz.ports.semantic import Deadline, SemanticResultInvalid, SemanticResultUnavailable
         from yoetz.protocol.ids import IdKind, new_id
 
+        coordinator = self._privacy_relay.get()
+        if type(coordinator) is not PrivacyCoordinator:
+            return False
         try:
             provider = load_config({}, os.environ, None).provider
         except Exception:
@@ -2011,33 +2025,88 @@ class _LockedHumanEffects:
             # The credential just stored is not the configured destination. Probing would hit a
             # different host or model, so leave the key stored and unverified.
             return False
+        policy_app = coordinator.policy_application
+        if policy_app is None:
+            return False
+        request_id = str(new_id(IdKind.REQUEST))
+        task_id = str(new_id(IdKind.TASK))
+        scope = AuthorizationScope(
+            AuthorizationScopeKind.TASK,
+            policy_app.setup_scope.installation_id,
+            canonical_digest(
+                {
+                    "endpoint_profile_id": provider.endpoint_profile_id,
+                    "endpoint_profile_version": provider.endpoint_profile_version,
+                    "kind": "credential_probe_workspace",
+                    "model_id": provider.model,
+                    "provider_id": provider.provider_id,
+                }
+            ),
+            task_id,
+        )
+        payload = b'{"credential_probe":true}'
+        candidate = CandidateContext(
+            request_id=request_id,
+            channel=EgressChannel.LLM_INFERENCE,
+            local_sink=None,
+            purpose="credential-probe",
+            scope=scope,
+            subject_digest="sha256:" + hashlib.sha256(payload).hexdigest(),
+            provider_binding=provider_binding_from_config(provider),
+            items=(
+                CandidateContextItem(
+                    "credential-probe",
+                    DataCategory.BOUNDED_STRUCTURAL_METADATA,
+                    scope,
+                    "/credential-probe",
+                    payload,
+                ),
+            ),
+        )
         try:
-            attempt = ProviderAttemptAuthBinding(
-                provider_id=target.provider_id,
-                model_id=target.model_id,
-                endpoint_profile_id=target.endpoint_profile_id,
-                endpoint_profile_version=target.endpoint_profile_version,
-                purpose=PROBE_PURPOSE,
-                authorization_scope_digest=target.scope_digest,
-                purpose_digest=canonical_digest({"purpose": PROBE_PURPOSE}),
-                dispatch_id=str(new_id(IdKind.EGRESS_DISPATCH)),
-                request_body_digest=probe_request_digest(provider),
-                service_generation=self._lifecycle.instance.generation,
-                monotonic_deadline=time.monotonic() + 30.0,
-            )
-            handle = await self._vault.provider_credential(attempt)
-            result = await probe_provider_credential(
-                provider, handle, attempt, now=datetime.now(UTC)
+            result = await coordinator.evaluate_semantic(
+                candidate,
+                Deadline(
+                    policy_app.clock.now_utc(),
+                    policy_app.clock.monotonic_seconds() + 30.0,
+                ),
             )
         except Exception:
             # A probe must never be why a ceremony fails. An unverified credential is stored.
             return False
+        provider_result = (
+            result.result if type(result) is SemanticEgressProviderOutcome else None
+        )
+        failure_class = (
+            provider_result.provenance.failure_class if provider_result is not None else None
+        )
+        rejected = (
+            type(provider_result) is SemanticResultUnavailable
+            and failure_class
+            in {SemanticFailureClass.AUTHENTICATION, SemanticFailureClass.AUTHORIZATION}
+        )
+        accepted = (
+            type(result) is SemanticEgressSuccess
+            or type(provider_result) is SemanticResultInvalid
+            or (
+                type(provider_result) is SemanticResultUnavailable
+                and failure_class
+                in {SemanticFailureClass.RATE_LIMITED, SemanticFailureClass.QUOTA_EXHAUSTED}
+            )
+        )
+        outcome = (
+            "rejected"
+            if rejected
+            else "accepted"
+            if accepted
+            else "unverified"
+        )
         record_bounded_event_without_raising(
             component="provider_credential",
-            operation=f"credential_probe_{result.outcome}",
-            reason="accepted" if result.failure_class is None else result.failure_class.value,
+            operation=f"credential_probe_{outcome}",
+            reason="accepted" if failure_class is None else failure_class.value,
         )
-        if result.outcome != "rejected":
+        if not rejected:
             return False
         from yoetz.service.vault import ProviderCredentialBinding
 

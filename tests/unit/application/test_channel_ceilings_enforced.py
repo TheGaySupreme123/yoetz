@@ -172,7 +172,9 @@ def _policy_with_ceilings(
 
 
 def _candidate(
-    *, scope_kind: AuthorizationScopeKind = AuthorizationScopeKind.TASK
+    *,
+    scope_kind: AuthorizationScopeKind = AuthorizationScopeKind.TASK,
+    purpose: str = "semantic-review",
 ) -> CandidateContext:
     scope = AuthorizationScope(
         scope_kind,
@@ -189,7 +191,7 @@ def _candidate(
         _REQUEST,
         EgressChannel.LLM_INFERENCE,
         None,
-        "semantic-review",
+        purpose,
         scope,
         _SUBJECT,
         binding,
@@ -288,6 +290,30 @@ async def test_within_ceilings_stamps_policy_intersect_case_max() -> None:
     request = audit.prepared[0]
     assert request.max_bytes == 100
     assert request.max_tokens == 8
+
+
+@pytest.mark.anyio
+async def test_credential_probe_requires_an_explicit_purpose_and_is_capped_at_one_token() -> None:
+    denied, denied_audit = _coordinator(minimal_external_policy(), byte_count=100, token_count=8)
+    denied_result = await denied.evaluate_semantic(
+        _candidate(purpose="credential-probe"),
+        _deadline(),
+    )
+    assert isinstance(denied_result, SemanticEgressBlocked)
+    assert denied_result.reason is PrivacyReason.PURPOSE_NOT_ALLOWED
+    assert denied_audit.prepared == []
+
+    admitted_policy = with_llm(
+        minimal_external_policy(),
+        allowed_purposes=("credential-probe", "semantic-review"),
+    )
+    admitted, admitted_audit = _coordinator(admitted_policy, byte_count=100, token_count=8)
+    result = await admitted.evaluate_semantic(
+        _candidate(purpose="credential-probe"),
+        _deadline(),
+    )
+    assert admitted_audit.prepared, f"credential probe must reach prepare; got {result!r}"
+    assert admitted_audit.prepared[0].max_tokens == 1
 
 
 @pytest.mark.anyio

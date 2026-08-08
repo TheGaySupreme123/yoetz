@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 
@@ -134,6 +135,22 @@ def test_message_content_is_the_approved_payload_as_text() -> None:
     )
     assert body["model"] == "openai/gpt-5.2"
     assert body["max_tokens"] == 2048
+
+
+def test_credential_probe_body_is_taskless_and_has_a_one_token_ceiling() -> None:
+    payload = canonical_encode(cast(JsonValue, {"items": [{"content_base64": "e30="}]}))
+    case = replace(
+        _case(payload),
+        purpose="credential-probe",
+        token_count=1,
+    )
+
+    body = cast(dict[str, JsonValue], strict_json_parse(render_case(case, _profile()).body))
+    messages = cast(list[JsonValue], body["messages"])
+
+    assert messages == [{"role": "user", "content": payload.decode("utf-8")}]
+    assert body["max_tokens"] == 1
+    assert "response_format" not in body
 
 
 def test_response_format_follows_the_recorded_endpoint_capability() -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
+from textual.widgets import Input
 
 from builders.tui_runtime import CLI, DESKTOP, FakeRuntime
 from yoetz.tui.app import YoetzTui
@@ -190,6 +191,25 @@ async def test_b_on_the_review_question_returns_to_project_trust(make_app: MakeA
         assert runtime.applied == []
 
 
+async def test_b_on_the_local_review_question_reasks_it_without_cancelling(
+    make_app: MakeApp,
+) -> None:
+    runtime = FakeRuntime()
+    app = make_app(first_run=True, runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await pilot.press("down", "enter")  # set up without Codex
+        await pilot.pause()
+        assert app.open_view is not None
+        assert app.open_view.view_name == "review-mode"
+        await pilot.press("b")
+        await pilot.pause()
+        assert app.open_view is not None
+        assert app.open_view.view_name == "review-mode"
+        assert "Setup stopped" not in transcript(app)
+        assert runtime.applied == []
+
+
 async def test_b_on_project_trust_returns_to_the_installation_picker(
     make_app: MakeApp,
 ) -> None:
@@ -254,6 +274,7 @@ async def test_b_typed_into_a_searchable_picker_filters_and_does_not_go_back(
         await pilot.pause()
         # The letter belonged to the query, so the view is still open.
         assert app.open_view is view
+        assert view.query_one("#view-search", Input).value == "b"
 
 
 async def test_declining_project_trust_changes_nothing(make_app: MakeApp) -> None:

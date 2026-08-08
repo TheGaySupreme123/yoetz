@@ -194,6 +194,24 @@ def test_openai_responses_body_disables_application_state_storage() -> None:
     assert body["store"] is False
 
 
+def test_credential_probe_body_is_taskless_and_has_a_one_token_ceiling() -> None:
+    payload = canonical_encode({"items": [{"content_base64": "e30="}]})
+    case = replace(
+        _case(),
+        payload=payload,
+        byte_count=len(payload),
+        token_count=1,
+        purpose="credential-probe",
+    )
+
+    body = cast(dict[str, Any], strict_json_parse(render_case(case).body))
+
+    assert body["input"] == strict_json_parse(payload)
+    assert body["max_output_tokens"] == 1
+    assert "text" not in body
+    assert "system" not in render_case(case).body.decode("utf-8")
+
+
 def _binding(rendered_body_sha256: str) -> ProviderAttemptAuthBinding:
     return ProviderAttemptAuthBinding(
         provider_id="fireworks",

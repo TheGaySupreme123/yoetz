@@ -93,6 +93,7 @@ type LocalDisclosureResult = (
 # This value crosses the privacy-policy boundary, so it must match the
 # documented/recipe vocabulary and the stored provider-credential binding.
 _SEMANTIC_PURPOSE = "semantic-review"
+_CREDENTIAL_PROBE_PURPOSE = "credential-probe"
 _MEDIA_TYPE = "application/json"
 _SCHEMA_ID = "yoetz-semantic-case-1.0.0"
 # Breadth order, matching ``_scope_rank`` in ``yoetz.application.privacy_policy``: a lower rank
@@ -478,7 +479,7 @@ class PrivacyCoordinator:
                 PrivacyOutcome.CHANNEL_UNAVAILABLE,
                 PrivacyReason.CHANNEL_UNAVAILABLE,
             )
-        if candidate.purpose != _SEMANTIC_PURPOSE:
+        if candidate.purpose not in {_SEMANTIC_PURPOSE, _CREDENTIAL_PROBE_PURPOSE}:
             return SemanticEgressBlocked(
                 candidate.request_id,
                 PrivacyOutcome.BLOCKED_BY_POLICY,
@@ -708,7 +709,7 @@ class PrivacyCoordinator:
                 PrivacyOutcome.BLOCKED_BY_POLICY,
                 PrivacyReason.DESTINATION_NOT_ALLOWED,
             )
-        if _SEMANTIC_PURPOSE not in llm.allowed_purposes and llm.enabled:
+        if candidate.purpose not in llm.allowed_purposes and llm.enabled:
             return await self._complete_semantic_predispatch(
                 candidate,
                 effective,
@@ -804,9 +805,13 @@ class PrivacyCoordinator:
             minimized.byte_count if llm.max_bytes <= 0 else min(llm.max_bytes, minimized.byte_count)
         )
         auth_max_tokens = (
-            minimized.token_count
-            if llm.max_tokens <= 0
-            else min(llm.max_tokens, minimized.token_count)
+            1
+            if candidate.purpose == _CREDENTIAL_PROBE_PURPOSE
+            else (
+                minimized.token_count
+                if llm.max_tokens <= 0
+                else min(llm.max_tokens, minimized.token_count)
+            )
         )
         try:
             prepared = await self._audit.prepare_disclosure_proposal(

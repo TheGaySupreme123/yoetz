@@ -202,15 +202,25 @@ def _build_body_object(
     # Chat Completions message content is text, not a nested JSON value: the approved canonical
     # payload bytes travel verbatim as the user message string. Passing a parsed object here is
     # what makes these endpoints reject the request before any review can happen.
-    body: dict[str, JsonValue] = {
-        "model": case.provider_binding.model_id,
-        "messages": [
-            {"role": "system", "content": _SYSTEM_INSTRUCTION},
-            {"role": "user", "content": payload_text},
-        ],
-        "max_tokens": OPENAI_MAX_OUTPUT_TOKENS,
-    }
-    if profile.structured_output_enforcement == "provider_enforced":
+    if case.purpose == "credential-probe":
+        body: dict[str, JsonValue] = {
+            "model": case.provider_binding.model_id,
+            "messages": [{"role": "user", "content": payload_text}],
+            "max_tokens": 1,
+        }
+    else:
+        body = {
+            "model": case.provider_binding.model_id,
+            "messages": [
+                {"role": "system", "content": _SYSTEM_INSTRUCTION},
+                {"role": "user", "content": payload_text},
+            ],
+            "max_tokens": OPENAI_MAX_OUTPUT_TOKENS,
+        }
+    if (
+        case.purpose != "credential-probe"
+        and profile.structured_output_enforcement == "provider_enforced"
+    ):
         body["response_format"] = _RESPONSE_FORMAT
     return body
 
@@ -237,6 +247,16 @@ def render_case(
     if len(body) > OPENAI_MAX_RESPONSE_BODY_BYTES:
         raise ValueError("chat_completions_rendered_body_too_large")
 
+    prompt_digest = (
+        "sha256:" + hashlib.sha256(case.payload).hexdigest()
+        if case.purpose == "credential-probe"
+        else _PROMPT_DIGEST
+    )
+    schema_digest = (
+        canonical_digest({"kind": "credential-probe", "version": 1})
+        if case.purpose == "credential-probe"
+        else _SCHEMA_DIGEST
+    )
     return RenderedChatCompletionsRequest(
         body=body,
         body_sha256="sha256:" + hashlib.sha256(body).hexdigest(),
@@ -244,8 +264,8 @@ def render_case(
         model=case.provider_binding.model_id,
         endpoint_profile_id=case.provider_binding.endpoint_profile_id,
         endpoint_profile_version=case.provider_binding.endpoint_profile_version,
-        prompt_digest=_PROMPT_DIGEST,
-        schema_digest=_SCHEMA_DIGEST,
+        prompt_digest=prompt_digest,
+        schema_digest=schema_digest,
     )
 
 

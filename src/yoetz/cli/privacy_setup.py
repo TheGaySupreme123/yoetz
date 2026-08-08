@@ -242,7 +242,7 @@ def build_candidate_policy(
             answers.content_categories,
             answers.content_data_classes,
             answers.external_provider,
-            ("semantic-review",),
+            ("credential-probe", "semantic-review"),
             answers.authorization_scope,
             answers.request_confirmation,
             _CASE_MAX_BYTES,

@@ -411,7 +411,7 @@ class YoetzTui(App[int]):
             self.exit(0)
             return
         if choice == "local":
-            review = await self._ask_review_mode()
+            review = await self._ask_review_mode(allow_back=True)
             while review == BACK:
                 review = await self._ask_review_mode()
             if review is None:
@@ -509,36 +509,15 @@ class YoetzTui(App[int]):
             return
         await self.command_provider()
         provider = await self.runtime.provider_posture()
-        if not provider.endpoint_bound or provider.credential_connected is not True:
+        if (
+            not provider.endpoint_bound
+            or provider.credential_connected is not True
+            or provider.llm_inference_enabled is not True
+        ):
             self.say(
                 Level.BLOCKED,
                 "Semantic setup is not complete",
-                ("A provider binding and stored credential are required.",),
-            )
-            await self._offer_local_only_finish(option, connected=connected)
-            return
-        try:
-            # First run gets the same recommendation-first screen as `yoetz --privacy`.
-            report = await self.hand_over_terminal(
-                lambda: self.runtime.run_privacy_setup(None, offer_recommended=True)
-            )
-        except SuspendNotSupported:
-            self.say(
-                Level.UNPROVEN,
-                "This terminal cannot open the trusted privacy ceremony",
-                ("Run 'yoetz privacy setup' from your shell.",),
-            )
-            await self._offer_local_only_finish(option, connected=connected)
-            return
-        except RuntimeError_ as error:
-            self._report(error)
-            await self._offer_local_only_finish(option, connected=connected)
-            return
-        if getattr(report, "outcome", "failed") not in {"configured", "unchanged"}:
-            self.say(
-                Level.BLOCKED,
-                "Semantic privacy setup is not complete",
-                (f"Reason: {getattr(report, 'reason', 'privacy_setup_failed')}",),
+                ("A provider binding, privacy policy, and stored credential are required.",),
             )
             await self._offer_local_only_finish(option, connected=connected)
             return
@@ -1292,6 +1271,28 @@ class YoetzTui(App[int]):
         except RuntimeError_ as error:
             self._report(error)
             return
+        try:
+            # Authorize the exact provider channel before any credential-bearing probe can run.
+            report = await self.hand_over_terminal(
+                lambda: self.runtime.run_privacy_setup(None, offer_recommended=True)
+            )
+        except SuspendNotSupported:
+            self.say(
+                Level.UNPROVEN,
+                "This terminal cannot open the trusted privacy ceremony",
+                ("Run 'yoetz privacy setup' from your shell before storing the API key.",),
+            )
+            return
+        except RuntimeError_ as error:
+            self._report(error)
+            return
+        if getattr(report, "outcome", "failed") not in {"configured", "unchanged"}:
+            self.say(
+                Level.BLOCKED,
+                "Semantic privacy setup is not complete",
+                (f"Reason: {getattr(report, 'reason', 'privacy_setup_failed')}",),
+            )
+            return
         status = await self._run_confidential(
             "Provider API key",
             self.runtime.store_provider_credential,
@@ -1306,39 +1307,6 @@ class YoetzTui(App[int]):
             )
             return
         self.say(Level.ACTIVE, "", render_provider_stored(posture, self.body_width))
-        await self._offer_provider_test()
-
-    async def _offer_provider_test(self) -> None:
-        choice = await self.ask(
-            SelectionView(
-                name="provider-test",
-                title="Test the connection now?",
-                options=[
-                    Option("test", "Run a bounded connection test"),
-                    Option("skip", "Not now", "Local verification is unaffected either way."),
-                ],
-                hint="enter to choose · esc to skip",
-            )
-        )
-        if choice != "test":
-            self.say(
-                Level.UNPROVEN,
-                "The provider connection has not been tested",
-                ("Local deterministic verification is ready regardless.",),
-            )
-            return
-        # No bounded live-probe operation is exposed by the service yet, and a
-        # test that cannot run must never be reported as one that passed.
-        self.say(
-            Level.UNPROVEN,
-            "A live provider test is not available from this build",
-            (
-                "Yoetz will not report a connection as working without probing it.",
-                "Your binding and key are stored; deeper review stays off until",
-                "your privacy choice allows it and a probe succeeds.",
-            ),
-            details=("no bounded provider probe operation is exposed by the local service",),
-        )
 
     async def command_service(self) -> None:
         posture = await self.runtime.vault_posture()

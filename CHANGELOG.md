@@ -323,8 +323,9 @@ carried them; they are listed because each one describes the behavior that now s
 - Semantic review reported `transport_unavailable` for every unavailable provider class except
   rate-limit and quota, so a rejected API key, a forbidden binding, a provider outage, and a real
   socket failure were indistinguishable on every owner-facing surface. The exact
-  `SemanticFailureClass` is now recorded as a durable owner-only diagnostic; the public taxonomy
-  is unchanged and the record carries no provider-controlled text.
+  `SemanticFailureClass` is recorded as a durable owner-only diagnostic when present;
+  `unclassified` is recorded when no class is available. The public taxonomy is unchanged and the
+  record carries no provider-controlled text.
 - The terminal interface previewed the Codex integration on one MCP route and applied it on
   another, so on a fresh installation the approved preview digest never matched and first run's
   Codex connection failed as `preview_stale`. The route now travels on the approved plan, and the
