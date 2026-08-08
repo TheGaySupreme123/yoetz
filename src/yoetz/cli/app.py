@@ -700,7 +700,20 @@ service_app.command("stop")(_service_command("stop"))
 def service_run() -> None:
     """Run the persistent service in the foreground."""
 
-    from yoetz.service.daemon import main as daemon_main
+    try:
+        from yoetz.service.daemon import main as daemon_main
+    except ModuleNotFoundError as error:
+        # A passphrase vault is part of the supported base installation.  The
+        # daemon imports its Argon2 implementation while composing the vault,
+        # so recognize only that exact absent module here rather than turning
+        # an arbitrary broken import into an operator-facing dependency claim.
+        if error.name != "cryptography.hazmat.primitives.kdf.argon2":
+            raise
+        _stderr(
+            "passphrase_kdf_unavailable: reinstall this Yoetz package before starting "
+            "a passphrase vault"
+        )
+        raise typer.Exit(exit_code_for(PublicErrorCode.SERVICE_UNAVAILABLE)) from None
 
     daemon_main()
 

@@ -71,6 +71,11 @@ existing-vault user experiencing a missing keyring entry, a wrong passphrase, or
 is never told to run initialization; that failure routes to
 [`../runbooks/key-recovery.md`](../runbooks/key-recovery.md) instead.
 
+The installed Cryptography Argon2id implementation is required before a passphrase-vault service
+can start. If that exact packaged KDF module is unavailable, `yoetz service run` fails closed before
+opening retained state, with `passphrase_kdf_unavailable` and the remedy to reinstall Yoetz. It does
+not substitute another KDF, initialize a replacement vault, or remove retained data.
+
 ### Existing-keyring vaults are a distinct case
 
 An already-committed keyring-backed vault created by an earlier release, or restored through a
