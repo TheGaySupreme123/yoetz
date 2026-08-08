@@ -28,13 +28,14 @@ manifests, the packaging/capability suites, and the release workflows under `.gi
 6. **Keys, semantic readiness, and compatibility extras:** the certified standard install includes
    direct pinned
    `cryptography` (AES-GCM, RFC 3394 AES Key Wrap, HKDF/HMAC) and `keyring` plus the approved
-   macOS/Linux secure-backend dependencies because object/vault crypto and OS-keyring-first service
-   startup are v0.1 core behavior. Founder-authorized amendment (2026-07-29): `argon2-cffi`,
-   `httpx`, and `openai` are also standard direct dependencies because first run offers both
-   passphrase storage and semantic review and must not offer a path the installed artifact cannot
-   execute. `semantic-openai` and `portable-recovery` remain compatibility extras for existing
-   install commands, with the same exact pins; they add no dependency absent from the standard
-   install. A malformed or incomplete environment still fails closed rather than downgrading.
+   macOS/Linux secure-backend dependencies because object/vault crypto, the Cryptography Argon2id
+   passphrase KDF, and OS-keyring-first service startup are v0.1 core behavior.
+   Founder-authorized amendment (2026-07-29): `argon2-cffi`, `httpx`, and `openai` are also standard
+   direct dependencies because first run offers both passphrase storage and semantic review and must
+   not offer a path the installed artifact cannot execute. `semantic-openai` and
+   `portable-recovery` remain compatibility extras for existing install commands, with the same
+   exact pins; they add no dependency absent from the standard install. A malformed or incomplete
+   environment still fails closed rather than downgrading.
 7. **Type/lint stack and npm boundary:** Ruff `0.15.22` (format+lint, line length 100), official
    npm Pyright `1.1.411` via a development-only private `package.json`, strict mode. The locked
    contributor/CI toolchain is Node `26.5.0` with npm `12.0.1`; `npm ci --ignore-scripts` followed
