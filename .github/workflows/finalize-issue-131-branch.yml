@@ -1,0 +1,50 @@
+name: Finalize issue 131 branch
+
+on:
+  push:
+    branches:
+      - agent/issue-131-typed-evidence-provenance
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+
+      - name: Verify implementation landed
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'digest_binding' src/yoetz/domain/events.py
+          grep -q 'source_diff' src/yoetz/domain/events.py
+          grep -R -q 'evidence_digest_subject_legacy_unknown' src tests
+          test -f docs/adr/ADR-020-typed-evidence-digest-provenance.md
+
+      - name: Remove temporary transfer files
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/export-issue-131-source.yml
+          rm -f .github/workflows/apply-issue-131-patch.yml
+          rm -f .github/workflows/finalize-issue-131-branch.yml
+          find . -type f -name 'issue-131.patch.xz.b64' -delete
+
+      - name: Squash onto main and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin main
+          git reset --soft origin/main
+          git add -A
+          git commit -m 'Bind evidence digests to typed provenance'
+          git push --force-with-lease origin HEAD:agent/issue-131-typed-evidence-provenance
