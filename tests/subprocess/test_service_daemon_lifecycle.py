@@ -83,7 +83,9 @@ class Vault:
     generation = 0
     mode = Mode()
     async def lock(self): pass
-    async def close(self): await asyncio.sleep(0.5)
+    async def close(self):
+        # Hold teardown past endpoint removal so peer EOF reproduces the old cancellation race.
+        await asyncio.sleep(0.5)
 class DeferredListener:
     def __init__(self):
         self.listener = None
