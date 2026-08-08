@@ -1,0 +1,39 @@
+name: Format issue 24 branch
+
+on:
+  push:
+    branches:
+      - fix/issue-24-service-stop-shutdown
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: fix/issue-24-service-stop-shutdown
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Install uv and pinned Python
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+
+      - name: Format and commit
+        run: |
+          uv run --no-project --python 3.14.6 --with ruff==0.15.22 \
+            ruff format src/yoetz/service/daemon.py tests/subprocess/test_service_daemon_lifecycle.py
+          rm .github/workflows/format-issue-24.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/yoetz/service/daemon.py tests/subprocess/test_service_daemon_lifecycle.py \
+            .github/workflows/format-issue-24.yml
+          git commit -m "style: format service stop fix"
+          git push origin HEAD:fix/issue-24-service-stop-shutdown
