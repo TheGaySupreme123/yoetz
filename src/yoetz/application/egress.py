@@ -709,7 +709,7 @@ class PrivacyCoordinator:
                 PrivacyOutcome.BLOCKED_BY_POLICY,
                 PrivacyReason.DESTINATION_NOT_ALLOWED,
             )
-        if candidate.purpose not in llm.allowed_purposes and llm.enabled:
+        if candidate.purpose not in llm.allowed_purposes:
             return await self._complete_semantic_predispatch(
                 candidate,
                 effective,

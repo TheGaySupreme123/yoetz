@@ -59,6 +59,16 @@ External profiles bind an exact five-field `ProviderBinding`: `provider_id`, `mo
 endpoint, scope mismatch, expired authorization, or policy version mismatch denies before the
 provider adapter is even constructed.
 
+`credential-probe` is a distinct `llm_inference` purpose, not an implication of enabling semantic
+review. During provider-credential setup, the local human separately decides whether one fixed,
+content-free request may verify the just-stored credential. The policy preview and its widening
+decision display the resulting allowed-purpose set, and a policy that omits `credential-probe`
+blocks it before adapter construction. An admitted probe uses the exact configured provider
+binding, carries only bounded structural metadata, and follows the ordinary authorization and
+egress-receipt path. A classified authentication or authorization refusal withdraws the stored
+credential; uncertain transport, outage, timeout, unsupported-profile, and invalid-response
+outcomes retain it as unverified.
+
 `ReviewContextProfile` is a **separate** closed value — `structural`, `goal_aware`, `assisted`,
 `expanded`, or `custom` — that determines which recorded case material a local selector considers,
 never whether that material may leave. `structural` is typed timeline/state/coverage facts only;

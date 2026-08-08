@@ -1397,10 +1397,15 @@ async def run_provider_setup(
 
         typer.echo("")
         typer.echo("Choose the exact disclosure policy before the API key can be tested.")
+        credential_probe_authorized = typer.confirm(
+            "After storage, permit one fixed, content-free request to verify this API key?",
+            default=True,
+        )
         try:
             privacy_result = await run_privacy_setup(
                 recipe_hint="assisted_review",
                 offer_recommended=True,
+                credential_probe_authorized=credential_probe_authorized,
             )
         except (ControlError, HumanCeremonyCliError, OSError, ValueError) as error:
             typer.echo(f"privacy_setup_failed: {type(error).__name__}", err=True)
@@ -1430,7 +1435,9 @@ async def run_provider_setup(
         if type(reason) is str:
             typer.echo(f"Reason: {reason}")
         return 20
-    privacy_outcome = getattr(privacy_result, "outcome", "failed")
+    privacy_outcome = (
+        "not_attempted" if privacy_result is None else getattr(privacy_result, "outcome", "failed")
+    )
     _emit_provider_setup_layer_report(privacy_outcome=privacy_outcome)
     if privacy_outcome == "failed":
         return 20
@@ -1592,16 +1599,22 @@ async def run_setup_wizard(
     }
     semantic_status: dict[str, JsonValue] | None = None
     if interactive and review_mode == "semantic":
+
         async def authorize_provider_channel() -> bool:
             nonlocal privacy
             from yoetz.cli.privacy_setup import run_privacy_setup
             from yoetz.cli.unlock import HumanCeremonyCliError
             from yoetz.ports.control import ControlError
 
+            credential_probe_authorized = typer.confirm(
+                "After storage, permit one fixed, content-free request to verify this API key?",
+                default=True,
+            )
             try:
                 privacy_result = await run_privacy_setup(
                     recipe_hint="assisted_review",
                     offer_recommended=True,
+                    credential_probe_authorized=credential_probe_authorized,
                 )
             except (ControlError, HumanCeremonyCliError, OSError, ValueError) as error:
                 reason = getattr(error, "reason", None)

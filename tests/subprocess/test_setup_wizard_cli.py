@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal, cast
@@ -481,7 +482,7 @@ def test_semantic_first_run_suggests_and_selects_assisted_privacy_draft(
         CommandOutput(0, b""),  # add
         _yoetz_entry("policy"),  # verify get
     ]
-    privacy_calls: list[tuple[str | None, bool]] = []
+    privacy_calls: list[tuple[str | None, bool, bool]] = []
 
     async def ready(*, start_if_absent: bool = False) -> dict[str, object]:
         del start_if_absent
@@ -492,16 +493,20 @@ def test_semantic_first_run_suggests_and_selects_assisted_privacy_draft(
         *,
         provider_choice: str | None = None,
         model: str | None = None,
+        before_credential: Callable[[], Awaitable[bool]] | None = None,
     ) -> tuple[dict[str, object], dict[str, object]]:
         del provider_choice, model
+        assert before_credential is not None
+        assert await before_credential() is True
         return service, {"binding": "configured", "credential": "stored"}
 
     async def privacy_setup(
         *,
         recipe_hint: str | None = None,
         offer_recommended: bool = False,
+        credential_probe_authorized: bool = False,
     ) -> SimpleNamespace:
-        privacy_calls.append((recipe_hint, offer_recommended))
+        privacy_calls.append((recipe_hint, offer_recommended, credential_probe_authorized))
         return SimpleNamespace(
             outcome="configured",
             profile="confirm_every_request",
@@ -519,11 +524,11 @@ def test_semantic_first_run_suggests_and_selects_assisted_privacy_draft(
     monkeypatch.setattr(privacy_setup_module, "run_privacy_setup", privacy_setup)
     monkeypatch.setattr(provider_status_module, "provider_status_report", provider_status)
 
-    # harness 1, review mode 1 (semantic review, the recommended answer), then confirm.
-    result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\n1\nY\n")
+    # Harness 1, semantic review, registration confirmation, then credential-probe consent.
+    result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\n1\nY\nY\n")
 
     assert result.exit_code == 0
-    assert privacy_calls == [("assisted_review", True)]
+    assert privacy_calls == [("assisted_review", True, True)]
     assert "Privacy: configured (confirm_every_request)" in result.stdout
 
 
@@ -819,8 +824,11 @@ def test_provider_setup_success_reports_layers_without_ready_overclaim(
         *,
         provider_choice: str | None = None,
         model: str | None = None,
+        before_credential: Callable[[], Awaitable[bool]] | None = None,
     ) -> tuple[dict[str, object], dict[str, object]]:
         del provider_choice, model
+        assert before_credential is not None
+        assert await before_credential() is True
         return service, {"binding": "configured", "credential": "stored"}
 
     async def fake_privacy_setup(**_kwargs: object) -> PrivacySetupReport:
@@ -831,7 +839,7 @@ def test_provider_setup_success_reports_layers_without_ready_overclaim(
     monkeypatch.setattr(setup_module, "_interactive_provider_setup", fake_interactive)
     monkeypatch.setattr("yoetz.cli.privacy_setup.run_privacy_setup", fake_privacy_setup)
 
-    result = _RUNNER.invoke(cli.app, ["--set", "--fireworks", "--model", "m"])
+    result = _RUNNER.invoke(cli.app, ["--set", "--fireworks", "--model", "m"], input="Y\n")
     plain = _plain(result.output)
     assert result.exit_code == 0
     assert "Yoetz is ready to use this provider." not in plain

@@ -1762,7 +1762,10 @@ class _LockedHumanEffects:
 
     def _privacy_app(self) -> object:
         coordinator = self._privacy_relay.get()
-        app = getattr(coordinator, "policy_application", None)
+        # Human effects have always accepted the policy application itself. Credential probing
+        # additionally needs the coordinator, so the late-bound relay now exposes the coordinator
+        # in production; keep the original application-shaped test and recovery path valid.
+        app = getattr(coordinator, "policy_application", coordinator)
         if app is None:
             raise HumanControlError("kind_forbidden")
         return app
@@ -1995,6 +1998,7 @@ class _LockedHumanEffects:
             SemanticEgressSuccess,
         )
         from yoetz.config.load import load_config
+        from yoetz.domain.findings import SemanticFailureClass
         from yoetz.domain.privacy import (
             AuthorizationScope,
             AuthorizationScopeKind,
@@ -2003,7 +2007,6 @@ class _LockedHumanEffects:
             DataCategory,
             EgressChannel,
         )
-        from yoetz.domain.findings import SemanticFailureClass
         from yoetz.observability.logging import record_bounded_event_without_raising
         from yoetz.ports.semantic import Deadline, SemanticResultInvalid, SemanticResultUnavailable
         from yoetz.protocol.ids import IdKind, new_id
@@ -2025,45 +2028,48 @@ class _LockedHumanEffects:
             # The credential just stored is not the configured destination. Probing would hit a
             # different host or model, so leave the key stored and unverified.
             return False
-        policy_app = coordinator.policy_application
-        if policy_app is None:
-            return False
-        request_id = str(new_id(IdKind.REQUEST))
-        task_id = str(new_id(IdKind.TASK))
-        scope = AuthorizationScope(
-            AuthorizationScopeKind.TASK,
-            policy_app.setup_scope.installation_id,
-            canonical_digest(
-                {
-                    "endpoint_profile_id": provider.endpoint_profile_id,
-                    "endpoint_profile_version": provider.endpoint_profile_version,
-                    "kind": "credential_probe_workspace",
-                    "model_id": provider.model,
-                    "provider_id": provider.provider_id,
-                }
-            ),
-            task_id,
-        )
-        payload = b'{"credential_probe":true}'
-        candidate = CandidateContext(
-            request_id=request_id,
-            channel=EgressChannel.LLM_INFERENCE,
-            local_sink=None,
-            purpose="credential-probe",
-            scope=scope,
-            subject_digest="sha256:" + hashlib.sha256(payload).hexdigest(),
-            provider_binding=provider_binding_from_config(provider),
-            items=(
-                CandidateContextItem(
-                    "credential-probe",
-                    DataCategory.BOUNDED_STRUCTURAL_METADATA,
-                    scope,
-                    "/credential-probe",
-                    payload,
-                ),
-            ),
-        )
         try:
+            policy_app = coordinator.policy_application
+            if policy_app is None:
+                return False
+            setup_scope = getattr(policy_app, "setup_scope", None)
+            if setup_scope is None:
+                return False
+            request_id = str(new_id(IdKind.REQUEST))
+            task_id = str(new_id(IdKind.TASK))
+            scope = AuthorizationScope(
+                AuthorizationScopeKind.TASK,
+                setup_scope.installation_id,
+                canonical_digest(
+                    {
+                        "endpoint_profile_id": provider.endpoint_profile_id,
+                        "endpoint_profile_version": provider.endpoint_profile_version,
+                        "kind": "credential_probe_workspace",
+                        "model_id": provider.model,
+                        "provider_id": provider.provider_id,
+                    }
+                ),
+                task_id,
+            )
+            payload = b'{"credential_probe":true}'
+            candidate = CandidateContext(
+                request_id=request_id,
+                channel=EgressChannel.LLM_INFERENCE,
+                local_sink=None,
+                purpose="credential-probe",
+                scope=scope,
+                subject_digest="sha256:" + hashlib.sha256(payload).hexdigest(),
+                provider_binding=provider_binding_from_config(provider),
+                items=(
+                    CandidateContextItem(
+                        "credential-probe",
+                        DataCategory.BOUNDED_STRUCTURAL_METADATA,
+                        scope,
+                        "/credential-probe",
+                        payload,
+                    ),
+                ),
+            )
             result = await coordinator.evaluate_semantic(
                 candidate,
                 Deadline(
@@ -2074,17 +2080,14 @@ class _LockedHumanEffects:
         except Exception:
             # A probe must never be why a ceremony fails. An unverified credential is stored.
             return False
-        provider_result = (
-            result.result if type(result) is SemanticEgressProviderOutcome else None
-        )
+        provider_result = result.result if type(result) is SemanticEgressProviderOutcome else None
         failure_class = (
             provider_result.provenance.failure_class if provider_result is not None else None
         )
-        rejected = (
-            type(provider_result) is SemanticResultUnavailable
-            and failure_class
-            in {SemanticFailureClass.AUTHENTICATION, SemanticFailureClass.AUTHORIZATION}
-        )
+        rejected = type(provider_result) is SemanticResultUnavailable and failure_class in {
+            SemanticFailureClass.AUTHENTICATION,
+            SemanticFailureClass.AUTHORIZATION,
+        }
         accepted = (
             type(result) is SemanticEgressSuccess
             or type(provider_result) is SemanticResultInvalid
@@ -2094,13 +2097,7 @@ class _LockedHumanEffects:
                 in {SemanticFailureClass.RATE_LIMITED, SemanticFailureClass.QUOTA_EXHAUSTED}
             )
         )
-        outcome = (
-            "rejected"
-            if rejected
-            else "accepted"
-            if accepted
-            else "unverified"
-        )
+        outcome = "rejected" if rejected else "accepted" if accepted else "unverified"
         record_bounded_event_without_raising(
             component="provider_credential",
             operation=f"credential_probe_{outcome}",

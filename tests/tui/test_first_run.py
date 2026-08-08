@@ -200,11 +200,13 @@ async def test_b_on_the_local_review_question_reasks_it_without_cancelling(
         await pilot.pause()
         await pilot.press("down", "enter")  # set up without Codex
         await pilot.pause()
-        assert app.open_view is not None
-        assert app.open_view.view_name == "review-mode"
+        review_view = app.open_view
+        assert review_view is not None
+        assert review_view.view_name == "review-mode"
         await pilot.press("b")
         await pilot.pause()
         assert app.open_view is not None
+        assert app.open_view is not review_view
         assert app.open_view.view_name == "review-mode"
         assert "Setup stopped" not in transcript(app)
         assert runtime.applied == []

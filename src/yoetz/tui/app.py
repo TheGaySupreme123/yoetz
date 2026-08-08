@@ -413,7 +413,7 @@ class YoetzTui(App[int]):
         if choice == "local":
             review = await self._ask_review_mode(allow_back=True)
             while review == BACK:
-                review = await self._ask_review_mode()
+                review = await self._ask_review_mode(allow_back=True)
             if review is None:
                 self.say(Level.OPTIONAL, "Setup stopped. Nothing was changed.")
                 return
