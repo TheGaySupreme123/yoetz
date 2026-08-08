@@ -11,6 +11,8 @@ it, so its text is a product promise and not an implementation detail.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from builders.privacy_widenings import WIDENING_CASES
@@ -21,12 +23,17 @@ from yoetz.cli.unlock import (
 )
 from yoetz.domain.privacy import (
     PRIVACY_CHANGE_FIELDS,
+    AuthorizationScope,
+    AuthorizationScopeKind,
     PrivacyPolicy,
     PrivacyPolicyChange,
     PrivacyPolicyChangeValue,
     sort_privacy_changes,
 )
-from yoetz.service.confidential_protocol import PrivacyPolicyDecisionPreview
+from yoetz.service.confidential_protocol import (
+    PrivacyPolicyDecisionPreview,
+    PrivacyPolicyTransitionPreviewMember,
+)
 
 _DIGEST = "sha256:" + "b" * 64
 
@@ -174,3 +181,85 @@ def test_a_field_the_screen_cannot_place_fails_closed_instead_of_disappearing(
 
     with pytest.raises(HumanCeremonyCliError, match="preview_invalid"):
         _privacy_policy_change_text(preview)
+
+
+def test_compound_approval_names_machine_ceiling_and_repository_insert_without_identity() -> None:
+    from yoetz.service.daemon import (
+        _private_repository_preview_baseline,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    changes = (
+        PrivacyPolicyChange(
+            "global",
+            "network_egress",
+            None,
+            PrivacyPolicyChangeValue.of_flag(False),
+            PrivacyPolicyChangeValue.of_flag(True),
+            True,
+        ),
+    )
+    candidate = next(
+        candidate
+        for name, _current, candidate, *_rest in WIDENING_CASES
+        if name == "channel_enabled"
+    )
+    candidate = replace(
+        candidate,
+        effective_scope=AuthorizationScope(
+            AuthorizationScopeKind.WORKSPACE,
+            candidate.effective_scope.installation_id,
+            "hmac-sha256:" + "c" * 64,
+        ),
+    )
+    baseline = _private_repository_preview_baseline(candidate)
+    insert_changes = privacy_policy_changes(baseline, candidate)
+    assert baseline.effective_scope == candidate.effective_scope
+    assert baseline.network_egress_permitted is False
+    preview = PrivacyPolicyDecisionPreview(
+        "pending-1",
+        _DIGEST,
+        (),
+        (
+            PrivacyPolicyTransitionPreviewMember("machine_ceiling", "replace", changes),
+            PrivacyPolicyTransitionPreviewMember("repository_grant", "insert", insert_changes),
+        ),
+    )
+
+    text = _privacy_policy_change_text(preview)
+
+    assert "Installation-wide ceiling (replace)" in text
+    assert "Repository grant (insert)" in text
+    assert "Before: no repository grant; external model review is off." in text
+    assert "After: insert a repository grant bounded by the installation ceiling." in text
+    assert "Information allowed (External model review): Not applicable ->" in text
+    assert "Sensitivity allowed (External model review): Not applicable ->" in text
+    assert "Provider and model (External model review): Not applicable -> fireworks /" in text
+    assert "Confirmation (External model review): Not applicable -> No confirmation" in text
+    assert text.count("sha256:") == 1
+    assert "/Users/" not in text
+    assert "hmac-sha256:" not in text
+
+
+def test_repository_replacement_renders_the_exact_row_diff() -> None:
+    changes = (
+        PrivacyPolicyChange(
+            "global",
+            "network_egress",
+            None,
+            PrivacyPolicyChangeValue.of_flag(False),
+            PrivacyPolicyChangeValue.of_flag(True),
+            True,
+        ),
+    )
+    preview = PrivacyPolicyDecisionPreview(
+        "pending-1",
+        _DIGEST,
+        (),
+        (PrivacyPolicyTransitionPreviewMember("repository_grant", "replace", changes),),
+    )
+
+    text = _privacy_policy_change_text(preview)
+
+    assert "Repository grant (replace)" in text
+    assert "exact existing grant" in text
+    assert "Data leaving this computer: Not allowed -> Allowed" in text

@@ -34,6 +34,7 @@ from yoetz.service.confidential_protocol import (
     PortableRecoveryTarget,
     PrivacyPendingTarget,
     PrivacyPolicyDecisionPreview,
+    PrivacyPolicyTransitionPreviewMember,
     ProviderCredentialTarget,
     RetryAction,
     SecretIngressBinding,
@@ -454,6 +455,43 @@ def test_privacy_policy_preview_round_trips_the_complete_change_set() -> None:
     )
 
     assert decode_human_frame(encode_human_frame(envelope)) == envelope
+
+
+def test_compound_privacy_preview_round_trips_both_authority_layers() -> None:
+    preview = PrivacyPolicyDecisionPreview(
+        "pending-1",
+        _DIGEST_A,
+        (),
+        (
+            PrivacyPolicyTransitionPreviewMember("machine_ceiling", "replace", _policy_changes()),
+            PrivacyPolicyTransitionPreviewMember("repository_grant", "insert", _policy_changes()),
+        ),
+    )
+    envelope = ServerOpenedEnvelope(
+        "1" * 64,
+        1,
+        HumanCeremonyBinding(
+            1,
+            "1" * 64,
+            "0" * 64,
+            HumanCeremonyKind.PRIVACY_POLICY_DECISION,
+            _SERVICE_ID,
+            3,
+            0,
+            None,
+            _DIGEST_A,
+            60_000,
+        ),
+        preview,
+        DecisionRequiredPhase(),
+    )
+
+    assert decode_human_frame(encode_human_frame(envelope)) == envelope
+
+
+def test_repository_insert_preview_requires_the_explicit_private_baseline_diff() -> None:
+    with pytest.raises(ValueError, match="privacy_policy_preview_member_invalid"):
+        PrivacyPolicyTransitionPreviewMember("repository_grant", "insert", ())
 
 
 def test_a_widening_preview_cannot_be_opened_with_an_incomplete_change_set() -> None:

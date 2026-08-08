@@ -28,7 +28,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 from types import MappingProxyType
@@ -47,6 +48,7 @@ from yoetz.domain.privacy import (
     ApprovedLocalDisclosureCase,
     ApprovedOutboundCase,
     ApprovedProviderCase,
+    AuthorizationScope,
     ConsentSource,
     EgressAuthorization,
     EgressChannel,
@@ -63,6 +65,7 @@ from yoetz.domain.privacy import (
     ReceiptTransformations,
     RequestCommitment,
 )
+from yoetz.domain.values import validate_commitment, validate_sha256_digest
 from yoetz.observability.privacy import privacy_request_commitment
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
@@ -155,6 +158,9 @@ class ProviderCredentialMinter(Protocol):
     async def mint(self, binding: ProviderAttemptAuthBinding) -> ProviderCredentialHandle: ...
 
 
+type RepositoryAuthorityValidator = Callable[[AuthorizationScope, str], Awaitable[bool]]
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderRegistry:
     """One immutable, generation-fenced snapshot of currently permitted provider adapters.
@@ -168,6 +174,8 @@ class ProviderRegistry:
     policy_version: int
     policy_generation: int
     policy_digest: str
+    repository_privacy_commitment: str | None
+    authority_digest: str
     service_generation: int
     vault_generation: int
     human_authority_digest: str
@@ -176,6 +184,9 @@ class ProviderRegistry:
     require_current_provider_data_use_evidence: bool = False
 
     def __post_init__(self) -> None:
+        if self.repository_privacy_commitment is not None:
+            validate_commitment(self.repository_privacy_commitment)
+        validate_sha256_digest(self.authority_digest)
         if type(self.external) is not MappingProxyType:
             raise TypeError("provider_registry_external_not_immutable")
         if self.local_model is not None and type(self.local_model) is not tuple:
@@ -238,6 +249,7 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
     __slots__ = (
         "_audit",
         "_audit_mac",
+        "_authority_epoch",
         "_classifier",
         "_clock",
         "_close_task",
@@ -249,6 +261,7 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         "_local_model_registry",
         "_local_model_resolver",
         "_registry",
+        "_repository_authority_validator",
     )
 
     def __init__(
@@ -263,6 +276,7 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         audit_mac: MacKeyHandle,
         clock: ClockPort,
         ids: IdPort,
+        repository_authority_validator: RepositoryAuthorityValidator | None = None,
     ) -> None:
         if type(local_model_registry) is not InstalledLocalModelProfileRegistry:
             raise TypeError("privacy_gateway_local_model_registry_invalid")
@@ -275,7 +289,9 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         self._audit_mac = audit_mac
         self._clock = clock
         self._ids = ids
+        self._repository_authority_validator = repository_authority_validator
         self._lock = asyncio.Lock()
+        self._authority_epoch = 0
         self._registry: ProviderRegistry | None = None
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
@@ -340,6 +356,60 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
     async def reconcile_policy(
         self, policy: EffectivePrivacyPolicy, human_authority: HumanAuthorityCapability
     ) -> ProviderReconciliation:
+        """Reconcile a policy without inventing repository authority.
+
+        A machine policy may still reconcile local-only capability, but it cannot construct an
+        external provider factory. Repository-aware callers use
+        :meth:`reconcile_repository_policy` with the exact authority digest returned by the
+        policy store.
+        """
+
+        return await self._reconcile_policy(
+            policy,
+            human_authority,
+            repository_privacy_commitment=None,
+            authority_digest=policy.effective_digest,
+        )
+
+    async def reconcile_repository_policy(
+        self,
+        policy: EffectivePrivacyPolicy,
+        human_authority: HumanAuthorityCapability,
+        *,
+        repository_privacy_commitment: str,
+        authority_digest: str,
+    ) -> ProviderReconciliation:
+        if policy.policy.effective_scope.workspace_ref_commitment != repository_privacy_commitment:
+            raise ValueError("privacy_gateway_repository_scope_mismatch")
+        authority_epoch = await self._validated_repository_authority_epoch(
+            policy.policy.effective_scope, authority_digest
+        )
+        if authority_epoch is None:
+            return await self._reconcile_policy(
+                policy,
+                human_authority,
+                repository_privacy_commitment=None,
+                authority_digest=authority_digest,
+            )
+        return await self._reconcile_policy(
+            policy,
+            human_authority,
+            repository_privacy_commitment=repository_privacy_commitment,
+            authority_digest=authority_digest,
+            authority_scope=policy.policy.effective_scope,
+            authority_epoch=authority_epoch,
+        )
+
+    async def _reconcile_policy(
+        self,
+        policy: EffectivePrivacyPolicy,
+        human_authority: HumanAuthorityCapability,
+        *,
+        repository_privacy_commitment: str | None,
+        authority_digest: str,
+        authority_scope: AuthorizationScope | None = None,
+        authority_epoch: int | None = None,
+    ) -> ProviderReconciliation:
         if type(policy) is not EffectivePrivacyPolicy:
             raise TypeError("privacy_gateway_effective_policy_invalid")
         if type(human_authority) is not HumanAuthorityCapability:
@@ -348,8 +418,14 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         async with self._lock:
             if self._closed:
                 return ProviderReconciliation(policy.generation, 0, 0, ())
+            if repository_privacy_commitment is not None and (
+                authority_scope is None or authority_epoch != self._authority_epoch
+            ):
+                return ProviderReconciliation(policy.generation, 0, 0, ())
             previous = self._registry
-            allowed_external = _llm_binding(policy.policy)
+            allowed_external = (
+                _llm_binding(policy.policy) if repository_privacy_commitment is not None else None
+            )
             allowed_local = _local_binding(policy.policy)
             # Phase 1: install an immediate deny fence for anything the new policy no longer
             # permits, before any (possibly slow) candidate construction happens outside the lock.
@@ -368,11 +444,13 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
                         fenced_local = previous.local_model
                     else:
                         stale_local = previous.local_model
-            self._registry = ProviderRegistry(
+            phase_registry = ProviderRegistry(
                 policy.policy.policy_id,
                 policy.policy.version,
                 policy.generation,
                 policy.effective_digest,
+                repository_privacy_commitment,
+                authority_digest,
                 human_authority.service_generation,
                 human_authority.vault_generation,
                 human_authority.capability_digest,
@@ -380,6 +458,7 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
                 fenced_local,
                 policy.policy.require_current_provider_data_use_evidence,
             )
+            self._registry = phase_registry
 
         for factory in stale_external.values():
             await _best_effort_close(factory)
@@ -400,12 +479,29 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
             if builder is None:
                 unavailable.append((_binding_digest(allowed_external), "factory_unavailable"))
             else:
-                try:
-                    new_external[allowed_external] = builder()
-                except Exception:  # noqa: BLE001 - a foreign factory failure is bounded here
-                    unavailable.append(
-                        (_binding_digest(allowed_external), "factory_construction_failed")
-                    )
+                assert authority_scope is not None
+                build_epoch = await self._validated_repository_authority_epoch(
+                    authority_scope, authority_digest
+                )
+                if build_epoch is not None:
+                    async with self._lock:
+                        if (
+                            not self._closed
+                            and self._current_registry() is phase_registry
+                            and build_epoch == self._authority_epoch
+                        ):
+                            try:
+                                # Construction is the capability-admission boundary. Holding the
+                                # same lock as close_revoked makes either revocation or this exact
+                                # construction win, never both in an ambiguous order.
+                                new_external[allowed_external] = builder()
+                            except Exception:  # noqa: BLE001 - bounded foreign failure
+                                unavailable.append(
+                                    (
+                                        _binding_digest(allowed_external),
+                                        "factory_construction_failed",
+                                    )
+                                )
 
         new_local = fenced_local
         if (
@@ -454,7 +550,15 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         # candidates. Stale candidates built against an outdated snapshot are closed, not adopted.
         async with self._lock:
             current = self._current_registry()
-            if self._closed or current is None or current.policy_generation != policy.generation:
+            if (
+                self._closed
+                or current is None
+                or current is not phase_registry
+                or (
+                    repository_privacy_commitment is not None
+                    and authority_epoch != self._authority_epoch
+                )
+            ):
                 for binding, factory in new_external.items():
                     if binding not in fenced_external:
                         await _best_effort_close(factory)
@@ -472,6 +576,8 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
                 policy.policy.version,
                 policy.generation,
                 policy.effective_digest,
+                repository_privacy_commitment,
+                authority_digest,
                 human_authority.service_generation,
                 human_authority.vault_generation,
                 human_authority.capability_digest,
@@ -501,6 +607,11 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         registry = self._registry
         now_monotonic = self._clock.monotonic_seconds()
         now_utc = self._clock.now_utc()
+
+        if not await self._repository_authority_is_current(authorization.scope, registry):
+            return await self._preconsume_failure(
+                case, authorization, PrivacyReason.AUTHORIZATION_STALE
+            )
 
         reason = self._predispatch_reason(
             case, authorization, registry, deadline, now_monotonic, now_utc
@@ -535,6 +646,13 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
 
         body_digest = "sha256:" + hashlib.sha256(body).hexdigest()
         commitment = privacy_request_commitment(body, self._audit_mac)
+
+        # Recheck after deterministic rendering and immediately before a credential handle can
+        # exist. Repository revocation is allowed to race with rendering, but never with minting.
+        if not await self._repository_authority_is_current(authorization.scope, registry):
+            return await self._preconsume_failure(
+                case, authorization, PrivacyReason.AUTHORIZATION_STALE
+            )
 
         binding = ProviderAttemptAuthBinding(
             provider_id=case.provider_binding.provider_id,
@@ -573,12 +691,29 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
                 case, authorization, PrivacyReason.PROVIDER_UNAVAILABLE
             )
 
-        try:
-            await self._audit.consume(authorization.authorization_id, dispatch_id, now_utc)
-        except Exception:  # noqa: BLE001 - a lost consume race is bounded here
-            return await self._preconsume_failure(
-                case, authorization, PrivacyReason.AUTHORIZATION_REUSED
-            )
+        # Validate without the gateway lock so a validator is free to trigger close_revoked. The
+        # captured epoch is then consumed under that same lock with the audit CAS: revocation that
+        # wins first makes this attempt stale, while revocation after the CAS is ordered after an
+        # admitted physical attempt.
+        final_authority_epoch = await self._validated_repository_authority_epoch(
+            authorization.scope, registry.authority_digest
+        )
+        admission_failure: PrivacyReason | None = None
+        async with self._lock:
+            if (
+                final_authority_epoch is None
+                or self._closed
+                or self._current_registry() is not registry
+                or final_authority_epoch != self._authority_epoch
+            ):
+                admission_failure = PrivacyReason.AUTHORIZATION_STALE
+            else:
+                try:
+                    await self._audit.consume(authorization.authorization_id, dispatch_id, now_utc)
+                except Exception:  # noqa: BLE001 - a lost consume race is bounded here
+                    admission_failure = PrivacyReason.AUTHORIZATION_REUSED
+        if admission_failure is not None:
+            return await self._preconsume_failure(case, authorization, admission_failure)
 
         # From here on the physical attempt is admitted: no failure below can restore authority,
         # only its actual terminal or `outcome_unknown` receipt is produced.
@@ -633,6 +768,8 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
             or registry.service_generation != authorization.service_generation
         ):
             return PrivacyReason.AUTHORIZATION_STALE
+        if authorization.scope.workspace_ref_commitment != registry.repository_privacy_commitment:
+            return PrivacyReason.AUTHORIZATION_STALE
         if deadline.expired(now_monotonic):
             return PrivacyReason.DEADLINE_EXPIRED
         if now_utc >= authorization.expires_at:
@@ -642,6 +779,46 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
             if data_use is None or not data_use.recommendation_eligible(now_utc):
                 return PrivacyReason.POLICY_DENIED
         return None
+
+    async def _repository_authority_is_current(
+        self, scope: AuthorizationScope, registry: ProviderRegistry | None
+    ) -> bool:
+        if (
+            registry is None
+            or registry.repository_privacy_commitment is None
+            or scope.workspace_ref_commitment != registry.repository_privacy_commitment
+        ):
+            return False
+        validator = self._repository_authority_validator
+        if validator is None:
+            return False
+        try:
+            return await validator(scope, registry.authority_digest) is True
+        except Exception:
+            return False
+
+    async def _validated_repository_authority_epoch(
+        self, scope: AuthorizationScope, authority_digest: str
+    ) -> int | None:
+        """Return an optimistic epoch only for one exact live repository snapshot.
+
+        Callers must compare the returned value again while holding ``_lock`` at the capability
+        boundary. A validator may itself close the registry; capturing the epoch before invoking
+        it makes that closure observable without ever invoking foreign code under the lock.
+        """
+
+        validator = self._repository_authority_validator
+        if validator is None:
+            return None
+        async with self._lock:
+            if self._closed:
+                return None
+            authority_epoch = self._authority_epoch
+        try:
+            current = await validator(scope, authority_digest)
+        except Exception:
+            return None
+        return authority_epoch if current is True else None
 
     async def _preconsume_failure(
         self, case: ApprovedOutboundCase, authorization: EgressAuthorization, reason: PrivacyReason
@@ -782,17 +959,35 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
     async def close_revoked(self, policy_generation: int) -> None:
         if type(policy_generation) is not int or policy_generation < 1:
             raise TypeError("privacy_gateway_generation_invalid")
-        async with self._lock:
+        async with self.authority_mutation_fence():
+            pass
+
+    @asynccontextmanager
+    async def authority_mutation_fence(self) -> AsyncGenerator[None]:
+        """Linearize durable authority mutation with reconcile and dispatch admission.
+
+        The lock remains held while the caller mutates the policy store. Reconciliation and final
+        authorization consume therefore observe either the complete old authority or the complete
+        new authority, never the released pre-commit gap. Cleanup is intentionally deferred until
+        after release because closing adapters may run foreign async code.
+        """
+
+        registry: ProviderRegistry | None = None
+        await self._lock.acquire()
+        try:
             registry = self._registry
-            if self._closed or registry is None or registry.policy_generation > policy_generation:
-                return
+            self._authority_epoch += 1
             self._registry = None
-        await _close_registry(registry)
+            yield
+        finally:
+            self._lock.release()
+            await _close_registry(registry)
 
     async def close(self) -> None:
         async with self._lock:
             if self._close_task is None:
                 self._closed = True
+                self._authority_epoch += 1
                 registry = self._registry
                 self._registry = None
                 self._close_task = asyncio.create_task(_close_registry(registry))

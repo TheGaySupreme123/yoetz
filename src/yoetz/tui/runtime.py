@@ -311,6 +311,7 @@ class YoetzRuntime:
                     recipe_hint,
                 ),
                 offer_recommended=offer_recommended,
+                workspace_locator=self._cwd,
             )
         except (ControlError, HumanCeremonyCliError, OSError, ValueError) as error:
             raise RuntimeError_(
@@ -318,7 +319,9 @@ class YoetzRuntime:
                 "the trusted privacy ceremony could not be completed",
             ) from error
 
-    def privacy_recommendation(self) -> PrivacyRecommendation:
+    def privacy_recommendation(
+        self, posture: PrivacyPosture | None = None
+    ) -> PrivacyRecommendation:
         """The same recommendation rule the CLI uses, never a second opinion."""
 
         from yoetz.cli.privacy_setup import recommended_privacy_recipe
@@ -332,10 +335,15 @@ class YoetzRuntime:
             # configuration that could not be read.
             recipe = "private"
         if recipe == "assisted_review":
+            grant_sentence = (
+                " This repository already has the required grant."
+                if posture is not None and posture.repository_grant_state == "granted"
+                else " Approval creates the required grant only for this repository."
+            )
             return PrivacyRecommendation(
                 recipe,
                 "This exact provider route has current reviewed no-training and retention evidence, "
-                "so bounded Assisted review is available for this workspace.",
+                "so bounded Assisted review is available for this repository." + grant_sentence,
                 "It may disclose selected problem-local ordinary user content; the trusted policy "
                 "review shows the exact boundary and provider caveats before approval.",
             )
@@ -530,10 +538,13 @@ class YoetzRuntime:
     @asynccontextmanager
     async def _client(self) -> AsyncGenerator[Any]:
         from yoetz.cli.app import build_service_client
-        from yoetz.ports.control import ControlError
+        from yoetz.ports.control import ControlClientKind, ControlError, WorkspaceLocator
 
         try:
-            client = await build_service_client()
+            client = await build_service_client(
+                ControlClientKind.UI,
+                workspace_locator=WorkspaceLocator(str(self._cwd.resolve(strict=True))),
+            )
         except ControlError as error:
             raise RuntimeError_(error.reason, "the local Yoetz service is not reachable")
         try:
@@ -569,15 +580,16 @@ class YoetzRuntime:
     # -- privacy --------------------------------------------------------
 
     async def privacy_posture(self) -> PrivacyPosture:
-        from yoetz.cli.provider_status import machine_scope_request
+        from yoetz.domain.values import JsonObject
         from yoetz.ports.control import ControlError
 
         try:
             async with self._client() as client:
-                effective = await client.privacy_get_effective(machine_scope_request())
+                effective = await client.privacy_get_setup(JsonObject({"schema_version": "2.0.0"}))
         except RuntimeError_, ControlError:
             return PrivacyPosture(profile=None, llm_inference_enabled=None, readable=False)
-        policy_map = _mapping(_mapping(effective).get("policy"))
+        response = _mapping(effective)
+        policy_map = _mapping(response.get("composed_policy"))
         if not policy_map:
             return PrivacyPosture(profile=None, llm_inference_enabled=None, readable=False)
         profile = policy_map.get("profile")
@@ -609,6 +621,24 @@ class YoetzRuntime:
             never_send=never_send,
             enabled_channels=tuple(enabled),
             network_egress_permitted=network_egress,
+            repository_grant_state=cast(
+                Literal["granted", "missing"] | None,
+                response.get("grant_state")
+                if response.get("grant_state") in {"granted", "missing"}
+                else None,
+            ),
+            repository_migration_state=cast(
+                str | None,
+                response.get("migration_state")
+                if response.get("migration_state")
+                in {
+                    "not_applicable",
+                    "legacy_route_available",
+                    "first_repository_available",
+                    "consumed",
+                }
+                else None,
+            ),
         )
 
     # -- provider -------------------------------------------------------
@@ -676,7 +706,7 @@ class YoetzRuntime:
     async def provider_posture(self) -> ProviderPosture:
         from yoetz.cli.provider_status import provider_status_report
 
-        report = await provider_status_report()
+        report = await provider_status_report(workspace_locator=self._cwd)
         endpoint_map = _mapping(report.get("endpoint"))
         blockers: list[tuple[str, str]] = []
         raw_blockers = report.get("blockers")

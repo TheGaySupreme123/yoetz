@@ -23,7 +23,7 @@ _MANIFEST_PATH = "manifest.json"
 _SCHEMA_NAMESPACE = "https://schemas.yoetz.dev/0.1/"
 _EXPECTED_SCHEMA_MANIFEST_SCHEMA = "yoetz.schema-manifest/1.0.0"
 _EXPECTED_SCHEMA_MANIFEST_VERSION = "1.0.0"
-_EXPECTED_MEMBER_COUNT = 58
+_EXPECTED_MEMBER_COUNT = 62
 _EXPECTED_REQUEST_RESULT_VERSION_COUNT = 37
 _EXPECTED_EVENT_VERSION_COUNT = 16
 
@@ -163,7 +163,12 @@ def test_schema_registry_is_complete() -> None:
     assert len(paths) == len(set(paths))
     assert len({member["$id"] for member in members}) == len(members)
     for member in members:
-        expected = "2.0.0" if member["path"].startswith("consent/") else "1.0.0"
+        path = member["path"]
+        expected = (
+            "2.0.0"
+            if path.startswith("consent/") or path.endswith("-2.0.0.schema.json")
+            else "1.0.0"
+        )
         assert member["schema_version"] == expected
     for member in members:
         _assert_manifest_member_shape(member)

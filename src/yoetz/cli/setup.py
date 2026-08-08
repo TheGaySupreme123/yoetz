@@ -1595,6 +1595,8 @@ async def run_setup_wizard(
     privacy: dict[str, JsonValue] = {
         "outcome": "deferred" if not interactive else "not_changed",
         "profile": "unknown",
+        "grant_state": None,
+        "migration_state": None,
         "reason": None,
     }
     semantic_status: dict[str, JsonValue] | None = None
@@ -1628,6 +1630,8 @@ async def run_setup_wizard(
                 privacy = {
                     "outcome": "failed",
                     "profile": "unknown",
+                    "grant_state": None,
+                    "migration_state": None,
                     "reason": reason if type(reason) is str else "privacy_setup_failed",
                 }
                 return False
@@ -1635,6 +1639,8 @@ async def run_setup_wizard(
                 "outcome": privacy_result.outcome,
                 "profile": privacy_result.profile,
                 "proposal_id": privacy_result.proposal_id,
+                "grant_state": getattr(privacy_result, "grant_state", None),
+                "migration_state": getattr(privacy_result, "migration_state", None),
                 "reason": privacy_result.reason,
             }
             return privacy_result.outcome in {"configured", "unchanged"}

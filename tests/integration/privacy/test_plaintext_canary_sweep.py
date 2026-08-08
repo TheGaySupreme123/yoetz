@@ -15,7 +15,9 @@ import hmac
 import json
 import logging
 import os
-from collections.abc import AsyncIterator, Callable, Iterator
+import subprocess
+from collections.abc import AsyncIterator, Buffer, Callable, Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -27,6 +29,8 @@ from cryptography.hazmat.primitives.keywrap import aes_key_unwrap, aes_key_wrap
 from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
 from yoetz.adapters.privacy.catalog import CatalogPrivacyAudit, CatalogPrivacyPolicyStore
 from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer
+from yoetz.adapters.repository_identity import resolve_repository_privacy_context
+from yoetz.adapters.sqlite.migrations import CATALOG_MIGRATIONS
 from yoetz.application.egress import PrivacyCoordinator
 from yoetz.config.models import LoggingConfig
 from yoetz.domain.privacy import (
@@ -52,6 +56,13 @@ from yoetz.observability.privacy import (
     build_diagnostic_manifest,
     scan_for_sensitive_content,
 )
+from yoetz.ports.control import (
+    ControlClientKind,
+    RepositoryPrivacyContext,
+    ServiceState,
+    ServiceStatus,
+    WorkspaceLocator,
+)
 from yoetz.ports.keys import BundleKeys, WrappedDek
 from yoetz.ports.objects import (
     ObjectKind,
@@ -64,6 +75,7 @@ from yoetz.ports.objects import (
 from yoetz.ports.secret_memory import SecretConsumer, SecretMemoryCapability, SecretPurpose
 from yoetz.protocol.ids import IdKind
 from yoetz.protocol.models import DataCategory
+from yoetz.service.control_protocol import client_handshake, server_handshake
 
 if TYPE_CHECKING:
     from yoetz.ports.secret_memory import SecretHandle
@@ -77,6 +89,7 @@ _REQUEST_FAULT = "req_50000000-0000-4000-8000-000000000006"
 _ROUTE_DIGEST = "sha256:" + "7" * 64
 _DIGEST = "sha256:" + "3" * 64
 _NOW = datetime(2026, 7, 19, tzinfo=UTC)
+_SERVICE = "svc_50000000-0000-4000-8000-000000000007"
 
 
 class _Clock:
@@ -183,8 +196,8 @@ class _Gateway:
 def _database(path: Path) -> apsw.Connection:
     db = apsw.Connection(str(path))
     db.execute("PRAGMA journal_mode=WAL")
-    migration = Path("migrations/catalog/0001.sql").read_text(encoding="utf-8")
-    db.execute(migration)
+    for migration in CATALOG_MIGRATIONS:
+        db.execute(migration.ddl.decode("utf-8"))
     db.execute(
         """INSERT INTO task_routes (
                task_id, workspace_ref_commitment, external_ref_commitment,
@@ -228,7 +241,7 @@ def _scope() -> AuthorizationScope:
     )
 
 
-def _policy() -> PrivacyPolicy:
+def _policy(scope: AuthorizationScope | None = None) -> PrivacyPolicy:
     return PrivacyPolicy(
         _POLICY,
         1,
@@ -238,7 +251,7 @@ def _policy() -> PrivacyPolicy:
         ReviewSelectionPolicy.for_profile(ReviewContextProfile.STRUCTURAL),
         False,
         False,
-        _scope(),
+        _scope() if scope is None else scope,
         tuple(_disabled(channel) for channel in sorted(EgressChannel, key=lambda item: item.value)),
         False,
         None,
@@ -267,17 +280,24 @@ def _coordinator(
 
 
 def _candidate(
-    request_id: str, item_id: str, category: DataCategory, origin_ref: str, plaintext: bytes
+    request_id: str,
+    item_id: str,
+    category: DataCategory,
+    origin_ref: str,
+    plaintext: bytes,
+    *,
+    scope: AuthorizationScope | None = None,
 ) -> CandidateContext:
+    effective_scope = _scope() if scope is None else scope
     return CandidateContext(
         request_id,
         None,
         LocalDisclosureSink.TRUSTED_HUMAN_CONTROL,
         "trusted-preview",
-        _scope(),
+        effective_scope,
         None,
         None,
-        (CandidateContextItem(item_id, category, _scope(), origin_ref, plaintext),),
+        (CandidateContextItem(item_id, category, effective_scope, origin_ref, plaintext),),
     )
 
 
@@ -316,6 +336,57 @@ class _Env:
     def surfaces(self) -> dict[str, bytes]:
         self.db.execute("PRAGMA wal_checkpoint(PASSIVE)")
         return _durable_surfaces(self.db_path, self.bundle_root)
+
+
+class _RecordingMemoryStream:
+    """In-memory authenticated stream retaining frames only for the positive-control assertion."""
+
+    def __init__(self, peer_identity: object) -> None:
+        self.peer_identity = peer_identity
+        self.other: _RecordingMemoryStream | None = None
+        self.sent: list[bytes] = []
+        self._chunks: asyncio.Queue[bytes] = asyncio.Queue(maxsize=4)
+        self._buffer = bytearray()
+
+    async def receive(self, max_bytes: int) -> bytes:
+        while not self._buffer:
+            self._buffer.extend(await self._chunks.get())
+        chunk = bytes(self._buffer[:max_bytes])
+        del self._buffer[:max_bytes]
+        return chunk
+
+    async def send_all(self, data: Buffer) -> None:
+        assert self.other is not None
+        frame = bytes(data)
+        self.sent.append(frame)
+        await self.other._chunks.put(frame)
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _control_stream_pair() -> tuple[_RecordingMemoryStream, _RecordingMemoryStream, object]:
+    client_peer = object()
+    service_peer = object()
+    client = _RecordingMemoryStream(service_peer)
+    server = _RecordingMemoryStream(client_peer)
+    client.other = server
+    server.other = client
+    return client, server, client_peer
+
+
+def _service_status() -> ServiceStatus:
+    return ServiceStatus(
+        protocol_version="1.0",
+        service_version="0.1.0",
+        service_instance_id=_SERVICE,
+        service_generation="1",
+        state=ServiceState.LOCKED,
+        state_reason="human_authority_unavailable",
+        vault_mode="uninitialized",
+        capabilities=(),
+        session_monitor="unavailable",
+    )
 
 
 def test_canaries_absent_from_structural_surfaces(tmp_path: Path) -> None:
@@ -380,6 +451,146 @@ def test_canaries_absent_from_structural_surfaces(tmp_path: Path) -> None:
 
     manifest = build_diagnostic_manifest(RedactionProfile.SUPPORT, {"message": canary.decode()})
     assert canary.decode() not in repr(manifest)
+
+
+@pytest.mark.anyio
+async def test_repository_locator_is_ephemeral_and_only_its_commitment_persists(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    common_root_marker = f"GIT-COMMON-ROOT-CANARY-{os.urandom(8).hex()}"
+    locator_marker = f"RAW-WORKSPACE-LOCATOR-CANARY-{os.urandom(8).hex()}"
+    repository = tmp_path / common_root_marker
+    nested_locator = repository / locator_marker
+    repository.mkdir()
+    subprocess.run(
+        ["git", "-C", os.fspath(repository), "init"],
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+    )
+    nested_locator.mkdir()
+    locator = WorkspaceLocator(os.fspath(nested_locator))
+    raw_locator = locator.path.encode()
+    marker_canaries = (common_root_marker.encode(), locator_marker.encode(), raw_locator)
+
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    env = _Env(state_root)
+    client, server, client_peer = _control_stream_pair()
+    observed_locators: list[str] = []
+
+    async def resolve(value: WorkspaceLocator) -> RepositoryPrivacyContext:
+        observed_locators.append(value.path)
+        return await resolve_repository_privacy_context(value, env.audit_key)
+
+    client_session, server_session = await asyncio.gather(
+        client_handshake(
+            client,
+            ControlClientKind.CLI,
+            "0.1.0",
+            workspace_locator=locator,
+        ),
+        server_handshake(
+            server,
+            client_peer,
+            _service_status(),
+            repository_context_resolver=resolve,
+        ),
+    )
+    context = server_session.repository_privacy_context
+    assert context is not None and context.identity_kind == "git_common_root"
+    assert observed_locators == [locator.path]
+
+    # Positive control: the exact client hello carries the raw locator into the trusted resolver,
+    # while the server response and both retained session representations do not echo it.
+    assert all(canary in client.sent[0] for canary in marker_canaries)
+    assert all(canary not in b"".join(server.sent) for canary in marker_canaries)
+    assert all(canary.decode() not in repr(client_session) for canary in marker_canaries)
+    assert all(canary.decode() not in repr(server_session) for canary in marker_canaries)
+
+    machine_scope = AuthorizationScope(AuthorizationScopeKind.MACHINE, _INSTALLATION)
+    repository_scope = AuthorizationScope(
+        AuthorizationScopeKind.WORKSPACE,
+        _INSTALLATION,
+        context.commitment,
+    )
+    task_scope = AuthorizationScope(
+        AuthorizationScopeKind.TASK,
+        _INSTALLATION,
+        context.commitment,
+        _TASK,
+    )
+    machine_policy = replace(
+        _policy(machine_scope),
+        policy_id="pvy_50000000-0000-4000-8000-000000000008",
+        policy_digest="sha256:" + "8" * 64,
+    )
+    repository_policy = replace(
+        machine_policy,
+        policy_id="pvy_50000000-0000-4000-8000-000000000009",
+        policy_digest="sha256:" + "9" * 64,
+        effective_scope=repository_scope,
+    )
+    env.db.execute(
+        "UPDATE task_routes SET repository_privacy_commitment = ? WHERE task_id = ?",
+        (context.commitment, _TASK),
+    )
+    await env.policies.seed_if_absent(machine_policy)
+    await env.policies.seed_if_absent(repository_policy)
+    authority = await env.policies.repository_authority(task_scope)
+    approved = await env.coordinator.prepare_local_disclosure(
+        _candidate(
+            _REQUEST,
+            "item-1",
+            DataCategory.TASK_DESCRIPTION,
+            "note:repository-bound",
+            b"bounded content unrelated to the private locator",
+            scope=task_scope,
+        )
+    )
+    assert type(approved) is LocalDisclosureApproved
+    assert authority.repository_privacy_commitment == context.commitment
+    assert approved.receipt.scope.workspace_ref_commitment == context.commitment
+
+    # Exercise the dedicated canonical policy and receipt columns in addition to scanning the
+    # byte-level catalog/WAL/SHM and encrypted object corpus below.
+    canonical_rows = env.db.execute(
+        "SELECT policy_canonical FROM privacy_policy_versions "
+        "UNION ALL SELECT subject_structural_canonical FROM privacy_audit_records "
+        "UNION ALL SELECT receipt_canonical FROM privacy_audit_records "
+        "WHERE receipt_canonical IS NOT NULL"
+    ).fetchall()
+    assert len(canonical_rows) >= 4
+    for (canonical,) in canonical_rows:
+        assert type(canonical) is bytes
+        assert all(canary not in canonical for canary in marker_canaries)
+
+    surfaces = env.surfaces()
+    assert {"catalog_db", "catalog_db-wal", "catalog_db-shm"} <= surfaces.keys()
+    for name, data in surfaces.items():
+        findings = scan_for_sensitive_content(data, canaries=marker_canaries)
+        assert findings == (), f"repository locator leaked into {name!r}: {findings}"
+
+    retained_results = repr((authority, approved.receipt))
+    assert all(canary.decode() not in retained_results for canary in marker_canaries)
+    manifest = build_diagnostic_manifest(
+        RedactionProfile.SUPPORT,
+        {"workspace_locator": locator.path, "authority": retained_results},
+    )
+    assert all(canary.decode() not in repr(manifest) for canary in marker_canaries)
+
+    configure_logging(LoggingConfig(level="debug"), LogMode.SERVICE, clock=_Clock())
+    get_logger("repository_locator_canary_test").error(
+        "simulated_fault",
+        outcome=locator.path,
+        correlation_id=locator.path,
+    )
+    captured = capsys.readouterr()
+    assert all(canary.decode() not in captured.err for canary in marker_canaries)
+    assert all(canary.decode() not in captured.out for canary in marker_canaries)
 
 
 def test_ciphertext_matches_are_not_treated_as_plaintext(tmp_path: Path) -> None:

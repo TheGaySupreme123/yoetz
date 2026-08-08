@@ -84,7 +84,8 @@ def _id(kind: IdKind, value: int) -> str:
 def _sqlite_catalog(installation_id: str, clock: _Clock) -> SqliteStartCatalog:
     db = apsw.Connection(":memory:")
     root = Path(__file__).resolve().parents[3]
-    db.execute((root / "migrations/catalog/0001.sql").read_text(encoding="utf-8"))
+    for version in ("0001", "0002", "0003"):
+        db.execute((root / f"migrations/catalog/{version}.sql").read_text(encoding="utf-8"))
     db.executemany(
         "INSERT INTO catalog_meta(key, value) VALUES(?, ?)",
         (("installation_id", installation_id), ("owner_generation", "1")),

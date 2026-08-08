@@ -530,19 +530,27 @@ def _deadline(clock: _Clock, *, remaining_seconds: float = 30.0) -> Deadline:
     return Deadline(_NOW + timedelta(minutes=5), clock.monotonic + remaining_seconds)
 
 
+async def _repository_authority_current(_scope: object, _authority_digest: str) -> bool:
+    return True
+
+
 def _gateway(
     *,
     audit: _FullPrivacyAudit,
     clock: _Clock,
     credential_minter: _CredentialMinter | None = None,
     external_factory: object | None = None,
+    external_factory_builder: object | None = None,
     local_registry: InstalledLocalModelProfileRegistry | None = None,
     local_resolver: _LocalResolver | None = None,
+    repository_authority_validator: object | None = _repository_authority_current,
 ) -> PolicyEnforcingOutboundGateway:
     minter = credential_minter or _CredentialMinter()
-    builders = (
-        {_provider_binding(): (lambda: external_factory)} if external_factory is not None else {}
-    )
+    builders = {}
+    if external_factory_builder is not None:
+        builders[_provider_binding()] = external_factory_builder
+    elif external_factory is not None:
+        builders[_provider_binding()] = lambda: external_factory
     return PolicyEnforcingOutboundGateway(
         external_factory_builders=builders,  # type: ignore[arg-type]
         local_model_registry=local_registry or InstalledLocalModelProfileRegistry(),
@@ -553,6 +561,22 @@ def _gateway(
         audit_mac=_AuditKey(),  # type: ignore[arg-type]
         clock=clock,  # type: ignore[arg-type]
         ids=_Ids(),  # type: ignore[arg-type]
+        repository_authority_validator=repository_authority_validator,  # type: ignore[arg-type]
+    )
+
+
+async def _reconcile_repository(
+    gateway: PolicyEnforcingOutboundGateway,
+    effective: EffectivePrivacyPolicy,
+    human: HumanAuthorityCapability,
+) -> ProviderReconciliation:
+    repository = effective.policy.effective_scope.workspace_ref_commitment
+    assert repository is not None
+    return await gateway.reconcile_repository_policy(
+        effective,
+        human,
+        repository_privacy_commitment=repository,
+        authority_digest=effective.effective_digest,
     )
 
 
@@ -572,7 +596,7 @@ def test_reconcile_and_dispatch_external_semantic_succeeds() -> None:
     assert gateway.has_connected_provider_binding(_provider_binding()) is False
 
     async def run() -> tuple[SemanticResult, EgressAuthorization]:
-        reconciliation = await gateway.reconcile_policy(effective, human)
+        reconciliation = await _reconcile_repository(gateway, effective, human)
         assert reconciliation == ProviderReconciliation(1, 1, 0, ())
         assert gateway.has_connected_provider_binding(_provider_binding()) is True
         assert (
@@ -625,6 +649,22 @@ def test_reconcile_and_dispatch_external_semantic_succeeds() -> None:
     assert result.provenance.privacy_policy_digest == receipt.policy.policy_digest
     assert receipt.policy.policy_digest == policy.policy_digest
     assert result.provenance.policy_digest != "sha256:" + "0" * 64
+
+
+def test_legacy_reconcile_never_constructs_external_provider() -> None:
+    clock = _Clock()
+    audit = _FullPrivacyAudit()
+    factory = _FakeExternalFactory(_script_factory)
+    gateway = _gateway(audit=audit, clock=clock, external_factory=factory)
+    policy = _policy(external_enabled=True, local_enabled=False)
+    effective = EffectivePrivacyPolicy(policy, 1, policy.policy_digest)
+
+    reconciliation = asyncio.run(
+        gateway.reconcile_policy(effective, _human_authority(available=True))
+    )
+
+    assert reconciliation.activated_count == 0
+    assert gateway.has_connected_provider_binding(_provider_binding()) is False
 
 
 def test_a_placeholder_policy_digest_can_never_ride_a_successful_dispatch() -> None:
@@ -688,7 +728,7 @@ def test_dispatch_rejects_authorization_case_mismatch() -> None:
     human = _human_authority(available=True)
 
     async def run() -> tuple[SemanticResult, EgressAuthorization]:
-        await gateway.reconcile_policy(effective, human)
+        await _reconcile_repository(gateway, effective, human)
         authorization = _authorization(
             authorization_id="aut_60000000-0000-4000-8000-000000000020",
             policy_digest=policy.policy_digest,
@@ -722,6 +762,336 @@ def test_dispatch_rejects_authorization_case_mismatch() -> None:
     assert audit.authorization_state(authorization.authorization_id) == "authorized"
 
 
+def test_repository_authority_revoked_before_render_has_zero_provider_side_effects() -> None:
+    clock = _Clock()
+    audit = _FullPrivacyAudit()
+    minter = _CredentialMinter()
+    factory = _FakeExternalFactory(_script_factory)
+    validations = 0
+
+    async def revoked(_scope: object, _authority_digest: str) -> bool:
+        nonlocal validations
+        validations += 1
+        return validations <= 2
+
+    gateway = _gateway(
+        audit=audit,
+        clock=clock,
+        credential_minter=minter,
+        external_factory=factory,
+        repository_authority_validator=revoked,
+    )
+    policy = _policy(external_enabled=True, local_enabled=False)
+    effective = EffectivePrivacyPolicy(policy, 1, policy.policy_digest)
+    human = _human_authority(available=True)
+
+    async def run() -> tuple[SemanticResult, EgressAuthorization]:
+        await _reconcile_repository(gateway, effective, human)
+        authorization = _authorization(
+            authorization_id="aut_60000000-0000-4000-8000-000000000023",
+            policy_digest=policy.policy_digest,
+            service_generation=human.service_generation,
+        )
+        audit.seed_authorized(authorization)
+        case = _case(
+            case_id="cas_60000000-0000-4000-8000-000000000024",
+            authorization=authorization,
+            payload=canonical_encode({"note": "hello"}),
+        )
+        return (
+            await gateway.dispatch_external_semantic(case, authorization, _deadline(clock)),
+            authorization,
+        )
+
+    result, authorization = asyncio.run(run())
+    assert type(result) is SemanticResultUnavailable
+    assert validations == 3
+    assert factory.render_calls == 0
+    assert factory.built == []
+    assert minter.mint_calls == []
+    assert audit.authorization_state(authorization.authorization_id) == "authorized"
+
+
+def test_repository_authority_rechecked_after_render_before_credential_mint() -> None:
+    clock = _Clock()
+    audit = _FullPrivacyAudit()
+    minter = _CredentialMinter()
+    factory = _FakeExternalFactory(_script_factory)
+    validations = 0
+
+    async def revoke_after_render(_scope: object, _authority_digest: str) -> bool:
+        nonlocal validations
+        validations += 1
+        return validations <= 3
+
+    gateway = _gateway(
+        audit=audit,
+        clock=clock,
+        credential_minter=minter,
+        external_factory=factory,
+        repository_authority_validator=revoke_after_render,
+    )
+    policy = _policy(external_enabled=True, local_enabled=False)
+    effective = EffectivePrivacyPolicy(policy, 1, policy.policy_digest)
+    human = _human_authority(available=True)
+
+    async def run() -> tuple[SemanticResult, EgressAuthorization]:
+        await _reconcile_repository(gateway, effective, human)
+        authorization = _authorization(
+            authorization_id="aut_60000000-0000-4000-8000-000000000025",
+            policy_digest=policy.policy_digest,
+            service_generation=human.service_generation,
+        )
+        audit.seed_authorized(authorization)
+        case = _case(
+            case_id="cas_60000000-0000-4000-8000-000000000026",
+            authorization=authorization,
+            payload=canonical_encode({"note": "hello"}),
+        )
+        return (
+            await gateway.dispatch_external_semantic(case, authorization, _deadline(clock)),
+            authorization,
+        )
+
+    result, authorization = asyncio.run(run())
+    assert type(result) is SemanticResultUnavailable
+    assert validations == 4
+    assert factory.render_calls == 1
+    assert factory.built == []
+    assert minter.mint_calls == []
+    assert audit.authorization_state(authorization.authorization_id) == "authorized"
+
+
+def test_repository_revocation_during_build_admission_never_invokes_factory_builder() -> None:
+    clock = _Clock()
+    audit = _FullPrivacyAudit()
+    factory = _FakeExternalFactory(_script_factory)
+    validations = 0
+    build_calls = 0
+    holder: dict[str, PolicyEnforcingOutboundGateway] = {}
+
+    async def revoke_at_build_boundary(_scope: object, _authority_digest: str) -> bool:
+        nonlocal validations
+        validations += 1
+        if validations == 2:
+            await holder["gateway"].close_revoked(1)
+        return True
+
+    def build_factory() -> _FakeExternalFactory:
+        nonlocal build_calls
+        build_calls += 1
+        return factory
+
+    gateway = _gateway(
+        audit=audit,
+        clock=clock,
+        external_factory_builder=build_factory,
+        repository_authority_validator=revoke_at_build_boundary,
+    )
+    holder["gateway"] = gateway
+    policy = _policy(external_enabled=True, local_enabled=False)
+    effective = EffectivePrivacyPolicy(policy, 1, policy.policy_digest)
+
+    reconciliation = asyncio.run(
+        _reconcile_repository(gateway, effective, _human_authority(available=True))
+    )
+
+    assert validations == 2
+    assert build_calls == 0
+    assert reconciliation.activated_count == 0
+    assert gateway.has_connected_provider_binding(_provider_binding()) is False
+
+
+def test_repository_revocation_inside_final_validator_wins_before_consume() -> None:
+    clock = _Clock()
+    audit = _FullPrivacyAudit()
+    minter = _CredentialMinter()
+    factory = _FakeExternalFactory(_script_factory)
+    validations = 0
+    holder: dict[str, PolicyEnforcingOutboundGateway] = {}
+
+    async def revoke_at_final_boundary(_scope: object, _authority_digest: str) -> bool:
+        nonlocal validations
+        validations += 1
+        # Two validations admit reconciliation; dispatch then validates before render, before
+        # mint, and finally at the consume boundary.
+        if validations == 5:
+            await holder["gateway"].close_revoked(1)
+        return True
+
+    gateway = _gateway(
+        audit=audit,
+        clock=clock,
+        credential_minter=minter,
+        external_factory=factory,
+        repository_authority_validator=revoke_at_final_boundary,
+    )
+    holder["gateway"] = gateway
+    policy = _policy(external_enabled=True, local_enabled=False)
+    effective = EffectivePrivacyPolicy(policy, 1, policy.policy_digest)
+    human = _human_authority(available=True)
+
+    async def run() -> tuple[SemanticResult, EgressAuthorization]:
+        await _reconcile_repository(gateway, effective, human)
+        authorization = _authorization(
+            authorization_id="aut_60000000-0000-4000-8000-000000000027",
+            policy_digest=policy.policy_digest,
+            service_generation=human.service_generation,
+        )
+        audit.seed_authorized(authorization)
+        case = _case(
+            case_id="cas_60000000-0000-4000-8000-000000000028",
+            authorization=authorization,
+            payload=canonical_encode({"note": "hello"}),
+        )
+        return (
+            await gateway.dispatch_external_semantic(case, authorization, _deadline(clock)),
+            authorization,
+        )
+
+    result, authorization = asyncio.run(run())
+    assert type(result) is SemanticResultUnavailable
+    assert validations == 5
+    assert len(minter.mint_calls) == 1
+    assert len(factory.built) == 1
+    assert factory.built[0].evaluate_calls == 0
+    assert audit.authorization_state(authorization.authorization_id) == "authorized"
+
+
+def test_revocation_after_consume_waits_for_admitted_attempt_boundary() -> None:
+    clock = _Clock()
+    consume_entered = asyncio.Event()
+    allow_consume = asyncio.Event()
+
+    class _BlockingAudit(_FullPrivacyAudit):
+        async def consume(
+            self, authorization_id: str, dispatch_id: str, now: datetime
+        ) -> ConsumedAuthorization:
+            consume_entered.set()
+            await allow_consume.wait()
+            return await super().consume(authorization_id, dispatch_id, now)
+
+    audit = _BlockingAudit()
+    factory = _FakeExternalFactory(_script_factory)
+    gateway = _gateway(audit=audit, clock=clock, external_factory=factory)
+    policy = _policy(external_enabled=True, local_enabled=False)
+    effective = EffectivePrivacyPolicy(policy, 1, policy.policy_digest)
+    human = _human_authority(available=True)
+
+    async def run() -> tuple[SemanticResult, EgressAuthorization, bool]:
+        await _reconcile_repository(gateway, effective, human)
+        authorization = _authorization(
+            authorization_id="aut_60000000-0000-4000-8000-000000000029",
+            policy_digest=policy.policy_digest,
+            service_generation=human.service_generation,
+        )
+        audit.seed_authorized(authorization)
+        case = _case(
+            case_id="cas_60000000-0000-4000-8000-000000000030",
+            authorization=authorization,
+            payload=canonical_encode({"note": "hello"}),
+        )
+        dispatch = asyncio.create_task(
+            gateway.dispatch_external_semantic(case, authorization, _deadline(clock))
+        )
+        await asyncio.wait_for(consume_entered.wait(), timeout=1)
+        revoke = asyncio.create_task(gateway.close_revoked(1))
+        await asyncio.sleep(0)
+        revoke_was_blocked = not revoke.done()
+        allow_consume.set()
+        result = await dispatch
+        await revoke
+        return result, authorization, revoke_was_blocked
+
+    result, authorization, revoke_was_blocked = asyncio.run(run())
+    assert revoke_was_blocked is True
+    assert type(result) is SemanticResultSuccess
+    assert factory.built[0].evaluate_calls == 1
+    assert audit.authorization_state(authorization.authorization_id) == "consumed"
+
+
+def test_authority_mutation_fence_blocks_old_activation_and_consume_through_commit() -> None:
+    clock = _Clock()
+    audit = _FullPrivacyAudit()
+    factory = _FakeExternalFactory(_script_factory)
+    final_validation_entered = asyncio.Event()
+    allow_final_validation = asyncio.Event()
+    mutation_entered = asyncio.Event()
+    allow_commit = asyncio.Event()
+    authority_current = True
+    validations = 0
+    build_calls = 0
+
+    async def validate(_scope: object, _authority_digest: str) -> bool:
+        nonlocal validations
+        validations += 1
+        if validations == 5:
+            final_validation_entered.set()
+            await allow_final_validation.wait()
+        return authority_current
+
+    def build_factory() -> _FakeExternalFactory:
+        nonlocal build_calls
+        build_calls += 1
+        return factory
+
+    gateway = _gateway(
+        audit=audit,
+        clock=clock,
+        external_factory_builder=build_factory,
+        repository_authority_validator=validate,
+    )
+    policy = _policy(external_enabled=True, local_enabled=False)
+    effective = EffectivePrivacyPolicy(policy, 1, policy.policy_digest)
+    human = _human_authority(available=True)
+
+    async def run() -> tuple[SemanticResult, EgressAuthorization, ProviderReconciliation, bool]:
+        nonlocal authority_current
+        await _reconcile_repository(gateway, effective, human)
+        authorization = _authorization(
+            authorization_id="aut_60000000-0000-4000-8000-000000000031",
+            policy_digest=policy.policy_digest,
+            service_generation=human.service_generation,
+        )
+        audit.seed_authorized(authorization)
+        case = _case(
+            case_id="cas_60000000-0000-4000-8000-000000000032",
+            authorization=authorization,
+            payload=canonical_encode({"note": "hello"}),
+        )
+        dispatch = asyncio.create_task(
+            gateway.dispatch_external_semantic(case, authorization, _deadline(clock))
+        )
+        await asyncio.wait_for(final_validation_entered.wait(), timeout=1)
+
+        async def mutate_authority() -> None:
+            nonlocal authority_current
+            async with gateway.authority_mutation_fence():
+                mutation_entered.set()
+                await allow_commit.wait()
+                authority_current = False
+
+        mutation = asyncio.create_task(mutate_authority())
+        await asyncio.wait_for(mutation_entered.wait(), timeout=1)
+        activation = asyncio.create_task(_reconcile_repository(gateway, effective, human))
+        allow_final_validation.set()
+        await asyncio.sleep(0)
+        both_blocked_during_commit = not dispatch.done() and not activation.done()
+        allow_commit.set()
+        result, reconciliation = await asyncio.gather(dispatch, activation)
+        await mutation
+        return result, authorization, reconciliation, both_blocked_during_commit
+
+    result, authorization, reconciliation, both_blocked = asyncio.run(run())
+    assert both_blocked is True
+    assert type(result) is SemanticResultUnavailable
+    assert audit.authorization_state(authorization.authorization_id) == "authorized"
+    assert reconciliation.activated_count == 0
+    assert build_calls == 1
+    assert len(factory.built) == 1
+    assert factory.built[0].evaluate_calls == 0
+
+
 def test_final_body_scan_blocks_before_credential_mint() -> None:
     clock = _Clock()
     audit = _FullPrivacyAudit()
@@ -733,7 +1103,7 @@ def test_final_body_scan_blocks_before_credential_mint() -> None:
     human = _human_authority(available=True)
 
     async def run() -> tuple[SemanticResult, EgressAuthorization]:
-        await gateway.reconcile_policy(effective, human)
+        await _reconcile_repository(gateway, effective, human)
         authorization = _authorization(
             authorization_id="aut_60000000-0000-4000-8000-000000000030",
             policy_digest=policy.policy_digest,
@@ -775,7 +1145,7 @@ def test_expired_authorization_is_rejected_before_dispatch() -> None:
     human = _human_authority(available=True)
 
     async def run() -> SemanticResult:
-        await gateway.reconcile_policy(effective, human)
+        await _reconcile_repository(gateway, effective, human)
         authorization = _authorization(
             authorization_id="aut_60000000-0000-4000-8000-000000000040",
             policy_digest=policy.policy_digest,
@@ -810,7 +1180,7 @@ def test_expired_deadline_is_rejected_before_dispatch() -> None:
     human = _human_authority(available=True)
 
     async def run() -> SemanticResult:
-        await gateway.reconcile_policy(effective, human)
+        await _reconcile_repository(gateway, effective, human)
         authorization = _authorization(
             authorization_id="aut_60000000-0000-4000-8000-000000000042",
             policy_digest=policy.policy_digest,
@@ -845,7 +1215,7 @@ def test_human_authority_unavailable_empties_external_registry() -> None:
     human = _human_authority(available=False)
 
     async def run() -> tuple[ProviderReconciliation, SemanticResult]:
-        reconciliation = await gateway.reconcile_policy(effective, human)
+        reconciliation = await _reconcile_repository(gateway, effective, human)
         authorization = _authorization(
             authorization_id="aut_60000000-0000-4000-8000-000000000050",
             policy_digest=policy.policy_digest,
@@ -884,7 +1254,7 @@ def test_policy_tightening_closes_registry_and_denies_further_dispatch() -> None
     human = _human_authority(available=True)
 
     async def run() -> tuple[SemanticResult, ProviderReconciliation, SemanticResult]:
-        await gateway.reconcile_policy(wide_effective, human)
+        await _reconcile_repository(gateway, wide_effective, human)
         authorization = _authorization(
             authorization_id="aut_60000000-0000-4000-8000-000000000060",
             policy_digest=wide.policy_digest,
@@ -899,7 +1269,7 @@ def test_policy_tightening_closes_registry_and_denies_further_dispatch() -> None
         )
         first = await gateway.dispatch_external_semantic(case, authorization, _deadline(clock))
 
-        second_reconciliation = await gateway.reconcile_policy(tight_effective, human)
+        second_reconciliation = await _reconcile_repository(gateway, tight_effective, human)
 
         stale_authorization = _authorization(
             authorization_id="aut_60000000-0000-4000-8000-000000000062",
@@ -936,10 +1306,10 @@ def test_close_is_idempotent_and_fences_new_work() -> None:
     human = _human_authority(available=True)
 
     async def run() -> tuple[ProviderReconciliation, SemanticResult]:
-        await gateway.reconcile_policy(effective, human)
+        await _reconcile_repository(gateway, effective, human)
         await asyncio.gather(gateway.close(), gateway.close())
 
-        reconciliation = await gateway.reconcile_policy(effective, human)
+        reconciliation = await _reconcile_repository(gateway, effective, human)
 
         authorization = _authorization(
             authorization_id="aut_60000000-0000-4000-8000-000000000070",
@@ -999,7 +1369,7 @@ def test_local_model_dispatch_consumes_reservation_and_calls_evaluator_once() ->
     human = _human_authority(available=True)
 
     async def run() -> tuple[ProviderReconciliation, SemanticResult]:
-        reconciliation = await gateway.reconcile_policy(effective, human)
+        reconciliation = await _reconcile_repository(gateway, effective, human)
         audit.seed_local_reserved(_PROPOSAL)
         payload = canonical_encode({"note": "hello"})
         case = ApprovedLocalDisclosureCase(
@@ -1042,7 +1412,7 @@ def test_evaluator_exception_yields_transport_failed_without_reusable_authorizat
     human = _human_authority(available=True)
 
     async def run() -> tuple[SemanticResult, SemanticResult]:
-        await gateway.reconcile_policy(effective, human)
+        await _reconcile_repository(gateway, effective, human)
         authorization = _authorization(
             authorization_id="aut_60000000-0000-4000-8000-000000000090",
             policy_digest=policy.policy_digest,
@@ -1108,12 +1478,15 @@ def test_bundled_chat_completions_binding_reconciles_without_factory_unavailable
         audit_mac=_AuditKey(),  # type: ignore[arg-type]
         clock=clock,  # type: ignore[arg-type]
         ids=_Ids(),  # type: ignore[arg-type]
+        repository_authority_validator=_repository_authority_current,  # type: ignore[arg-type]
     )
     policy = _policy(external_enabled=True, local_enabled=False, binding=binding)
     effective = EffectivePrivacyPolicy(policy, 1, policy.policy_digest)
 
     async def run() -> ProviderReconciliation:
-        reconciliation = await gateway.reconcile_policy(effective, _human_authority(available=True))
+        reconciliation = await _reconcile_repository(
+            gateway, effective, _human_authority(available=True)
+        )
         await gateway.close()
         return reconciliation
 
@@ -1138,12 +1511,15 @@ def test_unregistered_endpoint_profile_reports_factory_unavailable_not_a_silent_
         audit_mac=_AuditKey(),  # type: ignore[arg-type]
         clock=clock,  # type: ignore[arg-type]
         ids=_Ids(),  # type: ignore[arg-type]
+        repository_authority_validator=_repository_authority_current,  # type: ignore[arg-type]
     )
     policy = _policy(external_enabled=True, local_enabled=False)
     effective = EffectivePrivacyPolicy(policy, 1, policy.policy_digest)
 
     async def run() -> ProviderReconciliation:
-        reconciliation = await gateway.reconcile_policy(effective, _human_authority(available=True))
+        reconciliation = await _reconcile_repository(
+            gateway, effective, _human_authority(available=True)
+        )
         await gateway.close()
         return reconciliation
 

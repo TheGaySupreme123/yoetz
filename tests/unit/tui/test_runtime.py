@@ -44,6 +44,36 @@ async def test_detect_reports_connected_when_the_second_installation_is_owned(
     assert detection.already_connected is True
 
 
+async def test_service_client_uses_ui_kind_and_runtime_cwd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import yoetz.cli.app as cli_app
+    from yoetz.ports.control import ControlClientKind, WorkspaceLocator
+
+    observed: list[tuple[ControlClientKind, WorkspaceLocator]] = []
+
+    class Client:
+        async def close(self) -> None:
+            return None
+
+    async def build(
+        client_kind: ControlClientKind,
+        *,
+        workspace_locator: WorkspaceLocator | None = None,
+    ) -> Client:
+        assert workspace_locator is not None
+        observed.append((client_kind, workspace_locator))
+        return Client()
+
+    monkeypatch.setattr(cli_app, "build_service_client", build)
+    runtime = YoetzRuntime(cwd=tmp_path)
+
+    async with runtime._client():  # pyright: ignore[reportPrivateUsage]
+        pass
+
+    assert observed == [(ControlClientKind.UI, WorkspaceLocator(str(tmp_path)))]
+
+
 def test_work_detail_preserves_unknown_open_obligation_count(tmp_path: Path) -> None:
     runtime = YoetzRuntime(cwd=tmp_path)
     session = _WorkSession(

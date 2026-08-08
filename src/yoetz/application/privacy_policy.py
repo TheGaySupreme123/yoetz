@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Final, Literal, cast
 
 from yoetz.domain.privacy import (
     AuthorizationScope,
+    AuthorizationScopeKind,
     ChannelPolicy,
     EgressChannel,
     PolicyOverlay,
@@ -34,6 +35,7 @@ from yoetz.ports.privacy import (
     OutboundGatewayPort,
     PendingDisclosurePage,
     PolicyCommitResult,
+    PolicyTransitionMember,
     PolicyTransitionProposal,
     PreparedPolicyTransition,
     PrivacyAuditPort,
@@ -43,6 +45,7 @@ from yoetz.ports.privacy import (
     PrivacyReceiptQuery,
     PrivacyReceiptView,
     ProviderReconciliation,
+    RepositoryPrivacyAuthority,
 )
 from yoetz.protocol.canonical import JsonValue, canonical_digest
 from yoetz.protocol.ids import IdKind, validate_id
@@ -92,6 +95,7 @@ class GetPrivacySetupRequest:
     current_policy_digest: str | None = None
     current_policy_version: int | None = None
     recipe_hint: PrivacyRecipe | None = None
+    repository_scope: AuthorizationScope | None = None
 
     def __post_init__(self) -> None:
         if type(self.session_id) is not str or not self.session_id:
@@ -114,6 +118,11 @@ class GetPrivacySetupRequest:
             type(self.current_policy_version) is not int or self.current_policy_version <= 0
         ):
             raise ValueError("privacy_setup_policy_version_invalid")
+        if self.repository_scope is not None and (
+            type(self.repository_scope) is not AuthorizationScope
+            or self.repository_scope.kind is not AuthorizationScopeKind.WORKSPACE
+        ):
+            raise ValueError("repository_privacy_scope_invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,11 +138,22 @@ class GetPrivacyEffectiveRequest:
 class ProposePrivacyPolicyRequest:
     expected_policy_digest: str
     candidate_policy: PrivacyPolicy
+    authority_digest: str | None = None
+    repository_scope: AuthorizationScope | None = None
 
     def __post_init__(self) -> None:
         validate_sha256_digest(self.expected_policy_digest)
         if type(self.candidate_policy) is not PrivacyPolicy:
             raise TypeError("candidate_policy_invalid")
+        if self.authority_digest is not None:
+            validate_sha256_digest(self.authority_digest)
+        if self.repository_scope is not None and (
+            type(self.repository_scope) is not AuthorizationScope
+            or self.repository_scope.kind is not AuthorizationScopeKind.WORKSPACE
+        ):
+            raise TypeError("repository_privacy_scope_invalid")
+        if (self.authority_digest is None) != (self.repository_scope is None):
+            raise ValueError("repository_privacy_binding_invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +227,7 @@ class PrivacySetupView:
     allowed_blocked_examples: tuple[AllowedBlockedExample, ...]
     recipes: tuple[ReviewRecipeView, ...]
     never_send_editable: Literal[False] = False
+    authority: RepositoryPrivacyAuthority | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,7 +279,18 @@ async def privacy_get_effective(
 async def privacy_get_setup(
     app: PrivacyPolicyApplication, request: GetPrivacySetupRequest
 ) -> PrivacySetupView:
-    effective = await app.policy_store.effective_policy(app.setup_scope)
+    authority = (
+        None
+        if request.repository_scope is None
+        else await app.policy_store.repository_authority(request.repository_scope)
+    )
+    if authority is not None and authority.migration_state == "first_repository_available":
+        authority = await app.policy_store.carry_forward_repository_authority(authority.scope)
+    effective = (
+        await app.policy_store.effective_policy(app.setup_scope)
+        if authority is None
+        else authority.effective
+    )
     choices = tuple(
         ChannelSetupChoice(
             channel,
@@ -306,31 +338,140 @@ async def privacy_get_setup(
             ("private", PrivacyProfile.LOCAL_ONLY, ReviewContextProfile.STRUCTURAL),
         )
     )
-    return PrivacySetupView(effective, choices, examples, recipes)
+    return PrivacySetupView(effective, choices, examples, recipes, False, authority)
 
 
 async def privacy_propose_policy(
     app: PrivacyPolicyApplication, request: ProposePrivacyPolicyRequest
 ) -> PolicyProposalResult:
-    current = await app.policy_store.effective_policy(request.candidate_policy.effective_scope)
+    if (
+        request.repository_scope is None
+        and request.candidate_policy.effective_scope.kind is not AuthorizationScopeKind.MACHINE
+    ):
+        raise ValueError("repository_privacy_context_required")
+    if request.repository_scope is not None:
+        authority = await app.policy_store.repository_authority(request.repository_scope)
+        if authority.authority_digest != request.authority_digest:
+            raise ValueError("privacy_policy_stale")
+        current = authority.effective
+    else:
+        authority = None
+        current = await app.policy_store.effective_policy(request.candidate_policy.effective_scope)
     if current.effective_digest != request.expected_policy_digest:
         raise ValueError("privacy_policy_stale")
-    if _is_tightening(current.policy, request.candidate_policy):
+    if authority is None and _is_tightening(current.policy, request.candidate_policy):
         return await privacy_tighten_policy(
             app,
             TightenPrivacyPolicyRequest(request.expected_policy_digest, request.candidate_policy),
         )
+    prepared_repository_candidate: PrivacyPolicy | None = None
+    if authority is not None and authority.grant_policy is not None:
+        exact_candidate = _policy_for_scope(
+            request.candidate_policy,
+            authority.scope,
+            policy_id=authority.grant_policy.policy_id,
+            version=authority.grant_policy.version + 1,
+            supersedes=authority.grant_policy.policy_digest,
+        )
+        if _is_tightening(current.policy, exact_candidate) and _is_tightening(
+            authority.grant_policy, exact_candidate
+        ):
+            async with app.gateway.authority_mutation_fence():
+                commit = await app.policy_store.tighten(
+                    authority.scope,
+                    _overlay(exact_candidate),
+                    authority.grant_policy.policy_digest,
+                )
+            return _result(commit, ProviderReconciliation(commit.generation, 0, 0, ()))
+    if authority is not None and authority.grant_policy is None:
+        repository_policy_id = app.ids.new(IdKind.PRIVACY_POLICY)
+        repository_candidate = _policy_for_scope(
+            request.candidate_policy,
+            authority.scope,
+            policy_id=repository_policy_id,
+            version=1,
+            supersedes=None,
+        )
+        prepared_repository_candidate = repository_candidate
+        repository_baseline = _policy_for_scope(
+            current.policy,
+            authority.scope,
+            policy_id=repository_policy_id,
+            version=1,
+            supersedes=None,
+        )
+        if _is_tightening(repository_baseline, repository_candidate):
+            async with app.gateway.authority_mutation_fence():
+                commit = await app.policy_store.insert_repository_tightening(
+                    authority.scope,
+                    repository_candidate,
+                    authority.authority_digest,
+                )
+            return _result(commit, ProviderReconciliation(commit.generation, 0, 0, ()))
     now = app.clock.now_utc()
     proposal_id = app.ids.new(IdKind.PRIVACY_PROPOSAL)
+    candidate = request.candidate_policy
+    members: tuple[PolicyTransitionMember, ...] = ()
+    proposal_scope = candidate.effective_scope
+    if authority is not None:
+        proposal_scope = authority.scope
+        machine_scope = AuthorizationScope(
+            AuthorizationScopeKind.MACHINE, authority.scope.installation_id
+        )
+        machine = await app.policy_store.effective_policy(machine_scope)
+        repository_candidate = _policy_for_scope(
+            candidate,
+            proposal_scope,
+            policy_id=(
+                cast(PrivacyPolicy, prepared_repository_candidate).policy_id
+                if authority.grant_policy is None
+                else authority.grant_policy.policy_id
+            ),
+            version=1 if authority.grant_policy is None else authority.grant_policy.version + 1,
+            supersedes=(
+                None if authority.grant_policy is None else authority.grant_policy.policy_digest
+            ),
+        )
+        compound: list[PolicyTransitionMember] = []
+        machine_candidate = _policy_for_scope(
+            candidate,
+            machine_scope,
+            policy_id=machine.policy.policy_id,
+            version=machine.policy.version + 1,
+            supersedes=machine.policy.policy_digest,
+        )
+        if not _is_tightening(machine.policy, machine_candidate):
+            compound.append(
+                PolicyTransitionMember(
+                    "replace",
+                    machine_scope,
+                    machine_candidate,
+                    machine.generation,
+                    machine.effective_digest,
+                )
+            )
+        compound.append(
+            PolicyTransitionMember(
+                "insert" if authority.grant_state == "missing" else "replace",
+                proposal_scope,
+                repository_candidate,
+                None if authority.grant_state == "missing" else authority.grant_generation,
+                None if authority.grant_state == "missing" else authority.grant_policy_digest,
+            )
+        )
+        members = tuple(compound)
+        candidate = repository_candidate
     proposal = PolicyTransitionProposal(
-        scope=request.candidate_policy.effective_scope,
+        scope=proposal_scope,
         expected_generation=current.generation,
-        proposed_policy=request.candidate_policy,
-        proposal_digest=canonical_digest(_policy_identity(request.candidate_policy)),
+        proposed_policy=candidate,
+        proposal_digest=canonical_digest(_policy_identity(candidate)),
         created_at=now,
         expires_at=now + timedelta(seconds=app.proposal_ttl_seconds),
         privacy_proposal_id=proposal_id,
         expected_policy_digest=request.expected_policy_digest,
+        authority_digest=request.authority_digest,
+        members=members,
     )
     prepared = await app.policy_store.prepare_transition(proposal)
     return PolicyDecisionRequired(prepared, proposal_id)
@@ -339,17 +480,19 @@ async def privacy_propose_policy(
 async def privacy_tighten_policy(
     app: PrivacyPolicyApplication, request: TightenPrivacyPolicyRequest
 ) -> PrivacyPolicyResult:
+    if request.candidate_policy.effective_scope.kind is not AuthorizationScopeKind.MACHINE:
+        raise ValueError("repository_privacy_context_required")
     current = await app.policy_store.effective_policy(request.candidate_policy.effective_scope)
     if current.effective_digest != request.expected_policy_digest:
         raise ValueError("privacy_policy_stale")
     if not _is_tightening(current.policy, request.candidate_policy):
         raise ValueError("privacy_authority_required")
-    commit = await app.policy_store.tighten(
-        request.candidate_policy.effective_scope,
-        _overlay(request.candidate_policy),
-        request.expected_policy_digest,
-    )
-    await app.gateway.close_revoked(current.generation)
+    async with app.gateway.authority_mutation_fence():
+        commit = await app.policy_store.tighten(
+            request.candidate_policy.effective_scope,
+            _overlay(request.candidate_policy),
+            request.expected_policy_digest,
+        )
     unavailable = ProviderReconciliation(commit.generation, 0, 0, ())
     return _result(commit, unavailable)
 
@@ -357,7 +500,11 @@ async def privacy_tighten_policy(
 async def decide_privacy_policy(
     app: PrivacyPolicyApplication, request: DecidePrivacyPolicyRequest
 ) -> PrivacyPolicyResult:
-    commit = await app.policy_store.commit_transition(request.prepared, request.decision)
+    if request.decision.approved:
+        async with app.gateway.authority_mutation_fence():
+            commit = await app.policy_store.commit_transition(request.prepared, request.decision)
+    else:
+        commit = await app.policy_store.commit_transition(request.prepared, request.decision)
     effective = EffectivePrivacyPolicy(
         commit.policy, commit.generation, commit.policy.policy_digest
     )
@@ -788,6 +935,27 @@ def _is_tightening(current: PrivacyPolicy, candidate: PrivacyPolicy) -> bool:
 
 def _policy_identity(policy: PrivacyPolicy) -> JsonValue:
     return cast(JsonValue, _to_json(policy))
+
+
+def _policy_for_scope(
+    source: PrivacyPolicy,
+    scope: AuthorizationScope,
+    *,
+    policy_id: str,
+    version: int,
+    supersedes: str | None,
+) -> PrivacyPolicy:
+    placeholder = replace(
+        source,
+        policy_id=policy_id,
+        version=version,
+        policy_digest="sha256:" + "0" * 64,
+        effective_scope=scope,
+        supersedes_policy_digest=supersedes,
+    )
+    identity = cast(dict[str, JsonValue], _policy_identity(placeholder))
+    identity.pop("policy_digest")
+    return replace(placeholder, policy_digest=canonical_digest(cast(JsonValue, identity)))
 
 
 def _to_json(value: object) -> object:

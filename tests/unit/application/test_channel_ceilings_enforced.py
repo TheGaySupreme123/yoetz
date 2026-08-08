@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -30,6 +31,7 @@ from yoetz.ports.ids import IdPort
 from yoetz.ports.privacy import (
     DisclosureProposalRequest,
     EffectivePrivacyPolicy,
+    HumanAuthorityCapability,
     MinimizedDisclosure,
     OutboundGatewayPort,
     PrivacyAuditPort,
@@ -77,23 +79,42 @@ class _Ids:
 
 
 class _Store:
-    def __init__(self, policy: PrivacyPolicy) -> None:
+    def __init__(
+        self,
+        policy: PrivacyPolicy,
+        *,
+        grant_state: str = "granted",
+        repository_privacy_commitment: str | None = "hmac-sha256:" + "a" * 64,
+    ) -> None:
         self._policy = policy
+        self._grant_state = grant_state
+        self._repository_privacy_commitment = repository_privacy_commitment
 
     async def effective_policy(self, scope: AuthorizationScope) -> EffectivePrivacyPolicy:
         del scope
         return EffectivePrivacyPolicy(self._policy, 1, self._policy.policy_digest)
+
+    async def repository_authority(self, scope: AuthorizationScope) -> object:
+        effective = await self.effective_policy(scope)
+        return SimpleNamespace(
+            effective=effective,
+            grant_state=self._grant_state,
+            repository_privacy_commitment=self._repository_privacy_commitment,
+            authority_digest="sha256:" + "9" * 64,
+        )
 
 
 class _Classifier:
     def __init__(self, *, byte_count: int, token_count: int) -> None:
         self._byte_count = byte_count
         self._token_count = token_count
+        self.classify_calls = 0
 
     def classify(
         self, candidate: CandidateContext, effective: EffectivePrivacyPolicy
     ) -> ClassifiedContext:
         del effective
+        self.classify_calls += 1
         items = tuple(
             ClassifiedContextItem(
                 item,
@@ -154,6 +175,14 @@ class _Audit:
 
 
 class _Gateway:
+    def __init__(self) -> None:
+        self.reconcile_calls = 0
+
+    async def reconcile_repository_policy(self, *args: object, **kwargs: object) -> object:
+        del args, kwargs
+        self.reconcile_calls += 1
+        return object()
+
     async def close(self) -> None:
         return None
 
@@ -224,8 +253,74 @@ def _coordinator(
         cast(OutboundGatewayPort, _Gateway()),
         cast(ClockPort, _Clock()),
         cast(IdPort, _Ids()),
+        human_authority=_human_authority(),
     )
     return coordinator, audit
+
+
+def _human_authority() -> HumanAuthorityCapability:
+    return HumanAuthorityCapability(
+        "established_passphrase",
+        "sha256:" + "8" * 64,
+        1,
+        "passphrase",
+        1,
+        True,
+    )
+
+
+@pytest.mark.anyio
+async def test_missing_repository_grant_blocks_before_classification_or_reconciliation() -> None:
+    policy = _policy_with_ceilings()
+    store = _Store(policy, grant_state="missing")
+    classifier = _Classifier(byte_count=16, token_count=1)
+    audit = _Audit()
+    gateway = _Gateway()
+    coordinator = PrivacyCoordinator(
+        cast(PrivacyPolicyStorePort, store),
+        cast(PrivacyClassifierPort, classifier),
+        cast(PrivacyAuditPort, audit),
+        cast(OutboundGatewayPort, gateway),
+        cast(ClockPort, _Clock()),
+        cast(IdPort, _Ids()),
+        human_authority=_human_authority(),
+    )
+
+    result = await coordinator.evaluate_semantic(_candidate(), _deadline())
+    assert isinstance(result, SemanticEgressBlocked)
+    assert result.reason is PrivacyReason.SCOPE_MISMATCH
+    assert classifier.classify_calls == 0
+    assert gateway.reconcile_calls == 0
+    assert audit.prepared == []
+
+
+@pytest.mark.anyio
+async def test_mismatched_repository_grant_blocks_before_classification_or_reconciliation() -> None:
+    policy = _policy_with_ceilings()
+    store = _Store(
+        policy,
+        grant_state="granted",
+        repository_privacy_commitment="hmac-sha256:" + "b" * 64,
+    )
+    classifier = _Classifier(byte_count=16, token_count=1)
+    audit = _Audit()
+    gateway = _Gateway()
+    coordinator = PrivacyCoordinator(
+        cast(PrivacyPolicyStorePort, store),
+        cast(PrivacyClassifierPort, classifier),
+        cast(PrivacyAuditPort, audit),
+        cast(OutboundGatewayPort, gateway),
+        cast(ClockPort, _Clock()),
+        cast(IdPort, _Ids()),
+        human_authority=_human_authority(),
+    )
+
+    result = await coordinator.evaluate_semantic(_candidate(), _deadline())
+    assert isinstance(result, SemanticEgressBlocked)
+    assert result.reason is PrivacyReason.SCOPE_MISMATCH
+    assert classifier.classify_calls == 0
+    assert gateway.reconcile_calls == 0
+    assert audit.prepared == []
 
 
 @pytest.mark.anyio

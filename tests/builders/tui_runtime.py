@@ -117,6 +117,7 @@ class FakeRuntime:
     plan_error: RuntimeError_ | None = None
     apply_result: IntegrationOutcome | None = None
     credential_result: str | None = "stored"
+    privacy_setup_grant_state: Literal["granted", "missing"] = "granted"
 
     applied: list[tuple[str, str | None]] = field(default_factory=lambda: [])
     # Which route each half of the integration asked for, so a test can assert they agree.
@@ -174,12 +175,23 @@ class FakeRuntime:
         }[recipe]
         self.privacy = PrivacyPosture(
             profile=profile,
-            llm_inference_enabled=recipe != "private",
+            llm_inference_enabled=(
+                recipe != "private" and self.privacy_setup_grant_state == "granted"
+            ),
             readable=True,
+            repository_grant_state=self.privacy_setup_grant_state,
+            repository_migration_state="not_applicable",
         )
-        return PrivacySetupReport("configured", profile)
+        return PrivacySetupReport(
+            "configured",
+            profile,
+            grant_state=self.privacy_setup_grant_state,
+            migration_state="not_applicable",
+        )
 
-    def privacy_recommendation(self) -> PrivacyRecommendation:
+    def privacy_recommendation(
+        self, _posture: PrivacyPosture | None = None
+    ) -> PrivacyRecommendation:
         return self.recommendation
 
     async def integration_plan(

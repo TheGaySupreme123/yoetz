@@ -32,8 +32,9 @@ pipes, redirected streams — prints help instead, exactly as before.
 
 Setup is a linear path inside the interface, each finished step collapsing into a short line:
 
-1. **Detection.** Supported harnesses (Codex in v0.1), your project and whether it is a Git
-   repository, whether system secure storage is available, and whether Yoetz is connected yet.
+1. **Detection.** Supported harnesses (Codex in v0.1), your project and its canonical Git common
+   root (or resolved non-Git directory), whether system secure storage is available, and whether
+   Yoetz is connected yet.
 2. **Which installation**, when several Codex binaries are found on your `PATH`, in the standard
    macOS Codex Desktop location, or in the Windows Store Codex App package. Friendly names lead;
    executable paths appear on selection and under `D`.
@@ -51,7 +52,8 @@ Setup is a linear path inside the interface, each finished step collapsing into 
 8. **Semantic setup, when selected** — provider/model, hidden API-key entry, then one exact
    recommended privacy policy. **Assisted review** is recommended only for an exact provider route
    with current reviewed no-training evidence and retention no longer than 30 days; it is bounded
-   to the current workspace and does not re-prompt for ordinary attempts after approval. Otherwise
+   to the current repository and does not re-prompt for ordinary attempts after approval. Branches
+   and linked worktrees share that grant; an independent clone does not. Otherwise
    **Private** is recommended. Accepting it asks nothing
    further; declining it opens the named recipes, and only **Custom** opens the settings
    themselves, in five grouped sections. The exact disclosure and separately reauthenticated
@@ -70,6 +72,12 @@ When re-running setup or `/connect` with the same installed package version and 
 available, Yoetz offers **upgrade first** or **continue with this version** rather than reinstalling
 the same bits. Continuing still adds or repairs harness integration (project skill + structural
 plugin sources + MCP) without a package reinstall. Yoetz never auto-upgrades.
+
+Upgrading replaces package bytes without rewriting accepted machine privacy-policy bytes. Eligible
+legacy authority may be automatically narrowed onto a bounded pre-upgrade repository route when its
+trusted locator next arrives; when no route existed, one first-repository carry-forward is available.
+Neither case asks again because no new repository gains authority. Every later repository remains
+Private until approved.
 
 **Network honesty:** zero-egress for task content remains the product promise. Structural package
 version checks are opt-out network (disable `update_checks` in privacy setup). Non-interactive CLI,
@@ -94,8 +102,9 @@ entry. A stopped service can prevent a later MCP call, but it cannot explain a s
 discovered the skill or attempted a Yoetz tool.
 
 Two different things are called a default here, and only one of them is a policy. The **seeded
-policy** is `local_only`: every installation starts zero-egress, and nothing moves it without a
-provider binding, a stored credential, and a separately reauthenticated policy commit. The
+policy** is `local_only`: every installation starts with external LLM disclosure denied, and
+nothing moves it without a provider binding, a stored credential, and a separately reauthenticated
+policy commit. The
 **recommended answer** to first run's "How should Yoetz review work?" is semantic review, because
 an installation that never reaches it can only ever report deterministic coverage. Accepting the
 recommendation opens those steps; it does not perform them, and local-only needs no provider and
@@ -128,9 +137,10 @@ Related: `yoetz service status`, `lock`, `unlock`, `idle-relock`, `stop`.
 
 ## What a fresh installation does not do
 
-An unconfigured installation is **zero-egress and deterministic**. It sends nothing anywhere. No
-provider is bound, no credential exists, and semantic review is unavailable — checks run the
-deterministic packs only and say so in their coverage vector.
+An unconfigured installation is **provider-egress-free and deterministic**. No task content is sent
+to an external provider; the separately configurable structural package update check may still be
+enabled. No provider is bound, no credential exists, and semantic review is unavailable — checks
+run the deterministic packs only and say so in their coverage vector.
 
 That state is fully useful: the ledger, deterministic checks, findings, and receipts all work. You
 opt into external review deliberately, or never.

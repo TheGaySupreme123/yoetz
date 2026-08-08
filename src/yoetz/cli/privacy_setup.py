@@ -19,6 +19,7 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Final, Literal, cast
 
 import typer
@@ -43,12 +44,13 @@ from yoetz.domain.privacy import (
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
-from yoetz.domain.values import JsonObject
+from yoetz.domain.values import JsonObject, validate_sha256_digest
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.models import DataCategory
 
 __all__ = [
     "PrivacySetupReport",
+    "PrivacySetupSnapshot",
     "build_candidate_policy",
     "recommended_privacy_recipe",
     "run_privacy_setup",
@@ -144,6 +146,46 @@ class PrivacySetupReport:
     profile: str
     proposal_id: str | None = None
     reason: str | None = None
+    grant_state: Literal["granted", "missing"] | None = None
+    migration_state: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PrivacySetupSnapshot:
+    """Repository-bound setup authority returned by the trusted local service.
+
+    The raw repository path never appears here. ``bound_scope`` contains only the installation
+    identifier and keyed repository commitment, and ``authority_digest`` binds the complete
+    machine-ceiling/repository-row snapshot that a proposal must compare-and-swap against.
+    """
+
+    composed_policy: PrivacyPolicy
+    bound_scope: JsonObject
+    authority_digest: str
+    grant_state: Literal["granted", "missing"]
+    migration_state: Literal[
+        "not_applicable",
+        "legacy_route_available",
+        "first_repository_available",
+        "consumed",
+    ]
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.composed_policy) is not PrivacyPolicy
+            or type(self.bound_scope) is not JsonObject
+        ):
+            raise TypeError("privacy_setup_snapshot_invalid")
+        validate_sha256_digest(self.authority_digest)
+        if self.grant_state not in {"granted", "missing"}:
+            raise ValueError("privacy_setup_snapshot_invalid")
+        if self.migration_state not in {
+            "not_applicable",
+            "legacy_route_available",
+            "first_repository_available",
+            "consumed",
+        }:
+            raise ValueError("privacy_setup_snapshot_invalid")
 
 
 def _disabled_channel(channel: EgressChannel) -> ChannelPolicy:
@@ -846,45 +888,86 @@ def _render_review(candidate: PrivacyPolicy) -> None:
     typer.echo("  Telemetry, crash diagnostics, capability testing: off")
 
 
-async def _effective_policy() -> PrivacyPolicy:
-    from yoetz.cli.app import build_service_client
-    from yoetz.cli.provider_status import machine_scope_request
-
-    client = await build_service_client()
+def _setup_snapshot_from_wire(raw: object) -> PrivacySetupSnapshot:
     try:
-        raw = await client.privacy_get_effective(machine_scope_request())
+        plain = dict(cast(Mapping[str, JsonValue], raw))
+        if plain.get("schema_version") != "2.0.0":
+            raise ValueError("privacy_setup_snapshot_invalid")
+        policy = plain["composed_policy"]
+        scope = plain["bound_scope"]
+        authority_digest = plain["authority_digest"]
+        grant_state = plain["grant_state"]
+        migration_state = plain["migration_state"]
+        if not isinstance(policy, Mapping) or not isinstance(scope, Mapping):
+            raise ValueError("privacy_setup_snapshot_invalid")
+        if type(authority_digest) is not str or type(grant_state) is not str:
+            raise ValueError("privacy_setup_snapshot_invalid")
+        if type(migration_state) is not str:
+            raise ValueError("privacy_setup_snapshot_invalid")
+        frozen_scope = JsonObject(cast(Mapping[str, JsonValue], scope))
+        decoded = decode_privacy_policy_canonical(canonical_encode(cast(JsonValue, policy)))
+        return PrivacySetupSnapshot(
+            decoded,
+            frozen_scope,
+            authority_digest,
+            cast(Literal["granted", "missing"], grant_state),
+            cast(
+                Literal[
+                    "not_applicable",
+                    "legacy_route_available",
+                    "first_repository_available",
+                    "consumed",
+                ],
+                migration_state,
+            ),
+        )
+    except KeyError, TypeError, ValueError:
+        raise ValueError("privacy_setup_snapshot_invalid") from None
+
+
+async def _setup_snapshot(workspace_locator: Path | None = None) -> PrivacySetupSnapshot:
+    from yoetz.cli.app import build_service_client
+    from yoetz.ports.control import WorkspaceLocator
+
+    locator = Path.cwd() if workspace_locator is None else workspace_locator
+    client = await build_service_client(
+        workspace_locator=WorkspaceLocator(str(locator.resolve(strict=True)))
+    )
+    try:
+        raw = await client.privacy_get_setup(JsonObject({"schema_version": "2.0.0"}))
     finally:
         await client.close()
-    plain = cast(dict[str, JsonValue], dict(raw))
-    policy = plain.get("policy")
-    if not isinstance(policy, Mapping):
-        raise ValueError("privacy_setup_effective_unavailable")
-    return decode_privacy_policy_canonical(canonical_encode(cast(JsonValue, policy)))
+    return _setup_snapshot_from_wire(raw)
 
 
-async def _propose(candidate: PrivacyPolicy, expected_digest: str) -> str | None:
+async def _propose(
+    candidate: PrivacyPolicy,
+    authority_digest: str,
+    *,
+    workspace_locator: Path | None = None,
+) -> str | None:
     from yoetz.adapters.privacy.catalog import encode_privacy_policy_json
-    from yoetz.cli.app import build_service_client, with_body_schema_version
+    from yoetz.cli.app import build_service_client
+    from yoetz.ports.control import WorkspaceLocator
 
-    client = await build_service_client()
+    locator = Path.cwd() if workspace_locator is None else workspace_locator
+    client = await build_service_client(
+        workspace_locator=WorkspaceLocator(str(locator.resolve(strict=True)))
+    )
     try:
         result = await client.privacy_propose_policy(
-            # The frozen privacy_propose_policy body requires schema_version. Omitting it fails
-            # frame validation before the request leaves this process, and the whole setup flow
-            # reports a closed invalid_request that names nothing. The shared helper derives both
-            # the requirement and the value from the schema, so there is one source of truth.
-            with_body_schema_version(
-                "privacy_propose_policy",
-                JsonObject(
-                    {
-                        "expected_policy_digest": expected_digest,
-                        "candidate_policy": encode_privacy_policy_json(candidate),
-                    }
-                ),
+            JsonObject(
+                {
+                    "schema_version": "2.0.0",
+                    "authority_digest": authority_digest,
+                    "candidate_policy": encode_privacy_policy_json(candidate),
+                }
             )
         )
     finally:
         await client.close()
+    if result.get("schema_version") != "2.0.0":
+        raise ValueError("privacy_setup_proposal_invalid")
     proposal_id = result.get("proposal_id")
     if result.get("outcome") == "decision_required" and type(proposal_id) is str:
         return proposal_id
@@ -921,6 +1004,32 @@ def _confirmed_candidate(
     candidate = build_candidate_policy(current, answers, now=datetime.now(UTC))
     _render_review(candidate)
     return candidate if typer.confirm(prompt, default=default) else None
+
+
+def _render_repository_authority(snapshot: PrivacySetupSnapshot) -> None:
+    """Describe repository authority without rendering its commitment or local path."""
+
+    typer.echo("Repository privacy authority:")
+    if snapshot.grant_state == "missing":
+        typer.echo("  External model review is off for this repository until you approve a grant.")
+    else:
+        typer.echo("  The current external-review permission applies to this repository.")
+    if snapshot.migration_state == "legacy_route_available":
+        typer.echo(
+            "  A previously accepted machine policy can be narrowed to this known repository "
+            "without reapproval or broader disclosure."
+        )
+    elif snapshot.migration_state == "first_repository_available":
+        typer.echo(
+            "  A previously accepted machine policy can be carried forward once to this first "
+            "repository without reapproval or broader disclosure."
+        )
+    elif snapshot.migration_state == "consumed" and snapshot.grant_state == "granted":
+        typer.echo(
+            "  Existing permission was carried forward and narrowed to this repository; no new "
+            "disclosure was approved."
+        )
+    typer.echo("")
 
 
 def _choose_candidate(
@@ -991,6 +1100,7 @@ async def run_privacy_setup(
     recipe_hint: PrivacyRecipe | None = None,
     offer_recommended: bool = False,
     credential_probe_authorized: bool = False,
+    workspace_locator: Path | None = None,
 ) -> PrivacySetupReport:
     """Run the trusted questionnaire and apply only an explicitly approved draft."""
 
@@ -1000,7 +1110,10 @@ async def run_privacy_setup(
             "unknown",
             reason="local_terminal_required",
         )
-    current = await _effective_policy()
+    locator = Path.cwd() if workspace_locator is None else workspace_locator
+    snapshot = await _setup_snapshot(locator)
+    current = snapshot.composed_policy
+    _render_repository_authority(snapshot)
     external, local = _configured_bindings()
     try:
         candidate = _choose_candidate(
@@ -1012,25 +1125,60 @@ async def run_privacy_setup(
             credential_probe_authorized=credential_probe_authorized,
         )
     except ValueError as error:
-        return PrivacySetupReport("failed", current.profile.value, reason=str(error))
+        return PrivacySetupReport(
+            "failed",
+            current.profile.value,
+            reason=str(error),
+            grant_state=snapshot.grant_state,
+            migration_state=snapshot.migration_state,
+        )
     if candidate is None:
-        return PrivacySetupReport("cancelled", current.profile.value)
-    if _substantive_identity(candidate) == _substantive_identity(current):
-        return PrivacySetupReport("unchanged", current.profile.value)
-    proposal_id = await _propose(candidate, current.policy_digest)
+        return PrivacySetupReport(
+            "cancelled",
+            current.profile.value,
+            grant_state=snapshot.grant_state,
+            migration_state=snapshot.migration_state,
+        )
+    if snapshot.grant_state == "granted" and _substantive_identity(
+        candidate
+    ) == _substantive_identity(current):
+        return PrivacySetupReport(
+            "unchanged",
+            current.profile.value,
+            grant_state=snapshot.grant_state,
+            migration_state=snapshot.migration_state,
+        )
+    proposal_id = await _propose(
+        candidate,
+        snapshot.authority_digest,
+        workspace_locator=locator,
+    )
     if proposal_id is None:
         await _warn_if_agent_route_cannot_dispatch(candidate)
-        return PrivacySetupReport("configured", candidate.profile.value)
+        return PrivacySetupReport(
+            "configured",
+            candidate.profile.value,
+            grant_state="granted",
+            migration_state=snapshot.migration_state,
+        )
     typer.echo("")
     typer.echo("Final widening decision (trusted local ceremony)")
     decision = await _decide(proposal_id)
     status = getattr(decision, "status", None)
     if status == "committed":
         await _warn_if_agent_route_cannot_dispatch(candidate)
-        return PrivacySetupReport("configured", candidate.profile.value, proposal_id)
+        return PrivacySetupReport(
+            "configured",
+            candidate.profile.value,
+            proposal_id,
+            grant_state="granted",
+            migration_state=snapshot.migration_state,
+        )
     return PrivacySetupReport(
         "cancelled",
         current.profile.value,
         proposal_id,
         "privacy_decision_not_approved" if status != "stale" else "privacy_proposal_stale",
+        snapshot.grant_state,
+        snapshot.migration_state,
     )

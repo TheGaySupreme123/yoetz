@@ -54,8 +54,11 @@ from yoetz.ports.privacy import (
     AgentProjectionRequest,
     CompletedAgentProjection,
     DisclosureProposalRequest,
+    HumanPolicyDecision,
     MinimizedDisclosure,
     PolicyOverlay,
+    PolicyTransitionMember,
+    PolicyTransitionProposal,
     PrivacyReceiptAudience,
     PrivacyReceiptPage,
     PrivacyReceiptQuery,
@@ -141,8 +144,8 @@ class _Gateway:
 
 def _database() -> apsw.Connection:
     db = apsw.Connection(":memory:")
-    migration = Path("migrations/catalog/0001.sql").read_text(encoding="utf-8")
-    db.execute(migration)
+    for version in ("0001", "0002", "0003"):
+        db.execute(Path(f"migrations/catalog/{version}.sql").read_text(encoding="utf-8"))
     return db
 
 
@@ -308,6 +311,59 @@ def test_policy_store_seed_effective_and_tightening_are_generation_cas() -> None
     assert db.execute(
         "SELECT state FROM privacy_policy_versions ORDER BY policy_generation"
     ).fetchall() == [("superseded",), ("current",)]
+
+
+def test_insert_only_repository_transition_load_commit_and_replay_are_exact() -> None:
+    db = _database()
+    store = CatalogPrivacyPolicyStore(db, _Clock())
+    machine = _policy()
+    repository_scope = AuthorizationScope(
+        AuthorizationScopeKind.WORKSPACE, _INSTALLATION, _WORKSPACE
+    )
+    repository = replace(
+        machine,
+        policy_id="pvy_30000000-0000-4000-8000-000000000010",
+        policy_digest=f"sha256:{'7' * 64}",
+        effective_scope=repository_scope,
+    )
+
+    async def run() -> tuple[object, object, object]:
+        await store.seed_if_absent(machine)
+        authority = await store.repository_authority(repository_scope)
+        proposal = PolicyTransitionProposal(
+            repository_scope,
+            authority.effective.generation,
+            repository,
+            canonical_digest({"candidate": repository.policy_digest}),
+            _NOW,
+            _NOW + timedelta(seconds=60),
+            _PROPOSAL,
+            authority.effective.effective_digest,
+            authority.authority_digest,
+            (PolicyTransitionMember("insert", repository_scope, repository, None, None),),
+        )
+        prepared = await store.prepare_transition(proposal)
+        assert await store.prepare_transition(proposal) == prepared
+        loaded = await store.load_pending_transition(_PROPOSAL)
+        decision = HumanPolicyDecision(
+            prepared.prepared_digest,
+            True,
+            _NOW + timedelta(seconds=1),
+            f"hmac-sha256:{'8' * 64}",
+        )
+        committed = await store.commit_transition(loaded, decision)
+        replayed = await store.commit_transition(loaded, decision)
+        return loaded, committed, replayed
+
+    loaded, committed, replayed = asyncio.run(run())
+    assert loaded.proposal.members[0].action == "insert"  # type: ignore[attr-defined]
+    assert committed == replayed
+    assert committed.policy == repository  # type: ignore[attr-defined]
+    transition = db.execute(
+        "SELECT state, terminal_result_digest FROM privacy_policy_transitions"
+    ).fetchone()
+    assert transition is not None and transition[0] == "committed"
+    assert type(transition[1]) is str
 
 
 def test_memory_and_sqlite_projection_replay_and_cursor_behavior_match() -> None:

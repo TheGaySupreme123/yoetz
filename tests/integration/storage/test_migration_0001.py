@@ -17,7 +17,7 @@ ROOT = Path(__file__).parents[3]
 
 def test_root_and_installed_migration_resources_are_byte_identical() -> None:
     for family, versions in (
-        ("catalog", ("0001", "0002")),
+        ("catalog", ("0001", "0002", "0003")),
         ("bundle", ("0001", "0002", "0003")),
     ):
         for version in versions:
@@ -36,7 +36,7 @@ def test_fresh_migrations_install_identified_foreign_key_clean_schemas() -> None
     initialize_bundle(bundle, {"task_id": "task_test", "owner_generation": "generation_test"})
 
     assert catalog.execute("PRAGMA application_id").fetchone() == (0x594F4554,)
-    assert catalog.execute("PRAGMA user_version").fetchone() == (2,)
+    assert catalog.execute("PRAGMA user_version").fetchone() == (3,)
     assert catalog.execute("PRAGMA foreign_keys").fetchone() == (1,)
     assert catalog.execute("PRAGMA trusted_schema").fetchone() == (0,)
     assert catalog.execute("PRAGMA foreign_key_check").fetchone() is None

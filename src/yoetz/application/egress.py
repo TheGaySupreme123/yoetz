@@ -53,6 +53,7 @@ from yoetz.ports.privacy import (
     AgentProjectionRequest,
     DisclosureProposalRequest,
     EffectivePrivacyPolicy,
+    HumanAuthorityCapability,
     HumanPrivacyControlPort,
     MinimizedDisclosure,
     OutboundGatewayPort,
@@ -265,6 +266,7 @@ class PrivacyCoordinator:
         "_data_use_resolver",
         "_gateway",
         "_human",
+        "_human_authority",
         "_ids",
         "_policies",
         "_policy_app",
@@ -282,6 +284,7 @@ class PrivacyCoordinator:
         *,
         service_generation: int = 1,
         human: HumanPrivacyControlPort | None = None,
+        human_authority: HumanAuthorityCapability | None = None,
         data_use_resolver: Callable[[ProviderBinding], ProviderDataUseProfile | None] | None = None,
     ) -> None:
         if type(service_generation) is not int or service_generation <= 0:
@@ -295,6 +298,7 @@ class PrivacyCoordinator:
         self._ids = ids
         self._service_generation = service_generation
         self._human = human
+        self._human_authority = human_authority
         self._data_use_resolver = data_use_resolver
         self._policy_app: PrivacyPolicyApplication | None = None
         self._closed = False
@@ -307,6 +311,14 @@ class PrivacyCoordinator:
 
     def bind_policy_application(self, app: PrivacyPolicyApplication) -> None:
         self._policy_app = app
+
+    async def activate_repository(self, scope: AuthorizationScope) -> bool:
+        """Lazily activate only the exact repository authority named by a trusted task route."""
+
+        async with self._admission_lock:
+            if self._closed:
+                return False
+            return await self._activate_repository_admitted(scope) is not None
 
     async def evaluate_semantic(
         self, candidate: CandidateContext, deadline: Deadline
@@ -499,9 +511,66 @@ class PrivacyCoordinator:
             )
 
         effective = await self._policies.effective_policy(candidate.scope)
-        # Concurrent generation change restarts policy evaluation before dispatch.
-        effective = await self._policies.effective_policy(candidate.scope)
-        return await self._semantic_pipeline(candidate, effective, deadline)
+        authority_digest: str | None = None
+        if candidate.provider_binding.transport == "external":
+            activated = await self._activate_repository_admitted(candidate.scope)
+            if activated is None:
+                return await self._complete_semantic_predispatch(
+                    candidate,
+                    effective,
+                    PrivacyOutcome.BLOCKED_BY_POLICY,
+                    PrivacyReason.SCOPE_MISMATCH,
+                )
+            effective, authority_digest = activated
+        return await self._semantic_pipeline(
+            candidate, effective, deadline, authority_digest=authority_digest
+        )
+
+    async def _activate_repository_admitted(
+        self, scope: AuthorizationScope
+    ) -> tuple[EffectivePrivacyPolicy, str] | None:
+        if scope.kind not in {AuthorizationScopeKind.TASK, AuthorizationScopeKind.REQUEST}:
+            return None
+        try:
+            authority = await self._policies.repository_authority(scope)
+        except Exception:
+            return None
+        effective = authority.effective
+        authority_digest = authority.authority_digest
+        repository = authority.repository_privacy_commitment
+        if (
+            authority.grant_state != "granted"
+            or type(effective) is not EffectivePrivacyPolicy
+            or repository != scope.workspace_ref_commitment
+        ):
+            return None
+        reconcile = getattr(self._gateway, "reconcile_repository_policy", None)
+        human_authority = self._human_authority
+        if reconcile is None or type(human_authority) is not HumanAuthorityCapability:
+            return None
+        try:
+            await reconcile(
+                effective,
+                human_authority,
+                repository_privacy_commitment=repository,
+                authority_digest=authority_digest,
+            )
+        except Exception:
+            return None
+        return effective, authority_digest
+
+    async def _repository_authority_is_current(
+        self, scope: AuthorizationScope, expected_authority_digest: str
+    ) -> bool:
+        try:
+            authority = await self._policies.repository_authority(scope)
+        except Exception:
+            return False
+        return (
+            authority.grant_state == "granted"
+            and authority.repository_privacy_commitment == scope.workspace_ref_commitment
+            and authority.authority_digest == expected_authority_digest
+        )
 
     async def _resume_admitted(
         self, request_id: str, case_digest: str, deadline: Deadline
@@ -622,6 +691,17 @@ class PrivacyCoordinator:
             scanner_profile_digest=proposal.policy_digest,
             forbidden_findings=(),
         )
+        authority_digest: str | None = None
+        if binding.transport == "external":
+            activated = await self._activate_repository_admitted(candidate.scope)
+            if activated is None:
+                return SemanticEgressBlocked(
+                    request_id,
+                    PrivacyOutcome.BLOCKED_BY_POLICY,
+                    PrivacyReason.SCOPE_MISMATCH,
+                    privacy_proposal_id=proposal.privacy_proposal_id,
+                )
+            effective, authority_digest = activated
         if status == "authorized":
             auth_id = state.authorization_id
             if type(auth_id) is not str:
@@ -651,6 +731,7 @@ class PrivacyCoordinator:
                 deadline,
                 subject_digest=state.reservation.subject_digest,
                 authorization=authorization,
+                authority_digest=authority_digest,
             )
         return await self._dispatch_approved(
             candidate,
@@ -660,6 +741,7 @@ class PrivacyCoordinator:
             ConsentSource.BASELINE_POLICY,
             deadline,
             subject_digest=state.reservation.subject_digest,
+            authority_digest=authority_digest,
         )
 
     async def _semantic_pipeline(
@@ -667,6 +749,8 @@ class PrivacyCoordinator:
         candidate: CandidateContext,
         effective: EffectivePrivacyPolicy,
         deadline: Deadline,
+        *,
+        authority_digest: str | None = None,
     ) -> SemanticEgressResult:
         policy = effective.policy
         binding = candidate.provider_binding
@@ -750,7 +834,27 @@ class PrivacyCoordinator:
 
         minimized = self._classifier.minimize_and_scan(classified, decision)
         # Re-run policy intersection after preparation.
-        effective = await self._policies.effective_policy(candidate.scope)
+        if binding.transport == "external":
+            if authority_digest is None or not await self._repository_authority_is_current(
+                candidate.scope, authority_digest
+            ):
+                return await self._complete_semantic_predispatch(
+                    candidate,
+                    effective,
+                    PrivacyOutcome.BLOCKED_BY_POLICY,
+                    PrivacyReason.SCOPE_MISMATCH,
+                )
+            refreshed = await self._activate_repository_admitted(candidate.scope)
+            if refreshed is None or refreshed[1] != authority_digest:
+                return await self._complete_semantic_predispatch(
+                    candidate,
+                    effective,
+                    PrivacyOutcome.BLOCKED_BY_POLICY,
+                    PrivacyReason.SCOPE_MISMATCH,
+                )
+            effective = refreshed[0]
+        else:
+            effective = await self._policies.effective_policy(candidate.scope)
         if minimized.forbidden_findings:
             return await self._complete_semantic_predispatch(
                 candidate,
@@ -860,6 +964,7 @@ class PrivacyCoordinator:
                 minimized,
                 subject_digest,
                 deadline,
+                authority_digest=authority_digest,
             )
         return await self._dispatch_approved(
             candidate,
@@ -869,6 +974,7 @@ class PrivacyCoordinator:
             ConsentSource.BASELINE_POLICY,
             deadline,
             subject_digest=subject_digest,
+            authority_digest=authority_digest,
         )
 
     async def _handle_human_gate(
@@ -879,6 +985,8 @@ class PrivacyCoordinator:
         minimized: MinimizedDisclosure,
         subject_digest: str,
         deadline: Deadline,
+        *,
+        authority_digest: str | None,
     ) -> SemanticEgressResult:
         if self._human is None:
             try:
@@ -941,6 +1049,7 @@ class PrivacyCoordinator:
             decision.consent_source,
             deadline,
             subject_digest=subject_digest,
+            authority_digest=authority_digest,
         )
 
     async def _dispatch_approved(
@@ -954,6 +1063,7 @@ class PrivacyCoordinator:
         *,
         subject_digest: str,
         authorization: object | None = None,
+        authority_digest: str | None = None,
     ) -> SemanticEgressResult:
         binding = candidate.provider_binding
         assert binding is not None
@@ -1017,6 +1127,16 @@ class PrivacyCoordinator:
                 proposal.prepared_case_digest,
                 subject_digest,
                 result,
+            )
+
+        if authority_digest is None or not await self._repository_authority_is_current(
+            candidate.scope, authority_digest
+        ):
+            return SemanticEgressBlocked(
+                candidate.request_id,
+                PrivacyOutcome.BLOCKED_BY_POLICY,
+                PrivacyReason.SCOPE_MISMATCH,
+                privacy_proposal_id=proposal.privacy_proposal_id,
             )
 
         minted: EgressAuthorization

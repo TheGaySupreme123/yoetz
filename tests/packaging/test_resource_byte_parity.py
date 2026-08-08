@@ -1,6 +1,6 @@
 """Reviewed/source/embedded/installed resource byte equality.
 
-Proves each of the 82 manifest-declared runtime resources is the exact reviewed byte set in the
+Proves each of the 88 manifest-declared runtime resources is the exact reviewed byte set in the
 root canonical source tree, the ``src/yoetz/resources`` package tree, the built wheel, and a clean
 offline install; that the nine canonical fixtures are the only ``fixtures/`` corpus shipped; and
 that corruption/missing/extra resource drift is detected before decode/use, both at the source
@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -26,16 +27,35 @@ import pytest
 _REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 _VERIFY_SCRIPT: Final = _REPO_ROOT / "scripts" / "verify_resource_manifest.py"
 _BUILD_TIMEOUT: Final = 120
-_EXPECTED_TOTAL: Final = 83
+_EXPECTED_TOTAL: Final = 88
 _EXPECTED_KIND_COUNTS: Final = {
     "canonical_vector": 9,
     "guidance": 5,
-    "migration": 7,
-    "json_schema": 59,
+    "migration": 8,
+    "json_schema": 63,
     "skill": 1,
     "compatibility_manifest": 1,
     "runtime_support": 1,
 }
+_WORKTREE_RESOURCE_OVERLAYS: Final = (
+    "migrations/catalog/0003.sql",
+    "schemas/manifest.json",
+    "schemas/service/control-hello-2.0.0.schema.json",
+    "schemas/service/control-hello-result-2.0.0.schema.json",
+    "schemas/service/control-request-2.0.0.schema.json",
+    "schemas/service/control-result-2.0.0.schema.json",
+    "schemas/version/version-manifest-1.0.0.schema.json",
+    "src/yoetz/resources/manifest.json",
+    "src/yoetz/resources/migrations/catalog/0003.sql",
+    "src/yoetz/resources/schemas/manifest.json",
+    "src/yoetz/resources/schemas/service/control-hello-2.0.0.schema.json",
+    "src/yoetz/resources/schemas/service/control-hello-result-2.0.0.schema.json",
+    "src/yoetz/resources/schemas/service/control-request-2.0.0.schema.json",
+    "src/yoetz/resources/schemas/service/control-result-2.0.0.schema.json",
+    "src/yoetz/resources/schemas/version/version-manifest-1.0.0.schema.json",
+    "src/yoetz/resources/support/runtime-support.json",
+    "support/runtime-support.json",
+)
 
 
 def _load_manifest() -> Any:  # raw JSON document, deliberately untyped
@@ -63,8 +83,18 @@ def _export_clean_source(dest: Path) -> None:
     finally:
         tar_path.unlink(missing_ok=True)
 
+    # This mutation matrix deliberately starts from ``git archive HEAD`` so unrelated untracked
+    # files cannot enter its baseline. During a release change, however, newly reviewed resources
+    # do not exist in HEAD until the final commit. Overlay only the explicit authority-v2 resource
+    # delta so the tests exercise the complete candidate inventory before that commit is made.
+    for relative in _WORKTREE_RESOURCE_OVERLAYS:
+        source = _REPO_ROOT / relative
+        target = dest / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
 
-def test_manifest_has_exactly_81_entries_with_the_reviewed_kind_counts() -> None:
+
+def test_manifest_has_exactly_88_entries_with_the_reviewed_kind_counts() -> None:
     manifest = _load_manifest()
     entries = manifest["entries"]
     assert len(entries) == _EXPECTED_TOTAL

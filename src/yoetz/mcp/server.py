@@ -7,6 +7,7 @@ import os
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal, cast
 
@@ -53,7 +54,7 @@ from yoetz.observability.logging import (
     configure_logging,
     record_unexpected_exception_without_raising,
 )
-from yoetz.ports.control import ControlClientKind, ControlError
+from yoetz.ports.control import ControlClientKind, ControlError, WorkspaceLocator
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id, safe_request_id_from
 from yoetz.protocol.models import (
@@ -182,6 +183,11 @@ class BridgeRuntime:
     descriptors: tuple[ToolDescriptor, ...]
     resources: tuple[GuidanceResource, ...]
     instructions: str
+    workspace_locator: WorkspaceLocator = field(
+        default_factory=lambda: WorkspaceLocator(os.fspath(Path.cwd().resolve(strict=True))),
+        repr=False,
+        compare=False,
+    )
     _slot: _ClientSlot = field(default_factory=_ClientSlot, repr=False, compare=False)
 
 
@@ -200,7 +206,8 @@ def build_bridge_runtime(route_profile: McpRouteProfile = "policy") -> BridgeRun
         descriptor.input_schema
         descriptor.output_schema
     build_last_resort_internal_error_result()
-    return BridgeRuntime(route_profile, descriptors, resources, instructions)
+    workspace_locator = WorkspaceLocator(os.fspath(Path.cwd().resolve(strict=True)))
+    return BridgeRuntime(route_profile, descriptors, resources, instructions, workspace_locator)
 
 
 BRIDGE_RUNTIME: Final = build_bridge_runtime()
@@ -235,7 +242,10 @@ async def ensure_service_client(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> Serv
                 return existing
         connected: ServiceClient | None = None
         try:
-            connected = await connect_service_on_demand(ControlClientKind.MCP_BRIDGE)
+            connected = await connect_service_on_demand(
+                ControlClientKind.MCP_BRIDGE,
+                workspace_locator=runtime.workspace_locator,
+            )
             await connected.connect()
         except Exception:
             runtime._slot.client = None  # pyright: ignore[reportPrivateUsage]

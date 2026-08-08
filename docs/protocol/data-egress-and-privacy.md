@@ -35,12 +35,15 @@ can never remove one.
 
 ## Policy resolution
 
-The effective policy is the **intersection** of machine, workspace, task, and request policy — never
-a union. A more specific scope may narrow automatically, but widening always requires a fresh
+The machine policy is an installation ceiling. The effective policy is the **intersection** of that
+ceiling with repository, task, and request policy — never a union. Standing external LLM admission
+also requires an exact current repository row; a permissive machine ceiling alone grants no
+repository. A more specific scope may narrow automatically, but widening always requires a fresh
 local-human authorization bound to the exact broader categories, channel, provider/endpoint,
 purpose, and scope. Every scope carries its full ancestor chain — installation ID, and then
 workspace, task, and request identifiers as applicable; a shortcut single reference is never
-accepted as authorization identity.
+accepted as authorization identity. Privacy repository identity comes from the service's trusted
+session locator, never from the operation's public `workspace_ref`.
 
 The four **`PrivacyProfile`** values govern LLM inference and its content-disclosure rules only —
 they are not a bundled consent switch for telemetry, diagnostics, updates, or capability testing:
@@ -57,7 +60,8 @@ they are not a bundled consent switch for telemetry, diagnostics, updates, or ca
 External profiles bind an exact five-field `ProviderBinding`: `provider_id`, `model_id`,
 `endpoint_profile_id`, `endpoint_profile_version`, and `transport`. An unknown profile, unbound
 endpoint, scope mismatch, expired authorization, or policy version mismatch denies before the
-provider adapter is even constructed.
+provider adapter is even constructed. A missing or mismatched exact repository grant additionally
+denies before credential-handle minting, authorization, or dispatch.
 
 `credential-probe` is a distinct `llm_inference` purpose, not an implication of enabling semantic
 review. During provider-credential setup, the local human separately decides whether one fixed,
@@ -79,9 +83,10 @@ authority and passes the same minimization/never-send path. No profile creates a
 repository/filesystem handle — a missing excerpt is reported as `not_recorded`, `not_selected`, or
 `withheld_by_policy`, never presented as observed-unchanged content.
 
-The fail-safe seed for every new installation is `local_only + structural`, with the global network
-ceiling false and all five channels off. The CLI's *configured, opt-in* recommendation is an
-inspectable standing workspace `trusted_provider + assisted` recipe, eligible only for an exact
+The fail-safe LLM seed for every new installation is `local_only + structural`, with no external LLM
+channel authority; the product may separately enable its bounded structural update-check channel.
+The CLI's *configured, opt-in* recommendation is an inspectable standing exact-repository
+`trusted_provider + assisted` recipe, eligible only for an exact
 current provider data-use record stating training `prohibited`, retention `none|bounded`, and
 provider human access `prohibited|restricted`. Unknown or stale posture removes the recommendation.
 The recipe ships with an editable `require_current_provider_data_use_evidence=true` runtime guard.
@@ -89,6 +94,12 @@ Once a standing policy is human-confirmed, ordinary checks, automatic retries, r
 agent responses, and rechecks proceed without further human prompts; human involvement remains
 required only for widening, credential mutation, `confirm_every_request` decisions, and finding
 waivers. Never-send content has no approval path under any profile.
+
+Repository binding is a trusted-control effect. CLI/UI supply their actual working directory and MCP
+supplies its configured/session working directory. The service resolves symlinks, selects the Git
+common root (or resolved non-Git directory), creates an installation-keyed commitment, and discards
+the raw path. Branches and linked worktrees share one grant; independent clones and unrelated
+repositories require their own.
 
 `network_egress_permitted` is the global network ceiling. When `false`, all five channels must be
 disabled. When `true`, it authorizes nothing by itself — every channel still needs its own consent.
@@ -203,6 +214,20 @@ through the ordinary control channel. A separate foreground human-control surfac
 renders, reauthenticates, and commits it. Ordinary MCP/agent schemas expose no method that can reach
 that surface. Revocation of an existing authorization is immediate.
 
+For a new repository, one proposal may contain both a necessary machine-ceiling widening and the
+first repository row. The service returns one authority digest covering the complete ancestor and
+migration state; the trusted preview shows both changes, and one CAS commits every member or none.
+Policy-digest-only older proposal shapes cannot perform this transition and fail closed under
+repository-grant mode.
+
+Package upgrades preserve accepted machine-policy bytes. An append-only catalog migration snapshots
+only the bounded pre-upgrade legacy-route frontier and entitlements. When an eligible route next
+arrives with a trusted locator, its accepted policy is cloned beneath the unchanged machine ceiling
+and the entitlement is atomically consumed. If no legacy route existed, one bounded first-repository
+carry-forward is available. This is no-reapproval narrowing, not new authority; later repositories
+remain Private. Replay is idempotent, and stale CAS, crash, expiry, denial, missing locator, or old
+decoder leaves external LLM admission blocked.
+
 ## Failure, cancellation, retry, and crash behavior
 
 Classification, minimization, redaction, schema, secret-scan, or receipt-persistence uncertainty
@@ -218,9 +243,14 @@ result.
 
 ## Extension and versioning
 
-New content categories, disclosure sinks, or egress channels require a coordinated schema, ADR, and
-fixture update — none is added as a silent policy-vocabulary change. `audit_store_version=1` and the
+New content categories, disclosure sinks, egress channels, or repository-authority shapes require a
+coordinated schema, ADR, and fixture update — none is added as a silent policy-vocabulary change.
+`audit_store_version=1` and the
 `hmac-sha256/yoetz-privacy-egress-request-v1` commitment format are frozen for v0.1.
+
+Installed-wheel two-repository semantic and receipt proof remains outstanding for issue #139.
+Router downstream/fallback authority and issue #141's foreground disclosure continuation are not
+part of this protocol change.
 
 ## See also
 

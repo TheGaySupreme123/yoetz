@@ -36,6 +36,14 @@ exfiltrate your repository" a structural property rather than a promise
 ([ADR-008](adr/ADR-008-local-service-vault-trust-boundary.md),
 [ADR-009](adr/ADR-009-data-egress-privacy.md)).
 
+Privacy authority has two durable levels: the machine policy is an installation ceiling, while
+external LLM work also requires an exact row for the installation-keyed commitment of the trusted
+session's canonical repository. The service derives that identity from actual/configured working
+directory, resolves Git's common root (or a resolved non-Git directory), and discards the raw path.
+Branches and linked worktrees share authority; independent clones do not. The public
+`workspace_ref` used to attach a task is a different, model-controlled identity and cannot select
+privacy authority.
+
 Secret material never travels over an ordinary CLI argument, environment variable, config file,
 log, trace, transcript, or LLM context. Credentials are provisioned through a confidential terminal
 ceremony ([ADR-015](adr/ADR-015-elevated-bootstrap-consent.md),
@@ -107,6 +115,9 @@ These are enforced in code and locked by tests; they are the reason the system i
 - **Every retryable write has an idempotency identity.** A timeout never proves failure.
 - **Every network channel is independently authorized.** No profile overrides the never-send set,
   and only a reauthenticated local human can loosen effective policy.
+- **Machine capability is not repository consent.** External LLM admission requires the exact
+  repository grant before provider construction or credential minting; a first grant may atomically
+  combine a machine-ceiling widening with repository-row creation.
 
 ## Storage
 
@@ -114,6 +125,11 @@ One SQLite bundle per task holds structural rows; content-bearing material lives
 object store and is referenced by digest. Migrations under `migrations/` are append-only and CI
 enforces that ([ADR-003](adr/ADR-003-storage-sqlite-durability.md)). Recovery paths — backup,
 restore, migrate, quarantine — are documented in [`docs/runbooks/`](runbooks/).
+
+Catalog migration preserves accepted machine-policy bytes. It may consume only bounded
+pre-upgrade route or one first-repository entitlement to clone that authority into a narrower child
+row without reapproval; later repositories inherit nothing. Schema decoders for older control
+shapes remain readable but cannot bypass the repository/authority-digest gate.
 
 ## Harness integration
 

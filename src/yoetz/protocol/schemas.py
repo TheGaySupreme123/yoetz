@@ -52,7 +52,7 @@ __all__ = [
 SCHEMA_NAMESPACE: Final = "https://schemas.yoetz.dev/0.1/"
 SCHEMA_MANIFEST_SCHEMA: Final = "yoetz.schema-manifest/1.0.0"
 SCHEMA_MANIFEST_VERSION: Final = "1.0.0"
-SCHEMA_MEMBER_COUNT: Final = 58
+SCHEMA_MEMBER_COUNT: Final = 62
 
 _DRAFT_2020_12: Final = "https://json-schema.org/draft/2020-12/schema"
 _SCHEMA_MEDIA_TYPE: Final = "application/schema+json"
@@ -614,7 +614,10 @@ def _load_catalog_state() -> _CatalogState:
         document.schema_name: document.schema_version
         for document in sorted(
             (item for item in ordered_documents if item.schema_kind is SchemaKind.REQUEST_RESULT),
-            key=lambda item: item.schema_name.encode("ascii"),
+            key=lambda item: (
+                item.schema_name.encode("ascii"),
+                tuple(int(part) for part in item.schema_version.split(".")),
+            ),
         )
     }
     event_versions_dict = {

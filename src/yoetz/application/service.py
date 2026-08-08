@@ -35,7 +35,12 @@ from yoetz.domain.values import (
     validate_sha256_digest,
 )
 from yoetz.ports.clock import ClockPort
-from yoetz.ports.control import ControlClientKind, ControlError, ControlMethod
+from yoetz.ports.control import (
+    ControlClientKind,
+    ControlError,
+    ControlMethod,
+    RepositoryPrivacyContext,
+)
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import CheckAwaitingHuman, CheckCommitResult, FrozenCase
 from yoetz.ports.publish_response_catalog import (
@@ -620,8 +625,28 @@ class Application:
         if self.semantic_ready and not self.provider_credential_connected:
             raise ValueError("semantic_ready_without_connected_provider_credential")
 
-    async def start(self, request: StartRequest) -> StartInternalResult:
-        return await execute_start(self, request)  # pyright: ignore[reportArgumentType]
+    async def start(
+        self,
+        request: StartRequest,
+        *,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> StartInternalResult:
+        result = await execute_start(self, request)  # pyright: ignore[reportArgumentType]
+        if repository_privacy_context is None:
+            return result
+        route = await self.start_catalog.resolve_route(result.session_id)
+        if route is None or route.task_id != result.task_id:
+            raise PublicOperationError(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "The stored task route is invalid.",
+                False,
+            )
+        await self.start_catalog.bind_repository_privacy(
+            result.task_id,
+            route.route_identity_digest,
+            repository_privacy_context.commitment,
+        )
+        return result
 
     async def publish_work(
         self, request: PublishWorkRequest

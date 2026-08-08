@@ -35,7 +35,9 @@ the privacy posture, unlock or stop the service) had to reassemble the correct s
    trusted privacy ceremony. It first renders the exact recommended `assisted_review` draft only
    for a current, exact-route eligible provider record, and otherwise renders `private`, with its
    tradeoffs; only declining that draft opens the detailed one-by-one questions. The shortcut
-   cannot be combined with a subcommand or provider-setup flags.
+   cannot be combined with a subcommand or provider-setup flags. The ceremony is bound to the
+   repository derived from the command's actual working directory. It renders the service-returned
+   grant and migration state; it never accepts public `workspace_ref` as privacy authority.
 
 3. **The menu is a dispatcher, not a new authority.** Every menu action invokes an operation the
    command tree already exposes, with its existing gates intact: MCP registration keeps
@@ -43,7 +45,8 @@ the privacy posture, unlock or stop the service) had to reassemble the correct s
    ceremony (the menu collects only the nonsecret identifiers `provider credential set|rotate`
    already accepts as flags); privacy policy mutation stays in the explicit
    `privacy setup|propose|tighten` commands and trusted decision ceremonies — the menu only
-   reads posture; service lifecycle uses the same client calls, and the menu never spawns the
+   reads posture, including the repository grant and bounded legacy-migration state; service
+   lifecycle uses the same client calls, and the menu never spawns the
    service (ADR-008). No secret is ever read by a menu prompt.
 
 4. **Bounded failures keep the menu open.** A `ControlError` renders the same guidance strings

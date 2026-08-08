@@ -14,6 +14,10 @@ A setup session exposes closed actions `begin`, `answer`, `review`, `propose`, `
 `request_confirmation`, `channel_consents`, `scope`, `review`, `decision_required`, `complete`, and
 `cancelled`.
 
+The current contract version also reports the service-bound repository-backed workspace scope,
+composed policy, authority digest, repository grant state, and bounded legacy-migration state. These
+are service-derived session facts, not answers supplied by the renderer.
+
 ## The thirteen settings
 
 These thirteen settings are the complete configurable surface. The `question_id` token and answer
@@ -39,7 +43,7 @@ before proposing.
 | 10 | `crash_diagnostics` | Whether crash diagnostics are permitted | boolean |
 | 11 | `update_checks` | Whether update checks are permitted | boolean |
 | 12 | `capability_testing` | Whether capability testing is permitted | boolean |
-| 13 | `authorization_scope` | Machine, workspace, task, or this request | full-ancestor-chain scope |
+| 13 | `authorization_scope` | Machine ceiling, exact repository-backed workspace, task, or this request | full-ancestor-chain scope |
 
 The setup UI never accepts a credential, key, recovery secret, provider token, or vault passphrase.
 
@@ -77,10 +81,10 @@ or skips the review/decision step.**
 First run, `yoetz --privacy`, and the terminal interface's `/privacy` all apply the same rule, from
 one function:
 
-- **No external provider binding configured → `private`.** Network egress stays off entirely.
+- **No external provider binding configured → `private`.** External LLM egress stays off.
 - **Exact route has current evidence of no default training and retention no longer than 30 days
-  → `assisted_review`.** The reviewed draft is workspace-scoped and does not require a prompt for
-  each ordinary request after the trusted widening ceremony commits it.
+  → `assisted_review`.** The reviewed draft is exact-repository-scoped and does not require a
+  prompt for each ordinary request after the trusted widening ceremony commits it.
 - **Unknown, stale, account-unqualified, or router-unconstrained provider posture → `private`.**
   The user may still choose Assisted once, but the exact review shows the unfavorable or unknown
   facts and that the runtime evidence guard is off; no reviewed-provider assurance is displayed.
@@ -108,7 +112,7 @@ at all — reading your own unlocked terminal is not a third-party disclosure.
 ### The recommended `assisted_review` recipe
 
 Deliberately different from the default: `PrivacyProfile=trusted_provider`,
-`ReviewContextProfile=assisted`, workspace scope, `request_confirmation=false`,
+`ReviewContextProfile=assisted`, exact repository scope, `request_confirmation=false`,
 `include_finding_prose=true`, `include_exact_command_text=false`,
 `require_current_provider_data_use_evidence=true`, data classes
 `public_structural|ordinary_user_content`, and the canonical `assisted` external category set
@@ -122,9 +126,16 @@ access and safety, legal, support, and abuse-monitoring exceptions remain promin
 facts. Unknown or stale posture removes the badge; a user can still pick Assisted or configure the
 route through `custom`, but the UI must not carry the recommendation's claim into that policy.
 
-Existing approved policies are never rewritten by this recommendation. An existing
+Existing approved machine-policy bytes are never rewritten by this recommendation or by package
+upgrade. An existing
 `confirm_every_request` user receives an explicit Assisted offer and keeps the current policy until
 the complete trusted before-to-after widening ceremony is approved.
+
+An upgrade may automatically clone previously accepted machine authority beneath an eligible
+pre-upgrade repository route, consuming one bounded entitlement, or use one first-repository
+carry-forward when no such route existed. The machine row remains byte-identical and later
+repositories inherit nothing, so this is narrowing and requires no reapproval. Grant and migration
+state remain visible in setup.
 
 Router profiles whose downstream provider and fallback set are not represented in the binding are
 not exact standing grants. They remain available only with per-request confirmation; Assisted or
@@ -164,20 +175,26 @@ confirmation first.
 
 ## Review, propose, and commit
 
-`review` displays the global ceiling, effective destination/purpose/scope/categories, every channel
-independently, the review-context profile and its exact compiled selector, the recipe expansion, the
-editable data-use runtime guard, the endpoint's data-use profile ID/version/evidence digest, whether
+`review` displays the machine ceiling, bound repository grant, effective destination, purpose,
+scope, categories, and every channel independently, the review-context profile and its exact
+compiled selector, the recipe expansion, the editable data-use runtime guard, the endpoint's
+data-use profile ID/version/evidence digest, whether
 per-request preview applies, the complete non-overridable never-send set, and a semantic diff from
 the current policy. Widening is visually highlighted and **cannot commit through `review` alone.**
 
 `tighten` commits immediately after the ordinary explicit confirmation, but only when the service
 independently proves every policy dimension is no broader than the current one. `propose` never
 commits a widening by itself: loosening any dimension returns `decision_required` with a
-`privacy_proposal_id`, an exact draft digest, the current policy version, an expiry, and — when an
+`privacy_proposal_id`, an exact draft digest, the current authority digest, an expiry, and — when an
 external provider is selected — the exact reviewed data-use profile ID/version/evidence digest. A
 separate foreground human-control surface then confidentially renders the pending proposal,
 reauthenticates the local human, and commits internally; the ordinary setup schema itself has no
 decide/confirm method, and no MCP, agent, import, or provider schema can reach that authority.
+
+A new-repository proposal may contain two members: widening the machine ceiling when necessary and
+inserting the first exact repository row. One preview shows both and one authority-digest-bound CAS
+commits both or neither. Older setup/propose decoders remain readable, but cannot create or migrate a
+repository grant and fail closed with upgrade guidance under repository-grant mode.
 
 **That trusted-terminal ceremony is the single authorization for a widening.** No other surface may
 take its own approval for one first. A selecting surface may show a proposal or hand one over, but a
@@ -216,6 +233,8 @@ ordinary egress path.
 ## Errors and edge cases
 
 - Closing, disconnecting, or crashing before `review`/`tighten`/decision commits nothing.
+- A missing trusted locator leaves repository authority unbound; public `workspace_ref` is never a
+  fallback.
 - A locked service may show status and confidential-unlock guidance but cannot expose policy
   content that requires decrypted state, and never accepts an ordinary-channel secret.
 - An unavailable provider profile is selectable only as an explanatory `unsupported` value — never
@@ -231,6 +250,7 @@ ordinary egress path.
 - [`data-egress-and-privacy.md`](data-egress-and-privacy.md) — the enforced policy/dispatch
   protocol this wizard configures.
 - [`../../PRIVACY.md`](../../PRIVACY.md) — the user-facing privacy summary.
-- `schemas/privacy/setup-wizard-contract-1.0.0.schema.json` — the wire schema for this contract.
+- the versioned `schemas/privacy/setup-wizard-contract-*.schema.json` set — the wire schemas for
+  this contract; older decoders remain fail-closed for repository authority.
 - `yoetz privacy setup` / `yoetz privacy show` / `yoetz privacy propose` / `yoetz privacy tighten`
   — the v0.1 CLI surface implementing this contract.

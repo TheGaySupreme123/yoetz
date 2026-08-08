@@ -66,6 +66,7 @@ def _load_resource(family: str, version: str) -> bytes:
 CATALOG_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration("0001", _load_resource("catalog", "0001")),
     Migration("0002", _load_resource("catalog", "0002")),
+    Migration("0003", _load_resource("catalog", "0003")),
 )
 BUNDLE_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration("0001", _load_resource("bundle", "0001")),
@@ -212,7 +213,7 @@ def run_migrations(
     db: apsw.Connection,
     registry: Sequence[Migration],
     *,
-    maintenance: MaintenanceHandle,
+    maintenance: MaintenanceHandle | None,
 ) -> MigrationReport:
     """Return the bounded migration result for an already initialized database."""
 

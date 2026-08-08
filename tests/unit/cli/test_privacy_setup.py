@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -434,15 +436,34 @@ def _install_setup_stubs(
     confirmations: Iterator[bool],
     prompts: list[str],
     external: ProviderBinding | None = None,
+    grant_state: Literal["granted", "missing"] = "missing",
+    migration_state: Literal[
+        "not_applicable",
+        "legacy_route_available",
+        "first_repository_available",
+        "consumed",
+    ] = "not_applicable",
 ) -> None:
     """Stub only the I/O edges, leaving the real recipe and branch selection under test."""
 
     import yoetz.cli.privacy_setup as module
 
-    async def effective() -> PrivacyPolicy:
-        return current
+    async def snapshot(_workspace_locator: object = None) -> object:
+        return module.PrivacySetupSnapshot(
+            current,
+            JsonObject({"kind": "workspace"}),
+            "sha256:" + "d" * 64,
+            grant_state,
+            migration_state,
+        )
 
-    async def propose(_candidate: PrivacyPolicy, _digest: str) -> str:
+    async def propose(
+        _candidate: PrivacyPolicy,
+        _digest: str,
+        *,
+        workspace_locator: object = None,
+    ) -> str:
+        del workspace_locator
         return "pvp_1"
 
     async def decide(_proposal: str) -> PrivacyDecisionResult:
@@ -466,7 +487,7 @@ def _install_setup_stubs(
         return None
 
     monkeypatch.setattr(module, "_interactive_terminal", interactive)
-    monkeypatch.setattr(module, "_effective_policy", effective)
+    monkeypatch.setattr(module, "_setup_snapshot", snapshot)
     monkeypatch.setattr(module, "_configured_bindings", bindings)
     monkeypatch.setattr(module, "_render_recipe_options", render_options)
     monkeypatch.setattr(module, "_render_review", render_review)
@@ -803,37 +824,77 @@ def test_custom_configuration_announces_all_five_sections(
 
 
 @pytest.mark.anyio
-async def test_effective_policy_accepts_service_json_object(
+async def test_repository_setup_snapshot_accepts_service_json_object(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import yoetz.cli.app as app_module
     import yoetz.cli.privacy_setup as module
-    import yoetz.cli.provider_status as provider_status_module
     from yoetz.adapters.privacy.catalog import encode_privacy_policy_json
 
     current = local_only_policy()
 
     class Client:
-        async def privacy_get_effective(self, request: object) -> JsonObject:
-            assert request == JsonObject({"scope": "machine"})
-            return JsonObject({"policy": encode_privacy_policy_json(current)})
+        async def privacy_get_setup(self, request: object) -> JsonObject:
+            assert request == JsonObject({"schema_version": "2.0.0"})
+            return JsonObject(
+                {
+                    "schema_version": "2.0.0",
+                    "composed_policy": encode_privacy_policy_json(current),
+                    "bound_scope": {"kind": "workspace"},
+                    "authority_digest": "sha256:" + "d" * 64,
+                    "grant_state": "missing",
+                    "migration_state": "not_applicable",
+                }
+            )
 
         async def close(self) -> None:
             return None
 
-    async def build_client() -> Client:
+    async def build_client(*, workspace_locator: object = None) -> Client:
+        assert workspace_locator is not None
         return Client()
 
     monkeypatch.setattr(app_module, "build_service_client", build_client)
-    monkeypatch.setattr(
-        provider_status_module,
-        "machine_scope_request",
-        lambda: JsonObject({"scope": "machine"}),
+
+    observed = await module._setup_snapshot()  # pyright: ignore[reportPrivateUsage]
+
+    assert observed.composed_policy == current
+    assert observed.grant_state == "missing"
+
+
+@pytest.mark.anyio
+async def test_repository_proposal_carries_the_snapshot_authority_digest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import yoetz.cli.app as app_module
+    import yoetz.cli.privacy_setup as module
+
+    requests: list[JsonObject] = []
+
+    class Client:
+        async def privacy_propose_policy(self, request: JsonObject) -> JsonObject:
+            requests.append(request)
+            return JsonObject({"schema_version": "2.0.0", "outcome": "tightening_applied"})
+
+        async def close(self) -> None:
+            return None
+
+    async def build_client(*, workspace_locator: object = None) -> Client:
+        assert getattr(workspace_locator, "path", None) == str(tmp_path)
+        return Client()
+
+    monkeypatch.setattr(app_module, "build_service_client", build_client)
+    digest = "sha256:" + "d" * 64
+
+    assert (
+        await module._propose(  # pyright: ignore[reportPrivateUsage]
+            local_only_policy(), digest, workspace_locator=tmp_path
+        )
+        is None
     )
-
-    observed = await module._effective_policy()  # pyright: ignore[reportPrivateUsage]
-
-    assert observed == current
+    assert requests[0]["schema_version"] == "2.0.0"
+    assert requests[0]["authority_digest"] == digest
+    assert "expected_policy_digest" not in requests[0]
 
 
 @pytest.mark.anyio

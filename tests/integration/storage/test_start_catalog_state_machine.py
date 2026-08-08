@@ -81,10 +81,9 @@ class _Harness:
     def create(cls, seed: int) -> _Harness:
         installation_id = _id(IdKind.INSTALLATION, seed)
         db = apsw.Connection(":memory:")
-        migration = (Path(__file__).resolve().parents[3] / "migrations/catalog/0001.sql").read_text(
-            encoding="utf-8"
-        )
-        db.execute(migration)
+        root = Path(__file__).resolve().parents[3]
+        for version in ("0001", "0002", "0003"):
+            db.execute((root / f"migrations/catalog/{version}.sql").read_text(encoding="utf-8"))
         db.executemany(
             "INSERT INTO catalog_meta(key, value) VALUES(?, ?)",
             (("installation_id", installation_id), ("owner_generation", "1")),

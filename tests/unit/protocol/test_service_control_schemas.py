@@ -201,6 +201,79 @@ def test_hello_status_and_client_kind_authority_matrix() -> None:
     _assert_invalid("control-hello-result", widened)
 
 
+def test_v2_hello_adds_only_an_optional_ephemeral_workspace_locator() -> None:
+    hello: dict[str, JsonValue] = {
+        "protocol_version": "1.0",
+        "client_kind": "cli",
+        "client_version": "0.1.0",
+        "connection_nonce": "0" * 64,
+        "schema_manifest_digest": _DIGEST,
+        "workspace_locator": {"schema_version": "1.0.0", "path": "/tmp/repository"},
+    }
+    validate_schema_instance("control-hello", "2.0.0", hello)
+    with pytest.raises(ProtocolValueError):
+        validate_schema_instance("control-hello", "1.0.0", hello)
+    for invalid_locator in (
+        {"schema_version": "1.0.0", "path": "relative"},
+        {"schema_version": "1.0.0", "path": "/tmp/repository", "extra": True},
+        {"schema_version": "2.0.0", "path": "/tmp/repository"},
+    ):
+        candidate = deepcopy(hello)
+        candidate["workspace_locator"] = cast(JsonValue, invalid_locator)
+        with pytest.raises(ProtocolValueError):
+            validate_schema_instance("control-hello", "2.0.0", candidate)
+
+
+def test_v2_repository_privacy_bodies_are_closed_and_v1_is_retained() -> None:
+    request_schema = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-request-2.0.0.schema.json").read_bytes()),
+    )
+    result_schema = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-result-2.0.0.schema.json").read_bytes()),
+    )
+    request_defs = cast(dict[str, dict[str, Any]], request_schema["$defs"])
+    setup_request_union = request_defs["privacy_get_setup_body"]
+    assert len(setup_request_union["oneOf"]) == 2
+    setup_request = setup_request_union["oneOf"][1]
+    assert setup_request["additionalProperties"] is False
+    assert setup_request["required"] == ["schema_version"]
+    assert setup_request["properties"] == {"schema_version": {"const": "2.0.0"}}
+    proposal_request_union = request_defs["privacy_propose_policy_body"]
+    assert len(proposal_request_union["oneOf"]) == 2
+    proposal_request = proposal_request_union["oneOf"][1]
+    assert proposal_request["additionalProperties"] is False
+    assert set(proposal_request["required"]) == {
+        "schema_version",
+        "authority_digest",
+        "candidate_policy",
+    }
+    assert "expected_policy_digest" not in proposal_request["properties"]
+
+    result_defs = cast(dict[str, dict[str, Any]], result_schema["$defs"])
+    setup_result_union = result_defs["privacy_get_setup_body"]
+    assert len(setup_result_union["oneOf"]) == 2
+    setup_result = setup_result_union["oneOf"][1]
+    assert setup_result["additionalProperties"] is False
+    assert set(setup_result["required"]) == {
+        "schema_version",
+        "composed_policy",
+        "bound_scope",
+        "authority_digest",
+        "grant_state",
+        "migration_state",
+        "channel_choices",
+        "allowed_blocked_examples",
+        "recipes",
+        "never_send_editable",
+    }
+    assert setup_result["properties"]["never_send_editable"] == {"const": False}
+    assert len(result_defs["privacy_propose_policy_body"]["oneOf"]) == 4
+    v1_defs = cast(dict[str, dict[str, Any]], _schema("control-request")["$defs"])
+    assert "expected_policy_digest" in v1_defs["privacy_propose_policy_body"]["properties"]
+
+
 def test_control_request_and_result_unions_are_exact_and_disjoint() -> None:
     request_schema = _schema("control-request")
     result_schema = _schema("control-result")

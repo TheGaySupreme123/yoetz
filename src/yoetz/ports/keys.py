@@ -12,6 +12,8 @@ from yoetz.domain.values import validate_sha256_digest
 from yoetz.ports.secret_memory import SecretConsumer, SecretHandle, SecretPurpose
 from yoetz.protocol.canonical import canonical_encode, strict_json_parse
 
+REPOSITORY_PRIVACY_MAC_DOMAIN = b"yoetz/repository-privacy/v1\x00"
+
 __all__ = [
     "BundleKeys",
     "KeyStoreError",
@@ -22,6 +24,7 @@ __all__ = [
     "RecoveryArtifact",
     "RecoveryKeyMaterialHandle",
     "RecoverySecret",
+    "REPOSITORY_PRIVACY_MAC_DOMAIN",
     "WrapKeyHandle",
     "WrappedDek",
 ]

@@ -29,6 +29,7 @@ from yoetz.ports.control import (
     ControlError,
     ControlMethod,
     McpRouteProfile,
+    RepositoryPrivacyContext,
     ServiceState,
 )
 from yoetz.protocol.canonical import canonical_digest
@@ -376,6 +377,67 @@ async def test_ready_handler_preserves_check_route_default(
 
     assert result is marker
     assert seen == [expected]
+
+
+@pytest.mark.anyio
+async def test_start_handler_receives_only_the_trusted_repository_context_keyword() -> None:
+    seen: list[object] = []
+    marker = object()
+    context = RepositoryPrivacyContext("hmac-sha256:" + "1" * 64, "git_common_root")
+
+    async def handler(
+        _request: object,
+        *,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> object:
+        seen.append(repository_privacy_context)
+        return marker
+
+    request = ControlCallRequest(
+        kind="call",
+        protocol_version="1.0",
+        rpc_id=new_id(IdKind.CONTROL_RPC),
+        service_instance_id=_INSTANCE_ID,
+        service_generation="7",
+        method=ControlMethod.START,
+        body=_start_body(),
+    )
+
+    result = await ServiceDaemon._invoke_ready_handler(  # pyright: ignore[reportPrivateUsage]
+        handler, request, context
+    )
+
+    assert result is marker
+    assert seen == [context]
+
+
+@pytest.mark.anyio
+async def test_locator_bound_session_keeps_v1_tighten_machine_only() -> None:
+    seen: list[object] = []
+    marker = object()
+    context = RepositoryPrivacyContext("hmac-sha256:" + "2" * 64, "git_common_root")
+
+    async def legacy_handler(request: object) -> object:
+        seen.append(request)
+        return marker
+
+    body = JsonObject({"schema_version": "1.0.0"})
+    request = ControlCallRequest(
+        kind="call",
+        protocol_version="1.0",
+        rpc_id=new_id(IdKind.CONTROL_RPC),
+        service_instance_id=_INSTANCE_ID,
+        service_generation="7",
+        method=ControlMethod.PRIVACY_TIGHTEN_POLICY,
+        body=body,
+    )
+
+    result = await ServiceDaemon._invoke_ready_handler(  # pyright: ignore[reportPrivateUsage]
+        legacy_handler, request, context
+    )
+
+    assert result is marker
+    assert seen == [body]
 
 
 def _daemon() -> tuple[ServiceDaemon, _Application, _Vault, _Listener]:

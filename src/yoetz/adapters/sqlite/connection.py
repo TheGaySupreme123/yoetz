@@ -52,7 +52,7 @@ BUSY_TIMEOUT_MS: Final = 5_000
 STATEMENT_CACHE_SIZE: Final = 100
 WRITER_QUEUE_DEPTH: Final = 64
 
-_SUPPORTED_CATALOG_SCHEMA_VERSION: Final = 2
+_SUPPORTED_CATALOG_SCHEMA_VERSION: Final = 3
 _SUPPORTED_BUNDLE_SCHEMA_VERSION: Final = 5
 _SUPPORTED_SCHEMA_VERSION: Final = _SUPPORTED_BUNDLE_SCHEMA_VERSION
 _PROTOCOL_VERSION: Final = "0.1"
@@ -526,6 +526,39 @@ def _open_recovery_writer(  # pyright: ignore[reportUnusedFunction]
     """Open the sole pre-fence writer used by migration/ownership recovery."""
 
     return _open_verified_writer(path, require_fence=False)
+
+
+def _open_catalog_migration_writer(  # pyright: ignore[reportUnusedFunction]
+    path: Path,
+) -> apsw.Connection:
+    """Open one existing stale catalog for exclusive ready-startup migration.
+
+    This capability deliberately has no SQL authorizer because schema migration requires DDL.
+    It accepts neither fresh databases nor bundle databases, and callers must close it before
+    reopening the catalog through :func:`open_catalog_writer`.
+    """
+
+    _verify_safe_path(path, may_create=False)
+    db: apsw.Connection | None = None
+    try:
+        db = apsw.Connection(
+            str(path),
+            flags=apsw.SQLITE_OPEN_READWRITE,
+            statementcachesize=STATEMENT_CACHE_SIZE,
+        )
+        _configure_writer(db)
+        verify_sqlite_build(db)
+        tables = _table_names(db)
+        if "catalog_meta" not in tables or "bundle_meta" in tables:
+            raise StorageUnsafeError("schema_metadata_disagrees")
+        identity = verify_schema_identity(db)
+        if identity.state != "migration_required":
+            raise StorageUnsafeError("schema_metadata_disagrees")
+        return db
+    except Exception:
+        if db is not None:
+            _close_quietly(db)
+        raise
 
 
 def open_catalog_writer(path: Path) -> apsw.Connection:

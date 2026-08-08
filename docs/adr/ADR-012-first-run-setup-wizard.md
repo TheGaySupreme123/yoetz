@@ -52,7 +52,7 @@ exactly those contracts and connects the steps without weakening any existing tr
    already-reviewed hidden-input vault initialize/unlock and credential ceremony; it adds no
    secret field to wizard arguments, configuration, reports, MCP, or agent context. Noninteractive
    setup remains a report plus explicit follow-up commands and never chooses egress. The semantic
-   `assisted_review` is workspace-scoped, problem-local, and does not require recurring prompts
+   `assisted_review` is repository-scoped, problem-local, and does not require recurring prompts
    after its trusted policy commit. Unknown, stale, broad, or account-unqualified evidence never
    earns the recommendation and remains an informed explicit choice only. It is a starting draft,
    not consent. `private` remains the fail-safe no-egress choice, while Metadata only, expanded,
@@ -61,6 +61,19 @@ exactly those contracts and connects the steps without weakening any existing tr
    parser is a declared, exactly pinned core dependency; a clean installed-artifact gate imports
    and enters `setup run` so development-only transitive packages cannot hide a missing runtime
    dependency.
+
+   Repository scope comes only from the service's trusted locator path. CLI and TUI supply their
+   actual working directory; MCP supplies its configured/session working directory. The service
+   resolves the canonical Git common root (or resolved non-Git directory), commits it under the
+   installation key, and discards the raw path. Public `workspace_ref` remains a task-attachment
+   selector and cannot select privacy authority. A proposal for a new repository may combine a
+   necessary machine-ceiling widening with insertion of the first repository row; setup renders the
+   complete two-part change and binds one approval to one authority digest and atomic CAS.
+
+   Upgrades preserve previously accepted machine-policy bytes. Eligible pre-upgrade routes consume
+   bounded migration entitlements when their trusted repository locator next arrives; if none existed,
+   one bounded first-repository carry-forward is available. This automatic step only narrows existing
+   authority and does not ask again. New repositories beyond those entitlements remain Private.
 
 2. **Bounded bare-invocation change (amends ADR-007 decision 3).** The root Typer app drops
    `no_args_is_help=True`; the root callback reproduces the historical help output for every bare
@@ -172,12 +185,18 @@ availability, structured-output interoperability, provider data use, or E-007 ca
 A new user's path is now: `npx yoetz` or `uvx yoetz` → interactive wizard → detected-harness
 selection (Codex in v0.1) → installation selection when needed → explicit `Y`/`N` confirmation →
 local-only or semantic-review choice → discoverable project skill → structural plugin/hook sources
-→ route-matched Codex MCP registration → on-demand local service → local vault/provider ceremonies
+→ route-matched Codex MCP registration → on-demand local service → trusted repository binding →
+local vault/provider ceremonies
 when semantic was chosen → recommendation-first privacy review → separately reauthenticated privacy
 decision.
 Each mutating step is previewed, digest-bound, and individually declinable; `yoetz setup status`
 reports the same posture read-only at any time. The CLI support-command matrix grows by one
 (`setup`), recorded in the conformance contract test in the same change.
+
+Package replacement changes binaries, not accepted trust bytes. Installed-wheel proof is still
+required before issue #139 can close: consecutive real checks must prove distinct attempt authority
+and receipts in one approved repository, and a second repository must remain blocked. Router routing
+and issue #141's foreground disclosure continuation are outside this wizard change.
 
 The cost is one bounded exception to the previously uniform bare-invocation behavior, and a second
 distribution surface to keep in version lockstep — enforced by a packaging test that compares the

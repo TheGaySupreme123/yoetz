@@ -7,7 +7,7 @@ import base64
 import hmac
 from collections.abc import Generator
 from contextlib import contextmanager
-from dataclasses import fields, is_dataclass
+from dataclasses import fields, is_dataclass, replace
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Final, Literal, cast
@@ -44,7 +44,11 @@ from yoetz.domain.privacy import (
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
-from yoetz.domain.values import format_rfc3339_millis, parse_rfc3339_millis
+from yoetz.domain.values import (
+    format_rfc3339_millis,
+    parse_rfc3339_millis,
+    validate_sha256_digest,
+)
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.keys import MacKeyHandle
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource, ObjectStorePort
@@ -61,16 +65,19 @@ from yoetz.ports.privacy import (
     PendingDisclosurePage,
     PolicyCommitResult,
     PolicyOverlay,
+    PolicyTransitionMember,
     PolicyTransitionProposal,
     PreparedDisclosureReservation,
     PreparedPolicyTransition,
     PrivacyAuditObjectRoots,
     PrivacyAuditReservation,
     PrivacyAuditState,
+    PrivacyAuthorityAncestor,
     PrivacyReceiptAudience,
     PrivacyReceiptPage,
     PrivacyReceiptQuery,
     PrivacyReceiptView,
+    RepositoryPrivacyAuthority,
 )
 from yoetz.protocol.canonical import (
     JsonValue,
@@ -78,7 +85,7 @@ from yoetz.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
-from yoetz.protocol.ids import IdKind, new_id
+from yoetz.protocol.ids import IdKind, new_id, validate_id
 
 __all__ = [
     "CatalogPrivacyAudit",
@@ -486,6 +493,50 @@ def _omit_json_nulls(value: JsonValue) -> JsonValue:
     return value
 
 
+def _transition_members(proposal: PolicyTransitionProposal) -> tuple[PolicyTransitionMember, ...]:
+    if proposal.members:
+        return proposal.members
+    if proposal.expected_policy_digest is None:
+        raise ValueError("privacy_policy_proposal_identity_missing")
+    return (
+        PolicyTransitionMember(
+            "replace",
+            proposal.scope,
+            proposal.proposed_policy,
+            proposal.expected_generation,
+            proposal.expected_policy_digest,
+        ),
+    )
+
+
+def _commit_result_bytes(result: PolicyCommitResult) -> bytes:
+    return canonical_encode(_json(result))
+
+
+def _commit_result_from_bytes(value: bytes) -> PolicyCommitResult:
+    source = _mapping(strict_json_parse(value))
+    return PolicyCommitResult(
+        _policy_from_domain_mapping(_mapping(source["policy"])),
+        _integer(source["generation"]),
+        _integer(source["revoked_authorization_count"]),
+        _integer(source["closed_session_count"]),
+    )
+
+
+def _policy_for_repository(policy: PrivacyPolicy, scope: AuthorizationScope) -> PrivacyPolicy:
+    placeholder = replace(
+        policy,
+        policy_id=new_id(IdKind.PRIVACY_POLICY),
+        version=1,
+        policy_digest="sha256:" + "0" * 64,
+        effective_scope=scope,
+        supersedes_policy_digest=None,
+    )
+    identity = encode_privacy_policy_json(placeholder)
+    identity.pop("policy_digest")
+    return replace(placeholder, policy_digest=canonical_digest(cast(JsonValue, identity)))
+
+
 @contextmanager
 def _transaction(db: apsw.Connection) -> Generator[None]:
     db.execute("BEGIN IMMEDIATE")
@@ -560,76 +611,492 @@ class CatalogPrivacyPolicyStore:
         generation = ordered[-1][1]
         return EffectivePrivacyPolicy(composed, generation, composed.policy_digest)
 
+    async def repository_authority(self, scope: AuthorizationScope) -> RepositoryPrivacyAuthority:
+        if scope.kind is AuthorizationScopeKind.MACHINE:
+            raise ValueError("repository_privacy_scope_required")
+        commitment = scope.workspace_ref_commitment
+        if commitment is None:
+            raise ValueError("repository_privacy_scope_required")
+        rows = self._db.execute(
+            "SELECT policy_canonical, policy_generation FROM privacy_policy_versions "
+            "WHERE state = 'current'"
+        ).fetchall()
+        rank = {
+            AuthorizationScopeKind.MACHINE: 0,
+            AuthorizationScopeKind.WORKSPACE: 1,
+            AuthorizationScopeKind.TASK: 2,
+            AuthorizationScopeKind.REQUEST: 3,
+        }
+        eligible: list[tuple[PrivacyPolicy, int]] = []
+        exact: tuple[PrivacyPolicy, int] | None = None
+        for canonical, generation in rows:
+            policy = _policy_from_bytes(cast(bytes, canonical))
+            item = (policy, cast(int, generation))
+            if policy.effective_scope.contains(scope):
+                eligible.append(item)
+            if (
+                policy.effective_scope.kind is AuthorizationScopeKind.WORKSPACE
+                and policy.effective_scope.installation_id == scope.installation_id
+                and policy.effective_scope.workspace_ref_commitment == commitment
+            ):
+                exact = item
+        if not eligible:
+            raise ValueError("privacy_policy_missing")
+        ordered = sorted(eligible, key=lambda item: (rank[item[0].effective_scope.kind], item[1]))
+        composed = ordered[0][0]
+        for policy, _generation in ordered[1:]:
+            composed = composed.meet(policy)
+        effective = EffectivePrivacyPolicy(composed, ordered[-1][1], composed.policy_digest)
+        ancestors = tuple(
+            PrivacyAuthorityAncestor(policy.effective_scope, generation, policy.policy_digest)
+            for policy, generation in ordered
+        )
+        machine_policy = next(
+            (
+                policy
+                for policy, _generation in ordered
+                if policy.effective_scope.kind is AuthorizationScopeKind.MACHINE
+            ),
+            None,
+        )
+        state = self._db.execute(
+            "SELECT first_repository_carry_forward_state, migration_policy_canonical, "
+            "migration_policy_digest FROM privacy_installation_authority "
+            "WHERE installation_id = ?",
+            (scope.installation_id,),
+        ).fetchone()
+        if state is None:
+            machine = next(
+                (
+                    item
+                    for item in ordered
+                    if item[0].effective_scope.kind is AuthorizationScopeKind.MACHINE
+                ),
+                None,
+            )
+            entitlement_rows = self._db.execute(
+                "SELECT task_id, route_identity_digest FROM privacy_legacy_route_entitlements "
+                "WHERE entitlement_state = 'available' ORDER BY task_id"
+            ).fetchall()
+            first_state = (
+                "not_applicable"
+                if machine is None or not machine[0].network_egress_permitted
+                else "available"
+                if not entitlement_rows
+                else "not_applicable"
+            )
+            if machine is None:
+                raise ValueError("privacy_policy_missing")
+            frontier = canonical_digest(
+                {
+                    "legacy_routes": [
+                        {"route_identity_digest": cast(str, row[1]), "task_id": cast(str, row[0])}
+                        for row in entitlement_rows
+                    ],
+                    "machine_generation": machine[1],
+                    "machine_policy_digest": machine[0].policy_digest,
+                }
+            )
+            now = format_rfc3339_millis(self._clock.now_utc())
+            self._db.execute(
+                "INSERT OR IGNORE INTO privacy_installation_authority "
+                "(installation_id, authority_mode, migration_frontier, "
+                "migration_policy_generation, migration_policy_digest, "
+                "migration_policy_canonical, first_repository_carry_forward_state, "
+                "created_at, updated_at) "
+                "VALUES (?, 'repository_grants', ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    scope.installation_id,
+                    frontier,
+                    machine[1],
+                    machine[0].policy_digest,
+                    canonical_encode(_json(machine[0])),
+                    first_state,
+                    now,
+                    now,
+                ),
+            )
+            state = self._db.execute(
+                "SELECT first_repository_carry_forward_state, migration_policy_canonical, "
+                "migration_policy_digest FROM privacy_installation_authority "
+                "WHERE installation_id = ?",
+                (scope.installation_id,),
+            ).fetchone()
+        available_route = self._db.execute(
+            "SELECT 1 FROM privacy_legacy_route_entitlements "
+            "WHERE entitlement_state = 'available' LIMIT 1"
+        ).fetchone()
+        consumed_route = self._db.execute(
+            "SELECT 1 FROM privacy_legacy_route_entitlements "
+            "WHERE entitlement_state = 'consumed' "
+            "AND repository_privacy_commitment = ? LIMIT 1",
+            (commitment,),
+        ).fetchone()
+        if state is None:
+            raise ValueError("privacy_authority_state_corrupt")
+        first_state = cast(str, state[0])
+        migration_policy = _policy_from_bytes(cast(bytes, state[1]))
+        if migration_policy.policy_digest != state[2]:
+            raise ValueError("privacy_authority_state_corrupt")
+        if (
+            machine_policy is None
+            or not machine_policy.network_egress_permitted
+            or not migration_policy.network_egress_permitted
+        ):
+            migration_state = "not_applicable"
+        elif exact is not None:
+            migration_state: Literal[
+                "not_applicable", "legacy_route_available", "first_repository_available", "consumed"
+            ] = (
+                "consumed"
+                if first_state == "consumed" or consumed_route is not None
+                else "not_applicable"
+            )
+        elif available_route is not None:
+            migration_state = "legacy_route_available"
+        elif first_state == "available":
+            migration_state = "first_repository_available"
+        elif first_state == "consumed":
+            migration_state = "consumed"
+        else:
+            migration_state = "not_applicable"
+        grant_state: Literal["granted", "missing"] = "granted" if exact is not None else "missing"
+        authority_digest = canonical_digest(
+            {
+                "ancestors": [
+                    {
+                        "generation": ancestor.generation,
+                        "policy_digest": ancestor.policy_digest,
+                        "scope": _scope_json(ancestor.scope),
+                    }
+                    for ancestor in ancestors
+                ],
+                "authority_mode": "repository_grants",
+                "grant_state": grant_state,
+                "migration_state": migration_state,
+                "repository_privacy_commitment": commitment,
+            }
+        )
+        return RepositoryPrivacyAuthority(
+            scope,
+            effective,
+            commitment,
+            grant_state,
+            migration_state,
+            authority_digest,
+            ancestors,
+            None if exact is None else exact[1],
+            None if exact is None else exact[0].policy_digest,
+            None if exact is None else exact[0],
+        )
+
+    async def carry_forward_repository_authority(
+        self,
+        scope: AuthorizationScope,
+        *,
+        task_id: str | None = None,
+        route_identity_digest: str | None = None,
+    ) -> RepositoryPrivacyAuthority:
+        if scope.kind is not AuthorizationScopeKind.WORKSPACE:
+            raise ValueError("repository_privacy_scope_required")
+        if (task_id is None) != (route_identity_digest is None):
+            raise ValueError("repository_privacy_route_binding_invalid")
+        if task_id is not None:
+            validate_id(IdKind.TASK, task_id)
+            validate_sha256_digest(cast(str, route_identity_digest))
+        current = await self.repository_authority(scope)
+        if current.grant_state == "granted":
+            return current
+        now = self._clock.now_utc()
+        wire_now = format_rfc3339_millis(now)
+        async with self._lock:
+            with _transaction(self._db):
+                if (
+                    self._db.execute(
+                        "SELECT 1 FROM privacy_policy_versions WHERE scope_digest = ? "
+                        "AND state = 'current'",
+                        (_scope_digest(scope),),
+                    ).fetchone()
+                    is not None
+                ):
+                    pass
+                else:
+                    machine_row = self._db.execute(
+                        "SELECT policy_canonical FROM privacy_policy_versions "
+                        "WHERE installation_id = ? AND scope_kind = 'machine' "
+                        "AND state = 'current'",
+                        (scope.installation_id,),
+                    ).fetchone()
+                    if machine_row is None:
+                        raise ValueError("privacy_policy_missing")
+                    machine = _policy_from_bytes(cast(bytes, machine_row[0]))
+                    if not machine.network_egress_permitted:
+                        raise ValueError("repository_privacy_migration_unavailable")
+                    if task_id is None:
+                        state = self._db.execute(
+                            "SELECT first_repository_carry_forward_state, "
+                            "migration_policy_digest, migration_policy_canonical "
+                            "FROM privacy_installation_authority WHERE installation_id = ?",
+                            (scope.installation_id,),
+                        ).fetchone()
+                        legacy = self._db.execute(
+                            "SELECT 1 FROM privacy_legacy_route_entitlements "
+                            "WHERE entitlement_state = 'available' LIMIT 1"
+                        ).fetchone()
+                        if state is None or state[0] != "available" or legacy is not None:
+                            raise ValueError("repository_privacy_migration_unavailable")
+                        frontier = _policy_from_bytes(cast(bytes, state[2]))
+                        if frontier.policy_digest != state[1]:
+                            raise ValueError("privacy_authority_state_corrupt")
+                    else:
+                        entitlement = self._db.execute(
+                            "SELECT route_identity_digest, migration_policy_digest, "
+                            "migration_policy_canonical "
+                            "FROM privacy_legacy_route_entitlements "
+                            "WHERE task_id = ? AND entitlement_state = 'available'",
+                            (task_id,),
+                        ).fetchone()
+                        if entitlement is None or entitlement[0] != route_identity_digest:
+                            raise ValueError("repository_privacy_migration_unavailable")
+                        frontier = _policy_from_bytes(cast(bytes, entitlement[2]))
+                        if frontier.policy_digest != entitlement[1]:
+                            raise ValueError("privacy_authority_state_corrupt")
+                        route = self._db.execute(
+                            "SELECT active_route_identity_digest, repository_privacy_commitment "
+                            "FROM task_routes WHERE task_id = ?",
+                            (task_id,),
+                        ).fetchone()
+                        if (
+                            route is None
+                            or route[0] != route_identity_digest
+                            or route[1]
+                            not in {
+                                None,
+                                scope.workspace_ref_commitment,
+                            }
+                        ):
+                            raise ValueError("repository_privacy_route_binding_invalid")
+                    if not frontier.network_egress_permitted:
+                        raise ValueError("repository_privacy_migration_unavailable")
+                    repository_policy = _policy_for_repository(frontier.meet(machine), scope)
+                    generation = self._next_generation()
+                    self._insert_policy(repository_policy, generation, "seed", None)
+                    if task_id is None:
+                        self._db.execute(
+                            "UPDATE privacy_installation_authority SET "
+                            "first_repository_carry_forward_state = 'consumed', updated_at = ? "
+                            "WHERE installation_id = ? AND "
+                            "first_repository_carry_forward_state = 'available'",
+                            (wire_now, scope.installation_id),
+                        )
+                    else:
+                        self._db.execute(
+                            "UPDATE task_routes SET repository_privacy_commitment = ?, "
+                            "updated_at = ? WHERE task_id = ? AND "
+                            "active_route_identity_digest = ? AND "
+                            "repository_privacy_commitment IS NULL",
+                            (
+                                scope.workspace_ref_commitment,
+                                wire_now,
+                                task_id,
+                                route_identity_digest,
+                            ),
+                        )
+                        self._db.execute(
+                            "UPDATE privacy_legacy_route_entitlements SET "
+                            "entitlement_state = 'consumed', "
+                            "repository_privacy_commitment = ?, consumed_at = ? "
+                            "WHERE task_id = ? AND entitlement_state = 'available'",
+                            (scope.workspace_ref_commitment, wire_now, task_id),
+                        )
+        return await self.repository_authority(scope)
+
+    async def insert_repository_tightening(
+        self,
+        scope: AuthorizationScope,
+        policy: PrivacyPolicy,
+        expected_authority_digest: str,
+    ) -> PolicyCommitResult:
+        if scope.kind is not AuthorizationScopeKind.WORKSPACE or policy.effective_scope != scope:
+            raise ValueError("repository_privacy_scope_required")
+        validate_sha256_digest(expected_authority_digest)
+        async with self._lock:
+            with _transaction(self._db):
+                authority = await self.repository_authority(scope)
+                if (
+                    authority.authority_digest != expected_authority_digest
+                    or authority.grant_state != "missing"
+                ):
+                    raise ValueError("privacy_policy_stale")
+                generation = self._next_generation()
+                self._insert_policy(policy, generation, "tightening", None)
+        return PolicyCommitResult(policy, generation, 0, 0)
+
     async def prepare_transition(
         self, proposal: PolicyTransitionProposal
     ) -> PreparedPolicyTransition:
         if proposal.privacy_proposal_id is None or proposal.expected_policy_digest is None:
             raise ValueError("privacy_policy_proposal_identity_missing")
-        current = await self.effective_policy(proposal.scope)
-        if (
-            current.generation != proposal.expected_generation
-            or current.effective_digest != proposal.expected_policy_digest
-        ):
-            raise ValueError("privacy_policy_stale")
-        candidate = canonical_encode(_json(proposal.proposed_policy))
+        members = _transition_members(proposal)
+        if proposal.authority_digest is not None:
+            authority = await self.repository_authority(proposal.scope)
+            if authority.authority_digest != proposal.authority_digest:
+                raise ValueError("privacy_policy_stale")
         diff = canonical_encode(
             {
-                "base_policy_digest": current.effective_digest,
-                "candidate_policy_digest": proposal.proposed_policy.policy_digest,
+                "authority_digest": proposal.authority_digest,
+                "members": [
+                    {
+                        "action": member.action,
+                        "candidate_policy_digest": member.candidate_policy.policy_digest,
+                        "expected_generation": member.expected_generation,
+                        "expected_policy_digest": member.expected_policy_digest,
+                        "scope": _scope_json(member.scope),
+                    }
+                    for member in members
+                ],
             }
         )
         exact_diff_digest = canonical_digest(strict_json_parse(diff))
         prepared_digest = canonical_digest(
             {
+                "authority_digest": proposal.authority_digest,
                 "diff_digest": exact_diff_digest,
                 "proposal_digest": proposal.proposal_digest,
                 "proposal_id": proposal.privacy_proposal_id,
             }
         )
+        prepared = PreparedPolicyTransition(proposal, prepared_digest, exact_diff_digest, True)
         now = self._clock.now_utc()
         async with self._lock:
             with _transaction(self._db):
+                if proposal.authority_digest is not None:
+                    authority = await self.repository_authority(proposal.scope)
+                    if authority.authority_digest != proposal.authority_digest:
+                        raise ValueError("privacy_policy_stale")
+                existing = self._db.execute(
+                    "SELECT 1 FROM privacy_policy_transitions WHERE proposal_id = ?",
+                    (proposal.privacy_proposal_id,),
+                ).fetchone()
+                if existing is not None:
+                    loaded = await self.load_pending_transition(proposal.privacy_proposal_id)
+                    if loaded != prepared:
+                        raise ValueError("privacy_policy_transition_conflict")
+                    return loaded
+                for member in members:
+                    row = self._db.execute(
+                        "SELECT policy_digest, policy_generation FROM privacy_policy_versions "
+                        "WHERE scope_digest = ? AND state = 'current'",
+                        (_scope_digest(member.scope),),
+                    ).fetchone()
+                    if member.action == "insert":
+                        if row is not None:
+                            raise ValueError("privacy_policy_stale")
+                    elif row != (member.expected_policy_digest, member.expected_generation):
+                        raise ValueError("privacy_policy_stale")
+                base_member = next(
+                    (member for member in members if member.action == "replace"), None
+                )
+                if base_member is None:
+                    base = self._current_exact(
+                        AuthorizationScope(
+                            AuthorizationScopeKind.MACHINE, proposal.scope.installation_id
+                        )
+                    )
+                    base_generation = base.generation
+                else:
+                    base = self._current_exact(base_member.scope)
+                    base_generation = cast(int, base_member.expected_generation)
+                candidate = canonical_encode(_json(proposal.proposed_policy))
                 self._db.execute(
                     """INSERT INTO privacy_policy_transitions (
                            proposal_id, scope_digest, base_policy_id, base_policy_version,
                            base_policy_generation, proposal_digest, candidate_policy_digest,
                            candidate_policy_canonical, diff_canonical, state, expires_at,
-                           created_at, updated_at
-                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)""",
+                           created_at, updated_at, authority_digest
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)""",
                     (
                         proposal.privacy_proposal_id,
                         _scope_digest(proposal.scope),
-                        current.policy.policy_id,
-                        current.policy.version,
-                        current.generation,
+                        base.policy.policy_id,
+                        base.policy.version,
+                        base_generation,
                         proposal.proposal_digest,
                         proposal.proposed_policy.policy_digest,
                         candidate,
                         diff,
                         format_rfc3339_millis(proposal.expires_at),
+                        format_rfc3339_millis(proposal.created_at),
                         format_rfc3339_millis(now),
-                        format_rfc3339_millis(now),
+                        proposal.authority_digest,
                     ),
                 )
-        return PreparedPolicyTransition(proposal, prepared_digest, exact_diff_digest, True)
+                for ordinal, member in enumerate(members):
+                    self._db.execute(
+                        """INSERT INTO privacy_policy_transition_members (
+                               proposal_id, member_ordinal, action, scope_digest, scope_kind,
+                               scope_canonical, expected_policy_generation, expected_policy_digest,
+                               candidate_policy_digest, candidate_policy_canonical
+                           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            proposal.privacy_proposal_id,
+                            ordinal,
+                            member.action,
+                            _scope_digest(member.scope),
+                            member.scope.kind.value,
+                            canonical_encode(_scope_json(member.scope)),
+                            member.expected_generation,
+                            member.expected_policy_digest,
+                            member.candidate_policy.policy_digest,
+                            canonical_encode(_json(member.candidate_policy)),
+                        ),
+                    )
+        return prepared
 
     async def load_pending_transition(self, proposal_id: str) -> PreparedPolicyTransition:
         row = self._db.execute(
-            """SELECT base_policy_generation, proposal_digest, candidate_policy_canonical,
-                      diff_canonical, expires_at, created_at
-               FROM privacy_policy_transitions
-               WHERE proposal_id = ? AND state = 'pending'""",
+            """SELECT transition.base_policy_generation, transition.proposal_digest,
+                      transition.candidate_policy_canonical, transition.diff_canonical,
+                      transition.expires_at, transition.created_at,
+                      transition.authority_digest, base.policy_digest
+               FROM privacy_policy_transitions AS transition
+               JOIN privacy_policy_versions AS base
+                 ON base.policy_id = transition.base_policy_id
+                AND base.policy_version = transition.base_policy_version
+               WHERE transition.proposal_id = ? AND transition.state = 'pending'""",
             (proposal_id,),
         ).fetchone()
         if row is None:
             raise ValueError("privacy_policy_transition_unavailable")
         candidate = _policy_from_bytes(cast(bytes, row[2]))
-        # Rebuild the identity this proposal was prepared with. Deriving the base digest from
-        # the *current* policy instead would silently re-key prepared_digest whenever the
-        # effective policy moves, so the digest a human previewed would not be the digest the
-        # commit is authorised against.
         diff = cast(bytes, row[3])
-        base_policy_digest = cast(str, _mapping(strict_json_parse(diff))["base_policy_digest"])
+        member_rows = self._db.execute(
+            """SELECT action, scope_canonical, expected_policy_generation,
+                      expected_policy_digest, candidate_policy_canonical
+               FROM privacy_policy_transition_members
+               WHERE proposal_id = ? ORDER BY member_ordinal""",
+            (proposal_id,),
+        ).fetchall()
+        members = tuple(
+            PolicyTransitionMember(
+                cast(Literal["replace", "insert"], item[0]),
+                _scope_from_json(strict_json_parse(cast(bytes, item[1]))),
+                _policy_from_bytes(cast(bytes, item[4])),
+                cast(int | None, item[2]),
+                cast(str | None, item[3]),
+            )
+            for item in member_rows
+        )
+        parsed_diff = _mapping(strict_json_parse(diff))
+        if members:
+            replacement = next((member for member in members if member.action == "replace"), None)
+            expected_policy_digest = (
+                cast(str, row[7])
+                if replacement is None
+                else cast(str, replacement.expected_policy_digest)
+            )
+        else:
+            expected_policy_digest = cast(str, parsed_diff["base_policy_digest"])
         proposal = PolicyTransitionProposal(
             scope=candidate.effective_scope,
             expected_generation=cast(int, row[0]),
@@ -638,11 +1105,14 @@ class CatalogPrivacyPolicyStore:
             created_at=parse_rfc3339_millis(row[5]),
             expires_at=parse_rfc3339_millis(row[4]),
             privacy_proposal_id=proposal_id,
-            expected_policy_digest=base_policy_digest,
+            expected_policy_digest=expected_policy_digest,
+            authority_digest=cast(str | None, row[6]),
+            members=members,
         )
         exact_diff_digest = canonical_digest(strict_json_parse(diff))
         prepared_digest = canonical_digest(
             {
+                "authority_digest": proposal.authority_digest,
                 "diff_digest": exact_diff_digest,
                 "proposal_digest": proposal.proposal_digest,
                 "proposal_id": proposal_id,
@@ -657,60 +1127,139 @@ class CatalogPrivacyPolicyStore:
         proposal_id = proposal.privacy_proposal_id
         if proposal_id is None or decision.prepared_digest != prepared.prepared_digest:
             raise ValueError("privacy_policy_decision_mismatch")
+        decision_digest = canonical_digest(
+            {
+                "approved": decision.approved,
+                "authority_commitment": decision.authority_commitment,
+                "decided_at": format_rfc3339_millis(decision.decided_at),
+                "prepared_digest": decision.prepared_digest,
+            }
+        )
         now = self._clock.now_utc()
+        terminal_error: str | None = None
+        result: PolicyCommitResult | None = None
         async with self._lock:
             with _transaction(self._db):
                 row = self._db.execute(
-                    "SELECT state, base_policy_generation, expires_at, candidate_policy_canonical FROM privacy_policy_transitions WHERE proposal_id = ?",
+                    "SELECT state, expires_at, decision_digest, terminal_result_canonical "
+                    "FROM privacy_policy_transitions WHERE proposal_id = ?",
                     (proposal_id,),
                 ).fetchone()
-                if row is None or row[0] != "pending":
+                if row is None:
                     raise ValueError("privacy_policy_transition_unavailable")
-                if cast(int, row[1]) != proposal.expected_generation:
+                state = cast(str, row[0])
+                if state in {"committed", "denied"}:
+                    if row[2] != decision_digest or row[3] is None:
+                        raise ValueError("privacy_policy_decision_mismatch")
+                    return _commit_result_from_bytes(cast(bytes, row[3]))
+                if state == "expired":
+                    raise ValueError("privacy_policy_decision_expired")
+                if state == "stale":
                     raise ValueError("privacy_policy_stale")
-                if parse_rfc3339_millis(row[2]) <= decision.decided_at:
+                if state != "pending":
+                    raise ValueError("privacy_policy_transition_unavailable")
+                if parse_rfc3339_millis(row[1]) <= decision.decided_at:
                     self._db.execute(
                         "UPDATE privacy_policy_transitions SET state='expired', terminal_at=?, updated_at=? WHERE proposal_id=?",
                         (format_rfc3339_millis(now), format_rfc3339_millis(now), proposal_id),
                     )
-                    raise ValueError("privacy_policy_decision_expired")
-                if not decision.approved:
+                    terminal_error = "privacy_policy_decision_expired"
+                members = _transition_members(proposal)
+                if terminal_error is None and proposal.authority_digest is not None:
+                    authority = await self.repository_authority(proposal.scope)
+                    if authority.authority_digest != proposal.authority_digest:
+                        self._db.execute(
+                            "UPDATE privacy_policy_transitions SET state='stale', terminal_at=?, "
+                            "updated_at=? WHERE proposal_id=?",
+                            (
+                                format_rfc3339_millis(now),
+                                format_rfc3339_millis(now),
+                                proposal_id,
+                            ),
+                        )
+                        terminal_error = "privacy_policy_stale"
+                if terminal_error is None:
+                    for member in members:
+                        current_row = self._db.execute(
+                            "SELECT policy_digest, policy_generation FROM privacy_policy_versions "
+                            "WHERE scope_digest = ? AND state = 'current'",
+                            (_scope_digest(member.scope),),
+                        ).fetchone()
+                        valid = (
+                            current_row is None
+                            if member.action == "insert"
+                            else current_row
+                            == (member.expected_policy_digest, member.expected_generation)
+                        )
+                        if not valid:
+                            self._db.execute(
+                                "UPDATE privacy_policy_transitions SET state='stale', terminal_at=?, "
+                                "updated_at=? WHERE proposal_id=?",
+                                (
+                                    format_rfc3339_millis(now),
+                                    format_rfc3339_millis(now),
+                                    proposal_id,
+                                ),
+                            )
+                            terminal_error = "privacy_policy_stale"
+                            break
+                if terminal_error is None and not decision.approved:
+                    current = await self.effective_policy(proposal.scope)
+                    result = PolicyCommitResult(current.policy, current.generation, 0, 0)
+                    terminal = _commit_result_bytes(result)
                     self._db.execute(
                         """UPDATE privacy_policy_transitions SET state='denied',
-                               human_decision='denied', decision_digest=?, terminal_at=?, updated_at=?
+                               human_decision='denied', decision_digest=?, terminal_at=?, updated_at=?,
+                               terminal_result_canonical=?, terminal_result_digest=?
                            WHERE proposal_id=?""",
                         (
-                            prepared.prepared_digest,
+                            decision_digest,
                             format_rfc3339_millis(now),
                             format_rfc3339_millis(now),
+                            terminal,
+                            canonical_digest(strict_json_parse(terminal)),
                             proposal_id,
                         ),
                     )
-                    current = self._current_exact(proposal.scope)
-                    return PolicyCommitResult(current.policy, current.generation, 0, 0)
-                policy = _policy_from_bytes(cast(bytes, row[3]))
-                current = self._current_exact(proposal.scope)
-                if current.generation != proposal.expected_generation:
-                    raise ValueError("privacy_policy_stale")
-                generation = self._next_generation()
-                self._supersede(current.policy, now)
-                self._insert_policy(policy, generation, "human_expansion", proposal_id)
-                self._db.execute(
-                    """UPDATE privacy_policy_transitions SET state='committed',
-                           human_decision='approved', decision_digest=?, authority_commitment=?,
-                           committed_policy_id=?, committed_policy_version=?, terminal_at=?, updated_at=?
-                       WHERE proposal_id=?""",
-                    (
-                        prepared.prepared_digest,
-                        decision.authority_commitment,
-                        policy.policy_id,
-                        policy.version,
-                        format_rfc3339_millis(now),
-                        format_rfc3339_millis(now),
-                        proposal_id,
-                    ),
-                )
-        return PolicyCommitResult(policy, generation, 0, 0)
+                elif terminal_error is None:
+                    generation = 0
+                    policy = proposal.proposed_policy
+                    for member in members:
+                        if member.action == "replace":
+                            self._supersede(self._current_exact(member.scope).policy, now)
+                        generation = self._next_generation()
+                        self._insert_policy(
+                            member.candidate_policy,
+                            generation,
+                            "human_expansion",
+                            proposal_id,
+                        )
+                        policy = member.candidate_policy
+                    result = PolicyCommitResult(policy, generation, 0, 0)
+                    terminal = _commit_result_bytes(result)
+                    self._db.execute(
+                        """UPDATE privacy_policy_transitions SET state='committed',
+                               human_decision='approved', decision_digest=?, authority_commitment=?,
+                               committed_policy_id=?, committed_policy_version=?, terminal_at=?,
+                               updated_at=?, terminal_result_canonical=?, terminal_result_digest=?
+                           WHERE proposal_id=?""",
+                        (
+                            decision_digest,
+                            decision.authority_commitment,
+                            policy.policy_id,
+                            policy.version,
+                            format_rfc3339_millis(now),
+                            format_rfc3339_millis(now),
+                            terminal,
+                            canonical_digest(strict_json_parse(terminal)),
+                            proposal_id,
+                        ),
+                    )
+        if terminal_error is not None:
+            raise ValueError(terminal_error)
+        if result is None:
+            raise ValueError("privacy_policy_transition_unavailable")
+        return result
 
     async def tighten(
         self,

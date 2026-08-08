@@ -17,8 +17,10 @@ from yoetz.ports.control import (
     ControlClientKind,
     ControlMethod,
     ControlResult,
+    RepositoryPrivacyContext,
     ServiceState,
     ServiceStatus,
+    WorkspaceLocator,
 )
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.errors import PublicErrorCode
@@ -452,6 +454,60 @@ def test_handshake_negotiates_exact_mcp_authority_and_peer_binding() -> None:
         assert client_result.connection_nonce == server_result.connection_nonce
         assert client_result.peer_identity is client.peer_identity
         assert server_result.peer_identity is client_peer
+
+    asyncio.run(exercise())
+
+
+def test_v2_handshake_consumes_locator_and_retains_only_opaque_server_context() -> None:
+    async def exercise() -> None:
+        client, server, client_peer = _stream_pair()
+        observed: list[str] = []
+        context = RepositoryPrivacyContext("hmac-sha256:" + "1" * 64, "git_common_root")
+
+        async def resolve(locator: WorkspaceLocator) -> RepositoryPrivacyContext:
+            observed.append(locator.path)
+            return context
+
+        client_result, server_result = await asyncio.gather(
+            client_handshake(
+                client,
+                ControlClientKind.CLI,
+                "0.1.0",
+                workspace_locator=WorkspaceLocator("/private/raw-repository"),
+            ),
+            server_handshake(
+                server,
+                client_peer,
+                _status(),
+                repository_context_resolver=resolve,
+            ),
+        )
+
+        assert observed == ["/private/raw-repository"]
+        assert client_result.repository_privacy_context is None
+        assert server_result.repository_privacy_context == context
+        assert "raw-repository" not in repr(server_result)
+
+    asyncio.run(exercise())
+
+
+def test_legacy_hello_remains_unbound_and_never_invokes_locator_resolver() -> None:
+    async def exercise() -> None:
+        client, server, client_peer = _stream_pair()
+
+        async def reject(_locator: WorkspaceLocator) -> RepositoryPrivacyContext:
+            raise AssertionError("legacy hello must not resolve a repository")
+
+        _client_result, server_result = await asyncio.gather(
+            client_handshake(client, ControlClientKind.CLI, "0.1.0"),
+            server_handshake(
+                server,
+                client_peer,
+                _status(),
+                repository_context_resolver=reject,
+            ),
+        )
+        assert server_result.repository_privacy_context is None
 
     asyncio.run(exercise())
 

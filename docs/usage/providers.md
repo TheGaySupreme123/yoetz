@@ -120,14 +120,17 @@ Before spending a run on semantic review, ask whether the five structural condit
 yoetz provider status --json
 ```
 
-The report names each condition and the exact next command when one is known to be unmet. Five of
-them are **installation** conditions; a sixth verdict describes the Codex agent route separately.
+The report names each condition and the exact next command when one is known to be unmet. Five are
+**installation capability** conditions, a sixth is the exact current-repository grant, and a
+separate verdict describes the Codex agent route.
 
 1. the local service is running and unlocked
 2. `verification.semantic` is not `disabled`
 3. a provider endpoint is bound in `config.toml`
 4. **the bound provider's** credential is connected (service capability `external_provider`)
-5. the effective privacy policy enables the `llm_inference` channel
+5. the machine privacy ceiling enables the `llm_inference` channel
+6. the repository derived from the trusted current session has an exact granted row beneath that
+   ceiling
 
 Condition 4 is per-provider, not "any credential". If you rebind the endpoint from one preset to
 another and do not run the credential ceremony for the new one, the old credential does not carry
@@ -143,12 +146,16 @@ for an existing locked vault, use `yoetz service unlock`; and when the scoped pl
 or rejected, use `yoetz service auto-unlock repair`. The JSON field `readiness_determinable`
 distinguishes a known not-ready state from one that cannot yet be read.
 
-`semantic_ready: true` is structural readiness only. It does not prove live provider dispatch.
+`semantic_ready: true` means all six structural conditions hold for this repository-bound service
+view. It does not prove live provider dispatch. `repository_grant_state` and
+`repository_migration_state` expose the authority inputs separately; an omitted trusted locator
+makes repository state unknown and readiness false rather than inheriting the machine ceiling.
 
 ### The agent route is a separate verdict
 
-`semantic_ready` covers the five conditions above and nothing else. It says this **installation**
-can dispatch semantic review. It does not say the Codex agent gets a route that will.
+`semantic_ready` covers the six conditions above and nothing else. It says this repository-bound
+service view has the provider, machine-ceiling, and exact repository authority needed for semantic
+review. It does not say the Codex agent gets a route that will dispatch.
 
 Yoetz registers Codex with one of two serve commands, and both classify as `yoetz_owned` — so
 registration state alone cannot tell them apart. The report therefore names the route directly:
@@ -160,6 +167,8 @@ registration state alone cannot tell them apart. The report therefore names the 
   "configured_profile": "policy",
   "observed": true
 },
+"repository_grant_state": "granted",
+"repository_migration_state": "not_applicable",
 "agent_route_semantic_ready": false
 ```
 
@@ -174,16 +183,19 @@ registration state alone cannot tell them apart. The report therefore names the 
   Preview alone changes nothing.
 - `observed: false` — the route could not be read. That is *unknown*, not *absent*, and it is never
   reported as a blocker.
+- `repository_grant_state` / `repository_migration_state` — the exact trusted-session repository
+  authority inputs. Public `workspace_ref` never supplies them.
 - `agent_route_semantic_ready` — `semantic_ready` **and** `registered_profile == "policy"`. An
   unread route therefore makes it `false`: `registered_profile` is `null`, so an unobserved route
   is never treated as a policy route.
 
-**A strict registration does not make this installation not-ready.** The strict route is a
+**A strict registration does not make this repository-bound service view not-ready.** The strict
+route is a
 process-local ceiling (ADR-018): it stops that one MCP process from requesting semantic review. A
 `yoetz check` from the CLI, or a check from the terminal interface, still dispatches normally. So
-`semantic_ready: true` alongside a strict route is not a contradiction — it means CLI and terminal
-checks can dispatch while the Codex agent route cannot. A strict route adds a `mcp_route_profile`
-blocker marked `scope: "agent_route"`, and leaves the exit code alone.
+`semantic_ready: true` alongside a strict route is not a contradiction — it means repository-bound
+capability exists while that Codex agent route cannot dispatch. A strict route adds a
+`mcp_route_profile` blocker marked `scope: "agent_route"`, and leaves the exit code alone.
 
 Neither verdict substitutes for the other. Reading `semantic_ready: true` and expecting semantic
 review through a strict agent route is exactly the conflation this field exists to prevent; see the
@@ -191,22 +203,29 @@ review through a strict agent route is exactly the conflation this field exists 
 
 ### Where the route verdict is reported
 
-Both verdicts appear wherever readiness is shown, never merged:
+Both verdicts and the repository-authority inputs appear wherever readiness is shown, never merged:
 
 - `yoetz provider status` (human and `--json`).
 - The terminal interface's readiness layers, as a separate `Codex agent route permits deeper
-  review` line beside `Deeper review ready`. An unread registration renders as unknown rather than
-  as a blocker.
+  review` line beside `Repository grant` and `Deeper review ready`. An unread registration or
+  unbound repository renders as unknown rather than as inherited authority.
 - `yoetz privacy setup` and the terminal interface's `/privacy`: when a committed policy permits
   external review and the registered route is `strict`, the ceremony names the mismatch and the
   command that fixes it. That note is advisory — it never fails the ceremony, changes an exit
   code, or appears when the route cannot be read.
 
-The last one exists because policy and registration are separate facts changed by different
-commands. Moving from local-only to assisted review with an older strict registration in place
-produces a correct policy and a Codex session where every check returns `blocked_by_policy` /
-`route_semantic_ceiling` — accurate, and impossible to act on without being told which of the two
-is the cause.
+The last one exists because machine ceiling, repository grant, and registration are separate facts
+changed by different transitions. Moving from local-only to assisted review with an older strict
+registration in place produces a correct policy and a Codex session where every check returns
+`blocked_by_policy` / `route_semantic_ceiling` — accurate, and impossible to act on without being
+told which of the two is the cause.
+
+The service derives repository identity from the client's actual/configured working directory,
+resolves Git's common root, commits it under the installation key, and discards the raw path.
+Branches and linked worktrees share a grant; independent clones do not. Upgrades preserve accepted
+machine bytes and may only consume the bounded legacy carry-forward described in ADR-009. None of
+these structural verdicts substitutes for the installed-wheel two-repository semantic and receipt
+proof still outstanding under issue #139.
 
 ## The credential ceremony
 

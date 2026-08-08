@@ -11,9 +11,10 @@ transcript, or one successful `check`, is never grounds for a blanket compatibil
 |---|---|
 | Package / commit / release provenance | `version --json` |
 | Public protocol version (`PROTOCOL_VERSION = "0.1"`) and per-operation request/result schema version (`1.0.0`) | `version --json`, `schemas/operations/` |
+| Local-control hello/setup/proposal versions, including repository-locator and authority-digest support | `version --json`, `schemas/service/`, `schemas/privacy/` |
 | Each durable event schema name and version (sixteen families, each `1.0.0`) | `schemas/events/`, `version --json` |
 | Canonical encoding / digest domain version | `docs/adr/ADR-002-canonical-protocol.md`, `fixtures/canonical/` |
-| Storage schema and its ordered migration set | `version --json` (catalog 2, bundle 4), `migrations/` |
+| Storage schema and its ordered migration set | `version --json` (catalog 3, bundle 2), `migrations/` |
 | Object envelope / encryption / key / recovery artifact formats | `version --json` (object format `yoetz-object/1`) |
 | Projection engine/generation and deterministic policy/config digest | `version --json` (projection `yoetz/0.1.0`) |
 | Receipt schema and render version | `schemas/receipts/receipt-document-1.0.0.schema.json` |
@@ -54,6 +55,10 @@ optimism about a range.
 - Writers never append under an unsupported protocol, storage, object, or canonical version.
 - A newer, unknown storage schema allows at most tested structural read-only inspection and version
   guidance; every write and migration fails closed (`MIGRATION_REQUIRED` / `STORAGE_UNSAFE`).
+- Older local-control hello/setup/proposal decoders remain available only for their frozen shapes.
+  An omitted repository locator yields an unbound session, and a policy-digest-only proposal cannot
+  create a repository row, consume migration entitlement, or authorize external LLM work under
+  repository-grant mode. Compatibility is fail-closed, not an authority downgrade.
 - An old package reading a bundle changed by a newer package is supported only when the release
   support matrix says so for that exact pair — installing an old wheel is never rollback.
 
@@ -99,6 +104,12 @@ exclusive generation and a verified backup taken first. Migration never rewrites
 bytes. There is no automatic downgrade or reverse SQL. "Rollback" means restoring a verified
 pre-migration backup into a new quarantined target, replaying it, and then performing an atomic
 catalog switch — see [`../runbooks/migration-rollback.md`](../runbooks/migration-rollback.md).
+
+Catalog repository-authority migration is narrower than an ordinary policy decision: it preserves
+accepted machine-policy bytes and records bounded pre-upgrade route/first-repository entitlements.
+Consumption requires a trusted repository locator and atomically inserts the exact child row. It is
+idempotent and grants no later repository. An old client or missing locator cannot consume the
+entitlement and leaves external LLM work blocked.
 
 An unknown object, recovery, or key format, or a key-slot mismatch, fails payload access or write
 outright; there is no plaintext or empty fallback. Machine-bound and portable-recovery backup

@@ -34,6 +34,7 @@ from yoetz.adapters.keys.encrypted_vault import EncryptedVaultStore
 from yoetz.adapters.keys.os_keyring import AutoUnlockPassphraseStore
 from yoetz.adapters.keys.secret_memory import LocalSecretMemory
 from yoetz.adapters.keys.vault_passphrase import VaultRootEnvelope
+from yoetz.adapters.repository_identity import resolve_repository_privacy_context
 from yoetz.adapters.session_events import SessionEventMonitor
 from yoetz.application.publish_work import (
     PublishWorkInternalResult,
@@ -59,7 +60,16 @@ from yoetz.config.paths import (
     unlock_throttle_path,
     verify_private_local_bundle,
 )
-from yoetz.domain.privacy import LocalDisclosureSink
+from yoetz.domain.privacy import (
+    AuthorizationScopeKind,
+    ChannelPolicy,
+    EgressChannel,
+    LocalDisclosureSink,
+    PrivacyPolicy,
+    PrivacyProfile,
+    ReviewContextProfile,
+    ReviewSelectionPolicy,
+)
 from yoetz.domain.values import frontier_from_json
 from yoetz.observability.logging import (
     LogMode,
@@ -73,12 +83,14 @@ from yoetz.ports.control import (
     ControlError,
     ControlMethod,
     ControlResult,
+    RepositoryPrivacyContext,
     ServiceState,
     ServiceStatus,
     ServiceStopResult,
+    WorkspaceLocator,
 )
 from yoetz.ports.diagnostics import StartupCheckResult
-from yoetz.ports.keys import MacKeyPurpose
+from yoetz.ports.keys import KeyStorePort, MacKeyPurpose
 from yoetz.ports.secret_memory import (
     HumanAuthorizationProof,
     SecretHandle,
@@ -124,6 +136,7 @@ from yoetz.service.confidential_protocol import (
     PrivacyDisclosureDecisionPreview,
     PrivacyPendingTarget,
     PrivacyPolicyDecisionPreview,
+    PrivacyPolicyTransitionPreviewMember,
     ProviderCredentialResult,
     ProviderCredentialRotatePreview,
     ProviderCredentialSetPreview,
@@ -697,6 +710,7 @@ class ServiceDaemon:
         request: ControlCallRequest,
         *,
         projection_context: ClientProjectionContext | None = None,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
         _defer_stop: bool = False,
     ) -> ControlResult:
         """Validate, admit, execute, project, and correlate one ordinary call."""
@@ -710,6 +724,11 @@ class ServiceDaemon:
                 elif (
                     type(projection_context) is not ClientProjectionContext
                     or projection_context.client_kind is not client_kind
+                ):
+                    raise ControlError("frame_invalid")
+                if (
+                    repository_privacy_context is not None
+                    and type(repository_privacy_context) is not RepositoryPrivacyContext
                 ):
                     raise ControlError("frame_invalid")
                 validate_request(request)
@@ -727,7 +746,9 @@ class ServiceDaemon:
             elif request.method is ControlMethod.SERVICE_STOP:
                 body = ServiceStopResult()
             else:
-                body = await self._dispatch_ready(projection_context, request)
+                body = await self._dispatch_ready(
+                    projection_context, request, repository_privacy_context
+                )
             result = self._result(request, body)
             if request.method is ControlMethod.SERVICE_STOP and not _defer_stop:
                 await self.stop()
@@ -849,7 +870,10 @@ class ServiceDaemon:
         )
 
     async def _dispatch_ready(
-        self, projection_context: ClientProjectionContext, request: ControlCallRequest
+        self,
+        projection_context: ClientProjectionContext,
+        request: ControlCallRequest,
+        repository_privacy_context: RepositoryPrivacyContext | None,
     ) -> object:
         application = self._application
         if application is None:
@@ -864,11 +888,15 @@ class ServiceDaemon:
             if not callable(handler):
                 raise ControlError("method_forbidden")
             if request.deadline_ms is None:
-                internal = await self._invoke_ready_handler(handler, request)
+                internal = await self._invoke_ready_handler(
+                    handler, request, repository_privacy_context
+                )
             else:
                 try:
                     async with asyncio.timeout(request.deadline_ms / 1_000):
-                        internal = await self._invoke_ready_handler(handler, request)
+                        internal = await self._invoke_ready_handler(
+                            handler, request, repository_privacy_context
+                        )
                 except TimeoutError as exc:
                     raise ControlError("request_timeout", retryable=True) from exc
             # The handler has returned, so a write may already be durable. Everything below only
@@ -885,6 +913,7 @@ class ServiceDaemon:
     async def _invoke_ready_handler(
         handler: object,
         request: ControlCallRequest,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
     ) -> object:
         operation = cast(Callable[..., Awaitable[object]], handler)
         if (
@@ -892,6 +921,16 @@ class ServiceDaemon:
             and request.route_profile is not None
         ):
             return await operation(request.body, route_profile=request.route_profile)
+        if repository_privacy_context is not None and request.method in {
+            ControlMethod.START,
+            ControlMethod.PRIVACY_GET_SETUP,
+            ControlMethod.PRIVACY_GET_EFFECTIVE,
+            ControlMethod.PRIVACY_PROPOSE_POLICY,
+        }:
+            return await operation(
+                request.body,
+                repository_privacy_context=repository_privacy_context,
+            )
         return await operation(request.body)
 
     async def _project_completed_response(
@@ -1054,6 +1093,17 @@ class ServiceDaemon:
                 except LifecycleError:
                     pass
 
+    async def _resolve_repository_context(
+        self, locator: WorkspaceLocator
+    ) -> RepositoryPrivacyContext | None:
+        """Consume a raw locator only while an installation key is ready."""
+
+        vault = self._composition.vault
+        if not vault.ready:
+            return None
+        key = cast(KeyStorePort, vault).installation_mac_handle(MacKeyPurpose.CATALOG_LOOKUP)
+        return await resolve_repository_privacy_context(locator, key)
+
     async def _serve_control_connection(self, stream: ControlStream) -> None:
         session: ControlSession | None = None
         calls: dict[str, asyncio.Task[None]] = {}
@@ -1061,7 +1111,12 @@ class ServiceDaemon:
         try:
             try:
                 async with asyncio.timeout(_CONTROL_HANDSHAKE_DEADLINE_SECONDS):
-                    session = await server_handshake(stream, stream.peer_identity, self.status())
+                    session = await server_handshake(
+                        stream,
+                        stream.peer_identity,
+                        self.status(),
+                        repository_context_resolver=self._resolve_repository_context,
+                    )
             except TimeoutError:
                 return
             while not self._stop_event.is_set():
@@ -1140,7 +1195,15 @@ class ServiceDaemon:
         request: ControlCallRequest,
         write_lock: asyncio.Lock,
     ) -> None:
-        result = await self.dispatch(session.client_kind, request, _defer_stop=True)
+        if session.repository_privacy_context is None:
+            result = await self.dispatch(session.client_kind, request, _defer_stop=True)
+        else:
+            result = await self.dispatch(
+                session.client_kind,
+                request,
+                repository_privacy_context=session.repository_privacy_context,
+                _defer_stop=True,
+            )
         session.correlate(result)
         async with write_lock:
             async with asyncio.timeout(_CONTROL_RESPONSE_WRITE_DEADLINE_SECONDS):
@@ -1752,6 +1815,55 @@ class _InstallationStateStore:
             raise RuntimeError("service_generation_invalid") from exc
 
 
+def _private_repository_preview_baseline(candidate: PrivacyPolicy) -> PrivacyPolicy:
+    """Materialize the absent repository row as an explicit Private/no-egress policy.
+
+    An insert has no stored policy to diff. Treating that as an empty diff hides the exact
+    provider, categories, sensitivity classes, confirmation rule, and ceilings the new grant
+    creates. Local agent and trusted-human visibility remain the candidate's values because the
+    repository grant changes standing model authority, not those already-local audiences.
+    """
+
+    disabled_channels = tuple(
+        ChannelPolicy(
+            channel,
+            False,
+            (),
+            (),
+            None,
+            (),
+            AuthorizationScopeKind.MACHINE,
+            False,
+            0,
+            0,
+            0,
+        )
+        for channel in sorted(EgressChannel, key=lambda item: item.value.encode("ascii"))
+    )
+    return PrivacyPolicy(
+        candidate.policy_id,
+        candidate.version,
+        candidate.policy_digest,
+        PrivacyProfile.LOCAL_ONLY,
+        ReviewContextProfile.STRUCTURAL,
+        ReviewSelectionPolicy.for_profile(ReviewContextProfile.STRUCTURAL),
+        False,
+        False,
+        candidate.effective_scope,
+        disabled_channels,
+        False,
+        None,
+        (),
+        (),
+        candidate.agent_context_categories,
+        candidate.agent_context_data_classes,
+        candidate.trusted_human_control_categories,
+        candidate.trusted_human_control_data_classes,
+        candidate.created_at,
+        candidate.supersedes_policy_digest,
+    )
+
+
 class _LockedHumanEffects:
     def __init__(
         self,
@@ -1919,7 +2031,6 @@ class _LockedHumanEffects:
                     raise HumanControlError("target_invalid") from exc
                 raise HumanControlError("target_invalid") from exc
             proposal = prepared.proposal
-            base = await store.effective_policy(proposal.scope)
             # The human approves against this diff, and it is the *same* call that classifies a
             # widen — so a dimension the classifier treats as widening cannot be absent from the
             # screen. The preview type refuses a change set with no widening in it, which turns a
@@ -1932,10 +2043,74 @@ class _LockedHumanEffects:
                 }
             )
             try:
-                changes = privacy_policy_changes(base.policy, proposal.proposed_policy)
-                preview_policy = PrivacyPolicyDecisionPreview(
-                    target.pending_id, prepared.exact_diff_digest, changes
-                )
+                if proposal.members:
+                    preview_members: list[PrivacyPolicyTransitionPreviewMember] = []
+                    for member in proposal.members:
+                        if (
+                            member.scope.kind is AuthorizationScopeKind.MACHINE
+                            and member.action == "replace"
+                        ):
+                            # A machine scope has no ancestor overlay, so this is the exact row
+                            # identified by the member's CAS generation and digest.
+                            base = await store.effective_policy(member.scope)
+                            if (
+                                base.generation != member.expected_generation
+                                or base.effective_digest != member.expected_policy_digest
+                            ):
+                                raise ValueError("privacy_policy_preview_member_stale")
+                            changes = privacy_policy_changes(base.policy, member.candidate_policy)
+                            preview_members.append(
+                                PrivacyPolicyTransitionPreviewMember(
+                                    "machine_ceiling", "replace", changes
+                                )
+                            )
+                        elif (
+                            member.scope.kind is AuthorizationScopeKind.WORKSPACE
+                            and member.action == "insert"
+                        ):
+                            # The exact before-state is an absent row, represented as an explicit
+                            # Private/no-egress policy at this repository scope. Never substitute
+                            # the inherited machine row: that would falsely claim a repository
+                            # grant existed and would hide what the insert newly authorizes.
+                            baseline = _private_repository_preview_baseline(member.candidate_policy)
+                            changes = privacy_policy_changes(baseline, member.candidate_policy)
+                            preview_members.append(
+                                PrivacyPolicyTransitionPreviewMember(
+                                    "repository_grant", "insert", changes
+                                )
+                            )
+                        elif (
+                            member.scope.kind is AuthorizationScopeKind.WORKSPACE
+                            and member.action == "replace"
+                        ):
+                            authority = await store.repository_authority(member.scope)
+                            base_policy = authority.grant_policy
+                            if (
+                                base_policy is None
+                                or authority.grant_generation != member.expected_generation
+                                or authority.grant_policy_digest != member.expected_policy_digest
+                            ):
+                                raise ValueError("privacy_policy_preview_member_stale")
+                            changes = privacy_policy_changes(base_policy, member.candidate_policy)
+                            preview_members.append(
+                                PrivacyPolicyTransitionPreviewMember(
+                                    "repository_grant", "replace", changes
+                                )
+                            )
+                        else:
+                            raise ValueError("privacy_policy_preview_member_unrenderable")
+                    preview_policy = PrivacyPolicyDecisionPreview(
+                        target.pending_id,
+                        prepared.exact_diff_digest,
+                        (),
+                        tuple(preview_members),
+                    )
+                else:
+                    base = await store.effective_policy(proposal.scope)
+                    changes = privacy_policy_changes(base.policy, proposal.proposed_policy)
+                    preview_policy = PrivacyPolicyDecisionPreview(
+                        target.pending_id, prepared.exact_diff_digest, changes
+                    )
             except (TypeError, ValueError) as exc:
                 # Both the diff and the preview fail closed on malformed policy state, and
                 # `open_ceremony` only translates `HumanControlError` — anything else escapes

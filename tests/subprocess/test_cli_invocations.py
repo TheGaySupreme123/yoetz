@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -8,6 +9,7 @@ from pydantic import BaseModel
 from typer.testing import CliRunner
 
 import yoetz.cli.app as cli
+from yoetz.ports.control import ControlClientKind, WorkspaceLocator
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.models import StartRequest, StartResult
 
@@ -158,6 +160,67 @@ def test_workflow_uses_service_client_and_preserves_failure_envelope(
     assert result.stdout.encode("utf-8") == canonical_encode(_FAILURE_WIRE) + b"\n"
     assert client.request == _REQUEST
     assert client.closed is True
+
+
+def test_direct_start_binds_the_default_client_to_the_actual_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    client = _Client()
+    observed: list[tuple[ControlClientKind, WorkspaceLocator | None]] = []
+
+    async def connect(
+        client_kind: ControlClientKind,
+        *,
+        workspace_locator: WorkspaceLocator | None = None,
+    ) -> _Client:
+        observed.append((client_kind, workspace_locator))
+        return client
+
+    def request_model(
+        model_type: type[BaseModel], input_path: str | None, inline: str | None
+    ) -> BaseModel:
+        del model_type, input_path, inline
+        return _REQUEST
+
+    def result_wire(model: object) -> dict[str, JsonValue]:
+        assert model is _FAILURE
+        return _FAILURE_WIRE
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "connect_service", connect)
+    monkeypatch.setattr(cli, "_request_model", request_model)
+    monkeypatch.setattr(cli, "public_model_to_wire", result_wire)
+
+    result = CliRunner().invoke(cli.app, ["start", "--request", "{}", "--json"])
+
+    assert result.exit_code == 10
+    assert len(observed) == 1
+    kind, locator = observed[0]
+    assert kind is ControlClientKind.CLI
+    assert locator == WorkspaceLocator(str(tmp_path.resolve(strict=True)))
+
+
+@pytest.mark.anyio
+async def test_default_client_allows_an_explicit_unbound_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _Client()
+    observed: list[WorkspaceLocator | None] = []
+
+    async def connect(
+        client_kind: ControlClientKind,
+        *,
+        workspace_locator: WorkspaceLocator | None = None,
+    ) -> _Client:
+        assert client_kind is ControlClientKind.CLI
+        observed.append(workspace_locator)
+        return client
+
+    monkeypatch.setattr(cli, "connect_service", connect)
+
+    assert await cli.build_service_client(workspace_locator=None) is client
+    assert observed == [None]
 
 
 def test_missing_or_ambiguous_input_is_usage_error_without_traceback() -> None:

@@ -220,6 +220,13 @@ memory. See [`local-service-security.md`](local-service-security.md) and
 release gate, not a completed claim — see `docs/public-claims.json` for exactly which statements
 have current evidence.
 
+The machine policy is an installation ceiling, not standing authority for every repository. External
+LLM admission additionally requires an exact granted row for the installation-keyed commitment of
+the trusted session's canonical Git common root (or resolved non-Git directory). Public
+`workspace_ref` cannot select it; absence or mismatch blocks before provider construction or
+credential-handle minting. Package upgrades preserve machine-policy bytes and may only perform the
+bounded no-reapproval legacy narrowing defined by ADR-009.
+
 ## Schemas, fixtures and further reading
 
 - [`schemas/`](../../schemas/) — the released JSON Schema set (requests, results, events, config,

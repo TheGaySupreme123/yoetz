@@ -30,7 +30,12 @@ from yoetz.adapters.sqlite.connection import (
     open_writer,
     verify_schema_identity,
 )
-from yoetz.adapters.sqlite.migrations import initialize_bundle, initialize_catalog
+from yoetz.adapters.sqlite.migrations import (
+    CATALOG_MIGRATIONS,
+    initialize_bundle,
+    initialize_catalog,
+    run_migrations,
+)
 from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.adapters.sqlite.start_catalog import SqliteStartCatalog
 from yoetz.application.check import FinalSemanticEvaluation
@@ -343,6 +348,14 @@ def _open_recovery_writer(path: Path) -> apsw.Connection:
     return opener(path)
 
 
+def _open_catalog_migration_writer(path: Path) -> apsw.Connection:
+    opener = cast(
+        Callable[[Path], apsw.Connection],
+        getattr(connection_module, "_open_catalog_migration_writer"),
+    )
+    return opener(path)
+
+
 def _nonce() -> str:
     return base64.urlsafe_b64encode(os.urandom(18)).decode("ascii").rstrip("=")
 
@@ -409,7 +422,19 @@ async def open_ready_catalog(
     """Open, initialize if needed, and generation-bind the ready catalog."""
 
     _install_sqlite_support_policy()
-    db = open_catalog_writer(path)
+    try:
+        db = open_catalog_writer(path)
+    except connection_module.StorageUnsafeError as exc:
+        if exc.reason_code != "schema_metadata_disagrees":
+            raise
+        migration_db = _open_catalog_migration_writer(path)
+        try:
+            run_migrations(migration_db, CATALOG_MIGRATIONS, maintenance=None)
+        finally:
+            _close_db(migration_db)
+        # Migration DDL never shares a connection with runtime work. Reopen through the ordinary
+        # authorizer-guarded path and re-verify the resulting identity below.
+        db = open_catalog_writer(path)
     try:
         identity = verify_schema_identity(db)
         if identity.state == "uninitialized":
@@ -1211,6 +1236,20 @@ async def build_privacy_coordinator(
     builders = external_factory_builders_from_config(
         None if config is None else config.provider, clock=clock
     )
+
+    async def repository_authority_is_current(
+        scope: AuthorizationScope, expected_authority_digest: str
+    ) -> bool:
+        try:
+            snapshot = await policies.repository_authority(scope)
+        except Exception:
+            return False
+        return (
+            snapshot.grant_state == "granted"
+            and snapshot.repository_privacy_commitment == scope.workspace_ref_commitment
+            and snapshot.authority_digest == expected_authority_digest
+        )
+
     gateway = PolicyEnforcingOutboundGateway(
         external_factory_builders=builders,  # type: ignore[arg-type]
         local_model_registry=InstalledLocalModelProfileRegistry(),
@@ -1221,6 +1260,7 @@ async def build_privacy_coordinator(
         audit_mac=audit_key,  # pyright: ignore[reportArgumentType]
         clock=clock,
         ids=ids,
+        repository_authority_validator=repository_authority_is_current,
     )
     machine_scope = AuthorizationScope(AuthorizationScopeKind.MACHINE, installation_id)
     # Bootstrap seed is first-run only. Later unlocks must reuse the durable machine policy;
@@ -1269,8 +1309,6 @@ async def build_privacy_coordinator(
         vault_generation,
         True,
     )
-    await gateway.reconcile_policy(effective, authority)
-
     coordinator = PrivacyCoordinator(
         policies,
         classifier,
@@ -1279,6 +1317,7 @@ async def build_privacy_coordinator(
         clock,
         ids,
         service_generation=service_generation,
+        human_authority=authority,
         data_use_resolver=gateway.bound_data_use_profile,
     )
     policy_app = PrivacyPolicyApplication(
@@ -1799,7 +1838,6 @@ def _privacy_gated_semantic_evaluator(
     installation_id: str,
     resolve_provider: Callable[[], Awaitable[ProviderBinding | None]],
     catalog: StartCatalogPort,
-    lookup: MacKeyHandle,
     ids: IdPort,
     *,
     timeout_seconds: int = 60,
@@ -1829,31 +1867,6 @@ def _privacy_gated_semantic_evaluator(
             assert type(renewed) is _OpLease
             current_lease[0] = renewed
 
-        # Re-resolve against the live generation-fenced registry on every check: a binding
-        # activated after composition must take effect without a service restart, and a revoked
-        # binding must not remain usable from the stale readiness snapshot.
-        try:
-            provider = await resolve_provider()
-        except Exception as exc:
-            record_unexpected_exception_without_raising(
-                exc,
-                component="semantic_composition",
-                operation="semantic_evaluation_failed",
-                request_id=frozen.lease.operation_id,
-            )
-            return FinalSemanticEvaluation(
-                SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE
-            )
-        if provider is None:
-            record_bounded_event_without_raising(
-                component="semantic_composition",
-                operation="semantic_not_dispatched_credential_unavailable",
-                reason=SemanticReason.CREDENTIAL_UNAVAILABLE.value,
-                request_id=frozen.lease.operation_id,
-            )
-            return FinalSemanticEvaluation(
-                SemanticStatus.UNAVAILABLE, SemanticReason.CREDENTIAL_UNAVAILABLE
-            )
         try:
             route = await catalog.resolve_route(frozen.lease.session_id)
             if route is None or route.state is not TaskRouteState.ACTIVE:
@@ -1864,16 +1877,63 @@ def _privacy_gated_semantic_evaluator(
                     request_id=frozen.lease.operation_id,
                 )
                 return await _semantic_not_configured(frozen, findings)
-            workspace = lookup.mac(
-                WORKSPACE_REF_DOMAIN,
-                f"{route.route_identity_digest}\x00{route.task_id}".encode("ascii"),
-            )
+            repository = route.repository_privacy_commitment
+            if repository is None:
+                record_bounded_event_without_raising(
+                    component="semantic_composition",
+                    operation="semantic_not_dispatched_repository_scope_unavailable",
+                    reason=SemanticReason.SCOPE_NOT_AUTHORIZED.value,
+                    request_id=frozen.lease.operation_id,
+                )
+                return FinalSemanticEvaluation(
+                    SemanticStatus.BLOCKED_BY_POLICY,
+                    SemanticReason.SCOPE_NOT_AUTHORIZED,
+                )
             scope = AuthorizationScope(
                 AuthorizationScopeKind.TASK,
                 installation_id,
-                workspace,
+                repository,
                 route.task_id,
             )
+            # Exact repository authority must exist before provider construction, registry lookup,
+            # or even credential-record inspection. Activation is idempotent for an unchanged
+            # binding and is revalidated again inside the coordinator before authorization.
+            if not await privacy.activate_repository(scope):
+                record_bounded_event_without_raising(
+                    component="semantic_composition",
+                    operation="semantic_not_dispatched_repository_scope_unavailable",
+                    reason=SemanticReason.SCOPE_NOT_AUTHORIZED.value,
+                    request_id=frozen.lease.operation_id,
+                )
+                return FinalSemanticEvaluation(
+                    SemanticStatus.BLOCKED_BY_POLICY,
+                    SemanticReason.SCOPE_NOT_AUTHORIZED,
+                )
+            # Re-resolve only after repository-scoped lazy reconciliation. A binding activated
+            # after composition takes effect without restart; a revoked grant cannot reach this
+            # lookup because activation above fails closed.
+            try:
+                provider = await resolve_provider()
+            except Exception as exc:
+                record_unexpected_exception_without_raising(
+                    exc,
+                    component="semantic_composition",
+                    operation="semantic_evaluation_failed",
+                    request_id=frozen.lease.operation_id,
+                )
+                return FinalSemanticEvaluation(
+                    SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE
+                )
+            if provider is None:
+                record_bounded_event_without_raising(
+                    component="semantic_composition",
+                    operation="semantic_not_dispatched_credential_unavailable",
+                    reason=SemanticReason.CREDENTIAL_UNAVAILABLE.value,
+                    request_id=frozen.lease.operation_id,
+                )
+                return FinalSemanticEvaluation(
+                    SemanticStatus.UNAVAILABLE, SemanticReason.CREDENTIAL_UNAVAILABLE
+                )
             typed_findings = tuple(item for item in findings if type(item) is Finding)
             # Live effective policy owns review selection; never mint a synthetic policy identity.
             policy_app = getattr(privacy, "policy_application", None)
@@ -2181,11 +2241,12 @@ async def provide_service_ready_context(
             return None
         return candidate_binding
 
-    provider_binding = await resolve_provider_binding()
-    provider_credential_connected = provider_binding is not None
-    semantic_ready = (
-        semantic_configured and provider_endpoint_bound and provider_credential_connected
-    )
+    # Repository authority is session-specific, so ready-time composition cannot truthfully claim
+    # a connected external provider or inspect its credential. Those facts are resolved only after
+    # a task route supplies its trusted repository commitment.
+    provider_binding: ProviderBinding | None = None
+    provider_credential_connected = False
+    semantic_ready = False
     capabilities = {
         RuntimeCapability.STRUCTURAL_READ,
         RuntimeCapability.PAYLOAD_READ,
@@ -2263,7 +2324,6 @@ async def provide_service_ready_context(
             installation_id,
             resolve_provider_binding,
             catalog,
-            lookup,
             ids,
             timeout_seconds=60 if provider_cfg is None else int(provider_cfg.timeout_seconds),
             max_retries=2 if provider_cfg is None else int(provider_cfg.max_retries),
