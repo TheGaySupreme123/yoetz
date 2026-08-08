@@ -20,12 +20,12 @@ jobs:
           fetch-depth: 1
 
       - name: Export full checkout
-        run: tar --exclude=.git --exclude=issue-131-source.tar.gz -czf issue-131-source.tar.gz .
+        run: tar --exclude=.git -czf "${RUNNER_TEMP}/issue-131-source.tar.gz" .
 
       - name: Upload source archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: issue-131-full-source
-          path: issue-131-source.tar.gz
+          path: ${{ runner.temp }}/issue-131-source.tar.gz
           if-no-files-found: error
           retention-days: 1
