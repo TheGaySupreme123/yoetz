@@ -19,13 +19,13 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Export tracked source
-        run: git archive --format=tar.gz --output=issue-131-source.tar.gz HEAD
+      - name: Export full checkout
+        run: tar --exclude=.git --exclude=issue-131-source.tar.gz -czf issue-131-source.tar.gz .
 
       - name: Upload source archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: issue-131-source
+          name: issue-131-full-source
           path: issue-131-source.tar.gz
           if-no-files-found: error
           retention-days: 1
