@@ -1,19 +1,25 @@
-"""Trusted-console review for non-default actions (ADR-015 / ADR-016)."""
+"""Trusted-console review and chat-user authorize for non-default actions (ADR-015/016/#164)."""
 
 from __future__ import annotations
 
 import os
 import time
 from collections.abc import Mapping
-from typing import Protocol
+from datetime import UTC, datetime
+from typing import Literal, Protocol
 
 from yoetz.cli.trusted_console import TrustedConsoleError, TrustedForegroundConsole
 from yoetz.cli.unlock import (
     HumanCeremonyCliError,
     overwrite_secret_buffer,
+    run_human_ceremony,
     run_human_ceremony_on_terminal,
 )
 from yoetz.protocol.canonical import JsonValue, canonical_digest
+from yoetz.protocol.chat_user_authority import (
+    ChatUserAttestationModel,
+    chat_user_authority_available,
+)
 from yoetz.protocol.consent import ConsentPrepareResultModel, ConsentReviewResultModel
 from yoetz.service.confidential_client import ConfidentialClientError
 from yoetz.service.confidential_protocol import (
@@ -30,6 +36,7 @@ from yoetz.service.elevated_bootstrap import (
     catalog_payload,
     claim_pending_for_review,
     complete_review,
+    grant_target_digest,
     operation_spec,
     prepare_pending,
     projection_for_status,
@@ -37,6 +44,7 @@ from yoetz.service.elevated_bootstrap import (
 )
 
 __all__ = [
+    "authorize_elevated",
     "catalog_elevated",
     "prepare_elevated",
     "review_elevated",
@@ -60,10 +68,16 @@ def prepare_elevated(
     operation: ElevatedOperation,
     *,
     provider_binding: Mapping[str, str] | None = None,
+    grant_binding: Mapping[str, str] | None = None,
     target_digest: str | None = None,
 ) -> dict[str, JsonValue]:
-    digest = _target_digest(operation, provider_binding, target_digest)
-    pending = prepare_pending(operation, target_digest=digest, provider_binding=provider_binding)
+    digest = _target_digest(operation, provider_binding, grant_binding, target_digest)
+    pending = prepare_pending(
+        operation,
+        target_digest=digest,
+        provider_binding=provider_binding,
+        grant_binding=grant_binding,
+    )
     model = ConsentPrepareResultModel.model_validate(
         {
             "schema": "yoetz.elevated-bootstrap.prepare-result/2",
@@ -95,6 +109,9 @@ def _review_result(
     *,
     outcome: str,
     result: Mapping[str, JsonValue],
+    authority_channel: Literal[
+        "trusted_console_presence", "chat_user_host_tool_approval"
+    ] = "trusted_console_presence",
 ) -> dict[str, JsonValue]:
     model = ConsentReviewResultModel.model_validate(
         {
@@ -104,6 +121,7 @@ def _review_result(
             "risk_class": pending.risk_class,
             "outcome": outcome,
             "danger_digest": pending.danger_digest,
+            "authority_channel": authority_channel,
             "result": dict(result),
         }
     )
@@ -179,7 +197,84 @@ async def _complete_approved(
         return await _complete_vault_initialize(console)
     if pending.operation in {"provider_credential_set", "provider_credential_rotate"}:
         return await _complete_provider_credential(console, pending)
+    if pending.operation == "repository_privacy_grant":
+        raise ElevatedBootstrapError("repository_privacy_grant_requires_chat_user_authorize")
     raise ElevatedBootstrapError("operation_not_implemented")
+
+
+async def authorize_elevated(
+    attestation: ChatUserAttestationModel | Mapping[str, object],
+    *,
+    provider_credential: bytearray | None = None,
+) -> dict[str, JsonValue]:
+    """Complete one prepared consent via host-tool-approval chat-user authority (#164)."""
+
+    try:
+        model = (
+            attestation
+            if type(attestation) is ChatUserAttestationModel
+            else ChatUserAttestationModel.model_validate(attestation)
+        )
+    except (TypeError, ValueError) as exc:
+        raise ElevatedBootstrapError("chat_user_attestation_invalid") from exc
+    pending: PendingElevatedConsent | None = None
+    consumed = False
+    try:
+        if not chat_user_authority_available(model.client_kind, model.host_tool_approval):
+            raise ElevatedBootstrapError("chat_user_authority_unavailable")
+        if model.channel != "host_tool_approval":
+            raise ElevatedBootstrapError("chat_user_attestation_invalid")
+        pending = claim_pending_for_review()
+        spec = operation_spec(pending.operation)
+        if not spec.chat_user_authorize_allowed:
+            raise ElevatedBootstrapError("chat_user_operation_forbidden")
+        if (
+            model.pending_id != pending.pending_id
+            or model.operation != pending.operation
+            or model.danger_digest != pending.danger_digest
+            or model.target_digest != pending.target_digest
+        ):
+            raise ElevatedBootstrapError("chat_user_target_mismatch")
+        if pending.expires_at_unix <= int(time.time()):
+            complete_review(pending, outcome="expired")
+            consumed = True
+            raise ElevatedBootstrapError("pending_expired")
+        if model.decision == "deny":
+            complete_review(pending, outcome="denied")
+            consumed = True
+            return _review_result(
+                pending,
+                outcome="denied",
+                result={"decision": "denied"},
+                authority_channel="chat_user_host_tool_approval",
+            )
+        if pending.risk_class == "secret_ingress" and not model.warning_acknowledged:
+            raise ElevatedBootstrapError("chat_user_warning_required")
+        if pending.operation in {"provider_credential_set", "provider_credential_rotate"}:
+            if provider_credential is None:
+                raise ElevatedBootstrapError("provider_credential_required")
+            result = await _complete_provider_credential_supplied(pending, provider_credential)
+        elif pending.operation == "repository_privacy_grant":
+            if provider_credential is not None:
+                raise ElevatedBootstrapError("provider_credential_forbidden")
+            result = await _complete_repository_privacy_grant(pending)
+        else:
+            raise ElevatedBootstrapError("chat_user_operation_forbidden")
+        complete_review(pending, outcome="approved")
+        consumed = True
+        return _review_result(
+            pending,
+            outcome="completed",
+            result=result,
+            authority_channel="chat_user_host_tool_approval",
+        )
+    except BaseException:
+        if pending is not None and not consumed:
+            _consume_failed_review(pending, "failed")
+        raise
+    finally:
+        if provider_credential is not None:
+            overwrite_secret_buffer(provider_credential)
 
 
 def _auto_unlock_store() -> _AutoUnlockStore:
@@ -251,9 +346,14 @@ async def _complete_provider_credential(
         snapshot = await get_privacy_setup_snapshot()
     except (ControlError, OSError, ValueError) as exc:
         raise ElevatedBootstrapError("repository_privacy_scope_unavailable") from exc
-    repository_commitment = snapshot.bound_scope.get("workspace_ref_commitment")
+    repository_commitment = binding.get("repository_privacy_commitment")
+    if repository_commitment is None:
+        repository_commitment = snapshot.bound_scope.get("workspace_ref_commitment")
     if type(repository_commitment) is not str:
         raise ElevatedBootstrapError("repository_privacy_scope_unavailable")
+    observed_commitment = snapshot.bound_scope.get("workspace_ref_commitment")
+    if observed_commitment != repository_commitment:
+        raise ElevatedBootstrapError("chat_user_target_mismatch")
     target = ProviderCredentialTarget(
         action=action,
         provider_id=binding["provider_id"],
@@ -280,9 +380,143 @@ async def _complete_provider_credential(
     }
 
 
+async def _complete_provider_credential_supplied(
+    pending: PendingElevatedConsent,
+    provider_credential: bytearray,
+) -> dict[str, JsonValue]:
+    if pending.provider_binding is None:
+        raise ElevatedBootstrapError("provider_binding_required")
+    target = await _provider_credential_target(pending)
+    action = "set" if pending.operation == "provider_credential_set" else "rotate"
+    kind = (
+        HumanCeremonyKind.PROVIDER_CREDENTIAL_SET
+        if action == "set"
+        else HumanCeremonyKind.PROVIDER_CREDENTIAL_ROTATE
+    )
+    reauth = _load_auto_unlock_passphrase()
+    if reauth is None:
+        raise ElevatedBootstrapError("chat_user_reauthentication_unavailable")
+    # Copy: run_human_ceremony overwrites supplied buffers in its finally.
+    credential = bytearray(provider_credential)
+    try:
+        result = await run_human_ceremony(
+            kind,
+            target,
+            provider_credential=credential,
+            provider_reauthentication=reauth,
+        )
+    except ConfidentialClientError as exc:
+        raise ElevatedBootstrapError(f"ceremony_{exc.reason}") from exc
+    except HumanCeremonyCliError as exc:
+        raise ElevatedBootstrapError(exc.reason) from exc
+    if type(result) is not ProviderCredentialResult:
+        raise ElevatedBootstrapError("result_invalid")
+    return {
+        "action": result.action,
+        "generation": result.stored_generation,
+        "outcome": result.activation_status,
+    }
+
+
+async def _provider_credential_target(pending: PendingElevatedConsent) -> ProviderCredentialTarget:
+    if pending.provider_binding is None:
+        raise ElevatedBootstrapError("provider_binding_required")
+    binding = pending.provider_binding
+    action = "set" if pending.operation == "provider_credential_set" else "rotate"
+    from yoetz.cli.privacy_setup import get_privacy_setup_snapshot
+    from yoetz.ports.control import ControlError
+
+    try:
+        snapshot = await get_privacy_setup_snapshot()
+    except (ControlError, OSError, ValueError) as exc:
+        raise ElevatedBootstrapError("repository_privacy_scope_unavailable") from exc
+    repository_commitment = binding.get("repository_privacy_commitment")
+    if type(repository_commitment) is not str:
+        raise ElevatedBootstrapError("repository_privacy_scope_unavailable")
+    observed_commitment = snapshot.bound_scope.get("workspace_ref_commitment")
+    if observed_commitment != repository_commitment:
+        raise ElevatedBootstrapError("chat_user_target_mismatch")
+    return ProviderCredentialTarget(
+        action=action,
+        provider_id=binding["provider_id"],
+        model_id=binding["model_id"],
+        endpoint_profile_id=binding["endpoint_profile_id"],
+        endpoint_profile_version=binding["endpoint_profile_version"],
+        purpose=binding["purpose"],
+        scope_digest=binding["scope_digest"],
+        purpose_digest=binding["purpose_digest"],
+        repository_privacy_commitment=repository_commitment,
+    )
+
+
+def _load_auto_unlock_passphrase() -> bytearray | None:
+    from yoetz.adapters.keys.os_keyring import AutoUnlockPassphraseStore
+    from yoetz.config.load import load_config
+    from yoetz.config.paths import bundle_root
+
+    try:
+        config = load_config({}, os.environ, None)
+        return AutoUnlockPassphraseStore(bundle_root(_data_dir=config.storage.data_dir)).load()
+    except Exception:
+        return None
+
+
+async def _complete_repository_privacy_grant(
+    pending: PendingElevatedConsent,
+) -> dict[str, JsonValue]:
+    if pending.grant_binding is None:
+        raise ElevatedBootstrapError("grant_binding_required")
+    recipe = pending.grant_binding["recipe"]
+    expected_commitment = pending.grant_binding["repository_privacy_commitment"]
+    expected_authority_digest = pending.grant_binding["authority_digest"]
+    from yoetz.cli.privacy_control import decide_policy
+    from yoetz.cli.privacy_setup import (
+        _configured_bindings,  # pyright: ignore[reportPrivateUsage]
+        _propose,  # pyright: ignore[reportPrivateUsage]
+        _recipe_answers,  # pyright: ignore[reportPrivateUsage]
+        build_candidate_policy,
+        get_privacy_setup_snapshot,
+    )
+    from yoetz.ports.control import ControlError
+
+    try:
+        snapshot = await get_privacy_setup_snapshot()
+    except (ControlError, OSError, ValueError) as exc:
+        raise ElevatedBootstrapError("repository_privacy_scope_unavailable") from exc
+    observed = snapshot.bound_scope.get("workspace_ref_commitment")
+    if type(observed) is not str or observed != expected_commitment:
+        raise ElevatedBootstrapError("chat_user_target_mismatch")
+    if snapshot.authority_digest != expected_authority_digest:
+        raise ElevatedBootstrapError("chat_user_target_mismatch")
+    try:
+        external, _local = _configured_bindings()
+        answers = _recipe_answers(recipe, snapshot.composed_policy, external)  # type: ignore[arg-type]
+        candidate = build_candidate_policy(snapshot.composed_policy, answers, now=datetime.now(UTC))
+        proposal_id = await _propose(candidate, snapshot.authority_digest)
+    except (ControlError, OSError, TypeError, ValueError) as exc:
+        raise ElevatedBootstrapError("repository_privacy_grant_failed") from exc
+    if proposal_id is None:
+        return {"recipe": recipe, "outcome": "tightened"}
+    passphrase = _load_auto_unlock_passphrase()
+    if passphrase is None:
+        raise ElevatedBootstrapError("chat_user_reauthentication_unavailable")
+    try:
+        decision_result = await decide_policy(
+            proposal_id, decision="approve", passphrase=passphrase
+        )
+    except (HumanCeremonyCliError, ConfidentialClientError, OSError, ValueError) as exc:
+        raise ElevatedBootstrapError("repository_privacy_grant_failed") from exc
+    from yoetz.service.confidential_protocol import PrivacyDecisionResult
+
+    if type(decision_result) is not PrivacyDecisionResult or decision_result.status != "committed":
+        raise ElevatedBootstrapError("repository_privacy_grant_failed")
+    return {"recipe": recipe, "outcome": "granted"}
+
+
 def _target_digest(
     operation: ElevatedOperation,
     provider_binding: Mapping[str, str] | None,
+    grant_binding: Mapping[str, str] | None,
     target_digest: str | None,
 ) -> str:
     spec = operation_spec(operation)
@@ -293,9 +527,24 @@ def _target_digest(
     if operation in {"provider_credential_set", "provider_credential_rotate"}:
         if provider_binding is None:
             raise ElevatedBootstrapError("provider_binding_required")
+        from yoetz.service.confidential_protocol import ProviderCredentialTarget
         from yoetz.service.vault import ProviderCredentialBinding
 
         action = "set" if operation == "provider_credential_set" else "rotate"
+        repository_commitment = provider_binding.get("repository_privacy_commitment")
+        if repository_commitment is not None:
+            target = ProviderCredentialTarget(
+                action=action,
+                provider_id=provider_binding["provider_id"],
+                model_id=provider_binding["model_id"],
+                endpoint_profile_id=provider_binding["endpoint_profile_id"],
+                endpoint_profile_version=provider_binding["endpoint_profile_version"],
+                purpose=provider_binding["purpose"],
+                scope_digest=provider_binding["scope_digest"],
+                purpose_digest=provider_binding["purpose_digest"],
+                repository_privacy_commitment=repository_commitment,
+            )
+            return target.target_digest()
         binding = ProviderCredentialBinding(
             provider_id=provider_binding["provider_id"],
             model_id=provider_binding["model_id"],
@@ -306,6 +555,10 @@ def _target_digest(
             purpose_digest=provider_binding["purpose_digest"],
         )
         return binding.target_digest(action)
+    if operation == "repository_privacy_grant":
+        if grant_binding is None:
+            raise ElevatedBootstrapError("grant_binding_required")
+        return grant_target_digest(grant_binding)
     if spec.requires_target_digest_arg:
         if target_digest is None:
             raise ElevatedBootstrapError("target_digest_required")

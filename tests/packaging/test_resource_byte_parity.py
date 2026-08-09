@@ -27,12 +27,12 @@ import pytest
 _REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 _VERIFY_SCRIPT: Final = _REPO_ROOT / "scripts" / "verify_resource_manifest.py"
 _BUILD_TIMEOUT: Final = 120
-_EXPECTED_TOTAL: Final = 89
+_EXPECTED_TOTAL: Final = 90
 _EXPECTED_KIND_COUNTS: Final = {
     "canonical_vector": 9,
     "guidance": 5,
     "migration": 8,
-    "json_schema": 64,
+    "json_schema": 65,
     "skill": 1,
     "compatibility_manifest": 1,
     "runtime_support": 1,
@@ -46,6 +46,12 @@ _WORKTREE_RESOURCE_OVERLAYS: Final = (
     "schemas/events/evidence-recorded-1.1.0.schema.json",
     "schemas/events/opaque-unknown-event-draft-1.0.0.schema.json",
     "schemas/manifest.json",
+    "schemas/consent/catalog-2.0.0.schema.json",
+    "schemas/consent/chat-user-attestation-1.0.0.schema.json",
+    "schemas/consent/pending-agent-2.0.0.schema.json",
+    "schemas/consent/prepare-result-2.0.0.schema.json",
+    "schemas/consent/review-result-2.0.0.schema.json",
+    "schemas/consent/status-2.0.0.schema.json",
     "schemas/service/control-hello-2.0.0.schema.json",
     "schemas/service/control-hello-result-2.0.0.schema.json",
     "schemas/service/control-request-2.0.0.schema.json",
@@ -60,6 +66,12 @@ _WORKTREE_RESOURCE_OVERLAYS: Final = (
     "src/yoetz/resources/schemas/events/evidence-recorded-1.1.0.schema.json",
     "src/yoetz/resources/schemas/events/opaque-unknown-event-draft-1.0.0.schema.json",
     "src/yoetz/resources/schemas/manifest.json",
+    "src/yoetz/resources/schemas/consent/catalog-2.0.0.schema.json",
+    "src/yoetz/resources/schemas/consent/chat-user-attestation-1.0.0.schema.json",
+    "src/yoetz/resources/schemas/consent/pending-agent-2.0.0.schema.json",
+    "src/yoetz/resources/schemas/consent/prepare-result-2.0.0.schema.json",
+    "src/yoetz/resources/schemas/consent/review-result-2.0.0.schema.json",
+    "src/yoetz/resources/schemas/consent/status-2.0.0.schema.json",
     "src/yoetz/resources/schemas/service/control-hello-2.0.0.schema.json",
     "src/yoetz/resources/schemas/service/control-hello-result-2.0.0.schema.json",
     "src/yoetz/resources/schemas/service/control-request-2.0.0.schema.json",

@@ -19,6 +19,7 @@ type ConsentOperation = Literal[
     "vault_initialize",
     "provider_credential_set",
     "provider_credential_rotate",
+    "repository_privacy_grant",
     "idle_relock_disable",
     "privacy_policy_widen",
     "backup_execute",
@@ -55,10 +56,11 @@ class AgentSafePendingModel(_ClosedModel):
     expires_at_unix: Annotated[int, Field(gt=0)]
     target_digest: Digest
     review_command: tuple[Literal["yoetz"], Literal["consent"], Literal["review"]]
+    authorize_command: tuple[Literal["yoetz"], Literal["consent"], Literal["authorize"]]
 
-    @field_validator("review_command", mode="before")
+    @field_validator("review_command", "authorize_command", mode="before")
     @classmethod
-    def _adapt_review_command(cls, value: object) -> object:
+    def _adapt_commands(cls, value: object) -> object:
         return tuple(cast(list[object], value)) if type(value) is list else value
 
 
@@ -68,7 +70,9 @@ class ConsentCatalogOperationModel(_ClosedModel):
     summary: BoundedText
     implemented: bool
     requires_provider_binding: bool
+    requires_grant_binding: bool
     requires_target_digest_arg: bool
+    chat_user_authorize_allowed: bool
     prepare_hint: BoundedText
 
 
@@ -88,6 +92,9 @@ class ConsentRulesModel(_ClosedModel):
     one_pending_at_a_time: Literal[True]
     approval_arguments_forbidden: Literal[True]
     agent_selected_initialization_secret_forbidden: Literal[True]
+    # Attested host-tool-approval authorize is the only chat/MCP exception (issue #164).
+    chat_user_host_tool_approval_permitted: Literal[True]
+    unattested_chat_assent_forbidden: Literal[True]
 
     @field_validator("never_over_chat_or_mcp", mode="before")
     @classmethod
@@ -141,6 +148,11 @@ class ConsentProviderCredentialResultModel(_ClosedModel):
     outcome: Literal["active", "local_only", "stored"]
 
 
+class ConsentRepositoryPrivacyGrantResultModel(_ClosedModel):
+    recipe: Literal["assisted_review", "private", "metadata_only"]
+    outcome: Literal["granted", "tightened", "denied"]
+
+
 class ConsentReviewResultModel(_ClosedModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -156,9 +168,10 @@ class ConsentReviewResultModel(_ClosedModel):
                                 "vault_initialize",
                                 "provider_credential_set",
                                 "provider_credential_rotate",
+                                "repository_privacy_grant",
                             ]
                         },
-                        "risk_class": {"const": "secret_ingress"},
+                        "risk_class": {"enum": ["privacy_widen", "secret_ingress"]},
                         "outcome": {"const": "denied"},
                         "result": {
                             "type": "object",
@@ -189,8 +202,13 @@ class ConsentReviewResultModel(_ClosedModel):
                         "outcome": {"const": "completed"},
                         "result": {
                             "type": "object",
-                            "properties": {"action": {"const": "set"}},
-                            "required": ["action"],
+                            "properties": {
+                                "action": {"const": "set"},
+                                "generation": {"type": "integer", "exclusiveMinimum": 0},
+                                "outcome": {"enum": ["active", "local_only", "stored"]},
+                            },
+                            "required": ["action", "generation", "outcome"],
+                            "additionalProperties": False,
                         },
                     }
                 },
@@ -201,12 +219,75 @@ class ConsentReviewResultModel(_ClosedModel):
                         "outcome": {"const": "completed"},
                         "result": {
                             "type": "object",
-                            "properties": {"action": {"const": "rotate"}},
-                            "required": ["action"],
+                            "properties": {
+                                "action": {"const": "rotate"},
+                                "generation": {"type": "integer", "exclusiveMinimum": 0},
+                                "outcome": {"enum": ["active", "local_only", "stored"]},
+                            },
+                            "required": ["action", "generation", "outcome"],
+                            "additionalProperties": False,
                         },
                     }
                 },
-            ]
+                {
+                    "properties": {
+                        "operation": {"const": "repository_privacy_grant"},
+                        "risk_class": {"const": "privacy_widen"},
+                        "outcome": {"const": "completed"},
+                        "result": {
+                            "type": "object",
+                            "properties": {
+                                "recipe": {"enum": ["assisted_review", "private", "metadata_only"]},
+                                "outcome": {"enum": ["granted", "tightened"]},
+                            },
+                            "required": ["recipe", "outcome"],
+                        },
+                    }
+                },
+            ],
+            "allOf": [
+                {
+                    "if": {"properties": {"operation": {"const": "vault_initialize"}}},
+                    "then": {
+                        "properties": {
+                            "risk_class": {"const": "secret_ingress"},
+                            "authority_channel": {"const": "trusted_console_presence"},
+                        }
+                    },
+                },
+                {
+                    "if": {
+                        "properties": {
+                            "operation": {
+                                "enum": [
+                                    "provider_credential_set",
+                                    "provider_credential_rotate",
+                                ]
+                            }
+                        }
+                    },
+                    "then": {
+                        "properties": {
+                            "risk_class": {"const": "secret_ingress"},
+                            "authority_channel": {
+                                "enum": [
+                                    "trusted_console_presence",
+                                    "chat_user_host_tool_approval",
+                                ]
+                            },
+                        }
+                    },
+                },
+                {
+                    "if": {"properties": {"operation": {"const": "repository_privacy_grant"}}},
+                    "then": {
+                        "properties": {
+                            "risk_class": {"const": "privacy_widen"},
+                            "authority_channel": {"const": "chat_user_host_tool_approval"},
+                        }
+                    },
+                },
+            ],
         },
     )
 
@@ -216,10 +297,14 @@ class ConsentReviewResultModel(_ClosedModel):
     risk_class: RiskClass
     outcome: Literal["completed", "denied"]
     danger_digest: Digest
+    authority_channel: Literal["trusted_console_presence", "chat_user_host_tool_approval"] = (
+        "trusted_console_presence"
+    )
     result: (
         ConsentDeniedResultModel
         | ConsentVaultInitializedResultModel
         | ConsentProviderCredentialResultModel
+        | ConsentRepositoryPrivacyGrantResultModel
     )
 
     @model_validator(mode="after")
@@ -228,10 +313,25 @@ class ConsentReviewResultModel(_ClosedModel):
             "vault_initialize",
             "provider_credential_set",
             "provider_credential_rotate",
+            "repository_privacy_grant",
         }:
             raise ValueError("review_operation_not_implemented")
-        if self.risk_class != "secret_ingress":
+        expected_risk = (
+            "privacy_widen" if self.operation == "repository_privacy_grant" else "secret_ingress"
+        )
+        if self.risk_class != expected_risk:
             raise ValueError("review_risk_class_mismatch")
+        if self.authority_channel == "chat_user_host_tool_approval" and self.operation not in {
+            "provider_credential_set",
+            "provider_credential_rotate",
+            "repository_privacy_grant",
+        }:
+            raise ValueError("review_authority_channel_mismatch")
+        if (
+            self.operation == "repository_privacy_grant"
+            and self.authority_channel != "chat_user_host_tool_approval"
+        ):
+            raise ValueError("review_authority_channel_mismatch")
         if self.outcome == "denied":
             if type(self.result) is not ConsentDeniedResultModel:
                 raise ValueError("review_result_outcome_mismatch")
@@ -239,6 +339,12 @@ class ConsentReviewResultModel(_ClosedModel):
         if self.operation == "vault_initialize":
             if type(self.result) is not ConsentVaultInitializedResultModel:
                 raise ValueError("review_result_operation_mismatch")
+            return self
+        if self.operation == "repository_privacy_grant":
+            if type(self.result) is not ConsentRepositoryPrivacyGrantResultModel:
+                raise ValueError("review_result_operation_mismatch")
+            if self.result.outcome == "denied":
+                raise ValueError("review_result_outcome_mismatch")
             return self
         if type(self.result) is not ConsentProviderCredentialResultModel:
             raise ValueError("review_result_operation_mismatch")

@@ -365,13 +365,21 @@ case → single-use authorization → bounded gateway → bound sink/provider �
 
 | Event | Human required? | Rule |
 |---|---:|---|
-| First new-repository grant, first `assisted` commit, later wider provider/category/class/scope, or credential set/rotate | yes | Exact trusted-local compound diff/credential ceremony |
+| First new-repository grant, first `assisted` commit, later wider provider/category/class/scope, or credential set/rotate | yes | Exact trusted-local compound diff/credential ceremony, or host-approved chat-user authorize for the exact prepared consent action (issue #164) |
 | Eligible legacy machine authority narrowed onto its bounded pre-upgrade repository entitlement | no | Atomic carry-forward preserves machine bytes and grants no new repository |
 | Ordinary check, automatic retry inside the confirmed policy, reviewer challenge, agent response, or recheck | no | Direct agent-to-agent path with a fresh authorization and receipt per physical attempt |
 | Tightening policy | no | May apply immediately after the service proves it cannot widen |
 | `confirm_every_request` physical attempt | yes | Exact prepared-case foreground decision for that one attempt, on any ready vault |
 | Finding waiver | yes | Existing interactive-human `finding_only` authority |
 | Never-send match or out-of-scope content | impossible to approve | Fail closed under every profile and fork claiming upstream conformance |
+
+Bare chat assent is never authority. When the user asks an agent for help finishing exact setup,
+host-approved chat-user authorize (`yoetz consent authorize` with
+`yoetz.chat-user-attestation/1`, issue #164) may complete a prepared `repository_privacy_grant` or
+provider credential set/rotate after one retention warning. Denial, expiry, cancellation, target
+drift, or unavailable host capability yields zero policy/credential mutation and zero provider
+dispatch. The trusted CLI/TUI (`yoetz --privacy`, `yoetz consent review`) remains recommended and
+always available.
 
 ## Consequences and proof obligations
 

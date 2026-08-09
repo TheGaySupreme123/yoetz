@@ -201,8 +201,13 @@ trusted-console boundary for `vault_initialize`, `provider_credential_set`, and
 presence. The current runtime has no production presence adapter and fails closed before console
 open or pending claim. Initialization accepts only its helper-generated,
 credential-store-verified passphrase; provider secrets are entered inside the confidential
-ceremony. Provider credentials become opaque adapter-scoped handles in the service vault;
-provider adapters and normal clients never receive reusable credential bytes.
+ceremony. **Amendment (issue #164, 2026-08-09):** host-approved `yoetz consent authorize` may
+complete exact prepared `provider_credential_set|rotate` (and `repository_privacy_grant`) without
+the trusted console when a first-party host tool-approval attestation binds the pending digests;
+one-shot provider credential bytes may enter the same YZS1 ingress from authorize stdin after
+warning acknowledgement, and are overwritten best-effort. Provider credentials become opaque
+adapter-scoped handles in the service vault; provider adapters and normal clients never receive
+reusable credential bytes.
 
 `UnlockCoordinator` solely owns the persistent passphrase throttle: admission delay, in-progress
 reservation, failure charge, success reset, crash re-arm, and repair. It calls cryptographic vault

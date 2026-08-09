@@ -885,6 +885,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "consent/chat-user-attestation-1.0.0.schema.json",
+        "chat-user-attestation",
+        "1.0.0",
+        "request_result",
+        "local-control",
+        lambda: (
+            __import__(
+                "yoetz.protocol.chat_user_authority", fromlist=["ChatUserAttestationModel"]
+            ).ChatUserAttestationModel
+        ),
+    ),
+    _RegistryEntry(
         "consent/pending-agent-2.0.0.schema.json",
         "pending-agent",
         "2.0.0",

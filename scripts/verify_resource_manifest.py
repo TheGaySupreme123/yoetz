@@ -217,6 +217,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/consent/chat-user-attestation-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/consent/pending-agent-2.0.0.schema.json",
         "json_schema",
         "application/schema+json",

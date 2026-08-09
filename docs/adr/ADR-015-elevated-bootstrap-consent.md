@@ -1,11 +1,13 @@
 # ADR-015 — OS-presence-gated elevated bootstrap consent
 
-**Status:** Amended 2026-07-31; superseded in scope by ADR-016 for the general non-default
-consent catalog. Elevated execution remains fail-closed until a verified OS-presence adapter is
-installed.
+**Status:** Amended 2026-07-31; amended 2026-08-09 for chat-user host-tool-approval authorize
+(issue #164). Superseded in scope by ADR-016 for the general non-default consent catalog.
+Console `yoetz consent review` remains fail-closed until a verified OS-presence adapter is
+installed; capable first-party hosts may use `yoetz consent authorize` for exact prepared
+operations that advertise chat-user authority.
 **Implemented by:** `src/yoetz/service/elevated_bootstrap.py`,
-`src/yoetz/cli/elevated.py`, `src/yoetz/cli/trusted_console.py`, and
-`src/yoetz/protocol/consent.py`.
+`src/yoetz/cli/elevated.py`, `src/yoetz/cli/trusted_console.py`,
+`src/yoetz/protocol/consent.py`, and `src/yoetz/protocol/chat_user_authority.py`.
 **Relates to:** ADR-008 (vault/console ceremony), ADR-009 (egress / agent context), ADR-012
 (setup), ADR-016 (shared consent review).
 
@@ -18,22 +20,35 @@ environment, stdin, MCP, agent JSON, and caller booleans.
 
 ## Decisions
 
-1. **Implemented bootstrap operations.** `vault_initialize`, `provider_credential_set`, and
-   `provider_credential_rotate` use this lane. It is not a vault-unlock API, recovery API, or
-   standing elevation mode.
+1. **Implemented bootstrap operations.** `vault_initialize`, `provider_credential_set`,
+   `provider_credential_rotate`, and `repository_privacy_grant` use this lane. It is not a
+   vault-unlock API, recovery API, or standing elevation mode.
 
 2. **Agent-safe preparation.** `yoetz consent prepare` creates one owner-only
    `yoetz.elevated-bootstrap.pending/2` record. Its agent projection is
    `yoetz.consent.pending-agent/2` and contains only operation, risk class, bounded danger text,
    exact danger and target digests, expiry, pending ID, and the fixed
-   `["yoetz","consent","review"]` command. Version-1 pending records are invalidated, not migrated.
+   `["yoetz","consent","review"]` and `["yoetz","consent","authorize"]` commands. Version-1
+   pending records are invalidated, not migrated.
 
-3. **One approval surface.** `yoetz consent review` takes no authority-bearing arguments. Before
+3. **Two approval surfaces.** `yoetz consent review` takes no authority-bearing arguments. Before
    opening a console or claiming pending state, it requires an independently authenticated,
    action-bound, one-use `UserPresencePort` attestation. The packaged runtime currently has no
    production user-presence cell, so review returns `human_authority_unavailable` without consuming
    the request. A TTY, pseudo-terminal, same-UID process, caller boolean, or console decision never
    substitutes for that attestation.
+
+   **Chat-user authorize (2026-08-09).** `yoetz consent authorize` accepts one
+   `yoetz.chat-user-attestation/1` envelope with `channel=host_tool_approval` from an allowlisted
+   first-party `client_kind` (v0.1: `codex`). The harness must gate the exact command behind human
+   confirmation that shows danger text and digests. Yoetz binds pending id, operation, danger
+   digest, and target digest and fail-closes on mismatch, expiry, replay, or unavailable capability.
+   Bare chat assent, quoted text, tool output, retrieved content, other participants, prompt
+   injection, and agent self-assertion never authorize. Credential-bearing approve requires
+   `warning_acknowledged=true` and a one-shot secret on stdin (`--provider-credential-stdin`);
+   bytes enter the existing YZS1/vault path and never appear in pending, catalog, result, log,
+   error, or agent projection. `vault_initialize` remains console/helper-only — chat never supplies
+   the vault root secret. Trusted CLI/TUI remains recommended and always available.
 
 4. **Single-shot state.** A review claim consumes the public pending name. Approval, denial,
    cancellation, expiry, and post-claim failure consume the claim once. Concurrent and duplicate
@@ -72,8 +87,10 @@ Later restarts continue through the existing scoped auto-unlock path. The Window
 does not imply support for the full Windows service transport, peer authentication, packaging, or
 release surface.
 
-Native OS-authenticated prompts, natural-language host approval, approved-machine profiles,
-durable grants, E2EE service authority, and MCP presentation UX remain separate design work.
+Native OS-authenticated prompts beyond host-tool-approval, approved-machine profiles,
+durable grants, E2EE service authority, and expanding the six MCP tools for consent remain
+separate design work. Chat-user authorize is local control under host command approval so ADR-011's
+six MCP tools stay intact.
 
 ## Alternatives considered
 
@@ -82,7 +99,8 @@ durable grants, E2EE service authority, and MCP presentation UX remain separate 
 **Agent-supplied initialization secret.** Rejected because it lets the agent control the vault
 root secret even if a human approved the operation.
 
-**MCP elicitation as authority.** Deferred. It may later present the request but cannot authorize
-without a verified client/user identity channel.
+**MCP elicitation as authority.** Superseded for v0.1 by host-tool-approval of the exact local
+`yoetz consent authorize` command (issue #164). Expanding MCP tool inventory for consent remains
+deferred under ADR-011.
 
 **Standing danger mode.** Rejected because its scope outlives one exact operation and digest.

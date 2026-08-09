@@ -17,6 +17,7 @@ from yoetz.cli import elevated
 from yoetz.cli.app import app
 from yoetz.cli.trusted_console import TrustedForegroundConsole
 from yoetz.protocol.canonical import canonical_digest
+from yoetz.protocol.chat_user_authority import ChatUserAttestationModel
 from yoetz.protocol.consent import ConsentReviewResultModel
 from yoetz.protocol.schemas import SchemaInstanceInvalid, validate_schema_instance
 from yoetz.service.confidential_protocol import ProviderCredentialResult, VaultStateResult
@@ -52,6 +53,173 @@ def _patch_verified_presence() -> Any:
     """Admit post-presence behavior in unit tests; production remains fail-closed."""
 
     return patch("yoetz.cli.elevated._require_action_bound_user_presence", return_value=None)
+
+
+_CHAT_PROVIDER_BINDING = {
+    "endpoint_profile_id": "ep",
+    "endpoint_profile_version": "1",
+    "model_id": "model",
+    "provider_id": "provider",
+    "purpose": "semantic-review",
+    "purpose_digest": canonical_digest({"purpose": "semantic-review"}),
+    "scope_digest": "sha256:" + ("b" * 64),
+    "repository_privacy_commitment": "hmac-sha256:" + ("c" * 64),
+}
+
+
+def _chat_attestation(
+    pending: Any, *, decision: str = "approve", warning: bool = True
+) -> dict[str, object]:
+    return {
+        "schema": "yoetz.chat-user-attestation/1",
+        "channel": "host_tool_approval",
+        "client_kind": "codex",
+        "host_tool_approval": "required_and_active",
+        "pending_id": pending.pending_id,
+        "operation": pending.operation,
+        "danger_digest": pending.danger_digest,
+        "target_digest": pending.target_digest,
+        "warning_acknowledged": warning,
+        "decision": decision,
+    }
+
+
+def test_chat_user_attestation_is_closed_and_schema_bound() -> None:
+    payload = {
+        "schema": "yoetz.chat-user-attestation/1",
+        "channel": "host_tool_approval",
+        "client_kind": "codex",
+        "host_tool_approval": "required_and_active",
+        "pending_id": "a" * 64,
+        "operation": "provider_credential_set",
+        "danger_digest": "sha256:" + ("b" * 64),
+        "target_digest": "sha256:" + ("c" * 64),
+        "warning_acknowledged": True,
+        "decision": "approve",
+    }
+    assert ChatUserAttestationModel.model_validate(payload).client_kind == "codex"
+    validate_schema_instance("chat-user-attestation", "1.0.0", payload)
+    with pytest.raises(ValidationError):
+        ChatUserAttestationModel.model_validate({**payload, "extra": "forbidden"})
+
+
+def test_chat_user_authorize_consumes_exact_provider_request_and_wipes_input(
+    tmp_path: Path,
+) -> None:
+    observed: list[bytes] = []
+
+    async def complete(pending: Any, credential: bytearray) -> dict[str, object]:
+        observed.append(bytes(credential))
+        assert pending.operation == "provider_credential_set"
+        return {"action": "set", "generation": 3, "outcome": "stored"}
+
+    async def run() -> dict[str, Any]:
+        with _patch_state(tmp_path):
+            prepared = cast(
+                dict[str, Any],
+                elevated.prepare_elevated(
+                    "provider_credential_set", provider_binding=_CHAT_PROVIDER_BINDING
+                ),
+            )
+            pending = load_pending(_state=tmp_path)
+            assert pending is not None
+            secret = bytearray(b"chat-secret")
+            with patch(
+                "yoetz.cli.elevated._complete_provider_credential_supplied",
+                side_effect=complete,
+            ):
+                result = cast(
+                    dict[str, Any],
+                    await elevated.authorize_elevated(
+                        _chat_attestation(pending), provider_credential=secret
+                    ),
+                )
+            assert bytes(secret) == b"\x00" * len(secret)
+            assert prepared["pending"]["pending_id"] == pending.pending_id
+            return result
+
+    result = anyio.run(run)
+    assert observed == [b"chat-secret"]
+    assert result["authority_channel"] == "chat_user_host_tool_approval"
+    assert result["outcome"] == "completed"
+    validate_schema_instance("review-result", "2.0.0", result)
+    assert load_pending(_state=tmp_path) is None
+    assert "chat-secret" not in json.dumps(result)
+
+
+def test_chat_user_authorize_denial_is_single_shot_for_repository_grant(tmp_path: Path) -> None:
+    async def run() -> dict[str, Any]:
+        grant = {
+            "recipe": "assisted_review",
+            "repository_privacy_commitment": "hmac-sha256:" + ("d" * 64),
+            "authority_digest": "sha256:" + ("e" * 64),
+        }
+        with _patch_state(tmp_path):
+            elevated.prepare_elevated("repository_privacy_grant", grant_binding=grant)
+            pending = load_pending(_state=tmp_path)
+            assert pending is not None
+            with patch("yoetz.cli.elevated._complete_repository_privacy_grant") as complete:
+                result = cast(
+                    dict[str, Any],
+                    await elevated.authorize_elevated(
+                        _chat_attestation(pending, decision="deny", warning=False)
+                    ),
+                )
+                complete.assert_not_awaited()
+            return result
+
+    result = anyio.run(run)
+    assert result["outcome"] == "denied"
+    assert result["authority_channel"] == "chat_user_host_tool_approval"
+    assert load_pending(_state=tmp_path) is None
+
+
+def test_chat_user_authorize_requires_advertised_capability_before_claim(tmp_path: Path) -> None:
+    async def run() -> None:
+        with _patch_state(tmp_path):
+            elevated.prepare_elevated(
+                "provider_credential_set", provider_binding=_CHAT_PROVIDER_BINDING
+            )
+            pending = load_pending(_state=tmp_path)
+            assert pending is not None
+            with patch("yoetz.cli.elevated.chat_user_authority_available", return_value=False):
+                with pytest.raises(ElevatedBootstrapError) as exc:
+                    await elevated.authorize_elevated(_chat_attestation(pending))
+                assert exc.value.reason == "chat_user_authority_unavailable"
+            assert load_pending(_state=tmp_path) == pending
+
+    anyio.run(run)
+
+
+def test_chat_user_authorize_requires_one_warning_before_secret_ingress(tmp_path: Path) -> None:
+    async def run() -> None:
+        with _patch_state(tmp_path):
+            elevated.prepare_elevated(
+                "provider_credential_set", provider_binding=_CHAT_PROVIDER_BINDING
+            )
+            pending = load_pending(_state=tmp_path)
+            assert pending is not None
+            secret = bytearray(b"chat-secret")
+            with patch("yoetz.cli.elevated._complete_provider_credential_supplied") as complete:
+                with pytest.raises(ElevatedBootstrapError) as exc:
+                    await elevated.authorize_elevated(
+                        _chat_attestation(pending, warning=False), provider_credential=secret
+                    )
+                assert exc.value.reason == "chat_user_warning_required"
+                complete.assert_not_awaited()
+            assert bytes(secret) == b"\x00" * len(secret)
+            assert load_pending(_state=tmp_path) is None
+
+    anyio.run(run)
+
+
+def test_chat_user_authorize_rejects_invalid_attestation_as_bounded_failure() -> None:
+    async def run() -> None:
+        with pytest.raises(ElevatedBootstrapError) as exc:
+            await elevated.authorize_elevated({"schema": "forged"})
+        assert exc.value.reason == "chat_user_attestation_invalid"
+
+    anyio.run(run)
 
 
 def test_catalog_and_prepare_are_agent_safe(tmp_path: Path) -> None:

@@ -17,6 +17,7 @@ from yoetz.service.elevated_bootstrap import (
     catalog_payload,
     claim_pending_for_review,
     complete_review,
+    grant_target_digest,
     load_pending,
     prepare_pending,
     projection_for_status,
@@ -24,6 +25,8 @@ from yoetz.service.elevated_bootstrap import (
 )
 
 _TARGET = canonical_digest({"expected_mode": "uninitialized", "kind": "empty_vault"})
+_REPOSITORY_COMMITMENT = "hmac-sha256:" + ("c" * 64)
+_AUTHORITY_DIGEST = "sha256:" + ("d" * 64)
 _BINDING = {
     "endpoint_profile_id": "ep_fireworks",
     "endpoint_profile_version": "1",
@@ -57,9 +60,14 @@ def test_catalog_is_review_only_and_agent_safe() -> None:
     assert catalog["rules"]["verified_user_presence_required"] is True
     assert catalog["rules"]["trusted_console_is_not_authority"] is True
     assert catalog["rules"]["agent_selected_initialization_secret_forbidden"] is True
+    assert catalog["rules"]["chat_user_host_tool_approval_permitted"] is True
+    assert catalog["rules"]["unattested_chat_assent_forbidden"] is True
     by_name = {item["operation"]: item for item in catalog["operations"]}
     assert by_name["vault_initialize"]["implemented"] is True
     assert by_name["provider_credential_rotate"]["implemented"] is True
+    assert by_name["provider_credential_set"]["chat_user_authorize_allowed"] is True
+    assert by_name["repository_privacy_grant"]["requires_grant_binding"] is True
+    assert by_name["repository_privacy_grant"]["chat_user_authorize_allowed"] is True
     assert by_name["backup_execute"]["implemented"] is False
     assert by_name["backup_execute"]["risk_class"] == "review_only"
     _assert_agent_safe(catalog)
@@ -75,6 +83,7 @@ def test_prepare_projection_contains_only_agent_safe_review_fields(tmp_path: Pat
         "expires_at_unix",
         "operation",
         "pending_id",
+        "authorize_command",
         "review_command",
         "risk_class",
         "schema",
@@ -82,6 +91,7 @@ def test_prepare_projection_contains_only_agent_safe_review_fields(tmp_path: Pat
     }
     assert projection["schema"] == "yoetz.consent.pending-agent/2"
     assert projection["review_command"] == ["yoetz", "consent", "review"]
+    assert projection["authorize_command"] == ["yoetz", "consent", "authorize"]
     assert pending.expires_at_unix - pending.created_at_unix == 15 * 60
     stored = json.loads(
         (tmp_path / "elevated-bootstrap" / "elevated-bootstrap-pending.json").read_text()
@@ -219,6 +229,36 @@ def test_prepare_provider_binding_rules(tmp_path: Path) -> None:
             _state=tmp_path,
         )
     assert incomplete.value.reason == "provider_binding_invalid"
+
+
+def test_repository_grant_and_provider_bindings_are_repository_bound(tmp_path: Path) -> None:
+    grant = {
+        "recipe": "assisted_review",
+        "repository_privacy_commitment": _REPOSITORY_COMMITMENT,
+        "authority_digest": _AUTHORITY_DIGEST,
+    }
+    pending = prepare_pending(
+        "repository_privacy_grant",
+        target_digest=grant_target_digest(grant),
+        grant_binding=grant,
+        _state=tmp_path,
+    )
+    assert pending.grant_binding == grant
+    assert load_pending(_state=tmp_path) == pending
+    assert (
+        grant_target_digest({**grant, "authority_digest": "sha256:" + ("e" * 64)})
+        != pending.target_digest
+    )
+
+    provider = {**_BINDING, "repository_privacy_commitment": _REPOSITORY_COMMITMENT}
+    tmp_path_provider = tmp_path / "provider"
+    provider_pending = prepare_pending(
+        "provider_credential_set",
+        target_digest=_TARGET,
+        provider_binding=provider,
+        _state=tmp_path_provider,
+    )
+    assert provider_pending.provider_binding == provider
 
 
 def test_target_digest_and_unimplemented_operations_are_rejected(tmp_path: Path) -> None:

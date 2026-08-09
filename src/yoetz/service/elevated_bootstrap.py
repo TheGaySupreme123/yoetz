@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Final, Literal, NoReturn, cast
 
 from yoetz.config.paths import ensure_owner_only_dir, state_dir
-from yoetz.domain.values import ProtocolValueError, validate_sha256_digest
+from yoetz.domain.values import ProtocolValueError, validate_commitment, validate_sha256_digest
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.consent import (
     AgentSafePendingModel,
@@ -36,6 +36,7 @@ __all__ = [
     "claim_pending_for_review",
     "clear_pending",
     "complete_review",
+    "grant_target_digest",
     "load_pending",
     "operation_spec",
     "prepare_pending",
@@ -55,6 +56,7 @@ ElevatedOperation = Literal[
     "vault_initialize",
     "provider_credential_set",
     "provider_credential_rotate",
+    "repository_privacy_grant",
     "idle_relock_disable",
     "privacy_policy_widen",
     "backup_execute",
@@ -80,6 +82,14 @@ _PROVIDER_BINDING_KEYS: Final = (
     "scope_digest",
     "purpose_digest",
 )
+_PROVIDER_REPOSITORY_KEY: Final = "repository_privacy_commitment"
+_PROVIDER_BINDING_OPTIONAL_KEYS: Final = frozenset({_PROVIDER_REPOSITORY_KEY})
+_GRANT_BINDING_KEYS: Final = (
+    "recipe",
+    "repository_privacy_commitment",
+    "authority_digest",
+)
+_GRANT_RECIPES: Final = frozenset({"assisted_review", "private", "metadata_only"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,8 +101,10 @@ class ConsentOperationSpec:
     summary: str
     danger_text: str
     requires_provider_binding: bool
+    requires_grant_binding: bool
     requires_target_digest_arg: bool
     implemented: bool
+    chat_user_authorize_allowed: bool
 
 
 CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
@@ -104,37 +116,63 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
             "DANGER — vault initialize. Creates this installation's encrypted vault and stores a "
             "helper-generated auto-unlock secret in the scoped platform credential store. Review "
             "requires independent action-bound OS user presence; a foreground console alone is "
-            "never authorization."
+            "never authorization. Chat-user authorize cannot supply the vault root secret."
         ),
         requires_provider_binding=False,
+        requires_grant_binding=False,
         requires_target_digest_arg=False,
         implemented=True,
+        chat_user_authorize_allowed=False,
     ),
     ConsentOperationSpec(
         operation="provider_credential_set",
         risk_class="secret_ingress",
         summary="Store an LLM API credential in the vault.",
         danger_text=(
-            "DANGER — provider credential set. Stores an API credential in the local vault. "
-            "Review requires independent action-bound OS user presence and the exact provider "
-            "binding; secret entry occurs only inside the foreground console."
+            "DANGER — provider credential set. Stores an API credential in the local vault for the "
+            "exact provider binding. Ordinary chat may retain or expose the value — prefer a "
+            "confidential input surface or a limited/rotatable credential, or run "
+            "`yoetz consent review` locally. After one clear warning, host-approved "
+            "`yoetz consent authorize` may complete this exact action without a second terminal."
         ),
         requires_provider_binding=True,
+        requires_grant_binding=False,
         requires_target_digest_arg=False,
         implemented=True,
+        chat_user_authorize_allowed=True,
     ),
     ConsentOperationSpec(
         operation="provider_credential_rotate",
         risk_class="secret_ingress",
         summary="Rotate a stored LLM API credential.",
         danger_text=(
-            "DANGER — provider credential rotate. Replaces a stored API credential. Review requires "
-            "independent action-bound OS user presence and the exact provider binding; secret entry "
-            "occurs only inside the foreground console."
+            "DANGER — provider credential rotate. Replaces a stored API credential for the exact "
+            "provider binding. Ordinary chat may retain or expose the value — prefer confidential "
+            "input or a limited/rotatable credential, or run `yoetz consent review` locally. "
+            "After one clear warning, host-approved `yoetz consent authorize` may complete this "
+            "exact action without a second terminal."
         ),
         requires_provider_binding=True,
+        requires_grant_binding=False,
         requires_target_digest_arg=False,
         implemented=True,
+        chat_user_authorize_allowed=True,
+    ),
+    ConsentOperationSpec(
+        operation="repository_privacy_grant",
+        risk_class="privacy_widen",
+        summary="Grant exact repository privacy recipe (e.g. assisted_review).",
+        danger_text=(
+            "DANGER — repository privacy grant. Widens or sets external-review permission for one "
+            "exact repository recipe. Host-approved `yoetz consent authorize` may complete this "
+            "exact prepared grant when the user asks the agent for help; bare chat assent never "
+            "authorizes. The safer local path remains `yoetz --privacy`."
+        ),
+        requires_provider_binding=False,
+        requires_grant_binding=True,
+        requires_target_digest_arg=False,
+        implemented=True,
+        chat_user_authorize_allowed=True,
     ),
     ConsentOperationSpec(
         operation="idle_relock_disable",
@@ -145,8 +183,10 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
             "verified foreground console after reviewing the exact change."
         ),
         requires_provider_binding=False,
+        requires_grant_binding=False,
         requires_target_digest_arg=False,
         implemented=False,
+        chat_user_authorize_allowed=False,
     ),
     ConsentOperationSpec(
         operation="privacy_policy_widen",
@@ -154,12 +194,14 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         summary="Widen standing privacy/egress policy.",
         danger_text=(
             "DANGER — privacy policy widen. Allows broader disclosure to agents or providers. "
-            "Confirm the exact policy digest only if you intend this widening. Secrets still must "
-            "never be pasted into chat."
+            "Confirm the exact policy digest only if you intend this widening. Prefer "
+            "`repository_privacy_grant` for exact recipe grants from chat."
         ),
         requires_provider_binding=False,
+        requires_grant_binding=False,
         requires_target_digest_arg=True,
         implemented=False,
+        chat_user_authorize_allowed=False,
     ),
     ConsentOperationSpec(
         operation="backup_execute",
@@ -170,9 +212,11 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
             "only from the verified foreground console after reviewing the preview."
         ),
         requires_provider_binding=False,
+        requires_grant_binding=False,
         requires_target_digest_arg=True,
         # Catalogued for ADR-016; prepare refuses until owning CLIs consume a durable grant.
         implemented=False,
+        chat_user_authorize_allowed=False,
     ),
     ConsentOperationSpec(
         operation="restore_execute",
@@ -183,8 +227,10 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
             "digest. Confirm only if you reviewed the preview. Recovery secrets never go in chat."
         ),
         requires_provider_binding=False,
+        requires_grant_binding=False,
         requires_target_digest_arg=True,
         implemented=False,
+        chat_user_authorize_allowed=False,
     ),
     ConsentOperationSpec(
         operation="migrate_execute",
@@ -195,8 +241,10 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
             "Confirm only if you reviewed the preview and backup preflight."
         ),
         requires_provider_binding=False,
+        requires_grant_binding=False,
         requires_target_digest_arg=True,
         implemented=False,
+        chat_user_authorize_allowed=False,
     ),
     ConsentOperationSpec(
         operation="skill_install",
@@ -207,8 +255,10 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
             "digest. Confirm only if you reviewed the file list and digests."
         ),
         requires_provider_binding=False,
+        requires_grant_binding=False,
         requires_target_digest_arg=True,
         implemented=False,
+        chat_user_authorize_allowed=False,
     ),
     ConsentOperationSpec(
         operation="harness_mcp_register",
@@ -219,8 +269,10 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
             "digest. Confirm only if you reviewed the binary path and serve command."
         ),
         requires_provider_binding=False,
+        requires_grant_binding=False,
         requires_target_digest_arg=True,
         implemented=False,
+        chat_user_authorize_allowed=False,
     ),
 )
 
@@ -250,6 +302,7 @@ class PendingElevatedConsent:
     expires_at_unix: int
     target_digest: str
     provider_binding: Mapping[str, str] | None
+    grant_binding: Mapping[str, str] | None = None
 
     def as_json(self) -> dict[str, JsonValue]:
         payload: dict[str, JsonValue] = {
@@ -266,6 +319,8 @@ class PendingElevatedConsent:
         }
         if self.provider_binding is not None:
             payload["provider_binding"] = dict(self.provider_binding)
+        if self.grant_binding is not None:
+            payload["grant_binding"] = dict(self.grant_binding)
         return payload
 
 
@@ -304,6 +359,7 @@ def _danger_digest(
     pending_id: str,
     expires_at_unix: int,
     provider_binding: Mapping[str, str] | None,
+    grant_binding: Mapping[str, str] | None = None,
 ) -> str:
     body: dict[str, JsonValue] = {
         "danger_text": danger_text,
@@ -316,6 +372,8 @@ def _danger_digest(
     }
     if provider_binding is not None:
         body["provider_binding"] = dict(provider_binding)
+    if grant_binding is not None:
+        body["grant_binding"] = dict(grant_binding)
     return canonical_digest(body)
 
 
@@ -324,6 +382,7 @@ def prepare_pending(
     *,
     target_digest: str,
     provider_binding: Mapping[str, str] | None = None,
+    grant_binding: Mapping[str, str] | None = None,
     _state: Path | None = None,
 ) -> PendingElevatedConsent:
     spec = operation_spec(operation)
@@ -333,9 +392,14 @@ def prepare_pending(
         raise ElevatedBootstrapError("provider_binding_required")
     if not spec.requires_provider_binding and provider_binding is not None:
         raise ElevatedBootstrapError("provider_binding_forbidden")
+    if spec.requires_grant_binding and grant_binding is None:
+        raise ElevatedBootstrapError("grant_binding_required")
+    if not spec.requires_grant_binding and grant_binding is not None:
+        raise ElevatedBootstrapError("grant_binding_forbidden")
     binding = (
         _validated_provider_binding(provider_binding) if provider_binding is not None else None
     )
+    grant = _validated_grant_binding(grant_binding) if grant_binding is not None else None
     try:
         validated_digest = validate_sha256_digest(target_digest)
     except ProtocolValueError as exc:
@@ -357,6 +421,7 @@ def prepare_pending(
         pending_id=pending_id,
         expires_at_unix=expires,
         provider_binding=binding,
+        grant_binding=grant,
     )
     pending = PendingElevatedConsent(
         pending_id=pending_id,
@@ -368,6 +433,7 @@ def prepare_pending(
         expires_at_unix=expires,
         target_digest=validated_digest,
         provider_binding=binding,
+        grant_binding=grant,
     )
     _write_pending(pending, _state=_state)
     _audit(
@@ -385,7 +451,9 @@ def prepare_pending(
 
 
 def _validated_provider_binding(binding: Mapping[str, str]) -> dict[str, str]:
-    if set(binding) != set(_PROVIDER_BINDING_KEYS):
+    keys = set(binding)
+    required = set(_PROVIDER_BINDING_KEYS)
+    if keys != required and keys != required | _PROVIDER_BINDING_OPTIONAL_KEYS:
         raise ElevatedBootstrapError("provider_binding_invalid")
     normalized: dict[str, str] = {}
     for key in _PROVIDER_BINDING_KEYS:
@@ -399,6 +467,13 @@ def _validated_provider_binding(binding: Mapping[str, str]) -> dict[str, str]:
                 raise ElevatedBootstrapError("provider_binding_invalid") from exc
         else:
             normalized[key] = value
+    if _PROVIDER_REPOSITORY_KEY in binding:
+        try:
+            normalized[_PROVIDER_REPOSITORY_KEY] = validate_commitment(
+                binding[_PROVIDER_REPOSITORY_KEY]
+            )
+        except ProtocolValueError as exc:
+            raise ElevatedBootstrapError("provider_binding_invalid") from exc
     try:
         ProviderCredentialTarget(
             action="set",
@@ -409,10 +484,47 @@ def _validated_provider_binding(binding: Mapping[str, str]) -> dict[str, str]:
             purpose=normalized["purpose"],
             scope_digest=normalized["scope_digest"],
             purpose_digest=normalized["purpose_digest"],
+            repository_privacy_commitment=normalized.get(_PROVIDER_REPOSITORY_KEY),
         )
     except (TypeError, ValueError) as exc:
         raise ElevatedBootstrapError("provider_binding_invalid") from exc
     return normalized
+
+
+def _validated_grant_binding(binding: Mapping[str, str]) -> dict[str, str]:
+    if set(binding) != set(_GRANT_BINDING_KEYS):
+        raise ElevatedBootstrapError("grant_binding_invalid")
+    recipe = binding["recipe"]
+    commitment = binding["repository_privacy_commitment"]
+    authority_digest = binding["authority_digest"]
+    if type(recipe) is not str or recipe not in _GRANT_RECIPES:
+        raise ElevatedBootstrapError("grant_binding_invalid")
+    if type(authority_digest) is not str:
+        raise ElevatedBootstrapError("grant_binding_invalid")
+    try:
+        validated_commitment = validate_commitment(commitment)
+        validated_authority_digest = validate_sha256_digest(authority_digest)
+    except ProtocolValueError as exc:
+        raise ElevatedBootstrapError("grant_binding_invalid") from exc
+    return {
+        "recipe": recipe,
+        "repository_privacy_commitment": validated_commitment,
+        "authority_digest": validated_authority_digest,
+    }
+
+
+def grant_target_digest(grant_binding: Mapping[str, str]) -> str:
+    """Canonical target digest for one exact repository privacy grant."""
+
+    binding = _validated_grant_binding(grant_binding)
+    return canonical_digest(
+        {
+            "kind": "repository_privacy_grant",
+            "recipe": binding["recipe"],
+            "repository_privacy_commitment": binding["repository_privacy_commitment"],
+            "authority_digest": binding["authority_digest"],
+        }
+    )
 
 
 def _require_int(value: object) -> int:
@@ -479,6 +591,8 @@ def _load_pending_path(
         }
         if "provider_binding" in source:
             expected_keys.add("provider_binding")
+        if "grant_binding" in source:
+            expected_keys.add("grant_binding")
         if set(source) != expected_keys or source.get("state") != "pending":
             raise ElevatedBootstrapError("pending_corrupt")
         operation = _require_str(source["operation"])
@@ -501,9 +615,29 @@ def _load_pending_path(
                 raise ElevatedBootstrapError("pending_corrupt") from exc
         else:
             raise ElevatedBootstrapError("pending_corrupt")
+        grant_raw = source.get("grant_binding")
+        grant: dict[str, str] | None
+        if grant_raw is None:
+            grant = None
+        elif isinstance(grant_raw, dict) and all(
+            isinstance(k, str) and isinstance(v, str)
+            for k, v in cast(dict[object, object], grant_raw).items()
+        ):
+            try:
+                grant = _validated_grant_binding(
+                    {str(k): str(v) for k, v in cast(dict[object, object], grant_raw).items()}
+                )
+            except ElevatedBootstrapError as exc:
+                raise ElevatedBootstrapError("pending_corrupt") from exc
+        else:
+            raise ElevatedBootstrapError("pending_corrupt")
         if spec.requires_provider_binding and binding is None:
             raise ElevatedBootstrapError("pending_corrupt")
         if not spec.requires_provider_binding and binding is not None:
+            raise ElevatedBootstrapError("pending_corrupt")
+        if spec.requires_grant_binding and grant is None:
+            raise ElevatedBootstrapError("pending_corrupt")
+        if not spec.requires_grant_binding and grant is not None:
             raise ElevatedBootstrapError("pending_corrupt")
         risk = _require_str(source["risk_class"])
         danger_text = _require_str(source["danger_text"])
@@ -525,6 +659,7 @@ def _load_pending_path(
             expires_at_unix=expires_at,
             target_digest=target_digest,
             provider_binding=binding,
+            grant_binding=grant,
         )
     except ElevatedBootstrapError:
         raise
@@ -538,6 +673,7 @@ def _load_pending_path(
         pending_id=pending.pending_id,
         expires_at_unix=pending.expires_at_unix,
         provider_binding=pending.provider_binding,
+        grant_binding=pending.grant_binding,
     )
     if not _exact_match(expected, pending.danger_digest):
         raise ElevatedBootstrapError("pending_tampered")
@@ -680,6 +816,7 @@ def projection_for_status(
         expires_at_unix=pending.expires_at_unix,
         target_digest=pending.target_digest,
         review_command=("yoetz", "consent", "review"),
+        authorize_command=("yoetz", "consent", "authorize"),
     )
     return cast(dict[str, JsonValue], model.model_dump(mode="json", by_alias=True))
 
@@ -689,6 +826,11 @@ def catalog_payload() -> dict[str, JsonValue]:
 
     operations: list[JsonValue] = []
     for spec in CONSENT_OPERATIONS:
+        hint = f"yoetz consent prepare {spec.operation}"
+        if spec.requires_target_digest_arg:
+            hint += " --target-digest <sha256:...>"
+        if spec.requires_grant_binding:
+            hint += " --recipe <assisted_review|private|metadata_only>"
         operations.append(
             {
                 "operation": spec.operation,
@@ -696,11 +838,10 @@ def catalog_payload() -> dict[str, JsonValue]:
                 "summary": spec.summary,
                 "implemented": spec.implemented,
                 "requires_provider_binding": spec.requires_provider_binding,
+                "requires_grant_binding": spec.requires_grant_binding,
                 "requires_target_digest_arg": spec.requires_target_digest_arg,
-                "prepare_hint": (
-                    f"yoetz consent prepare {spec.operation}"
-                    + (" --target-digest <sha256:...>" if spec.requires_target_digest_arg else "")
-                ),
+                "chat_user_authorize_allowed": spec.chat_user_authorize_allowed,
+                "prepare_hint": hint,
             }
         )
     model = ConsentCatalogModel.model_validate(
@@ -724,6 +865,8 @@ def catalog_payload() -> dict[str, JsonValue]:
                 "one_pending_at_a_time": True,
                 "approval_arguments_forbidden": True,
                 "agent_selected_initialization_secret_forbidden": True,
+                "chat_user_host_tool_approval_permitted": True,
+                "unattested_chat_assent_forbidden": True,
             },
             "operations": operations,
         }
