@@ -172,6 +172,7 @@ def _build_strict_local_application() -> tuple[Application, _StrictLocalRuntime,
         profile=RuntimeProfile.STRICT_LOCAL,
         policy_packs=("research-evidence/0.1.0", "work-integrity/0.1.0"),
         version_manifest=start_app.version_manifest,
+        enforce_repository_identity=False,
     )
     return app, runtime, clock, catalog
 

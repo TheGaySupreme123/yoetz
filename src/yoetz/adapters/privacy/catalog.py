@@ -510,16 +510,52 @@ def _transition_members(proposal: PolicyTransitionProposal) -> tuple[PolicyTrans
 
 
 def _commit_result_bytes(result: PolicyCommitResult) -> bytes:
-    return canonical_encode(_json(result))
+    return canonical_encode(
+        {
+            "closed_session_count": result.closed_session_count,
+            "generation": result.generation,
+            "policy": _json(result.policy),
+            "revoked_authorization_count": result.revoked_authorization_count,
+        }
+    )
 
 
 def _commit_result_from_bytes(value: bytes) -> PolicyCommitResult:
     source = _mapping(strict_json_parse(value))
+    if set(source) != {
+        "closed_session_count",
+        "generation",
+        "policy",
+        "revoked_authorization_count",
+    }:
+        raise ValueError("privacy_policy_terminal_result_corrupt")
     return PolicyCommitResult(
         _policy_from_domain_mapping(_mapping(source["policy"])),
         _integer(source["generation"]),
         _integer(source["revoked_authorization_count"]),
         _integer(source["closed_session_count"]),
+    )
+
+
+def _verified_commit_result(value: bytes, digest: str) -> PolicyCommitResult:
+    parsed = strict_json_parse(value)
+    if canonical_encode(parsed) != value or canonical_digest(parsed) != digest:
+        raise ValueError("privacy_policy_terminal_result_corrupt")
+    return _commit_result_from_bytes(value)
+
+
+def _legacy_decision_digest(
+    decision: HumanPolicyDecision, decided_at: datetime
+) -> str:
+    """Reconstruct the pre-v3 timestamp-bound decision identity for safe migration."""
+
+    return canonical_digest(
+        {
+            "approved": decision.approved,
+            "authority_commitment": decision.authority_commitment,
+            "decided_at": format_rfc3339_millis(decided_at),
+            "prepared_digest": decision.prepared_digest,
+        }
     )
 
 
@@ -661,7 +697,8 @@ class CatalogPrivacyPolicyStore:
         )
         state = self._db.execute(
             "SELECT first_repository_carry_forward_state, migration_policy_canonical, "
-            "migration_policy_digest FROM privacy_installation_authority "
+            "migration_policy_digest, first_repository_carry_forward_commitment "
+            "FROM privacy_installation_authority "
             "WHERE installation_id = ?",
             (scope.installation_id,),
         ).fetchone()
@@ -718,7 +755,8 @@ class CatalogPrivacyPolicyStore:
             )
             state = self._db.execute(
                 "SELECT first_repository_carry_forward_state, migration_policy_canonical, "
-                "migration_policy_digest FROM privacy_installation_authority "
+                "migration_policy_digest, first_repository_carry_forward_commitment "
+                "FROM privacy_installation_authority "
                 "WHERE installation_id = ?",
                 (scope.installation_id,),
             ).fetchone()
@@ -735,6 +773,7 @@ class CatalogPrivacyPolicyStore:
         if state is None:
             raise ValueError("privacy_authority_state_corrupt")
         first_state = cast(str, state[0])
+        first_commitment = cast(str | None, state[3])
         migration_policy = _policy_from_bytes(cast(bytes, state[1]))
         if migration_policy.policy_digest != state[2]:
             raise ValueError("privacy_authority_state_corrupt")
@@ -749,15 +788,13 @@ class CatalogPrivacyPolicyStore:
                 "not_applicable", "legacy_route_available", "first_repository_available", "consumed"
             ] = (
                 "consumed"
-                if first_state == "consumed" or consumed_route is not None
+                if first_commitment == commitment or consumed_route is not None
                 else "not_applicable"
             )
         elif available_route is not None:
             migration_state = "legacy_route_available"
         elif first_state == "available":
             migration_state = "first_repository_available"
-        elif first_state == "consumed":
-            migration_state = "consumed"
         else:
             migration_state = "not_applicable"
         grant_state: Literal["granted", "missing"] = "granted" if exact is not None else "missing"
@@ -884,10 +921,11 @@ class CatalogPrivacyPolicyStore:
                     if task_id is None:
                         self._db.execute(
                             "UPDATE privacy_installation_authority SET "
-                            "first_repository_carry_forward_state = 'consumed', updated_at = ? "
+                            "first_repository_carry_forward_state = 'consumed', "
+                            "first_repository_carry_forward_commitment = ?, updated_at = ? "
                             "WHERE installation_id = ? AND "
                             "first_repository_carry_forward_state = 'available'",
-                            (wire_now, scope.installation_id),
+                            (scope.workspace_ref_commitment, wire_now, scope.installation_id),
                         )
                     else:
                         self._db.execute(
@@ -1054,8 +1092,19 @@ class CatalogPrivacyPolicyStore:
         return prepared
 
     async def load_pending_transition(self, proposal_id: str) -> PreparedPolicyTransition:
+        return await self._load_transition(proposal_id, pending_only=True)
+
+    async def load_transition(self, proposal_id: str) -> PreparedPolicyTransition:
+        return await self._load_transition(proposal_id, pending_only=False)
+
+    async def _load_transition(
+        self, proposal_id: str, *, pending_only: bool
+    ) -> PreparedPolicyTransition:
+        state_filter = " AND transition.state = 'pending'" if pending_only else (
+            " AND transition.state IN ('pending', 'committed', 'denied')"
+        )
         row = self._db.execute(
-            """SELECT transition.base_policy_generation, transition.proposal_digest,
+            f"""SELECT transition.base_policy_generation, transition.proposal_digest,
                       transition.candidate_policy_canonical, transition.diff_canonical,
                       transition.expires_at, transition.created_at,
                       transition.authority_digest, base.policy_digest
@@ -1063,7 +1112,7 @@ class CatalogPrivacyPolicyStore:
                JOIN privacy_policy_versions AS base
                  ON base.policy_id = transition.base_policy_id
                 AND base.policy_version = transition.base_policy_version
-               WHERE transition.proposal_id = ? AND transition.state = 'pending'""",
+               WHERE transition.proposal_id = ?{state_filter}""",
             (proposal_id,),
         ).fetchone()
         if row is None:
@@ -1131,8 +1180,8 @@ class CatalogPrivacyPolicyStore:
             {
                 "approved": decision.approved,
                 "authority_commitment": decision.authority_commitment,
-                "decided_at": format_rfc3339_millis(decision.decided_at),
                 "prepared_digest": decision.prepared_digest,
+                "proposal_id": proposal_id,
             }
         )
         now = self._clock.now_utc()
@@ -1141,7 +1190,10 @@ class CatalogPrivacyPolicyStore:
         async with self._lock:
             with _transaction(self._db):
                 row = self._db.execute(
-                    "SELECT state, expires_at, decision_digest, terminal_result_canonical "
+                    "SELECT state, expires_at, decision_digest, terminal_result_canonical, "
+                    "terminal_result_digest, terminal_result_version, authority_commitment, "
+                    "committed_policy_id, committed_policy_version, base_policy_id, "
+                    "base_policy_version, base_policy_generation, terminal_at "
                     "FROM privacy_policy_transitions WHERE proposal_id = ?",
                     (proposal_id,),
                 ).fetchone()
@@ -1149,9 +1201,87 @@ class CatalogPrivacyPolicyStore:
                     raise ValueError("privacy_policy_transition_unavailable")
                 state = cast(str, row[0])
                 if state in {"committed", "denied"}:
-                    if row[2] != decision_digest or row[3] is None:
+                    if (state == "committed") != decision.approved:
                         raise ValueError("privacy_policy_decision_mismatch")
-                    return _commit_result_from_bytes(cast(bytes, row[3]))
+                    if row[5] is None:
+                        if state == "committed" and row[6] != decision.authority_commitment:
+                            raise ValueError("privacy_policy_decision_mismatch")
+                        terminal_at = parse_rfc3339_millis(cast(str, row[12]))
+                        if row[2] not in {
+                            _legacy_decision_digest(decision, decision.decided_at),
+                            _legacy_decision_digest(decision, terminal_at),
+                        }:
+                            raise ValueError("privacy_policy_decision_mismatch")
+                        if state == "committed":
+                            legacy = self._db.execute(
+                                "SELECT policy_canonical, policy_generation "
+                                "FROM privacy_policy_versions WHERE policy_id = ? "
+                                "AND policy_version = ?",
+                                (row[7], row[8]),
+                            ).fetchone()
+                        else:
+                            legacy = self._db.execute(
+                                "SELECT policy_canonical, policy_generation "
+                                "FROM privacy_policy_versions WHERE policy_id = ? "
+                                "AND policy_version = ?",
+                                (row[9], row[10]),
+                            ).fetchone()
+                        if (
+                            legacy is None
+                            or type(legacy[0]) is not bytes
+                            or type(legacy[1]) is not int
+                            or (state == "denied" and legacy[1] != row[11])
+                        ):
+                            raise ValueError("privacy_policy_terminal_result_corrupt")
+                        legacy_result = PolicyCommitResult(
+                            _policy_from_bytes(legacy[0]), legacy[1], 0, 0
+                        )
+                        terminal = _commit_result_bytes(legacy_result)
+                        terminal_digest = canonical_digest(strict_json_parse(terminal))
+                        self._db.execute(
+                            "UPDATE privacy_policy_transitions SET decision_digest = ?, "
+                            "decision_at = ?, terminal_result_canonical = ?, "
+                            "terminal_result_digest = ?, terminal_result_version = 1, "
+                            "updated_at = ? WHERE proposal_id = ? "
+                            "AND terminal_result_version IS NULL",
+                            (
+                                decision_digest,
+                                format_rfc3339_millis(terminal_at),
+                                terminal,
+                                terminal_digest,
+                                format_rfc3339_millis(now),
+                                proposal_id,
+                            ),
+                        )
+                        return replace(legacy_result, replayed=True)
+                    if (
+                        row[5] != 1
+                        or row[2] != decision_digest
+                        or type(row[3]) is not bytes
+                        or type(row[4]) is not str
+                    ):
+                        raise ValueError("privacy_policy_decision_mismatch")
+                    replayed = _verified_commit_result(row[3], row[4])
+                    if state == "committed" and (
+                        replayed.policy.policy_id != row[7]
+                        or replayed.policy.version != row[8]
+                    ):
+                        raise ValueError("privacy_policy_terminal_result_corrupt")
+                    if state == "committed":
+                        committed_generation = self._db.execute(
+                            "SELECT policy_generation FROM privacy_policy_versions "
+                            "WHERE policy_id = ? AND policy_version = ?",
+                            (row[7], row[8]),
+                        ).fetchone()
+                        if committed_generation != (replayed.generation,):
+                            raise ValueError("privacy_policy_terminal_result_corrupt")
+                    elif (
+                        replayed.policy.policy_id != row[9]
+                        or replayed.policy.version != row[10]
+                        or replayed.generation != row[11]
+                    ):
+                        raise ValueError("privacy_policy_terminal_result_corrupt")
+                    return replace(replayed, replayed=True)
                 if state == "expired":
                     raise ValueError("privacy_policy_decision_expired")
                 if state == "stale":
@@ -1210,7 +1340,8 @@ class CatalogPrivacyPolicyStore:
                     self._db.execute(
                         """UPDATE privacy_policy_transitions SET state='denied',
                                human_decision='denied', decision_digest=?, terminal_at=?, updated_at=?,
-                               terminal_result_canonical=?, terminal_result_digest=?
+                               terminal_result_canonical=?, terminal_result_digest=?,
+                               decision_at=?, terminal_result_version=1
                            WHERE proposal_id=?""",
                         (
                             decision_digest,
@@ -1218,6 +1349,7 @@ class CatalogPrivacyPolicyStore:
                             format_rfc3339_millis(now),
                             terminal,
                             canonical_digest(strict_json_parse(terminal)),
+                            format_rfc3339_millis(decision.decided_at),
                             proposal_id,
                         ),
                     )
@@ -1241,7 +1373,8 @@ class CatalogPrivacyPolicyStore:
                         """UPDATE privacy_policy_transitions SET state='committed',
                                human_decision='approved', decision_digest=?, authority_commitment=?,
                                committed_policy_id=?, committed_policy_version=?, terminal_at=?,
-                               updated_at=?, terminal_result_canonical=?, terminal_result_digest=?
+                               updated_at=?, terminal_result_canonical=?, terminal_result_digest=?,
+                               decision_at=?, terminal_result_version=1
                            WHERE proposal_id=?""",
                         (
                             decision_digest,
@@ -1252,6 +1385,7 @@ class CatalogPrivacyPolicyStore:
                             format_rfc3339_millis(now),
                             terminal,
                             canonical_digest(strict_json_parse(terminal)),
+                            format_rfc3339_millis(decision.decided_at),
                             proposal_id,
                         ),
                     )

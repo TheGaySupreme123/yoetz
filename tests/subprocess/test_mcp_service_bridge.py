@@ -289,18 +289,27 @@ async def test_locked_error_is_structured_and_resources_never_connect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     locked = _FakeClient(ControlError("vault_locked"))
-    remaining = _install_clients(monkeypatch, [locked])
+    unlocked = _FakeClient()
+    remaining = _install_clients(monkeypatch, [locked, unlocked])
     runtime = bridge.build_bridge_runtime()
 
     resources = await bridge.list_resources()
     assert len(resources) == 5
-    assert len(remaining) == 1
+    assert len(remaining) == 2
 
     result = await bridge.dispatch_start(_requests()["start"], runtime)
     assert result.isError is True
     assert result.structuredContent is not None
     assert result.structuredContent["error"]["code"] == "VAULT_LOCKED"
     assert "unlock" not in {tool.name for tool in await bridge.list_tools()}
+    assert locked.closed is True
+    assert runtime._slot.client is None  # pyright: ignore[reportPrivateUsage]
+
+    after_unlock = await bridge.dispatch_start(_requests()["start"], runtime)
+    assert after_unlock.isError is True
+    assert unlocked.calls and unlocked.calls[0][0] == "start"
+    assert runtime._slot.client is unlocked  # pyright: ignore[reportPrivateUsage]
+    await bridge.close_bridge_runtime(runtime)
 
 
 @pytest.mark.anyio

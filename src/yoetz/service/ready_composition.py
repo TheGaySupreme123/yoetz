@@ -2333,11 +2333,16 @@ async def provide_service_ready_context(
         candidates: tuple[ObservationAdviceCandidate, ...],
         basis: str,
         gaps: tuple[str, ...],
+        yoetz_session_id: str | None,
     ) -> ObservationAdviceSemanticAddon | None:
         # Privacy-gated observation semantic path: authorize/dispatch through the coordinator.
         # Provider failure or no-discrepancy leaves deterministic advice intact (no upgrade).
         del gaps
-        if not semantic_ready or provider_binding is None:
+        if (
+            not semantic_ready
+            or provider_binding is None
+            or yoetz_session_id is None
+        ):
             return None
         packet = minimized_semantic_evidence_packet(
             candidates,
@@ -2352,20 +2357,36 @@ async def provide_service_ready_context(
                 if basis.startswith("sha256:")
                 else canonical_digest(cast(CanonicalJsonValue, {"basis": basis}))
             )
-            machine_scope = AuthorizationScope(AuthorizationScopeKind.MACHINE, installation_id)
+            route = await catalog.resolve_route(yoetz_session_id)
+            if (
+                route is None
+                or route.state is not TaskRouteState.ACTIVE
+                or route.repository_privacy_commitment is None
+            ):
+                return None
+            repository_scope = AuthorizationScope(
+                AuthorizationScopeKind.TASK,
+                installation_id,
+                route.repository_privacy_commitment,
+                route.task_id,
+            )
+            if not await cast(PrivacyCoordinator, privacy).activate_repository(
+                repository_scope
+            ):
+                return None
             candidate = CandidateContext(
                 request_id=ids.new(IdKind.REQUEST),
                 channel=EgressChannel.LLM_INFERENCE,
                 local_sink=None,
                 purpose="semantic-review",
-                scope=machine_scope,
+                scope=repository_scope,
                 subject_digest=subject,
                 provider_binding=provider_binding,
                 items=(
                     CandidateContextItem(
                         "observation-advice-packet",
                         DataCategory.BOUNDED_STRUCTURAL_METADATA,
-                        machine_scope,
+                        repository_scope,
                         "/observation-advice",
                         payload,
                     ),

@@ -62,13 +62,8 @@ from yoetz.config.paths import (
 )
 from yoetz.domain.privacy import (
     AuthorizationScopeKind,
-    ChannelPolicy,
     EgressChannel,
     LocalDisclosureSink,
-    PrivacyPolicy,
-    PrivacyProfile,
-    ReviewContextProfile,
-    ReviewSelectionPolicy,
 )
 from yoetz.domain.values import frontier_from_json
 from yoetz.observability.logging import (
@@ -916,22 +911,23 @@ class ServiceDaemon:
         repository_privacy_context: RepositoryPrivacyContext | None = None,
     ) -> object:
         operation = cast(Callable[..., Awaitable[object]], handler)
-        if (
-            request.method in {ControlMethod.CHECK, ControlMethod.STATUS}
-            and request.route_profile is not None
-        ):
-            return await operation(request.body, route_profile=request.route_profile)
-        if repository_privacy_context is not None and request.method in {
+        kwargs: dict[str, object] = {}
+        if request.method in {ControlMethod.CHECK, ControlMethod.STATUS}:
+            if request.route_profile is not None:
+                kwargs["route_profile"] = request.route_profile
+        if request.method in {
             ControlMethod.START,
+            ControlMethod.PUBLISH_WORK,
+            ControlMethod.CHECK,
+            ControlMethod.RESPOND,
+            ControlMethod.STATUS,
+            ControlMethod.RECEIPT,
             ControlMethod.PRIVACY_GET_SETUP,
             ControlMethod.PRIVACY_GET_EFFECTIVE,
             ControlMethod.PRIVACY_PROPOSE_POLICY,
         }:
-            return await operation(
-                request.body,
-                repository_privacy_context=repository_privacy_context,
-            )
-        return await operation(request.body)
+            kwargs["repository_privacy_context"] = repository_privacy_context
+        return await operation(request.body, **kwargs)
 
     async def _project_completed_response(
         self,
@@ -1815,55 +1811,6 @@ class _InstallationStateStore:
             raise RuntimeError("service_generation_invalid") from exc
 
 
-def _private_repository_preview_baseline(candidate: PrivacyPolicy) -> PrivacyPolicy:
-    """Materialize the absent repository row as an explicit Private/no-egress policy.
-
-    An insert has no stored policy to diff. Treating that as an empty diff hides the exact
-    provider, categories, sensitivity classes, confirmation rule, and ceilings the new grant
-    creates. Local agent and trusted-human visibility remain the candidate's values because the
-    repository grant changes standing model authority, not those already-local audiences.
-    """
-
-    disabled_channels = tuple(
-        ChannelPolicy(
-            channel,
-            False,
-            (),
-            (),
-            None,
-            (),
-            AuthorizationScopeKind.MACHINE,
-            False,
-            0,
-            0,
-            0,
-        )
-        for channel in sorted(EgressChannel, key=lambda item: item.value.encode("ascii"))
-    )
-    return PrivacyPolicy(
-        candidate.policy_id,
-        candidate.version,
-        candidate.policy_digest,
-        PrivacyProfile.LOCAL_ONLY,
-        ReviewContextProfile.STRUCTURAL,
-        ReviewSelectionPolicy.for_profile(ReviewContextProfile.STRUCTURAL),
-        False,
-        False,
-        candidate.effective_scope,
-        disabled_channels,
-        False,
-        None,
-        (),
-        (),
-        candidate.agent_context_categories,
-        candidate.agent_context_data_classes,
-        candidate.trusted_human_control_categories,
-        candidate.trusted_human_control_data_classes,
-        candidate.created_at,
-        candidate.supersedes_policy_digest,
-    )
-
-
 class _LockedHumanEffects:
     def __init__(
         self,
@@ -1912,19 +1859,7 @@ class _LockedHumanEffects:
                 target.action == "set"
             ):
                 raise HumanControlError("target_invalid")
-            digest = canonical_digest(
-                {
-                    "action": target.action,
-                    "endpoint_profile_id": target.endpoint_profile_id,
-                    "endpoint_profile_version": target.endpoint_profile_version,
-                    "kind": target.kind,
-                    "model_id": target.model_id,
-                    "provider_id": target.provider_id,
-                    "purpose": target.purpose,
-                    "purpose_digest": target.purpose_digest,
-                    "scope_digest": target.scope_digest,
-                }
-            )
+            digest = target.target_digest()
             preview: HumanPreview
             if target.action == "set":
                 preview = ProviderCredentialSetPreview(target)
@@ -2018,14 +1953,17 @@ class _LockedHumanEffects:
                 except (TypeError, ValueError) as exc:
                     raise HumanControlError("pending_not_actionable") from exc
                 return preview_disclosure, digest, effective.generation
-            from yoetz.application.privacy_policy import privacy_policy_changes
+            from yoetz.application.privacy_policy import (
+                privacy_policy_changes,
+                private_repository_baseline,
+            )
 
             app = self._privacy_app()
             store = getattr(app, "policy_store", None)
             if store is None:
                 raise HumanControlError("kind_forbidden")
             try:
-                prepared = await store.load_pending_transition(target.pending_id)
+                prepared = await store.load_transition(target.pending_id)
             except ValueError as exc:
                 if exc.args == ("privacy_policy_transition_unavailable",):
                     raise HumanControlError("target_invalid") from exc
@@ -2072,7 +2010,7 @@ class _LockedHumanEffects:
                             # Private/no-egress policy at this repository scope. Never substitute
                             # the inherited machine row: that would falsely claim a repository
                             # grant existed and would hide what the insert newly authorizes.
-                            baseline = _private_repository_preview_baseline(member.candidate_policy)
+                            baseline = private_repository_baseline(member.candidate_policy)
                             changes = privacy_policy_changes(baseline, member.candidate_policy)
                             preview_members.append(
                                 PrivacyPolicyTransitionPreviewMember(
@@ -2144,7 +2082,12 @@ class _LockedHumanEffects:
             target.purpose_digest,
         )
         await self._vault.store_provider_credential(
-            target.action, binding, secret, proof, now_monotonic
+            target.action,
+            binding,
+            secret,
+            proof,
+            now_monotonic,
+            target_digest=target.target_digest(),
         )
         generation = self._vault._provider_generations.get(binding, 1)  # pyright: ignore[reportPrivateUsage]
         # The credential is the one setup answer nothing downstream can infer. Verify it while
@@ -2183,7 +2126,6 @@ class _LockedHumanEffects:
             CandidateContext,
             CandidateContextItem,
             DataCategory,
-            EgressChannel,
         )
         from yoetz.observability.logging import record_bounded_event_without_raising
         from yoetz.ports.semantic import Deadline, SemanticResultInvalid, SemanticResultUnavailable
@@ -2208,7 +2150,7 @@ class _LockedHumanEffects:
             return False
         try:
             policy_app = coordinator.policy_application
-            if policy_app is None:
+            if policy_app is None or target.repository_privacy_commitment is None:
                 return False
             setup_scope = getattr(policy_app, "setup_scope", None)
             if setup_scope is None:
@@ -2218,17 +2160,11 @@ class _LockedHumanEffects:
             scope = AuthorizationScope(
                 AuthorizationScopeKind.TASK,
                 setup_scope.installation_id,
-                canonical_digest(
-                    {
-                        "endpoint_profile_id": provider.endpoint_profile_id,
-                        "endpoint_profile_version": provider.endpoint_profile_version,
-                        "kind": "credential_probe_workspace",
-                        "model_id": provider.model,
-                        "provider_id": provider.provider_id,
-                    }
-                ),
+                target.repository_privacy_commitment,
                 task_id,
             )
+            if not await coordinator.activate_repository(scope):
+                return False
             payload = b'{"credential_probe":true}'
             candidate = CandidateContext(
                 request_id=request_id,
@@ -2365,7 +2301,7 @@ class _LockedHumanEffects:
         if target.decision_kind != "policy":
             raise HumanControlError("kind_forbidden")
         try:
-            prepared = await app.policy_store.load_pending_transition(target.pending_id)
+            prepared = await app.policy_store.load_transition(target.pending_id)
         except ValueError as exc:
             if exc.args == ("privacy_policy_transition_unavailable",):
                 raise HumanControlError("target_invalid") from exc

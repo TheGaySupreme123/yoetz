@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -604,6 +605,7 @@ class Application:
     connected_provider_ids: tuple[str, ...] = ()
     provider_credential_connected: bool = False
     semantic_ready: bool = False
+    enforce_repository_identity: bool = True
     _close_lock: asyncio.Lock = field(init=False, repr=False, compare=False)
     _close_task: asyncio.Task[None] | None = field(
         init=False, default=None, repr=False, compare=False
@@ -619,6 +621,8 @@ class Application:
             raise TypeError("provider_credential_connected_invalid")
         if type(self.semantic_ready) is not bool:
             raise TypeError("semantic_ready_invalid")
+        if type(self.enforce_repository_identity) is not bool:
+            raise TypeError("repository_identity_enforcement_invalid")
         # Readiness may never outrun the resolved binding. A connected provider that is not the
         # configured one leaves dispatch on the credential-unavailable path, so a readiness flag
         # set without it would report ready while every check reports unavailable.
@@ -631,26 +635,67 @@ class Application:
         *,
         repository_privacy_context: RepositoryPrivacyContext | None = None,
     ) -> StartInternalResult:
-        result = await execute_start(self, request)  # pyright: ignore[reportArgumentType]
-        if repository_privacy_context is None:
-            return result
-        route = await self.start_catalog.resolve_route(result.session_id)
-        if route is None or route.task_id != result.task_id:
+        return await execute_start(
+            self,  # pyright: ignore[reportArgumentType]
+            request,
+            repository_privacy_commitment=(
+                None
+                if repository_privacy_context is None
+                else repository_privacy_context.commitment
+            ),
+        )
+
+    async def _require_repository_route(
+        self,
+        request: object,
+        repository_privacy_context: RepositoryPrivacyContext | None,
+    ) -> None:
+        """Fence every task workflow to the trusted repository on its active route."""
+
+        if not self.enforce_repository_identity:
+            return
+
+        session_id = getattr(request, "session_id", None)
+        if type(session_id) is not str:
             raise PublicOperationError(
-                PublicErrorCode.STORAGE_CORRUPT,
-                "The stored task route is invalid.",
+                PublicErrorCode.INVALID_REQUEST,
+                "The task request is invalid.",
                 False,
             )
-        await self.start_catalog.bind_repository_privacy(
-            result.task_id,
-            route.route_identity_digest,
-            repository_privacy_context.commitment,
+        route = await self.start_catalog.resolve_route(session_id)
+        request_task_id = getattr(request, "task_id", None)
+        if route is None:
+            raise PublicOperationError(
+                PublicErrorCode.SESSION_NOT_FOUND,
+                "The requested task attachment was not found.",
+                False,
+            )
+        if request_task_id is not None and request_task_id != route.task_id:
+            raise PublicOperationError(
+                PublicErrorCode.SESSION_CONFLICT,
+                "The requested task attachment conflicts.",
+                False,
+            )
+        expected = route.repository_privacy_commitment
+        actual = (
+            None
+            if repository_privacy_context is None
+            else repository_privacy_context.commitment
         )
-        return result
+        if expected is None or actual is None or not hmac.compare_digest(expected, actual):
+            raise PublicOperationError(
+                PublicErrorCode.SESSION_CONFLICT,
+                "The requested task attachment conflicts.",
+                False,
+            )
 
     async def publish_work(
-        self, request: PublishWorkRequest
+        self,
+        request: PublishWorkRequest,
+        *,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
     ) -> PublishWorkInternalResult | PublishWorkResult:
+        await self._require_repository_route(request, repository_privacy_context)
         return await execute_publish_work(self, request)  # pyright: ignore[reportArgumentType]
 
     def publish_response_key(
@@ -777,9 +822,11 @@ class Application:
         request: CheckRequest,
         *,
         route_profile: Literal["policy", "strict"] = "policy",
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
     ) -> CheckCommitResult | CheckAwaitingHuman:
         from yoetz.application.check import execute_check
 
+        await self._require_repository_route(request, repository_privacy_context)
         # Resolve omitted mode via policy so recorded check events carry the resolved value.
         if request.mode is None:
             request = request.model_copy(
@@ -791,7 +838,13 @@ class Application:
             route_profile=route_profile,
         )
 
-    async def respond(self, request: RespondRequest) -> RespondInternalResult:
+    async def respond(
+        self,
+        request: RespondRequest,
+        *,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> RespondInternalResult:
+        await self._require_repository_route(request, repository_privacy_context)
         return await execute_respond(self, request)  # pyright: ignore[reportArgumentType]
 
     async def status(
@@ -799,14 +852,22 @@ class Application:
         request: StatusRequest,
         *,
         route_profile: Literal["policy", "strict"] | None = None,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
     ) -> StatusInternalResult:
+        await self._require_repository_route(request, repository_privacy_context)
         return await execute_status(
             self,  # pyright: ignore[reportArgumentType]
             request,
             route_profile=route_profile,
         )
 
-    async def receipt(self, request: ReceiptRequest) -> ReceiptInternalResult:
+    async def receipt(
+        self,
+        request: ReceiptRequest,
+        *,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> ReceiptInternalResult:
+        await self._require_repository_route(request, repository_privacy_context)
         return await execute_receipt(self, request)  # pyright: ignore[reportArgumentType]
 
     async def import_codex_jsonl(self, request: ImportCodexJsonlRequest) -> ImportReportInternal:
@@ -1220,6 +1281,7 @@ class ReadyApplicationFactory:
                 connected_provider_ids=context.connected_provider_ids,
                 provider_credential_connected=context.provider_credential_connected,
                 semantic_ready=context.semantic_ready,
+                enforce_repository_identity=True,
             )
             if context.verification_supervisor is not None:
                 await context.verification_supervisor.start()

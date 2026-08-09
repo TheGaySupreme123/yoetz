@@ -736,7 +736,9 @@ class YoetzRuntime:
 
     # -- confidential ceremonies ---------------------------------------
 
-    def credential_target(self) -> ProviderCredentialTarget:
+    def credential_target(
+        self, repository_privacy_commitment: str | None = None
+    ) -> ProviderCredentialTarget:
         """Build the nonsecret credential identifiers for the ceremony."""
 
         from yoetz.config.load import load_config
@@ -761,14 +763,23 @@ class YoetzRuntime:
             purpose=binding.purpose,
             scope_digest=binding.authorization_scope_digest,
             purpose_digest=binding.purpose_digest,
+            repository_privacy_commitment=repository_privacy_commitment,
         )
 
     async def store_provider_credential(self) -> str:
         """Run the existing confidential ceremony. No secret crosses this call."""
 
+        from yoetz.cli.privacy_setup import get_privacy_setup_snapshot
         from yoetz.cli.unlock import HumanCeremonyCliError, set_provider_credential
 
-        target = self.credential_target()
+        snapshot = await get_privacy_setup_snapshot()
+        repository_commitment = snapshot.bound_scope.get("workspace_ref_commitment")
+        if type(repository_commitment) is not str:
+            raise RuntimeError_(
+                "repository_privacy_scope_unavailable",
+                "the current repository is not bound to privacy authority",
+            )
+        target = self.credential_target(repository_commitment)
         try:
             result = await set_provider_credential(target)
         except HumanCeremonyCliError as error:

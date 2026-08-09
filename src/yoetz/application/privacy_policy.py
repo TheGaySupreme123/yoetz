@@ -77,6 +77,7 @@ __all__ = [
     "privacy_pending_list",
     "privacy_receipts_list",
     "privacy_tighten_policy",
+    "private_repository_baseline",
 ]
 
 _SETUP_MESSAGES = frozenset({"begin", "answer", "review", "cancel"})
@@ -284,8 +285,6 @@ async def privacy_get_setup(
         if request.repository_scope is None
         else await app.policy_store.repository_authority(request.repository_scope)
     )
-    if authority is not None and authority.migration_state == "first_repository_available":
-        authority = await app.policy_store.carry_forward_repository_authority(authority.scope)
     effective = (
         await app.policy_store.effective_policy(app.setup_scope)
         if authority is None
@@ -393,13 +392,7 @@ async def privacy_propose_policy(
             supersedes=None,
         )
         prepared_repository_candidate = repository_candidate
-        repository_baseline = _policy_for_scope(
-            current.policy,
-            authority.scope,
-            policy_id=repository_policy_id,
-            version=1,
-            supersedes=None,
-        )
+        repository_baseline = private_repository_baseline(repository_candidate)
         if _is_tightening(repository_baseline, repository_candidate):
             async with app.gateway.authority_mutation_fence():
                 commit = await app.policy_store.insert_repository_tightening(
@@ -477,6 +470,49 @@ async def privacy_propose_policy(
     return PolicyDecisionRequired(prepared, proposal_id)
 
 
+def private_repository_baseline(candidate: PrivacyPolicy) -> PrivacyPolicy:
+    """Represent an absent repository grant as explicit Private/no-egress authority."""
+
+    disabled_channels = tuple(
+        ChannelPolicy(
+            channel,
+            False,
+            (),
+            (),
+            None,
+            (),
+            AuthorizationScopeKind.MACHINE,
+            False,
+            0,
+            0,
+            0,
+        )
+        for channel in sorted(EgressChannel, key=lambda item: item.value.encode("ascii"))
+    )
+    return PrivacyPolicy(
+        candidate.policy_id,
+        candidate.version,
+        candidate.policy_digest,
+        PrivacyProfile.LOCAL_ONLY,
+        ReviewContextProfile.STRUCTURAL,
+        ReviewSelectionPolicy.for_profile(ReviewContextProfile.STRUCTURAL),
+        False,
+        False,
+        candidate.effective_scope,
+        disabled_channels,
+        False,
+        None,
+        (),
+        (),
+        candidate.agent_context_categories,
+        candidate.agent_context_data_classes,
+        candidate.trusted_human_control_categories,
+        candidate.trusted_human_control_data_classes,
+        candidate.created_at,
+        candidate.supersedes_policy_digest,
+    )
+
+
 async def privacy_tighten_policy(
     app: PrivacyPolicyApplication, request: TightenPrivacyPolicyRequest
 ) -> PrivacyPolicyResult:
@@ -508,7 +544,11 @@ async def decide_privacy_policy(
     effective = EffectivePrivacyPolicy(
         commit.policy, commit.generation, commit.policy.policy_digest
     )
-    reconciliation = await app.gateway.reconcile_policy(effective, request.human_authority)
+    reconciliation = (
+        ProviderReconciliation(commit.generation, 0, 0, ())
+        if commit.replayed
+        else await app.gateway.reconcile_policy(effective, request.human_authority)
+    )
     return _result(commit, reconciliation)
 
 

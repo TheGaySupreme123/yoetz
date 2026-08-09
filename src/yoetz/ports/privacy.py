@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Literal, Protocol, cast
@@ -330,6 +330,7 @@ class PolicyCommitResult:
     generation: int
     revoked_authorization_count: int
     closed_session_count: int
+    replayed: bool = field(default=False, compare=False)
 
     def __post_init__(self) -> None:
         if type(self.policy) is not PrivacyPolicy:
@@ -337,6 +338,8 @@ class PolicyCommitResult:
         _positive(self.generation)
         _nonnegative(self.revoked_authorization_count)
         _nonnegative(self.closed_session_count)
+        if type(self.replayed) is not bool:
+            raise _invalid()
 
 
 @dataclass(frozen=True, slots=True)
@@ -899,6 +902,8 @@ class PrivacyPolicyStorePort(Protocol):
     ) -> PreparedPolicyTransition: ...
 
     async def load_pending_transition(self, proposal_id: str) -> PreparedPolicyTransition: ...
+
+    async def load_transition(self, proposal_id: str) -> PreparedPolicyTransition: ...
 
     async def commit_transition(
         self, prepared: PreparedPolicyTransition, decision: HumanPolicyDecision

@@ -105,6 +105,7 @@ _REGISTERED_TOOL_NAMES: Final = frozenset(
 # answered by the live service and reconnecting around it drops the session for nothing, so both
 # projection reasons are handled in place and surfaced with their own remedy.
 _RECONNECT_REASONS: Final = frozenset({"service_unavailable", "service_generation_changed"})
+_DISCARD_CLIENT_REASONS: Final = _RECONNECT_REASONS | {"vault_locked"}
 # One wording for both post-commit projection failures — the service's own (control reason
 # `response_projection_failed`) and the bridge's. In both the operation stands and the only safe
 # recovery is replaying the same request_id, so the caller must never see them differ.
@@ -451,9 +452,10 @@ async def _invoke_with_reconnect[RequestT: BaseModel, ResultT: BaseModel](
     try:
         return await invoke(client, request)
     except ControlError as error:
+        if error.reason in _DISCARD_CLIENT_REASONS:
+            await _discard_client(runtime, client)
         if not error.retryable or error.reason not in _RECONNECT_REASONS:
             raise
-        await _discard_client(runtime, client)
         replacement = await ensure_service_client(runtime)
         return await invoke(replacement, request)
 

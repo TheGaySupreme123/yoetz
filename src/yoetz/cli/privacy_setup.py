@@ -51,6 +51,7 @@ from yoetz.protocol.models import DataCategory
 __all__ = [
     "PrivacySetupReport",
     "PrivacySetupSnapshot",
+    "get_privacy_setup_snapshot",
     "build_candidate_policy",
     "recommended_privacy_recipe",
     "run_privacy_setup",
@@ -925,7 +926,9 @@ def _setup_snapshot_from_wire(raw: object) -> PrivacySetupSnapshot:
         raise ValueError("privacy_setup_snapshot_invalid") from None
 
 
-async def _setup_snapshot(workspace_locator: Path | None = None) -> PrivacySetupSnapshot:
+async def get_privacy_setup_snapshot(
+    workspace_locator: Path | None = None,
+) -> PrivacySetupSnapshot:
     from yoetz.cli.app import build_service_client
     from yoetz.ports.control import WorkspaceLocator
 
@@ -1111,7 +1114,7 @@ async def run_privacy_setup(
             reason="local_terminal_required",
         )
     locator = Path.cwd() if workspace_locator is None else workspace_locator
-    snapshot = await _setup_snapshot(locator)
+    snapshot = await get_privacy_setup_snapshot(locator)
     current = snapshot.composed_policy
     _render_repository_authority(snapshot)
     external, local = _configured_bindings()

@@ -487,7 +487,7 @@ def _install_setup_stubs(
         return None
 
     monkeypatch.setattr(module, "_interactive_terminal", interactive)
-    monkeypatch.setattr(module, "_setup_snapshot", snapshot)
+    monkeypatch.setattr(module, "get_privacy_setup_snapshot", snapshot)
     monkeypatch.setattr(module, "_configured_bindings", bindings)
     monkeypatch.setattr(module, "_render_recipe_options", render_options)
     monkeypatch.setattr(module, "_render_review", render_review)
@@ -856,7 +856,7 @@ async def test_repository_setup_snapshot_accepts_service_json_object(
 
     monkeypatch.setattr(app_module, "build_service_client", build_client)
 
-    observed = await module._setup_snapshot()  # pyright: ignore[reportPrivateUsage]
+    observed = await module.get_privacy_setup_snapshot()
 
     assert observed.composed_policy == current
     assert observed.grant_state == "missing"

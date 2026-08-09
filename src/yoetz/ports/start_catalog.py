@@ -149,6 +149,7 @@ class StartCommand:
     identity_input: StartIdentityInput
     identity_commitments: StartIdentityCommitments
     session_id: str | None = None
+    repository_privacy_commitment: str | None = None
 
     def __post_init__(self) -> None:
         _id(IdKind.REQUEST, self.operation_id)
@@ -164,6 +165,11 @@ class StartCommand:
             raise _invalid()
         if self.session_id is not None:
             _id(IdKind.SESSION, self.session_id)
+        if self.repository_privacy_commitment is not None:
+            try:
+                validate_commitment(self.repository_privacy_commitment)
+            except ValueError as exc:
+                raise _invalid() from exc
         input_has_refs = self.identity_input.workspace_ref is not None
         commitments_have_refs = self.identity_commitments.workspace_ref_commitment is not None
         if input_has_refs != commitments_have_refs:

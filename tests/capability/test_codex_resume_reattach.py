@@ -197,6 +197,7 @@ async def test_idempotent_reattach_does_not_duplicate_local_effect(tmp_path: Pat
         profile=RuntimeProfile.STRICT_LOCAL,
         policy_packs=("research-evidence/0.1.0", "work-integrity/0.1.0"),
         version_manifest=start_app.version_manifest,
+        enforce_repository_identity=False,
     )
     started = await app.start(start_request(501, title="Resume reattach local oracle"))
     obligation_id = protocol_id("obl_", 502)

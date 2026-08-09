@@ -460,6 +460,21 @@ class MemoryStartCatalogAdapter:
                 raise _error(PublicErrorCode.SESSION_CONFLICT)
             if request.mode is StartMode.ATTACH and route is None:
                 raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+            if route is not None:
+                expected = route.repository_privacy_commitment
+                actual = request.repository_privacy_commitment
+                if expected is not None and (
+                    actual is None or not hmac.compare_digest(expected, actual)
+                ):
+                    raise _error(PublicErrorCode.SESSION_CONFLICT)
+                if expected is None and actual is not None:
+                    route = replace(
+                        route,
+                        repository_privacy_commitment=actual,
+                        updated_at=now,
+                    )
+                    self._state.routes[route.task_id] = route
+                    self._state.revision += 1
 
             created = route is None
             if created:
@@ -485,6 +500,7 @@ class MemoryStartCatalogAdapter:
                     quarantine_code=None,
                     created_at=now,
                     updated_at=now,
+                    repository_privacy_commitment=request.repository_privacy_commitment,
                 )
                 self._install_route(route)
             else:

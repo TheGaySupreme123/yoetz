@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hmac
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import cast
 
@@ -28,7 +28,6 @@ from yoetz.domain.privacy import (
     PrivacyAuditSubject,
     PrivacyPolicy,
 )
-from yoetz.domain.values import format_rfc3339_millis
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.keys import MacKeyHandle
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource, ObjectStorePort
@@ -98,6 +97,7 @@ class _MemoryTransition:
     state: str = "pending"
     decision_digest: str | None = None
     result: PolicyCommitResult | None = None
+    decided_at: datetime | None = None
 
 
 @dataclass(slots=True, repr=False)
@@ -109,6 +109,7 @@ class MemoryPrivacyCatalogState:
     root_generation: dict[str, int] = field(default_factory=dict[str, int])
     generation: int = 0
     first_repository_carry_forward_state: str | None = None
+    first_repository_carry_forward_commitment: str | None = None
     migration_frontier_policy: PrivacyPolicy | None = None
     legacy_route_entitlements: dict[tuple[str, str], PrivacyPolicy] = field(
         default_factory=dict[tuple[str, str], PrivacyPolicy]
@@ -234,7 +235,8 @@ class MemoryPrivacyPolicyStore:
         elif exact is not None:
             migration_state = (
                 "consumed"
-                if first_state == "consumed"
+                if scope.workspace_ref_commitment
+                == self._state.first_repository_carry_forward_commitment
                 or scope.workspace_ref_commitment
                 in self._state.consumed_legacy_repository_commitments
                 else "not_applicable"
@@ -243,8 +245,6 @@ class MemoryPrivacyPolicyStore:
             migration_state = "legacy_route_available"
         elif first_state == "available":
             migration_state = "first_repository_available"
-        elif first_state == "consumed":
-            migration_state = "consumed"
         else:
             migration_state = "not_applicable"
         ancestors = tuple(
@@ -331,6 +331,9 @@ class MemoryPrivacyPolicyStore:
             self._state.policies[_scope_digest(scope)] = _PolicyRow(policy, self._state.generation)
             if entitlement is None:
                 self._state.first_repository_carry_forward_state = "consumed"
+                self._state.first_repository_carry_forward_commitment = cast(
+                    str, scope.workspace_ref_commitment
+                )
             else:
                 del self._state.legacy_route_entitlements[entitlement]
                 self._state.consumed_legacy_repository_commitments.add(
@@ -425,6 +428,12 @@ class MemoryPrivacyPolicyStore:
             raise ValueError("privacy_policy_transition_unavailable")
         return row.prepared
 
+    async def load_transition(self, proposal_id: str) -> PreparedPolicyTransition:
+        row = self._state.transitions.get(proposal_id)
+        if row is None or row.state not in {"pending", "committed", "denied"}:
+            raise ValueError("privacy_policy_transition_unavailable")
+        return row.prepared
+
     async def commit_transition(
         self, prepared: PreparedPolicyTransition, decision: HumanPolicyDecision
     ) -> PolicyCommitResult:
@@ -436,8 +445,8 @@ class MemoryPrivacyPolicyStore:
             {
                 "approved": decision.approved,
                 "authority_commitment": decision.authority_commitment,
-                "decided_at": format_rfc3339_millis(decision.decided_at),
                 "prepared_digest": decision.prepared_digest,
+                "proposal_id": proposal_id,
             }
         )
         async with self._lock:
@@ -447,7 +456,7 @@ class MemoryPrivacyPolicyStore:
             if stored.state in {"committed", "denied"}:
                 if stored.decision_digest != decision_digest or stored.result is None:
                     raise ValueError("privacy_policy_decision_mismatch")
-                return stored.result
+                return replace(stored.result, replayed=True)
             if stored.state == "expired":
                 raise ValueError("privacy_policy_decision_expired")
             if stored.state == "stale":
@@ -485,7 +494,7 @@ class MemoryPrivacyPolicyStore:
                 current = await self.effective_policy(proposal.scope)
                 result = PolicyCommitResult(current.policy, current.generation, 0, 0)
                 self._state.transitions[proposal_id] = _MemoryTransition(
-                    prepared, "denied", decision_digest, result
+                    prepared, "denied", decision_digest, result, decision.decided_at
                 )
                 return result
             result: PolicyCommitResult | None = None
@@ -498,7 +507,7 @@ class MemoryPrivacyPolicyStore:
             if result is None:
                 raise ValueError("privacy_policy_transition_base_missing")
             self._state.transitions[proposal_id] = _MemoryTransition(
-                prepared, "committed", decision_digest, result
+                prepared, "committed", decision_digest, result, decision.decided_at
             )
         return result
 

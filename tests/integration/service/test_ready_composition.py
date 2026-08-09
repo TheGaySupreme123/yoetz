@@ -821,6 +821,7 @@ async def test_ready_factory_completes_and_projects_deterministic_check(tmp_path
             diagnostics=_Diagnostics(),
         )
         app = await factory(1, vault.generation)
+        object.__setattr__(app, "enforce_repository_identity", False)
         common = {
             "protocol_version": "0.1",
             "schema_version": "1.0.0",
@@ -1145,6 +1146,7 @@ async def test_ready_factory_deterministic_check_records_semantic_not_requested_
             diagnostics=_Diagnostics(),
         )
         app = await factory(1, vault.generation)
+        object.__setattr__(app, "enforce_repository_identity", False)
         common = {
             "protocol_version": "0.1",
             "schema_version": "1.0.0",
@@ -1330,6 +1332,7 @@ async def test_ready_check_never_activates_provider_from_machine_policy_without_
             diagnostics=_Diagnostics(),
         )
         app = await factory(1, vault.generation)
+        object.__setattr__(app, "enforce_repository_identity", False)
         common = {
             "protocol_version": "0.1",
             "schema_version": "1.0.0",

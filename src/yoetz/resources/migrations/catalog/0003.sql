@@ -10,8 +10,16 @@ CREATE TABLE privacy_installation_authority (
     migration_policy_canonical BLOB NOT NULL,
     first_repository_carry_forward_state TEXT NOT NULL
         CHECK (first_repository_carry_forward_state IN ('available', 'consumed', 'not_applicable')),
+    first_repository_carry_forward_commitment TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    CHECK (
+        (first_repository_carry_forward_state = 'consumed'
+            AND first_repository_carry_forward_commitment IS NOT NULL)
+        OR
+        (first_repository_carry_forward_state != 'consumed'
+            AND first_repository_carry_forward_commitment IS NULL)
+    )
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE privacy_legacy_route_entitlements (
@@ -74,7 +82,11 @@ SELECT
     machine.policy_canonical,
     CASE
         WHEN EXISTS (SELECT 1 FROM privacy_legacy_route_entitlements) THEN 'not_applicable'
-        ELSE 'available'
+        WHEN json_extract(
+            CAST(machine.policy_canonical AS TEXT),
+            '$.network_egress_permitted'
+        ) = 1 THEN 'available'
+        ELSE 'not_applicable'
     END,
     machine.created_at,
     machine.created_at
@@ -89,6 +101,12 @@ ADD COLUMN terminal_result_canonical BLOB;
 
 ALTER TABLE privacy_policy_transitions
 ADD COLUMN terminal_result_digest TEXT;
+
+ALTER TABLE privacy_policy_transitions
+ADD COLUMN decision_at TEXT;
+
+ALTER TABLE privacy_policy_transitions
+ADD COLUMN terminal_result_version INTEGER;
 
 CREATE TABLE privacy_policy_transition_members (
     proposal_id TEXT NOT NULL REFERENCES privacy_policy_transitions(proposal_id),

@@ -244,6 +244,16 @@ async def _complete_provider_credential(
         if action == "set"
         else HumanCeremonyKind.PROVIDER_CREDENTIAL_ROTATE
     )
+    from yoetz.cli.privacy_setup import get_privacy_setup_snapshot
+    from yoetz.ports.control import ControlError
+
+    try:
+        snapshot = await get_privacy_setup_snapshot()
+    except (ControlError, OSError, ValueError) as exc:
+        raise ElevatedBootstrapError("repository_privacy_scope_unavailable") from exc
+    repository_commitment = snapshot.bound_scope.get("workspace_ref_commitment")
+    if type(repository_commitment) is not str:
+        raise ElevatedBootstrapError("repository_privacy_scope_unavailable")
     target = ProviderCredentialTarget(
         action=action,
         provider_id=binding["provider_id"],
@@ -253,6 +263,7 @@ async def _complete_provider_credential(
         purpose=binding["purpose"],
         scope_digest=binding["scope_digest"],
         purpose_digest=binding["purpose_digest"],
+        repository_privacy_commitment=repository_commitment,
     )
     try:
         result = await run_human_ceremony_on_terminal(console, kind, target)

@@ -321,6 +321,7 @@ def _build_app(
         profile=RuntimeProfile.TEST_FAKE,
         policy_packs=_POLICY_PACKS,
         version_manifest=start_app.version_manifest,
+        enforce_repository_identity=False,
     )
     return app, runtime, projection
 

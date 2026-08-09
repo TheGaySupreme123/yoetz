@@ -184,9 +184,7 @@ def test_a_field_the_screen_cannot_place_fails_closed_instead_of_disappearing(
 
 
 def test_compound_approval_names_machine_ceiling_and_repository_insert_without_identity() -> None:
-    from yoetz.service.daemon import (
-        _private_repository_preview_baseline,  # pyright: ignore[reportPrivateUsage]
-    )
+    from yoetz.application.privacy_policy import private_repository_baseline
 
     changes = (
         PrivacyPolicyChange(
@@ -211,7 +209,7 @@ def test_compound_approval_names_machine_ceiling_and_repository_insert_without_i
             "hmac-sha256:" + "c" * 64,
         ),
     )
-    baseline = _private_repository_preview_baseline(candidate)
+    baseline = private_repository_baseline(candidate)
     insert_changes = privacy_policy_changes(baseline, candidate)
     assert baseline.effective_scope == candidate.effective_scope
     assert baseline.network_egress_permitted is False

@@ -11,6 +11,7 @@ from typing import cast
 import pytest
 
 from builders.privacy_policies import minimal_external_policy
+from yoetz.application.egress import PrivacyCoordinator
 from yoetz.application.privacy_policy import PrivacyPolicyApplication
 from yoetz.domain.privacy import (
     ConsentSource,
@@ -27,6 +28,7 @@ from yoetz.service.confidential_protocol import (
     PrivacyDecisionResult,
     PrivacyDisclosureDecisionPreview,
     PrivacyPendingTarget,
+    ProviderCredentialTarget,
 )
 from yoetz.service.daemon import _LockedHumanEffects, _PrivacyPolicyAppRelay
 from yoetz.service.human_control import HumanControlError
@@ -42,6 +44,9 @@ _COMMITMENT = "hmac-sha256:" + "d" * 64
 class _Clock:
     def now_utc(self) -> datetime:
         return _NOW
+
+    def monotonic_seconds(self) -> float:
+        return 1.0
 
 
 class _PolicyStore:
@@ -317,3 +322,73 @@ async def test_locked_vault_refuses_a_disclosure_decision() -> None:
 
     with pytest.raises(HumanControlError, match="state_forbidden"):
         await effects.decide_privacy(target, "approve", None, 1.0)
+
+
+@pytest.mark.anyio
+async def test_credential_probe_uses_the_ceremonys_trusted_repository_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_effects, _audit = _effects()
+    app = cast(PrivacyPolicyApplication, base_effects._privacy_app())
+    coordinator = PrivacyCoordinator(
+        cast(object, SimpleNamespace()),
+        cast(object, SimpleNamespace()),
+        cast(object, SimpleNamespace()),
+        cast(object, SimpleNamespace()),
+        cast(object, _Clock()),
+        cast(object, SimpleNamespace()),
+    )
+    coordinator.bind_policy_application(app)
+    relay = _PrivacyPolicyAppRelay()
+    relay.bind(lambda: coordinator)
+    effects = _LockedHumanEffects(
+        cast(object, SimpleNamespace()), cast(object, _Vault()), relay
+    )
+    repository = "hmac-sha256:" + "9" * 64
+    target = ProviderCredentialTarget(
+        "set",
+        "openai",
+        "gpt-5",
+        "responses",
+        "1",
+        "credential-probe",
+        _CASE_DIGEST,
+        canonical_digest({"purpose": "credential-probe"}),
+        repository,
+    )
+    observed: list[object] = []
+
+    async def activate(self: object, scope: object) -> bool:
+        del self
+        observed.append(scope)
+        return True
+
+    async def evaluate(self: object, candidate: object, deadline: object) -> object:
+        del self, deadline
+        observed.append(candidate)
+        return object()
+
+    provider = SimpleNamespace(
+        provider_id="openai",
+        model="gpt-5",
+        endpoint_profile_id="responses",
+        endpoint_profile_version="1",
+    )
+
+    def load_config(*args: object) -> object:
+        del args
+        return SimpleNamespace(provider=provider)
+
+    monkeypatch.setattr(PrivacyCoordinator, "activate_repository", activate)
+    monkeypatch.setattr(PrivacyCoordinator, "evaluate_semantic", evaluate)
+    monkeypatch.setattr("yoetz.config.load.load_config", load_config)
+
+    refused = await effects._provider_credential_refused(target, object())
+
+    assert refused is False
+    assert len(observed) == 2
+    scope = observed[0]
+    assert scope.workspace_ref_commitment == repository  # type: ignore[attr-defined]
+    candidate = observed[1]
+    assert candidate.scope == scope  # type: ignore[attr-defined]
+    assert candidate.items[0].source_scope == scope  # type: ignore[attr-defined]

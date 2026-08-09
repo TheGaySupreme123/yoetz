@@ -19,7 +19,7 @@ from yoetz.domain.privacy import (
     PrivacyPolicyChangeValue,
     validate_privacy_change_set,
 )
-from yoetz.domain.values import validate_sha256_digest
+from yoetz.domain.values import validate_commitment, validate_sha256_digest
 from yoetz.protocol.canonical import (
     JsonValue,
     canonical_digest,
@@ -261,6 +261,7 @@ class ProviderCredentialTarget:
     purpose: str
     scope_digest: str
     purpose_digest: str
+    repository_privacy_commitment: str | None = None
     kind: Literal["provider_credential"] = "provider_credential"
 
     def __post_init__(self) -> None:
@@ -278,8 +279,29 @@ class ProviderCredentialTarget:
         _require_token(self.purpose, "provider_credential_target_invalid")
         _require_digest(self.scope_digest, "provider_credential_target_invalid")
         _require_digest(self.purpose_digest, "provider_credential_target_invalid")
+        if self.repository_privacy_commitment is not None:
+            try:
+                validate_commitment(self.repository_privacy_commitment)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("provider_credential_target_invalid") from exc
         if self.purpose_digest != canonical_digest({"purpose": self.purpose}):
             raise ValueError("provider_credential_target_invalid")
+
+    def target_digest(self) -> str:
+        return canonical_digest(
+            {
+                "action": self.action,
+                "endpoint_profile_id": self.endpoint_profile_id,
+                "endpoint_profile_version": self.endpoint_profile_version,
+                "kind": self.kind,
+                "model_id": self.model_id,
+                "provider_id": self.provider_id,
+                "purpose": self.purpose,
+                "purpose_digest": self.purpose_digest,
+                "repository_privacy_commitment": self.repository_privacy_commitment,
+                "scope_digest": self.scope_digest,
+            }
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1277,6 +1299,7 @@ def _target_to_json(target: HumanOpenTarget) -> dict[str, JsonValue]:
             "provider_id": target.provider_id,
             "purpose": target.purpose,
             "purpose_digest": target.purpose_digest,
+            "repository_privacy_commitment": target.repository_privacy_commitment,
             "scope_digest": target.scope_digest,
         }
     if type(target) is PrivacyPendingTarget:
@@ -1322,6 +1345,7 @@ def _target_from_json(value: JsonValue) -> HumanOpenTarget:
                 "provider_id",
                 "purpose",
                 "purpose_digest",
+                "repository_privacy_commitment",
                 "scope_digest",
             },
         )
@@ -1334,6 +1358,9 @@ def _target_from_json(value: JsonValue) -> HumanOpenTarget:
             purpose=cast(str, source["purpose"]),
             scope_digest=cast(str, source["scope_digest"]),
             purpose_digest=cast(str, source["purpose_digest"]),
+            repository_privacy_commitment=cast(
+                str | None, source["repository_privacy_commitment"]
+            ),
         )
     if kind == "privacy_pending":
         _keys(source, {"decision_kind", "kind", "pending_id"})

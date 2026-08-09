@@ -39,6 +39,12 @@ def _plain(text: str) -> str:
     return _ANSI_ESCAPE.sub("", text)
 
 
+async def _fake_repository_privacy_snapshot(*_args: object) -> SimpleNamespace:
+    return SimpleNamespace(
+        bound_scope={"workspace_ref_commitment": "hmac-sha256:" + "7" * 64}
+    )
+
+
 def _binary(path: str = "/opt/harness/bin/codex") -> HarnessBinary:
     return HarnessBinary(
         harness_id=HarnessId.CODEX,
@@ -1130,6 +1136,7 @@ def test_ready_auto_unlock_vault_reuses_scoped_secret_for_provider_reauthenticat
     """Fresh Keychain-backed setup must ask only for the provider credential."""
 
     import yoetz.adapters.keys.os_keyring as keyring_module
+    import yoetz.cli.privacy_setup as privacy_setup_module
     import yoetz.cli.provider_binding as binding_module
     import yoetz.cli.setup as setup_module
     import yoetz.cli.unlock as unlock_module
@@ -1188,6 +1195,11 @@ def test_ready_auto_unlock_vault_reuses_scoped_secret_for_provider_reauthenticat
         return SimpleNamespace(choice="fireworks", provider_id="fireworks")
 
     monkeypatch.setattr(keyring_module.AutoUnlockPassphraseStore, "load", fake_load)
+    monkeypatch.setattr(
+        privacy_setup_module,
+        "get_privacy_setup_snapshot",
+        _fake_repository_privacy_snapshot,
+    )
     monkeypatch.setattr(config_module, "load_config", fake_load_config)
     monkeypatch.setattr(paths_module, "bundle_root", fake_bundle_root)
     monkeypatch.setattr(binding_module, "apply_provider_endpoint_choice", fake_write)
@@ -1296,6 +1308,7 @@ def test_existing_bound_credential_replacement_does_not_inherit_old_presence(
     result_lost: bool,
     expected_credential: str,
 ) -> None:
+    import yoetz.cli.privacy_setup as privacy_setup_module
     import yoetz.cli.provider_binding as binding_module
     import yoetz.cli.provider_status as provider_status_module
     import yoetz.cli.setup as setup_module
@@ -1338,6 +1351,11 @@ def test_existing_bound_credential_replacement_does_not_inherit_old_presence(
         return {"reachable": True, "state": "ready", "vault_mode": "os_managed"}
 
     monkeypatch.setattr(config_module, "load_config", fake_load_config)
+    monkeypatch.setattr(
+        privacy_setup_module,
+        "get_privacy_setup_snapshot",
+        _fake_repository_privacy_snapshot,
+    )
     monkeypatch.setattr(binding_module, "apply_provider_endpoint_choice", fake_write)
     monkeypatch.setattr(write_module, "provider_preset", fake_preset)
     monkeypatch.setattr(setup_module, "_restart_service_for_semantic_composition", fake_restart)
@@ -1370,6 +1388,7 @@ def test_existing_bound_credential_replacement_does_not_inherit_old_presence(
 def test_lost_credential_result_recovers_from_recomposed_presence(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    import yoetz.cli.privacy_setup as privacy_setup_module
     import yoetz.cli.provider_binding as binding_module
     import yoetz.cli.provider_status as provider_status_module
     import yoetz.cli.setup as setup_module
@@ -1399,6 +1418,11 @@ def test_lost_credential_result_recovers_from_recomposed_presence(
         config_module,
         "load_config",
         fake_load_config,
+    )
+    monkeypatch.setattr(
+        privacy_setup_module,
+        "get_privacy_setup_snapshot",
+        _fake_repository_privacy_snapshot,
     )
     monkeypatch.setattr(
         binding_module,

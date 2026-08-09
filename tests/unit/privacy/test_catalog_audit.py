@@ -13,6 +13,7 @@ from typing import cast
 import apsw
 import pytest
 
+from builders.privacy_policies import minimal_external_policy
 from yoetz.adapters.memory.privacy import (
     MemoryPrivacyAudit,
     MemoryPrivacyCatalogState,
@@ -43,6 +44,7 @@ from yoetz.domain.privacy import (
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
+from yoetz.domain.values import format_rfc3339_millis
 from yoetz.ports.objects import (
     ObjectMetadata,
     ObjectRef,
@@ -313,7 +315,10 @@ def test_policy_store_seed_effective_and_tightening_are_generation_cas() -> None
     ).fetchall() == [("superseded",), ("current",)]
 
 
-def test_insert_only_repository_transition_load_commit_and_replay_are_exact() -> None:
+@pytest.mark.parametrize("approved", [False, True])
+def test_insert_only_repository_transition_load_commit_and_replay_are_exact(
+    approved: bool,
+) -> None:
     db = _database()
     store = CatalogPrivacyPolicyStore(db, _Clock())
     machine = _policy()
@@ -347,23 +352,125 @@ def test_insert_only_repository_transition_load_commit_and_replay_are_exact() ->
         loaded = await store.load_pending_transition(_PROPOSAL)
         decision = HumanPolicyDecision(
             prepared.prepared_digest,
-            True,
+            approved,
             _NOW + timedelta(seconds=1),
             f"hmac-sha256:{'8' * 64}",
         )
         committed = await store.commit_transition(loaded, decision)
-        replayed = await store.commit_transition(loaded, decision)
+        restarted = CatalogPrivacyPolicyStore(db, _Clock())
+        terminal = await restarted.load_transition(_PROPOSAL)
+        replayed = await restarted.commit_transition(
+            terminal,
+            replace(decision, decided_at=decision.decided_at + timedelta(seconds=1)),
+        )
+        with pytest.raises(ValueError, match="privacy_policy_decision_mismatch"):
+            await restarted.commit_transition(
+                terminal, replace(decision, approved=not approved)
+            )
         return loaded, committed, replayed
 
     loaded, committed, replayed = asyncio.run(run())
     assert loaded.proposal.members[0].action == "insert"  # type: ignore[attr-defined]
     assert committed == replayed
-    assert committed.policy == repository  # type: ignore[attr-defined]
+    assert replayed.replayed is True  # type: ignore[attr-defined]
+    assert committed.policy == (repository if approved else machine)  # type: ignore[attr-defined]
     transition = db.execute(
         "SELECT state, terminal_result_digest FROM privacy_policy_transitions"
     ).fetchone()
-    assert transition is not None and transition[0] == "committed"
+    assert transition is not None and transition[0] == (
+        "committed" if approved else "denied"
+    )
     assert type(transition[1]) is str
+
+    db.execute(
+        "UPDATE privacy_policy_transitions SET terminal_result_canonical = ? "
+        "WHERE proposal_id = ?",
+        (b'{}', _PROPOSAL),
+    )
+    with pytest.raises(ValueError, match="privacy_policy_terminal_result_corrupt"):
+        asyncio.run(
+            CatalogPrivacyPolicyStore(db, _Clock()).commit_transition(
+                asyncio.run(CatalogPrivacyPolicyStore(db, _Clock()).load_transition(_PROPOSAL)),
+                HumanPolicyDecision(
+                    loaded.prepared_digest,  # type: ignore[attr-defined]
+                    approved,
+                    _NOW + timedelta(seconds=3),
+                    f"hmac-sha256:{'8' * 64}",
+                ),
+            )
+        )
+
+
+def test_v2_terminal_transition_migrates_to_stable_replay_identity() -> None:
+    db = _database()
+    store = CatalogPrivacyPolicyStore(db, _Clock())
+    machine = _policy()
+    repository_scope = AuthorizationScope(
+        AuthorizationScopeKind.WORKSPACE, _INSTALLATION, _WORKSPACE
+    )
+    repository = replace(
+        machine,
+        policy_id="pvy_30000000-0000-4000-8000-000000000010",
+        policy_digest=f"sha256:{'7' * 64}",
+        effective_scope=repository_scope,
+    )
+    original_at = _NOW + timedelta(seconds=1)
+
+    async def commit() -> HumanPolicyDecision:
+        await store.seed_if_absent(machine)
+        authority = await store.repository_authority(repository_scope)
+        proposal = PolicyTransitionProposal(
+            repository_scope,
+            authority.effective.generation,
+            repository,
+            canonical_digest({"candidate": repository.policy_digest}),
+            _NOW,
+            _NOW + timedelta(seconds=60),
+            _PROPOSAL,
+            authority.effective.effective_digest,
+            authority.authority_digest,
+            (PolicyTransitionMember("insert", repository_scope, repository, None, None),),
+        )
+        prepared = await store.prepare_transition(proposal)
+        decision = HumanPolicyDecision(
+            prepared.prepared_digest,
+            True,
+            original_at,
+            f"hmac-sha256:{'8' * 64}",
+        )
+        await store.commit_transition(prepared, decision)
+        return decision
+
+    decision = asyncio.run(commit())
+    legacy_digest = canonical_digest(
+        {
+            "approved": True,
+            "authority_commitment": decision.authority_commitment,
+            "decided_at": format_rfc3339_millis(original_at),
+            "prepared_digest": decision.prepared_digest,
+        }
+    )
+    db.execute(
+        "UPDATE privacy_policy_transitions SET decision_digest = ?, decision_at = NULL, "
+        "terminal_result_version = NULL, terminal_at = ? WHERE proposal_id = ?",
+        (legacy_digest, format_rfc3339_millis(original_at), _PROPOSAL),
+    )
+
+    async def replay() -> object:
+        restarted = CatalogPrivacyPolicyStore(db, _Clock())
+        loaded = await restarted.load_transition(_PROPOSAL)
+        return await restarted.commit_transition(
+            loaded, replace(decision, decided_at=original_at + timedelta(seconds=10))
+        )
+
+    replayed = asyncio.run(replay())
+    assert replayed.replayed is True  # type: ignore[attr-defined]
+    migrated = db.execute(
+        "SELECT terminal_result_version, decision_at FROM privacy_policy_transitions "
+        "WHERE proposal_id = ?",
+        (_PROPOSAL,),
+    ).fetchone()
+    assert migrated == (1, format_rfc3339_millis(original_at))
 
 
 def test_memory_and_sqlite_projection_replay_and_cursor_behavior_match() -> None:
@@ -451,6 +558,40 @@ def test_memory_and_sqlite_policy_generation_results_match() -> None:
         )
 
     assert asyncio.run(run()) == ((1, seed), (1, seed))
+
+
+def test_first_repository_carry_forward_provenance_is_exact_not_installation_wide() -> None:
+    db = _database()
+    store = CatalogPrivacyPolicyStore(db, _Clock())
+    machine = minimal_external_policy()
+    repository_a = AuthorizationScope(
+        AuthorizationScopeKind.WORKSPACE, _INSTALLATION, "hmac-sha256:" + "1" * 64
+    )
+    repository_b = AuthorizationScope(
+        AuthorizationScopeKind.WORKSPACE, _INSTALLATION, "hmac-sha256:" + "2" * 64
+    )
+
+    async def run() -> tuple[object, object, object]:
+        await store.seed_if_absent(machine)
+        available = await store.repository_authority(repository_a)
+        carried = await store.carry_forward_repository_authority(repository_a)
+        explicit = replace(
+            machine,
+            policy_id="pvy_30000000-0000-4000-8000-000000000011",
+            policy_digest="sha256:" + "9" * 64,
+            version=1,
+            effective_scope=repository_b,
+            supersedes_policy_digest=None,
+        )
+        await store.seed_if_absent(explicit)
+        later = await store.repository_authority(repository_b)
+        return available, carried, later
+
+    available, carried, later = asyncio.run(run())
+    assert available.migration_state == "first_repository_available"  # type: ignore[attr-defined]
+    assert carried.migration_state == "consumed"  # type: ignore[attr-defined]
+    assert later.grant_state == "granted"  # type: ignore[attr-defined]
+    assert later.migration_state == "not_applicable"  # type: ignore[attr-defined]
 
 
 def test_memory_and_sqlite_content_proposal_root_sets_match() -> None:
