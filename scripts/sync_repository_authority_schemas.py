@@ -49,6 +49,18 @@ def _hello() -> dict[str, Any]:
         "required": ["schema_version", "path"],
         "type": "object",
     }
+    generated["properties"]["presentation_context"] = {
+        "additionalProperties": False,
+        "properties": {
+            "output_is_controlling_tty": {"type": "boolean"},
+            "render_mode": {
+                "enum": ["human_readable", "machine_readable"],
+                "type": "string",
+            },
+        },
+        "required": ["render_mode", "output_is_controlling_tty"],
+        "type": "object",
+    }
     return generated
 
 
@@ -150,6 +162,12 @@ def _setup_result() -> dict[str, Any]:
                 "type": "string",
             },
             "never_send_editable": {"const": False},
+            "privacy_projection": {
+                "$ref": (
+                    "https://schemas.yoetz.dev/0.1/common/"
+                    "operation-result-1.0.0.schema.json#/$defs/privacy_projection"
+                )
+            },
             "recipes": {
                 "items": {
                     "additionalProperties": False,
@@ -197,6 +215,7 @@ def _setup_result() -> dict[str, Any]:
             "allowed_blocked_examples",
             "recipes",
             "never_send_editable",
+            "privacy_projection",
         ],
         "type": "object",
     }

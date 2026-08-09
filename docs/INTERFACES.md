@@ -437,15 +437,31 @@ attempt returned after it lost lease/deadline authority;
 `stale` means a once-valid result no longer matches the frozen frontier/dependency digest. These
 states are distinct and there is no second `completed` spelling.
 
-`awaiting_human` is the one **nonterminal** semantic status. It means one exact prepared case is
-waiting on a local disclosure decision under the per-request confirmation posture: the check
-operation, its semantic job, and its physical attempt all stay open, no provider was reached, and no
-verdict or completion-grade coverage exists yet. It must not be recorded as a failed attempt or
-committed as a terminal check result — approval resumes the *same* request, attempt, provider
-request id, proposal, and case digest, because the provider request id is part of the prepared bytes
-the human approved. The durable suspension lives in `semantic_disclosure_waits` (bundle schema 5),
-which is one-use: denial or expiry resumes exactly once and commits the corresponding terminal
-result, and a transient provider retry creates a fresh proposal requiring a fresh decision.
+`awaiting_human` is the one **nonterminal** semantic status. Under the per-request confirmation
+posture, one exact prepared case is waiting on a local disclosure decision: the check operation,
+semantic job, and physical attempt stay open, no provider was reached, and no verdict or
+completion-grade coverage exists yet. Approval resumes the *same* request, attempt, provider
+request id, proposal, and case digest. The durable suspension lives in `semantic_disclosure_waits`
+(bundle schema 5), which is one-use. A missing standing repository grant stops earlier: only the
+check operation is suspended, before provider construction, job creation, credential inspection,
+or dispatch. Bundle migration 0006 records `operations.suspension_kind=repository_grant`
+transactionally on that exact operation; status reads that durable discriminator and never
+reconstructs it from mutable current authority. The marker clears only when that same operation
+resumes or terminalizes. Only a successfully read, valid, exactly bound
+`RepositoryPrivacyAuthority(grant_state="missing")` may create this suspension. An unbound or
+mismatched route, missing commitment, closed coordinator, invalid or unavailable policy,
+unavailable reconciliation capability, or activation/reconciliation failure is terminal
+`blocked_by_policy/scope_not_authorized`, with no provider construction, job, attempt, dispatch, or
+trusted-approval instruction. Neither suspension branch is committed as a terminal result.
+
+The agent-facing handoff preserves that state distinction. Both a missing standing repository grant
+and a one-use `confirm_every_request` decision are nonterminal `awaiting_human` continuations bound
+to the exact original check request id. The continuation kind distinguishes them: repository setup
+has the fixed trusted CLI/TUI command `yoetz --privacy` and no proposal id or expiry, while the
+one-use decision carries its durable proposal id, expiry, and exact decision command. The caller
+recovers either continuation through `status(view=operation)` or exact replay of the original
+request and must never create a replacement check. Chat confirmation is never authority. Denial,
+expiry, cancellation, stale authority, or incomplete local review remains pre-dispatch.
 
 Every status is paired with one required closed `SemanticReason`, never prose or a renderer guess:
 `deterministic_mode`, `no_material_semantic_case`, `provider_not_configured`,
@@ -1246,11 +1262,26 @@ linked worktrees share one commitment; independent clones and unrelated reposito
 older hello decoder or omitted locator produces an unbound session and cannot create, migrate, or
 consume repository disclosure authority.
 
+The version 2 hello also carries one closed optional `presentation_context(render_mode,
+output_is_controlling_tty)` produced by the authenticated local client from its actual rendering
+path. Omission defaults to machine-readable/non-TTY. The daemon retains these facts on the
+`ControlSession` and constructs the service-internal `ClientProjectionContext` for every connected
+call; request bodies cannot replace them. An interactive CLI privacy flow sends human-readable plus
+its foreground controlling-TTY fact. JSON rendering, pipe/redirection, MCP, or missing/contradictory
+facts remain `agent_context`.
+
 The `privacy_get_setup` version 2 result carries `PrivacySetupSnapshot`: exactly the composed policy,
 bound repository-backed workspace scope, `authority_digest`, `grant_state`, and `migration_state`
-beside the setup projection. The matching version 2 `privacy_propose_policy` request binds its
-candidate and any compound transition members to that `authority_digest`, not merely to one current
-policy digest. Decoders for the version 1 setup/propose bodies remain registered for compatibility,
+beside the setup projection. The snapshot traverses the same generic local client-result privacy
+projection and reserve/complete disclosure-receipt path as other ordinary local results; its closed
+wire branch therefore requires `privacy_projection`. Reading it grants no authority:
+the matching version 2 `privacy_propose_policy` request still binds its candidate and any compound
+transition members to that `authority_digest`, not merely to one current policy digest, and the
+separate trusted decision remains mandatory. `privacy_get_setup`, version 2
+`privacy_get_effective`, and version 2 `privacy_propose_policy` receive only the service-derived
+`RepositoryPrivacyContext` from their control session; the ready application facade must forward
+that exact context to the bound privacy handler and must not accept a body-supplied replacement.
+Decoders for the version 1 setup/propose bodies remain registered for compatibility,
 but a version 1 request cannot create a repository row, consume a migration entitlement, or
 authorize standing external LLM work; under repository-grant mode it fails closed with bounded
 upgrade guidance.
@@ -1304,11 +1335,13 @@ This stored-body guarantee applies only to `publish_work`; `start|check|respond|
 their existing durable internal-result replay and still run client projection on each call.
 
 `read_projection_failed` covers the same window for methods that append nothing
-(`_READ_ONLY_METHODS` in `service/daemon.py`: `status` plus the two privacy receipt reads). It is
+(`_READ_ONLY_METHODS` in `service/daemon.py`: `status`, repository privacy reads, and privacy
+receipt reads). It is
 also always `retryable=True`, but its remedy is a fresh request: advertising same-`request_id`
-replay for a read points the caller at an operation record that was never written. Only `status`
-can reach the reclassification, since both privacy reads are projection-exempt. `check` and
-`receipt` append their own events and are therefore writes, not reads.
+replay for a read points the caller at an operation record that was never written. Repository
+setup/effective reads can also reach this reclassification because they traverse
+ordinary local projection. `check` and `receipt` append their own events and are therefore writes,
+not reads.
 
 Inside that window the projection internals fail with bounded, named errors rather than bare
 `KeyError`/`IndexError`: `_replace_pointer` raises `projection_pointer_unresolved` for an omission
@@ -2419,6 +2452,11 @@ kind, and defaults fail-safe to machine-readable/non-TTY when trusted presentati
 absent. The daemon first obtains catalog-backed `Application.projection_binding_facts(...)`, then
 `Application.project_result_for_client(context, binding, result)` is the only route from a
 content-capable internal result to an ordinary serialized success.
+For repository privacy setup/effective/propose, `ControlProjectionBinding` additionally carries the
+installation-keyed repository commitment from `ControlSession.repository_privacy_context`; the
+scope resolver uses that trusted commitment to select the workspace policy and receipt scope.
+It never reads a repository identity from the request body. An unbound session stays fail-safe at
+machine scope.
 
 One public async method
 per operation: `start`, `publish_work`, `check`, `respond`, `status`, `receipt`, plus

@@ -56,6 +56,7 @@ from yoetz.ports.control import ControlClientKind, ControlMethod
 from yoetz.ports.ledger import CheckCommitResult
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.models import (
+    CheckContinuationModel,
     DataCategory,
     PublicErrorModel,
     PublishWorkAcceptedEventModel,
@@ -99,6 +100,7 @@ def _version_slice_payload() -> dict[str, object]:
 # are caller-supplied and already reject null at parse time; they are intentionally absent here.
 # A new result model that joins the set without a row in this table fails the inventory test.
 _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = (
+    (CheckContinuationModel, frozenset({"pending_id", "expires_at"})),
     (PublishWorkAcceptedEventModel, frozenset({"summary"})),
     (PublicErrorModel, frozenset({"safe_details"})),
     (RespondEvidenceSummaryModel, frozenset({"description"})),
@@ -765,6 +767,12 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
     """
 
     covered: dict[tuple[str, str], str] = {
+        ("CheckContinuationModel", "pending_id"): (
+            "test_status_view_operation_recovers_missing_repository_grant_for_same_request"
+        ),
+        ("CheckContinuationModel", "expires_at"): (
+            "test_status_view_operation_recovers_missing_repository_grant_for_same_request"
+        ),
         ("PublishWorkAcceptedEventModel", "summary"): (
             "test_publish_accepted_events_omit_unset_summary"
         ),

@@ -26,7 +26,12 @@ from yoetz.cli.render import (
     render_human_status,
 )
 from yoetz.domain.values import JsonObject
-from yoetz.ports.control import ControlClientKind, ControlError, WorkspaceLocator
+from yoetz.ports.control import (
+    ControlClientKind,
+    ControlError,
+    ProjectionRenderMode,
+    WorkspaceLocator,
+)
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
 from yoetz.protocol.models import (
@@ -169,6 +174,8 @@ async def build_service_client(
     workspace_locator: WorkspaceLocator | None | _WorkspaceLocatorDefault = (
         _WORKSPACE_LOCATOR_DEFAULT
     ),
+    projection_render_mode: ProjectionRenderMode = ProjectionRenderMode.MACHINE_READABLE,
+    output_is_controlling_tty: bool = False,
 ) -> ServiceClient:
     """Connect to the fixed same-user service endpoint; never spawn one.
 
@@ -181,7 +188,12 @@ async def build_service_client(
         if workspace_locator is _WORKSPACE_LOCATOR_DEFAULT
         else cast(WorkspaceLocator | None, workspace_locator)
     )
-    return await connect_service(client_kind, workspace_locator=locator)
+    return await connect_service(
+        client_kind,
+        workspace_locator=locator,
+        projection_render_mode=projection_render_mode,
+        output_is_controlling_tty=output_is_controlling_tty,
+    )
 
 
 def _bounded_input(input_path: str | None, inline: str | None) -> JsonValue:

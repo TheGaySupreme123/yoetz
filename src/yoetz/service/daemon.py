@@ -231,6 +231,8 @@ _PROJECTION_EXEMPT_METHODS = _STRUCTURAL_METHODS | {
 _READ_ONLY_METHODS: Final[frozenset[ControlMethod]] = frozenset(
     {
         ControlMethod.STATUS,
+        ControlMethod.PRIVACY_GET_SETUP,
+        ControlMethod.PRIVACY_GET_EFFECTIVE,
         ControlMethod.PRIVACY_PENDING_LIST,
         ControlMethod.PRIVACY_RECEIPTS_LIST,
         ControlMethod.PRIVACY_RECEIPTS_GET,
@@ -898,7 +900,11 @@ class ServiceDaemon:
             # shapes the response; an unexpected failure there must not be reported as a failed
             # operation.
             return await self._project_completed_response(
-                projection_context, request, application, internal
+                projection_context,
+                request,
+                application,
+                internal,
+                repository_privacy_context,
             )
         finally:
             if admission is not None:
@@ -935,6 +941,7 @@ class ServiceDaemon:
         request: ControlCallRequest,
         application: _ReadyApplication,
         internal: object,
+        repository_privacy_context: RepositoryPrivacyContext | None,
     ) -> object:
         """Shape one already-completed operation, never collapsing a commit into a plain failure.
 
@@ -989,6 +996,11 @@ class ServiceDaemon:
                 original_request_id=facts.original_request_id,
                 route_identity_digest=facts.route_identity_digest,
                 control_request_canonical=encode_control_frame(request)[4:],
+                repository_privacy_commitment=(
+                    None
+                    if repository_privacy_context is None
+                    else repository_privacy_context.commitment
+                ),
             )
             projected = await application.project_result_for_client(
                 projection_context,
@@ -1192,11 +1204,25 @@ class ServiceDaemon:
         write_lock: asyncio.Lock,
     ) -> None:
         if session.repository_privacy_context is None:
-            result = await self.dispatch(session.client_kind, request, _defer_stop=True)
+            result = await self.dispatch(
+                session.client_kind,
+                request,
+                projection_context=ClientProjectionContext(
+                    session.client_kind,
+                    session.projection_render_mode,
+                    session.output_is_controlling_tty,
+                ),
+                _defer_stop=True,
+            )
         else:
             result = await self.dispatch(
                 session.client_kind,
                 request,
+                projection_context=ClientProjectionContext(
+                    session.client_kind,
+                    session.projection_render_mode,
+                    session.output_is_controlling_tty,
+                ),
                 repository_privacy_context=session.repository_privacy_context,
                 _defer_stop=True,
             )

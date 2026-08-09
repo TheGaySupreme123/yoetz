@@ -29,7 +29,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
 )
 from yoetz.domain.values import (
-    DISCLOSURE_CONTINUATION_INSTRUCTION,
+    REPOSITORY_GRANT_CONTINUATION_KIND,
     Frontier,
     SemanticContinuation,
     claim_id,
@@ -234,6 +234,16 @@ def check_awaiting_human_json(result: CheckAwaitingHuman) -> dict[str, JsonValue
     completion-grade shape for a check that has not run would let a caller conclude from it.
     """
 
+    continuation: dict[str, JsonValue] = {
+        "kind": result.continuation.kind,
+        "command": result.continuation.command,
+        "replay_request_id": result.continuation.request_id,
+        "instruction": result.continuation.instruction,
+    }
+    if result.continuation.pending_id is not None:
+        continuation["pending_id"] = result.continuation.pending_id
+    if result.continuation.expires_at is not None:
+        continuation["expires_at"] = result.continuation.expires_at.wire
     return {
         "protocol_version": "0.1",
         "schema_version": "1.0.0",
@@ -247,14 +257,7 @@ def check_awaiting_human_json(result: CheckAwaitingHuman) -> dict[str, JsonValue
         "result_frontier": dict(result.result_frontier.as_wire().items()),
         "semantic_status": SemanticStatus.AWAITING_HUMAN.value,
         "semantic_reason": SemanticReason.HUMAN_APPROVAL_REQUIRED.value,
-        "continuation": {
-            "kind": result.continuation.kind,
-            "pending_id": result.continuation.pending_id,
-            "expires_at": result.continuation.expires_at.wire,
-            "command": result.continuation.command,
-            "replay_request_id": result.continuation.request_id,
-            "instruction": DISCLOSURE_CONTINUATION_INSTRUCTION,
-        },
+        "continuation": continuation,
         "versions": {
             "protocol_version": result.versions.protocol_version,
             "engine_version": result.versions.engine_version,
@@ -363,8 +366,8 @@ class FinalSemanticEvaluation:
     # can succeed while structurally unable to answer its own question; coverage must say so.
     withheld_review_categories: tuple[str, ...] = ()
     # Set only on the nonterminal awaiting_human branch: what the caller must do to resume this
-    # exact request. Every terminal outcome leaves it None, so its presence is the signal that the
-    # job, attempt, and check operation are all still open.
+    # exact request. Every terminal outcome leaves it None. A one-use disclosure wait keeps its
+    # job and attempt open; a missing standing repository grant stops before either exists.
     continuation: SemanticContinuation | None = None
 
     def __post_init__(self) -> None:
@@ -1261,7 +1264,8 @@ async def execute_check_commit(
         # advance, or commit. Everything below produces a terminal result, and a terminal result
         # is exactly what makes the human's later approval useless: the operation is closed, the
         # attempt is spent, and there is nothing left to resume. The operation stays in
-        # SEMANTIC_WAIT so replaying this same request_id resumes the same attempt.
+        # SEMANTIC_WAIT so replaying this same request_id resumes the same request. A one-use
+        # decision resumes its exact attempt; a standing-grant handoff has not created one yet.
         if (
             semantic_result.status is SemanticStatus.AWAITING_HUMAN
             and semantic_result.continuation is None
@@ -1283,6 +1287,12 @@ async def execute_check_commit(
             )
         if semantic_result.status is SemanticStatus.AWAITING_HUMAN:
             assert semantic_result.continuation is not None
+            if semantic_result.continuation.kind == REPOSITORY_GRANT_CONTINUATION_KIND:
+                # No provider job or attempt exists for a missing standing grant. Expire this
+                # operation lease before returning so exact same-request replay can reclaim it
+                # immediately after the trusted ceremony (or reproduce the same handoff before
+                # approval) without opening a fresh check.
+                await runtime.ledger.suspend_check_for_repository_grant(frozen.lease)
             return CheckAwaitingHuman(
                 runtime.task_id,
                 request.session_id,

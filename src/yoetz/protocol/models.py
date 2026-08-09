@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import types
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -851,6 +851,42 @@ class _ClosedModel(BaseModel):
         return cast(object, value)
 
 
+def _strip_optional_non_null_fields(
+    model: BaseModel, dumped: Mapping[str, JsonValue]
+) -> dict[str, JsonValue]:
+    """Omit unset optional non-null fields recursively from one public model tree."""
+
+    root: object = getattr(model, "root", None)
+    if isinstance(root, BaseModel):
+        return _strip_optional_non_null_fields(root, dumped)
+    declared: object = getattr(type(model), "optional_non_null_fields", None)
+    optional: frozenset[str] = (
+        cast(frozenset[str], declared) if isinstance(declared, frozenset) else frozenset()
+    )
+    result: dict[str, JsonValue] = {}
+    for key, value in dumped.items():
+        if key in optional and value is None:
+            continue
+        attribute: object = getattr(model, key)
+        if isinstance(attribute, BaseModel) and isinstance(value, Mapping):
+            result[key] = _strip_optional_non_null_fields(attribute, value)
+        elif (
+            isinstance(attribute, Sequence)
+            and not isinstance(attribute, (str, bytes))
+            and isinstance(value, list)
+        ):
+            children: list[JsonValue] = []
+            for child, child_dump in zip(cast(Sequence[object], attribute), value, strict=True):
+                if isinstance(child, BaseModel) and isinstance(child_dump, Mapping):
+                    children.append(_strip_optional_non_null_fields(child, child_dump))
+                else:
+                    children.append(child_dump)
+            result[key] = children
+        else:
+            result[key] = value
+    return result
+
+
 class PublicEnvelopeModel(_ClosedModel):
     protocol_version: Literal["0.1"]
     schema_version: Literal["1.0.0"]
@@ -1008,12 +1044,13 @@ def _validate_model_against_schema(model: BaseModel, schema_name: str) -> None:
 
     from yoetz.protocol.schemas import SchemaInstanceInvalid, validate_schema_instance
 
-    dumped = model.model_dump(
+    raw_dump = model.model_dump(
         mode="json",
         by_alias=True,
         exclude_unset=True,
         exclude_none=False,
     )
+    dumped = _strip_optional_non_null_fields(model, cast(Mapping[str, JsonValue], raw_dump))
     try:
         validate_schema_instance(schema_name, "1.0.0", cast(JsonValue, dumped))
     except SchemaInstanceInvalid as exc:
@@ -1946,20 +1983,29 @@ class CheckContinuationModel(_ClosedModel):
     drives it to read the catalog database or product source instead.
     """
 
-    kind: Literal["privacy_disclosure_decision"]
-    pending_id: PrivacyProposalIdWire
-    expires_at: TimestampWire
+    optional_non_null_fields = frozenset({"pending_id", "expires_at"})
+
+    kind: Literal["privacy_disclosure_decision", "repository_privacy_setup"]
+    pending_id: PrivacyProposalIdWire | None = None
+    expires_at: TimestampWire | None = None
     command: tuple[String1To256, ...]
     replay_request_id: RequestIdWire
     instruction: String1To4096
 
     @model_validator(mode="after")
     def _validate_continuation(self) -> CheckContinuationModel:
-        if len(self.command) != 4:
-            raise ValueError("check_continuation_command_invalid")
-        head = ("yoetz", "privacy", "decide-disclosure")
-        if tuple(self.command[:3]) != head or self.command[3] != self.pending_id:
-            raise ValueError("check_continuation_command_invalid")
+        if self.kind == "privacy_disclosure_decision":
+            if self.pending_id is None or self.expires_at is None or len(self.command) != 4:
+                raise ValueError("check_continuation_disclosure_invalid")
+            head = ("yoetz", "privacy", "decide-disclosure")
+            if tuple(self.command[:3]) != head or self.command[3] != self.pending_id:
+                raise ValueError("check_continuation_command_invalid")
+        elif (
+            self.pending_id is not None
+            or self.expires_at is not None
+            or tuple(self.command) != ("yoetz", "--privacy")
+        ):
+            raise ValueError("check_continuation_repository_setup_invalid")
         return self
 
 
@@ -2723,6 +2769,11 @@ class StatusOperationPageModel(_ClosedModel):
 
     @model_validator(mode="after")
     def _validate_operation_page(self) -> StatusOperationPageModel:
+        if (
+            self.continuation is not None
+            and self.continuation.replay_request_id != self.operation_request_id
+        ):
+            raise ValueError("status_operation_continuation_request_mismatch")
         if self.continuation is not None and not (
             self.state == "pending" and self.operation_kind == "check"
         ):
@@ -3004,18 +3055,19 @@ def public_model_to_wire(model: object) -> dict[str, JsonValue]:
     if schema_name is None:
         raise TypeError("public_model_wrong_type")
     public_model = cast(BaseModel, model)
-    dumped = public_model.model_dump(
+    raw_dump = public_model.model_dump(
         mode="json",
         by_alias=True,
         exclude_unset=True,
         exclude_none=False,
     )
+    dumped = _strip_optional_non_null_fields(public_model, raw_dump)
     if type(dumped) is not dict:
         raise TypeError("public_model_wrong_type")
     from yoetz.protocol.schemas import validate_schema_instance
 
     validate_schema_instance(schema_name, "1.0.0", cast(JsonValue, dumped))
-    return cast(dict[str, JsonValue], dict(dumped))
+    return dict(dumped)
 
 
 type _LeafClassification = Literal["public_structural"] | DataCategory

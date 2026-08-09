@@ -527,6 +527,50 @@ def _stub_route(monkeypatch: pytest.MonkeyPatch, observation: object) -> list[st
 
 
 @pytest.mark.anyio
+async def test_tui_opt_out_reaches_review_without_proposing_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The documented prompt-loop opt-out is not service configuration.
+
+    The privacy ceremony loads the configured bindings after rendering repository authority.
+    Treating ``YOETZ_TUI`` as an unknown config override failed there before the first review or
+    decision prompt, even though the variable can only choose the terminal presentation layer.
+    """
+
+    import os
+
+    import yoetz.cli.privacy_setup as module
+
+    configured_bindings = module._configured_bindings  # pyright: ignore[reportPrivateUsage]
+    prompts: list[str] = []
+    _install_setup_stubs(
+        monkeypatch,
+        current=local_only_policy(),
+        confirmations=iter((False,)),
+        prompts=prompts,
+        migration_state="legacy_route_available",
+    )
+    monkeypatch.setattr(module, "_configured_bindings", configured_bindings)
+    for name in tuple(os.environ):
+        if name.startswith("YOETZ_"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("YOETZ_CONFIG", str(tmp_path / "missing.toml"))
+    monkeypatch.setenv("YOETZ_TUI", "0")
+
+    async def forbidden_propose(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("declining the review must not create a privacy proposal")
+
+    monkeypatch.setattr(module, "_propose", forbidden_propose)
+
+    report = await module.run_privacy_setup(recipe_hint="private")
+
+    assert report.outcome == "cancelled"
+    assert report.migration_state == "legacy_route_available"
+    assert prompts == ["Create this exact privacy proposal (Private)?"]
+
+
+@pytest.mark.anyio
 async def test_a_widening_commit_names_a_strict_route_that_cannot_dispatch_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -850,8 +894,15 @@ async def test_repository_setup_snapshot_accepts_service_json_object(
         async def close(self) -> None:
             return None
 
-    async def build_client(*, workspace_locator: object = None) -> Client:
+    async def build_client(
+        *,
+        workspace_locator: object = None,
+        projection_render_mode: object = None,
+        output_is_controlling_tty: bool = False,
+    ) -> Client:
         assert workspace_locator is not None
+        assert getattr(projection_render_mode, "value", None) == "human_readable"
+        assert type(output_is_controlling_tty) is bool
         return Client()
 
     monkeypatch.setattr(app_module, "build_service_client", build_client)
@@ -879,8 +930,15 @@ async def test_repository_proposal_carries_the_snapshot_authority_digest(
         async def close(self) -> None:
             return None
 
-    async def build_client(*, workspace_locator: object = None) -> Client:
+    async def build_client(
+        *,
+        workspace_locator: object = None,
+        projection_render_mode: object = None,
+        output_is_controlling_tty: bool = False,
+    ) -> Client:
         assert getattr(workspace_locator, "path", None) == str(tmp_path)
+        assert getattr(projection_render_mode, "value", None) == "human_readable"
+        assert type(output_is_controlling_tty) is bool
         return Client()
 
     monkeypatch.setattr(app_module, "build_service_client", build_client)

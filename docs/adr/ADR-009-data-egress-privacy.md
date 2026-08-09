@@ -363,6 +363,25 @@ case → single-use authorization → bounded gateway → bound sink/provider �
 
 ### Human involvement under the recommended recipe
 
+An agent may guide the owner to a trusted ceremony but cannot stand in for it. Both a nonterminal
+per-request decision and an explicitly reported missing standing repository grant use the exact
+command carried by their distinct continuation kinds and preserve the original check request
+identity. Repository setup uses the trusted CLI/TUI entrypoint `yoetz --privacy`; the one-use
+decision carries a proposal id and expiry. Recovery uses `status(view=operation)` or exact replay of
+the original request, never a fresh check. Chat assent is never authority, and denial, expiry,
+cancellation, stale authority, or incomplete review remains pre-dispatch.
+
+The repository continuation is permitted only after the trusted policy store returns a valid,
+exactly bound authority whose observed `grant_state` is `missing`. The operation records that
+suspension discriminator transactionally; status never infers it from later mutable authority.
+Missing route commitment, unbound or mismatched identity, coordinator closure, policy failure,
+invalid effective policy, unavailable reconciliation, and reconciliation failure are terminal
+no-dispatch policy outcomes and advertise no approval surface. Repository privacy setup/effective/
+propose result projection derives its workspace disclosure policy and receipt scope only from the
+authenticated control session's repository context. The same session carries closed render-mode
+and controlling-TTY facts: only interactive human-readable CLI output selects
+`local_human_view`; JSON, pipe/redirection, MCP, or absent facts remain fail-safe agent context.
+
 | Event | Human required? | Rule |
 |---|---:|---|
 | First new-repository grant, first `assisted` commit, later wider provider/category/class/scope, or credential set/rotate | yes | Exact trusted-local compound diff/credential ceremony |

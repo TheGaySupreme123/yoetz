@@ -7,7 +7,6 @@ import hashlib
 import hmac
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel
@@ -33,6 +32,7 @@ from yoetz.domain.values import (
     Frontier,
     JsonObject,
     frontier_from_json,
+    validate_commitment,
     validate_sha256_digest,
 )
 from yoetz.ports.clock import ClockPort
@@ -40,6 +40,7 @@ from yoetz.ports.control import (
     ControlClientKind,
     ControlError,
     ControlMethod,
+    ProjectionRenderMode,
     RepositoryPrivacyContext,
 )
 from yoetz.ports.ids import IdPort
@@ -110,13 +111,6 @@ __all__ = [
 _MAX_FINDINGS_LIMIT = 10
 
 
-class ProjectionRenderMode(str, Enum):  # noqa: UP042 - closed internal enum
-    """How the authenticated ordinary client will render the projected body."""
-
-    HUMAN_READABLE = "human_readable"
-    MACHINE_READABLE = "machine_readable"
-
-
 @dataclass(frozen=True, slots=True)
 class ClientProjectionContext:
     """Trusted service-side facts used to choose one ordinary disclosure sink."""
@@ -155,6 +149,7 @@ class ControlProjectionBinding:
     original_request_id: str | None
     route_identity_digest: str | None
     control_request_canonical: bytes
+    repository_privacy_commitment: str | None = None
 
     def __post_init__(self) -> None:
         validate_id(IdKind.CONTROL_RPC, self.rpc_id)
@@ -167,6 +162,8 @@ class ControlProjectionBinding:
             validate_id(IdKind.REQUEST, self.original_request_id)
         if self.route_identity_digest is not None:
             validate_sha256_digest(self.route_identity_digest)
+        if self.repository_privacy_commitment is not None:
+            validate_commitment(self.repository_privacy_commitment)
         if type(self.control_request_canonical) is not bytes or not self.control_request_canonical:
             raise TypeError("projection_control_request_invalid")
         try:
@@ -307,7 +304,7 @@ type _ScopeResolver = Callable[
     [ControlProjectionBinding, Mapping[str, JsonValue]], AuthorizationScope
 ]
 type _ReceiptVersions = Callable[[TaskRuntime], ReceiptVersionSlice]
-type _SupportHandler = Callable[[object], Awaitable[JsonObject]]
+type _SupportHandler = Callable[..., Awaitable[JsonObject]]
 
 
 def _empty_support_handlers() -> Mapping[ControlMethod, _SupportHandler]:
@@ -877,14 +874,41 @@ class Application:
     async def review(self, request: ReviewRequest) -> ReviewInternal:
         return await execute_review(self, request)  # pyright: ignore[reportArgumentType]
 
-    async def privacy_get_setup(self, request: object) -> JsonObject:
-        return await self._support(ControlMethod.PRIVACY_GET_SETUP, request)
+    async def privacy_get_setup(
+        self,
+        request: object,
+        *,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> JsonObject:
+        return await self._support(
+            ControlMethod.PRIVACY_GET_SETUP,
+            request,
+            repository_privacy_context=repository_privacy_context,
+        )
 
-    async def privacy_get_effective(self, request: object) -> JsonObject:
-        return await self._support(ControlMethod.PRIVACY_GET_EFFECTIVE, request)
+    async def privacy_get_effective(
+        self,
+        request: object,
+        *,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> JsonObject:
+        return await self._support(
+            ControlMethod.PRIVACY_GET_EFFECTIVE,
+            request,
+            repository_privacy_context=repository_privacy_context,
+        )
 
-    async def privacy_propose_policy(self, request: object) -> JsonObject:
-        return await self._support(ControlMethod.PRIVACY_PROPOSE_POLICY, request)
+    async def privacy_propose_policy(
+        self,
+        request: object,
+        *,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> JsonObject:
+        return await self._support(
+            ControlMethod.PRIVACY_PROPOSE_POLICY,
+            request,
+            repository_privacy_context=repository_privacy_context,
+        )
 
     async def privacy_tighten_policy(self, request: object) -> JsonObject:
         return await self._support(ControlMethod.PRIVACY_TIGHTEN_POLICY, request)
@@ -937,11 +961,24 @@ class Application:
     async def observation_revoke(self, request: object) -> JsonObject:
         return await self._support(ControlMethod.OBSERVATION_REVOKE, request)
 
-    async def _support(self, method: ControlMethod, request: object) -> JsonObject:
+    async def _support(
+        self,
+        method: ControlMethod,
+        request: object,
+        *,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> JsonObject:
         handler = self.support_handlers.get(method)
         if handler is None:
             raise ControlError("method_forbidden")
-        result = await handler(request)
+        kwargs: dict[str, object] = {}
+        if method in {
+            ControlMethod.PRIVACY_GET_SETUP,
+            ControlMethod.PRIVACY_GET_EFFECTIVE,
+            ControlMethod.PRIVACY_PROPOSE_POLICY,
+        }:
+            kwargs["repository_privacy_context"] = repository_privacy_context
+        result = await handler(request, **kwargs)
         if type(result) is not JsonObject or "privacy_projection" in result:
             raise TypeError("support_internal_body_invalid")
         return result

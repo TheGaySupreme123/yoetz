@@ -121,6 +121,12 @@ def test_missing_file_uses_defaults_and_empty_env_is_unset(tmp_path: Path) -> No
     assert config.logging.level == "info"
 
 
+def test_tui_opt_out_is_known_process_control_not_a_config_override(tmp_path: Path) -> None:
+    config = load_config({}, {"YOETZ_TUI": "0"}, tmp_path / "missing.toml")
+
+    assert config.profile == "strict-local"
+
+
 def test_minimal_parse_ignores_nonminimal_provider_shape(tmp_path: Path) -> None:
     config_path = tmp_path / "minimal.toml"
     config_path.write_text(

@@ -70,7 +70,7 @@ _SUPPORT_SCHEMA: Final = "yoetz.runtime-support/1"
 _RESOURCE_ROOT: Final = "yoetz.resources"
 _MANIFEST_LIMIT: Final = 1_048_576
 _RESOURCE_LIMIT: Final = 4_194_304
-_EXPECTED_RESOURCE_COUNT: Final = 89
+_EXPECTED_RESOURCE_COUNT: Final = 90
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -572,11 +572,11 @@ def _resource_counts(entries: tuple[_ResourceEntry, ...]) -> VersionPairs:
     expected = {
         "canonical_vectors": 9,
         "guidance_resources": 5,
-        "migrations": 8,
+        "migrations": 9,
         "runtime_support_resources": 1,
         "schema_resources": 64,
         "skill_resources": 2,
-        "total": 89,
+        "total": 90,
     }
     if counts != expected:
         raise ResourceIntegrityError("resource_counts_invalid")

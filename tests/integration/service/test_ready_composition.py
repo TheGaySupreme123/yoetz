@@ -24,10 +24,13 @@ from yoetz.application.service import ClientProjectionContext, ControlProjection
 from yoetz.config.models import YoetzConfig
 from yoetz.config.write import fireworks_provider
 from yoetz.domain.privacy import AuthorizationScope, AuthorizationScopeKind
+from yoetz.domain.values import JsonObject
 from yoetz.ports.control import (
     ControlCallRequest,
     ControlClientKind,
     ControlMethod,
+    ProjectionRenderMode,
+    RepositoryPrivacyContext,
     ServiceState,
 )
 from yoetz.ports.diagnostics import StartupCheckResult
@@ -35,7 +38,9 @@ from yoetz.ports.ledger import CheckCommitResult
 from yoetz.ports.privacy import (
     EffectivePrivacyPolicy,
     HumanAuthorityCapability,
+    LocalDisclosureReceiptView,
     OutboundGatewayPort,
+    PrivacyReceiptAudience,
 )
 from yoetz.ports.secret_memory import HumanAuthorizationProof, SecretPurpose
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
@@ -343,7 +348,7 @@ async def test_open_ready_catalog_seeds_generation_property(tmp_path: Path) -> N
 
 
 @pytest.mark.anyio
-async def test_ready_factory_installs_application_that_starts(tmp_path: Path) -> None:
+async def test_ready_factory_starts_and_reads_repository_bound_setup(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
     clock = _Clock()
     memory = LocalSecretMemory()
@@ -378,6 +383,61 @@ async def test_ready_factory_installs_application_that_starts(tmp_path: Path) ->
             diagnostics=_Diagnostics(),
         )
         app = await factory(1, vault.generation)
+        repository_context = RepositoryPrivacyContext(
+            "hmac-sha256:" + "4" * 64,
+            "git_common_root",
+        )
+        setup = await app.privacy_get_setup(
+            JsonObject({"schema_version": "2.0.0"}),
+            repository_privacy_context=repository_context,
+        )
+        setup_rpc_id = new_id(IdKind.CONTROL_RPC)
+        setup_binding = ControlProjectionBinding(
+            rpc_id=setup_rpc_id,
+            method=ControlMethod.PRIVACY_GET_SETUP,
+            service_instance_id=_INSTANCE_ID,
+            service_generation=1,
+            original_request_id=None,
+            route_identity_digest=None,
+            control_request_canonical=canonical_encode(
+                {
+                    "method": ControlMethod.PRIVACY_GET_SETUP.value,
+                    "rpc_id": setup_rpc_id,
+                    "service_generation": "1",
+                    "service_instance_id": _INSTANCE_ID,
+                }
+            ),
+            repository_privacy_commitment=repository_context.commitment,
+        )
+        setup_scope = app.disclosure_scope_for(setup_binding, setup)
+        assert setup_scope == AuthorizationScope(
+            AuthorizationScopeKind.WORKSPACE,
+            _INSTALLATION_ID,
+            repository_context.commitment,
+        )
+        assert app.disclosure_scope_for(
+            replace(setup_binding, repository_privacy_commitment=None), setup
+        ) == AuthorizationScope(AuthorizationScopeKind.MACHINE, _INSTALLATION_ID)
+        projected_setup = await app.project_result_for_client(
+            ClientProjectionContext(
+                ControlClientKind.CLI,
+                ProjectionRenderMode.HUMAN_READABLE,
+                True,
+            ),
+            setup_binding,
+            setup,
+        )
+        assert type(projected_setup) is JsonObject
+        projection = cast(dict[str, JsonValue], projected_setup)["privacy_projection"]
+        assert isinstance(projection, JsonObject)
+        receipt_id = cast(str, projection["local_disclosure_receipt_id"])
+        policy_app = app.privacy.policy_application
+        assert policy_app is not None
+        receipt_view = await policy_app.audit.get_receipt(
+            receipt_id, PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL
+        )
+        assert type(receipt_view) is LocalDisclosureReceiptView
+        assert receipt_view.receipt.scope == setup_scope
         request = StartRequest.model_validate(
             {
                 "protocol_version": "0.1",
@@ -419,6 +479,9 @@ async def test_ready_factory_installs_application_that_starts(tmp_path: Path) ->
             result,
         )
 
+        assert setup["grant_state"] == "missing"
+        bound_scope = cast(JsonObject, setup["bound_scope"])
+        assert bound_scope["workspace_ref_commitment"] == repository_context.commitment
         assert result.ok is True
         assert result.outcome == "created"
         assert result.frontier.sequence == "1"
@@ -1354,24 +1417,23 @@ async def test_ready_check_never_activates_provider_from_machine_policy_without_
                 }
             )
         )
-        first = await app.check(
-            CheckRequest.model_validate(
-                {
-                    **common,
-                    "request_id": "req_00000000-0000-4000-8000-000000000402",
-                    "session_id": started.session_id,
-                    "writer_id": started.writer_id,
-                    "expected_frontier": {
-                        "sequence": str(started.frontier.sequence),
-                        "head_digest": started.frontier.head_digest,
-                    },
-                    "mode": "semantic_required",
-                    "max_findings": "3",
-                    "policy_packs": ["work-integrity/0.1.0"],
-                }
-            )
+        original_request = CheckRequest.model_validate(
+            {
+                **common,
+                "request_id": "req_00000000-0000-4000-8000-000000000402",
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": {
+                    "sequence": str(started.frontier.sequence),
+                    "head_digest": started.frontier.head_digest,
+                },
+                "mode": "semantic_required",
+                "max_findings": "3",
+                "policy_packs": ["work-integrity/0.1.0"],
+            }
         )
-        assert type(first) is CheckCommitResult, f"unexpected nonterminal check: {type(first)}"
+        first = await app.check(original_request)
+        assert type(first) is CheckCommitResult
         assert first.semantic_status.value == "blocked_by_policy"
         assert first.semantic_reason.value == "scope_not_authorized"
 
@@ -1420,32 +1482,15 @@ async def test_ready_check_never_activates_provider_from_machine_policy_without_
         await vault.store_provider_credential("set", credential_binding, credential, proof, 2.0)
         assert await vault.has_provider_credential(credential_binding) is True
 
-        second = await app.check(
-            CheckRequest.model_validate(
-                {
-                    **common,
-                    "request_id": "req_00000000-0000-4000-8000-000000000403",
-                    "session_id": started.session_id,
-                    "writer_id": started.writer_id,
-                    "expected_frontier": {
-                        "sequence": str(first.result_frontier.sequence),
-                        "head_digest": first.result_frontier.head_digest,
-                    },
-                    "mode": "semantic_required",
-                    "max_findings": "3",
-                    "policy_packs": ["work-integrity/0.1.0"],
-                }
-            )
-        )
-        assert type(second) is CheckCommitResult, f"unexpected nonterminal check: {type(second)}"
+        second = await app.check(original_request)
+        assert type(second) is CheckCommitResult
 
         assert app.semantic_evaluator is evaluator
         # Credential rotation/storage does not create repository authority or activate the
         # provider. The second check fails at the same exact grant fence without a provider call.
-        assert (second.semantic_status.value, second.semantic_reason.value) == (
-            "blocked_by_policy",
-            "scope_not_authorized",
-        )
+        assert second.outcome == "replayed"
+        assert second.semantic_status == first.semantic_status
+        assert second.semantic_reason == first.semantic_reason
         assert "fireworks" not in cast(
             tuple[str, ...], tuple(getattr(gateway, "connected_provider_ids")())
         )

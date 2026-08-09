@@ -97,6 +97,7 @@ from yoetz.ports.ledger import (
     CheckCommitResult,
     CheckPhase,
     CheckPolicyExecution,
+    CheckSuspensionKind,
     CheckVersionSlice,
     EvidenceProjectionFilter,
     FindingProjectionPosition,
@@ -1156,6 +1157,7 @@ class MemoryLedgerAdapter:
             lease_owner_id=self._fence.service_instance_id,
             lease_generation=cast(int, record.lease_generation) + 1,
             lease_expires_at=_now(self._clock) + timedelta(seconds=60),
+            suspension_kind=None,
         )
         key = (record.writer_id, record.operation_id)
         self._state.operations[key] = (updated, None)
@@ -1836,6 +1838,23 @@ class MemoryLedgerAdapter:
             self._state.jobs[job_id] = job
             self._state.job_by_case[identity] = job_id
             return job
+
+    async def suspend_check_for_repository_grant(self, lease: OperationLease) -> None:
+        """Durably mark and expire the lease for a pre-job standing-grant suspension."""
+
+        async with self._lock:
+            record = self._require_lease(lease)
+            if record.phase is not CheckPhase.SEMANTIC_WAIT or any(
+                job.writer_id == lease.writer_id and job.operation_id == lease.operation_id
+                for job in self._state.jobs.values()
+            ):
+                raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+            suspended = replace(
+                record,
+                lease_expires_at=_now(self._clock),
+                suspension_kind=CheckSuspensionKind.REPOSITORY_GRANT,
+            )
+            self._state.operations[(record.writer_id, record.operation_id)] = (suspended, None)
 
     async def claim_semantic_job(self, lease: OperationLease, job_id: str) -> SemanticAttemptHandle:
         async with self._lock:

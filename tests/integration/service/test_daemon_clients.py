@@ -10,6 +10,8 @@ from typing import cast
 import pytest
 
 import yoetz.service.daemon as daemon_module
+from builders.privacy_policies import INSTALLATION_ID, local_only_policy
+from yoetz.adapters.privacy.catalog import encode_privacy_policy_json
 from yoetz.application.publish_work import PublishWorkInternalResult
 from yoetz.application.service import (
     ClientProjectionContext,
@@ -17,6 +19,7 @@ from yoetz.application.service import (
     ProjectedControlBody,
     ProjectionBindingFacts,
     ProjectionRenderMode,
+    resolve_client_disclosure_sink,
 )
 from yoetz.config.models import LoggingConfig, YoetzConfig
 from yoetz.domain.privacy import LocalDisclosureSink
@@ -60,6 +63,12 @@ from yoetz.service.confidential_protocol import (
     VaultUnlockPreview,
     decode_human_frame,
     encode_human_frame,
+)
+from yoetz.service.control_protocol import (
+    client_handshake,
+    parse_control_result,
+    read_control_frame,
+    write_control_frame,
 )
 from yoetz.service.daemon import ServiceComposition, ServiceDaemon
 from yoetz.service.lifecycle import LifecycleError, ServiceLifecycle
@@ -121,6 +130,38 @@ class _Monitor:
         self.closed = True
 
 
+class _ConnectedControlStream:
+    def __init__(self, peer_identity: object) -> None:
+        self.peer_identity = peer_identity
+        self.other: _ConnectedControlStream | None = None
+        self._chunks: asyncio.Queue[bytes] = asyncio.Queue(maxsize=8)
+        self._buffer = bytearray()
+
+    async def receive(self, max_bytes: int) -> bytes:
+        while not self._buffer:
+            self._buffer.extend(await self._chunks.get())
+        chunk = bytes(self._buffer[:max_bytes])
+        del self._buffer[:max_bytes]
+        return chunk
+
+    async def send_all(self, data: Buffer) -> None:
+        assert self.other is not None
+        await self.other._chunks.put(bytes(data))
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _connected_control_pair() -> tuple[_ConnectedControlStream, _ConnectedControlStream]:
+    client_peer = object()
+    service_peer = object()
+    client = _ConnectedControlStream(service_peer)
+    server = _ConnectedControlStream(client_peer)
+    client.other = server
+    server.other = client
+    return client, server
+
+
 class _Vault:
     mode = VaultMode.OS_KEYRING
     generation = 3
@@ -144,6 +185,7 @@ class _Application:
         self.start_calls = 0
         self.publish_work_calls = 0
         self.projections: list[ClientProjectionContext] = []
+        self.projection_bindings: list[ControlProjectionBinding] = []
         self.close_count = 0
         self.publish_work_error: PublicOperationError | None = None
         # Stands in for an accepted, durable batch so the post-commit response path can be
@@ -157,6 +199,7 @@ class _Application:
         self.publish_response_stores = 0
         self.cached_publish_response: PublishWorkResult | None = None
         self.publish_response_store_error: PublicOperationError | None = None
+        self.privacy_setup_contexts: list[RepositoryPrivacyContext | None] = []
 
     async def start(
         self,
@@ -258,6 +301,16 @@ class _Application:
         assert isinstance(request, JsonObject)
         return JsonObject({"accepted": True})
 
+    async def privacy_get_setup(
+        self,
+        request: object,
+        *,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> JsonObject:
+        assert request == JsonObject({"schema_version": "2.0.0"})
+        self.privacy_setup_contexts.append(repository_privacy_context)
+        return _privacy_setup_snapshot()
+
     async def projection_binding_facts(
         self,
         method: ControlMethod,
@@ -281,8 +334,10 @@ class _Application:
             ControlMethod.PUBLISH_WORK,
             ControlMethod.CHECK,
             ControlMethod.STATUS,
+            ControlMethod.PRIVACY_GET_SETUP,
         }
         self.projections.append(context)
+        self.projection_bindings.append(binding)
         if self.projection_failures:
             self.projection_failures -= 1
             raise RuntimeError("one-shot-projection-failure")
@@ -290,6 +345,24 @@ class _Application:
             raise self.projection_error
         if type(result) is PublishWorkInternalResult:
             return _projected_publish_work_result(result)
+        if method is ControlMethod.PRIVACY_GET_SETUP:
+            assert type(result) is JsonObject
+            return JsonObject(
+                {
+                    **dict(result.items()),
+                    "privacy_projection": {
+                        "sink": "local_human_view",
+                        "local_disclosure_receipt_id": ("egr_00000000-0000-4000-8000-000000000060"),
+                        "policy_id": "pvy_00000000-0000-4000-8000-000000000061",
+                        "policy_version": "1",
+                        "policy_digest": "sha256:" + "6" * 64,
+                        "included_categories": [],
+                        "blocked_categories": [],
+                        "omitted_pointers": [],
+                        "projection_commitment": "hmac-sha256:" + "7" * 64,
+                    },
+                }
+            )
         assert isinstance(result, StartResult | PublishWorkResult | JsonObject)
         return result
 
@@ -367,6 +440,27 @@ def _request(daemon: ServiceDaemon, method: ControlMethod, body: object) -> Cont
     )
 
 
+def _privacy_setup_snapshot() -> JsonObject:
+    return JsonObject(
+        {
+            "schema_version": "2.0.0",
+            "composed_policy": encode_privacy_policy_json(local_only_policy()),
+            "bound_scope": {
+                "kind": "workspace",
+                "installation_id": INSTALLATION_ID,
+                "workspace_ref_commitment": "hmac-sha256:" + "8" * 64,
+            },
+            "authority_digest": "sha256:" + "9" * 64,
+            "grant_state": "missing",
+            "migration_state": "not_applicable",
+            "channel_choices": [],
+            "allowed_blocked_examples": [],
+            "recipes": [],
+            "never_send_editable": False,
+        }
+    )
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     ("route_profile", "expected"),
@@ -412,7 +506,18 @@ async def test_ready_handler_preserves_check_route_default(
 
 
 @pytest.mark.anyio
-async def test_start_handler_receives_only_the_trusted_repository_context_keyword() -> None:
+@pytest.mark.parametrize(
+    "method",
+    (
+        ControlMethod.START,
+        ControlMethod.PRIVACY_GET_SETUP,
+        ControlMethod.PRIVACY_GET_EFFECTIVE,
+        ControlMethod.PRIVACY_PROPOSE_POLICY,
+    ),
+)
+async def test_repository_bound_handler_receives_only_the_trusted_context_keyword(
+    method: ControlMethod,
+) -> None:
     seen: list[object] = []
     marker = object()
     context = RepositoryPrivacyContext("hmac-sha256:" + "1" * 64, "git_common_root")
@@ -431,8 +536,12 @@ async def test_start_handler_receives_only_the_trusted_repository_context_keywor
         rpc_id=new_id(IdKind.CONTROL_RPC),
         service_instance_id=_INSTANCE_ID,
         service_generation="7",
-        method=ControlMethod.START,
-        body=_start_body(),
+        method=method,
+        body=(
+            _start_body()
+            if method is ControlMethod.START
+            else JsonObject({"schema_version": "2.0.0"})
+        ),
     )
 
     result = await ServiceDaemon._invoke_ready_handler(  # pyright: ignore[reportPrivateUsage]
@@ -441,6 +550,32 @@ async def test_start_handler_receives_only_the_trusted_repository_context_keywor
 
     assert result is marker
     assert seen == [context]
+
+
+@pytest.mark.anyio
+async def test_v2_privacy_setup_snapshot_uses_generic_client_projection() -> None:
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    context = RepositoryPrivacyContext("hmac-sha256:" + "8" * 64, "git_common_root")
+
+    result = await daemon.dispatch(
+        ControlClientKind.CLI,
+        _request(
+            daemon,
+            ControlMethod.PRIVACY_GET_SETUP,
+            JsonObject({"schema_version": "2.0.0"}),
+        ),
+        repository_privacy_context=context,
+    )
+
+    assert result.outcome == "ok", result.body
+    assert type(result.body) is JsonObject
+    assert result.body.get("schema_version") == "2.0.0"
+    assert result.body.get("privacy_projection") is not None
+    assert application.privacy_setup_contexts == [context]
+    assert len(application.projections) == 1
+    assert application.projection_bindings[0].repository_privacy_commitment == context.commitment
+    await daemon.close()
 
 
 @pytest.mark.anyio
@@ -1027,6 +1162,74 @@ async def test_dispatch_passes_trusted_human_projection_context() -> None:
     assert application.projections == [context]
     assert daemon.status().state is ServiceState.READY
     await daemon.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("client_kind", "render_mode", "controlling_tty", "expected_sink"),
+    (
+        (
+            ControlClientKind.CLI,
+            ProjectionRenderMode.HUMAN_READABLE,
+            True,
+            LocalDisclosureSink.LOCAL_HUMAN_VIEW,
+        ),
+        (
+            ControlClientKind.CLI,
+            ProjectionRenderMode.MACHINE_READABLE,
+            True,
+            LocalDisclosureSink.AGENT_CONTEXT,
+        ),
+        (
+            ControlClientKind.CLI,
+            ProjectionRenderMode.HUMAN_READABLE,
+            False,
+            LocalDisclosureSink.AGENT_CONTEXT,
+        ),
+        (
+            ControlClientKind.MCP_BRIDGE,
+            ProjectionRenderMode.HUMAN_READABLE,
+            True,
+            LocalDisclosureSink.AGENT_CONTEXT,
+        ),
+    ),
+)
+async def test_connected_control_session_carries_trusted_presentation_to_daemon_projection(
+    client_kind: ControlClientKind,
+    render_mode: ProjectionRenderMode,
+    controlling_tty: bool,
+    expected_sink: LocalDisclosureSink,
+) -> None:
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    client, server = _connected_control_pair()
+    server_task = asyncio.create_task(daemon._serve_control_connection(server))  # pyright: ignore[reportPrivateUsage]
+    try:
+        session = await client_handshake(
+            client,
+            client_kind,
+            "0.1.0",
+            projection_render_mode=render_mode,
+            output_is_controlling_tty=controlling_tty,
+        )
+        request = _request(daemon, ControlMethod.START, _start_body())
+        session.admit(request)
+        await write_control_frame(client, request)
+        result = parse_control_result(await read_control_frame(client))
+        session.correlate(result)
+
+        expected_context = ClientProjectionContext(
+            client_kind,
+            render_mode,
+            controlling_tty,
+        )
+        assert result.outcome == "ok"
+        assert application.projections == [expected_context]
+        assert resolve_client_disclosure_sink(expected_context) is expected_sink
+    finally:
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await daemon.close()
 
 
 @pytest.mark.anyio

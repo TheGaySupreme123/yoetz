@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import os
 import queue
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -250,8 +252,10 @@ def test_singleton_rejection_and_signal_driven_foreground_shutdown(tmp_path: Pat
 
 def test_control_stop_exits_unlinks_endpoint_and_releases_singleton(tmp_path: Path) -> None:
     lock_path = tmp_path / "service.lock"
-    runtime_path = tmp_path / "runtime"
-    runtime_path.mkdir(mode=0o700)
+    # AF_UNIX pathname limits are materially shorter than pytest's private full-suite basetemp.
+    # The production runtime directory is short; use the same shape here so this remains a
+    # control-stop lifecycle test rather than a platform pathname-limit probe.
+    runtime_path = Path(tempfile.mkdtemp(prefix="yoetz-sock-", dir="/private/tmp"))
     runtime_path.chmod(0o700)
     endpoint_path = runtime_path / "control.sock"
     owner = _spawn_control_daemon(lock_path, runtime_path)
@@ -287,3 +291,4 @@ def test_control_stop_exits_unlinks_endpoint_and_releases_singleton(tmp_path: Pa
         if owner.poll() is None:
             owner.kill()
             owner.wait(timeout=5)
+        shutil.rmtree(runtime_path, ignore_errors=True)

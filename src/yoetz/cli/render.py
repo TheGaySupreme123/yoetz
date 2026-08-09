@@ -14,6 +14,7 @@ from yoetz.protocol.models import (
     ReceiptSuccessModel,
     StatusCompactPageModel,
     StatusFindingsPageModel,
+    StatusOperationPageModel,
     StatusSuccessModel,
 )
 
@@ -104,6 +105,22 @@ def render_human_status(result: StatusSuccessModel) -> str:
         lines.extend(
             ("Open obligations: unavailable in this view", f"Unresolved findings: {unresolved}")
         )
+    elif isinstance(result.page, StatusOperationPageModel):
+        lines.extend(
+            (
+                "Open obligations: unavailable in this view",
+                "Unresolved findings: unavailable in this view",
+                f"Operation: {result.page.operation_request_id} ({result.page.state})",
+            )
+        )
+        if result.page.continuation is not None:
+            lines.extend(
+                (
+                    f"Continuation: {result.page.continuation.kind}",
+                    "Trusted command: " + " ".join(result.page.continuation.command),
+                    f"Replay request ID: {result.page.continuation.replay_request_id}",
+                )
+            )
     else:
         lines.extend(
             (
@@ -150,15 +167,17 @@ def render_human_awaiting_human(result: CheckAwaitingHumanModel) -> str:
     if type(result) is not CheckAwaitingHumanModel:
         raise TypeError("check_result_invalid")
     continuation = result.continuation
-    return "\n".join(
-        (
-            "Semantic review: awaiting_human (human_approval_required)",
-            "",
-            "This check is paused for a local disclosure decision. No verdict yet.",
-            "",
-            f"  {' '.join(continuation.command)}",
-            "",
-            f"Expires at: {continuation.expires_at}",
-            f"Then replay the same check with request_id {continuation.replay_request_id}.",
-        )
-    )
+    lines = [
+        "Semantic review: awaiting_human (human_approval_required)",
+        "",
+        "This check is paused for trusted local privacy authority. No verdict yet.",
+        "",
+        f"  {' '.join(continuation.command)}",
+        "",
+    ]
+    if continuation.pending_id is not None:
+        lines.append(f"Pending decision: {continuation.pending_id}")
+    if continuation.expires_at is not None:
+        lines.append(f"Expires at: {continuation.expires_at}")
+    lines.append(f"Then replay the same check with request_id {continuation.replay_request_id}.")
+    return "\n".join(lines)

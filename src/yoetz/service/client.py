@@ -53,6 +53,7 @@ from yoetz.ports.control import (
     ControlMethod,
     ControlResult,
     McpRouteProfile,
+    ProjectionRenderMode,
     ServiceStatus,
     ServiceStopResult,
     WorkspaceLocator,
@@ -1053,6 +1054,8 @@ async def connect_service(
     client_kind: ControlClientKind,
     *,
     workspace_locator: WorkspaceLocator | None = None,
+    projection_render_mode: ProjectionRenderMode = ProjectionRenderMode.MACHINE_READABLE,
+    output_is_controlling_tty: bool = False,
 ) -> ServiceClient:
     """Connect only to the verified fixed ordinary endpoint and perform the handshake."""
 
@@ -1060,11 +1063,20 @@ async def connect_service(
         raise TypeError("control_client_kind_invalid")
     if workspace_locator is not None and type(workspace_locator) is not WorkspaceLocator:
         raise TypeError("workspace_locator_invalid")
+    if type(projection_render_mode) is not ProjectionRenderMode:
+        raise TypeError("projection_render_mode_invalid")
+    if type(output_is_controlling_tty) is not bool:
+        raise TypeError("projection_tty_fact_invalid")
     stream: AuthenticatedUnixStream | None = None
     try:
         stream = await connect_control()
         session = await client_handshake(
-            stream, client_kind, __version__, workspace_locator=workspace_locator
+            stream,
+            client_kind,
+            __version__,
+            workspace_locator=workspace_locator,
+            projection_render_mode=projection_render_mode,
+            output_is_controlling_tty=output_is_controlling_tty,
         )
         return _connected_client(stream, session, client_kind)
     except LocalControlTransportError as exc:

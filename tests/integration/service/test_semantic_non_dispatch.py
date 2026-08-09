@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -13,7 +14,13 @@ import yoetz.service.ready_composition as ready_composition_module
 from builders.ledger_adapters import FixedClock
 from builders.policy_cases import FRONTIER, make_case
 from yoetz.application.check import FinalSemanticEvaluation, semantic_coverage_gap_code
-from yoetz.application.egress import PrivacyCoordinator, SemanticEgressAwaitingHuman
+from yoetz.application.egress import (
+    PrivacyCoordinator,
+    RepositoryGrantAdmission,
+    SemanticEgressAwaitingHuman,
+    SemanticEgressProviderOutcome,
+)
+from yoetz.domain.findings import SamplingParams, SemanticDispatchKind, SemanticFailureClass
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
@@ -31,7 +38,15 @@ from yoetz.domain.receipts import (
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
 )
 from yoetz.ports.ledger import CheckPhase, FrozenCase, OperationLease
-from yoetz.ports.privacy import EffectivePrivacyPolicy
+from yoetz.ports.privacy import (
+    EffectivePrivacyPolicy,
+    OutboundGatewayPort,
+    PrivacyAuditPort,
+    PrivacyClassifierPort,
+    PrivacyPolicyStorePort,
+    RepositoryPrivacyAuthority,
+)
+from yoetz.ports.semantic import ProviderAttemptProvenance, SemanticResultUnavailable
 from yoetz.ports.start_catalog import StartCatalogPort, TaskRoute, TaskRouteState
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.models import DataCategory, SemanticReason, SemanticStatus
@@ -108,24 +123,61 @@ def _test_effective_policy() -> EffectivePrivacyPolicy:
 
 
 class _PolicyStore:
-    def __init__(self, effective: EffectivePrivacyPolicy) -> None:
+    def __init__(self, effective: EffectivePrivacyPolicy, *, repository_granted: bool) -> None:
         self._effective = effective
+        self._repository_granted = repository_granted
 
     async def effective_policy(self, scope: AuthorizationScope) -> EffectivePrivacyPolicy:
         del scope
         return self._effective
 
+    async def repository_authority(self, scope: AuthorizationScope) -> RepositoryPrivacyAuthority:
+        grant_policy = None
+        grant_generation = None
+        grant_policy_digest = None
+        if self._repository_granted:
+            grant_policy = replace(
+                self._effective.policy,
+                effective_scope=AuthorizationScope(
+                    AuthorizationScopeKind.WORKSPACE,
+                    _INSTALLATION,
+                    _REPOSITORY,
+                ),
+                policy_digest="sha256:" + "e" * 64,
+            )
+            grant_generation = 1
+            grant_policy_digest = grant_policy.policy_digest
+        return RepositoryPrivacyAuthority(
+            scope=scope,
+            effective=self._effective,
+            repository_privacy_commitment=_REPOSITORY,
+            grant_state="granted" if self._repository_granted else "missing",
+            migration_state="not_applicable",
+            authority_digest="sha256:" + "f" * 64,
+            ancestors=(),
+            grant_generation=grant_generation,
+            grant_policy_digest=grant_policy_digest,
+            grant_policy=grant_policy,
+        )
+
+    def set_repository_granted(self, granted: bool) -> None:
+        self._repository_granted = granted
+
 
 class _PolicyApplication:
-    def __init__(self, effective: EffectivePrivacyPolicy) -> None:
-        self.policy_store = _PolicyStore(effective)
+    def __init__(self, effective: EffectivePrivacyPolicy, *, repository_granted: bool) -> None:
+        self.policy_store = _PolicyStore(effective, repository_granted=repository_granted)
 
 
 class _Privacy:
-    def __init__(self) -> None:
+    def __init__(self, *, repository_granted: bool = True) -> None:
         self.calls = 0
+        self.repository_granted = repository_granted
         # Real policy path is required for dispatch; never mint synthetic policy identity.
-        self.policy_application = _PolicyApplication(_test_effective_policy())
+        self.policy_application = _PolicyApplication(
+            _test_effective_policy(), repository_granted=repository_granted
+        )
+        self.terminal_provider_result = False
 
     async def activate_repository(self, scope: AuthorizationScope) -> bool:
         assert scope == AuthorizationScope(
@@ -134,12 +186,67 @@ class _Privacy:
             _REPOSITORY,
             _TASK,
         )
-        return True
+        return self.repository_granted
+
+    async def admit_repository_grant(self, scope: AuthorizationScope) -> RepositoryGrantAdmission:
+        policy_application = cast(
+            _PolicyApplication | None, getattr(self, "policy_application", None)
+        )
+        if policy_application is None:
+            return RepositoryGrantAdmission.UNAVAILABLE
+        try:
+            authority = await policy_application.policy_store.repository_authority(scope)
+        except Exception:
+            return RepositoryGrantAdmission.UNAVAILABLE
+        if (
+            type(authority) is not RepositoryPrivacyAuthority
+            or authority.scope != scope
+            or authority.repository_privacy_commitment != scope.workspace_ref_commitment
+        ):
+            return RepositoryGrantAdmission.UNAVAILABLE
+        if authority.grant_state == "missing":
+            return RepositoryGrantAdmission.MISSING
+        if authority.grant_state != "granted":
+            return RepositoryGrantAdmission.UNAVAILABLE
+        try:
+            activated = await self.activate_repository(scope)
+        except Exception:
+            return RepositoryGrantAdmission.UNAVAILABLE
+        return (
+            RepositoryGrantAdmission.GRANTED if activated else RepositoryGrantAdmission.UNAVAILABLE
+        )
 
     async def evaluate_semantic(self, candidate: object, deadline: object) -> object:
         del deadline
         self.calls += 1
         request_id = cast(str, getattr(candidate, "request_id"))
+        if self.terminal_provider_result:
+            return SemanticEgressProviderOutcome(
+                request_id=request_id,
+                privacy_proposal_id="ppr_53000000-0000-4000-8000-000000000002",
+                authorization_id="aut_53000000-0000-4000-8000-000000000003",
+                dispatch_kind=SemanticDispatchKind.EXTERNAL,
+                result=SemanticResultUnavailable(
+                    ProviderAttemptProvenance(
+                        provider=_PROVIDER.provider_id,
+                        endpoint_profile_id=_PROVIDER.endpoint_profile_id,
+                        endpoint_profile_version=_PROVIDER.endpoint_profile_version,
+                        model=_PROVIDER.model_id,
+                        sdk_version="1.0.0",
+                        prompt_digest="sha256:" + "1" * 64,
+                        schema_digest="sha256:" + "2" * 64,
+                        policy_digest="sha256:" + "3" * 64,
+                        privacy_policy_digest="sha256:" + "4" * 64,
+                        sampling_params=SamplingParams(128),
+                        latency_ms=1,
+                        status=SemanticStatus.UNAVAILABLE,
+                        failure_class=SemanticFailureClass.TRANSPORT,
+                    )
+                ),
+                case_digest="sha256:" + "5" * 64,
+                privacy_receipt_id="egr_53000000-0000-4000-8000-000000000004",
+                request_commitment="hmac-sha256:" + "6" * 64,
+            )
         return SemanticEgressAwaitingHuman(
             request_id,
             "ppr_53000000-0000-4000-8000-000000000001",
@@ -244,6 +351,108 @@ def _assert_record(tmp_path: Path, operation: str, reason: SemanticReason) -> No
     assert "payload" not in raw
     assert "exception" not in raw
     assert str(tmp_path) not in raw
+
+
+@pytest.mark.anyio
+async def test_missing_repository_grant_suspends_same_request_before_provider_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    privacy = _Privacy(repository_granted=False)
+    provider_resolutions = 0
+
+    def resolve() -> ProviderBinding | None:
+        nonlocal provider_resolutions
+        provider_resolutions += 1
+        return _PROVIDER
+
+    result = await _evaluator(privacy, resolve, _route())(_frozen(), ())
+
+    assert (result.status, result.reason) == (
+        SemanticStatus.AWAITING_HUMAN,
+        SemanticReason.HUMAN_APPROVAL_REQUIRED,
+    )
+    assert result.continuation is not None
+    assert result.continuation.kind == "repository_privacy_setup"
+    assert result.continuation.command == ("yoetz", "--privacy")
+    assert result.continuation.request_id == _REQUEST
+    assert provider_resolutions == 0
+    assert privacy.calls == 0
+    _assert_record(
+        tmp_path,
+        "semantic_suspended_repository_grant_missing",
+        SemanticReason.HUMAN_APPROVAL_REQUIRED,
+    )
+
+
+@pytest.mark.anyio
+async def test_exact_same_request_resumes_after_trusted_grant_to_terminal_provider_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    privacy = _Privacy(repository_granted=False)
+    provider_resolutions = 0
+
+    def resolve() -> ProviderBinding | None:
+        nonlocal provider_resolutions
+        provider_resolutions += 1
+        return _PROVIDER
+
+    evaluator = _evaluator(privacy, resolve, _route())
+    original = _frozen()
+    suspended = await evaluator(original, ())
+
+    assert suspended.status is SemanticStatus.AWAITING_HUMAN
+    assert suspended.continuation is not None
+    assert suspended.continuation.request_id == original.lease.operation_id == _REQUEST
+    assert provider_resolutions == privacy.calls == 0
+
+    privacy.repository_granted = True
+    privacy.policy_application.policy_store.set_repository_granted(True)
+    privacy.terminal_provider_result = True
+    resumed = await evaluator(original, ())
+
+    assert (resumed.status, resumed.reason) == (
+        SemanticStatus.UNAVAILABLE,
+        SemanticReason.TRANSPORT_UNAVAILABLE,
+    )
+    assert resumed.continuation is None
+    assert provider_resolutions == privacy.calls == 1
+
+
+class _ClosingGateway:
+    async def close(self) -> None:
+        return None
+
+
+@pytest.mark.anyio
+async def test_closed_real_coordinator_is_terminal_without_repository_setup_or_dispatch() -> None:
+    coordinator = PrivacyCoordinator(
+        cast(
+            PrivacyPolicyStorePort, _PolicyStore(_test_effective_policy(), repository_granted=False)
+        ),
+        cast(PrivacyClassifierPort, object()),
+        cast(PrivacyAuditPort, object()),
+        cast(OutboundGatewayPort, _ClosingGateway()),
+        FixedClock(),
+        ready_composition_module.IdPort(),
+    )
+    await coordinator.close()
+    provider_resolutions = 0
+
+    def resolve() -> ProviderBinding | None:
+        nonlocal provider_resolutions
+        provider_resolutions += 1
+        return _PROVIDER
+
+    result = await _evaluator(cast(_Privacy, coordinator), resolve, _route())(_frozen(), ())
+
+    assert (result.status, result.reason) == (
+        SemanticStatus.BLOCKED_BY_POLICY,
+        SemanticReason.SCOPE_NOT_AUTHORIZED,
+    )
+    assert result.continuation is None
+    assert provider_resolutions == 0
 
 
 @pytest.mark.anyio
@@ -390,3 +599,87 @@ async def test_provider_resolution_failure_stays_inside_composition_boundary(
     assert records[0]["request_id"] == _REQUEST
     raw = diagnostics_module.diagnostic_log_path(root=tmp_path).read_text(encoding="ascii")
     assert "resolver-detail-must-not-leak" not in raw
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "failure_class",
+    (
+        "route_commitment_absent",
+        "authority_capability_absent",
+        "policy_store_failure",
+        "invalid_effective_policy",
+        "repository_mismatch",
+        "coordinator_closed",
+        "effective_policy_unbound",
+        "reconcile_capability_absent",
+        "reconciliation_failure",
+    ),
+)
+async def test_only_explicit_trusted_missing_authority_advertises_repository_setup(
+    failure_class: str,
+) -> None:
+    privacy = _Privacy(repository_granted=True)
+    route = _route()
+    provider_resolutions = 0
+
+    def resolve() -> ProviderBinding | None:
+        nonlocal provider_resolutions
+        provider_resolutions += 1
+        return _PROVIDER
+
+    if failure_class == "route_commitment_absent":
+        route = replace(route, repository_privacy_commitment=None)
+    elif failure_class == "authority_capability_absent":
+        object.__setattr__(privacy, "policy_application", None)
+    elif failure_class in {"policy_store_failure", "invalid_effective_policy"}:
+
+        async def authority_failure(scope: AuthorizationScope) -> RepositoryPrivacyAuthority:
+            del scope
+            raise RuntimeError(failure_class)
+
+        privacy.policy_application.policy_store.repository_authority = authority_failure
+    elif failure_class == "repository_mismatch":
+        original = privacy.policy_application.policy_store.repository_authority
+
+        async def mismatched(scope: AuthorizationScope) -> RepositoryPrivacyAuthority:
+            authority = await original(scope)
+            return replace(
+                authority,
+                scope=AuthorizationScope(
+                    AuthorizationScopeKind.TASK,
+                    _INSTALLATION,
+                    _REPOSITORY,
+                    "tsk_53000000-0000-4000-8000-000000000099",
+                ),
+            )
+
+        privacy.policy_application.policy_store.repository_authority = mismatched
+    elif failure_class in {
+        "coordinator_closed",
+        "effective_policy_unbound",
+        "reconcile_capability_absent",
+    }:
+
+        async def activation_unavailable(scope: AuthorizationScope) -> bool:
+            del scope
+            return False
+
+        privacy.activate_repository = activation_unavailable
+    else:
+
+        async def activation_failure(scope: AuthorizationScope) -> bool:
+            del scope
+            raise RuntimeError("reconciliation_failure")
+
+        privacy.activate_repository = activation_failure
+
+    result = await _evaluator(privacy, resolve, route)(_frozen(), ())
+
+    assert (result.status, result.reason) == (
+        SemanticStatus.BLOCKED_BY_POLICY,
+        SemanticReason.SCOPE_NOT_AUTHORIZED,
+    )
+    assert result.continuation is None
+    assert provider_resolutions == 0
+    assert privacy.calls == 0

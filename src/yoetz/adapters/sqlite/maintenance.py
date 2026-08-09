@@ -20,6 +20,7 @@ from typing import Literal, Protocol, cast
 
 import apsw
 
+from yoetz.adapters.sqlite.migrations import BUNDLE_MIGRATIONS, current_schema_version
 from yoetz.domain.values import (
     Frontier,
     JsonObject,
@@ -76,6 +77,7 @@ _MAX_MANIFEST_BYTES = 1024 * 1024
 _MAX_SIDECAR_BYTES = 4 * 1024 * 1024
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
 _YOETZ_APPLICATION_ID = 0x594F4554
+_CURRENT_BUNDLE_SCHEMA_VERSION = current_schema_version(BUNDLE_MIGRATIONS)
 
 
 class _OperationState(StrEnum):
@@ -554,7 +556,7 @@ def _verify_database_snapshot(path: Path, manifest: BackupManifest) -> None:
         if database.pragma("application_id") != _YOETZ_APPLICATION_ID:
             raise MaintenanceError(MaintenanceReason.DATABASE_INVALID, False, {})
         version = database.pragma("user_version")
-        if type(version) is not int or not 1 <= version <= 5:
+        if type(version) is not int or not 1 <= version <= _CURRENT_BUNDLE_SCHEMA_VERSION:
             raise MaintenanceError(MaintenanceReason.DATABASE_INVALID, False, {})
         if database.execute("PRAGMA quick_check").fetchone() != ("ok",):
             raise MaintenanceError(MaintenanceReason.DATABASE_INVALID, False, {})

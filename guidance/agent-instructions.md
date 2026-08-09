@@ -50,9 +50,9 @@ already authorized, not a request for new permission.
 # A check awaiting a local decision is not finished
 
 `semantic_status: awaiting_human` with `semantic_reason: human_approval_required` is the one
-nonterminal check outcome: the operation, its semantic job, and its physical attempt all stay open.
-The result carries a `continuation` with the `pending_id`, its `expires_at`, and the exact command to
-run.
+nonterminal check outcome. Its typed `continuation` identifies either a standing repository setup
+handoff or a one-use disclosure decision and always carries the exact trusted command and original
+request id. Only the one-use branch carries `pending_id` and `expires_at`.
 
 Show the user that command verbatim. Do not create a new check request — a fresh request abandons the
 proposal being decided; after the decision, replay the exact same `check` request with the same
@@ -61,6 +61,20 @@ proposal being decided; after the decision, replay the exact same `check` reques
 available, and returns none once it is not — in which case run the check again rather than guessing.
 Do not request a receipt and do not tell the user the task is done until that same request reaches a
 terminal result.
+
+# A missing repository grant needs the trusted privacy surface
+
+Act only when Yoetz explicitly reports that the current repository grant is missing; do not infer
+that fact from a generic policy refusal. Tell the user to run the exact trusted CLI/TUI entrypoint
+`yoetz --privacy`, complete the repository review there, and then tell you when it is done. A “yes”
+or “done” in agent chat is notification only and never grants authority. Do not attempt approval
+through MCP, arguments, environment, stdin, or terminal automation.
+
+The repository grant is standing authority for that exact repository until it is revoked or
+changed. It is distinct from the one-use `confirm_every_request` disclosure decision above. Keep
+the missing-grant check open: recover its continuation through `status` with `view=operation` or
+replay the exact original check with the same `request_id`. Never create a fresh request. Denial,
+expiry, cancellation, stale authority, or an incomplete ceremony remains a no dispatch outcome.
 
 # Publishing a completion claim is an assertion, not a conclusion
 

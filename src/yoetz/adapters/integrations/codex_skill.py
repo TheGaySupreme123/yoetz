@@ -268,6 +268,27 @@ def _load_source_bundle(resource_source: SkillResourceSource | None = None) -> _
         or member_digest != canonical_digest(manifest_without_digest)
     ):
         raise _error(IntegrationReason.SOURCE_INVALID)
+    managed_members = skill_manifest.get("managed_members")
+    if type(managed_members) is not list:
+        raise _error(IntegrationReason.SOURCE_INVALID)
+    recorded_members: dict[str, Mapping[str, object]] = {}
+    for raw_member in managed_members:
+        if not isinstance(raw_member, Mapping):
+            raise _error(IntegrationReason.SOURCE_INVALID)
+        logical_name = raw_member.get("logical_name")
+        if type(logical_name) is not str or logical_name in recorded_members:
+            raise _error(IntegrationReason.SOURCE_INVALID)
+        recorded_members[logical_name] = cast(Mapping[str, object], raw_member)
+    if set(recorded_members) != set(members):
+        raise _error(IntegrationReason.SOURCE_INVALID)
+    for logical_name, data in members.items():
+        record = recorded_members[logical_name]
+        if logical_name == "manifest.json":
+            if record.get("identity_status") != "self_excluded":
+                raise _error(IntegrationReason.SOURCE_INVALID)
+            continue
+        if record.get("size") != len(data) or record.get("sha256") != _sha(data):
+            raise _error(IntegrationReason.SOURCE_INVALID)
     skill_version = skill_manifest.get("skill_version")
     protocol_version = skill_manifest.get("protocol_version")
     profile_ids = skill_manifest.get("capability_profile_ids")

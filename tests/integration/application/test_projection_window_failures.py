@@ -90,6 +90,8 @@ def test_read_only_methods_are_exactly_the_non_appending_ones() -> None:
     assert _READ_ONLY_METHODS == frozenset(
         {
             ControlMethod.STATUS,
+            ControlMethod.PRIVACY_GET_SETUP,
+            ControlMethod.PRIVACY_GET_EFFECTIVE,
             # Names the disclosure proposals awaiting a decision; deciding one is a separate
             # confidential ceremony, so listing them appends nothing.
             ControlMethod.PRIVACY_PENDING_LIST,
@@ -100,8 +102,12 @@ def test_read_only_methods_are_exactly_the_non_appending_ones() -> None:
     assert ControlMethod.RECEIPT not in _READ_ONLY_METHODS
     assert ControlMethod.CHECK not in _READ_ONLY_METHODS
     assert ControlMethod.PUBLISH_WORK not in _READ_ONLY_METHODS
-    # Both privacy reads are projection-exempt, so only STATUS can reach the reclassification.
-    assert _READ_ONLY_METHODS - _PROJECTION_EXEMPT_METHODS == {ControlMethod.STATUS}
+    # Repository privacy reads are projected; listing pending/receipt records stays structural.
+    assert _READ_ONLY_METHODS - _PROJECTION_EXEMPT_METHODS == {
+        ControlMethod.STATUS,
+        ControlMethod.PRIVACY_GET_SETUP,
+        ControlMethod.PRIVACY_GET_EFFECTIVE,
+    }
 
 
 def test_read_projection_failure_is_a_registered_retryable_reason() -> None:

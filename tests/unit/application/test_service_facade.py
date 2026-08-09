@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from typing import cast
 
@@ -100,6 +101,7 @@ def _application(
     responses: _Responses | None = None,
     *,
     enforce_repository_identity: bool = False,
+    support_handlers: Mapping[ControlMethod, Callable[..., Awaitable[JsonObject]]] | None = None,
 ) -> Application:
     return Application(
         start_catalog=cast(StartCatalogPort, catalog),
@@ -119,6 +121,7 @@ def _application(
         profile=RuntimeProfile.TEST_FAKE,
         policy_packs=("research-evidence/0.1.0", "work-integrity/0.1.0"),
         version_manifest={},
+        support_handlers={} if support_handlers is None else support_handlers,
         enforce_repository_identity=enforce_repository_identity,
     )
 
@@ -150,6 +153,48 @@ async def test_task_workflows_reject_cross_repository_context_before_execution(
 
     assert failure.value.code is PublicErrorCode.SESSION_CONFLICT
     assert catalog.calls == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("method_name", "control_method"),
+    (
+        ("privacy_get_setup", ControlMethod.PRIVACY_GET_SETUP),
+        ("privacy_get_effective", ControlMethod.PRIVACY_GET_EFFECTIVE),
+        ("privacy_propose_policy", ControlMethod.PRIVACY_PROPOSE_POLICY),
+    ),
+)
+async def test_repository_scoped_privacy_support_forwards_trusted_context(
+    method_name: str,
+    control_method: ControlMethod,
+) -> None:
+    """The facade must not drop the daemon-authenticated repository binding."""
+
+    seen: list[tuple[object, RepositoryPrivacyContext | None]] = []
+    context = RepositoryPrivacyContext("hmac-sha256:" + "c" * 64, "git_common_root")
+    expected = JsonObject({"ok": True})
+
+    async def handler(
+        request: object,
+        *,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> JsonObject:
+        seen.append((request, repository_privacy_context))
+        return expected
+
+    app = _application(
+        _Catalog(_route()),
+        support_handlers={control_method: handler},
+    )
+    body = JsonObject({"schema_version": "2.0.0"})
+
+    result = await getattr(app, method_name)(
+        body,
+        repository_privacy_context=context,
+    )
+
+    assert result is expected
+    assert seen == [(body, context)]
 
 
 def _publish_internal() -> PublishWorkInternalResult:

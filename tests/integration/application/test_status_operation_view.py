@@ -57,6 +57,7 @@ from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.ledger import (
     AppendCommand,
     CheckPhase,
+    CheckSuspensionKind,
     OperationKind,
     OperationRecord,
     OperationState,
@@ -591,6 +592,68 @@ async def test_status_view_operation_reports_pending_for_in_flight_check() -> No
     assert page.state == "pending"
     assert page.operation_kind == "check"
     assert page.accepted_events == ()
+
+
+async def test_status_view_operation_recovers_missing_repository_grant_for_same_request() -> None:
+    base, _objects, seed, ledger = _publish_composition()
+    app = _PublishApp(base.runtime)
+    op_id = "req_00000000-0000-4000-8000-000000000703"
+    resume = ObjectRef(
+        "obj_00000000-0000-4000-8000-00000000aaac",
+        1,
+        "hmac-sha256:" + "a" * 64,
+        "sha256:" + "b" * 64,
+        "yoetz-object/1",
+        "bmk-1",
+        ObjectMetadata(
+            ObjectKind.DETERMINISTIC_RESULT,
+            "application/vnd.yoetz.deterministic-result+json",
+            seed.task_id,
+            datetime(2026, 1, 1, tzinfo=UTC),
+        ),
+    )
+    pending = OperationRecord(
+        seed.writer_id,
+        op_id,
+        OperationKind.CHECK,
+        "sha256:" + "c" * 64,
+        OperationState.PENDING,
+        CheckPhase.SEMANTIC_WAIT,
+        "owner-generation-1",
+        "lease-owner-1",
+        1,
+        datetime(2030, 1, 1, tzinfo=UTC),
+        resume,
+        None,
+        None,
+        None,
+        None,
+        None,
+        CheckSuspensionKind.REPOSITORY_GRANT,
+    )
+    ledger._state.operations[(seed.writer_id, op_id)] = (  # pyright: ignore[reportPrivateUsage]
+        pending,
+        None,
+    )
+
+    status = await execute_status(
+        cast(StatusApplication, app),
+        _status_operation_request(
+            session_id=seed.session_id,
+            writer_id=seed.writer_id,
+            operation_request_id=op_id,
+            request_tail=704,
+        ),
+    )
+
+    page = cast(StatusOperationPageModel, status.page)
+    assert page.continuation is not None
+    assert page.continuation.kind == "repository_privacy_setup"
+    assert page.continuation.command == ("yoetz", "--privacy")
+    assert page.continuation.replay_request_id == op_id
+    continuation_wire = page.continuation.model_dump(mode="json", exclude_none=True)
+    assert "pending_id" not in continuation_wire
+    assert "expires_at" not in continuation_wire
 
 
 def _complete_check_record(writer_id: str, operation_id: str) -> OperationRecord:

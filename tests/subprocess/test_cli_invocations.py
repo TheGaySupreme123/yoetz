@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from typer.testing import CliRunner
 
 import yoetz.cli.app as cli
-from yoetz.ports.control import ControlClientKind, WorkspaceLocator
+from yoetz.ports.control import ControlClientKind, ProjectionRenderMode, WorkspaceLocator
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.models import StartRequest, StartResult
 
@@ -173,7 +173,11 @@ def test_direct_start_binds_the_default_client_to_the_actual_cwd(
         client_kind: ControlClientKind,
         *,
         workspace_locator: WorkspaceLocator | None = None,
+        projection_render_mode: ProjectionRenderMode = ProjectionRenderMode.MACHINE_READABLE,
+        output_is_controlling_tty: bool = False,
     ) -> _Client:
+        assert projection_render_mode is ProjectionRenderMode.MACHINE_READABLE
+        assert output_is_controlling_tty is False
         observed.append((client_kind, workspace_locator))
         return client
 
@@ -212,8 +216,12 @@ async def test_default_client_allows_an_explicit_unbound_connection(
         client_kind: ControlClientKind,
         *,
         workspace_locator: WorkspaceLocator | None = None,
+        projection_render_mode: ProjectionRenderMode = ProjectionRenderMode.MACHINE_READABLE,
+        output_is_controlling_tty: bool = False,
     ) -> _Client:
         assert client_kind is ControlClientKind.CLI
+        assert projection_render_mode is ProjectionRenderMode.MACHINE_READABLE
+        assert output_is_controlling_tty is False
         observed.append(workspace_locator)
         return client
 

@@ -1266,10 +1266,17 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "publishing the completion claim and its evidence, and again after any material edit, "
         "new evidence, or "
         "finding response; a check with no new events since the last one adds nothing. "
-        "awaiting_human is the one nonterminal result: it carries a continuation with the pending "
-        "id, its expiry, and the exact command to run. Show that command, do not create a new "
+        "awaiting_human is the one nonterminal result: its typed continuation identifies standing "
+        "repository setup or a one-use decision and carries the exact command to run. Show that "
+        "command, do not create a new "
         "check request, do not inspect Yoetz storage or source, and replay this same request with "
-        "the same request_id after the decision. Semantic "
+        "the same request_id after the decision. If Yoetz explicitly reports that the current "
+        "repository grant is missing, direct the owner to run yoetz --privacy and complete the "
+        "trusted local review there; assent in agent chat never authorizes that standing grant. "
+        "It is distinct from a one-use decision; recover either handoff through operation status "
+        "or replay this exact original request with the same request_id, never a fresh request. "
+        "Denial, expiry, cancellation, stale authority, or incomplete review means no dispatch. "
+        "Semantic "
         "review that does not succeed is a coverage gap rather than a retry problem: "
         "not_configured, blocked_by_policy, and human_denied will not change without owner "
         "action; unavailable and timeout already spent that job's own attempt budget; refused, "
@@ -1375,7 +1382,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
             {
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
                 "publish_work": "sha256:e29c8b514d8eeab7efdc4d7b16181f766d45824f91b6960eb6c93ff0a9071d34",
-                "check": "sha256:cdd4c9e9910ee1cb43f98620bc6ae01b900cc19adca141ad8692e5338e545769",
+                "check": "sha256:a7ba7d6bbdeb039cf43efb3809b4a754eaa839b5952d26d1ae82abec7983d1e0",
                 "respond": "sha256:7af2775e5204a902a116eefb24e4588eb66645df39f6748f22975ba44a7896e6",
                 "status": "sha256:f50314514f180a19f912662e191fec7880e2e41a6fc8dd475a063c2263eafa61",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
@@ -1385,7 +1392,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
             {
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
                 "publish_work": "sha256:e29c8b514d8eeab7efdc4d7b16181f766d45824f91b6960eb6c93ff0a9071d34",
-                "check": "sha256:bbec4681f3ec06f5e44b81a9cc3f0f6a089bc2ff39c610928b40f7153ea93db4",
+                "check": "sha256:0dd39bc128059a8ac40bcbf2bda3727ba799a2c5e9d39df18ce73a5709e3b1fc",
                 "respond": "sha256:7af2775e5204a902a116eefb24e4588eb66645df39f6748f22975ba44a7896e6",
                 "status": "sha256:f50314514f180a19f912662e191fec7880e2e41a6fc8dd475a063c2263eafa61",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
@@ -1395,8 +1402,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:ff9b2dc64ccb6d3a0a12119688d3a447b11b22db9fe4fa5655e4e723017ec1c8",
-        "strict": "sha256:35f00bbf132d2e85b042b53969c326684746dd1efa99dd70d122f21cc30bf007",
+        "policy": "sha256:6154ab34eacf1dee5de8a6b7f851c1b93a783ef38ff69d9318f45b131b2c6653",
+        "strict": "sha256:d4e2e8bb5770d85534a729b332d38fe9333fce66b31262ee1b3f51bc90c5ef2e",
     }
 )
 
