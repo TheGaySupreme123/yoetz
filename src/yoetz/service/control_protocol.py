@@ -23,6 +23,7 @@ from yoetz.ports.control import (
     ControlMethod,
     ControlRequest,
     ControlResult,
+    ProjectionRenderMode,
     RepositoryPrivacyContext,
     ServiceState,
     ServiceStatus,
@@ -183,6 +184,10 @@ class ControlSession:
     repository_privacy_context: RepositoryPrivacyContext | None = field(
         default=None, repr=False, compare=False
     )
+    projection_render_mode: ProjectionRenderMode = field(
+        default=ProjectionRenderMode.MACHINE_READABLE, repr=False, compare=False
+    )
+    output_is_controlling_tty: bool = field(default=False, repr=False, compare=False)
     _active: dict[str, _PendingCall] = field(
         default_factory=_new_pending_calls, init=False, repr=False, compare=False
     )
@@ -198,6 +203,10 @@ class ControlSession:
             and type(self.repository_privacy_context) is not RepositoryPrivacyContext
         ):
             raise TypeError("repository_privacy_context_invalid")
+        if type(self.projection_render_mode) is not ProjectionRenderMode:
+            raise TypeError("projection_render_mode_invalid")
+        if type(self.output_is_controlling_tty) is not bool:
+            raise TypeError("projection_tty_fact_invalid")
         if type(self.allowed_methods) is not tuple or not self.allowed_methods:
             raise ValueError("control_allowed_methods_invalid")
         expected = tuple(
@@ -701,6 +710,8 @@ async def client_handshake(
     client_version: str,
     *,
     workspace_locator: WorkspaceLocator | None = None,
+    projection_render_mode: ProjectionRenderMode = ProjectionRenderMode.MACHINE_READABLE,
+    output_is_controlling_tty: bool = False,
 ) -> ControlSession:
     """Negotiate an ordinary peer-authenticated client session."""
 
@@ -708,6 +719,10 @@ async def client_handshake(
         raise TypeError("control_client_kind_invalid")
     if workspace_locator is not None and type(workspace_locator) is not WorkspaceLocator:
         raise TypeError("workspace_locator_invalid")
+    if type(projection_render_mode) is not ProjectionRenderMode:
+        raise TypeError("projection_render_mode_invalid")
+    if type(output_is_controlling_tty) is not bool:
+        raise TypeError("projection_tty_fact_invalid")
     nonce = secrets.token_hex(32)
     hello: dict[str, JsonValue] = {
         "protocol_version": CONTROL_PROTOCOL_VERSION,
@@ -721,6 +736,10 @@ async def client_handshake(
             "schema_version": workspace_locator.schema_version,
             "path": workspace_locator.path,
         }
+    hello["presentation_context"] = {
+        "render_mode": projection_render_mode.value,
+        "output_is_controlling_tty": output_is_controlling_tty,
+    }
     try:
         await write_control_frame(stream, hello)
         result = await read_control_frame(stream)
@@ -750,6 +769,8 @@ async def client_handshake(
             allowed_methods=allowed,
             peer_identity=stream.peer_identity,
             connection_nonce=nonce,
+            projection_render_mode=projection_render_mode,
+            output_is_controlling_tty=output_is_controlling_tty,
         )
     except BaseException as exc:
         if isinstance(exc, asyncio.CancelledError):
@@ -779,6 +800,16 @@ async def server_handshake(
         if hello["schema_manifest_digest"] != _manifest_digest():
             _fail("manifest_mismatch")
         kind = ControlClientKind(cast(str, hello["client_kind"]))
+        raw_presentation = hello.get("presentation_context")
+        render_mode = ProjectionRenderMode.MACHINE_READABLE
+        output_is_controlling_tty = False
+        if raw_presentation is not None:
+            if not isinstance(raw_presentation, Mapping):
+                _fail("protocol_mismatch")
+            render_mode = ProjectionRenderMode(cast(str, raw_presentation["render_mode"]))
+            output_is_controlling_tty = cast(bool, raw_presentation["output_is_controlling_tty"])
+            if type(output_is_controlling_tty) is not bool:
+                _fail("protocol_mismatch")
         raw_locator = hello.get("workspace_locator")
         repository_context: RepositoryPrivacyContext | None = None
         if raw_locator is not None and repository_context_resolver is not None:
@@ -815,6 +846,8 @@ async def server_handshake(
             service_generation=service_status.service_generation,
             allowed_methods=allowed,
             repository_privacy_context=repository_context,
+            projection_render_mode=render_mode,
+            output_is_controlling_tty=output_is_controlling_tty,
             peer_identity=peer_identity,
             connection_nonce=cast(str, hello["connection_nonce"]),
         )

@@ -10,11 +10,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import FrozenInstanceError, fields
 from importlib import resources
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 from urllib.parse import urldefrag
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 import yoetz.protocol.schemas as schemas_module
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
@@ -782,6 +782,38 @@ def _candidate_status_result_wire(*, omitted: bool = False) -> dict[str, JsonVal
     return result
 
 
+def test_human_status_renders_operation_continuation_and_exact_trusted_command() -> None:
+    from yoetz.cli.render import render_human_status
+
+    models = _models_module()
+    result = _status_result_wire()
+    operation_request_id = _test_id("req_")
+    result["view"] = "operation"
+    result["page"] = {
+        "operation_request_id": operation_request_id,
+        "found": True,
+        "state": "pending",
+        "operation_kind": "check",
+        "outcome": None,
+        "subject_frontier": None,
+        "result_frontier": None,
+        "accepted_events": [],
+        "continuation": {
+            "kind": "repository_privacy_setup",
+            "command": ["yoetz", "--privacy"],
+            "replay_request_id": operation_request_id,
+            "instruction": "Run the trusted repository privacy setup, then replay this request.",
+        },
+        "next_cursor": None,
+    }
+    parsed = models.StatusResultModel.model_validate(result)
+    assert type(parsed.root) is models.StatusSuccessModel
+    rendered = render_human_status(parsed.root)
+    assert "Continuation: repository_privacy_setup" in rendered
+    assert "Trusted command: yoetz --privacy" in rendered
+    assert f"Replay request ID: {operation_request_id}" in rendered
+
+
 def _respond_result_wire() -> dict[str, JsonValue]:
     return {
         "protocol_version": "0.1",
@@ -1135,6 +1167,28 @@ def test_public_model_to_wire_is_the_validated_boundary() -> None:
     derived = DerivedStartRequest.model_validate(_start_request_wire())
     with pytest.raises(TypeError, match="^public_model_wrong_type$"):
         models.public_model_to_wire(derived)
+
+
+def test_recursive_optional_cleanup_resolves_serialization_aliases() -> None:
+    models = _models_module()
+
+    class _AliasedLeaf(BaseModel):
+        optional_non_null_fields: ClassVar[frozenset[str]] = frozenset({"omitted"})
+        omitted: str | None = None
+
+    class _AliasedParent(BaseModel):
+        event_schema: _AliasedLeaf = Field(alias="schema")
+
+    child = _AliasedLeaf.model_construct(omitted=None)
+    parent = _AliasedParent.model_construct(event_schema=child)
+    raw = parent.model_dump(mode="json", by_alias=True, exclude_unset=True, exclude_none=False)
+    assert raw == {"schema": {"omitted": None}}
+
+    strip = cast(
+        Callable[[BaseModel, Mapping[str, JsonValue]], dict[str, JsonValue]],
+        getattr(models, "_strip_optional_non_null_fields"),
+    )
+    assert strip(parent, cast(Mapping[str, JsonValue], raw)) == {"schema": {}}
 
 
 def test_all_result_roots_serialize_success_and_shared_failure_without_wrapper() -> None:
@@ -2612,7 +2666,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 1_703
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 1_706
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:

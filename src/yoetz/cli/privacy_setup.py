@@ -361,6 +361,16 @@ def _interactive_terminal() -> bool:
         return False
 
 
+def _output_is_controlling_tty() -> bool:
+    """Return the presentation fact used only for ordinary result projection."""
+
+    try:
+        fd = sys.stdout.fileno()
+        return os.isatty(fd) and os.tcgetpgrp(fd) == os.getpgrp()
+    except AttributeError, OSError, ValueError:
+        return False
+
+
 _RECIPE_SUMMARIES: Final[dict[PrivacyRecipe, str]] = {
     "private": "maximum confidentiality; no network egress or external semantic review",
     "metadata_only": (
@@ -949,11 +959,13 @@ async def get_privacy_setup_snapshot(
     workspace_locator: Path | None = None,
 ) -> PrivacySetupSnapshot:
     from yoetz.cli.app import build_service_client
-    from yoetz.ports.control import WorkspaceLocator
+    from yoetz.ports.control import ProjectionRenderMode, WorkspaceLocator
 
     locator = Path.cwd() if workspace_locator is None else workspace_locator
     client = await build_service_client(
-        workspace_locator=WorkspaceLocator(str(locator.resolve(strict=True)))
+        workspace_locator=WorkspaceLocator(str(locator.resolve(strict=True))),
+        projection_render_mode=ProjectionRenderMode.HUMAN_READABLE,
+        output_is_controlling_tty=_output_is_controlling_tty(),
     )
     try:
         raw = await client.privacy_get_setup(JsonObject({"schema_version": "2.0.0"}))
@@ -970,11 +982,13 @@ async def _propose(
 ) -> str | None:
     from yoetz.adapters.privacy.catalog import encode_privacy_policy_json
     from yoetz.cli.app import build_service_client
-    from yoetz.ports.control import WorkspaceLocator
+    from yoetz.ports.control import ProjectionRenderMode, WorkspaceLocator
 
     locator = Path.cwd() if workspace_locator is None else workspace_locator
     client = await build_service_client(
-        workspace_locator=WorkspaceLocator(str(locator.resolve(strict=True)))
+        workspace_locator=WorkspaceLocator(str(locator.resolve(strict=True))),
+        projection_render_mode=ProjectionRenderMode.HUMAN_READABLE,
+        output_is_controlling_tty=_output_is_controlling_tty(),
     )
     try:
         result = await client.privacy_propose_policy(

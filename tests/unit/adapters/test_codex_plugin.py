@@ -47,13 +47,58 @@ def _resources() -> _Resources:
         b"---\nname: yoetz\ndescription: Durable evidence guidance.\n"
         b"metadata:\n  short-description: Yoetz guidance\n---\n\n# Yoetz\n"
     )
+    guidance_files = {
+        "references/agent-instructions.md": (
+            "guidance/agent-instructions.md",
+            b"# Agent instructions\n",
+        ),
+        "references/coverage-and-receipts.md": (
+            "guidance/coverage-and-receipts.md",
+            b"# Coverage and receipts\n",
+        ),
+        "references/publication-policy.md": (
+            "guidance/publication-policy.md",
+            b"# Publication policy\n",
+        ),
+        "references/request-templates.md": (
+            "guidance/request-templates.md",
+            b"# Request templates\n",
+        ),
+        "references/workflow.md": ("guidance/workflow.md", b"# Workflow\n"),
+    }
+    managed_members: list[JsonValue] = [
+        {
+            "logical_name": "SKILL.md",
+            "origin": "harness_owned",
+            "role": "skill",
+            "sha256": _digest(skill),
+            "size": len(skill),
+        },
+        {
+            "identity_status": "self_excluded",
+            "logical_name": "manifest.json",
+            "origin": "harness_owned",
+            "role": "compatibility_manifest",
+        },
+    ]
+    managed_members.extend(
+        {
+            "logical_name": installed_path,
+            "origin": "shared_guidance",
+            "role": "guidance",
+            "sha256": _digest(data),
+            "size": len(data),
+            "source_logical_name": package_path,
+        }
+        for installed_path, (package_path, data) in guidance_files.items()
+    )
     skill_manifest_body: dict[str, JsonValue] = {
         "capability_profile_ids": [],
         "codex_version_bounds": {"tested": []},
         "guidance_version": "0.1.0",
         "harness": "codex",
         "hooks_by_capability_profile": {},
-        "managed_members": [],
+        "managed_members": managed_members,
         "protocol_version": "0.1",
         "schema": "yoetz.codex-skill-manifest/1",
         "skill": "yoetz",
@@ -63,11 +108,7 @@ def _resources() -> _Resources:
     files = {
         "skills/codex/yoetz/SKILL.md": skill,
         "skills/codex/yoetz/manifest.json": canonical_encode(skill_manifest_body) + b"\n",
-        "guidance/agent-instructions.md": b"# Agent instructions\n",
-        "guidance/coverage-and-receipts.md": b"# Coverage and receipts\n",
-        "guidance/publication-policy.md": b"# Publication policy\n",
-        "guidance/request-templates.md": b"# Request templates\n",
-        "guidance/workflow.md": b"# Workflow\n",
+        **{package_path: data for package_path, data in guidance_files.values()},
     }
     entries: list[JsonValue] = []
     for package_path, data in sorted(files.items(), key=lambda item: item[0].encode("ascii")):

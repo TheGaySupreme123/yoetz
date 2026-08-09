@@ -65,6 +65,7 @@ from yoetz.ports.ledger import (
     CheckCommitResult,
     CheckPhase,
     CheckPolicyExecution,
+    CheckSuspensionKind,
     CheckVersionSlice,
     FrozenCase,
     OperationKind,
@@ -480,7 +481,7 @@ class SqliteLedger:
             for pending_row in self._db.execute(
                 "SELECT writer_id,operation_id,operation_kind,request_digest,phase,"
                 "owner_generation,lease_owner_id,lease_generation,lease_expires_at,"
-                "resume_object_id FROM operations WHERE state='pending'"
+                "resume_object_id,suspension_kind FROM operations WHERE state='pending'"
             ):
                 (
                     writer_value,
@@ -493,6 +494,7 @@ class SqliteLedger:
                     lease_generation,
                     lease_expires_at,
                     resume_object_id,
+                    suspension_kind_value,
                 ) = pending_row
                 try:
                     phase = CheckPhase(cast(str, phase_value))
@@ -521,6 +523,9 @@ class SqliteLedger:
                         None,
                         None,
                         None,
+                        None
+                        if suspension_kind_value is None
+                        else CheckSuspensionKind(cast(str, suspension_kind_value)),
                     )
                     writer = self._state.writers[operation.writer_id]
                     if self._objects is None:
@@ -780,14 +785,15 @@ class SqliteLedger:
                 else locator.result_object_ref.object_id,
                 None if record.quarantine_code is None else record.quarantine_code.value,
                 None if record.terminal_at is None else format_rfc3339_millis(record.terminal_at),
+                None if record.suspension_kind is None else record.suspension_kind.value,
             )
             if exists is None:
                 self._db.execute(
                     "INSERT INTO operations(writer_id,operation_id,operation_kind,request_digest,"
                     "resume_object_id,state,phase,owner_generation,lease_owner_id,lease_generation,"
                     "lease_expires_at,first_ingestion_seq,last_ingestion_seq,result_canonical,"
-                    "result_digest,result_object_id,quarantine_code,terminal_at,created_at,updated_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "result_digest,result_object_id,quarantine_code,terminal_at,suspension_kind,"
+                    "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (key[0], key[1], *values, now, now),
                 )
             else:
@@ -796,7 +802,8 @@ class SqliteLedger:
                     "state=?,phase=?,owner_generation=?,lease_owner_id=?,lease_generation=?,"
                     "lease_expires_at=?,first_ingestion_seq=?,last_ingestion_seq=?,"
                     "result_canonical=?,result_digest=?,result_object_id=?,quarantine_code=?,"
-                    "terminal_at=?,updated_at=? WHERE writer_id=? AND operation_id=?",
+                    "terminal_at=?,suspension_kind=?,updated_at=? "
+                    "WHERE writer_id=? AND operation_id=?",
                     (*values, now, key[0], key[1]),
                 )
         for job in self._state.jobs.values():
@@ -1449,6 +1456,11 @@ class SqliteLedger:
         result = await self._oracle().enqueue_semantic_job(lease, case_digest, case_object_ref)
         await self._sync_after_mutation()
         return result
+
+    async def suspend_check_for_repository_grant(self, lease: OperationLease) -> None:
+        await self._ensure_recovered()
+        await self._oracle().suspend_check_for_repository_grant(lease)
+        await self._sync_after_mutation()
 
     async def claim_semantic_job(self, lease: OperationLease, job_id: str) -> SemanticAttemptHandle:
         await self._ensure_recovered()

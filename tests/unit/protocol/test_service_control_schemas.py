@@ -267,6 +267,7 @@ def test_v2_repository_privacy_bodies_are_closed_and_v1_is_retained() -> None:
         "allowed_blocked_examples",
         "recipes",
         "never_send_editable",
+        "privacy_projection",
     }
     assert setup_result["properties"]["never_send_editable"] == {"const": False}
     assert len(result_defs["privacy_propose_policy_body"]["oneOf"]) == 4

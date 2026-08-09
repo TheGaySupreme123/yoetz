@@ -11,17 +11,20 @@ nothing a caller could mistake for a verdict.
 from __future__ import annotations
 
 import uuid
-from typing import Any, Final
+from typing import Any, Final, cast
 
 import pytest
 from pydantic import ValidationError
 
+from yoetz.protocol.canonical import JsonValue
+from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.models import (
     CheckAwaitingHumanModel,
     CheckResultModel,
     CheckSuccessModel,
     StatusOperationPageModel,
 )
+from yoetz.protocol.schemas import validate_schema_instance
 
 _PENDING: Final = f"ppr_{uuid.uuid4()}"
 _REQUEST: Final = f"req_{uuid.uuid4()}"
@@ -56,6 +59,19 @@ def _continuation(**overrides: Any) -> dict[str, Any]:
         "command": ["yoetz", "privacy", "decide-disclosure", _PENDING],
         "replay_request_id": _REQUEST,
         "instruction": _INSTRUCTION,
+    }
+    body.update(overrides)
+    return body
+
+
+def _repository_grant_continuation(**overrides: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "kind": "repository_privacy_setup",
+        "command": ["yoetz", "--privacy"],
+        "replay_request_id": _REQUEST,
+        "instruction": (
+            "Use the trusted local privacy ceremony, then replay this exact request id."
+        ),
     }
     body.update(overrides)
     return body
@@ -106,6 +122,52 @@ def test_the_branch_carries_the_exact_command_the_user_must_run() -> None:
         "decide-disclosure",
         _PENDING,
     )
+
+
+def test_missing_repository_grant_carries_standing_setup_without_one_use_fields() -> None:
+    result = CheckResultModel.model_validate(
+        _awaiting(continuation=_repository_grant_continuation())
+    )
+    assert type(result.root) is CheckAwaitingHumanModel
+
+    continuation = result.root.continuation
+    assert continuation.kind == "repository_privacy_setup"
+    assert continuation.command == ("yoetz", "--privacy")
+    assert continuation.pending_id is None
+    assert continuation.expires_at is None
+
+
+@pytest.mark.parametrize(
+    "continuation",
+    (_continuation(), _repository_grant_continuation()),
+)
+def test_both_continuation_schema_branches_accept_only_their_exact_commands(
+    continuation: dict[str, Any],
+) -> None:
+    valid = _awaiting(continuation=continuation)
+    validate_schema_instance("check-result", "1.0.0", cast(JsonValue, valid))
+    invalid = _awaiting(
+        continuation={**continuation, "command": ["x"] * len(continuation["command"])}
+    )
+    with pytest.raises(ProtocolValueError):
+        validate_schema_instance("check-result", "1.0.0", cast(JsonValue, invalid))
+
+
+@pytest.mark.parametrize("field", ("pending_id", "expires_at"))
+def test_standing_repository_grant_rejects_one_use_confirmation_fields(field: str) -> None:
+    value = _PENDING if field == "pending_id" else "2026-08-05T13:00:00.000Z"
+    with pytest.raises(ValidationError):
+        CheckResultModel.model_validate(
+            _awaiting(continuation=_repository_grant_continuation(**{field: value}))
+        )
+
+
+@pytest.mark.parametrize("field", ("pending_id", "expires_at"))
+def test_one_use_confirmation_requires_its_pending_identity_and_expiry(field: str) -> None:
+    continuation = _continuation()
+    del continuation[field]
+    with pytest.raises(ValidationError):
+        CheckResultModel.model_validate(_awaiting(continuation=continuation))
 
 
 def test_the_branch_returns_no_verdict_and_no_coverage() -> None:
@@ -184,6 +246,35 @@ def test_operation_status_returns_the_same_continuation_for_a_pending_check() ->
     assert page.continuation is not None
     assert page.continuation.pending_id == _PENDING
     assert page.continuation.command[3] == _PENDING
+
+
+def test_operation_status_recovers_the_same_standing_repository_grant_handoff() -> None:
+    page = StatusOperationPageModel.model_validate(
+        {
+            "operation_request_id": _REQUEST,
+            "found": True,
+            "state": "pending",
+            "operation_kind": "check",
+            "continuation": _repository_grant_continuation(),
+        }
+    )
+
+    assert page.continuation is not None
+    assert page.continuation.kind == "repository_privacy_setup"
+    assert page.continuation.replay_request_id == _REQUEST
+
+
+def test_operation_status_rejects_a_continuation_for_another_request() -> None:
+    with pytest.raises(ValidationError):
+        StatusOperationPageModel.model_validate(
+            {
+                "operation_request_id": _REQUEST,
+                "found": True,
+                "state": "pending",
+                "operation_kind": "check",
+                "continuation": _continuation(replay_request_id=f"req_{uuid.uuid4()}"),
+            }
+        )
 
 
 def test_operation_status_returns_no_continuation_for_other_states() -> None:

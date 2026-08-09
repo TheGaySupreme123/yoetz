@@ -14,10 +14,10 @@ import os
 import sys
 import tempfile
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 from yoetz.protocol.canonical import (
     JsonValue,
@@ -32,10 +32,12 @@ __all__ = [
     "ResourceInventory",
     "ResourceInventoryEntry",
     "build_manifest",
+    "build_codex_skill_manifest",
     "collect_source_entries",
     "load_inventory_config",
     "main",
     "sync_resource_tree",
+    "verify_codex_skill_manifest",
     "verify_resource_tree",
 ]
 
@@ -111,6 +113,35 @@ _ALLOWED_SOURCE_ROOTS: Final = (
 )
 _MAX_TEXT_BYTES: Final = 2_000_000
 _MAX_BINARY_BYTES: Final = 20_000_000
+_CODEX_SKILL_MANIFEST = "skills/codex/yoetz/manifest.json"
+_CODEX_SKILL_MEMBERS: Final = (
+    ("SKILL.md", "harness_owned", "skill", "skills/codex/yoetz/SKILL.md"),
+    (
+        "references/agent-instructions.md",
+        "shared_guidance",
+        "guidance",
+        "guidance/agent-instructions.md",
+    ),
+    (
+        "references/coverage-and-receipts.md",
+        "shared_guidance",
+        "guidance",
+        "guidance/coverage-and-receipts.md",
+    ),
+    (
+        "references/publication-policy.md",
+        "shared_guidance",
+        "guidance",
+        "guidance/publication-policy.md",
+    ),
+    (
+        "references/request-templates.md",
+        "shared_guidance",
+        "guidance",
+        "guidance/request-templates.md",
+    ),
+    ("references/workflow.md", "shared_guidance", "guidance", "guidance/workflow.md"),
+)
 
 # The reviewed, explicit v0.1 inventory across 6 canonical source roots. Every entry
 # is deliberately listed here; nothing is discovered by scanning the repository.
@@ -169,6 +200,7 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ("migrations/bundle/0003.sql", "migration", "application/sql", True),
     ("migrations/bundle/0004.sql", "migration", "application/sql", True),
     ("migrations/bundle/0005.sql", "migration", "application/sql", True),
+    ("migrations/bundle/0006.sql", "migration", "application/sql", True),
     ("migrations/catalog/0001.sql", "migration", "application/sql", True),
     ("migrations/catalog/0002.sql", "migration", "application/sql", True),
     ("migrations/catalog/0003.sql", "migration", "application/sql", True),
@@ -634,6 +666,63 @@ def load_inventory_config() -> ResourceInventory:
     )
 
 
+def build_codex_skill_manifest(*, repo_root: Path) -> bytes:
+    """Render nested managed-member identities from their single owning source bytes."""
+
+    path = repo_root / _CODEX_SKILL_MANIFEST
+    data = _read_guarded(path, size_cap=_MAX_TEXT_BYTES)
+    try:
+        parsed = strict_json_parse(data[:-1] if data.endswith(b"\n") else data)
+    except Exception as exc:  # noqa: BLE001 - normalized into bounded verification failure
+        raise ResourceManifestError("codex_skill_manifest_invalid", detail=str(path)) from exc
+    if not isinstance(parsed, Mapping):
+        raise ResourceManifestError("codex_skill_manifest_invalid", detail=str(path))
+    source = cast(Mapping[str, JsonValue], parsed)
+    if (
+        source.get("schema") != "yoetz.codex-skill-manifest/1"
+        or source.get("skill") != "yoetz"
+        or source.get("harness") != "codex"
+    ):
+        raise ResourceManifestError("codex_skill_manifest_invalid", detail=str(path))
+    document = dict(source)
+    managed: list[JsonValue] = []
+    for logical_name, origin, role, source_path in _CODEX_SKILL_MEMBERS:
+        member_data = _read_guarded(repo_root / source_path, size_cap=_MAX_TEXT_BYTES)
+        member: dict[str, JsonValue] = {
+            "logical_name": logical_name,
+            "origin": origin,
+            "role": role,
+            "sha256": f"sha256:{hashlib.sha256(member_data).hexdigest()}",
+            "size": len(member_data),
+        }
+        if origin == "shared_guidance":
+            member["source_logical_name"] = source_path
+        managed.append(member)
+    managed.insert(
+        1,
+        {
+            "identity_status": "self_excluded",
+            "logical_name": "manifest.json",
+            "origin": "harness_owned",
+            "role": "compatibility_manifest",
+        },
+    )
+    document["managed_members"] = managed
+    document.pop("member_digest", None)
+    document["member_digest"] = canonical_digest(cast(JsonValue, document))
+    return canonical_encode(cast(JsonValue, document)) + b"\n"
+
+
+def verify_codex_skill_manifest(*, repo_root: Path) -> bytes:
+    """Return expected bytes or fail when nested managed-member metadata is stale."""
+
+    expected = build_codex_skill_manifest(repo_root=repo_root)
+    actual = _read_guarded(repo_root / _CODEX_SKILL_MANIFEST, size_cap=_MAX_TEXT_BYTES)
+    if actual != expected:
+        raise ResourceManifestError("codex_skill_manifest_stale", detail=_CODEX_SKILL_MANIFEST)
+    return expected
+
+
 def _read_guarded(path: Path, *, size_cap: int) -> bytes:
     if path.is_symlink():
         raise ResourceManifestError("symlink_forbidden", detail=str(path))
@@ -887,8 +976,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     try:
+        if args.sync:
+            expected_skill_manifest = build_codex_skill_manifest(repo_root=repo_root)
+            (repo_root / _CODEX_SKILL_MANIFEST).write_bytes(expected_skill_manifest)
         inventory = load_inventory_config()
         resources = collect_source_entries(inventory, repo_root=repo_root)
+        if not args.sync:
+            verify_codex_skill_manifest(repo_root=repo_root)
         manifest_bytes = build_manifest(inventory, resources)
     except ResourceManifestError as exc:
         print(f"verify_resource_manifest: FAIL ({exc.reason}) {exc.detail}", file=sys.stderr)

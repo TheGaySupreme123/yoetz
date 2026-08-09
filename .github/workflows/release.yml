@@ -122,6 +122,7 @@ jobs:
       - name: Verify generated schema/resource parity
         run: |
           uv run --locked python scripts/generate_schemas.py --check
+          uv run --locked python scripts/sync_check_continuation_schemas.py --check
           uv run --locked python scripts/verify_resource_manifest.py --check
 
       - name: Verify migration/protocol/vector append-only policy against the previous release

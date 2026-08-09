@@ -41,6 +41,7 @@ from yoetz.adapters.sqlite.start_catalog import SqliteStartCatalog
 from yoetz.application.check import FinalSemanticEvaluation
 from yoetz.application.egress import (
     PrivacyCoordinator,
+    RepositoryGrantAdmission,
     SemanticEgressAwaitingHuman,
     SemanticEgressBlocked,
     SemanticEgressProviderOutcome,
@@ -104,6 +105,7 @@ from yoetz.domain.values import (
     Frontier,
     disclosure_continuation,
     format_rfc3339_millis,
+    repository_grant_continuation,
     session_id,
 )
 from yoetz.domain.values import (
@@ -118,7 +120,7 @@ from yoetz.observability.logging import (
     record_unexpected_exception_without_raising,
 )
 from yoetz.ports.clock import ClockPort
-from yoetz.ports.control import ControlError
+from yoetz.ports.control import ControlError, ControlMethod
 from yoetz.ports.diagnostics import DiagnosticsPort, RuntimeCapability, StartupCheckResult
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.keys import BundleKeys, MacKeyHandle, MacKeyPurpose
@@ -1895,10 +1897,35 @@ def _privacy_gated_semantic_evaluator(
                 repository,
                 route.task_id,
             )
-            # Exact repository authority must exist before provider construction, registry lookup,
-            # or even credential-record inspection. Activation is idempotent for an unchanged
-            # binding and is revalidated again inside the coordinator before authorization.
-            if not await privacy.activate_repository(scope):
+            # The coordinator owns repository admission under its closure lock. Only an exactly
+            # bound missing grant observed while that lock is live can yield a trusted setup
+            # continuation. Closure, malformed/mismatched authority, policy failures, and failed
+            # reconciliation are terminal no-dispatch states.
+            try:
+                repository_admission = await privacy.admit_repository_grant(scope)
+            except Exception as exc:
+                record_unexpected_exception_without_raising(
+                    exc,
+                    component="semantic_composition",
+                    operation="repository_admission_failed",
+                    request_id=frozen.lease.operation_id,
+                )
+                repository_admission = RepositoryGrantAdmission.UNAVAILABLE
+            if repository_admission is RepositoryGrantAdmission.MISSING:
+                record_bounded_event_without_raising(
+                    component="semantic_composition",
+                    operation="semantic_suspended_repository_grant_missing",
+                    reason=SemanticReason.HUMAN_APPROVAL_REQUIRED.value,
+                    request_id=frozen.lease.operation_id,
+                )
+                return FinalSemanticEvaluation(
+                    SemanticStatus.AWAITING_HUMAN,
+                    SemanticReason.HUMAN_APPROVAL_REQUIRED,
+                    continuation=repository_grant_continuation(
+                        request_id=frozen.lease.operation_id
+                    ),
+                )
+            if repository_admission is not RepositoryGrantAdmission.GRANTED:
                 record_bounded_event_without_raising(
                     component="semantic_composition",
                     operation="semantic_not_dispatched_repository_scope_unavailable",
@@ -2294,6 +2321,18 @@ async def provide_service_ready_context(
     def disclosure_scope_for(
         binding: ControlProjectionBinding, source: Mapping[str, CanonicalJsonValue]
     ) -> AuthorizationScope:
+        if binding.method in {
+            ControlMethod.PRIVACY_GET_SETUP,
+            ControlMethod.PRIVACY_GET_EFFECTIVE,
+            ControlMethod.PRIVACY_PROPOSE_POLICY,
+        }:
+            if binding.repository_privacy_commitment is not None:
+                return AuthorizationScope(
+                    AuthorizationScopeKind.WORKSPACE,
+                    installation_id,
+                    binding.repository_privacy_commitment,
+                )
+            return AuthorizationScope(AuthorizationScopeKind.MACHINE, installation_id)
         task = source.get("task_id")
         if type(task) is str and binding.route_identity_digest is not None:
             workspace = lookup.mac(
@@ -2456,6 +2495,7 @@ async def provide_service_ready_context(
     privacy_app = cast(PrivacyCoordinator, privacy).policy_application
     if privacy_app is not None:
         support_handlers.update(build_privacy_support_handlers(privacy_app))
+
     return ServiceReadyContext(
         service_generation=service_generation,
         vault_generation=vault_generation,

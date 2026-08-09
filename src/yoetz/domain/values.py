@@ -24,6 +24,8 @@ from yoetz.protocol.ids import IdKind, validate_actor_id, validate_id
 __all__ = [
     "DISCLOSURE_CONTINUATION_INSTRUCTION",
     "DISCLOSURE_CONTINUATION_KIND",
+    "REPOSITORY_GRANT_CONTINUATION_INSTRUCTION",
+    "REPOSITORY_GRANT_CONTINUATION_KIND",
     "GENESIS_DIGEST",
     "ActionId",
     "Actor",
@@ -67,6 +69,7 @@ __all__ = [
     "receipt_id",
     "render_wire_sequence",
     "request_id",
+    "repository_grant_continuation",
     "result_id",
     "session_id",
     "subject_state_relation",
@@ -602,6 +605,7 @@ def subject_state_relation(
 
 
 DISCLOSURE_CONTINUATION_KIND: Final = "privacy_disclosure_decision"
+REPOSITORY_GRANT_CONTINUATION_KIND: Final = "repository_privacy_setup"
 
 # The check result and the status recovery query must return the *same* continuation. Two copies
 # of this prose would eventually disagree, and the caller has no way to tell which one is current.
@@ -609,6 +613,12 @@ DISCLOSURE_CONTINUATION_INSTRUCTION: Final = (
     "A local disclosure decision is required before this check can dispatch. Run the command "
     "above, then replay this exact check request with the same request_id. Do not create a new "
     "check request and do not request a receipt until this request reaches a terminal result."
+)
+REPOSITORY_GRANT_CONTINUATION_INSTRUCTION: Final = (
+    "A standing repository privacy grant is required before this check can dispatch. Run the "
+    "command above in a trusted local CLI/TUI, then replay this exact check request with the same "
+    "request_id. This is not a one-use disclosure confirmation. Do not approve through chat, "
+    "create a new check request, or request a receipt until this request reaches a terminal result."
 )
 
 
@@ -623,23 +633,40 @@ class SemanticContinuation:
     """
 
     kind: str
-    pending_id: str
-    expires_at: Timestamp
+    pending_id: str | None
+    expires_at: Timestamp | None
     request_id: str
 
     def __post_init__(self) -> None:
-        if self.kind != DISCLOSURE_CONTINUATION_KIND:
+        if self.kind not in {
+            DISCLOSURE_CONTINUATION_KIND,
+            REPOSITORY_GRANT_CONTINUATION_KIND,
+        }:
             raise ProtocolValueError("invalid_continuation_kind")
-        _validated_id(IdKind.PRIVACY_PROPOSAL, self.pending_id)
         _validated_id(IdKind.REQUEST, self.request_id)
-        if type(self.expires_at) is not Timestamp:
-            raise ProtocolValueError("invalid_continuation_expiry")
+        if self.kind == DISCLOSURE_CONTINUATION_KIND:
+            if type(self.pending_id) is not str:
+                raise ProtocolValueError("invalid_continuation_pending_id")
+            _validated_id(IdKind.PRIVACY_PROPOSAL, self.pending_id)
+            if type(self.expires_at) is not Timestamp:
+                raise ProtocolValueError("invalid_continuation_expiry")
+        elif self.pending_id is not None or self.expires_at is not None:
+            raise ProtocolValueError("invalid_continuation_repository_setup")
 
     @property
     def command(self) -> tuple[str, ...]:
         """The exact argv the caller should surface, never a reconstructed or templated one."""
 
+        if self.kind == REPOSITORY_GRANT_CONTINUATION_KIND:
+            return ("yoetz", "--privacy")
+        assert self.pending_id is not None
         return ("yoetz", "privacy", "decide-disclosure", self.pending_id)
+
+    @property
+    def instruction(self) -> str:
+        if self.kind == REPOSITORY_GRANT_CONTINUATION_KIND:
+            return REPOSITORY_GRANT_CONTINUATION_INSTRUCTION
+        return DISCLOSURE_CONTINUATION_INSTRUCTION
 
 
 def disclosure_continuation(
@@ -654,6 +681,17 @@ def disclosure_continuation(
         DISCLOSURE_CONTINUATION_KIND,
         pending_id,
         timestamp_from_datetime(expires_at),
+        request_id,
+    )
+
+
+def repository_grant_continuation(*, request_id: str) -> SemanticContinuation:
+    """Build the standing repository-grant continuation for one suspended check."""
+
+    return SemanticContinuation(
+        REPOSITORY_GRANT_CONTINUATION_KIND,
+        None,
+        None,
         request_id,
     )
 

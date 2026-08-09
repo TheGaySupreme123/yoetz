@@ -17,6 +17,7 @@ from yoetz.ports.control import (
     ControlClientKind,
     ControlMethod,
     ControlResult,
+    ProjectionRenderMode,
     RepositoryPrivacyContext,
     ServiceState,
     ServiceStatus,
@@ -474,6 +475,8 @@ def test_v2_handshake_consumes_locator_and_retains_only_opaque_server_context() 
                 ControlClientKind.CLI,
                 "0.1.0",
                 workspace_locator=WorkspaceLocator("/private/raw-repository"),
+                projection_render_mode=ProjectionRenderMode.HUMAN_READABLE,
+                output_is_controlling_tty=True,
             ),
             server_handshake(
                 server,
@@ -486,6 +489,8 @@ def test_v2_handshake_consumes_locator_and_retains_only_opaque_server_context() 
         assert observed == ["/private/raw-repository"]
         assert client_result.repository_privacy_context is None
         assert server_result.repository_privacy_context == context
+        assert server_result.projection_render_mode is ProjectionRenderMode.HUMAN_READABLE
+        assert server_result.output_is_controlling_tty is True
         assert "raw-repository" not in repr(server_result)
 
     asyncio.run(exercise())

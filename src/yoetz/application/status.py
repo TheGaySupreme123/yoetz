@@ -15,9 +15,10 @@ from yoetz.application.check import CheckScope, run_deterministic_policies
 from yoetz.domain.findings import FINDING_KIND_TRAITS, FindingOrigin
 from yoetz.domain.observation import AdviceSnapshot
 from yoetz.domain.values import (
-    DISCLOSURE_CONTINUATION_INSTRUCTION,
     Frontier,
+    SemanticContinuation,
     disclosure_continuation,
+    repository_grant_continuation,
 )
 from yoetz.kernel.deterministic_checks import (
     DeterministicAssessment,
@@ -28,6 +29,7 @@ from yoetz.observability.logging import record_unexpected_exception_without_rais
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ledger import (
     AssignmentProjectionFilter,
+    CheckSuspensionKind,
     EvidenceProjectionFilter,
     FindingProjectionPosition,
     FindingsProjectionFilter,
@@ -36,6 +38,7 @@ from yoetz.ports.ledger import (
     IdProjectionPosition,
     ObligationsProjectionFilter,
     OperationKind,
+    OperationRecord,
     OperationState,
     ProjectionFilter,
     ProjectionPage,
@@ -411,10 +414,10 @@ def _mapping(value: JsonValue) -> dict[str, JsonValue]:
     return cast(dict[str, JsonValue], source)
 
 
-async def _disclosure_continuation(
-    runtime: object,
+async def _operation_continuation(
+    application: Application,
     writer_id: str,
-    operation_request_id: str,
+    operation: OperationRecord,
 ) -> dict[str, JsonValue] | None:
     """Rebuild the continuation for one suspended check from durable state.
 
@@ -424,32 +427,40 @@ async def _disclosure_continuation(
     readable operation page into an error.
     """
 
+    runtime = application.runtime
+    operation_request_id = operation.operation_id
     ledger = getattr(runtime, "ledger", None)
     load = getattr(ledger, "load_disclosure_wait", None)
-    if load is None:
+    continuation: SemanticContinuation | None = None
+    if operation.suspension_kind is CheckSuspensionKind.REPOSITORY_GRANT:
+        continuation = repository_grant_continuation(request_id=operation_request_id)
+    elif load is not None:
+        try:
+            wait = await load(writer_id, operation_request_id)
+        except Exception:
+            wait = None
+        if wait is not None and getattr(wait, "state", None) == "awaiting":
+            try:
+                continuation = disclosure_continuation(
+                    pending_id=wait.pending_id,
+                    expires_at=wait.pending_expires_at,
+                    request_id=operation_request_id,
+                )
+            except TypeError, ValueError:
+                continuation = None
+    if continuation is None:
         return None
-    try:
-        wait = await load(writer_id, operation_request_id)
-    except Exception:
-        return None
-    if wait is None or getattr(wait, "state", None) != "awaiting":
-        return None
-    try:
-        continuation = disclosure_continuation(
-            pending_id=wait.pending_id,
-            expires_at=wait.pending_expires_at,
-            request_id=operation_request_id,
-        )
-    except TypeError, ValueError:
-        return None
-    return {
+    result: dict[str, JsonValue] = {
         "kind": continuation.kind,
-        "pending_id": continuation.pending_id,
-        "expires_at": continuation.expires_at.wire,
         "command": continuation.command,
         "replay_request_id": continuation.request_id,
-        "instruction": DISCLOSURE_CONTINUATION_INSTRUCTION,
+        "instruction": continuation.instruction,
     }
+    if continuation.pending_id is not None:
+        result["pending_id"] = continuation.pending_id
+    if continuation.expires_at is not None:
+        result["expires_at"] = continuation.expires_at.wire
+    return result
 
 
 def _operation_page_from_record(
@@ -912,9 +923,17 @@ async def execute_status(
             operation = await runtime.ledger.lookup_operation(
                 request.writer_id, request.filter.operation_request_id
             )
-            continuation = await _disclosure_continuation(
-                runtime, request.writer_id, request.filter.operation_request_id
-            )
+            continuation = None
+            if (
+                operation is not None
+                and getattr(operation, "state", None) is OperationState.PENDING
+                and getattr(operation, "operation_kind", None) is OperationKind.CHECK
+            ):
+                continuation = await _operation_continuation(
+                    app,
+                    request.writer_id,
+                    operation,
+                )
             try:
                 page = _operation_page_from_record(
                     request.filter.operation_request_id, operation, continuation

@@ -27,11 +27,11 @@ import pytest
 _REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 _VERIFY_SCRIPT: Final = _REPO_ROOT / "scripts" / "verify_resource_manifest.py"
 _BUILD_TIMEOUT: Final = 120
-_EXPECTED_TOTAL: Final = 95
+_EXPECTED_TOTAL: Final = 96
 _EXPECTED_KIND_COUNTS: Final = {
     "canonical_vector": 9,
     "guidance": 5,
-    "migration": 8,
+    "migration": 9,
     "json_schema": 70,
     "skill": 1,
     "compatibility_manifest": 1,
@@ -43,6 +43,7 @@ _WORKTREE_RESOURCE_OVERLAYS: Final = (
     "guidance/publication-policy.md",
     "guidance/request-templates.md",
     "migrations/catalog/0003.sql",
+    "migrations/bundle/0006.sql",
     "schemas/events/event-draft-1.0.0.schema.json",
     "schemas/events/evidence-recorded-1.1.0.schema.json",
     "schemas/events/opaque-unknown-event-draft-1.0.0.schema.json",
@@ -58,18 +59,22 @@ _WORKTREE_RESOURCE_OVERLAYS: Final = (
     "schemas/consent/review-result-3.0.0.schema.json",
     "schemas/consent/status-2.0.0.schema.json",
     "schemas/consent/status-3.0.0.schema.json",
+    "schemas/operations/check-result-1.0.0.schema.json",
+    "schemas/operations/status-result-1.0.0.schema.json",
     "schemas/service/control-hello-2.0.0.schema.json",
     "schemas/service/control-hello-result-2.0.0.schema.json",
     "schemas/service/control-request-2.0.0.schema.json",
     "schemas/service/control-result-2.0.0.schema.json",
     "schemas/version/version-manifest-1.0.0.schema.json",
     "skills/codex/yoetz/SKILL.md",
+    "skills/codex/yoetz/manifest.json",
     "src/yoetz/resources/manifest.json",
     "src/yoetz/resources/guidance/agent-instructions.md",
     "src/yoetz/resources/guidance/coverage-and-receipts.md",
     "src/yoetz/resources/guidance/publication-policy.md",
     "src/yoetz/resources/guidance/request-templates.md",
     "src/yoetz/resources/migrations/catalog/0003.sql",
+    "src/yoetz/resources/migrations/bundle/0006.sql",
     "src/yoetz/resources/schemas/events/event-draft-1.0.0.schema.json",
     "src/yoetz/resources/schemas/events/evidence-recorded-1.1.0.schema.json",
     "src/yoetz/resources/schemas/events/opaque-unknown-event-draft-1.0.0.schema.json",
@@ -85,12 +90,15 @@ _WORKTREE_RESOURCE_OVERLAYS: Final = (
     "src/yoetz/resources/schemas/consent/review-result-3.0.0.schema.json",
     "src/yoetz/resources/schemas/consent/status-2.0.0.schema.json",
     "src/yoetz/resources/schemas/consent/status-3.0.0.schema.json",
+    "src/yoetz/resources/schemas/operations/check-result-1.0.0.schema.json",
+    "src/yoetz/resources/schemas/operations/status-result-1.0.0.schema.json",
     "src/yoetz/resources/schemas/service/control-hello-2.0.0.schema.json",
     "src/yoetz/resources/schemas/service/control-hello-result-2.0.0.schema.json",
     "src/yoetz/resources/schemas/service/control-request-2.0.0.schema.json",
     "src/yoetz/resources/schemas/service/control-result-2.0.0.schema.json",
     "src/yoetz/resources/schemas/version/version-manifest-1.0.0.schema.json",
     "src/yoetz/resources/skills/codex/yoetz/SKILL.md",
+    "src/yoetz/resources/skills/codex/yoetz/manifest.json",
     "src/yoetz/resources/support/runtime-support.json",
     "support/runtime-support.json",
 )
@@ -132,7 +140,7 @@ def _export_clean_source(dest: Path) -> None:
         shutil.copy2(source, target)
 
 
-def test_manifest_has_exactly_95_entries_with_the_reviewed_kind_counts() -> None:
+def test_manifest_has_exactly_96_entries_with_the_reviewed_kind_counts() -> None:
     manifest = _load_manifest()
     entries = manifest["entries"]
     assert len(entries) == _EXPECTED_TOTAL
@@ -155,6 +163,27 @@ def test_source_tree_and_package_tree_are_byte_identical_in_the_real_checkout() 
         timeout=60,
     )
     assert completed.returncode == 0, completed.stderr.decode("utf-8", "replace")
+
+
+def test_nested_codex_skill_member_metadata_detects_changed_owned_bytes(
+    synthetic_repo_root: Path,
+) -> None:
+    skill = synthetic_repo_root / "skills/codex/yoetz/SKILL.md"
+    skill.write_bytes(skill.read_bytes() + b"\n")
+    completed = subprocess.run(  # noqa: S603 - fixed local verifier argv, no shell
+        [
+            sys.executable,
+            str(_VERIFY_SCRIPT),
+            "--check",
+            "--repo-root",
+            str(synthetic_repo_root),
+        ],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        timeout=30,
+    )
+    assert completed.returncode == 1
+    assert b"codex_skill_manifest_stale" in completed.stderr
 
 
 def test_every_manifest_entry_source_path_matches_its_recorded_digest_and_size() -> None:

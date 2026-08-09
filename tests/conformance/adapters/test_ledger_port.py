@@ -8,6 +8,7 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import cast
 
 import apsw
@@ -29,8 +30,10 @@ from yoetz.ports.ledger import (
     CheckCommitResult,
     CheckPhase,
     CheckPolicyExecution,
+    CheckSuspensionKind,
     FrozenCase,
     OperationKind,
+    OperationLease,
     SelectedAttempt,
     SemanticAttemptHandle,
 )
@@ -43,6 +46,7 @@ from yoetz.ports.objects import (
     StagedObject,
 )
 from yoetz.ports.runtime import OwnershipFence
+from yoetz.protocol.canonical import canonical_encode
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 from yoetz.protocol.models import SemanticReason, SemanticStatus
@@ -312,6 +316,211 @@ async def _object_ref(
         ),
     )
     return await objects.finalize(staged)
+
+
+async def _semantic_wait_lease(
+    adapter: MemoryLedgerAdapter | SqliteLedger,
+    command: AppendCommand,
+    operation_id: str,
+) -> OperationLease:
+    frozen = await adapter.freeze_case(
+        command.session_id,
+        command.writer_id,
+        1,
+        operation_id,
+        "sha256:" + "7" * 64,
+    )
+    assert type(frozen) is FrozenCase
+    operation = await adapter.lookup_operation(command.writer_id, operation_id)
+    assert operation is not None and operation.resume_object_ref is not None
+    prior = operation.resume_object_ref
+    canonical = canonical_encode(
+        {
+            "schema_version": "1.0.0",
+            "request_id": operation_id,
+            "request_digest": "sha256:" + "7" * 64,
+            "task_id": command.task_id,
+            "session_id": command.session_id,
+            "writer_id": command.writer_id,
+            "subject_frontier": frozen.case.frontier.as_wire(),
+            "dependency_digest": frozen.lease.dependency_digest,
+            "prior_resume": {
+                "object_id": prior.object_id,
+                "envelope_digest": prior.envelope_digest,
+                "commitment": prior.commitment,
+            },
+            "policy_executions": (),
+            "assessments": (),
+        }
+    )
+    objects = adapter._objects  # pyright: ignore[reportPrivateUsage]
+    assert objects is not None
+    staged = await objects.stage(
+        ObjectSource(data=canonical, declared_size=len(canonical)),
+        ObjectMetadata(
+            ObjectKind.DETERMINISTIC_RESULT,
+            "application/vnd.yoetz.deterministic-result+json",
+            command.task_id,
+            datetime(2026, 7, 19, 12, 0, tzinfo=UTC),
+        ),
+    )
+    local_result = await objects.finalize(staged)
+    lease = await adapter.advance_check_phase(
+        frozen.lease,
+        CheckPhase.RESERVED,
+        CheckPhase.LOCAL_READY,
+        local_result,
+    )
+    return await adapter.advance_check_phase(
+        lease, CheckPhase.LOCAL_READY, CheckPhase.SEMANTIC_WAIT
+    )
+
+
+@pytest.mark.anyio
+async def test_repository_grant_suspension_is_exact_and_clears_on_same_request_resume() -> None:
+    command = ledger_command(request_suffix="6")
+    operation_id = "req_00000000-0000-4000-8000-000000000031"
+    for adapter in (memory_ledger(command), sqlite_ledger(command)):
+        await adapter.append_batch(command)
+        lease = await _semantic_wait_lease(adapter, command, operation_id)
+        await adapter.suspend_check_for_repository_grant(lease)
+        suspended = await adapter.lookup_operation(command.writer_id, operation_id)
+        assert suspended is not None
+        assert suspended.suspension_kind is CheckSuspensionKind.REPOSITORY_GRANT
+        assert not any(
+            job.writer_id == command.writer_id and job.operation_id == operation_id
+            for job in adapter._state.jobs.values()  # pyright: ignore[reportPrivateUsage]
+        )
+
+        resumed = await adapter.freeze_case(
+            command.session_id,
+            command.writer_id,
+            1,
+            operation_id,
+            "sha256:" + "7" * 64,
+        )
+        assert type(resumed) is FrozenCase
+        current = await adapter.lookup_operation(command.writer_id, operation_id)
+        assert current is not None
+        assert current.suspension_kind is None
+
+
+@pytest.mark.anyio
+async def test_repository_grant_suspension_rejects_wrong_phase_and_existing_job() -> None:
+    command = ledger_command(request_suffix="7")
+    for offset, adapter in enumerate((memory_ledger(command), sqlite_ledger(command)), start=1):
+        await adapter.append_batch(command)
+        wrong_id = f"req_00000000-0000-4000-8000-00000000003{offset}"
+        frozen = await adapter.freeze_case(
+            command.session_id,
+            command.writer_id,
+            1,
+            wrong_id,
+            "sha256:" + "8" * 64,
+        )
+        assert type(frozen) is FrozenCase
+        with pytest.raises(PublicOperationError) as wrong_phase:
+            await adapter.suspend_check_for_repository_grant(frozen.lease)
+        assert wrong_phase.value.code is PublicErrorCode.OPERATION_PENDING
+        wrong_record = await adapter.lookup_operation(command.writer_id, wrong_id)
+        assert wrong_record is not None and wrong_record.suspension_kind is None
+
+        job_id = f"req_00000000-0000-4000-8000-00000000004{offset}"
+        lease = await _semantic_wait_lease(adapter, command, job_id)
+        case_ref = await _object_ref(adapter, command, ObjectKind.SEMANTIC_CASE)
+        await adapter.enqueue_semantic_job(lease, "sha256:" + "9" * 64, case_ref)
+        with pytest.raises(PublicOperationError) as existing_job:
+            await adapter.suspend_check_for_repository_grant(lease)
+        assert existing_job.value.code is PublicErrorCode.OPERATION_PENDING
+        job_record = await adapter.lookup_operation(command.writer_id, job_id)
+        assert job_record is not None and job_record.suspension_kind is None
+
+
+@pytest.mark.anyio
+async def test_repository_grant_suspension_survives_memory_rebind_and_sqlite_restart(
+    tmp_path: Path,
+) -> None:
+    command = ledger_command(request_suffix="8")
+    operation_id = "req_00000000-0000-4000-8000-000000000035"
+
+    memory_ids = _Ids()
+    memory_objects = _Objects(memory_ids)
+    memory_state = MemoryLedgerState()
+    memory = MemoryLedgerAdapter(
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        state=memory_state,
+        import_state=MemoryImportState(),
+        transaction_lock=asyncio.Lock(),
+        clock=_Clock(),
+        ids=memory_ids,
+        objects=memory_objects,
+    )
+    await memory.append_batch(command)
+    await memory.suspend_check_for_repository_grant(
+        await _semantic_wait_lease(memory, command, operation_id)
+    )
+    rebound = MemoryLedgerAdapter(
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        state=memory_state,
+        import_state=MemoryImportState(),
+        transaction_lock=asyncio.Lock(),
+        clock=_Clock(),
+        ids=memory_ids,
+        objects=memory_objects,
+    )
+    rebound_record = await rebound.lookup_operation(command.writer_id, operation_id)
+    assert rebound_record is not None
+    assert rebound_record.suspension_kind is CheckSuspensionKind.REPOSITORY_GRANT
+
+    database = tmp_path / "repository-grant-suspension.sqlite3"
+    first_db = apsw.Connection(str(database))
+    initialize_bundle(
+        first_db,
+        {
+            "task_id": command.task_id,
+            "owner_generation": "1",
+            "owner_nonce": "ledger-test-nonce",
+        },
+    )
+    sqlite_ids = _Ids()
+    sqlite_objects = _Objects(sqlite_ids)
+    first = SqliteLedger(
+        db=first_db,
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=_Clock(),
+        ids=sqlite_ids,
+        objects=sqlite_objects,
+    )
+    await first.append_batch(command)
+    await first.suspend_check_for_repository_grant(
+        await _semantic_wait_lease(first, command, operation_id)
+    )
+    first_db.close()
+
+    second = SqliteLedger(
+        db=apsw.Connection(str(database)),
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=_Clock(),
+        ids=sqlite_ids,
+        objects=sqlite_objects,
+    )
+    restarted = await second.lookup_operation(command.writer_id, operation_id)
+    assert restarted is not None
+    assert restarted.suspension_kind is CheckSuspensionKind.REPOSITORY_GRANT
+    resumed = await second.freeze_case(
+        command.session_id,
+        command.writer_id,
+        1,
+        operation_id,
+        "sha256:" + "7" * 64,
+    )
+    assert type(resumed) is FrozenCase
+    cleared = await second.lookup_operation(command.writer_id, operation_id)
+    assert cleared is not None and cleared.suspension_kind is None
 
 
 @pytest.mark.anyio

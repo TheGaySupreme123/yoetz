@@ -36,6 +36,7 @@ __all__ = [
     "ControlClientPort",
     "ControlError",
     "ControlMethod",
+    "ProjectionRenderMode",
     "ControlRequest",
     "ControlResult",
     "McpRouteProfile",
@@ -64,6 +65,11 @@ class ControlClientKind(str, Enum):  # noqa: UP042 - exact wire enum base
     CLI = "cli"
     MCP_BRIDGE = "mcp_bridge"
     UI = "ui"
+
+
+class ProjectionRenderMode(str, Enum):  # noqa: UP042 - exact wire enum base
+    HUMAN_READABLE = "human_readable"
+    MACHINE_READABLE = "machine_readable"
 
 
 type RepositoryIdentityKind = Literal["git_common_root", "directory"]

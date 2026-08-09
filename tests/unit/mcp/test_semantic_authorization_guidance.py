@@ -97,6 +97,23 @@ def test_awaiting_human_is_excluded_from_the_stop_retrying_rules(source: Callabl
     assert "neither a gap to disclose nor a retry to spend" in text
 
 
+@pytest.mark.parametrize("source", (_skill, _instructions))
+def test_missing_repository_grant_handoff_stays_in_the_trusted_surface(
+    source: Callable[[], str],
+) -> None:
+    text = source()
+
+    assert "repository grant" in text
+    assert "yoetz --privacy" in text
+    assert "chat" in text
+    assert "standing" in text
+    assert "one-use" in text
+    assert "no dispatch" in text
+    assert "view=operation" in text
+    assert "same `request_id`" in text
+    assert "never create a fresh request" in text
+
+
 def test_check_descriptor_states_the_bounded_standing_policy() -> None:
     description = descriptor_for("check").description
 
@@ -111,6 +128,17 @@ def test_check_descriptor_gives_the_continuation_procedure() -> None:
     assert "awaiting_human is the one nonterminal result" in description
     assert "do not create a new check request" in description
     assert "same request_id" in description
+
+
+def test_check_descriptor_keeps_repository_grant_approval_out_of_agent_chat() -> None:
+    description = descriptor_for("check").description
+
+    assert "yoetz --privacy" in description
+    assert "agent chat" in description
+    assert "repository grant" in description
+    assert "no dispatch" in description
+    assert "operation status" in description
+    assert "never a fresh request" in description
 
 
 @pytest.mark.parametrize("profile", ("policy", "strict"))

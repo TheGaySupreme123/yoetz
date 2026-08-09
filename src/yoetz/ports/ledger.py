@@ -129,6 +129,10 @@ class CheckPhase(str, Enum):  # noqa: UP042 - exact durable enum base
     TERMINAL = "terminal"
 
 
+class CheckSuspensionKind(str, Enum):  # noqa: UP042 - exact durable enum base
+    REPOSITORY_GRANT = "repository_grant"
+
+
 class AttemptOutcome(str, Enum):  # noqa: UP042 - exact durable enum base
     RESPONSE_DURABLE = "response_durable"
     FAILED = "failed"
@@ -643,6 +647,7 @@ class OperationRecord:
     result_locator: OperationResultLocator | None
     quarantine_code: OperationQuarantineCode | None
     terminal_at: datetime | None
+    suspension_kind: CheckSuspensionKind | None = None
 
     def __post_init__(self) -> None:
         _id(IdKind.WRITER, self.writer_id)
@@ -651,6 +656,13 @@ class OperationRecord:
             raise _invalid()
         _digest(self.request_digest)
         if type(self.phase) is not CheckPhase:
+            raise _invalid()
+        if self.suspension_kind is not None and (
+            type(self.suspension_kind) is not CheckSuspensionKind
+            or self.state is not OperationState.PENDING
+            or self.operation_kind is not OperationKind.CHECK
+            or self.phase is not CheckPhase.SEMANTIC_WAIT
+        ):
             raise _invalid()
         if self.resume_object_ref is not None:
             if type(self.resume_object_ref) is not ObjectRef:
@@ -695,6 +707,7 @@ class OperationRecord:
             return
         if (
             self.phase is not CheckPhase.TERMINAL
+            or self.suspension_kind is not None
             or any(value is not None for value in lease_values)
             or type(self.result_canonical) is not bytes
             or self.result_digest is None
@@ -1431,6 +1444,8 @@ class LedgerPort(Protocol):
         next_phase: CheckPhase,
         durable_object_ref: ObjectRef | None = None,
     ) -> OperationLease: ...
+
+    async def suspend_check_for_repository_grant(self, lease: OperationLease) -> None: ...
 
     async def enqueue_semantic_job(
         self,

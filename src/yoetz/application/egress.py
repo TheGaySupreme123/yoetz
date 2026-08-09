@@ -8,6 +8,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from yoetz.domain.findings import SemanticDispatchKind
@@ -61,6 +62,7 @@ from yoetz.ports.privacy import (
     PrivacyAuditPort,
     PrivacyClassifierPort,
     PrivacyPolicyStorePort,
+    RepositoryPrivacyAuthority,
 )
 from yoetz.ports.semantic import (
     Deadline,
@@ -80,6 +82,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "PrivacyCoordinator",
+    "RepositoryGrantAdmission",
     "SemanticEgressAwaitingHuman",
     "SemanticEgressBlocked",
     "SemanticEgressProviderOutcome",
@@ -90,6 +93,20 @@ __all__ = [
 type LocalDisclosureResult = (
     LocalDisclosureApproved | LocalDisclosureBlocked | LocalDisclosureUnavailable
 )
+
+
+class RepositoryGrantAdmission(StrEnum):
+    """Admission-locked repository authority outcome for check composition.
+
+    ``MISSING`` is deliberately the sole nonterminal handoff: the coordinator observed an exactly
+    bound, missing standing grant while still open. All other states are fail-closed so callers
+    cannot turn an unavailable coordinator or malformed policy state into a trusted ceremony.
+    """
+
+    MISSING = "missing"
+    GRANTED = "granted"
+    UNAVAILABLE = "unavailable"
+
 
 # This value crosses the privacy-policy boundary, so it must match the
 # documented/recipe vocabulary and the stored provider-credential binding.
@@ -320,6 +337,31 @@ class PrivacyCoordinator:
                 return False
             return await self._activate_repository_admitted(scope) is not None
 
+    async def admit_repository_grant(self, scope: AuthorizationScope) -> RepositoryGrantAdmission:
+        """Classify and activate exact repository authority under the closure fence.
+
+        This is the only API that may authorize the repository-setup continuation.  It shares the
+        coordinator admission lock with ``close`` and semantic dispatch, so a closed coordinator
+        or a close racing this lookup is never reported as an actionable missing-grant handoff.
+        """
+
+        async with self._admission_lock:
+            if self._closed:
+                return RepositoryGrantAdmission.UNAVAILABLE
+            authority = await self._repository_authority_admitted(scope)
+            if authority is None:
+                return RepositoryGrantAdmission.UNAVAILABLE
+            if authority.grant_state == "missing":
+                return RepositoryGrantAdmission.MISSING
+            if authority.grant_state != "granted":
+                return RepositoryGrantAdmission.UNAVAILABLE
+            activated = await self._activate_repository_from_authority_admitted(authority, scope)
+            return (
+                RepositoryGrantAdmission.GRANTED
+                if activated is not None
+                else RepositoryGrantAdmission.UNAVAILABLE
+            )
+
     async def evaluate_semantic(
         self, candidate: CandidateContext, deadline: Deadline
     ) -> SemanticEgressResult:
@@ -535,6 +577,28 @@ class PrivacyCoordinator:
             authority = await self._policies.repository_authority(scope)
         except Exception:
             return None
+        return await self._activate_repository_from_authority_admitted(authority, scope)
+
+    async def _repository_authority_admitted(
+        self, scope: AuthorizationScope
+    ) -> RepositoryPrivacyAuthority | None:
+        if scope.kind not in {AuthorizationScopeKind.TASK, AuthorizationScopeKind.REQUEST}:
+            return None
+        try:
+            authority = await self._policies.repository_authority(scope)
+        except Exception:
+            return None
+        if (
+            type(authority) is not RepositoryPrivacyAuthority
+            or authority.scope != scope
+            or authority.repository_privacy_commitment != scope.workspace_ref_commitment
+        ):
+            return None
+        return authority
+
+    async def _activate_repository_from_authority_admitted(
+        self, authority: RepositoryPrivacyAuthority, scope: AuthorizationScope
+    ) -> tuple[EffectivePrivacyPolicy, str] | None:
         effective = authority.effective
         authority_digest = authority.authority_digest
         repository = authority.repository_privacy_commitment

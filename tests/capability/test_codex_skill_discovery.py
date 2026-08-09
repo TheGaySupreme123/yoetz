@@ -88,6 +88,40 @@ def _injectable_skill_resources() -> _Resources:
         "guidance/request-templates.md": b"# Request templates\n",
         "guidance/workflow.md": b"# Workflow\n",
     }
+    installed_paths = {
+        "SKILL.md": "skills/codex/yoetz/SKILL.md",
+        "references/agent-instructions.md": "guidance/agent-instructions.md",
+        "references/coverage-and-receipts.md": "guidance/coverage-and-receipts.md",
+        "references/publication-policy.md": "guidance/publication-policy.md",
+        "references/request-templates.md": "guidance/request-templates.md",
+        "references/workflow.md": "guidance/workflow.md",
+    }
+    managed_members: list[JsonValue] = []
+    for logical_name, package_path in installed_paths.items():
+        data = files[package_path]
+        managed_members.append(
+            {
+                "logical_name": logical_name,
+                "origin": "harness_owned" if logical_name == "SKILL.md" else "shared_guidance",
+                "role": "skill" if logical_name == "SKILL.md" else "guidance",
+                "sha256": bytes_digest(data),
+                "size": len(data),
+                **({} if logical_name == "SKILL.md" else {"source_logical_name": package_path}),
+            }
+        )
+    managed_members.insert(
+        1,
+        {
+            "identity_status": "self_excluded",
+            "logical_name": "manifest.json",
+            "origin": "harness_owned",
+            "role": "compatibility_manifest",
+        },
+    )
+    skill_manifest_body["managed_members"] = managed_members
+    skill_manifest_body.pop("member_digest")
+    skill_manifest_body["member_digest"] = canonical_digest(skill_manifest_body)
+    files["skills/codex/yoetz/manifest.json"] = canonical_encode(skill_manifest_body) + b"\n"
     entries: list[JsonValue] = []
     for package_path, data in sorted(files.items(), key=lambda item: item[0].encode("ascii")):
         entries.append(

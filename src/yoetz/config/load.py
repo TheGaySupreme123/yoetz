@@ -33,6 +33,9 @@ type _LeafPath = tuple[str, ...]
 
 _ENV_TO_LEAF: Final[dict[str, _LeafPath | None]] = {
     "YOETZ_CONFIG": None,
+    # Documented presentation control, recognized here so strict config loading cannot mistake
+    # the prompt-loop opt-out for a service setting. It maps to no configuration leaf.
+    "YOETZ_TUI": None,
     "YOETZ_PROFILE": ("profile",),
     "YOETZ_STORAGE_DATA_DIR": ("storage", "data_dir"),
     "YOETZ_STORAGE_DURABILITY": ("storage", "durability"),

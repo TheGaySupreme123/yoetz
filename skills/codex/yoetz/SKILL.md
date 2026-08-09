@@ -120,9 +120,9 @@ permits agent-chat authorization or an agent-selected vault secret.
 ## When a check is waiting on a local decision
 
 If a check returns `semantic_status: awaiting_human` with `semantic_reason:
-human_approval_required`, the result carries a `continuation` with a `pending_id`, an `expires_at`,
-and the exact command to run. The user has chosen the per-request confirmation posture; nothing is
-wrong.
+human_approval_required`, its typed `continuation` identifies either a standing repository setup
+handoff or a one-use disclosure decision. Both carry the exact trusted command and original request
+id; only the one-use confirmation carries a `pending_id` and `expires_at`.
 
 Do exactly this:
 
@@ -139,10 +139,30 @@ Do exactly this:
 - **Do not request a receipt yet, and do not tell the user the task is done.** The check has not
   reached a terminal result, so there is no verdict, no coverage, and nothing to conclude from.
 
-`awaiting_human` is not a coverage gap and not a failure. It is the one nonterminal check outcome:
-the operation, its semantic job, and its physical attempt are all still open, waiting on the user.
-Denial or expiry resolves it once and produces a terminal result you can then read normally. A
-provider retry creates a fresh proposal and needs its own decision.
+`awaiting_human` is not a coverage gap and not a failure. It is the one nonterminal check outcome.
+For one-use confirmation the operation, semantic job, and physical attempt remain open. Missing
+standing repository authority stops earlier with only the operation suspended and no provider job
+or attempt created. Denial or expiry resolves a one-use decision once; a provider retry creates a
+fresh proposal and needs its own decision.
+
+## When the current repository grant is missing
+
+Act only when Yoetz explicitly reports that the current repository grant is missing; do not infer
+it from a generic policy refusal. Tell the user to run the exact trusted CLI/TUI entrypoint:
+
+```text
+yoetz --privacy
+```
+
+Ask them to complete the repository review there and then tell you when it is done. A “yes” or
+“done” in agent chat is notification only and never grants authority. Do not try to approve through
+MCP, arguments, environment, stdin, or terminal automation.
+
+This is a standing grant for that exact repository until revoked or changed. It is different from
+the one-use `confirm_every_request` decision carried by the other continuation kind. Keep the
+missing-grant request open: recover it with `status` using `view=operation`, or replay the exact
+original check with the same `request_id`. Never create a fresh request. Denial, expiry,
+cancellation, stale authority, or an incomplete ceremony remains a no dispatch outcome.
 
 ## Before you claim done
 
