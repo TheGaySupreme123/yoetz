@@ -6,7 +6,7 @@ import os
 import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 from yoetz.cli.trusted_console import TrustedConsoleError, TrustedForegroundConsole
 from yoetz.cli.unlock import (
@@ -18,7 +18,7 @@ from yoetz.cli.unlock import (
 from yoetz.protocol.canonical import JsonValue, canonical_digest
 from yoetz.protocol.chat_user_authority import (
     ChatUserAttestationModel,
-    chat_user_authority_available,
+    agent_chat_attestation_supported,
 )
 from yoetz.protocol.consent import ConsentPrepareResultModel, ConsentReviewResultModel
 from yoetz.service.confidential_client import ConfidentialClientError
@@ -37,6 +37,7 @@ from yoetz.service.elevated_bootstrap import (
     claim_pending_for_review,
     complete_review,
     grant_target_digest,
+    load_pending,
     operation_spec,
     prepare_pending,
     projection_for_status,
@@ -80,7 +81,7 @@ def prepare_elevated(
     )
     model = ConsentPrepareResultModel.model_validate(
         {
-            "schema": "yoetz.elevated-bootstrap.prepare-result/2",
+            "schema": "yoetz.elevated-bootstrap.prepare-result/3",
             "pending": projection_for_status(pending),
         }
     )
@@ -110,12 +111,12 @@ def _review_result(
     outcome: str,
     result: Mapping[str, JsonValue],
     authority_channel: Literal[
-        "trusted_console_presence", "chat_user_host_tool_approval"
+        "trusted_console_presence", "agent_attested_chat_instruction"
     ] = "trusted_console_presence",
 ) -> dict[str, JsonValue]:
     model = ConsentReviewResultModel.model_validate(
         {
-            "schema": "yoetz.elevated-bootstrap.result/2",
+            "schema": "yoetz.elevated-bootstrap.result/3",
             "pending_id": pending.pending_id,
             "operation": pending.operation,
             "risk_class": pending.risk_class,
@@ -198,7 +199,7 @@ async def _complete_approved(
     if pending.operation in {"provider_credential_set", "provider_credential_rotate"}:
         return await _complete_provider_credential(console, pending)
     if pending.operation == "repository_privacy_grant":
-        raise ElevatedBootstrapError("repository_privacy_grant_requires_chat_user_authorize")
+        raise ElevatedBootstrapError("repository_privacy_grant_requires_yoetz_privacy")
     raise ElevatedBootstrapError("operation_not_implemented")
 
 
@@ -207,7 +208,7 @@ async def authorize_elevated(
     *,
     provider_credential: bytearray | None = None,
 ) -> dict[str, JsonValue]:
-    """Complete one prepared consent via host-tool-approval chat-user authority (#164)."""
+    """Complete one prepared consent from an exact agent-attested chat instruction (#164)."""
 
     try:
         model = (
@@ -220,21 +221,37 @@ async def authorize_elevated(
     pending: PendingElevatedConsent | None = None
     consumed = False
     try:
-        if not chat_user_authority_available(model.client_kind, model.host_tool_approval):
-            raise ElevatedBootstrapError("chat_user_authority_unavailable")
-        if model.channel != "host_tool_approval":
+        if not agent_chat_attestation_supported(model.client_kind, model.instruction_source):
+            raise ElevatedBootstrapError("agent_chat_attestation_unsupported")
+        if model.channel != "agent_attested_chat_instruction":
             raise ElevatedBootstrapError("chat_user_attestation_invalid")
-        pending = claim_pending_for_review()
-        spec = operation_spec(pending.operation)
-        if not spec.chat_user_authorize_allowed:
+        observed = load_pending()
+        if observed is None:
+            raise ElevatedBootstrapError("pending_absent")
+        spec = operation_spec(observed.operation)
+        if not spec.agent_chat_authorize_allowed:
             raise ElevatedBootstrapError("chat_user_operation_forbidden")
         if (
-            model.pending_id != pending.pending_id
-            or model.operation != pending.operation
-            or model.danger_digest != pending.danger_digest
-            or model.target_digest != pending.target_digest
+            model.pending_id != observed.pending_id
+            or model.operation != observed.operation
+            or model.danger_digest != observed.danger_digest
+            or model.target_digest != observed.target_digest
         ):
             raise ElevatedBootstrapError("chat_user_target_mismatch")
+        if model.decision == "approve" and not model.warning_acknowledged:
+            raise ElevatedBootstrapError("chat_user_warning_required")
+        credential_operation = observed.operation in {
+            "provider_credential_set",
+            "provider_credential_rotate",
+        }
+        if model.decision == "approve" and credential_operation:
+            if provider_credential is None:
+                raise ElevatedBootstrapError("provider_credential_required")
+        elif provider_credential is not None:
+            raise ElevatedBootstrapError("provider_credential_forbidden")
+        pending = claim_pending_for_review()
+        if pending != observed:
+            raise ElevatedBootstrapError("pending_tampered")
         if pending.expires_at_unix <= int(time.time()):
             complete_review(pending, outcome="expired")
             consumed = True
@@ -246,17 +263,12 @@ async def authorize_elevated(
                 pending,
                 outcome="denied",
                 result={"decision": "denied"},
-                authority_channel="chat_user_host_tool_approval",
+                authority_channel="agent_attested_chat_instruction",
             )
-        if pending.risk_class == "secret_ingress" and not model.warning_acknowledged:
-            raise ElevatedBootstrapError("chat_user_warning_required")
         if pending.operation in {"provider_credential_set", "provider_credential_rotate"}:
-            if provider_credential is None:
-                raise ElevatedBootstrapError("provider_credential_required")
+            assert provider_credential is not None
             result = await _complete_provider_credential_supplied(pending, provider_credential)
         elif pending.operation == "repository_privacy_grant":
-            if provider_credential is not None:
-                raise ElevatedBootstrapError("provider_credential_forbidden")
             result = await _complete_repository_privacy_grant(pending)
         else:
             raise ElevatedBootstrapError("chat_user_operation_forbidden")
@@ -266,7 +278,7 @@ async def authorize_elevated(
             pending,
             outcome="completed",
             result=result,
-            authority_channel="chat_user_host_tool_approval",
+            authority_channel="agent_attested_chat_instruction",
         )
     except BaseException:
         if pending is not None and not consumed:
@@ -330,40 +342,18 @@ async def _complete_provider_credential(
     console: TrustedForegroundConsole,
     pending: PendingElevatedConsent,
 ) -> dict[str, JsonValue]:
-    if pending.provider_binding is None:
-        raise ElevatedBootstrapError("provider_binding_required")
-    binding = pending.provider_binding
     action = "set" if pending.operation == "provider_credential_set" else "rotate"
     kind = (
         HumanCeremonyKind.PROVIDER_CREDENTIAL_SET
         if action == "set"
         else HumanCeremonyKind.PROVIDER_CREDENTIAL_ROTATE
     )
-    from yoetz.cli.privacy_setup import get_privacy_setup_snapshot
-    from yoetz.ports.control import ControlError
-
-    try:
-        snapshot = await get_privacy_setup_snapshot()
-    except (ControlError, OSError, ValueError) as exc:
-        raise ElevatedBootstrapError("repository_privacy_scope_unavailable") from exc
-    repository_commitment = binding.get("repository_privacy_commitment")
-    if repository_commitment is None:
-        repository_commitment = snapshot.bound_scope.get("workspace_ref_commitment")
-    if type(repository_commitment) is not str:
-        raise ElevatedBootstrapError("repository_privacy_scope_unavailable")
-    observed_commitment = snapshot.bound_scope.get("workspace_ref_commitment")
-    if observed_commitment != repository_commitment:
-        raise ElevatedBootstrapError("chat_user_target_mismatch")
-    target = ProviderCredentialTarget(
-        action=action,
-        provider_id=binding["provider_id"],
-        model_id=binding["model_id"],
-        endpoint_profile_id=binding["endpoint_profile_id"],
-        endpoint_profile_version=binding["endpoint_profile_version"],
-        purpose=binding["purpose"],
-        scope_digest=binding["scope_digest"],
-        purpose_digest=binding["purpose_digest"],
-        repository_privacy_commitment=repository_commitment,
+    target = await _provider_credential_target(
+        pending,
+        # Pending records prepared before repository binding was introduced remain usable only
+        # through the stronger trusted-console review. Agent-attested chat always requires the
+        # commitment to have been bound at prepare time.
+        allow_legacy_repository_binding=True,
     )
     try:
         result = await run_human_ceremony_on_terminal(console, kind, target)
@@ -386,7 +376,10 @@ async def _complete_provider_credential_supplied(
 ) -> dict[str, JsonValue]:
     if pending.provider_binding is None:
         raise ElevatedBootstrapError("provider_binding_required")
-    target = await _provider_credential_target(pending)
+    target = await _provider_credential_target(
+        pending,
+        allow_legacy_repository_binding=False,
+    )
     action = "set" if pending.operation == "provider_credential_set" else "rotate"
     kind = (
         HumanCeremonyKind.PROVIDER_CREDENTIAL_SET
@@ -418,7 +411,11 @@ async def _complete_provider_credential_supplied(
     }
 
 
-async def _provider_credential_target(pending: PendingElevatedConsent) -> ProviderCredentialTarget:
+async def _provider_credential_target(
+    pending: PendingElevatedConsent,
+    *,
+    allow_legacy_repository_binding: bool,
+) -> ProviderCredentialTarget:
     if pending.provider_binding is None:
         raise ElevatedBootstrapError("provider_binding_required")
     binding = pending.provider_binding
@@ -431,6 +428,8 @@ async def _provider_credential_target(pending: PendingElevatedConsent) -> Provid
     except (ControlError, OSError, ValueError) as exc:
         raise ElevatedBootstrapError("repository_privacy_scope_unavailable") from exc
     repository_commitment = binding.get("repository_privacy_commitment")
+    if repository_commitment is None and allow_legacy_repository_binding:
+        repository_commitment = snapshot.bound_scope.get("workspace_ref_commitment")
     if type(repository_commitment) is not str:
         raise ElevatedBootstrapError("repository_privacy_scope_unavailable")
     observed_commitment = snapshot.bound_scope.get("workspace_ref_commitment")
@@ -471,11 +470,12 @@ async def _complete_repository_privacy_grant(
     expected_authority_digest = pending.grant_binding["authority_digest"]
     from yoetz.cli.privacy_control import decide_policy
     from yoetz.cli.privacy_setup import (
-        _configured_bindings,  # pyright: ignore[reportPrivateUsage]
-        _propose,  # pyright: ignore[reportPrivateUsage]
-        _recipe_answers,  # pyright: ignore[reportPrivateUsage]
+        PrivacyRecipe,
         build_candidate_policy,
+        configured_bindings,
         get_privacy_setup_snapshot,
+        propose_privacy_candidate,
+        recipe_answers,
     )
     from yoetz.ports.control import ControlError
 
@@ -489,10 +489,14 @@ async def _complete_repository_privacy_grant(
     if snapshot.authority_digest != expected_authority_digest:
         raise ElevatedBootstrapError("chat_user_target_mismatch")
     try:
-        external, _local = _configured_bindings()
-        answers = _recipe_answers(recipe, snapshot.composed_policy, external)  # type: ignore[arg-type]
+        external, _local = configured_bindings()
+        answers = recipe_answers(
+            cast(PrivacyRecipe, recipe),
+            snapshot.composed_policy,
+            external,
+        )
         candidate = build_candidate_policy(snapshot.composed_policy, answers, now=datetime.now(UTC))
-        proposal_id = await _propose(candidate, snapshot.authority_digest)
+        proposal_id = await propose_privacy_candidate(candidate, snapshot.authority_digest)
     except (ControlError, OSError, TypeError, ValueError) as exc:
         raise ElevatedBootstrapError("repository_privacy_grant_failed") from exc
     if proposal_id is None:

@@ -80,6 +80,11 @@ bytes; otherwise it requires a new schema version. A new event family requires a
 registry, schema, reducer, unknown-gap handling, fixture, skill, and documentation update — it never
 ships as a silent addition.
 
+The agent-chat consent change publishes `catalog`, `pending-agent`, `prepare-result`,
+`review-result`, and `status` as request/result schema version `3.0.0`. Their frozen `2.0.0` files
+remain byte-identical and present in the registry and package; current runtime projections emit v3.
+The new `chat-user-attestation` family is version `1.0.0` because it had no earlier public shape.
+
 The declared-completion-scope change is an explicit pre-release 0.1 correction under that optional
 field rule. `plan_published` and `plan_revised` remain event schema `1.0.0`, and status remains
 request/result schema `1.0.0`. Existing plan events omit `no_obligations_reason` and retain their

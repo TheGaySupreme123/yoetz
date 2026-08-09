@@ -217,14 +217,16 @@ vault initialization and console `yoetz consent review` for provider credential 
 independently verified action-bound OS user presence before the foreground console opens. The
 current runtime has no production presence adapter and fails closed with
 `human_authority_unavailable` before pending claim on that path. Initialization uses a
-helper-generated, credential-store-verified secret. Issue #164 adds a narrow host-tool-approval
-path: after one retention warning, `yoetz consent authorize` may deliver a one-shot provider
-credential through stdin into the existing YZS1/vault ceremony for an exact prepared pending
-target; secret bytes still never enter structural tables, logs, errors, status, receipts, or
-agent-visible echoes. This is not generic headless unlock and does not unlock an already-locked
-vault. F-008 unattended readiness remains limited to an approved OS-keyring vault or the exact
-bundle-scoped platform-entry restart exception in ADR-008. Generic passphrase input through
-process-visible channels or a plaintext path remains prohibited.
+helper-generated, credential-store-verified secret. Issue #164 adds a narrow agent-attested path:
+after one retention warning and an explicit current-chat instruction, `yoetz consent authorize`
+may deliver a one-shot provider credential through stdin into the existing YZS1/vault ceremony
+for an exact prepared pending target. Yoetz binds and consumes the assertion but cannot
+independently authenticate its chat provenance; a compromised agent can forge it, which is an
+accepted risk of this opt-in path. Secret bytes still never enter structural tables, logs, errors,
+status, receipts, or agent-visible echoes. This is not generic headless unlock and does not unlock
+an already-locked vault. F-008 unattended readiness remains limited to an approved OS-keyring
+vault or the exact bundle-scoped platform-entry restart exception in ADR-008. Generic passphrase
+input through process-visible channels or a plaintext path remains prohibited.
 
 ## What stays plaintext
 

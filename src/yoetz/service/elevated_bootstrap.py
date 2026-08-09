@@ -104,7 +104,7 @@ class ConsentOperationSpec:
     requires_grant_binding: bool
     requires_target_digest_arg: bool
     implemented: bool
-    chat_user_authorize_allowed: bool
+    agent_chat_authorize_allowed: bool
 
 
 CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
@@ -122,7 +122,7 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         requires_grant_binding=False,
         requires_target_digest_arg=False,
         implemented=True,
-        chat_user_authorize_allowed=False,
+        agent_chat_authorize_allowed=False,
     ),
     ConsentOperationSpec(
         operation="provider_credential_set",
@@ -132,14 +132,15 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
             "DANGER — provider credential set. Stores an API credential in the local vault for the "
             "exact provider binding. Ordinary chat may retain or expose the value — prefer a "
             "confidential input surface or a limited/rotatable credential, or run "
-            "`yoetz consent review` locally. After one clear warning, host-approved "
-            "`yoetz consent authorize` may complete this exact action without a second terminal."
+            "`yoetz consent review` locally. After one clear warning and an explicit current-chat "
+            "instruction, the agent may attest and complete this exact action without a second "
+            "terminal. Yoetz cannot independently authenticate the chat provenance."
         ),
         requires_provider_binding=True,
         requires_grant_binding=False,
         requires_target_digest_arg=False,
         implemented=True,
-        chat_user_authorize_allowed=True,
+        agent_chat_authorize_allowed=True,
     ),
     ConsentOperationSpec(
         operation="provider_credential_rotate",
@@ -149,14 +150,15 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
             "DANGER — provider credential rotate. Replaces a stored API credential for the exact "
             "provider binding. Ordinary chat may retain or expose the value — prefer confidential "
             "input or a limited/rotatable credential, or run `yoetz consent review` locally. "
-            "After one clear warning, host-approved `yoetz consent authorize` may complete this "
-            "exact action without a second terminal."
+            "After one clear warning and an explicit current-chat instruction, the agent may "
+            "attest and complete this exact action without a second terminal. Yoetz cannot "
+            "independently authenticate the chat provenance."
         ),
         requires_provider_binding=True,
         requires_grant_binding=False,
         requires_target_digest_arg=False,
         implemented=True,
-        chat_user_authorize_allowed=True,
+        agent_chat_authorize_allowed=True,
     ),
     ConsentOperationSpec(
         operation="repository_privacy_grant",
@@ -164,15 +166,16 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         summary="Grant exact repository privacy recipe (e.g. assisted_review).",
         danger_text=(
             "DANGER — repository privacy grant. Widens or sets external-review permission for one "
-            "exact repository recipe. Host-approved `yoetz consent authorize` may complete this "
-            "exact prepared grant when the user asks the agent for help; bare chat assent never "
-            "authorizes. The safer local path remains `yoetz --privacy`."
+            "exact repository recipe. After one warning, an agent attesting an explicit "
+            "current-chat instruction may complete this exact prepared grant. Yoetz cannot "
+            "independently authenticate that provenance; the stronger local path remains "
+            "`yoetz --privacy`."
         ),
         requires_provider_binding=False,
         requires_grant_binding=True,
         requires_target_digest_arg=False,
         implemented=True,
-        chat_user_authorize_allowed=True,
+        agent_chat_authorize_allowed=True,
     ),
     ConsentOperationSpec(
         operation="idle_relock_disable",
@@ -186,7 +189,7 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         requires_grant_binding=False,
         requires_target_digest_arg=False,
         implemented=False,
-        chat_user_authorize_allowed=False,
+        agent_chat_authorize_allowed=False,
     ),
     ConsentOperationSpec(
         operation="privacy_policy_widen",
@@ -201,7 +204,7 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         requires_grant_binding=False,
         requires_target_digest_arg=True,
         implemented=False,
-        chat_user_authorize_allowed=False,
+        agent_chat_authorize_allowed=False,
     ),
     ConsentOperationSpec(
         operation="backup_execute",
@@ -216,7 +219,7 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         requires_target_digest_arg=True,
         # Catalogued for ADR-016; prepare refuses until owning CLIs consume a durable grant.
         implemented=False,
-        chat_user_authorize_allowed=False,
+        agent_chat_authorize_allowed=False,
     ),
     ConsentOperationSpec(
         operation="restore_execute",
@@ -230,7 +233,7 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         requires_grant_binding=False,
         requires_target_digest_arg=True,
         implemented=False,
-        chat_user_authorize_allowed=False,
+        agent_chat_authorize_allowed=False,
     ),
     ConsentOperationSpec(
         operation="migrate_execute",
@@ -244,7 +247,7 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         requires_grant_binding=False,
         requires_target_digest_arg=True,
         implemented=False,
-        chat_user_authorize_allowed=False,
+        agent_chat_authorize_allowed=False,
     ),
     ConsentOperationSpec(
         operation="skill_install",
@@ -258,7 +261,7 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         requires_grant_binding=False,
         requires_target_digest_arg=True,
         implemented=False,
-        chat_user_authorize_allowed=False,
+        agent_chat_authorize_allowed=False,
     ),
     ConsentOperationSpec(
         operation="harness_mcp_register",
@@ -272,7 +275,7 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         requires_grant_binding=False,
         requires_target_digest_arg=True,
         implemented=False,
-        chat_user_authorize_allowed=False,
+        agent_chat_authorize_allowed=False,
     ),
 )
 
@@ -802,12 +805,12 @@ def complete_review(
 def projection_for_status(
     pending: PendingElevatedConsent | None,
 ) -> dict[str, JsonValue] | None:
-    """Versioned agent-safe pending projection with no authorization or secret-ingress value."""
+    """Versioned agent-safe projection with exact bounded recovery/authorization guidance."""
 
     if pending is None:
         return None
     model = AgentSafePendingModel(
-        schema="yoetz.consent.pending-agent/2",
+        schema="yoetz.consent.pending-agent/3",
         operation=pending.operation,
         risk_class=pending.risk_class,
         pending_id=pending.pending_id,
@@ -815,8 +818,20 @@ def projection_for_status(
         danger_text=pending.danger_text,
         expires_at_unix=pending.expires_at_unix,
         target_digest=pending.target_digest,
+        repository_privacy_recipe=(
+            None
+            if pending.grant_binding is None
+            else cast(
+                Literal["assisted_review", "private", "metadata_only"],
+                pending.grant_binding["recipe"],
+            )
+        ),
         review_command=("yoetz", "consent", "review"),
-        authorize_command=("yoetz", "consent", "authorize"),
+        authorize_command=(
+            ("yoetz", "consent", "authorize")
+            if operation_spec(pending.operation).agent_chat_authorize_allowed
+            else None
+        ),
     )
     return cast(dict[str, JsonValue], model.model_dump(mode="json", by_alias=True))
 
@@ -840,13 +855,13 @@ def catalog_payload() -> dict[str, JsonValue]:
                 "requires_provider_binding": spec.requires_provider_binding,
                 "requires_grant_binding": spec.requires_grant_binding,
                 "requires_target_digest_arg": spec.requires_target_digest_arg,
-                "chat_user_authorize_allowed": spec.chat_user_authorize_allowed,
+                "agent_chat_authorize_allowed": spec.agent_chat_authorize_allowed,
                 "prepare_hint": hint,
             }
         )
     model = ConsentCatalogModel.model_validate(
         {
-            "schema": "yoetz.consent.catalog/2",
+            "schema": "yoetz.consent.catalog/3",
             "default_safe": [
                 "mcp.start",
                 "mcp.publish_work",
@@ -857,16 +872,20 @@ def catalog_payload() -> dict[str, JsonValue]:
                 "privacy.tighten",
             ],
             "rules": {
-                "never_over_chat_or_mcp": list(_FORBIDDEN),
+                "forbidden_secret_channels": [
+                    channel for channel in _FORBIDDEN if channel != "stdin"
+                ],
                 "no_standing_yolo": True,
                 "path_safety_not_waivable_by_consent": True,
-                "verified_user_presence_required": True,
+                "independent_user_presence_required_for_agent_chat": False,
                 "trusted_console_is_not_authority": True,
                 "one_pending_at_a_time": True,
                 "approval_arguments_forbidden": True,
                 "agent_selected_initialization_secret_forbidden": True,
-                "chat_user_host_tool_approval_permitted": True,
-                "unattested_chat_assent_forbidden": True,
+                "authorized_one_shot_stdin_permitted": True,
+                "agent_attested_current_chat_instruction_permitted": True,
+                "agent_attestation_is_independent_proof": False,
+                "compromised_agent_can_forge_attestation": True,
             },
             "operations": operations,
         }
@@ -877,7 +896,7 @@ def catalog_payload() -> dict[str, JsonValue]:
 def status_payload(*, _state: Path | None = None) -> dict[str, JsonValue]:
     model = ConsentStatusModel.model_validate(
         {
-            "schema": "yoetz.elevated-bootstrap.status/2",
+            "schema": "yoetz.elevated-bootstrap.status/3",
             "pending": projection_for_status(load_pending(_state=_state)),
             "consent_catalog": catalog_payload(),
         }

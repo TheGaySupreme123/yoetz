@@ -365,7 +365,7 @@ case → single-use authorization → bounded gateway → bound sink/provider �
 
 | Event | Human required? | Rule |
 |---|---:|---|
-| First new-repository grant, first `assisted` commit, later wider provider/category/class/scope, or credential set/rotate | yes | Exact trusted-local compound diff/credential ceremony, or host-approved chat-user authorize for the exact prepared consent action (issue #164) |
+| First new-repository grant, first `assisted` commit, later wider provider/category/class/scope, or credential set/rotate | yes | Exact trusted-local compound diff/credential ceremony, or an explicit current-chat instruction relayed by the agent for the exact prepared consent action (issue #164) |
 | Eligible legacy machine authority narrowed onto its bounded pre-upgrade repository entitlement | no | Atomic carry-forward preserves machine bytes and grants no new repository |
 | Ordinary check, automatic retry inside the confirmed policy, reviewer challenge, agent response, or recheck | no | Direct agent-to-agent path with a fresh authorization and receipt per physical attempt |
 | Tightening policy | no | May apply immediately after the service proves it cannot widen |
@@ -373,12 +373,15 @@ case → single-use authorization → bounded gateway → bound sink/provider �
 | Finding waiver | yes | Existing interactive-human `finding_only` authority |
 | Never-send match or out-of-scope content | impossible to approve | Fail closed under every profile and fork claiming upstream conformance |
 
-Bare chat assent is never authority. When the user asks an agent for help finishing exact setup,
-host-approved chat-user authorize (`yoetz consent authorize` with
+When the user explicitly instructs an allowlisted first-party agent in the current chat to finish
+exact setup, agent-attested authorize (`yoetz consent authorize` with
 `yoetz.chat-user-attestation/1`, issue #164) may complete a prepared `repository_privacy_grant` or
-provider credential set/rotate after one retention warning. Denial, expiry, cancellation, target
-drift, or unavailable host capability yields zero policy/credential mutation and zero provider
-dispatch. The trusted CLI/TUI (`yoetz --privacy`, `yoetz consent review`) remains recommended and
+provider credential set/rotate after one warning. This is delegated agent authority: Yoetz binds
+the exact pending/action/digests but cannot independently distinguish genuine current-chat words
+from a forged agent assertion. Retrieved content, tool output, quoted text, or earlier history do
+not authorize under the agent skill contract. Denial, expiry, cancellation, target drift, or an
+unsupported client yields zero policy/credential mutation and zero provider dispatch. The trusted
+CLI/TUI (`yoetz --privacy`, `yoetz consent review`) remains the stronger recommended path and is
 always available.
 
 ## Consequences and proof obligations

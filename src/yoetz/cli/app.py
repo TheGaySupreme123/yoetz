@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from enum import Enum
 from functools import cache
 from pathlib import Path
-from typing import Annotated, Any, BinaryIO, Final, Literal, cast
+from typing import Annotated, Any, BinaryIO, Final, Literal, Protocol, cast
 
 import anyio
 import typer
@@ -76,6 +76,11 @@ _DEADLINE = Annotated[
     int | None,
     typer.Option("--deadline-ms", min=1, max=86_400_000),
 ]
+
+
+class _MutableBinaryReader(Protocol):
+    def readinto(self, buffer: memoryview) -> int | None: ...
+
 
 app = typer.Typer(
     name="yoetz",
@@ -1866,12 +1871,15 @@ def elevated_prepare(
         async def _grant_binding() -> int:
             nonlocal grant
             privacy = importlib.import_module("yoetz.cli.privacy_setup")
-            snapshot = await cast(
-                Callable[..., Awaitable[object]], privacy.get_privacy_setup_snapshot
-            )()
-            bound = cast(Mapping[str, object], getattr(snapshot, "bound_scope"))
-            commitment = bound.get("workspace_ref_commitment")
-            authority_digest = getattr(snapshot, "authority_digest", None)
+            try:
+                snapshot = await cast(
+                    Callable[..., Awaitable[object]], privacy.get_privacy_setup_snapshot
+                )()
+                bound = cast(Mapping[str, object], getattr(snapshot, "bound_scope"))
+                commitment = bound.get("workspace_ref_commitment")
+                authority_digest = getattr(snapshot, "authority_digest", None)
+            except Exception as exc:
+                raise elevated_error("repository_privacy_scope_unavailable") from exc
             if type(commitment) is not str or type(authority_digest) is not str:
                 raise elevated_error("repository_privacy_scope_unavailable")
             grant = {
@@ -1924,6 +1932,38 @@ def elevated_review(
     _finish(run_async(_run))
 
 
+def _read_bounded_stdin_secret(maximum: int) -> bytearray:
+    """Read one pipe-delimited secret directly into mutable storage."""
+
+    if type(maximum) is not int or maximum <= 0:
+        raise ValueError("provider_credential_invalid")
+    storage = bytearray(maximum + 1)
+    used = 0
+    try:
+        stream = cast(_MutableBinaryReader, sys.stdin.buffer)
+        while used < len(storage):
+            view = memoryview(storage)[used:]
+            try:
+                count = stream.readinto(view)
+            finally:
+                view.release()
+            if count is None or count <= 0:
+                break
+            used += count
+        if used > maximum:
+            raise ValueError("provider_credential_invalid")
+        if used > 0 and storage[used - 1] == 10:
+            used -= 1
+        if used == 0 or any(storage[index] in {0, 10, 13} for index in range(used)):
+            raise ValueError("provider_credential_invalid")
+        del storage[used:]
+        return storage
+    except BaseException:
+        for index in range(len(storage)):
+            storage[index] = 0
+        raise
+
+
 @elevated_app.command("authorize")
 def elevated_authorize(
     pending_id: Annotated[str, typer.Option("--pending-id")],
@@ -1948,7 +1988,7 @@ def elevated_authorize(
     ] = False,
     json_output: _JSON = True,
 ) -> None:
-    """Host-tool-approval chat-user authorize for one exact prepared consent (#164)."""
+    """Relay one explicit current-chat instruction for an exact prepared consent (#164)."""
 
     module = importlib.import_module("yoetz.cli.elevated")
     errors = importlib.import_module("yoetz.service.elevated_bootstrap")
@@ -1963,22 +2003,17 @@ def elevated_authorize(
         secret: bytearray | None = None
         try:
             if provider_credential_stdin:
-                raw = sys.stdin.buffer.read(8193)
-                if len(raw) > 8192:
+                try:
+                    secret = _read_bounded_stdin_secret(8192)
+                except OSError, ValueError:
                     _stderr("elevated_bootstrap: provider_credential_invalid")
                     return 2
-                if raw.endswith(b"\n"):
-                    raw = raw[:-1]
-                if not raw or b"\x00" in raw or b"\n" in raw or b"\r" in raw:
-                    _stderr("elevated_bootstrap: provider_credential_invalid")
-                    return 2
-                secret = bytearray(raw)
             payload = await authorize(
                 {
                     "schema": "yoetz.chat-user-attestation/1",
-                    "channel": "host_tool_approval",
+                    "channel": "agent_attested_chat_instruction",
                     "client_kind": client_kind,
-                    "host_tool_approval": "required_and_active",
+                    "instruction_source": "explicit_current_chat_user",
                     "pending_id": pending_id,
                     "operation": operation,
                     "danger_digest": danger_digest,
@@ -1992,7 +2027,7 @@ def elevated_authorize(
             _stderr(f"elevated_bootstrap: {getattr(exc, 'reason', 'failed')}")
             return 2
         except Exception:
-            _stderr("elevated_bootstrap: chat_user_attestation_invalid")
+            _stderr("elevated_bootstrap: authorize_failed")
             return 2
         finally:
             if secret is not None:

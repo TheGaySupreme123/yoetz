@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import importlib
+import io
 import json
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -55,6 +58,12 @@ def _patch_verified_presence() -> Any:
     return patch("yoetz.cli.elevated._require_action_bound_user_presence", return_value=None)
 
 
+def _read_stdin_secret_for_test(maximum: int) -> bytearray:
+    module = importlib.import_module("yoetz.cli.app")
+    reader = cast(Callable[[int], bytearray], getattr(module, "_read_bounded_stdin_secret"))
+    return reader(maximum)
+
+
 _CHAT_PROVIDER_BINDING = {
     "endpoint_profile_id": "ep",
     "endpoint_profile_version": "1",
@@ -72,9 +81,9 @@ def _chat_attestation(
 ) -> dict[str, object]:
     return {
         "schema": "yoetz.chat-user-attestation/1",
-        "channel": "host_tool_approval",
+        "channel": "agent_attested_chat_instruction",
         "client_kind": "codex",
-        "host_tool_approval": "required_and_active",
+        "instruction_source": "explicit_current_chat_user",
         "pending_id": pending.pending_id,
         "operation": pending.operation,
         "danger_digest": pending.danger_digest,
@@ -87,9 +96,9 @@ def _chat_attestation(
 def test_chat_user_attestation_is_closed_and_schema_bound() -> None:
     payload = {
         "schema": "yoetz.chat-user-attestation/1",
-        "channel": "host_tool_approval",
+        "channel": "agent_attested_chat_instruction",
         "client_kind": "codex",
-        "host_tool_approval": "required_and_active",
+        "instruction_source": "explicit_current_chat_user",
         "pending_id": "a" * 64,
         "operation": "provider_credential_set",
         "danger_digest": "sha256:" + ("b" * 64),
@@ -101,6 +110,48 @@ def test_chat_user_attestation_is_closed_and_schema_bound() -> None:
     validate_schema_instance("chat-user-attestation", "1.0.0", payload)
     with pytest.raises(ValidationError):
         ChatUserAttestationModel.model_validate({**payload, "extra": "forbidden"})
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (b"provider-secret", b"provider-secret"),
+        (b"provider-secret\n", b"provider-secret"),
+    ],
+)
+def test_bounded_stdin_secret_reads_directly_into_mutable_storage(
+    raw: bytes, expected: bytes
+) -> None:
+    with patch("yoetz.cli.app.sys.stdin", SimpleNamespace(buffer=io.BytesIO(raw))):
+        secret = _read_stdin_secret_for_test(32)
+    assert isinstance(secret, bytearray)
+    assert bytes(secret) == expected
+
+
+@pytest.mark.parametrize("raw", [b"", b"a\nb", b"a\r", b"a\x00b", b"x" * 33])
+def test_bounded_stdin_secret_rejects_invalid_or_oversized_input(raw: bytes) -> None:
+    with (
+        patch("yoetz.cli.app.sys.stdin", SimpleNamespace(buffer=io.BytesIO(raw))),
+        pytest.raises(ValueError, match="provider_credential_invalid"),
+    ):
+        _read_stdin_secret_for_test(32)
+
+
+def test_prepare_repository_grant_maps_privacy_snapshot_failure() -> None:
+    async def fail_snapshot() -> object:
+        raise RuntimeError("private internal detail")
+
+    with patch(
+        "yoetz.cli.privacy_setup.get_privacy_setup_snapshot",
+        side_effect=fail_snapshot,
+    ):
+        result = CliRunner().invoke(
+            app,
+            ["consent", "prepare", "repository_privacy_grant", "--recipe", "private"],
+        )
+    assert result.exit_code == 2
+    assert "elevated_bootstrap: repository_privacy_scope_unavailable" in result.stderr
+    assert "private internal detail" not in result.stderr
 
 
 def test_chat_user_authorize_consumes_exact_provider_request_and_wipes_input(
@@ -140,11 +191,104 @@ def test_chat_user_authorize_consumes_exact_provider_request_and_wipes_input(
 
     result = anyio.run(run)
     assert observed == [b"chat-secret"]
-    assert result["authority_channel"] == "chat_user_host_tool_approval"
+    assert result["authority_channel"] == "agent_attested_chat_instruction"
     assert result["outcome"] == "completed"
-    validate_schema_instance("review-result", "2.0.0", result)
+    validate_schema_instance("review-result", "3.0.0", result)
     assert load_pending(_state=tmp_path) is None
     assert "chat-secret" not in json.dumps(result)
+
+
+def test_agent_chat_authorize_uses_real_supplied_credential_path(tmp_path: Path) -> None:
+    observed: list[tuple[bytes, bytes, object]] = []
+
+    async def privacy_snapshot() -> SimpleNamespace:
+        return SimpleNamespace(
+            bound_scope={
+                "workspace_ref_commitment": _CHAT_PROVIDER_BINDING["repository_privacy_commitment"]
+            }
+        )
+
+    async def ceremony(kind: object, target: object, **kwargs: object) -> ProviderCredentialResult:
+        credential = cast(bytearray, kwargs["provider_credential"])
+        reauthentication = cast(bytearray, kwargs["provider_reauthentication"])
+        observed.append((bytes(credential), bytes(reauthentication), target))
+        elevated.overwrite_secret_buffer(credential)
+        elevated.overwrite_secret_buffer(reauthentication)
+        return ProviderCredentialResult("set", 7, "stored")
+
+    async def run() -> dict[str, Any]:
+        with _patch_state(tmp_path):
+            elevated.prepare_elevated(
+                "provider_credential_set", provider_binding=_CHAT_PROVIDER_BINDING
+            )
+            pending = load_pending(_state=tmp_path)
+            assert pending is not None
+            secret = bytearray(b"chat-secret")
+            with (
+                patch(
+                    "yoetz.cli.privacy_setup.get_privacy_setup_snapshot",
+                    side_effect=privacy_snapshot,
+                ),
+                patch(
+                    "yoetz.cli.elevated._load_auto_unlock_passphrase",
+                    return_value=bytearray(b"local-reauth"),
+                ),
+                patch("yoetz.cli.elevated.run_human_ceremony", side_effect=ceremony),
+            ):
+                result = cast(
+                    dict[str, Any],
+                    await elevated.authorize_elevated(
+                        _chat_attestation(pending), provider_credential=secret
+                    ),
+                )
+            assert bytes(secret) == b"\x00" * len(secret)
+            return result
+
+    result = anyio.run(run)
+    assert result["result"] == {"action": "set", "generation": 7, "outcome": "stored"}
+    assert observed[0][0:2] == (b"chat-secret", b"local-reauth")
+    assert (
+        getattr(observed[0][2], "repository_privacy_commitment")
+        == (_CHAT_PROVIDER_BINDING["repository_privacy_commitment"])
+    )
+
+
+def test_agent_chat_authorize_fails_closed_without_local_reauthentication(
+    tmp_path: Path,
+) -> None:
+    async def privacy_snapshot() -> SimpleNamespace:
+        return SimpleNamespace(
+            bound_scope={
+                "workspace_ref_commitment": _CHAT_PROVIDER_BINDING["repository_privacy_commitment"]
+            }
+        )
+
+    async def run() -> None:
+        with _patch_state(tmp_path):
+            elevated.prepare_elevated(
+                "provider_credential_set", provider_binding=_CHAT_PROVIDER_BINDING
+            )
+            pending = load_pending(_state=tmp_path)
+            assert pending is not None
+            secret = bytearray(b"chat-secret")
+            with (
+                patch(
+                    "yoetz.cli.privacy_setup.get_privacy_setup_snapshot",
+                    side_effect=privacy_snapshot,
+                ),
+                patch("yoetz.cli.elevated._load_auto_unlock_passphrase", return_value=None),
+                patch("yoetz.cli.elevated.run_human_ceremony") as ceremony,
+            ):
+                with pytest.raises(ElevatedBootstrapError) as exc:
+                    await elevated.authorize_elevated(
+                        _chat_attestation(pending), provider_credential=secret
+                    )
+                assert exc.value.reason == "chat_user_reauthentication_unavailable"
+                ceremony.assert_not_awaited()
+            assert bytes(secret) == b"\x00" * len(secret)
+            assert load_pending(_state=tmp_path) is None
+
+    anyio.run(run)
 
 
 def test_chat_user_authorize_denial_is_single_shot_for_repository_grant(tmp_path: Path) -> None:
@@ -170,7 +314,7 @@ def test_chat_user_authorize_denial_is_single_shot_for_repository_grant(tmp_path
 
     result = anyio.run(run)
     assert result["outcome"] == "denied"
-    assert result["authority_channel"] == "chat_user_host_tool_approval"
+    assert result["authority_channel"] == "agent_attested_chat_instruction"
     assert load_pending(_state=tmp_path) is None
 
 
@@ -182,10 +326,10 @@ def test_chat_user_authorize_requires_advertised_capability_before_claim(tmp_pat
             )
             pending = load_pending(_state=tmp_path)
             assert pending is not None
-            with patch("yoetz.cli.elevated.chat_user_authority_available", return_value=False):
+            with patch("yoetz.cli.elevated.agent_chat_attestation_supported", return_value=False):
                 with pytest.raises(ElevatedBootstrapError) as exc:
                     await elevated.authorize_elevated(_chat_attestation(pending))
-                assert exc.value.reason == "chat_user_authority_unavailable"
+                assert exc.value.reason == "agent_chat_attestation_unsupported"
             assert load_pending(_state=tmp_path) == pending
 
     anyio.run(run)
@@ -208,7 +352,7 @@ def test_chat_user_authorize_requires_one_warning_before_secret_ingress(tmp_path
                 assert exc.value.reason == "chat_user_warning_required"
                 complete.assert_not_awaited()
             assert bytes(secret) == b"\x00" * len(secret)
-            assert load_pending(_state=tmp_path) is None
+            assert load_pending(_state=tmp_path) == pending
 
     anyio.run(run)
 
@@ -222,14 +366,114 @@ def test_chat_user_authorize_rejects_invalid_attestation_as_bounded_failure() ->
     anyio.run(run)
 
 
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("pending_id", "f" * 64),
+        ("operation", "provider_credential_rotate"),
+        ("danger_digest", "sha256:" + ("f" * 64)),
+        ("target_digest", "sha256:" + ("f" * 64)),
+    ],
+)
+def test_agent_chat_attestation_mismatch_does_not_consume_pending(
+    tmp_path: Path,
+    field: str,
+    replacement: str,
+) -> None:
+    async def run() -> None:
+        with _patch_state(tmp_path):
+            elevated.prepare_elevated(
+                "provider_credential_set", provider_binding=_CHAT_PROVIDER_BINDING
+            )
+            pending = load_pending(_state=tmp_path)
+            assert pending is not None
+            attestation = _chat_attestation(pending)
+            attestation[field] = replacement
+            secret = bytearray(b"chat-secret")
+            with pytest.raises(ElevatedBootstrapError) as exc:
+                await elevated.authorize_elevated(attestation, provider_credential=secret)
+            assert exc.value.reason == "chat_user_target_mismatch"
+            assert bytes(secret) == b"\x00" * len(secret)
+            assert load_pending(_state=tmp_path) == pending
+
+    anyio.run(run)
+
+
+def test_agent_chat_authorize_rejects_vault_and_missing_or_forbidden_credential(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        vault_state = tmp_path / "vault"
+        with _patch_state(vault_state):
+            elevated.prepare_elevated("vault_initialize")
+            vault_pending = load_pending(_state=vault_state)
+            assert vault_pending is not None
+            with pytest.raises(ElevatedBootstrapError) as vault_error:
+                await elevated.authorize_elevated(_chat_attestation(vault_pending))
+            assert vault_error.value.reason == "chat_user_operation_forbidden"
+            assert load_pending(_state=vault_state) == vault_pending
+
+        credential_state = tmp_path / "credential"
+        with _patch_state(credential_state):
+            elevated.prepare_elevated(
+                "provider_credential_set", provider_binding=_CHAT_PROVIDER_BINDING
+            )
+            credential_pending = load_pending(_state=credential_state)
+            assert credential_pending is not None
+            with pytest.raises(ElevatedBootstrapError) as missing:
+                await elevated.authorize_elevated(_chat_attestation(credential_pending))
+            assert missing.value.reason == "provider_credential_required"
+            assert load_pending(_state=credential_state) == credential_pending
+
+        grant_state = tmp_path / "grant"
+        grant = {
+            "recipe": "assisted_review",
+            "repository_privacy_commitment": "hmac-sha256:" + ("d" * 64),
+            "authority_digest": "sha256:" + ("e" * 64),
+        }
+        with _patch_state(grant_state):
+            elevated.prepare_elevated("repository_privacy_grant", grant_binding=grant)
+            grant_pending = load_pending(_state=grant_state)
+            assert grant_pending is not None
+            secret = bytearray(b"forbidden-secret")
+            with pytest.raises(ElevatedBootstrapError) as forbidden:
+                await elevated.authorize_elevated(
+                    _chat_attestation(grant_pending), provider_credential=secret
+                )
+            assert forbidden.value.reason == "provider_credential_forbidden"
+            assert bytes(secret) == b"\x00" * len(secret)
+            assert load_pending(_state=grant_state) == grant_pending
+
+    anyio.run(run)
+
+
+def test_repository_grant_requires_warning_without_consuming_pending(tmp_path: Path) -> None:
+    async def run() -> None:
+        grant = {
+            "recipe": "assisted_review",
+            "repository_privacy_commitment": "hmac-sha256:" + ("d" * 64),
+            "authority_digest": "sha256:" + ("e" * 64),
+        }
+        with _patch_state(tmp_path):
+            elevated.prepare_elevated("repository_privacy_grant", grant_binding=grant)
+            pending = load_pending(_state=tmp_path)
+            assert pending is not None
+            with pytest.raises(ElevatedBootstrapError) as exc:
+                await elevated.authorize_elevated(_chat_attestation(pending, warning=False))
+            assert exc.value.reason == "chat_user_warning_required"
+            assert load_pending(_state=tmp_path) == pending
+
+    anyio.run(run)
+
+
 def test_catalog_and_prepare_are_agent_safe(tmp_path: Path) -> None:
     with _patch_state(tmp_path):
         catalog = cast(dict[str, Any], elevated.catalog_elevated())
         prepared = cast(dict[str, Any], elevated.prepare_elevated("vault_initialize"))
-    assert catalog["schema"] == "yoetz.consent.catalog/2"
-    assert prepared["schema"] == "yoetz.elevated-bootstrap.prepare-result/2"
+    assert catalog["schema"] == "yoetz.consent.catalog/3"
+    assert prepared["schema"] == "yoetz.elevated-bootstrap.prepare-result/3"
     assert prepared["pending"]["review_command"] == ["yoetz", "consent", "review"]
-    validate_schema_instance("prepare-result", "2.0.0", prepared)
+    validate_schema_instance("prepare-result", "3.0.0", prepared)
     rendered = json.dumps({"catalog": catalog, "prepared": prepared})
     for forbidden in (
         "approve_command",
@@ -286,18 +530,19 @@ def test_review_result_binds_operation_outcome_and_result_in_model_and_schema(
     result: dict[str, object],
 ) -> None:
     payload = {
-        "schema": "yoetz.elevated-bootstrap.result/2",
+        "schema": "yoetz.elevated-bootstrap.result/3",
         "pending_id": "a" * 64,
         "operation": operation,
         "risk_class": risk_class,
         "outcome": outcome,
         "danger_digest": f"sha256:{'b' * 64}",
+        "authority_channel": "trusted_console_presence",
         "result": result,
     }
     with pytest.raises(ValidationError):
         ConsentReviewResultModel.model_validate(payload)
     with pytest.raises(SchemaInstanceInvalid):
-        validate_schema_instance("review-result", "2.0.0", cast(Any, payload))
+        validate_schema_instance("review-result", "3.0.0", cast(Any, payload))
 
 
 def test_review_approval_consumes_pending_and_returns_no_secret(tmp_path: Path) -> None:
@@ -317,9 +562,9 @@ def test_review_approval_consumes_pending_and_returns_no_secret(tmp_path: Path) 
                 return cast(dict[str, Any], await elevated.review_elevated())
 
     result = anyio.run(run)
-    assert result["schema"] == "yoetz.elevated-bootstrap.result/2"
+    assert result["schema"] == "yoetz.elevated-bootstrap.result/3"
     assert result["outcome"] == "completed"
-    validate_schema_instance("review-result", "2.0.0", result)
+    validate_schema_instance("review-result", "3.0.0", result)
     assert load_pending(_state=tmp_path) is None
     assert "human-entered-secret" not in json.dumps(result)
 

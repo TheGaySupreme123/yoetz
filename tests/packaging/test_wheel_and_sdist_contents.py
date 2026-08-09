@@ -48,7 +48,10 @@ _NATIVE_BINARY_SUFFIXES: Final = (".so", ".pyd", ".dylib", ".dll")
 def _is_attestation_schema_member(name: str) -> bool:
     """The reviewed attestation schema contains ``test`` in ``attestation``."""
 
-    return name.endswith("/chat-user-attestation-1.0.0.schema.json")
+    return name in {
+        "yoetz/resources/schemas/consent/chat-user-attestation-1.0.0.schema.json",
+        "src/yoetz/resources/schemas/consent/chat-user-attestation-1.0.0.schema.json",
+    }
 
 
 def _load_pyproject() -> dict[str, object]:
@@ -494,3 +497,15 @@ def test_forbidden_name_marker_catches_test_and_cache_paths() -> None:
     ):
         lowered = marker_path.lower()
         assert any(marker in lowered for marker in _FORBIDDEN_NAME_MARKERS)
+
+
+def test_attestation_schema_exemption_is_exactly_archive_scoped() -> None:
+    assert _is_attestation_schema_member(
+        "yoetz/resources/schemas/consent/chat-user-attestation-1.0.0.schema.json"
+    )
+    assert _is_attestation_schema_member(
+        "src/yoetz/resources/schemas/consent/chat-user-attestation-1.0.0.schema.json"
+    )
+    assert not _is_attestation_schema_member(
+        "tests/fixtures/chat-user-attestation-1.0.0.schema.json"
+    )
