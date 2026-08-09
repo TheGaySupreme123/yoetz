@@ -212,15 +212,21 @@ Without measured user presence either mode is ready only for locally permitted w
 activation remains fenced. A pristine headless installation cannot auto-create keyring mode or a
 passphrase auto-unlock entry unless its exact release cell carries the applicable verified setup
 authority; otherwise it remains setup-required.
-**Scoped exception (ADR-015/016, amended 2026-07-31):** elevated vault initialization and provider
-credential set/rotate require independently verified action-bound OS user presence before
-`yoetz consent review` may open a foreground console. The current runtime has no production
-presence adapter and fails closed with `human_authority_unavailable` before pending claim.
-Initialization uses a helper-generated, credential-store-verified secret; provider credentials
-are entered within the confidential console ceremony. This is not generic headless unlock and
-does not unlock an already-locked vault. F-008 unattended readiness remains limited to an approved
-OS-keyring vault or the exact bundle-scoped platform-entry restart exception in ADR-008. Generic
-passphrase input through process-visible channels or a plaintext path remains prohibited.
+**Scoped exception (ADR-015/016, amended 2026-07-31; chat-user authorize 2026-08-09):** elevated
+vault initialization and console `yoetz consent review` for provider credential set/rotate require
+independently verified action-bound OS user presence before the foreground console opens. The
+current runtime has no production presence adapter and fails closed with
+`human_authority_unavailable` before pending claim on that path. Initialization uses a
+helper-generated, credential-store-verified secret. Issue #164 adds a narrow agent-attested path:
+after one retention warning and an explicit current-chat instruction, `yoetz consent authorize`
+may deliver a one-shot provider credential through stdin into the existing YZS1/vault ceremony
+for an exact prepared pending target. Yoetz binds and consumes the assertion but cannot
+independently authenticate its chat provenance; a compromised agent can forge it, which is an
+accepted risk of this opt-in path. Secret bytes still never enter structural tables, logs, errors,
+status, receipts, or agent-visible echoes. This is not generic headless unlock and does not unlock
+an already-locked vault. F-008 unattended readiness remains limited to an approved OS-keyring
+vault or the exact bundle-scoped platform-entry restart exception in ADR-008. Generic passphrase
+input through process-visible channels or a plaintext path remains prohibited.
 
 ## What stays plaintext
 

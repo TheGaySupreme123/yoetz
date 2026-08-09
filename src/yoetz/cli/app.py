@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from enum import Enum
 from functools import cache
 from pathlib import Path
-from typing import Annotated, Any, BinaryIO, Final, Literal, cast
+from typing import Annotated, Any, BinaryIO, Final, Literal, Protocol, cast
 
 import anyio
 import typer
@@ -81,6 +81,11 @@ _DEADLINE = Annotated[
     int | None,
     typer.Option("--deadline-ms", min=1, max=86_400_000),
 ]
+
+
+class _MutableBinaryReader(Protocol):
+    def readinto(self, buffer: memoryview) -> int | None: ...
+
 
 app = typer.Typer(
     name="yoetz",
@@ -1814,6 +1819,13 @@ def elevated_prepare(
     purpose: Annotated[str | None, typer.Option("--purpose")] = None,
     scope_digest: Annotated[str | None, typer.Option("--scope-digest")] = None,
     purpose_digest: Annotated[str | None, typer.Option("--purpose-digest")] = None,
+    recipe: Annotated[
+        str | None,
+        typer.Option(
+            "--recipe",
+            help="Exact repository privacy recipe for repository_privacy_grant.",
+        ),
+    ] = None,
     target_digest: Annotated[
         str | None,
         typer.Option("--target-digest", help="Exact plan/preview digest when required."),
@@ -1827,6 +1839,7 @@ def elevated_prepare(
     elevated_error = cast(type[Exception], getattr(errors, "ElevatedBootstrapError"))
     prepare = cast(Callable[..., object], getattr(module, "prepare_elevated"))
     binding: dict[str, str] | None = None
+    grant: dict[str, str] | None = None
     if operation in {"provider_credential_set", "provider_credential_rotate"}:
         required = {
             "provider_id": provider_id,
@@ -1840,8 +1853,68 @@ def elevated_prepare(
         if any(value is None or value == "" for value in required.values()):
             _finish(_usage_failure())
         binding = {key: cast(str, value) for key, value in required.items()}
+
+        async def _provider_scope_binding() -> int:
+            privacy = importlib.import_module("yoetz.cli.privacy_setup")
+            try:
+                snapshot = await cast(
+                    Callable[..., Awaitable[object]], privacy.get_privacy_setup_snapshot
+                )()
+                bound = cast(Mapping[str, object], getattr(snapshot, "bound_scope"))
+                commitment = bound.get("workspace_ref_commitment")
+            except Exception as exc:
+                raise elevated_error("repository_privacy_scope_unavailable") from exc
+            if type(commitment) is not str:
+                raise elevated_error("repository_privacy_scope_unavailable")
+            binding["repository_privacy_commitment"] = commitment
+            return 0
+
+        try:
+            code = run_async(_provider_scope_binding)
+        except elevated_error as exc:
+            _stderr(f"elevated_bootstrap: {getattr(exc, 'reason', 'failed')}")
+            raise SystemExit(2) from None
+        if code != 0:
+            raise SystemExit(2)
+    if operation == "repository_privacy_grant":
+        if recipe is None or recipe == "":
+            _finish(_usage_failure())
+
+        async def _grant_binding() -> int:
+            nonlocal grant
+            privacy = importlib.import_module("yoetz.cli.privacy_setup")
+            try:
+                snapshot = await cast(
+                    Callable[..., Awaitable[object]], privacy.get_privacy_setup_snapshot
+                )()
+                bound = cast(Mapping[str, object], getattr(snapshot, "bound_scope"))
+                commitment = bound.get("workspace_ref_commitment")
+                authority_digest = getattr(snapshot, "authority_digest", None)
+            except Exception as exc:
+                raise elevated_error("repository_privacy_scope_unavailable") from exc
+            if type(commitment) is not str or type(authority_digest) is not str:
+                raise elevated_error("repository_privacy_scope_unavailable")
+            grant = {
+                "recipe": cast(str, recipe),
+                "repository_privacy_commitment": commitment,
+                "authority_digest": authority_digest,
+            }
+            return 0
+
+        try:
+            code = run_async(_grant_binding)
+        except elevated_error as exc:
+            _stderr(f"elevated_bootstrap: {getattr(exc, 'reason', 'failed')}")
+            raise SystemExit(2) from None
+        if code != 0 or grant is None:
+            raise SystemExit(2)
     try:
-        payload = prepare(operation, provider_binding=binding, target_digest=target_digest)
+        payload = prepare(
+            operation,
+            provider_binding=binding,
+            grant_binding=grant,
+            target_digest=target_digest,
+        )
     except elevated_error as exc:
         _stderr(f"elevated_bootstrap: {getattr(exc, 'reason', 'failed')}")
         raise SystemExit(2) from None
@@ -1865,6 +1938,113 @@ def elevated_review(
         except elevated_error as exc:
             _stderr(f"elevated_bootstrap: {getattr(exc, 'reason', 'failed')}")
             return 2
+        _human_or_json(payload, json_output=json_output)
+        return 0
+
+    _finish(run_async(_run))
+
+
+def _read_bounded_stdin_secret(maximum: int) -> bytearray:
+    """Read one pipe-delimited secret directly into mutable storage."""
+
+    if type(maximum) is not int or maximum <= 0:
+        raise ValueError("provider_credential_invalid")
+    storage = bytearray(maximum + 1)
+    used = 0
+    try:
+        stream = cast(_MutableBinaryReader, sys.stdin.buffer)
+        while used < len(storage):
+            view = memoryview(storage)[used:]
+            try:
+                count = stream.readinto(view)
+            finally:
+                view.release()
+            if count is None or count <= 0:
+                break
+            used += count
+        if used > maximum:
+            raise ValueError("provider_credential_invalid")
+        if used > 0 and storage[used - 1] == 10:
+            used -= 1
+        if used == 0 or any(storage[index] in {0, 10, 13} for index in range(used)):
+            raise ValueError("provider_credential_invalid")
+        del storage[used:]
+        return storage
+    except BaseException:
+        for index in range(len(storage)):
+            storage[index] = 0
+        raise
+
+
+@elevated_app.command("authorize")
+def elevated_authorize(
+    pending_id: Annotated[str, typer.Option("--pending-id")],
+    operation: Annotated[str, typer.Option("--operation")],
+    danger_digest: Annotated[str, typer.Option("--danger-digest")],
+    target_digest: Annotated[str, typer.Option("--target-digest")],
+    client_kind: Annotated[str, typer.Option("--client-kind")],
+    decision: Annotated[str, typer.Option("--decision", help="approve or deny")],
+    warning_acknowledged: Annotated[
+        bool,
+        typer.Option(
+            "--warning-acknowledged/--warning-not-acknowledged",
+            help="Required true for credential-bearing approve.",
+        ),
+    ] = False,
+    provider_credential_stdin: Annotated[
+        bool,
+        typer.Option(
+            "--provider-credential-stdin",
+            help="Read one provider credential from stdin (never echoed).",
+        ),
+    ] = False,
+    json_output: _JSON = True,
+) -> None:
+    """Relay one explicit current-chat instruction for an exact prepared consent (#164)."""
+
+    module = importlib.import_module("yoetz.cli.elevated")
+    errors = importlib.import_module("yoetz.service.elevated_bootstrap")
+    elevated_error = cast(type[Exception], getattr(errors, "ElevatedBootstrapError"))
+    authorize = cast(Callable[..., Awaitable[object]], getattr(module, "authorize_elevated"))
+    if decision not in {"approve", "deny"}:
+        _finish(_usage_failure())
+    if provider_credential_stdin and decision != "approve":
+        _finish(_usage_failure())
+
+    async def _run() -> int:
+        secret: bytearray | None = None
+        try:
+            if provider_credential_stdin:
+                try:
+                    secret = _read_bounded_stdin_secret(8192)
+                except OSError, ValueError:
+                    _stderr("elevated_bootstrap: provider_credential_invalid")
+                    return 2
+            payload = await authorize(
+                {
+                    "schema": "yoetz.chat-user-attestation/1",
+                    "channel": "agent_attested_chat_instruction",
+                    "client_kind": client_kind,
+                    "instruction_source": "explicit_current_chat_user",
+                    "pending_id": pending_id,
+                    "operation": operation,
+                    "danger_digest": danger_digest,
+                    "target_digest": target_digest,
+                    "warning_acknowledged": warning_acknowledged,
+                    "decision": decision,
+                },
+                provider_credential=secret,
+            )
+        except elevated_error as exc:
+            _stderr(f"elevated_bootstrap: {getattr(exc, 'reason', 'failed')}")
+            return 2
+        except Exception:
+            _stderr("elevated_bootstrap: authorize_failed")
+            return 2
+        finally:
+            if secret is not None:
+                unlock = importlib.import_module("yoetz.cli.unlock")
+                cast(Callable[[bytearray], None], unlock.overwrite_secret_buffer)(secret)
         _human_or_json(payload, json_output=json_output)
         return 0
 

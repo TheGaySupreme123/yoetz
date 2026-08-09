@@ -57,7 +57,12 @@ exactly those contracts and connects the steps without weakening any existing tr
    earns the recommendation and remains an informed explicit choice only. It is a starting draft,
    not consent. `private` remains the fail-safe no-egress choice, while Metadata only, expanded,
    and custom policies remain explicit. `yoetz --privacy` enters
-   the same short recommended-first ceremony at any later time. The setup update advisory's version
+   the same short recommended-first ceremony at any later time. **Amendment (issue #164,
+   2026-08-09):** when a user asks a capable first-party agent for help finishing exact provider
+   credential or repository privacy setup, the agent may relay an explicit current-chat instruction
+   through `yoetz consent authorize` after one warning without requiring a second local-terminal
+   ceremony. Yoetz binds the exact action but cannot independently authenticate the chat provenance;
+   the trusted CLI/TUI remains recommended and always available. The setup update advisory's version
    parser is a declared, exactly pinned core dependency; a clean installed-artifact gate imports
    and enters `setup run` so development-only transitive packages cannot hide a missing runtime
    dependency.

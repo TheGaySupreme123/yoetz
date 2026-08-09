@@ -13,12 +13,14 @@ __all__ = [
     "ConsentPrepareResultModel",
     "ConsentReviewResultModel",
     "ConsentStatusModel",
+    "RepositoryPrivacyRecipe",
 ]
 
 type ConsentOperation = Literal[
     "vault_initialize",
     "provider_credential_set",
     "provider_credential_rotate",
+    "repository_privacy_grant",
     "idle_relock_disable",
     "privacy_policy_widen",
     "backup_execute",
@@ -37,6 +39,7 @@ type RiskClass = Literal[
 type Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 type PendingId = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 type BoundedText = Annotated[str, Field(min_length=1, max_length=2048)]
+type RepositoryPrivacyRecipe = Literal["assisted_review", "private", "metadata_only"]
 
 _CLOSED_CONFIG = ConfigDict(extra="forbid", frozen=True, strict=True, validate_default=True)
 
@@ -46,7 +49,7 @@ class _ClosedModel(BaseModel):
 
 
 class AgentSafePendingModel(_ClosedModel):
-    schema_: Literal["yoetz.consent.pending-agent/2"] = Field(alias="schema")
+    schema_: Literal["yoetz.consent.pending-agent/3"] = Field(alias="schema")
     operation: ConsentOperation
     risk_class: RiskClass
     pending_id: PendingId
@@ -54,11 +57,13 @@ class AgentSafePendingModel(_ClosedModel):
     danger_text: BoundedText
     expires_at_unix: Annotated[int, Field(gt=0)]
     target_digest: Digest
+    repository_privacy_recipe: RepositoryPrivacyRecipe | None
     review_command: tuple[Literal["yoetz"], Literal["consent"], Literal["review"]]
+    authorize_command: tuple[Literal["yoetz"], Literal["consent"], Literal["authorize"]] | None
 
-    @field_validator("review_command", mode="before")
+    @field_validator("review_command", "authorize_command", mode="before")
     @classmethod
-    def _adapt_review_command(cls, value: object) -> object:
+    def _adapt_commands(cls, value: object) -> object:
         return tuple(cast(list[object], value)) if type(value) is list else value
 
 
@@ -68,35 +73,40 @@ class ConsentCatalogOperationModel(_ClosedModel):
     summary: BoundedText
     implemented: bool
     requires_provider_binding: bool
+    requires_grant_binding: bool
     requires_target_digest_arg: bool
+    agent_chat_authorize_allowed: bool
     prepare_hint: BoundedText
 
 
 class ConsentRulesModel(_ClosedModel):
-    never_over_chat_or_mcp: tuple[
+    forbidden_secret_channels: tuple[
         Literal["mcp"],
         Literal["argv"],
         Literal["env"],
-        Literal["stdin"],
         Literal["config"],
         Literal["transcript"],
     ]
     no_standing_yolo: Literal[True]
     path_safety_not_waivable_by_consent: Literal[True]
-    verified_user_presence_required: Literal[True]
+    independent_user_presence_required_for_agent_chat: Literal[False]
     trusted_console_is_not_authority: Literal[True]
     one_pending_at_a_time: Literal[True]
     approval_arguments_forbidden: Literal[True]
     agent_selected_initialization_secret_forbidden: Literal[True]
+    authorized_one_shot_stdin_permitted: Literal[True]
+    agent_attested_current_chat_instruction_permitted: Literal[True]
+    agent_attestation_is_independent_proof: Literal[False]
+    compromised_agent_can_forge_attestation: Literal[True]
 
-    @field_validator("never_over_chat_or_mcp", mode="before")
+    @field_validator("forbidden_secret_channels", mode="before")
     @classmethod
     def _adapt_never_channels(cls, value: object) -> object:
         return tuple(cast(list[object], value)) if type(value) is list else value
 
 
 class ConsentCatalogModel(_ClosedModel):
-    schema_: Literal["yoetz.consent.catalog/2"] = Field(alias="schema")
+    schema_: Literal["yoetz.consent.catalog/3"] = Field(alias="schema")
     default_safe: tuple[
         Literal["mcp.start"],
         Literal["mcp.publish_work"],
@@ -116,13 +126,13 @@ class ConsentCatalogModel(_ClosedModel):
 
 
 class ConsentStatusModel(_ClosedModel):
-    schema_: Literal["yoetz.elevated-bootstrap.status/2"] = Field(alias="schema")
+    schema_: Literal["yoetz.elevated-bootstrap.status/3"] = Field(alias="schema")
     pending: AgentSafePendingModel | None
     consent_catalog: ConsentCatalogModel
 
 
 class ConsentPrepareResultModel(_ClosedModel):
-    schema_: Literal["yoetz.elevated-bootstrap.prepare-result/2"] = Field(alias="schema")
+    schema_: Literal["yoetz.elevated-bootstrap.prepare-result/3"] = Field(alias="schema")
     pending: AgentSafePendingModel
 
 
@@ -141,6 +151,11 @@ class ConsentProviderCredentialResultModel(_ClosedModel):
     outcome: Literal["active", "local_only", "stored"]
 
 
+class ConsentRepositoryPrivacyGrantResultModel(_ClosedModel):
+    recipe: Literal["assisted_review", "private", "metadata_only"]
+    outcome: Literal["granted", "tightened", "denied"]
+
+
 class ConsentReviewResultModel(_ClosedModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -156,9 +171,10 @@ class ConsentReviewResultModel(_ClosedModel):
                                 "vault_initialize",
                                 "provider_credential_set",
                                 "provider_credential_rotate",
+                                "repository_privacy_grant",
                             ]
                         },
-                        "risk_class": {"const": "secret_ingress"},
+                        "risk_class": {"enum": ["privacy_widen", "secret_ingress"]},
                         "outcome": {"const": "denied"},
                         "result": {
                             "type": "object",
@@ -189,8 +205,13 @@ class ConsentReviewResultModel(_ClosedModel):
                         "outcome": {"const": "completed"},
                         "result": {
                             "type": "object",
-                            "properties": {"action": {"const": "set"}},
-                            "required": ["action"],
+                            "properties": {
+                                "action": {"const": "set"},
+                                "generation": {"type": "integer", "exclusiveMinimum": 0},
+                                "outcome": {"enum": ["active", "local_only", "stored"]},
+                            },
+                            "required": ["action", "generation", "outcome"],
+                            "additionalProperties": False,
                         },
                     }
                 },
@@ -201,25 +222,90 @@ class ConsentReviewResultModel(_ClosedModel):
                         "outcome": {"const": "completed"},
                         "result": {
                             "type": "object",
-                            "properties": {"action": {"const": "rotate"}},
-                            "required": ["action"],
+                            "properties": {
+                                "action": {"const": "rotate"},
+                                "generation": {"type": "integer", "exclusiveMinimum": 0},
+                                "outcome": {"enum": ["active", "local_only", "stored"]},
+                            },
+                            "required": ["action", "generation", "outcome"],
+                            "additionalProperties": False,
                         },
                     }
                 },
-            ]
+                {
+                    "properties": {
+                        "operation": {"const": "repository_privacy_grant"},
+                        "risk_class": {"const": "privacy_widen"},
+                        "outcome": {"const": "completed"},
+                        "result": {
+                            "type": "object",
+                            "properties": {
+                                "recipe": {"enum": ["assisted_review", "private", "metadata_only"]},
+                                "outcome": {"enum": ["granted", "tightened"]},
+                            },
+                            "required": ["recipe", "outcome"],
+                        },
+                    }
+                },
+            ],
+            "allOf": [
+                {
+                    "if": {"properties": {"operation": {"const": "vault_initialize"}}},
+                    "then": {
+                        "properties": {
+                            "risk_class": {"const": "secret_ingress"},
+                            "authority_channel": {"const": "trusted_console_presence"},
+                        }
+                    },
+                },
+                {
+                    "if": {
+                        "properties": {
+                            "operation": {
+                                "enum": [
+                                    "provider_credential_set",
+                                    "provider_credential_rotate",
+                                ]
+                            }
+                        }
+                    },
+                    "then": {
+                        "properties": {
+                            "risk_class": {"const": "secret_ingress"},
+                            "authority_channel": {
+                                "enum": [
+                                    "trusted_console_presence",
+                                    "agent_attested_chat_instruction",
+                                ]
+                            },
+                        }
+                    },
+                },
+                {
+                    "if": {"properties": {"operation": {"const": "repository_privacy_grant"}}},
+                    "then": {
+                        "properties": {
+                            "risk_class": {"const": "privacy_widen"},
+                            "authority_channel": {"const": "agent_attested_chat_instruction"},
+                        }
+                    },
+                },
+            ],
         },
     )
 
-    schema_: Literal["yoetz.elevated-bootstrap.result/2"] = Field(alias="schema")
+    schema_: Literal["yoetz.elevated-bootstrap.result/3"] = Field(alias="schema")
     pending_id: PendingId
     operation: ConsentOperation
     risk_class: RiskClass
     outcome: Literal["completed", "denied"]
     danger_digest: Digest
+    authority_channel: Literal["trusted_console_presence", "agent_attested_chat_instruction"]
     result: (
         ConsentDeniedResultModel
         | ConsentVaultInitializedResultModel
         | ConsentProviderCredentialResultModel
+        | ConsentRepositoryPrivacyGrantResultModel
     )
 
     @model_validator(mode="after")
@@ -228,10 +314,25 @@ class ConsentReviewResultModel(_ClosedModel):
             "vault_initialize",
             "provider_credential_set",
             "provider_credential_rotate",
+            "repository_privacy_grant",
         }:
             raise ValueError("review_operation_not_implemented")
-        if self.risk_class != "secret_ingress":
+        expected_risk = (
+            "privacy_widen" if self.operation == "repository_privacy_grant" else "secret_ingress"
+        )
+        if self.risk_class != expected_risk:
             raise ValueError("review_risk_class_mismatch")
+        if self.authority_channel == "agent_attested_chat_instruction" and self.operation not in {
+            "provider_credential_set",
+            "provider_credential_rotate",
+            "repository_privacy_grant",
+        }:
+            raise ValueError("review_authority_channel_mismatch")
+        if (
+            self.operation == "repository_privacy_grant"
+            and self.authority_channel != "agent_attested_chat_instruction"
+        ):
+            raise ValueError("review_authority_channel_mismatch")
         if self.outcome == "denied":
             if type(self.result) is not ConsentDeniedResultModel:
                 raise ValueError("review_result_outcome_mismatch")
@@ -239,6 +340,12 @@ class ConsentReviewResultModel(_ClosedModel):
         if self.operation == "vault_initialize":
             if type(self.result) is not ConsentVaultInitializedResultModel:
                 raise ValueError("review_result_operation_mismatch")
+            return self
+        if self.operation == "repository_privacy_grant":
+            if type(self.result) is not ConsentRepositoryPrivacyGrantResultModel:
+                raise ValueError("review_result_operation_mismatch")
+            if self.result.outcome == "denied":
+                raise ValueError("review_result_outcome_mismatch")
             return self
         if type(self.result) is not ConsentProviderCredentialResultModel:
             raise ValueError("review_result_operation_mismatch")

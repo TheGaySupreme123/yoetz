@@ -46,20 +46,23 @@ from yoetz.domain.privacy import (
 )
 from yoetz.domain.values import JsonObject, validate_sha256_digest
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
+from yoetz.protocol.consent import RepositoryPrivacyRecipe
 from yoetz.protocol.models import DataCategory
 
 __all__ = [
+    "PrivacyRecipe",
     "PrivacySetupReport",
     "PrivacySetupSnapshot",
-    "get_privacy_setup_snapshot",
     "build_candidate_policy",
+    "configured_bindings",
+    "get_privacy_setup_snapshot",
+    "propose_privacy_candidate",
+    "recipe_answers",
     "recommended_privacy_recipe",
     "run_privacy_setup",
 ]
 
-type PrivacyRecipe = Literal[
-    "private", "metadata_only", "assisted_review", "expanded_review", "custom"
-]
+type PrivacyRecipe = RepositoryPrivacyRecipe | Literal["expanded_review", "custom"]
 
 _SEMANTIC_CATEGORIES: Final = (
     DataCategory.BOUNDED_STRUCTURAL_METADATA,
@@ -560,6 +563,16 @@ def _recipe_answers(
     )
 
 
+def recipe_answers(
+    recipe: PrivacyRecipe,
+    current: PrivacyPolicy,
+    external: ProviderBinding | None,
+) -> PrivacySetupAnswers:
+    """Materialize one reviewed named recipe through the public typed helper."""
+
+    return _recipe_answers(recipe, current, external)
+
+
 def _section(number: int, title: str) -> None:
     typer.echo("")
     typer.echo(f"Section {number} of 5 — {title}")
@@ -656,6 +669,12 @@ def _configured_bindings() -> tuple[ProviderBinding | None, ProviderBinding | No
         )
     )
     return external, local
+
+
+def configured_bindings() -> tuple[ProviderBinding | None, ProviderBinding | None]:
+    """Return configured external and local provider bindings."""
+
+    return _configured_bindings()
 
 
 def _ask_custom_answers(
@@ -991,6 +1010,21 @@ async def _propose(
     if result.get("outcome") == "tightening_applied":
         return None
     raise ValueError("privacy_setup_proposal_invalid")
+
+
+async def propose_privacy_candidate(
+    candidate: PrivacyPolicy,
+    authority_digest: str,
+    *,
+    workspace_locator: Path | None = None,
+) -> str | None:
+    """Propose one exact privacy candidate through the public setup helper."""
+
+    return await _propose(
+        candidate,
+        authority_digest,
+        workspace_locator=workspace_locator,
+    )
 
 
 async def _decide(proposal_id: str) -> object:

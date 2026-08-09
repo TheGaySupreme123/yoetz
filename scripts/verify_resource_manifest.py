@@ -249,7 +249,25 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/consent/catalog-3.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/consent/chat-user-attestation-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/consent/pending-agent-2.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/consent/pending-agent-3.0.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
@@ -261,13 +279,31 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/consent/prepare-result-3.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/consent/review-result-2.0.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
     ),
     (
+        "schemas/consent/review-result-3.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/consent/status-2.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/consent/status-3.0.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
