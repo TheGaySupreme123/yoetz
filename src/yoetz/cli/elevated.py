@@ -20,7 +20,11 @@ from yoetz.protocol.chat_user_authority import (
     ChatUserAttestationModel,
     agent_chat_attestation_supported,
 )
-from yoetz.protocol.consent import ConsentPrepareResultModel, ConsentReviewResultModel
+from yoetz.protocol.consent import (
+    ConsentPrepareResultModel,
+    ConsentReviewResultModel,
+    RepositoryPrivacyRecipe,
+)
 from yoetz.service.confidential_client import ConfidentialClientError
 from yoetz.service.confidential_protocol import (
     EmptyVaultTarget,
@@ -470,7 +474,6 @@ async def _complete_repository_privacy_grant(
     expected_authority_digest = pending.grant_binding["authority_digest"]
     from yoetz.cli.privacy_control import decide_policy
     from yoetz.cli.privacy_setup import (
-        PrivacyRecipe,
         build_candidate_policy,
         configured_bindings,
         get_privacy_setup_snapshot,
@@ -491,7 +494,7 @@ async def _complete_repository_privacy_grant(
     try:
         external, _local = configured_bindings()
         answers = recipe_answers(
-            cast(PrivacyRecipe, recipe),
+            cast(RepositoryPrivacyRecipe, recipe),
             snapshot.composed_policy,
             external,
         )

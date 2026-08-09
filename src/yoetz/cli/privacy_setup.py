@@ -46,6 +46,7 @@ from yoetz.domain.privacy import (
 )
 from yoetz.domain.values import JsonObject, validate_sha256_digest
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
+from yoetz.protocol.consent import RepositoryPrivacyRecipe
 from yoetz.protocol.models import DataCategory
 
 __all__ = [
@@ -61,9 +62,7 @@ __all__ = [
     "run_privacy_setup",
 ]
 
-type PrivacyRecipe = Literal[
-    "private", "metadata_only", "assisted_review", "expanded_review", "custom"
-]
+type PrivacyRecipe = RepositoryPrivacyRecipe | Literal["expanded_review", "custom"]
 
 _SEMANTIC_CATEGORIES: Final = (
     DataCategory.BOUNDED_STRUCTURAL_METADATA,

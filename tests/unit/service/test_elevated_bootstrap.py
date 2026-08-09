@@ -234,7 +234,45 @@ def test_prepare_provider_binding_rules(tmp_path: Path) -> None:
     assert incomplete.value.reason == "provider_binding_invalid"
 
 
-def test_repository_grant_and_provider_bindings_are_repository_bound(tmp_path: Path) -> None:
+def test_prepare_grant_binding_rules(tmp_path: Path) -> None:
+    grant = {
+        "recipe": "assisted_review",
+        "repository_privacy_commitment": _REPOSITORY_COMMITMENT,
+        "authority_digest": _AUTHORITY_DIGEST,
+    }
+    with pytest.raises(ElevatedBootstrapError) as missing:
+        prepare_pending(
+            "repository_privacy_grant",
+            target_digest=grant_target_digest(grant),
+            _state=tmp_path,
+        )
+    assert missing.value.reason == "grant_binding_required"
+    with pytest.raises(ElevatedBootstrapError) as forbidden:
+        prepare_pending(
+            "vault_initialize",
+            target_digest=_TARGET,
+            grant_binding=grant,
+            _state=tmp_path,
+        )
+    assert forbidden.value.reason == "grant_binding_forbidden"
+    for invalid in (
+        {**grant, "recipe": "expanded_review"},
+        {**grant, "recipe": "custom"},
+        {**grant, "recipe": "unknown"},
+        {**grant, "repository_privacy_commitment": "not-a-commitment"},
+        {**grant, "authority_digest": "sha256:not-hex"},
+    ):
+        with pytest.raises(ElevatedBootstrapError) as malformed:
+            prepare_pending(
+                "repository_privacy_grant",
+                target_digest=grant_target_digest(grant),
+                grant_binding=invalid,
+                _state=tmp_path,
+            )
+        assert malformed.value.reason == "grant_binding_invalid"
+
+
+def test_repository_grant_is_repository_bound(tmp_path: Path) -> None:
     grant = {
         "recipe": "assisted_review",
         "repository_privacy_commitment": _REPOSITORY_COMMITMENT,
@@ -256,13 +294,14 @@ def test_repository_grant_and_provider_bindings_are_repository_bound(tmp_path: P
         != pending.target_digest
     )
 
+
+def test_provider_binding_preserves_repository_commitment(tmp_path: Path) -> None:
     provider = {**_BINDING, "repository_privacy_commitment": _REPOSITORY_COMMITMENT}
-    tmp_path_provider = tmp_path / "provider"
     provider_pending = prepare_pending(
         "provider_credential_set",
         target_digest=_TARGET,
         provider_binding=provider,
-        _state=tmp_path_provider,
+        _state=tmp_path,
     )
     assert provider_pending.provider_binding == provider
 

@@ -22,6 +22,7 @@ from yoetz.protocol.consent import (
     AgentSafePendingModel,
     ConsentCatalogModel,
     ConsentStatusModel,
+    RepositoryPrivacyRecipe,
 )
 from yoetz.service.confidential_protocol import ProviderCredentialTarget
 
@@ -89,7 +90,9 @@ _GRANT_BINDING_KEYS: Final = (
     "repository_privacy_commitment",
     "authority_digest",
 )
-_GRANT_RECIPES: Final = frozenset({"assisted_review", "private", "metadata_only"})
+_GRANT_RECIPES: Final[frozenset[RepositoryPrivacyRecipe]] = frozenset(
+    {"assisted_review", "private", "metadata_only"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -822,7 +825,7 @@ def projection_for_status(
             None
             if pending.grant_binding is None
             else cast(
-                Literal["assisted_review", "private", "metadata_only"],
+                RepositoryPrivacyRecipe,
                 pending.grant_binding["recipe"],
             )
         ),

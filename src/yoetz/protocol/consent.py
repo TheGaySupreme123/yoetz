@@ -13,6 +13,7 @@ __all__ = [
     "ConsentPrepareResultModel",
     "ConsentReviewResultModel",
     "ConsentStatusModel",
+    "RepositoryPrivacyRecipe",
 ]
 
 type ConsentOperation = Literal[
@@ -38,6 +39,7 @@ type RiskClass = Literal[
 type Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 type PendingId = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 type BoundedText = Annotated[str, Field(min_length=1, max_length=2048)]
+type RepositoryPrivacyRecipe = Literal["assisted_review", "private", "metadata_only"]
 
 _CLOSED_CONFIG = ConfigDict(extra="forbid", frozen=True, strict=True, validate_default=True)
 
@@ -55,7 +57,7 @@ class AgentSafePendingModel(_ClosedModel):
     danger_text: BoundedText
     expires_at_unix: Annotated[int, Field(gt=0)]
     target_digest: Digest
-    repository_privacy_recipe: Literal["assisted_review", "private", "metadata_only"] | None
+    repository_privacy_recipe: RepositoryPrivacyRecipe | None
     review_command: tuple[Literal["yoetz"], Literal["consent"], Literal["review"]]
     authorize_command: tuple[Literal["yoetz"], Literal["consent"], Literal["authorize"]] | None
 
