@@ -256,14 +256,20 @@ reason beside nonempty `obligation_refs`.
   "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
   "event_drafts": [{
     "event_id": "evt_00000000-0000-4000-8000-000000000007",
-    "schema": {"name": "evidence_recorded", "version": "1.0.0"},
+    "schema": {"name": "evidence_recorded", "version": "1.1.0"},
     "occurred_at": "2026-01-01T00:00:00.000Z", "causal_parents": [],
     "payload": {
       "evidence_id": "evd_00000000-0000-4000-8000-000000000001",
       "evidence_kind": "test_result", "strength": "content_digest",
       "content_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "digest_binding": {
+        "subject": "test_stdout",
+        "content_availability": "digest_only",
+        "byte_count": 4096,
+        "provenance": "caller_asserted"
+      },
       "observed_at": "2026-01-01T00:00:00.000Z",
-      "description": "Replace with the bounded evidence description"
+      "description": "Caller-authored summary; not the bytes identified by content_digest"
     },
     "artifact_refs": [], "evidence_refs": []
   }],

@@ -35,6 +35,33 @@ These are not publishable transitions: reading or searching, running a command w
 
 An obligation names what must be satisfied. Evidence is a bounded, provenance-labeled reason to believe something about it. A claim states a conclusion. Link them explicitly; do not substitute a file list for an obligation or a claim for evidence.
 
+### Digest subjects and provenance
+
+Every newly published `evidence_recorded/1.1.0` payload that includes `content_digest` must also
+include a closed `digest_binding` object:
+
+- `subject` names the exact byte class that was hashed;
+- `content_availability` is `captured`, `digest_only`, or `withheld`;
+- `byte_count` is the size of the exact hashed byte sequence;
+- `provenance` is `caller_asserted` for ordinary cooperative publication.
+
+The closed subjects are `approved_check_receipt`, `artifact_bytes`, `bounded_excerpt`,
+`command_stdout`, `import_report`, `source_diff`, `static_analysis_report`, `test_report`, and
+`test_stdout`. The subject must be compatible with `evidence_kind`. In particular,
+`evidence_kind=test_result` accepts test output/report, static-analysis report, or an approved-check
+receipt. It does not accept `source_diff`. Publish a source-diff digest as `evidence_kind=artifact`
+with `subject=source_diff` instead.
+
+`captured` requires the mirrored `captured_object_id`; `digest_only` and `withheld` forbid one. A
+digest proves byte identity only. It does not prove that a command ran, that its exit status was
+successful, that Yoetz inspected the content, or that the evidence supports a claim. `description`
+is caller-authored narrative and is never treated as the bytes identified by `content_digest`.
+
+Do not submit `approved_check` or `import_observed` provenance through ordinary publication. Those
+values are reserved for the capability-proven service path and trusted importer. Historical
+`evidence_recorded/1.0.0` records remain readable byte-for-byte; a historical digest without a
+binding is reported as legacy/unknown and cannot silently satisfy a new completion claim.
+
 ## Declare completion scope in the plan
 
 The effective current plan must distinguish obligations from an intentional empty scope. Normally,

@@ -21,6 +21,7 @@ from yoetz.domain.events import (
     EventDraft,
     EventPayload,
     EventSchema,
+    EvidenceDigestProvenance,
     EvidenceRecordedPayload,
     FindingRecordedPayload,
     LedgerChain,
@@ -572,6 +573,23 @@ def _validate_admission(
         known = item.draft.schema in PAYLOAD_TYPES
         if (known and item.draft.schema.name not in admitted) or (not known and not trusted_import):
             raise _event_invalid("event_family_not_admitted", event_index=index, subfield="schema")
+        payload = item.draft.payload
+        if type(payload) is EvidenceRecordedPayload and payload.digest_binding is not None:
+            provenance = payload.digest_binding.provenance
+            if not trusted_import and provenance is not EvidenceDigestProvenance.CALLER_ASSERTED:
+                raise _event_invalid(
+                    "evidence_digest_provenance_invalid",
+                    event_index=index,
+                    subfield="payload",
+                    payload_field="digest_binding",
+                )
+            if trusted_import and provenance is EvidenceDigestProvenance.APPROVED_CHECK:
+                raise _event_invalid(
+                    "evidence_digest_provenance_invalid",
+                    event_index=index,
+                    subfield="payload",
+                    payload_field="digest_binding",
+                )
     if request.expected_frontier is None and any(
         item.draft.schema in PAYLOAD_TYPES and item.draft.schema.name in _STATE_SENSITIVE_FAMILIES
         for item in drafts

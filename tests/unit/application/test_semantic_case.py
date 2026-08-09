@@ -28,6 +28,10 @@ from yoetz.application.semantic_case import (
 from yoetz.domain.events import (
     ClaimKind,
     ClaimRecordedPayload,
+    EvidenceContentAvailability,
+    EvidenceDigestBinding,
+    EvidenceDigestProvenance,
+    EvidenceDigestSubject,
     EvidenceKind,
     EvidenceRecordedPayload,
     ObligationPublishedPayload,
@@ -278,6 +282,68 @@ def test_assisted_profile_includes_only_linked_recorded_capped_excerpts() -> Non
     body = next(item for item in semantic.items if item.item_id == excerpt.excerpt_item_id)
     assert body.content == b"test output: 1 failed assertion"
     assert set(excerpt.linked_subject_refs) <= (semantic.frontier_refs | semantic.local_check_refs)
+
+
+def test_assisted_digest_excerpt_uses_typed_provenance_not_description() -> None:
+    case = _case_with_material(with_evidence=True)
+    record = case.projection.evidence[evd(1)]
+    assert record.payload is not None
+    typed_payload = EvidenceRecordedPayload(
+        evidence_id=record.payload.evidence_id,
+        evidence_kind=EvidenceKind.TEST_RESULT,
+        strength=EvidenceImmutability.CONTENT_DIGEST,
+        observed_at=record.payload.observed_at,
+        content_digest="sha256:" + "1" * 64,
+        description="caller prose that must not be substituted for output",
+        digest_binding=EvidenceDigestBinding(
+            subject=EvidenceDigestSubject.TEST_STDOUT,
+            content_availability=EvidenceContentAvailability.DIGEST_ONLY,
+            byte_count=512,
+            provenance=EvidenceDigestProvenance.CALLER_ASSERTED,
+        ),
+    )
+    typed = make_case(
+        plans=case.projection.plans,
+        obligations=case.projection.obligations,
+        claims=case.projection.claims,
+        evidence={evd(1): evidence_record(typed_payload, 4)},
+        extra_refs=(clm(1), obl(1), evd(1)),
+    )
+    semantic = _build(typed, ReviewContextProfile.ASSISTED, findings=_findings_for(typed))
+    excerpt = semantic.packet.targeted_excerpts[0]
+    item = next(row for row in semantic.items if row.item_id == excerpt.excerpt_item_id)
+    document = strict_json_parse(item.content)
+    assert isinstance(document, Mapping)
+    assert document["digest_subject"] == "test_stdout"
+    assert document["content_availability"] == "digest_only"
+    assert b"caller prose" not in item.content
+
+
+def test_assisted_legacy_digest_is_an_explicit_omission() -> None:
+    case = _case_with_material(with_evidence=True)
+    record = case.projection.evidence[evd(1)]
+    assert record.payload is not None
+    legacy_payload = EvidenceRecordedPayload(
+        evidence_id=record.payload.evidence_id,
+        evidence_kind=EvidenceKind.TEST_RESULT,
+        strength=EvidenceImmutability.CONTENT_DIGEST,
+        observed_at=record.payload.observed_at,
+        content_digest="sha256:" + "2" * 64,
+        description="legacy prose",
+    )
+    legacy = make_case(
+        plans=case.projection.plans,
+        obligations=case.projection.obligations,
+        claims=case.projection.claims,
+        evidence={evd(1): evidence_record(legacy_payload, 4)},
+        extra_refs=(clm(1), obl(1), evd(1)),
+    )
+    semantic = _build(legacy, ReviewContextProfile.ASSISTED, findings=_findings_for(legacy))
+    assert semantic.packet.targeted_excerpts == ()
+    assert any(
+        omission.subject_ref == evd(1) and omission.reason == "not_recorded"
+        for omission in semantic.packet.omissions
+    )
 
 
 def test_withheld_and_not_selected_material_use_correct_omission_reasons() -> None:

@@ -17,6 +17,21 @@ Use the exact enum values returned by the protocol; this reference does not crea
 
 Deterministic evidence says what a reviewed rule computed from the accepted record. Semantic evidence retains provider, model, policy, request, response, and review provenance. Imported evidence never gains cooperative authorship merely because Yoetz stores it. A digest records identity, not content inspection. TOML, path, or metadata construction is not proof of SDK wire dispatch or semantic review (Yoetz cooperative/evidence boundary).
 
+Digest-bearing evidence separates four facts: the evidence family, the exact byte subject, whether
+the bytes were retained, and who established that binding. Ordinary publication remains
+`caller_asserted` even when it supplies a valid SHA-256 digest. Only the approved-check service path
+may record `approved_check`, and only the trusted importer may record `import_observed`.
+
+Relevant limitations appear as exact coverage gaps:
+
+- `evidence_digest_subject_legacy_unknown`: a historical digest record does not say what bytes were hashed;
+- `evidence_content_digest_only`: the typed record retained identity but not the bytes;
+- `evidence_content_withheld`: the publisher explicitly withheld the bytes.
+
+These gaps make the conclusion coverage-incomplete. They do not establish that the evidence is
+false. Unrelated historical evidence is not pulled into a current check merely because it remains
+in the ledger.
+
 ## Freshness, redaction, and unknown input
 
 Evidence bound to an older material state is stale. Hidden, redacted, or unknown-schema material remains a limitation rather than being treated as absent. An import gap is a gap, not an unchanged-state fact.

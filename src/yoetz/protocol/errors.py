@@ -66,6 +66,11 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "event_family_not_admitted",
     "event_integer_out_of_range",
     "event_text_out_of_bounds",
+    "evidence_digest_availability_invalid",
+    "evidence_digest_binding_invalid",
+    "evidence_digest_binding_required",
+    "evidence_digest_provenance_invalid",
+    "evidence_digest_subject_incompatible",
     "evidence_strength_unsupported",
     "finding_json_shape_invalid",
     "finding_priority_mismatch",
@@ -193,7 +198,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 140
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 145
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)

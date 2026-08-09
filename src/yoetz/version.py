@@ -70,7 +70,7 @@ _SUPPORT_SCHEMA: Final = "yoetz.runtime-support/1"
 _RESOURCE_ROOT: Final = "yoetz.resources"
 _MANIFEST_LIMIT: Final = 1_048_576
 _RESOURCE_LIMIT: Final = 4_194_304
-_EXPECTED_RESOURCE_COUNT: Final = 88
+_EXPECTED_RESOURCE_COUNT: Final = 89
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -574,9 +574,9 @@ def _resource_counts(entries: tuple[_ResourceEntry, ...]) -> VersionPairs:
         "guidance_resources": 5,
         "migrations": 8,
         "runtime_support_resources": 1,
-        "schema_resources": 63,
+        "schema_resources": 64,
         "skill_resources": 2,
-        "total": 88,
+        "total": 89,
     }
     if counts != expected:
         raise ResourceIntegrityError("resource_counts_invalid")
@@ -607,7 +607,9 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
         egress_receipt_schema_version=EGRESS_RECEIPT_SCHEMA_VERSION,
         privacy_classifier_ruleset_version=PRIVACY_CLASSIFIER_RULESET_VERSION,
         request_result_schema_versions=_REQUEST_RESULT_VERSIONS,
-        event_schema_versions=tuple((name, "1.0.0") for name in _EVENT_NAMES),
+        event_schema_versions=tuple(
+            (name, "1.1.0" if name == "evidence_recorded" else "1.0.0") for name in _EVENT_NAMES
+        ),
         policy_versions=(RESEARCH_EVIDENCE_POLICY_VERSION, WORK_INTEGRITY_POLICY_VERSION),
         object_format_version=OBJECT_FORMAT_VERSION,
         catalog_schema_version=CATALOG_SCHEMA_VERSION,

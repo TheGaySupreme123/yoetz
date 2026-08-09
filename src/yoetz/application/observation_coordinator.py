@@ -10,7 +10,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from yoetz.adapters.approved_checks import ApprovedCheckRunner
+from yoetz.adapters.approved_checks import ApprovedCheckRunner, ApprovedCheckStatus
 from yoetz.adapters.git_subject_state import (
     GitSubjectStateAdapter,
     list_changed_relative_paths,
@@ -32,6 +32,7 @@ from yoetz.application.observation_advice import (
 from yoetz.application.observation_check_policy import load_observation_check_policy
 from yoetz.application.observation_materialize import (
     MaterializedObservationBatch,
+    approved_check_author,
     canonical_logical_identity,
     materialize_observation_envelope,
     media_type_for_schema,
@@ -40,6 +41,7 @@ from yoetz.application.observation_materialize import (
     stable_observation_id,
 )
 from yoetz.application.observation_verification import (
+    CompletedApprovedCheck,
     ObservationVerificationJob,
     ObservationVerificationRepository,
     ObservationVerificationSupervisor,
@@ -48,7 +50,23 @@ from yoetz.application.observation_verification import (
     orchestrate_changed_path_inspection,
 )
 from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
-from yoetz.domain.events import EventDraft, EventSchema, encode_payload, media_type_for
+from yoetz.domain.events import (
+    EVIDENCE_SCHEMA_VERSION,
+    ActionKind,
+    ActionRecordedPayload,
+    EventDraft,
+    EventSchema,
+    EvidenceContentAvailability,
+    EvidenceDigestBinding,
+    EvidenceDigestProvenance,
+    EvidenceDigestSubject,
+    EvidenceKind,
+    EvidenceRecordedPayload,
+    ResultOutcome,
+    ResultRecordedPayload,
+    encode_payload,
+    media_type_for,
+)
 from yoetz.domain.findings import Finding, FindingKind, FindingOrigin
 from yoetz.domain.observation import (
     ObservationContentChunk,
@@ -66,8 +84,14 @@ from yoetz.domain.observation import (
 from yoetz.domain.values import (
     Frontier,
     JsonObject,
+    SubjectStateRef,
+    action_id,
     event_id,
+    evidence_id,
+    object_id,
+    result_id,
     timestamp_from_datetime,
+    timestamp_from_string,
 )
 from yoetz.observability.privacy import redact_sensitive_content
 from yoetz.ports.clock import ClockPort
@@ -89,7 +113,7 @@ from yoetz.ports.runtime import (
 )
 from yoetz.ports.subject_state import SubjectStateCaptureCommand, SubjectStateFormat
 from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
-from yoetz.protocol.coverage import PublicationChannel
+from yoetz.protocol.coverage import EvidenceImmutability, PublicationChannel, coverage_for_channel
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
 
@@ -490,6 +514,243 @@ class ObservationCoordinator:
         await run_prepared_append(runtime.ledger, mutation)
         return operation_id, digest
 
+    async def _materialize_approved_check(
+        self,
+        runtime: TaskRuntime,
+        completed: CompletedApprovedCheck,
+    ) -> None:
+        """Append one idempotent service-owned action/evidence/result graph."""
+
+        writer_id = runtime.writer_id
+        if writer_id is None:
+            return
+        result = completed.result
+        operation_digest = canonical_digest(
+            JsonObject(
+                {
+                    "format": "yoetz.approved-check-ledger-materialization/1",
+                    "job_id": completed.job.job_id,
+                    "approval_commitment": completed.job.approval_commitment,
+                    "result_digest": result.result_digest,
+                    "task_id": runtime.task_id,
+                    "session_id": runtime.session_id,
+                    "writer_id": writer_id,
+                }
+            )
+        )
+        operation_id = self._stable_operation_id(operation_digest)
+        if await runtime.ledger.lookup_operation(writer_id, operation_id) is not None:
+            return
+
+        receipt_document = JsonObject(
+            {
+                "format": "yoetz.approved-check-evidence/1",
+                "job_id": completed.job.job_id,
+                "approval_id": completed.approval_id,
+                "approval_commitment": completed.job.approval_commitment,
+                "result_digest": result.result_digest,
+                "status": result.status.value,
+                "outcome": result.outcome.value,
+                "exit_status": result.exit_status,
+                "output_digest": result.output_digest,
+                "output_bytes": result.output_bytes,
+                "output_object_id": completed.output_object_id,
+                "subject_state_before": completed.job.subject_state_digest,
+                "subject_state_after": completed.subject_state_after,
+                "is_current": completed.is_current,
+                "recorded_at": completed.recorded_at,
+            }
+        )
+        receipt_bytes = canonical_encode(receipt_document)
+        receipt_metadata = ObjectMetadata(
+            ObjectKind.CAPTURED_CONTENT,
+            "application/vnd.yoetz.approved-check-evidence+json",
+            runtime.task_id,
+            self.clock.now_utc(),
+        )
+        staged_receipt = await runtime.objects.stage(
+            ObjectSource(data=receipt_bytes, declared_size=len(receipt_bytes)), receipt_metadata
+        )
+        receipt_ref = await runtime.objects.finalize(staged_receipt)
+        receipt_digest = canonical_digest(receipt_document)
+
+        source_identity = f"approved-check:{completed.job.job_id}:{result.result_digest}"
+        mapping = "approved-check/1.0.0"
+        action_value = action_id(
+            stable_observation_id(
+                kind=IdKind.ACTION,
+                task_id=runtime.task_id,
+                source_identity=source_identity,
+                mapping_version=mapping,
+                role="action",
+            )
+        )
+        evidence_value = evidence_id(
+            stable_observation_id(
+                kind=IdKind.EVIDENCE,
+                task_id=runtime.task_id,
+                source_identity=source_identity,
+                mapping_version=mapping,
+                role="evidence",
+            )
+        )
+        result_value = result_id(
+            stable_observation_id(
+                kind=IdKind.RESULT,
+                task_id=runtime.task_id,
+                source_identity=source_identity,
+                mapping_version=mapping,
+                role="result",
+            )
+        )
+        action_event = event_id(
+            stable_observation_id(
+                kind=IdKind.EVENT,
+                task_id=runtime.task_id,
+                source_identity=source_identity,
+                mapping_version=mapping,
+                role="action_event",
+            )
+        )
+        evidence_event = event_id(
+            stable_observation_id(
+                kind=IdKind.EVENT,
+                task_id=runtime.task_id,
+                source_identity=source_identity,
+                mapping_version=mapping,
+                role="evidence_event",
+            )
+        )
+        result_event = event_id(
+            stable_observation_id(
+                kind=IdKind.EVENT,
+                task_id=runtime.task_id,
+                source_identity=source_identity,
+                mapping_version=mapping,
+                role="result_event",
+            )
+        )
+        occurred_at = timestamp_from_string(completed.recorded_at)
+        subject_state = SubjectStateRef(
+            described_state=f"approved-check:{completed.job.subject_state_digest}"
+        )
+        evidence_payload = EvidenceRecordedPayload(
+            evidence_id=evidence_value,
+            evidence_kind=EvidenceKind.TEST_RESULT,
+            strength=EvidenceImmutability.IMMUTABLE_SNAPSHOT,
+            observed_at=occurred_at,
+            captured_object_id=object_id(receipt_ref.object_id),
+            content_digest=receipt_digest,
+            description=f"Approved check result status={result.status.value}",
+            subject_state=subject_state,
+            digest_binding=EvidenceDigestBinding(
+                subject=EvidenceDigestSubject.APPROVED_CHECK_RECEIPT,
+                content_availability=EvidenceContentAvailability.CAPTURED,
+                byte_count=len(receipt_bytes),
+                provenance=EvidenceDigestProvenance.APPROVED_CHECK,
+                approval_commitment=completed.job.approval_commitment,
+                approved_check_result_digest=result.result_digest,
+            ),
+        )
+        drafts = (
+            EventDraft(
+                action_event,
+                EventSchema("action_recorded", "1.0.0"),
+                occurred_at,
+                (),
+                ActionRecordedPayload(
+                    action_id=action_value,
+                    action_kind=ActionKind.COMMAND,
+                    description=f"Ran approved check {completed.approval_id}",
+                    command="approved-check-service",
+                    subject_state=subject_state,
+                ),
+                (),
+                (),
+            ),
+            EventDraft(
+                evidence_event,
+                EventSchema("evidence_recorded", EVIDENCE_SCHEMA_VERSION),
+                occurred_at,
+                (action_event,),
+                evidence_payload,
+                (object_id(receipt_ref.object_id),),
+                (),
+            ),
+            EventDraft(
+                result_event,
+                EventSchema("result_recorded", "1.0.0"),
+                occurred_at,
+                tuple(sorted((action_event, evidence_event), key=str.encode)),
+                ResultRecordedPayload(
+                    result_id=result_value,
+                    action_id=action_value,
+                    outcome=(
+                        ResultOutcome.SUCCESS
+                        if result.status is ApprovedCheckStatus.PASSED
+                        else ResultOutcome.FAILURE
+                    ),
+                    exit_status=result.exit_status,
+                    summary=f"Approved check status={result.status.value}",
+                    subject_state=subject_state,
+                    evidence_refs=(evidence_value,),
+                ),
+                (),
+                (evidence_value,),
+            ),
+        )
+        coverage = replace(
+            coverage_for_channel(PublicationChannel.ENGINE_DERIVED),
+            evidence_immutability=EvidenceImmutability.IMMUTABLE_SNAPSHOT,
+        )
+        refs: list[ObjectRef] = [receipt_ref]
+        entries: list[AppendEntry] = []
+        for draft in drafts:
+            payload_bytes = canonical_encode(encode_payload(cast(Any, draft.payload)))
+            metadata = ObjectMetadata(
+                ObjectKind.EVENT_PAYLOAD,
+                media_type_for(draft.schema.name),
+                runtime.task_id,
+                self.clock.now_utc(),
+            )
+            staged = await runtime.objects.stage(
+                ObjectSource(data=payload_bytes, declared_size=len(payload_bytes)), metadata
+            )
+            payload_ref = await runtime.objects.finalize(staged)
+            refs.append(payload_ref)
+            entries.append(
+                AppendEntry(
+                    draft,
+                    approved_check_author(),
+                    payload_ref,
+                    payload_ref.commitment,
+                    metadata.media_type,
+                    payload_ref.plaintext_size,
+                    PublicationChannel.ENGINE_DERIVED,
+                    coverage,
+                    "projected",
+                )
+            )
+        command = AppendCommand(
+            runtime.task_id,
+            runtime.session_id,
+            writer_id,
+            operation_id,
+            OperationKind.PUBLISH_WORK,
+            operation_digest,
+            None,
+            tuple(entries),
+        )
+        mutation = PreparedMutation(
+            command.writer_id,
+            command.operation_id,
+            command.request_digest,
+            command.expected_frontier,
+            tuple(refs),
+            command,
+        )
+        await run_prepared_append(runtime.ledger, mutation)
+
     async def _capture_content(
         self,
         runtime: TaskRuntime,
@@ -740,6 +1001,9 @@ class ObservationCoordinator:
             lease_owner=runtime.fence.service_instance_id,
             now=now_wire,
             lease_expires_at=lease_expiry,
+            materialize_result=lambda completed: self._materialize_approved_check(
+                runtime, completed
+            ),
         )
         worker.enqueue_if_changed(
             workspace=workspace,
@@ -937,6 +1201,9 @@ class ObservationCoordinator:
             lease_owner=runtime.fence.service_instance_id,
             now=now_wire,
             lease_expires_at=lease_expiry,
+            materialize_result=lambda completed: self._materialize_approved_check(
+                runtime, completed
+            ),
         )
 
     async def _run_verification(

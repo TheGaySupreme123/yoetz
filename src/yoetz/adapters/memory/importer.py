@@ -16,10 +16,15 @@ from enum import Enum
 from typing import Final, Literal, Protocol, cast
 
 from yoetz.domain.events import (
+    EVIDENCE_SCHEMA_VERSION,
     PAYLOAD_TYPES,
     EventDraft,
     EventPayload,
     EventSchema,
+    EvidenceContentAvailability,
+    EvidenceDigestBinding,
+    EvidenceDigestProvenance,
+    EvidenceDigestSubject,
     EvidenceKind,
     EvidenceRecordedPayload,
     decode_payload,
@@ -1143,7 +1148,7 @@ def report_evidence_draft(
 ) -> EventDraft:
     return EventDraft(
         event_id=event_id(job.report_event_id),
-        schema=EventSchema("evidence_recorded", "1.0.0"),
+        schema=EventSchema("evidence_recorded", EVIDENCE_SCHEMA_VERSION),
         occurred_at=observed_at,
         causal_parents=(),
         payload=EvidenceRecordedPayload(
@@ -1153,6 +1158,12 @@ def report_evidence_draft(
             observed_at=observed_at,
             captured_object_id=object_id(report.report_object.object_id),
             content_digest=report.report_digest,
+            digest_binding=EvidenceDigestBinding(
+                subject=EvidenceDigestSubject.IMPORT_REPORT,
+                content_availability=EvidenceContentAvailability.CAPTURED,
+                byte_count=report.report_object.plaintext_size,
+                provenance=EvidenceDigestProvenance.IMPORT_OBSERVED,
+            ),
         ),
         artifact_refs=(object_id(report.report_object.object_id),),
         evidence_refs=(),

@@ -110,6 +110,25 @@ def test_deterministic_case_codec_round_trips_canonical_bytes() -> None:
     assert canonical_encode(deterministic_case_to_json(decoded)) == canonical_encode(encoded)
 
 
+def test_legacy_digest_gap_is_scoped_to_evidence_linked_by_current_work() -> None:
+    records = replay_records("all-event-families")
+    unlinked = records[:8]
+    unlinked_case = build_deterministic_case(replay(unlinked), unlinked, CaseAvailabilityFacts())
+    assert not any(
+        gap.code == "evidence_digest_subject_legacy_unknown" for gap in unlinked_case.gaps
+    )
+
+    linked = records[:9]
+    linked_case = build_deterministic_case(replay(linked), linked, CaseAvailabilityFacts())
+    gap = next(
+        item for item in linked_case.gaps if item.code == "evidence_digest_subject_legacy_unknown"
+    )
+    evidence = next(iter(linked_case.projection.evidence.values()))
+    assert gap.subject_refs == (evidence.source_event_id,)
+    coverage = linked_case.coverage_by_ref[next(iter(linked_case.projection.evidence))]
+    assert "evidence_digest_subject_legacy_unknown" in coverage.known_gaps
+
+
 def test_frozen_history_is_bounded_and_legacy_cases_remain_distinct(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

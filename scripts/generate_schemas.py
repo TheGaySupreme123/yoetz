@@ -160,6 +160,7 @@ def _version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
         definitions = cast(dict[str, JsonValue], document["$defs"])
         request_versions = cast(dict[str, JsonValue], definitions["request_result_schema_versions"])
+        event_versions = cast(dict[str, JsonValue], definitions["event_schema_versions"])
         resource_counts = cast(dict[str, JsonValue], definitions["resource_counts"])
         resources = cast(dict[str, JsonValue], document["properties"])["resources"]
         if not isinstance(resources, dict):
@@ -190,6 +191,26 @@ def _version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             },
         )
     )
+    event_pairs = dict(manifest.event_schema_versions)
+    event_versions.clear()
+    event_versions.update(
+        cast(
+            dict[str, JsonValue],
+            {
+                "additionalProperties": False,
+                "maxProperties": len(event_pairs),
+                "minProperties": len(event_pairs),
+                "properties": {
+                    name: {"const": version}
+                    for name, version in sorted(
+                        event_pairs.items(), key=lambda item: item[0].encode()
+                    )
+                },
+                "required": sorted(event_pairs, key=str.encode),
+                "type": "object",
+            },
+        )
+    )
 
     counts = dict(manifest.resource_counts)
     count_properties: dict[str, JsonValue] = {
@@ -216,6 +237,282 @@ def _version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         "protocol_version",
     ):
         properties[field_name] = {"const": cast(JsonValue, getattr(manifest, field_name))}
+    return document
+
+
+def _evidence_payload_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Derive v1.1 from the frozen v1.0 bytes without rewriting historical identity."""
+
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "schemas/events/evidence-recorded-1.0.0.schema.json"
+    )
+    try:
+        document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+        properties = cast(dict[str, JsonValue], document["properties"])
+        all_of = cast(list[JsonValue], document["allOf"])
+    except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
+        raise SchemaGenerationError(
+            "evidence_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    definitions = cast(dict[str, JsonValue], document.setdefault("$defs", {}))
+    definitions.update(
+        {
+            "evidence_content_availability": {
+                "enum": ["captured", "digest_only", "withheld"],
+                "type": "string",
+            },
+            "evidence_digest_provenance": {
+                "enum": ["approved_check", "caller_asserted", "import_observed"],
+                "type": "string",
+            },
+            "evidence_digest_subject": {
+                "enum": [
+                    "approved_check_receipt",
+                    "artifact_bytes",
+                    "bounded_excerpt",
+                    "command_stdout",
+                    "import_report",
+                    "source_diff",
+                    "static_analysis_report",
+                    "test_report",
+                    "test_stdout",
+                ],
+                "type": "string",
+            },
+            "evidence_digest_binding": {
+                "additionalProperties": False,
+                "properties": {
+                    "approval_commitment": {
+                        "pattern": "^sha256:[0-9a-f]{64}$",
+                        "type": "string",
+                    },
+                    "approved_check_result_digest": {
+                        "pattern": "^sha256:[0-9a-f]{64}$",
+                        "type": "string",
+                    },
+                    "byte_count": {
+                        "maximum": 9_007_199_254_740_991,
+                        "minimum": 0,
+                        "type": "integer",
+                    },
+                    "content_availability": {"$ref": "#/$defs/evidence_content_availability"},
+                    "provenance": {"$ref": "#/$defs/evidence_digest_provenance"},
+                    "subject": {"$ref": "#/$defs/evidence_digest_subject"},
+                },
+                "required": ["subject", "content_availability", "byte_count", "provenance"],
+                "type": "object",
+            },
+        }
+    )
+    properties["digest_binding"] = {"$ref": "#/$defs/evidence_digest_binding"}
+
+    all_of.extend(
+        [
+            {
+                "if": {"required": ["content_digest"]},
+                "then": {"required": ["digest_binding"]},
+            },
+            {
+                "if": {"required": ["digest_binding"]},
+                "then": {"required": ["content_digest"]},
+            },
+            {
+                "if": {
+                    "properties": {
+                        "digest_binding": {
+                            "properties": {"content_availability": {"const": "captured"}},
+                            "required": ["content_availability"],
+                        }
+                    },
+                    "required": ["digest_binding"],
+                },
+                "then": {"required": ["captured_object_id"]},
+            },
+            {
+                "if": {
+                    "properties": {
+                        "digest_binding": {
+                            "properties": {
+                                "content_availability": {"enum": ["digest_only", "withheld"]}
+                            },
+                            "required": ["content_availability"],
+                        }
+                    },
+                    "required": ["digest_binding"],
+                },
+                "then": {"not": {"required": ["captured_object_id"]}},
+            },
+        ]
+    )
+    binding = cast(dict[str, JsonValue], definitions["evidence_digest_binding"])
+    binding["allOf"] = [
+        {
+            "if": {
+                "properties": {"provenance": {"const": "approved_check"}},
+                "required": ["provenance"],
+            },
+            "then": {"required": ["approval_commitment", "approved_check_result_digest"]},
+            "else": {
+                "not": {
+                    "anyOf": [
+                        {"required": ["approval_commitment"]},
+                        {"required": ["approved_check_result_digest"]},
+                    ]
+                }
+            },
+        },
+        {
+            "if": {
+                "properties": {"subject": {"const": "approved_check_receipt"}},
+                "required": ["subject"],
+            },
+            "then": {
+                "properties": {"provenance": {"const": "approved_check"}},
+                "required": ["provenance"],
+            },
+        },
+        {
+            "if": {
+                "properties": {"subject": {"const": "import_report"}},
+                "required": ["subject"],
+            },
+            "then": {
+                "properties": {"provenance": {"const": "import_observed"}},
+                "required": ["provenance"],
+            },
+        },
+    ]
+    compatible = {
+        "artifact": ["artifact_bytes", "bounded_excerpt", "source_diff"],
+        "command_output": [
+            "approved_check_receipt",
+            "command_stdout",
+            "static_analysis_report",
+            "test_report",
+            "test_stdout",
+        ],
+        "test_result": [
+            "approved_check_receipt",
+            "static_analysis_report",
+            "test_report",
+            "test_stdout",
+        ],
+        "research_source": ["artifact_bytes", "bounded_excerpt"],
+        "import_report": ["import_report"],
+        "other": ["bounded_excerpt"],
+    }
+    for kind, subjects in compatible.items():
+        all_of.append(
+            {
+                "if": {
+                    "properties": {"evidence_kind": {"const": kind}},
+                    "required": ["evidence_kind", "digest_binding"],
+                },
+                "then": {
+                    "properties": {
+                        "digest_binding": {
+                            "properties": {"subject": {"enum": subjects}},
+                            "required": ["subject"],
+                        }
+                    }
+                },
+            }
+        )
+    return document
+
+
+def _event_draft_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Add the exact evidence 1.1 pair to the reviewed draft structural union."""
+
+    source = Path(__file__).resolve().parent.parent / "schemas" / entry.relative_path
+    try:
+        document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+        definitions = cast(dict[str, JsonValue], document["$defs"])
+        branches = cast(list[JsonValue], document["oneOf"])
+    except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
+        raise SchemaGenerationError(
+            "event_draft_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+
+    definitions["schema_identity_evidence_recorded_1_1"] = {
+        "additionalProperties": False,
+        "properties": {
+            "name": {"const": "evidence_recorded"},
+            "version": {"const": "1.1.0"},
+        },
+        "required": ["name", "version"],
+        "type": "object",
+    }
+    definitions["evidence_recorded_1_1_schema"] = {
+        "$ref": "#/$defs/schema_identity_evidence_recorded_1_1"
+    }
+    branch: dict[str, JsonValue] = {
+        "properties": {
+            "payload": {
+                "$ref": ("https://schemas.yoetz.dev/0.1/events/evidence-recorded-1.1.0.schema.json")
+            },
+            "schema": {"$ref": "#/$defs/evidence_recorded_1_1_schema"},
+        },
+        "required": ["schema", "payload"],
+    }
+    branches[:] = [
+        item
+        for item in branches
+        if not (
+            isinstance(item, dict) and "evidence-recorded-1.1.0.schema.json" in json.dumps(item)
+        )
+    ]
+    legacy_index = next(
+        (
+            index
+            for index, item in enumerate(branches)
+            if isinstance(item, dict) and "evidence-recorded-1.0.0.schema.json" in json.dumps(item)
+        ),
+        None,
+    )
+    if legacy_index is None:
+        raise SchemaGenerationError(
+            "event_draft_schema_template_invalid", entries=(entry.relative_path,)
+        )
+    branches.insert(legacy_index + 1, branch)
+    return document
+
+
+def _opaque_unknown_event_draft_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Exclude every exact-known pair, including evidence 1.1, from opaque drafts."""
+
+    source = Path(__file__).resolve().parent.parent / "schemas" / entry.relative_path
+    try:
+        document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+        definitions = cast(dict[str, JsonValue], document["$defs"])
+        unknown = cast(dict[str, JsonValue], definitions["unknown_event_schema"])
+        current_not = cast(dict[str, JsonValue], unknown["not"])
+    except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
+        raise SchemaGenerationError(
+            "opaque_unknown_event_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+
+    legacy = current_not
+    if "anyOf" in current_not:
+        values = cast(list[JsonValue], current_not["anyOf"])
+        legacy = cast(dict[str, JsonValue], values[0])
+    unknown["not"] = {
+        "anyOf": [
+            legacy,
+            {
+                "additionalProperties": False,
+                "properties": {
+                    "name": {"const": "evidence_recorded"},
+                    "version": {"const": "1.1.0"},
+                },
+                "required": ["name", "version"],
+                "type": "object",
+            },
+        ]
+    }
     return document
 
 
@@ -713,6 +1010,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "events/evidence-recorded-1.0.0.schema.json",
         "evidence-recorded",
         "1.0.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["EvidenceRecordedPayload"]
+            ).EvidenceRecordedPayload
+        ),
+    ),
+    _RegistryEntry(
+        "events/evidence-recorded-1.1.0.schema.json",
+        "evidence-recorded",
+        "1.1.0",
         "event",
         "event-payload",
         lambda: (
@@ -1327,6 +1636,12 @@ def build_schema_documents(
             "events/plan-revised-1.0.0.schema.json",
         }:
             normalized = _plan_payload_schema(entry)
+        elif entry.relative_path == "events/event-draft-1.0.0.schema.json":
+            normalized = _event_draft_schema(entry)
+        elif entry.relative_path == "events/evidence-recorded-1.1.0.schema.json":
+            normalized = _evidence_payload_schema(entry)
+        elif entry.relative_path == "events/opaque-unknown-event-draft-1.0.0.schema.json":
+            normalized = _opaque_unknown_event_draft_schema(entry)
         elif entry.relative_path == "operations/start-result-1.0.0.schema.json":
             normalized = _start_result_schema(entry)
         elif entry.relative_path == "operations/status-result-1.0.0.schema.json":
