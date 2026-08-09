@@ -432,7 +432,9 @@ async def _operation_continuation(
     ledger = getattr(runtime, "ledger", None)
     load = getattr(ledger, "load_disclosure_wait", None)
     continuation: SemanticContinuation | None = None
-    if load is not None:
+    if operation.suspension_kind is CheckSuspensionKind.REPOSITORY_GRANT:
+        continuation = repository_grant_continuation(request_id=operation_request_id)
+    elif load is not None:
         try:
             wait = await load(writer_id, operation_request_id)
         except Exception:
@@ -446,8 +448,6 @@ async def _operation_continuation(
                 )
             except TypeError, ValueError:
                 continuation = None
-    if continuation is None and operation.suspension_kind is CheckSuspensionKind.REPOSITORY_GRANT:
-        continuation = repository_grant_continuation(request_id=operation_request_id)
     if continuation is None:
         return None
     result: dict[str, JsonValue] = {

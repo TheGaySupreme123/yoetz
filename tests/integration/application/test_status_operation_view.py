@@ -61,6 +61,7 @@ from yoetz.ports.ledger import (
     OperationKind,
     OperationRecord,
     OperationState,
+    SemanticDisclosureWait,
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectStorePort
 from yoetz.ports.publish_response_catalog import PublishResponseCatalogPort
@@ -577,7 +578,6 @@ async def test_status_view_operation_reports_pending_for_in_flight_check() -> No
         pending,
         None,
     )
-
     status = await execute_status(
         cast(StatusApplication, app),
         _status_operation_request(
@@ -634,6 +634,19 @@ async def test_status_view_operation_recovers_missing_repository_grant_for_same_
     ledger._state.operations[(seed.writer_id, op_id)] = (  # pyright: ignore[reportPrivateUsage]
         pending,
         None,
+    )
+    stale_job_id = protocol_id("job_", 705)
+    ledger._state.disclosure_waits[stale_job_id] = (  # pyright: ignore[reportPrivateUsage]
+        SemanticDisclosureWait(
+            stale_job_id,
+            protocol_id("att_", 706),
+            seed.writer_id,
+            op_id,
+            protocol_id("ppr_", 707),
+            datetime(2030, 1, 1, tzinfo=UTC),
+            "awaiting",
+            None,
+        )
     )
 
     status = await execute_status(

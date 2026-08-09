@@ -863,11 +863,16 @@ def _strip_optional_non_null_fields(
     optional: frozenset[str] = (
         cast(frozenset[str], declared) if isinstance(declared, frozenset) else frozenset()
     )
+    field_names_by_dump_key = {
+        (field.serialization_alias or field.alias or field_name): field_name
+        for field_name, field in type(model).model_fields.items()
+    }
     result: dict[str, JsonValue] = {}
     for key, value in dumped.items():
-        if key in optional and value is None:
+        field_name = field_names_by_dump_key.get(key, key)
+        if field_name in optional and value is None:
             continue
-        attribute: object = getattr(model, key)
+        attribute: object = getattr(model, field_name)
         if isinstance(attribute, BaseModel) and isinstance(value, Mapping):
             result[key] = _strip_optional_non_null_fields(attribute, value)
         elif (

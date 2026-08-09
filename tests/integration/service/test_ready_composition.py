@@ -1491,6 +1491,28 @@ async def test_ready_check_never_activates_provider_from_machine_policy_without_
         assert second.outcome == "replayed"
         assert second.semantic_status == first.semantic_status
         assert second.semantic_reason == first.semantic_reason
+
+        third = await app.check(
+            CheckRequest.model_validate(
+                {
+                    **common,
+                    "request_id": "req_00000000-0000-4000-8000-000000000403",
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": {
+                        "sequence": str(second.result_frontier.sequence),
+                        "head_digest": second.result_frontier.head_digest,
+                    },
+                    "mode": "semantic_required",
+                    "max_findings": "3",
+                    "policy_packs": ["work-integrity/0.1.0"],
+                }
+            )
+        )
+        assert type(third) is CheckCommitResult
+        assert third.outcome == "committed"
+        assert third.semantic_status.value == "blocked_by_policy"
+        assert third.semantic_reason.value == "scope_not_authorized"
         assert "fireworks" not in cast(
             tuple[str, ...], tuple(getattr(gateway, "connected_provider_ids")())
         )
