@@ -205,6 +205,12 @@ def _run_control_stop(lock_path: Path, runtime_path: Path) -> subprocess.Complet
     )
 
 
+def _short_socket_runtime() -> Path:
+    preferred_root = Path("/private/tmp")
+    runtime_root = preferred_root if preferred_root.is_dir() else Path(tempfile.gettempdir())
+    return Path(tempfile.mkdtemp(prefix="yoetz-sock-", dir=runtime_root))
+
+
 def _readline_bounded(process: subprocess.Popen[str], seconds: float = 10.0) -> str:
     stdout = process.stdout
     assert stdout is not None
@@ -255,7 +261,7 @@ def test_control_stop_exits_unlinks_endpoint_and_releases_singleton(tmp_path: Pa
     # AF_UNIX pathname limits are materially shorter than pytest's private full-suite basetemp.
     # The production runtime directory is short; use the same shape here so this remains a
     # control-stop lifecycle test rather than a platform pathname-limit probe.
-    runtime_path = Path(tempfile.mkdtemp(prefix="yoetz-sock-", dir="/private/tmp"))
+    runtime_path = _short_socket_runtime()
     runtime_path.chmod(0o700)
     endpoint_path = runtime_path / "control.sock"
     owner = _spawn_control_daemon(lock_path, runtime_path)
