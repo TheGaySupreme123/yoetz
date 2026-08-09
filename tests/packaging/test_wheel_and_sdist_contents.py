@@ -45,6 +45,15 @@ _FORBIDDEN_NAME_MARKERS: Final = (
 _NATIVE_BINARY_SUFFIXES: Final = (".so", ".pyd", ".dylib", ".dll")
 
 
+def _is_attestation_schema_member(name: str) -> bool:
+    """The reviewed attestation schema contains ``test`` in ``attestation``."""
+
+    return name in {
+        "yoetz/resources/schemas/consent/chat-user-attestation-1.0.0.schema.json",
+        "src/yoetz/resources/schemas/consent/chat-user-attestation-1.0.0.schema.json",
+    }
+
+
 def _load_pyproject() -> dict[str, object]:
     with (_REPO_ROOT / "pyproject.toml").open("rb") as handle:
         return tomllib.load(handle)
@@ -189,7 +198,8 @@ def test_wheel_member_inventory_matches_the_exact_allowlist(candidate: Candidate
 
     for member_name in members:
         lowered = member_name.lower()
-        assert not any(marker in lowered for marker in _FORBIDDEN_NAME_MARKERS), member_name
+        if not _is_attestation_schema_member(lowered):
+            assert not any(marker in lowered for marker in _FORBIDDEN_NAME_MARKERS), member_name
         assert not lowered.endswith(_NATIVE_BINARY_SUFFIXES), member_name
 
 
@@ -355,7 +365,8 @@ def test_sdist_member_inventory_matches_the_exact_allowlist(candidate: Candidate
         assert member_name.startswith(prefix), member_name
         rest = member_name[len(prefix) :]
         lowered = rest.lower()
-        assert not any(marker in lowered for marker in _FORBIDDEN_NAME_MARKERS), member_name
+        if not _is_attestation_schema_member(lowered):
+            assert not any(marker in lowered for marker in _FORBIDDEN_NAME_MARKERS), member_name
         assert not lowered.endswith(_NATIVE_BINARY_SUFFIXES), member_name
         if "/" not in rest:
             assert rest in allowed_top_level_files, f"unexpected top-level sdist file: {rest}"
@@ -486,3 +497,15 @@ def test_forbidden_name_marker_catches_test_and_cache_paths() -> None:
     ):
         lowered = marker_path.lower()
         assert any(marker in lowered for marker in _FORBIDDEN_NAME_MARKERS)
+
+
+def test_attestation_schema_exemption_is_exactly_archive_scoped() -> None:
+    assert _is_attestation_schema_member(
+        "yoetz/resources/schemas/consent/chat-user-attestation-1.0.0.schema.json"
+    )
+    assert _is_attestation_schema_member(
+        "src/yoetz/resources/schemas/consent/chat-user-attestation-1.0.0.schema.json"
+    )
+    assert not _is_attestation_schema_member(
+        "tests/fixtures/chat-user-attestation-1.0.0.schema.json"
+    )

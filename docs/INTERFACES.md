@@ -1563,23 +1563,36 @@ authorization signals.
 
 Elevated consent (`service/elevated_bootstrap.py`, CLI `yoetz consent` /
 `yoetz elevated-bootstrap`) is a separate owner-only pending-file lane outside
-`ControlClientPort`. It catalogues non-default operations (`yoetz.consent.catalog/2`) and creates
-digest-bound pending records (`yoetz.elevated-bootstrap.pending/2`). The v2 agent-safe projection
-contains only operation, risk class, bounded danger text, exact digests, expiry, pending ID, and
-the fixed `["yoetz","consent","review"]` command. A legacy v1 record is invalidated.
+`ControlClientPort`. It catalogues non-default operations (`yoetz.consent.catalog/3`) and creates
+digest-bound pending records (`yoetz.elevated-bootstrap.pending/2`). The v3 agent-safe projection
+contains only operation, risk class, bounded danger text, exact digests, expiry, pending ID, an
+exact bounded repository recipe when applicable, the fixed `["yoetz","consent","review"]`
+command, and an authorize command only for operations that permit agent-chat authorization. A
+legacy v1 durable record is invalidated. Catalog rules explicitly state that agent attestation is
+not independent proof and that a compromised agent can forge it.
 
-`yoetz consent review` is the only elevated review command, but it is not currently an approval
-path. It requires an independently authenticated, action-bound, one-use `UserPresencePort`
-attestation before opening the trusted console or atomically claiming the request. Because no
-production adapter is wired, it returns `human_authority_unavailable` and leaves pending state
-untouched. No TTY, pseudo-terminal, same-UID process, argv, environment, stdin, MCP, JSON, or caller
-boolean can authorize review. Once a verified adapter exists, vault initialization may generate a
-passphrase inside the trusted helper and provider credential set/rotate may use the same
-presence-gated surface. This lane does not unlock an already-locked vault. The explicit manual
-passphrase-initialization ceremony remains separate.
+`yoetz consent review` remains the OS-presence console path. It requires an independently
+authenticated, action-bound, one-use `UserPresencePort` attestation before opening the trusted
+console or atomically claiming the request. Because no production adapter is wired, it returns
+`human_authority_unavailable` and leaves pending state untouched. No TTY, pseudo-terminal, same-UID
+process, argv, environment, stdin, MCP, JSON, or caller boolean can authorize console review.
 
-The public v2 JSON Schema contracts are `catalog`, `pending-agent`, `prepare-result`,
-`review-result`, and `status`, each at version `2.0.0` under `schemas/consent/`. `review_only` irreversible
+`yoetz consent authorize` is the delegated agent-chat path (issue #164). It accepts one
+`yoetz.chat-user-attestation/1` envelope (`channel=agent_attested_chat_instruction`, allowlisted
+`client_kind`, `instruction_source=explicit_current_chat_user`, exact
+pending/operation/danger/target digests, decision, and `warning_acknowledged` for approve).
+Yoetz treats the assertion as authority but cannot independently authenticate its chat provenance;
+a compromised agent can forge it. Implemented agent-chat operations are
+`provider_credential_set`, `provider_credential_rotate`, and `repository_privacy_grant`. Credential
+approve may read one secret from stdin (`--provider-credential-stdin`); results are presence-only
+and never echo secret bytes. Vault initialization stays helper/console-only. This lane does not
+unlock an already-locked vault. The six MCP tools (ADR-011) are unchanged; authorize is local
+CLI control.
+
+The current public JSON Schema contracts are `catalog`, `pending-agent`, `prepare-result`,
+`review-result`, and `status`, each at version `3.0.0` under `schemas/consent/`; frozen version
+`2.0.0` bytes remain shipped for compatibility. `yoetz.chat-user-attestation/1` is version 1.0.0.
+`review_only` irreversible
 operations remain catalogued with `implemented=false` until owning mutation paths consume review.
 The Windows console adapter is a focused boundary implementation, not a claim that the Yoetz
 service, transport, peer authentication, packaging, or release surface supports Windows.

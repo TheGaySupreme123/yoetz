@@ -878,6 +878,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "2.0.0",
         "request_result",
         "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "consent/catalog-3.0.0.schema.json",
+        "catalog",
+        "3.0.0",
+        "request_result",
+        "local-control",
         lambda: (
             __import__(
                 "yoetz.protocol.consent", fromlist=["ConsentCatalogModel"]
@@ -885,9 +893,29 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "consent/chat-user-attestation-1.0.0.schema.json",
+        "chat-user-attestation",
+        "1.0.0",
+        "request_result",
+        "local-control",
+        lambda: (
+            __import__(
+                "yoetz.protocol.chat_user_authority", fromlist=["ChatUserAttestationModel"]
+            ).ChatUserAttestationModel
+        ),
+    ),
+    _RegistryEntry(
         "consent/pending-agent-2.0.0.schema.json",
         "pending-agent",
         "2.0.0",
+        "request_result",
+        "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "consent/pending-agent-3.0.0.schema.json",
+        "pending-agent",
+        "3.0.0",
         "request_result",
         "local-control",
         lambda: (
@@ -902,6 +930,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "2.0.0",
         "request_result",
         "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "consent/prepare-result-3.0.0.schema.json",
+        "prepare-result",
+        "3.0.0",
+        "request_result",
+        "local-control",
         lambda: (
             __import__(
                 "yoetz.protocol.consent", fromlist=["ConsentPrepareResultModel"]
@@ -914,6 +950,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "2.0.0",
         "request_result",
         "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "consent/review-result-3.0.0.schema.json",
+        "review-result",
+        "3.0.0",
+        "request_result",
+        "local-control",
         lambda: (
             __import__(
                 "yoetz.protocol.consent", fromlist=["ConsentReviewResultModel"]
@@ -924,6 +968,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "consent/status-2.0.0.schema.json",
         "status",
         "2.0.0",
+        "request_result",
+        "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "consent/status-3.0.0.schema.json",
+        "status",
+        "3.0.0",
         "request_result",
         "local-control",
         lambda: (

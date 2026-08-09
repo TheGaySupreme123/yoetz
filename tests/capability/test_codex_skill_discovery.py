@@ -161,6 +161,18 @@ def test_verified_skill_resources_have_stable_digests(tmp_path: Path) -> None:
     assert evidence.outcome is EvidenceOutcome.PASS
 
 
+def test_skill_and_guidance_define_exact_agent_attested_chat_authorization() -> None:
+    skill = read_verified_resource("skills/codex/yoetz/SKILL.md").decode("utf-8")
+    guidance = read_verified_resource("guidance/agent-instructions.md").decode("utf-8")
+
+    for document in (skill, guidance):
+        assert "agent-attested trust model, not host-verified proof" in document
+        assert "explicitly instructs you in the current chat" in document
+        assert "--provider-credential-stdin" in document
+        assert "vault_initialize" in document
+        assert "compromised agent could forge" in document
+
+
 @pytest.mark.anyio
 async def test_preview_and_modified_copy_protection_in_isolated_repo(tmp_path: Path) -> None:
     evidence_root = tmp_path / "evidence"

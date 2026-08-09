@@ -70,7 +70,7 @@ _SUPPORT_SCHEMA: Final = "yoetz.runtime-support/1"
 _RESOURCE_ROOT: Final = "yoetz.resources"
 _MANIFEST_LIMIT: Final = 1_048_576
 _RESOURCE_LIMIT: Final = 4_194_304
-_EXPECTED_RESOURCE_COUNT: Final = 89
+_EXPECTED_RESOURCE_COUNT: Final = 95
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -84,7 +84,8 @@ _RESOURCE_KINDS: Final = frozenset(
 )
 _REQUEST_RESULT_VERSIONS: Final = (
     ("actor-assertion", "1.0.0"),
-    ("catalog", "2.0.0"),
+    ("catalog", "3.0.0"),
+    ("chat-user-attestation", "1.0.0"),
     ("check-request", "1.0.0"),
     ("check-result", "1.0.0"),
     ("client-info", "1.0.0"),
@@ -98,8 +99,8 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("frontier", "1.0.0"),
     ("operation-result", "1.0.0"),
     ("outbound-case", "1.0.0"),
-    ("pending-agent", "2.0.0"),
-    ("prepare-result", "2.0.0"),
+    ("pending-agent", "3.0.0"),
+    ("prepare-result", "3.0.0"),
     ("privacy-policy", "1.0.0"),
     ("provider-judgment", "1.0.0"),
     ("public-error", "1.0.0"),
@@ -110,13 +111,13 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("receipt-result", "1.0.0"),
     ("respond-request", "1.0.0"),
     ("respond-result", "1.0.0"),
-    ("review-result", "2.0.0"),
+    ("review-result", "3.0.0"),
     ("semantic-provenance", "1.0.0"),
     ("service-status", "1.0.0"),
     ("setup-wizard-contract", "1.0.0"),
     ("start-request", "1.0.0"),
     ("start-result", "1.0.0"),
-    ("status", "2.0.0"),
+    ("status", "3.0.0"),
     ("status-request", "1.0.0"),
     ("status-result", "1.0.0"),
     ("subject-state-ref", "1.0.0"),
@@ -574,9 +575,9 @@ def _resource_counts(entries: tuple[_ResourceEntry, ...]) -> VersionPairs:
         "guidance_resources": 5,
         "migrations": 8,
         "runtime_support_resources": 1,
-        "schema_resources": 64,
+        "schema_resources": 70,
         "skill_resources": 2,
-        "total": 89,
+        "total": 95,
     }
     if counts != expected:
         raise ResourceIntegrityError("resource_counts_invalid")
