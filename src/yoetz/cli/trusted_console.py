@@ -18,6 +18,8 @@ _ERROR_REASONS: Final = frozenset(
     {
         _TRUST_FAILURE,
         "cancelled",
+        "empty_input",
+        "eof",
         "input_invalid",
         "interrupted",
     }
@@ -137,14 +139,14 @@ class _PosixConsoleAdapter:
                 finally:
                     view.release()
                 if count <= 0:
-                    raise TrustedConsoleError("input_invalid")
+                    raise TrustedConsoleError("eof")
                 used += count
                 if storage[used - 1] == 10:
                     break
             if used == 0 or storage[used - 1] != 10:
                 raise TrustedConsoleError("input_invalid")
             if used == 1:
-                raise TrustedConsoleError("input_invalid")
+                raise TrustedConsoleError("empty_input")
             storage[used - 1] = 0
             for index in range(used, len(storage)):
                 storage[index] = 0
@@ -334,12 +336,12 @@ class _CtypesWindowsConsoleApi:
                 ctypes.byref(read),
                 None,
             ):
-                raise TrustedConsoleError("input_invalid")
+                raise TrustedConsoleError("eof")
             used = int(read.value)
             while used > 0 and buffer[used - 1] in {"\r", "\n"}:
                 used -= 1
             if used <= 0:
-                raise TrustedConsoleError("input_invalid")
+                raise TrustedConsoleError("empty_input")
             encoded_size = int(
                 self._kernel32.WideCharToMultiByte(
                     self._CP_UTF8,
@@ -445,7 +447,10 @@ class _WindowsConsoleAdapter:
         encoded = self._api.read_line(self._input, maximum, hidden=hidden)
         if hidden:
             self.write("\n")
-        if not encoded or len(encoded) > maximum:
+        if not encoded:
+            _overwrite(encoded)
+            raise TrustedConsoleError("empty_input")
+        if len(encoded) > maximum:
             _overwrite(encoded)
             raise TrustedConsoleError("input_invalid")
         return encoded

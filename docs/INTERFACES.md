@@ -2406,6 +2406,17 @@ schema tokens are `yoetz.setup-wizard-marker/1`, `yoetz.setup-wizard-report/1`,
 `yoetz.setup-status/1`, and `yoetz.mcp-registration-preview/1`; the marker lives at
 `state_dir()/setup-wizard.json` via `config.paths.setup_marker_path`. The CLI surfaces are
 `yoetz setup run|status` and `yoetz integrate <harness> mcp status|preview|install` (ADR-012).
+Standalone `yoetz provider endpoint` retains its explicit credential next command. When endpoint
+binding is embedded in the composed setup wizard, that standalone handoff is suppressed because
+the wizard still owns privacy consent and confidential ingress. Every visible yes/no prompt near
+credential setup says that API-key entry has not started and accepts only yes/no; a separate
+heading announces the hidden trusted-console ceremony. Invalid visible-prompt input is never
+reflected by Yoetz. Provider credential failure reasons cross the report boundary only through a
+fixed nonsecret allowlist, while provider binding, credential storage, repository privacy, service
+state, and semantic readiness remain independent report components. Recovery commands are derived
+from the read-only committed/live status when available, with component results used only as a
+state-equivalent fallback, so failure in a later component cannot rewrite an already committed
+privacy grant.
 `setup status` rows carry `registration_state` and `registered_route_profile`; the
 `integrate <harness> mcp status` body carries `state` and `route_profile`.
 

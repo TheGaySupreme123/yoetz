@@ -213,6 +213,146 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
     return state
 
 
+def _wire_composed_provider_setup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    credential_outcome: Literal["stored", "failed"],
+    credential_reason: str = "empty_input",
+) -> dict[str, object]:
+    """Keep the real composed wizard/provider flow and fake only external boundaries."""
+
+    import yoetz.cli.privacy_setup as privacy_setup_module
+    import yoetz.cli.provider_binding as provider_binding_module
+    import yoetz.cli.provider_status as provider_status_module
+    import yoetz.cli.setup as setup_module
+    import yoetz.cli.unlock as unlock_module
+    import yoetz.config.load as config_module
+
+    provider = SimpleNamespace(
+        provider_id="fireworks",
+        model="accounts/fireworks/models/minimax-m3",
+        endpoint_profile_id="fireworks-responses",
+        endpoint_profile_version="1.0.0",
+    )
+    config_path = tmp_path / "config.toml"
+    state: dict[str, object] = {
+        "binding_embedded_flags": [],
+        "credential_targets": [],
+        "privacy_calls": [],
+        "reports": [],
+        "restart_calls": 0,
+        "status_reads": 0,
+        "stored": False,
+    }
+
+    async def ready(*, start_if_absent: bool = False) -> dict[str, object]:
+        del start_if_absent
+        return {"reachable": True, "state": "ready", "vault_mode": "os_managed"}
+
+    async def restart() -> dict[str, object]:
+        state["restart_calls"] = cast(int, state["restart_calls"]) + 1
+        return {"reachable": True, "state": "ready", "vault_mode": "os_managed"}
+
+    def prompt_binding(
+        *,
+        path: Path | None = None,
+        show_standalone_next_step: bool = True,
+    ) -> Path:
+        del path
+        cast(list[bool], state["binding_embedded_flags"]).append(show_standalone_next_step)
+        config_path.write_text("[provider]\n", encoding="utf-8")
+        return config_path
+
+    def load_config(*_args: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            storage=SimpleNamespace(data_dir=tmp_path),
+            provider=provider,
+        )
+
+    async def privacy_setup(
+        *,
+        recipe_hint: str | None = None,
+        offer_recommended: bool = False,
+        credential_probe_authorized: bool = False,
+    ) -> SimpleNamespace:
+        cast(list[tuple[str | None, bool, bool]], state["privacy_calls"]).append(
+            (recipe_hint, offer_recommended, credential_probe_authorized)
+        )
+        return SimpleNamespace(
+            outcome="configured",
+            profile="trusted_provider",
+            proposal_id="pvp_issue_165",
+            grant_state="granted",
+            migration_state="not_applicable",
+            reason=None,
+        )
+
+    async def provider_status() -> dict[str, object]:
+        state["status_reads"] = cast(int, state["status_reads"]) + 1
+        if state["status_reads"] == 1:
+            return {"credential_connected": False}
+        stored = state["stored"] is True
+        blockers: tuple[dict[str, object], ...] = ()
+        if not stored:
+            blockers = (
+                {
+                    "condition": "provider_credential",
+                    "state": "not_connected",
+                    "next_command": "yoetz provider credential set",
+                },
+            )
+        return {
+            "semantic_ready": stored,
+            "endpoint_bound": True,
+            "credential_connected": stored,
+            "llm_inference_enabled": True,
+            "repository_grant_state": "granted",
+            "blockers": blockers,
+        }
+
+    async def set_credential(
+        target: object,
+        credential: bytearray | None,
+        reauthentication: bytearray | None,
+    ) -> SimpleNamespace:
+        assert credential is None
+        assert reauthentication is None
+        cast(list[object], state["credential_targets"]).append(target)
+        if credential_outcome == "failed":
+            raise unlock_module.HumanCeremonyCliError(credential_reason)
+        state["stored"] = True
+        return SimpleNamespace(activation_status="stored")
+
+    original_emit_human_report = setup_module._emit_human_report
+
+    def capture_report(report: dict[str, object]) -> None:
+        cast(list[dict[str, object]], state["reports"]).append(
+            cast(dict[str, object], json.loads(json.dumps(report)))
+        )
+        original_emit_human_report(cast(dict[str, object], report))
+
+    monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(setup_module, "_service_reachability", ready)
+    monkeypatch.setattr(setup_module, "_restart_service_for_semantic_composition", restart)
+    monkeypatch.setattr(setup_module, "_emit_human_report", capture_report)
+    monkeypatch.setattr(
+        provider_binding_module,
+        "prompt_provider_endpoint_binding",
+        prompt_binding,
+    )
+    monkeypatch.setattr(config_module, "load_config", load_config)
+    monkeypatch.setattr(privacy_setup_module, "run_privacy_setup", privacy_setup)
+    monkeypatch.setattr(
+        privacy_setup_module,
+        "get_privacy_setup_snapshot",
+        _fake_repository_privacy_snapshot,
+    )
+    monkeypatch.setattr(provider_status_module, "provider_status_report", provider_status)
+    monkeypatch.setattr(unlock_module, "set_provider_credential", set_credential)
+    return state
+
+
 def test_non_interactive_without_accept_is_a_dry_run(wizard_env: dict[str, object]) -> None:
     result = _RUNNER.invoke(cli.app, ["setup", "run", "--non-interactive", "--json"])
     assert result.exit_code == 0
@@ -421,7 +561,9 @@ def test_interactive_wizard_selects_harness_then_installation_and_requires_y_or_
     import yoetz.cli.setup as setup_module
 
     monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)
-    monkeypatch.setattr(provider_binding, "prompt_provider_endpoint_binding", lambda: None)
+    monkeypatch.setattr(
+        provider_binding, "prompt_provider_endpoint_binding", lambda **_kwargs: None
+    )
 
     # harness 1, installation 2, review mode 2 (local only), a rejected y/n, then confirm.
     result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\n2\n2\nmaybe\nY\n")
@@ -458,7 +600,9 @@ def test_interactive_registration_n_declines_without_mutation(
     import yoetz.cli.setup as setup_module
 
     monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)
-    monkeypatch.setattr(provider_binding, "prompt_provider_endpoint_binding", lambda: None)
+    monkeypatch.setattr(
+        provider_binding, "prompt_provider_endpoint_binding", lambda **_kwargs: None
+    )
 
     result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\n1\nN\n")
 
@@ -534,6 +678,213 @@ def test_semantic_first_run_suggests_and_selects_assisted_privacy_draft(
     assert result.exit_code == 0
     assert privacy_calls == [("assisted_review", True, True)]
     assert "Privacy: configured (confirm_every_request)" in result.stdout
+
+
+def test_visible_consent_prompt_never_reflects_credential_shaped_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.cli.setup as setup_module
+
+    fake_credential = "sk-fake-issue-165-never-repeat"
+    answers = iter((fake_credential, "yes"))
+    emitted: list[str] = []
+
+    def prompt(*_args: object, **_kwargs: object) -> str:
+        return next(answers)
+
+    def echo(value: object = "", **_kwargs: object) -> None:
+        emitted.append(str(value))
+
+    monkeypatch.setattr(setup_module.typer, "prompt", prompt)
+    monkeypatch.setattr(setup_module.typer, "echo", echo)
+
+    assert (
+        setup_module._prompt_yes_no_before_credential(  # pyright: ignore[reportPrivateUsage]
+            "Consent?",
+            default=True,
+        )
+        is True
+    )
+    rendered = "\n".join(emitted)
+    assert fake_credential not in rendered
+    assert "not credential entry" in rendered
+    assert "No API key was read or stored" in rendered
+
+    _service, sanitized = setup_module._provider_setup_result(  # pyright: ignore[reportPrivateUsage]
+        {"reachable": True, "state": "ready"},
+        {
+            "binding": "configured",
+            "credential": "failed",
+            "credential_reason": fake_credential,
+        },
+    )
+    assert sanitized["credential_reason"] == "credential_setup_failed"
+    assert fake_credential not in json.dumps(sanitized)
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("cancelled", "cancelled"),
+        ("empty_input", "empty_input"),
+        ("eof", "eof"),
+        ("confirmation_mismatch", "confirmation_mismatch"),
+        ("credential_ambiguous", "credential_ambiguous"),
+        ("credential_secret_rejected", "credential_secret_rejected"),
+        ("credential_service_unavailable", "credential_service_unavailable"),
+        ("secret-shaped-caller-text", "credential_setup_failed"),
+    ],
+)
+def test_provider_setup_reason_is_bounded_and_allowlisted(reason: str, expected: str) -> None:
+    import yoetz.cli.setup as setup_module
+
+    assert (
+        setup_module._allowlisted_provider_setup_reason(  # pyright: ignore[reportPrivateUsage]
+            reason
+        )
+        == expected
+    )
+
+
+def test_composed_wizard_preserves_privacy_when_hidden_credential_input_is_empty(
+    wizard_env: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import yoetz.cli.setup as setup_module
+
+    fake_credential = "sk-fake-issue-165-must-never-appear"
+    wizard_env["outputs"] = [
+        CommandOutput(1, b""),
+        CommandOutput(1, b""),
+        CommandOutput(0, b""),
+        _yoetz_entry("policy"),
+    ]
+    state = _wire_composed_provider_setup(
+        monkeypatch,
+        tmp_path,
+        credential_outcome="failed",
+        credential_reason="empty_input",
+    )
+    original_prompt = setup_module.typer.prompt
+    probe_answers = iter((fake_credential, "yes"))
+
+    def route_visible_prompts(prompt: str, *args: object, **kwargs: object) -> object:
+        if prompt.startswith("After storage, permit one fixed"):
+            return next(probe_answers)
+        return original_prompt(prompt, *args, **kwargs)
+
+    monkeypatch.setattr(setup_module.typer, "prompt", route_visible_prompts)
+
+    result = _RUNNER.invoke(
+        cli.app,
+        ["setup", "run"],
+        input="1\n1\nY\n",
+    )
+
+    assert result.exit_code == 0
+    reports = cast(list[dict[str, object]], state["reports"])
+    assert len(reports) == 1
+    report = reports[0]
+    assert report["privacy"] == {
+        "outcome": "configured",
+        "profile": "trusted_provider",
+        "proposal_id": "pvp_issue_165",
+        "grant_state": "granted",
+        "migration_state": "not_applicable",
+        "reason": None,
+    }
+    assert report["provider"] == {
+        "binding": "configured",
+        "credential": "failed",
+        "credential_reason": "empty_input",
+    }
+    assert report["service"] == {
+        "reachable": True,
+        "state": "ready",
+        "vault_mode": "os_managed",
+    }
+    assert report["next_steps"] == [setup_module._NEXT_CREDENTIAL]  # pyright: ignore[reportPrivateUsage]
+    semantic_status = cast(dict[str, object], report["semantic_status"])
+    assert semantic_status["semantic_ready"] is False
+    assert semantic_status["repository_grant_state"] == "granted"
+    assert report["marker_written"] is False
+    assert state["binding_embedded_flags"] == [False]
+    assert state["privacy_calls"] == [("assisted_review", True, True)]
+    assert state["status_reads"] == 2
+    assert state["restart_calls"] == 1
+    assert state["stored"] is False
+    assert len(cast(list[object], state["credential_targets"])) == 1
+
+    assert "Privacy and credential-verification consent" in result.stdout
+    assert "API-key entry has not started" in result.stdout
+    assert "not credential entry" in result.stderr
+    assert "Hidden credential ceremony begins now" in result.stdout
+    assert "Privacy: configured (trusted_provider)" in result.stdout
+    assert "repository grant: granted" in result.stdout
+    assert "Credential: not stored" in result.stdout
+    assert "Credential reason: empty_input" in result.stdout
+    assert "next: run 'yoetz provider credential set'" not in result.stdout
+    assert "restart the Yoetz service" not in " ".join(cast(list[str], report["next_steps"]))
+    assert "yoetz --privacy" not in " ".join(cast(list[str], report["next_steps"]))
+    assert fake_credential not in result.output
+    assert fake_credential not in json.dumps(report)
+    secret_bytes = fake_credential.encode("utf-8")
+    for candidate in tmp_path.rglob("*"):
+        if candidate.is_file():
+            assert secret_bytes not in candidate.read_bytes()
+
+
+def test_composed_wizard_reaches_semantic_readiness_after_hidden_credential_storage(
+    wizard_env: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    wizard_env["outputs"] = [
+        CommandOutput(1, b""),
+        CommandOutput(1, b""),
+        CommandOutput(0, b""),
+        _yoetz_entry("policy"),
+    ]
+    state = _wire_composed_provider_setup(
+        monkeypatch,
+        tmp_path,
+        credential_outcome="stored",
+    )
+
+    result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\n1\nY\nY\n")
+
+    assert result.exit_code == 0
+    reports = cast(list[dict[str, object]], state["reports"])
+    assert len(reports) == 1
+    report = reports[0]
+    assert report["privacy"] == {
+        "outcome": "configured",
+        "profile": "trusted_provider",
+        "proposal_id": "pvp_issue_165",
+        "grant_state": "granted",
+        "migration_state": "not_applicable",
+        "reason": None,
+    }
+    assert report["provider"] == {
+        "binding": "configured",
+        "credential": "stored",
+        "credential_display": "********",
+    }
+    assert cast(dict[str, object], report["semantic_status"])["semantic_ready"] is True
+    assert report["next_steps"] == []
+    assert report["marker_written"] is True
+    assert state["binding_embedded_flags"] == [False]
+    assert state["privacy_calls"] == [("assisted_review", True, True)]
+    assert state["status_reads"] == 2
+    assert state["restart_calls"] == 2
+    assert state["stored"] is True
+    targets = cast(list[object], state["credential_targets"])
+    assert len(targets) == 1
+    assert getattr(targets[0], "repository_privacy_commitment") == "hmac-sha256:" + "7" * 64
+    assert "Hidden credential ceremony begins now" in result.stdout
+    assert "Credential: ********" in result.stdout
+    assert "Semantic-advice readiness: ready" in result.stdout
 
 
 def test_no_codex_found_still_completes_with_guidance(wizard_env: dict[str, object]) -> None:
@@ -951,7 +1302,7 @@ def test_uninitialized_provider_setup_provisions_auto_unlock(
         fake_create_for_initialization,
     )
     monkeypatch.setattr(unlock_module, "initialize_passphrase_vault", fake_initialize)
-    monkeypatch.setattr(binding_module, "prompt_provider_endpoint_binding", lambda: None)
+    monkeypatch.setattr(binding_module, "prompt_provider_endpoint_binding", lambda **_kwargs: None)
     monkeypatch.setattr(config_module, "load_config", fake_load_config)
     monkeypatch.setattr(paths_module, "bundle_root", fake_bundle_root)
     monkeypatch.setattr(setup_module, "_service_reachability", fake_reachability)
@@ -1039,7 +1390,7 @@ def test_uninitialized_setup_refuses_preexisting_auto_unlock_entry(
 
     monkeypatch.setattr(keyring_module, "AutoUnlockPassphraseStore", fake_store)
     monkeypatch.setattr(unlock_module, "initialize_passphrase_vault", fake_initialize)
-    monkeypatch.setattr(binding_module, "prompt_provider_endpoint_binding", lambda: None)
+    monkeypatch.setattr(binding_module, "prompt_provider_endpoint_binding", lambda **_kwargs: None)
     monkeypatch.setattr(config_module, "load_config", fake_load_config)
     monkeypatch.setattr(paths_module, "bundle_root", fake_bundle_root)
     monkeypatch.setattr(setup_module, "_service_reachability", fake_reachability)
@@ -1282,7 +1633,7 @@ def test_existing_bound_credential_can_be_reused_without_requesting_it_again(
     def reuse(*_args: object, **_kwargs: object) -> bool:
         return True
 
-    monkeypatch.setattr(setup_module.typer, "confirm", reuse)
+    monkeypatch.setattr(setup_module, "_prompt_yes_no_before_credential", reuse)
 
     _service, report = asyncio.run(
         setup_module._interactive_provider_setup(  # pyright: ignore[reportPrivateUsage]
@@ -1364,7 +1715,7 @@ def test_existing_bound_credential_replacement_does_not_inherit_old_presence(
     def replace_stored(*_args: object, **_kwargs: object) -> bool:
         return False
 
-    monkeypatch.setattr(setup_module.typer, "confirm", replace_stored)
+    monkeypatch.setattr(setup_module, "_prompt_yes_no_before_credential", replace_stored)
 
     _service, report = asyncio.run(
         setup_module._interactive_provider_setup(  # pyright: ignore[reportPrivateUsage]

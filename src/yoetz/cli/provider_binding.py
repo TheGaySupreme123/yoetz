@@ -119,8 +119,17 @@ def prompt_provider_model(choice: str) -> str | None:
     return None
 
 
-def prompt_provider_endpoint_binding(*, path: Path | None = None) -> Path | None:
-    """Prompt for a reviewed provider preset or custom origin; never asks for secrets."""
+def prompt_provider_endpoint_binding(
+    *,
+    path: Path | None = None,
+    show_standalone_next_step: bool = True,
+) -> Path | None:
+    """Prompt for a reviewed provider preset or custom origin; never asks for secrets.
+
+    ``show_standalone_next_step`` is false only when a composed setup flow owns the next
+    transition. Standalone endpoint setup keeps the repair command, while the wizard avoids
+    implying that it stopped before its policy and confidential-credential phases.
+    """
 
     typer.echo("")
     typer.echo("LLM endpoint (nonsecret)")
@@ -184,5 +193,6 @@ def prompt_provider_endpoint_binding(*, path: Path | None = None) -> Path | None
             "  note: owner-declared hosts use unknown data-use posture and never inherit "
             "the assisted recommendation badge"
         )
-    typer.echo(f"  next: {NEXT_CREDENTIAL}")
+    if show_standalone_next_step:
+        typer.echo(f"  next: {NEXT_CREDENTIAL}")
     return written
