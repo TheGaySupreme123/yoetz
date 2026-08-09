@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Final, Literal, cast
 
 from yoetz.domain.events import (
+    EVIDENCE_SCHEMA_VERSION,
     ActionKind,
     ActionRecordedPayload,
     ClaimKind,
@@ -54,6 +55,7 @@ from yoetz.protocol.coverage import (
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 
 __all__ = [
+    "approved_check_author",
     "MATERIALIZATION_MAPPING_VERSION",
     "MaterializedObservationBatch",
     "MaterializedObservationDraft",
@@ -206,7 +208,10 @@ def _draft(
 ) -> MaterializedObservationDraft:
     from yoetz.protocol.canonical import canonical_encode
 
-    schema = EventSchema(schema_name, "1.0.0")
+    schema = EventSchema(
+        schema_name,
+        EVIDENCE_SCHEMA_VERSION if schema_name == "evidence_recorded" else "1.0.0",
+    )
     draft = EventDraft(
         event_id(event),
         schema,
@@ -638,6 +643,14 @@ def observation_author() -> Actor:
         actor_id("yoetz:observation-coordinator"),
         ActorType.HARNESS,
         AuthorshipAssurance.HARNESS_OBSERVED,
+    )
+
+
+def approved_check_author() -> Actor:
+    return Actor(
+        actor_id("yoetz:approved-check-service"),
+        ActorType.YOETZ_ENGINE,
+        AuthorshipAssurance.SERVICE_AUTHENTICATED,
     )
 
 

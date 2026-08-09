@@ -315,7 +315,7 @@ No arithmetic averaging exists anywhere.
   observed artifact state. `described_state` is explanatory only and never participates in
   deterministic equality, freshness identity, or request commitments.
 
-## 7. Event families (`domain/events.py`, schema version `1.0.0` each)
+## 7. Event families (`domain/events.py`, schema version `1.0.0` unless noted)
 
 `session_opened`, `session_resumed`, `plan_published`, `obligation_published`,
 `assignment_recorded`, `decision_recorded`, `action_recorded`, `result_recorded`,
@@ -360,10 +360,10 @@ the singleton `(receipt_object_id,)`. These typed-ID mirrors plus locator logica
 are sufficient to rebuild the pure reverse `ReplayIndex` after payload deletion without retaining
 content, paths, URLs, or human redaction text.
 
-The supported payload dispatch map is keyed by the complete `EventSchema`; only the sixteen exact
-`(family, "1.0.0")` pairs decode. Every other syntactically valid pair, including a registered name
-at another patch, minor, or major version, is preserved as `UnknownEvent`. A malformed payload for
-an exact supported pair is invalid and never falls back to opaque handling.
+The supported payload dispatch map is keyed by the complete `EventSchema`. All sixteen families
+decode at `1.0.0`; `evidence_recorded/1.1.0` is also exact-known. Every other syntactically valid
+pair is preserved as `UnknownEvent`. A malformed payload for an exact supported pair is invalid and
+never falls back to opaque handling.
 
 Both ledger-record variants carry the complete accepted-envelope fields. `UnknownEvent` replaces
 the typed handle with `JsonValue | None` and adds `canonical_payload_digest` plus the fixed
@@ -389,6 +389,12 @@ Key payload fields (minimum; full shapes in `src/yoetz/domain/events.py`):
   `unknown`), optional `exit_status`, `subject_state`, `evidence_refs`.
 - `evidence_recorded`: `evidence_id`, `strength` (mirrors `EvidenceImmutability`), `reference`
   (mutable ref) and/or `captured_object_id` + `content_digest`, `observed_at`, `evidence_kind`.
+  New digest-bearing records use schema `1.1.0` and require `digest_binding` with closed `subject`,
+  `content_availability`, `byte_count`, and `provenance`. Kind/subject compatibility is closed;
+  `test_result` cannot bind `source_diff`. Ordinary publication can assert only
+  `caller_asserted`; approved-check and import provenance are reserved to their authenticated
+  channels. Schema `1.0.0` stays exact-readable and an untyped legacy digest remains unknown rather
+  than inheriting a subject from prose.
 - `claim_recorded`: `claim_id`, `claim_kind` (`completion`|`material`), `statement`,
   `supporting_refs` (evidence/result/obligation IDs), optional `subject_state`.
 - `plan_revised`: `plan_version`, `supersedes_plan_version`, `reason`, `summary`,
@@ -767,6 +773,10 @@ the frontier merely advanced.
   dimensions, caps freshness at `partial`, and adds `missing_ref`; an opaque event does the same and
   adds `unknown_event`. Every cap is a registered component-wise minimum, existing gaps are unioned
   and sorted, and overflow of the 64-token bound fails case freezing rather than truncating.
+  Relevant digest evidence additionally contributes `evidence_digest_subject_legacy_unknown`,
+  `evidence_content_digest_only`, or `evidence_content_withheld`. Relevance follows the current
+  claim/obligation/response support graph (including referenced results); unrelated historical
+  evidence contributes no gap to the current case.
 - `FindingBasisRef` is exactly
   `EventId|ObligationId|ClaimId|ActionId|ResultId|EvidenceId|FindingId`. `FindingFact.subject_refs`
   and `FindingBasis.supporting_refs` use that nominal union, never raw unvalidated strings.
@@ -2150,6 +2160,11 @@ Independent verification support (local control, not MCP):
   newer subject digests stale older pending work, identical workspace/policy/approval/state tuples
   are cached, abandoned running work returns to pending, and immutable results record whether the
   post-run state is still current.
+- Each completed approved check materializes a service-owned action/evidence/result graph. The
+  captured evidence is a bounded canonical receipt binding approval commitment, result digest,
+  output digest/byte count and encrypted output-object identity, subject state before/after, and
+  freshness. It uses `evidence_recorded/1.1.0` with `approved_check` provenance; no cooperative
+  request can mint that provenance.
 - `ObservationVerificationSupervisor` — ready-lifecycle background owner that wakes on enqueue,
   discovers pending work at startup, drains one serialized check per workspace through the
   enforcing sandbox, reclaims expired leases, and stops before vault/runtime closure. Hook ingest

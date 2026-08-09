@@ -13,6 +13,8 @@ import pytest
 from yoetz.adapters.integrations.codex_plugin import render_plugin_tree
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.application.observation_verification import (
+    CompletedApprovedCheck,
+    ObservationVerificationJob,
     ObservationVerificationSupervisor,
     ObservationVerificationWorker,
     VerificationDrainHandle,
@@ -124,6 +126,211 @@ async def test_supervisor_drains_after_notify_without_inline_await() -> None:
     await asyncio.sleep(0.05)
     assert ran["count"] >= 1
     await supervisor.stop()
+
+
+@pytest.mark.anyio
+async def test_completed_approved_check_forwards_bounded_result_for_ledger_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yoetz.adapters.approved_checks import (
+        ApprovedCheckApproval,
+        ApprovedCheckOutcome,
+        ApprovedCheckResult,
+        ApprovedCheckStatus,
+        approval_commitment,
+    )
+    from yoetz.application import observation_verification as verification_module
+
+    state = "sha256:" + "d" * 64
+    approval_digest = approval_commitment("focused-tests", ("/usr/bin/true",), allow_network=False)
+    result = ApprovedCheckResult(
+        status=ApprovedCheckStatus.PASSED,
+        outcome=ApprovedCheckOutcome.SUCCESS,
+        exit_status=0,
+        output_digest="sha256:" + "e" * 64,
+        output_bytes=14,
+        subject_state_digest=state,
+        approval_commitment=approval_digest,
+        result_digest="sha256:" + "f" * 64,
+        duration_ms=2,
+    )
+    approval = ApprovedCheckApproval(
+        approval_id="focused-tests",
+        argv=("/usr/bin/true",),
+        allow_network=False,
+        timeout_seconds=10.0,
+        approval_commitment=approval_digest,
+    )
+    job = ObservationVerificationJob(
+        job_id="job-1",
+        workspace_commitment="hmac-sha256:" + "a" * 64,
+        policy_digest="sha256:" + "b" * 64,
+        approval_commitment=approval_digest,
+        subject_state_digest=state,
+        state_token=1,
+    )
+    order: list[str] = []
+
+    class _Repo:
+        def claim_next(self, **_kwargs: object) -> ObservationVerificationJob | None:
+            return job
+
+        def complete(self, **kwargs: object) -> None:
+            order.append("complete")
+            assert kwargs["result"] == result
+            assert kwargs["output_object_id"] == "obj_00000000-0000-4000-8000-000000000001"
+
+    class _Runner:
+        _output_sink: object | None = None
+
+    def _run(**kwargs: object):
+        runner = kwargs["runner"]
+        sink = getattr(runner, "_output_sink")
+        assert callable(sink)
+        sink(b"bounded output")
+        return result, None
+
+    monkeypatch.setattr(verification_module, "run_bound_approved_check", _run)
+    persisted: list[bytes] = []
+    materialized: list[CompletedApprovedCheck] = []
+
+    async def _persist(_job: ObservationVerificationJob, content: bytes) -> str:
+        persisted.append(content)
+        return "obj_00000000-0000-4000-8000-000000000001"
+
+    async def _materialize(completed: CompletedApprovedCheck) -> None:
+        order.append("materialize")
+        materialized.append(completed)
+
+    worker = ObservationVerificationWorker(
+        repository=_Repo(),  # type: ignore[arg-type]
+        runner=_Runner(),  # type: ignore[arg-type]
+        workspace_provider=lambda _value: object(),  # type: ignore[arg-type,return-value]
+        policy_provider=lambda _workspace, _policy: (approval,),
+        capture_subject_state=lambda _workspace: state,
+        persist_output=_persist,
+        service_generation=1,
+        lease_owner="service",
+        now=lambda: "2026-08-09T00:00:00.000Z",
+        lease_expires_at=lambda: "2026-08-09T00:02:00.000Z",
+        materialize_result=_materialize,
+    )
+    assert await worker.run_once() == job
+    assert persisted == [b"bounded output"]
+    assert len(materialized) == 1
+    completed = materialized[0]
+    assert completed.approval_id == "focused-tests"
+    assert completed.result == result
+    assert completed.output_object_id == "obj_00000000-0000-4000-8000-000000000001"
+    assert completed.is_current is True
+    assert order == ["materialize", "complete"]
+
+
+@pytest.mark.anyio
+async def test_approved_check_materialization_is_service_owned_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    from typing import cast
+
+    from builders.ledger_adapters import (
+        FixedClock,
+        FixedIds,
+        MemoryObjects,
+        append_command,
+        memory_adapter,
+        ownership_fence,
+    )
+    from yoetz.adapters.approved_checks import (
+        ApprovedCheckOutcome,
+        ApprovedCheckResult,
+        ApprovedCheckStatus,
+        approval_commitment,
+    )
+    from yoetz.application.observation_coordinator import ObservationCoordinator
+    from yoetz.domain.events import (
+        AcceptedEvent,
+        EvidenceDigestProvenance,
+        EvidenceRecordedPayload,
+    )
+    from yoetz.ports.diagnostics import RuntimeCapability
+    from yoetz.ports.importer import ImporterPort
+    from yoetz.ports.objects import ObjectStorePort
+    from yoetz.ports.runtime import BundleRuntimePort, TaskRuntime
+    from yoetz.protocol.coverage import PublicationChannel
+
+    seed = append_command()
+    ledger = memory_adapter(seed)
+    objects = cast(MemoryObjects, ledger._objects)  # pyright: ignore[reportPrivateUsage]
+    runtime = TaskRuntime(
+        seed.task_id,
+        seed.session_id,
+        seed.writer_id,
+        frozenset({RuntimeCapability.WRITE}),
+        ledger,
+        cast(ObjectStorePort, objects),
+        cast(ImporterPort, object()),
+        "0.1.0",
+        "0.1.0",
+        "0.1",
+        "1.0.0",
+        ownership_fence(),
+    )
+    coordinator = ObservationCoordinator(
+        runtime=cast(BundleRuntimePort, object()),
+        local=LocalObservationStore(_state=tmp_path),
+        clock=FixedClock(),
+        ids=FixedIds(),
+        state_root=tmp_path,
+    )
+    approval_digest = approval_commitment("focused-tests", ("/usr/bin/true",), allow_network=False)
+    result = ApprovedCheckResult(
+        status=ApprovedCheckStatus.PASSED,
+        outcome=ApprovedCheckOutcome.SUCCESS,
+        exit_status=0,
+        output_digest="sha256:" + "e" * 64,
+        output_bytes=14,
+        subject_state_digest="sha256:" + "d" * 64,
+        approval_commitment=approval_digest,
+        result_digest="sha256:" + "f" * 64,
+        duration_ms=2,
+    )
+    completed = CompletedApprovedCheck(
+        job=ObservationVerificationJob(
+            job_id="job-materialize-1",
+            workspace_commitment="hmac-sha256:" + "a" * 64,
+            policy_digest="sha256:" + "b" * 64,
+            approval_commitment=approval_digest,
+            subject_state_digest="sha256:" + "d" * 64,
+            state_token=1,
+        ),
+        approval_id="focused-tests",
+        result=result,
+        subject_state_after="sha256:" + "d" * 64,
+        output_object_id=None,
+        is_current=True,
+        recorded_at="2026-08-09T00:00:00.000Z",
+    )
+
+    await coordinator._materialize_approved_check(runtime, completed)  # pyright: ignore[reportPrivateUsage]
+    object_count = len(objects._data)  # pyright: ignore[reportPrivateUsage]
+    await coordinator._materialize_approved_check(runtime, completed)  # pyright: ignore[reportPrivateUsage]
+    assert len(objects._data) == object_count  # pyright: ignore[reportPrivateUsage]
+
+    records = [row async for row in ledger.load_events(seed.session_id)]
+    assert [row.schema.name for row in records] == [
+        "action_recorded",
+        "evidence_recorded",
+        "result_recorded",
+    ]
+    evidence = records[1]
+    assert type(evidence) is AcceptedEvent
+    assert evidence.publication_channel is PublicationChannel.ENGINE_DERIVED
+    assert evidence.author.actor_type.value == "yoetz_engine"
+    assert type(evidence.payload) is EvidenceRecordedPayload
+    assert evidence.payload.digest_binding is not None
+    assert evidence.payload.digest_binding.provenance is EvidenceDigestProvenance.APPROVED_CHECK
+    assert evidence.payload.digest_binding.approval_commitment == approval_digest
+    assert evidence.payload.digest_binding.approved_check_result_digest == result.result_digest
 
 
 def test_untrusted_workspace_dot_does_not_bind_without_consent(

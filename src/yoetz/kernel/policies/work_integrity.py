@@ -115,6 +115,7 @@ def _coverage_admissible(case: DeterministicCase, ref: FindingBasisRef) -> bool:
         "captured_object_unavailable",
         "missing_ref",
         "unknown_event",
+        "evidence_digest_subject_legacy_unknown",
     } & set(coverage.known_gaps)
 
 

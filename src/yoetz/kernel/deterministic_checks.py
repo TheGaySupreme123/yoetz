@@ -14,6 +14,7 @@ from yoetz.domain.events import (
     AcceptedEvent,
     ClaimKind,
     EventSchema,
+    EvidenceContentAvailability,
     LedgerRecord,
     RedactionState,
     UnknownEvent,
@@ -1029,6 +1030,7 @@ def _weaken_ref_coverage(
     unavailable_object: bool,
     missing_ref: bool,
     unknown_event: bool,
+    evidence_provenance_gaps: frozenset[str] = frozenset(),
 ) -> Coverage:
     observation = base.artifact_observation
     immutability = base.evidence_immutability
@@ -1101,6 +1103,7 @@ def _weaken_ref_coverage(
             LEDGER_FRESHNESS_ORDER,
         )
         gaps.add("unknown_event")
+    gaps.update(evidence_provenance_gaps)
     if len(gaps) > MAX_REF_LIST:
         raise _invalid_case()
 
@@ -1291,6 +1294,58 @@ def build_deterministic_case(
             scope_gap.subject_refs,
         )
 
+    relevant_evidence: set[EvidenceId] = set()
+    relevant_results: set[ResultId] = set()
+    for record in projection.claims.values():
+        if record.payload is not None:
+            relevant_evidence.update(
+                evidence_id(ref) for ref in record.payload.supporting_refs if ref.startswith("evd_")
+            )
+            relevant_results.update(
+                result_id(ref) for ref in record.payload.supporting_refs if ref.startswith("res_")
+            )
+    for record in projection.obligations.values():
+        if record.payload is not None:
+            relevant_evidence.update(
+                evidence_id(ref)
+                for ref in record.payload.resolution_evidence_refs
+                if ref.startswith("evd_")
+            )
+            relevant_results.update(
+                result_id(ref)
+                for ref in record.payload.resolution_evidence_refs
+                if ref.startswith("res_")
+            )
+    for record in projection.responses.values():
+        if record.payload is not None:
+            relevant_evidence.update(
+                evidence_id(ref) for ref in record.payload.evidence_refs if ref.startswith("evd_")
+            )
+            relevant_results.update(
+                result_id(ref) for ref in record.payload.evidence_refs if ref.startswith("res_")
+            )
+    for result_ref in relevant_results:
+        result_record = projection.results.get(result_ref)
+        if result_record is not None and result_record.payload is not None:
+            relevant_evidence.update(result_record.payload.evidence_refs)
+    for evidence_ref in sorted(relevant_evidence, key=lambda value: str(value).encode("ascii")):
+        record = projection.evidence.get(evidence_ref)
+        if record is None or record.payload is None:
+            continue
+        payload = record.payload
+        if payload.content_digest is None:
+            continue
+        if payload.digest_binding is None:
+            code = "evidence_digest_subject_legacy_unknown"
+        elif payload.digest_binding.content_availability is EvidenceContentAvailability.DIGEST_ONLY:
+            code = "evidence_content_digest_only"
+        elif payload.digest_binding.content_availability is EvidenceContentAvailability.WITHHELD:
+            code = "evidence_content_withheld"
+        else:
+            continue
+        marker = f"{code}:{record.source_event_id}"
+        _add_gap(gaps, marker, code, (record.source_event_id,))
+
     current_sources = {record.source_event_id for record in _projection_records(projection)}
     envelope_redacted_events: set[EventId] = set()
     for source_event in current_sources:
@@ -1447,6 +1502,14 @@ def build_deterministic_case(
                 ref.startswith("evt_")
                 and event_id(ref) in unknown_events
                 and type(source) is UnknownEvent
+            ),
+            evidence_provenance_gaps=frozenset(
+                gap_codes_by_root.get(source_event, set())
+                & {
+                    "evidence_content_digest_only",
+                    "evidence_content_withheld",
+                    "evidence_digest_subject_legacy_unknown",
+                }
             ),
         )
 

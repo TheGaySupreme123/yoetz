@@ -69,6 +69,7 @@ from yoetz.protocol.canonical import JsonValue as CanonicalJsonValue
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.canonical import entry_digest as compute_entry_digest
 from yoetz.protocol.coverage import (
+    AuthorshipAssurance,
     Coverage,
     EvidenceImmutability,
     PublicationChannel,
@@ -98,6 +99,7 @@ __all__ = [
     "MAX_TEXT_BYTES",
     "PAYLOAD_TYPES",
     "SCHEMA_VERSION",
+    "EVIDENCE_SCHEMA_VERSION",
     "AcceptedEvent",
     "ActionKind",
     "ActionRecordedPayload",
@@ -113,6 +115,10 @@ __all__ = [
     "EventSchema",
     "OCCURRED_AT_DRAFT_DESCRIPTION",
     "EvidenceKind",
+    "EvidenceContentAvailability",
+    "EvidenceDigestBinding",
+    "EvidenceDigestProvenance",
+    "EvidenceDigestSubject",
     "EvidenceRecordedPayload",
     "FindingRecordedPayload",
     "IntegrationKind",
@@ -158,6 +164,7 @@ __all__ = [
 ]
 
 SCHEMA_VERSION: Final = "1.0.0"
+EVIDENCE_SCHEMA_VERSION: Final = "1.1.0"
 MAX_TEXT_BYTES: Final = 8_192
 MAX_REASON_BYTES: Final = 4_096
 MAX_LABEL_BYTES: Final = 256
@@ -253,6 +260,30 @@ class EvidenceKind(str, Enum):  # noqa: UP042 - exact wire enum base
     RESEARCH_SOURCE = "research_source"
     IMPORT_REPORT = "import_report"
     OTHER = "other"
+
+
+class EvidenceDigestSubject(str, Enum):  # noqa: UP042 - exact wire enum base
+    APPROVED_CHECK_RECEIPT = "approved_check_receipt"
+    ARTIFACT_BYTES = "artifact_bytes"
+    BOUNDED_EXCERPT = "bounded_excerpt"
+    COMMAND_STDOUT = "command_stdout"
+    IMPORT_REPORT = "import_report"
+    SOURCE_DIFF = "source_diff"
+    STATIC_ANALYSIS_REPORT = "static_analysis_report"
+    TEST_REPORT = "test_report"
+    TEST_STDOUT = "test_stdout"
+
+
+class EvidenceContentAvailability(str, Enum):  # noqa: UP042 - exact wire enum base
+    CAPTURED = "captured"
+    DIGEST_ONLY = "digest_only"
+    WITHHELD = "withheld"
+
+
+class EvidenceDigestProvenance(str, Enum):  # noqa: UP042 - exact wire enum base
+    APPROVED_CHECK = "approved_check"
+    CALLER_ASSERTED = "caller_asserted"
+    IMPORT_OBSERVED = "import_observed"
 
 
 class ClaimKind(str, Enum):  # noqa: UP042 - exact wire enum base
@@ -578,7 +609,11 @@ class PayloadRef:
 
 
 def _locator_key_kind(schema: EventSchema) -> str:
-    if schema.version != SCHEMA_VERSION or schema.name not in EVENT_FAMILIES:
+    if schema.name not in EVENT_FAMILIES:
+        return "none"
+    if schema.version != SCHEMA_VERSION and schema != EventSchema(
+        "evidence_recorded", EVIDENCE_SCHEMA_VERSION
+    ):
         return "none"
     schema_name = schema.name
     if schema_name in {"plan_published", "plan_revised"}:
@@ -1100,6 +1135,86 @@ class ResultRecordedPayload:
 
 
 @dataclass(frozen=True, slots=True)
+class EvidenceDigestBinding:
+    subject: EvidenceDigestSubject
+    content_availability: EvidenceContentAvailability
+    byte_count: int
+    provenance: EvidenceDigestProvenance
+    approval_commitment: str | None = None
+    approved_check_result_digest: str | None = None
+
+    def __post_init__(self) -> None:
+        subject = _exact_enum(self.subject, EvidenceDigestSubject)
+        availability = _exact_enum(self.content_availability, EvidenceContentAvailability)
+        provenance = _exact_enum(self.provenance, EvidenceDigestProvenance)
+        object.__setattr__(self, "subject", subject)
+        object.__setattr__(self, "content_availability", availability)
+        object.__setattr__(self, "provenance", provenance)
+        object.__setattr__(
+            self, "byte_count", _bounded_integer(self.byte_count, 0, _MAX_SAFE_INTEGER)
+        )
+        if self.approval_commitment is not None:
+            validate_sha256_digest(self.approval_commitment)
+        if self.approved_check_result_digest is not None:
+            validate_sha256_digest(self.approved_check_result_digest)
+        approved = provenance is EvidenceDigestProvenance.APPROVED_CHECK
+        if approved is not (
+            self.approval_commitment is not None and self.approved_check_result_digest is not None
+        ):
+            raise ProtocolValueError("evidence_digest_provenance_invalid")
+        if (
+            subject is EvidenceDigestSubject.APPROVED_CHECK_RECEIPT
+            and provenance is not EvidenceDigestProvenance.APPROVED_CHECK
+        ):
+            raise ProtocolValueError("evidence_digest_provenance_invalid")
+        if (
+            subject is EvidenceDigestSubject.IMPORT_REPORT
+            and provenance is not EvidenceDigestProvenance.IMPORT_OBSERVED
+        ):
+            raise ProtocolValueError("evidence_digest_provenance_invalid")
+
+
+_EVIDENCE_SUBJECTS_BY_KIND: Final[Mapping[EvidenceKind, frozenset[EvidenceDigestSubject]]] = (
+    MappingProxyType(
+        {
+            EvidenceKind.ARTIFACT: frozenset(
+                {
+                    EvidenceDigestSubject.ARTIFACT_BYTES,
+                    EvidenceDigestSubject.BOUNDED_EXCERPT,
+                    EvidenceDigestSubject.SOURCE_DIFF,
+                }
+            ),
+            EvidenceKind.COMMAND_OUTPUT: frozenset(
+                {
+                    EvidenceDigestSubject.APPROVED_CHECK_RECEIPT,
+                    EvidenceDigestSubject.COMMAND_STDOUT,
+                    EvidenceDigestSubject.STATIC_ANALYSIS_REPORT,
+                    EvidenceDigestSubject.TEST_REPORT,
+                    EvidenceDigestSubject.TEST_STDOUT,
+                }
+            ),
+            EvidenceKind.TEST_RESULT: frozenset(
+                {
+                    EvidenceDigestSubject.APPROVED_CHECK_RECEIPT,
+                    EvidenceDigestSubject.STATIC_ANALYSIS_REPORT,
+                    EvidenceDigestSubject.TEST_REPORT,
+                    EvidenceDigestSubject.TEST_STDOUT,
+                }
+            ),
+            EvidenceKind.RESEARCH_SOURCE: frozenset(
+                {
+                    EvidenceDigestSubject.ARTIFACT_BYTES,
+                    EvidenceDigestSubject.BOUNDED_EXCERPT,
+                }
+            ),
+            EvidenceKind.IMPORT_REPORT: frozenset({EvidenceDigestSubject.IMPORT_REPORT}),
+            EvidenceKind.OTHER: frozenset({EvidenceDigestSubject.BOUNDED_EXCERPT}),
+        }
+    )
+)
+
+
+@dataclass(frozen=True, slots=True)
 class EvidenceRecordedPayload:
     evidence_id: EvidenceId
     evidence_kind: EvidenceKind
@@ -1110,6 +1225,7 @@ class EvidenceRecordedPayload:
     content_digest: str | None = None
     description: str | None = None
     subject_state: SubjectStateRef | None = None
+    digest_binding: EvidenceDigestBinding | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "evidence_id", evidence_id(self.evidence_id))
@@ -1136,6 +1252,18 @@ class EvidenceRecordedPayload:
             )
         if self.subject_state is not None:
             object.__setattr__(self, "subject_state", _subject_state(self.subject_state))
+        if self.digest_binding is not None:
+            if type(self.digest_binding) is not EvidenceDigestBinding:
+                raise ProtocolValueError("invalid_event_value_type")
+            if self.content_digest is None:
+                raise ProtocolValueError("evidence_digest_binding_invalid")
+            if self.digest_binding.subject not in _EVIDENCE_SUBJECTS_BY_KIND[kind]:
+                raise ProtocolValueError("evidence_digest_subject_incompatible")
+            captured = (
+                self.digest_binding.content_availability is EvidenceContentAvailability.CAPTURED
+            )
+            if captured is not (self.captured_object_id is not None):
+                raise ProtocolValueError("evidence_digest_availability_invalid")
 
         supported = True
         if strength is EvidenceImmutability.MUTABLE_REFERENCE:
@@ -1460,6 +1588,7 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
         EventSchema("action_recorded", SCHEMA_VERSION): ActionRecordedPayload,
         EventSchema("result_recorded", SCHEMA_VERSION): ResultRecordedPayload,
         EventSchema("evidence_recorded", SCHEMA_VERSION): EvidenceRecordedPayload,
+        EventSchema("evidence_recorded", EVIDENCE_SCHEMA_VERSION): EvidenceRecordedPayload,
         EventSchema("claim_recorded", SCHEMA_VERSION): ClaimRecordedPayload,
         EventSchema("plan_revised", SCHEMA_VERSION): PlanRevisedPayload,
         EventSchema("finding_recorded", SCHEMA_VERSION): Finding,
@@ -1549,6 +1678,40 @@ def _encode_subject_state(value: SubjectStateRef) -> JsonObject:
         result["diff_digest"] = value.diff_digest
     if value.described_state is not None:
         result["described_state"] = value.described_state
+    return JsonObject(result)
+
+
+def _decode_digest_binding(value: object) -> EvidenceDigestBinding:
+    source = _closed_object(
+        value,
+        required=frozenset({"subject", "content_availability", "byte_count", "provenance"}),
+        optional=frozenset({"approval_commitment", "approved_check_result_digest"}),
+    )
+    return EvidenceDigestBinding(
+        subject=_enum_from_json(_field(source, "subject"), EvidenceDigestSubject),
+        content_availability=_enum_from_json(
+            _field(source, "content_availability"), EvidenceContentAvailability
+        ),
+        byte_count=cast(int, _field(source, "byte_count")),
+        provenance=_enum_from_json(_field(source, "provenance"), EvidenceDigestProvenance),
+        approval_commitment=cast(str | None, _optional(source, "approval_commitment")),
+        approved_check_result_digest=cast(
+            str | None, _optional(source, "approved_check_result_digest")
+        ),
+    )
+
+
+def _encode_digest_binding(value: EvidenceDigestBinding) -> JsonObject:
+    if type(value) is not EvidenceDigestBinding:
+        raise ProtocolValueError("invalid_event_value_type")
+    result: dict[str, object] = {
+        "subject": value.subject.value,
+        "content_availability": value.content_availability.value,
+        "byte_count": value.byte_count,
+        "provenance": value.provenance.value,
+    }
+    _optional_value(result, "approval_commitment", value.approval_commitment)
+    _optional_value(result, "approved_check_result_digest", value.approved_check_result_digest)
     return JsonObject(result)
 
 
@@ -1794,6 +1957,8 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
     if schema.name == "finding_recorded":
         return finding_from_json(frozen)
     required, optional = _PAYLOAD_SHAPES[schema.name]
+    if schema == EventSchema("evidence_recorded", EVIDENCE_SCHEMA_VERSION):
+        optional = frozenset({*optional, "digest_binding"})
     source = _closed_object(frozen, required=required, optional=optional)
 
     if schema.name == "session_opened":
@@ -1915,6 +2080,14 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
         )
     if schema.name == "evidence_recorded":
         state = _optional(source, "subject_state")
+        raw_binding = _optional(source, "digest_binding")
+        content_digest = cast(str | None, _optional(source, "content_digest"))
+        if schema.version == SCHEMA_VERSION and raw_binding is not None:
+            raise ProtocolValueError("invalid_event_value_type")
+        if schema.version == EVIDENCE_SCHEMA_VERSION and (
+            (content_digest is None) != (raw_binding is None)
+        ):
+            raise ProtocolValueError("evidence_digest_binding_required")
         return EvidenceRecordedPayload(
             evidence_id=evidence_id(_field(source, "evidence_id")),
             evidence_kind=_enum_from_json(_field(source, "evidence_kind"), EvidenceKind),
@@ -1926,9 +2099,10 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
                 if _optional(source, "captured_object_id") is None
                 else object_id(_field(source, "captured_object_id"))
             ),
-            content_digest=cast(str | None, _optional(source, "content_digest")),
+            content_digest=content_digest,
             description=cast(str | None, _optional(source, "description")),
             subject_state=None if state is None else _decode_subject_state(state),
+            digest_binding=(None if raw_binding is None else _decode_digest_binding(raw_binding)),
         )
     if schema.name == "claim_recorded":
         state = _optional(source, "subject_state")
@@ -2212,6 +2386,11 @@ def encode_payload(payload: EventPayload) -> JsonValue:
             "subject_state",
             None if value.subject_state is None else _encode_subject_state(value.subject_state),
         )
+        _optional_value(
+            result,
+            "digest_binding",
+            None if value.digest_binding is None else _encode_digest_binding(value.digest_binding),
+        )
         return _json_object(result)
     if payload_type is ClaimRecordedPayload:
         value = cast(ClaimRecordedPayload, payload)
@@ -2349,6 +2528,23 @@ def _expected_payload_type(schema: EventSchema) -> type[EventPayload] | None:
     return PAYLOAD_TYPES.get(schema)
 
 
+def _validate_evidence_schema_payload(
+    schema: EventSchema,
+    payload: EventPayload | None,
+) -> None:
+    if type(payload) is not EvidenceRecordedPayload:
+        return
+    evidence = payload
+    if schema == EventSchema("evidence_recorded", SCHEMA_VERSION):
+        if evidence.digest_binding is not None:
+            raise ProtocolValueError("invalid_event_value_type")
+        return
+    if schema == EventSchema("evidence_recorded", EVIDENCE_SCHEMA_VERSION) and (
+        (evidence.content_digest is None) != (evidence.digest_binding is None)
+    ):
+        raise ProtocolValueError("evidence_digest_binding_required")
+
+
 def _validate_envelope_ref_mirrors(
     schema: EventSchema,
     payload: EventPayload | None,
@@ -2451,6 +2647,7 @@ class EventDraft:
         if type(self.payload) is not payload_type:
             raise ProtocolValueError("invalid_event_value_type")
         typed_payload = cast(EventPayload, self.payload)
+        _validate_evidence_schema_payload(self.schema, typed_payload)
         _validate_envelope_ref_mirrors(
             self.schema,
             typed_payload,
@@ -2599,6 +2796,7 @@ class AcceptedEvent:
         if self.redaction is not RedactionState.PRESENT and self.payload is not None:
             raise ProtocolValueError("payload_redaction_mismatch")
         typed_payload = self.payload
+        _validate_evidence_schema_payload(self.schema, typed_payload)
         _validate_projection_locator(
             self.schema,
             self.event_id,
@@ -2619,6 +2817,19 @@ class AcceptedEvent:
                 or self.publication_channel is not PublicationChannel.CODEX_JSONL_IMPORT
             ):
                 raise ProtocolValueError("import_report_invalid")
+            binding = evidence.digest_binding
+            if binding is not None:
+                if binding.provenance is EvidenceDigestProvenance.APPROVED_CHECK and (
+                    self.author.actor_type is not ActorType.YOETZ_ENGINE
+                    or self.author.assurance is not AuthorshipAssurance.SERVICE_AUTHENTICATED
+                    or self.publication_channel is not PublicationChannel.ENGINE_DERIVED
+                ):
+                    raise ProtocolValueError("evidence_digest_provenance_invalid")
+                if binding.provenance is EvidenceDigestProvenance.IMPORT_OBSERVED and (
+                    self.author.actor_type is not ActorType.IMPORTER
+                    or self.publication_channel is not PublicationChannel.CODEX_JSONL_IMPORT
+                ):
+                    raise ProtocolValueError("evidence_digest_provenance_invalid")
         if compute_entry_digest(accepted_record_digest_preimage(self)) != self.entry_digest:
             raise ProtocolValueError("entry_digest_mismatch")
 

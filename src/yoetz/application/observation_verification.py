@@ -25,6 +25,7 @@ from yoetz.ports.workspace_inspect import (
 )
 
 __all__ = [
+    "CompletedApprovedCheck",
     "InspectionOrchestrationResult",
     "ObservationVerificationJob",
     "ObservationVerificationRepository",
@@ -37,6 +38,7 @@ __all__ = [
 ]
 
 type SubjectStateDigestFn = Callable[[LocalWorkspaceHandle], str]
+type ApprovedCheckMaterializer = Callable[["CompletedApprovedCheck"], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +56,17 @@ class ObservationVerificationJob:
     approval_commitment: str
     subject_state_digest: str
     state_token: int
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedApprovedCheck:
+    job: ObservationVerificationJob
+    approval_id: str
+    result: ApprovedCheckResult
+    subject_state_after: str | None
+    output_object_id: str | None
+    is_current: bool
+    recorded_at: str
 
 
 class ObservationVerificationRepository(Protocol):
@@ -226,6 +239,7 @@ class ObservationVerificationWorker:
     lease_owner: str
     now: NowProvider
     lease_expires_at: NowProvider
+    materialize_result: ApprovedCheckMaterializer | None = None
 
     def enqueue_if_changed(
         self,
@@ -283,6 +297,19 @@ class ObservationVerificationWorker:
         output_object_id = (
             await self.persist_output(job, captured[-1]) if captured and captured[-1] else None
         )
+        recorded_at = self.now()
+        if self.materialize_result is not None:
+            await self.materialize_result(
+                CompletedApprovedCheck(
+                    job=job,
+                    approval_id=approval.approval_id,
+                    result=result,
+                    subject_state_after=after,
+                    output_object_id=output_object_id,
+                    is_current=current,
+                    recorded_at=recorded_at,
+                )
+            )
         self.repository.complete(
             job=job,
             service_generation=self.service_generation,
@@ -294,7 +321,7 @@ class ObservationVerificationWorker:
             output_object_id=output_object_id,
             limitations_json=b"[]",
             is_current=current,
-            recorded_at=self.now(),
+            recorded_at=recorded_at,
         )
         return job
 

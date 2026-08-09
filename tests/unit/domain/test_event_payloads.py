@@ -23,6 +23,7 @@ from hypothesis.strategies import SearchStrategy
 
 from yoetz.domain.events import (
     EVENT_FAMILIES,
+    EVIDENCE_SCHEMA_VERSION,
     PAYLOAD_TYPES,
     SCHEMA_VERSION,
     AcceptedEvent,
@@ -36,6 +37,10 @@ from yoetz.domain.events import (
     EventDraft,
     EventPayload,
     EventSchema,
+    EvidenceContentAvailability,
+    EvidenceDigestBinding,
+    EvidenceDigestProvenance,
+    EvidenceDigestSubject,
     EvidenceKind,
     EvidenceRecordedPayload,
     FindingRecordedPayload,
@@ -445,8 +450,16 @@ def test_nested_and_finding_optional_nulls_fail_closed() -> None:
 
 
 def test_exact_schema_pair_dispatch_and_unknown_boundary() -> None:
-    assert tuple(schema.name for schema in PAYLOAD_TYPES) == EVENT_FAMILIES
-    assert all(schema.version == SCHEMA_VERSION for schema in PAYLOAD_TYPES)
+    assert tuple(dict.fromkeys(schema.name for schema in PAYLOAD_TYPES)) == EVENT_FAMILIES
+    assert {schema.version for schema in PAYLOAD_TYPES if schema.name == "evidence_recorded"} == {
+        SCHEMA_VERSION,
+        EVIDENCE_SCHEMA_VERSION,
+    }
+    assert all(
+        schema.version == SCHEMA_VERSION
+        for schema in PAYLOAD_TYPES
+        if schema.name != "evidence_recorded"
+    )
     row = _ROW_BY_FAMILY["session_opened"]
     valid_payload = freeze_json(row["payload"])
     for version in ("0.9.0", "1.0.1", "1.1.0", "2.0.0"):
@@ -466,6 +479,71 @@ def test_exact_schema_pair_dispatch_and_unknown_boundary() -> None:
     _assert_reason(
         "unknown_payload_field",
         lambda: decode_payload(_schema_for(row), freeze_json(malformed)),
+    )
+
+
+def test_evidence_1_1_requires_closed_compatible_digest_provenance() -> None:
+    legacy_row = _ROW_BY_FAMILY["evidence_recorded"]
+    legacy_payload = cast(dict[str, Any], legacy_row["payload"])
+    assert encode_payload(decode_payload(_schema_for(legacy_row), freeze_json(legacy_payload))) == (
+        freeze_json(legacy_payload)
+    )
+
+    versioned = deepcopy(legacy_payload)
+    versioned["strength"] = "content_digest"
+    versioned.pop("captured_object_id", None)
+    _assert_reason(
+        "evidence_digest_binding_required",
+        lambda: decode_payload(
+            EventSchema("evidence_recorded", EVIDENCE_SCHEMA_VERSION),
+            freeze_json(versioned),
+        ),
+    )
+    versioned["digest_binding"] = {
+        "subject": "source_diff",
+        "content_availability": "digest_only",
+        "byte_count": 128,
+        "provenance": "caller_asserted",
+    }
+    _assert_reason(
+        "evidence_digest_subject_incompatible",
+        lambda: decode_payload(
+            EventSchema("evidence_recorded", EVIDENCE_SCHEMA_VERSION),
+            freeze_json(versioned),
+        ),
+    )
+    versioned["evidence_kind"] = "artifact"
+    decoded = cast(
+        EvidenceRecordedPayload,
+        decode_payload(
+            EventSchema("evidence_recorded", EVIDENCE_SCHEMA_VERSION),
+            freeze_json(versioned),
+        ),
+    )
+    assert decoded.digest_binding == EvidenceDigestBinding(
+        subject=EvidenceDigestSubject.SOURCE_DIFF,
+        content_availability=EvidenceContentAvailability.DIGEST_ONLY,
+        byte_count=128,
+        provenance=EvidenceDigestProvenance.CALLER_ASSERTED,
+    )
+    validate_schema_instance(
+        "event-draft",
+        SCHEMA_VERSION,
+        cast(
+            CanonicalJsonValue,
+            {
+                "event_id": "evt_00000000-0000-4000-8000-000000000099",
+                "schema": {
+                    "name": "evidence_recorded",
+                    "version": EVIDENCE_SCHEMA_VERSION,
+                },
+                "occurred_at": "2026-08-09T00:00:00.000Z",
+                "causal_parents": [],
+                "payload": versioned,
+                "artifact_refs": [],
+                "evidence_refs": [],
+            },
+        ),
     )
 
 

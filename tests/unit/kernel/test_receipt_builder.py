@@ -334,6 +334,17 @@ def test_conclusion_selection_matches_state_strength() -> None:
     )
 
 
+def test_digest_provenance_limitation_is_retained_in_receipt() -> None:
+    code = "evidence_content_digest_only"
+    gap = CaseGap(f"{code}:{_SOURCE_EVENT_ID}", code, (_SOURCE_EVENT_ID,))
+    coverage = _coverage(gaps=(code,))
+    check = _check(CheckVerdict.NO_ISSUE_DETECTED, coverage)
+    receipt = _build(_context(coverage=coverage, gaps=(gap,), check=check))
+    assert receipt.conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE
+    assert receipt.coverage.known_gaps == (code,)
+    assert tuple(item.code for item in receipt.gaps) == (code,)
+
+
 def test_suppressed_findings_block_clear_conclusion_until_fresh_check() -> None:
     capped = _check(CheckVerdict.NO_ISSUE_DETECTED, _coverage(), suppressed=2)
     receipt = _build(_context(check=capped))

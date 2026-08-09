@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import cast
 
 import pytest
+from pydantic import ValidationError
 
 from builders.ledger_adapters import (
     FixedClock,
@@ -627,6 +628,90 @@ def _evidence_draft(event_tail: int) -> dict[str, object]:
         "artifact_refs": (),
         "evidence_refs": (),
     }
+
+
+def _typed_evidence_draft(
+    event_tail: int,
+    *,
+    evidence_kind: str,
+    digest_subject: str,
+    provenance: str = "caller_asserted",
+) -> dict[str, object]:
+    draft = _evidence_draft(event_tail)
+    draft["schema"] = {"name": "evidence_recorded", "version": "1.1.0"}
+    payload = cast(dict[str, object], draft["payload"])
+    payload["evidence_kind"] = evidence_kind
+    payload["digest_binding"] = {
+        "subject": digest_subject,
+        "content_availability": "digest_only",
+        "byte_count": 128,
+        "provenance": provenance,
+    }
+    if provenance == "approved_check":
+        binding = cast(dict[str, object], payload["digest_binding"])
+        binding["approval_commitment"] = "sha256:" + "22" * 32
+        binding["approved_check_result_digest"] = "sha256:" + "33" * 32
+    return draft
+
+
+@pytest.mark.anyio
+async def test_typed_digest_subject_mismatch_and_reserved_provenance_fail_before_staging() -> None:
+    app, objects = _composition()
+    before = len(objects._data)  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(ValidationError, match="schema_instance_invalid"):
+        _request(
+            request_tail=690,
+            event_drafts=(
+                _typed_evidence_draft(
+                    691,
+                    evidence_kind="test_result",
+                    digest_subject="source_diff",
+                ),
+            ),
+            expected_frontier={"sequence": "0", "head_digest": "genesis"},
+        )
+    assert len(objects._data) == before  # pyright: ignore[reportPrivateUsage]
+
+    reserved = _request(
+        request_tail=692,
+        event_drafts=(
+            _typed_evidence_draft(
+                693,
+                evidence_kind="test_result",
+                digest_subject="test_stdout",
+                provenance="approved_check",
+            ),
+        ),
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    with pytest.raises(PublicOperationError) as authority:
+        await execute_publish_work(cast(Application, app), reserved)
+    assert authority.value.safe_details["reason_code"] == "evidence_digest_provenance_invalid"
+    assert len(objects._data) == before  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.anyio
+async def test_honest_source_diff_digest_is_admitted_with_caller_coverage() -> None:
+    app, _objects = _composition()
+    request = _request(
+        request_tail=694,
+        event_drafts=(
+            _typed_evidence_draft(
+                695,
+                evidence_kind="artifact",
+                digest_subject="source_diff",
+            ),
+        ),
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    result = await execute_publish_work(cast(Application, app), request)
+    assert result.outcome == "accepted"
+    records = [
+        row async for row in app.runtime.task.ledger.load_events(app.runtime.task.session_id)
+    ]
+    record = records[0]
+    assert record.coverage.authorship_assurance.value == "self_asserted"
+    assert record.coverage.artifact_observation.value == "published_only"
 
 
 def _plan_draft(

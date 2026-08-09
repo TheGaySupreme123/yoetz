@@ -866,7 +866,44 @@ def build_semantic_case(
                         _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
                     )
                     continue
-            text = payload.description or payload.reference
+            if payload.content_digest is not None:
+                binding = payload.digest_binding
+                if binding is None:
+                    omissions.append(
+                        _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_recorded")
+                    )
+                    continue
+                text = canonical_encode(
+                    cast(
+                        JsonValue,
+                        {
+                            "schema": "yoetz.evidence-digest-provenance/1",
+                            "evidence_kind": payload.evidence_kind.value,
+                            "strength": payload.strength.value,
+                            "content_digest": payload.content_digest,
+                            "digest_subject": binding.subject.value,
+                            "content_availability": binding.content_availability.value,
+                            "byte_count": binding.byte_count,
+                            "provenance": binding.provenance.value,
+                            **(
+                                {}
+                                if binding.approval_commitment is None
+                                else {"approval_commitment": binding.approval_commitment}
+                            ),
+                            **(
+                                {}
+                                if binding.approved_check_result_digest is None
+                                else {
+                                    "approved_check_result_digest": (
+                                        binding.approved_check_result_digest
+                                    )
+                                }
+                            ),
+                        },
+                    )
+                ).decode("utf-8")
+            else:
+                text = payload.description or payload.reference
             if text is None or not text:
                 omissions.append(
                     _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_recorded")

@@ -166,7 +166,13 @@ def _example_id(kind: str, seed: int) -> str:
 _EXAMPLE_OCCURRED_AT: Final = "2026-01-01T00:00:00.000Z"
 
 
-def _example_draft(seed: int, family: str, payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+def _example_draft(
+    seed: int,
+    family: str,
+    payload: dict[str, JsonValue],
+    *,
+    version: str = "1.0.0",
+) -> dict[str, JsonValue]:
     """One minimal valid draft envelope for a family, so agents copy shape rather than guess it.
 
     ``occurred_at`` is intentionally a fixed illustrative placeholder. Live drafts must use the
@@ -175,7 +181,7 @@ def _example_draft(seed: int, family: str, payload: dict[str, JsonValue]) -> dic
 
     return {
         "event_id": _example_id("event", seed),
-        "schema": {"name": family, "version": "1.0.0"},
+        "schema": {"name": family, "version": version},
         "occurred_at": _EXAMPLE_OCCURRED_AT,
         "causal_parents": [],
         "payload": payload,
@@ -376,9 +382,16 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                             # requires content_digest.
                             "strength": "content_digest",
                             "content_digest": _EXAMPLE_HEAD_DIGEST,
+                            "digest_binding": {
+                                "subject": "test_stdout",
+                                "content_availability": "digest_only",
+                                "byte_count": 4096,
+                                "provenance": "caller_asserted",
+                            },
                             "observed_at": "2026-01-01T00:00:00.000Z",
                             "description": "Focused test slice for the touched module.",
                         },
+                        version="1.1.0",
                     ),
                     _example_draft(
                         8,
@@ -452,9 +465,16 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                             "evidence_kind": "test_result",
                             "strength": "content_digest",
                             "content_digest": _EXAMPLE_HEAD_DIGEST,
+                            "digest_binding": {
+                                "subject": "test_stdout",
+                                "content_availability": "digest_only",
+                                "byte_count": 4096,
+                                "provenance": "caller_asserted",
+                            },
                             "observed_at": "2026-01-01T00:00:00.000Z",
                             "description": "Focused test slice for the claimed outcome.",
                         },
+                        version="1.1.0",
                     ),
                     _example_draft(
                         12,
