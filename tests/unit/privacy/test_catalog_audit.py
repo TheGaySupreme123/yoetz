@@ -364,9 +364,7 @@ def test_insert_only_repository_transition_load_commit_and_replay_are_exact(
             replace(decision, decided_at=decision.decided_at + timedelta(seconds=1)),
         )
         with pytest.raises(ValueError, match="privacy_policy_decision_mismatch"):
-            await restarted.commit_transition(
-                terminal, replace(decision, approved=not approved)
-            )
+            await restarted.commit_transition(terminal, replace(decision, approved=not approved))
         return loaded, committed, replayed
 
     loaded, committed, replayed = asyncio.run(run())
@@ -377,15 +375,12 @@ def test_insert_only_repository_transition_load_commit_and_replay_are_exact(
     transition = db.execute(
         "SELECT state, terminal_result_digest FROM privacy_policy_transitions"
     ).fetchone()
-    assert transition is not None and transition[0] == (
-        "committed" if approved else "denied"
-    )
+    assert transition is not None and transition[0] == ("committed" if approved else "denied")
     assert type(transition[1]) is str
 
     db.execute(
-        "UPDATE privacy_policy_transitions SET terminal_result_canonical = ? "
-        "WHERE proposal_id = ?",
-        (b'{}', _PROPOSAL),
+        "UPDATE privacy_policy_transitions SET terminal_result_canonical = ? WHERE proposal_id = ?",
+        (b"{}", _PROPOSAL),
     )
     with pytest.raises(ValueError, match="privacy_policy_terminal_result_corrupt"):
         asyncio.run(

@@ -381,9 +381,7 @@ def test_provider_secret_ingress_uses_only_the_trusted_review_ceremony(
         return ProviderCredentialResult(cast(Any, expected_action), 2, "stored")
 
     async def privacy_snapshot() -> SimpleNamespace:
-        return SimpleNamespace(
-            bound_scope={"workspace_ref_commitment": "hmac-sha256:" + "7" * 64}
-        )
+        return SimpleNamespace(bound_scope={"workspace_ref_commitment": "hmac-sha256:" + "7" * 64})
 
     async def run() -> dict[str, object]:
         with (

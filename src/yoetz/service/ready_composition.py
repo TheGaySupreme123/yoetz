@@ -2338,11 +2338,7 @@ async def provide_service_ready_context(
         # Privacy-gated observation semantic path: authorize/dispatch through the coordinator.
         # Provider failure or no-discrepancy leaves deterministic advice intact (no upgrade).
         del gaps
-        if (
-            not semantic_ready
-            or provider_binding is None
-            or yoetz_session_id is None
-        ):
+        if not semantic_ready or provider_binding is None or yoetz_session_id is None:
             return None
         packet = minimized_semantic_evidence_packet(
             candidates,
@@ -2370,9 +2366,7 @@ async def provide_service_ready_context(
                 route.repository_privacy_commitment,
                 route.task_id,
             )
-            if not await cast(PrivacyCoordinator, privacy).activate_repository(
-                repository_scope
-            ):
+            if not await cast(PrivacyCoordinator, privacy).activate_repository(repository_scope):
                 return None
             candidate = CandidateContext(
                 request_id=ids.new(IdKind.REQUEST),

@@ -1269,10 +1269,8 @@ async def _interactive_provider_setup(
     )
     try:
         repository_snapshot = await get_privacy_setup_snapshot()
-        repository_commitment = repository_snapshot.bound_scope.get(
-            "workspace_ref_commitment"
-        )
-    except (ControlError, OSError, ValueError):
+        repository_commitment = repository_snapshot.bound_scope.get("workspace_ref_commitment")
+    except ControlError, OSError, ValueError:
         repository_commitment = None
     if type(repository_commitment) is not str:
         provider_report["credential_reason"] = "repository_privacy_scope_unavailable"

@@ -403,9 +403,7 @@ def test_setup_read_reports_first_repository_migration_without_consuming_it() ->
 def test_consumed_first_repository_provenance_is_not_reported_for_later_grants() -> None:
     state = MemoryPrivacyCatalogState()
     store = MemoryPrivacyPolicyStore(state, _Clock())
-    scope_a = AuthorizationScope(
-        AuthorizationScopeKind.WORKSPACE, _INSTALLATION, _REPOSITORY
-    )
+    scope_a = AuthorizationScope(AuthorizationScopeKind.WORKSPACE, _INSTALLATION, _REPOSITORY)
     scope_b = AuthorizationScope(
         AuthorizationScopeKind.WORKSPACE,
         _INSTALLATION,
@@ -417,9 +415,7 @@ def test_consumed_first_repository_provenance_is_not_reported_for_later_grants()
         await store.carry_forward_repository_authority(scope_a)
         authority_b = await store.repository_authority(scope_b)
         private_b = replace(_policy(), effective_scope=scope_b)
-        await store.insert_repository_tightening(
-            scope_b, private_b, authority_b.authority_digest
-        )
+        await store.insert_repository_tightening(scope_b, private_b, authority_b.authority_digest)
         return (
             await store.repository_authority(scope_a),
             await store.repository_authority(scope_b),

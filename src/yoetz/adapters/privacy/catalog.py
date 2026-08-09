@@ -544,9 +544,7 @@ def _verified_commit_result(value: bytes, digest: str) -> PolicyCommitResult:
     return _commit_result_from_bytes(value)
 
 
-def _legacy_decision_digest(
-    decision: HumanPolicyDecision, decided_at: datetime
-) -> str:
+def _legacy_decision_digest(decision: HumanPolicyDecision, decided_at: datetime) -> str:
     """Reconstruct the pre-v3 timestamp-bound decision identity for safe migration."""
 
     return canonical_digest(
@@ -1100,8 +1098,10 @@ class CatalogPrivacyPolicyStore:
     async def _load_transition(
         self, proposal_id: str, *, pending_only: bool
     ) -> PreparedPolicyTransition:
-        state_filter = " AND transition.state = 'pending'" if pending_only else (
-            " AND transition.state IN ('pending', 'committed', 'denied')"
+        state_filter = (
+            " AND transition.state = 'pending'"
+            if pending_only
+            else (" AND transition.state IN ('pending', 'committed', 'denied')")
         )
         row = self._db.execute(
             f"""SELECT transition.base_policy_generation, transition.proposal_digest,
@@ -1263,8 +1263,7 @@ class CatalogPrivacyPolicyStore:
                         raise ValueError("privacy_policy_decision_mismatch")
                     replayed = _verified_commit_result(row[3], row[4])
                     if state == "committed" and (
-                        replayed.policy.policy_id != row[7]
-                        or replayed.policy.version != row[8]
+                        replayed.policy.policy_id != row[7] or replayed.policy.version != row[8]
                     ):
                         raise ValueError("privacy_policy_terminal_result_corrupt")
                     if state == "committed":

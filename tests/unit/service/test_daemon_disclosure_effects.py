@@ -341,9 +341,7 @@ async def test_credential_probe_uses_the_ceremonys_trusted_repository_scope(
     coordinator.bind_policy_application(app)
     relay = _PrivacyPolicyAppRelay()
     relay.bind(lambda: coordinator)
-    effects = _LockedHumanEffects(
-        cast(object, SimpleNamespace()), cast(object, _Vault()), relay
-    )
+    effects = _LockedHumanEffects(cast(object, SimpleNamespace()), cast(object, _Vault()), relay)
     repository = "hmac-sha256:" + "9" * 64
     target = ProviderCredentialTarget(
         "set",

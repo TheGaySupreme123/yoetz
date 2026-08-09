@@ -40,9 +40,7 @@ def _plain(text: str) -> str:
 
 
 async def _fake_repository_privacy_snapshot(*_args: object) -> SimpleNamespace:
-    return SimpleNamespace(
-        bound_scope={"workspace_ref_commitment": "hmac-sha256:" + "7" * 64}
-    )
+    return SimpleNamespace(bound_scope={"workspace_ref_commitment": "hmac-sha256:" + "7" * 64})
 
 
 def _binary(path: str = "/opt/harness/bin/codex") -> HarnessBinary:

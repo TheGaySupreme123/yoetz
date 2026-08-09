@@ -678,9 +678,7 @@ class Application:
             )
         expected = route.repository_privacy_commitment
         actual = (
-            None
-            if repository_privacy_context is None
-            else repository_privacy_context.commitment
+            None if repository_privacy_context is None else repository_privacy_context.commitment
         )
         if expected is None or actual is None or not hmac.compare_digest(expected, actual):
             raise PublicOperationError(

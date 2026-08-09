@@ -551,7 +551,9 @@ class SqliteStartCatalog:
         if entitlement is None and not first_available and not allow_unentitled:
             raise _error(PublicErrorCode.SESSION_CONFLICT)
 
-        frontier_row = entitlement if entitlement is not None else first if first_available else None
+        frontier_row = (
+            entitlement if entitlement is not None else first if first_available else None
+        )
         scope = AuthorizationScope(
             AuthorizationScopeKind.WORKSPACE,
             self._installation_id,

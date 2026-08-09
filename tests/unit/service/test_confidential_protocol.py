@@ -181,9 +181,7 @@ def test_provider_credential_ceremony_is_bound_to_the_trusted_repository() -> No
     bound = replace(unbound, repository_privacy_commitment=_REPOSITORY)
 
     assert bound.target_digest() != unbound.target_digest()
-    envelope = ClientOpenEnvelope(
-        "0" * 64, HumanCeremonyKind.PROVIDER_CREDENTIAL_SET, bound
-    )
+    envelope = ClientOpenEnvelope("0" * 64, HumanCeremonyKind.PROVIDER_CREDENTIAL_SET, bound)
     assert decode_human_frame(encode_human_frame(envelope)) == envelope
 
 

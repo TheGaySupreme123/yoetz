@@ -1358,9 +1358,7 @@ def _target_from_json(value: JsonValue) -> HumanOpenTarget:
             purpose=cast(str, source["purpose"]),
             scope_digest=cast(str, source["scope_digest"]),
             purpose_digest=cast(str, source["purpose_digest"]),
-            repository_privacy_commitment=cast(
-                str | None, source["repository_privacy_commitment"]
-            ),
+            repository_privacy_commitment=cast(str | None, source["repository_privacy_commitment"]),
         )
     if kind == "privacy_pending":
         _keys(source, {"decision_kind", "kind", "pending_id"})
