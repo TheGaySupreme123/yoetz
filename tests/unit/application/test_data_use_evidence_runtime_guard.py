@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -32,6 +33,7 @@ from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.privacy import (
     EffectivePrivacyPolicy,
+    HumanAuthorityCapability,
     MinimizedDisclosure,
     OutboundGatewayPort,
     PrivacyAuditPort,
@@ -86,6 +88,14 @@ class _Store:
     async def effective_policy(self, scope: AuthorizationScope) -> EffectivePrivacyPolicy:
         del scope
         return EffectivePrivacyPolicy(self._policy, 1, self._policy.policy_digest)
+
+    async def repository_authority(self, scope: AuthorizationScope) -> object:
+        return SimpleNamespace(
+            effective=await self.effective_policy(scope),
+            grant_state="granted",
+            repository_privacy_commitment=scope.workspace_ref_commitment,
+            authority_digest="sha256:" + "9" * 64,
+        )
 
 
 class _Classifier:
@@ -149,8 +159,23 @@ class _Audit:
 
 
 class _Gateway:
+    async def reconcile_repository_policy(self, *args: object, **kwargs: object) -> object:
+        del args, kwargs
+        return object()
+
     async def close(self) -> None:
         return None
+
+
+def _human_authority() -> HumanAuthorityCapability:
+    return HumanAuthorityCapability(
+        "established_passphrase",
+        "sha256:" + "8" * 64,
+        1,
+        "passphrase",
+        1,
+        True,
+    )
 
 
 def _policy_requiring_data_use() -> PrivacyPolicy:
@@ -204,6 +229,7 @@ async def test_semantic_pipeline_blocks_when_flag_true_and_data_use_ineligible()
         cast(OutboundGatewayPort, _Gateway()),
         cast(ClockPort, _Clock()),
         cast(IdPort, _Ids()),
+        human_authority=_human_authority(),
         data_use_resolver=lambda _binding: ineligible,
     )
     result = await coordinator.evaluate_semantic(_candidate(binding), _deadline())
@@ -226,6 +252,7 @@ async def test_semantic_pipeline_blocks_when_flag_true_and_resolver_missing() ->
         cast(OutboundGatewayPort, _Gateway()),
         cast(ClockPort, _Clock()),
         cast(IdPort, _Ids()),
+        human_authority=_human_authority(),
         data_use_resolver=None,
     )
     result = await coordinator.evaluate_semantic(_candidate(binding), _deadline())
@@ -260,6 +287,7 @@ async def test_semantic_pipeline_allows_when_flag_true_and_eligible() -> None:
         cast(OutboundGatewayPort, _Gateway()),
         cast(ClockPort, _Clock()),
         cast(IdPort, _Ids()),
+        human_authority=_human_authority(),
         data_use_resolver=lambda _binding: eligible,
     )
     result = await coordinator.evaluate_semantic(_candidate(binding), _deadline())

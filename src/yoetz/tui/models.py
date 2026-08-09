@@ -266,6 +266,8 @@ class PrivacyPosture:
     never_send: tuple[str, ...] = ()
     enabled_channels: tuple[str, ...] = ()
     network_egress_permitted: bool | None = None
+    repository_grant_state: Literal["granted", "missing"] | None = None
+    repository_migration_state: str | None = None
 
     @property
     def choice(self) -> PrivacyChoice | None:
@@ -288,6 +290,33 @@ class PrivacyPosture:
         if not self.readable or self.network_egress_permitted is not True:
             return False
         return "update_checks" in self.enabled_channels
+
+    @property
+    def repository_authority_summary(self) -> str:
+        if self.repository_grant_state == "granted":
+            return "granted for this repository"
+        if self.repository_grant_state == "missing":
+            return "missing; external review is off for this repository"
+        return "unknown; repository authority could not be read"
+
+    @property
+    def repository_migration_summary(self) -> str | None:
+        if self.repository_migration_state is None:
+            return None
+        return {
+            "legacy_route_available": (
+                "Previously accepted permission can be narrowed to this known repository without "
+                "reapproval or broader disclosure."
+            ),
+            "first_repository_available": (
+                "Previously accepted permission can be carried forward once to this first "
+                "repository without reapproval or broader disclosure."
+            ),
+            "consumed": (
+                "Existing permission was carried forward and narrowed to this repository; no new "
+                "disclosure was approved."
+            ),
+        }.get(self.repository_migration_state)
 
 
 @dataclass(frozen=True, slots=True)

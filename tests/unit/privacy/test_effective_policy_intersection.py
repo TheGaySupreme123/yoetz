@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -11,18 +12,21 @@ import pytest
 
 from yoetz.adapters.memory.privacy import MemoryPrivacyCatalogState, MemoryPrivacyPolicyStore
 from yoetz.adapters.privacy.catalog import CatalogPrivacyPolicyStore
+from yoetz.adapters.sqlite.start_catalog import SqliteStartCatalog
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
     ChannelPolicy,
     DataClass,
     EgressChannel,
+    PolicyOverlay,
     PrivacyPolicy,
     PrivacyProfile,
     ProviderBinding,
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
+from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.models import DataCategory
 
 _NOW = datetime(2026, 8, 3, tzinfo=UTC)
@@ -33,6 +37,10 @@ _POLICY_M = "pvy_30000000-0000-4000-8000-000000000006"
 _POLICY_W = "pvy_30000000-0000-4000-8000-000000000007"
 _DIGEST_M = f"sha256:{'1' * 64}"
 _DIGEST_W = f"sha256:{'2' * 64}"
+_WORKSPACE_B = f"hmac-sha256:{'7' * 64}"
+_TASK_B = "tsk_30000000-0000-4000-8000-00000000000c"
+_ROUTE_A = f"sha256:{'8' * 64}"
+_ROUTE_B = f"sha256:{'9' * 64}"
 
 
 class _Clock:
@@ -41,6 +49,16 @@ class _Clock:
 
     def monotonic_seconds(self) -> float:
         return 1.0
+
+
+class _Ids:
+    def new(self, _kind: object) -> str:
+        return "svc_30000000-0000-4000-8000-00000000000d"
+
+
+class _Lookup:
+    def mac(self, _domain: bytes, _message: bytes) -> str:
+        raise AssertionError("legacy route binding does not commit new identity input")
 
 
 def _database() -> apsw.Connection:
@@ -183,6 +201,20 @@ def _llm_authorized(policy: PrivacyPolicy) -> bool:
     return policy.network_egress_permitted and llm.enabled
 
 
+def _overlay(policy: PrivacyPolicy) -> PolicyOverlay:
+    return PolicyOverlay(
+        policy.effective_scope,
+        policy.review_selection,
+        policy.require_current_provider_data_use_evidence,
+        policy.channel_policies,
+        policy.local_model_categories,
+        policy.local_model_data_classes,
+        policy.agent_context_categories,
+        policy.agent_context_data_classes,
+        policy,
+    )
+
+
 @pytest.mark.parametrize("store_kind", ["catalog", "memory"])
 def test_effective_policy_intersects_machine_ceiling_with_workspace_overlay(
     store_kind: str,
@@ -231,6 +263,141 @@ def _llm(policy: PrivacyPolicy) -> ChannelPolicy:
         for channel in policy.channel_policies
         if channel.channel is EgressChannel.LLM_INFERENCE
     )
+
+
+def test_legacy_repository_carry_forward_is_bounded_by_migration_frontier() -> None:
+    machine_scope = _machine_scope()
+    frontier = _minimal_external(
+        scope=machine_scope,
+        policy_id=_POLICY_M,
+        digest=_DIGEST_M,
+        max_bytes=1_000,
+    )
+    widened = replace(
+        _minimal_external(
+            scope=machine_scope,
+            policy_id=_POLICY_M,
+            digest=f"sha256:{'3' * 64}",
+            max_bytes=2_000,
+        ),
+        version=3,
+        supersedes_policy_digest=frontier.policy_digest,
+    )
+    scopes = (
+        AuthorizationScope(AuthorizationScopeKind.WORKSPACE, _INSTALLATION, _WORKSPACE),
+        AuthorizationScope(AuthorizationScopeKind.WORKSPACE, _INSTALLATION, _WORKSPACE_B),
+    )
+    routes = tuple(
+        (
+            task_id,
+            canonical_digest(
+                {
+                    "task_id": task_id,
+                    "bundle_relpath": f"tasks/{task_id}",
+                    "route_generation": 1,
+                }
+            ),
+        )
+        for task_id in (_TASK, _TASK_B)
+    )
+
+    async def run_catalog() -> tuple[object, object]:
+        db = _database()
+        store = CatalogPrivacyPolicyStore(db, _Clock())
+        await store.seed_if_absent(frontier)
+        for index, (task_id, route_digest) in enumerate(routes):
+            db.execute(
+                """INSERT INTO task_routes (
+                       task_id, workspace_ref_commitment, external_ref_commitment,
+                       active_session_id, bundle_relpath, route_generation,
+                       active_route_identity_digest, state, quarantine_code, created_at, updated_at
+                   ) VALUES (?, NULL, NULL, ?, ?, 1, ?, 'active', NULL, ?, ?)""",
+                (
+                    task_id,
+                    f"ses_30000000-0000-4000-8000-{index + 20:012x}",
+                    f"tasks/{task_id}",
+                    route_digest,
+                    "2026-08-03T00:00:00.000Z",
+                    "2026-08-03T00:00:00.000Z",
+                ),
+            )
+        for version in ("0002", "0003"):
+            db.execute(Path(f"migrations/catalog/{version}.sql").read_text(encoding="utf-8"))
+        await store.tighten(machine_scope, _overlay(widened), frontier.policy_digest)
+        start_catalog = SqliteStartCatalog(
+            db,
+            installation_id=_INSTALLATION,
+            lookup=_Lookup(),  # type: ignore[arg-type]
+            clock=_Clock(),
+            ids=_Ids(),  # type: ignore[arg-type]
+        )
+        authorities: list[object] = []
+        for scope, (task_id, route_digest) in zip(scopes, routes, strict=True):
+            await start_catalog.bind_repository_privacy(
+                task_id,
+                route_digest,
+                scope.workspace_ref_commitment,  # type: ignore[arg-type]
+            )
+            authorities.append(await store.repository_authority(scope))
+        return authorities[0], authorities[1]
+
+    async def run_memory() -> tuple[object, object]:
+        state = MemoryPrivacyCatalogState()
+        store = MemoryPrivacyPolicyStore(state, _Clock())
+        await store.seed_if_absent(frontier)
+        state.first_repository_carry_forward_state = "not_applicable"
+        state.migration_frontier_policy = frontier
+        state.legacy_route_entitlements = {route: frontier for route in routes}
+        await store.tighten(machine_scope, _overlay(widened), frontier.policy_digest)
+        authorities = [
+            await store.carry_forward_repository_authority(
+                scope, task_id=task_id, route_identity_digest=route_digest
+            )
+            for scope, (task_id, route_digest) in zip(scopes, routes, strict=True)
+        ]
+        return authorities[0], authorities[1]
+
+    for authorities in (asyncio.run(run_catalog()), asyncio.run(run_memory())):
+        for authority in authorities:
+            assert authority.migration_state == "consumed"  # type: ignore[attr-defined]
+            assert authority.grant_policy is not None  # type: ignore[attr-defined]
+            assert _llm(authority.grant_policy).max_bytes == 1_000  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("with_route", [False, True])
+def test_memory_failed_carry_forward_preserves_entitlement_history(with_route: bool) -> None:
+    machine = _minimal_external(scope=_machine_scope(), policy_id=_POLICY_M, digest=_DIGEST_M)
+    unavailable_frontier = _local_only(
+        scope=_machine_scope(),
+        policy_id=_POLICY_M,
+        digest=f"sha256:{'a' * 64}",
+    )
+    state = MemoryPrivacyCatalogState(
+        first_repository_carry_forward_state="not_applicable" if with_route else "available",
+        migration_frontier_policy=unavailable_frontier,
+        legacy_route_entitlements=({(_TASK, _ROUTE_A): unavailable_frontier} if with_route else {}),
+    )
+    store = MemoryPrivacyPolicyStore(state, _Clock())
+
+    async def run() -> None:
+        await store.seed_if_absent(machine)
+        with pytest.raises(ValueError, match="repository_privacy_migration_unavailable"):
+            await store.carry_forward_repository_authority(
+                _workspace_scope(),
+                task_id=_TASK if with_route else None,
+                route_identity_digest=_ROUTE_A if with_route else None,
+            )
+
+    asyncio.run(run())
+    assert state.first_repository_carry_forward_state == (
+        "not_applicable" if with_route else "available"
+    )
+    assert state.legacy_route_entitlements == (
+        {(_TASK, _ROUTE_A): unavailable_frontier} if with_route else {}
+    )
+    assert state.consumed_legacy_repository_commitments == set()
+    assert state.generation == 1
+    assert len(state.policies) == 1
 
 
 def test_meet_keeps_the_narrower_scope_ceiling() -> None:

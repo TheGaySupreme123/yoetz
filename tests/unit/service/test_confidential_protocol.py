@@ -34,6 +34,7 @@ from yoetz.service.confidential_protocol import (
     PortableRecoveryTarget,
     PrivacyPendingTarget,
     PrivacyPolicyDecisionPreview,
+    PrivacyPolicyTransitionPreviewMember,
     ProviderCredentialTarget,
     RetryAction,
     SecretIngressBinding,
@@ -60,6 +61,7 @@ _SERVICE_ID = "svc_00000000-0000-4000-8000-000000000001"
 _REQUEST_ID = "req_00000000-0000-4000-8000-000000000002"
 _DIGEST_A = "sha256:" + "a" * 64
 _PURPOSE_DIGEST = "sha256:df4c93f6d19a44d9b8b6c8eae62a0cf3203cde00f35fb220c42ec2a02d5ee8c1"
+_REPOSITORY = "hmac-sha256:" + "b" * 64
 
 
 def _binding(
@@ -171,6 +173,15 @@ def test_all_nine_open_targets_are_closed_and_round_trip(
     target: object,
 ) -> None:
     envelope = ClientOpenEnvelope("0" * 64, kind, cast(HumanOpenTarget, target))
+    assert decode_human_frame(encode_human_frame(envelope)) == envelope
+
+
+def test_provider_credential_ceremony_is_bound_to_the_trusted_repository() -> None:
+    unbound = _provider_target("set")
+    bound = replace(unbound, repository_privacy_commitment=_REPOSITORY)
+
+    assert bound.target_digest() != unbound.target_digest()
+    envelope = ClientOpenEnvelope("0" * 64, HumanCeremonyKind.PROVIDER_CREDENTIAL_SET, bound)
     assert decode_human_frame(encode_human_frame(envelope)) == envelope
 
 
@@ -454,6 +465,43 @@ def test_privacy_policy_preview_round_trips_the_complete_change_set() -> None:
     )
 
     assert decode_human_frame(encode_human_frame(envelope)) == envelope
+
+
+def test_compound_privacy_preview_round_trips_both_authority_layers() -> None:
+    preview = PrivacyPolicyDecisionPreview(
+        "pending-1",
+        _DIGEST_A,
+        (),
+        (
+            PrivacyPolicyTransitionPreviewMember("machine_ceiling", "replace", _policy_changes()),
+            PrivacyPolicyTransitionPreviewMember("repository_grant", "insert", _policy_changes()),
+        ),
+    )
+    envelope = ServerOpenedEnvelope(
+        "1" * 64,
+        1,
+        HumanCeremonyBinding(
+            1,
+            "1" * 64,
+            "0" * 64,
+            HumanCeremonyKind.PRIVACY_POLICY_DECISION,
+            _SERVICE_ID,
+            3,
+            0,
+            None,
+            _DIGEST_A,
+            60_000,
+        ),
+        preview,
+        DecisionRequiredPhase(),
+    )
+
+    assert decode_human_frame(encode_human_frame(envelope)) == envelope
+
+
+def test_repository_insert_preview_requires_the_explicit_private_baseline_diff() -> None:
+    with pytest.raises(ValueError, match="privacy_policy_preview_member_invalid"):
+        PrivacyPolicyTransitionPreviewMember("repository_grant", "insert", ())
 
 
 def test_a_widening_preview_cannot_be_opened_with_an_incomplete_change_set() -> None:

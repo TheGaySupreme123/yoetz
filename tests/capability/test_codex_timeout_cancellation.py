@@ -217,6 +217,7 @@ async def test_post_commit_retry_resolves_one_effect(tmp_path: Path) -> None:
         profile=RuntimeProfile.STRICT_LOCAL,
         policy_packs=("research-evidence/0.1.0", "work-integrity/0.1.0"),
         version_manifest=start_app.version_manifest,
+        enforce_repository_identity=False,
     )
     started = await app.start(start_request(700, title="Timeout cancellation local oracle"))
     request_id = protocol_id("req_", 701)

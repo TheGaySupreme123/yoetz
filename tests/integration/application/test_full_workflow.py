@@ -238,6 +238,7 @@ async def test_full_workflow_uses_one_final_client_projection(
         profile=RuntimeProfile.TEST_FAKE,
         policy_packs=("research-evidence/0.1.0", "work-integrity/0.1.0"),
         version_manifest=start_app.version_manifest,
+        enforce_repository_identity=False,
     )
 
     started = await app.start(start_request(810, title="Offline full workflow"))

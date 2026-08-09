@@ -1115,15 +1115,19 @@ class YoetzTui(App[int]):
         """
 
         current = await self.runtime.privacy_posture()
-        recommendation = self.runtime.privacy_recommendation()
+        recommendation = self.runtime.privacy_recommendation(current)
         already = current.choice is not None and current.profile == _PROFILE_FOR_RECIPE.get(
             recommendation.recipe
         )
+        authority_lines = [f"Repository grant: {current.repository_authority_summary}"]
+        if current.repository_migration_summary is not None:
+            authority_lines.append(current.repository_migration_summary)
         self.say(
             Level.ACTIVE,
             "Privacy",
             (
                 f"Currently: {current.summary}",
+                *authority_lines,
                 f"Recommended: {recommendation.label}",
                 recommendation.reason,
                 recommendation.tradeoff,
@@ -1202,10 +1206,19 @@ class YoetzTui(App[int]):
         outcome = getattr(report, "outcome", "failed")
         if outcome in {"configured", "unchanged"}:
             await self._refresh_header()
+            authority = getattr(report, "grant_state", None)
+            migration = getattr(report, "migration_state", None)
+            details = [f"Effective profile: {getattr(report, 'profile', recipe)}"]
+            if authority == "granted":
+                details.append("Repository grant: granted for this repository")
+            elif authority == "missing":
+                details.append("Repository grant: missing; external model review remains off")
+            if migration == "consumed":
+                details.append("An existing permission was carried forward without a new prompt.")
             self.say(
                 Level.VERIFIED,
                 "Privacy setup complete",
-                (f"Effective profile: {getattr(report, 'profile', recipe)}",),
+                tuple(details),
             )
             return
         self.say(
@@ -1293,6 +1306,30 @@ class YoetzTui(App[int]):
                 (f"Reason: {getattr(report, 'reason', 'privacy_setup_failed')}",),
             )
             return
+        grant_state = getattr(report, "grant_state", None)
+        if grant_state != "granted":
+            self.say(
+                Level.BLOCKED,
+                "Provider binding saved, without repository authority",
+                (
+                    "The exact repository grant is missing, so no API key was requested.",
+                    "Run /privacy from this repository before continuing provider setup.",
+                ),
+            )
+            return
+        authority_details = [
+            "Provider binding saved.",
+            "Exact repository grant: granted for this repository.",
+        ]
+        if getattr(report, "migration_state", None) == "consumed":
+            authority_details.append(
+                "Existing permission was carried forward and narrowed to this repository."
+            )
+        self.say(
+            Level.VERIFIED,
+            "Repository privacy authority ready",
+            tuple(authority_details),
+        )
         status = await self._run_confidential(
             "Provider API key",
             self.runtime.store_provider_credential,

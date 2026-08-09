@@ -19,7 +19,7 @@ from builders.privacy_policies import minimal_external_policy
 from yoetz.adapters.keys.encrypted_vault import EncryptedVaultStore
 from yoetz.adapters.keys.secret_memory import LocalSecretMemory
 from yoetz.adapters.sqlite.connection import open_catalog_writer
-from yoetz.adapters.sqlite.migrations import initialize_catalog
+from yoetz.adapters.sqlite.migrations import CATALOG_MIGRATIONS, Migration, initialize_catalog
 from yoetz.application.service import ClientProjectionContext, ControlProjectionBinding
 from yoetz.config.models import YoetzConfig
 from yoetz.config.write import fireworks_provider
@@ -176,6 +176,92 @@ def test_open_catalog_writer_allows_unfenced_catalog_initialization(tmp_path: Pa
             db.execute("INSERT INTO catalog_meta(key, value) VALUES ('owner_generation', '7')")
         row = db.execute("SELECT value FROM catalog_meta WHERE key='owner_generation'").fetchone()
         assert row == ("7",)
+    finally:
+        db.close(force=True)
+
+
+def _write_catalog_v2(path: Path) -> None:
+    db = open_catalog_writer(path)
+    try:
+        with db:
+            for migration in CATALOG_MIGRATIONS[:2]:
+                db.execute(migration.ddl.decode("utf-8"))
+            db.execute(
+                "INSERT INTO catalog_meta(key, value) VALUES ('storage_schema_version', '2')"
+            )
+    finally:
+        db.close(force=True)
+
+
+@pytest.mark.anyio
+async def test_open_ready_catalog_transactionally_migrates_v2_before_runtime_use(
+    tmp_path: Path,
+) -> None:
+    tmp_path.chmod(0o700)
+    catalog_path = tmp_path / "catalog.sqlite3"
+    _write_catalog_v2(catalog_path)
+    with pytest.raises(connection_module.StorageUnsafeError, match="schema_metadata_disagrees"):
+        open_catalog_writer(catalog_path)
+
+    catalog = await open_ready_catalog(
+        catalog_path,
+        installation_id=_INSTALLATION_ID,
+        service_generation=12,
+        lookup=_Lookup(),
+        clock=_Clock(),
+        ids=IdPort(),
+    )
+    try:
+        assert catalog._db.execute("PRAGMA user_version").fetchone() == (3,)  # pyright: ignore[reportPrivateUsage]
+        assert catalog._db.execute(  # pyright: ignore[reportPrivateUsage]
+            "SELECT value FROM catalog_meta WHERE key = 'storage_schema_version'"
+        ).fetchone() == ("3",)
+        assert (
+            catalog._db.execute(  # pyright: ignore[reportPrivateUsage]
+                "SELECT repository_privacy_commitment FROM task_routes LIMIT 1"
+            ).fetchone()
+            is None
+        )
+    finally:
+        catalog._db.close(force=True)  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.anyio
+async def test_open_ready_catalog_failed_migration_rolls_back_and_stays_v2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tmp_path.chmod(0o700)
+    catalog_path = tmp_path / "catalog.sqlite3"
+    _write_catalog_v2(catalog_path)
+    failing = Migration(
+        "0003",
+        b"CREATE TABLE migration_partial(value TEXT) STRICT;\n"
+        b"SELECT value FROM migration_failure_missing;\n"
+        b"PRAGMA user_version = 3;\n",
+    )
+    monkeypatch.setattr(
+        ready_composition_module,
+        "CATALOG_MIGRATIONS",
+        (*CATALOG_MIGRATIONS[:2], failing),
+    )
+
+    with pytest.raises(apsw.SQLError):
+        await open_ready_catalog(
+            catalog_path,
+            installation_id=_INSTALLATION_ID,
+            service_generation=12,
+            lookup=_Lookup(),
+            clock=_Clock(),
+            ids=IdPort(),
+        )
+
+    db = apsw.Connection(str(catalog_path), flags=apsw.SQLITE_OPEN_READONLY)
+    try:
+        assert db.execute("PRAGMA user_version").fetchone() == (2,)
+        assert (
+            db.execute("SELECT 1 FROM sqlite_schema WHERE name = 'migration_partial'").fetchone()
+            is None
+        )
     finally:
         db.close(force=True)
 
@@ -735,6 +821,7 @@ async def test_ready_factory_completes_and_projects_deterministic_check(tmp_path
             diagnostics=_Diagnostics(),
         )
         app = await factory(1, vault.generation)
+        object.__setattr__(app, "enforce_repository_identity", False)
         common = {
             "protocol_version": "0.1",
             "schema_version": "1.0.0",
@@ -1059,6 +1146,7 @@ async def test_ready_factory_deterministic_check_records_semantic_not_requested_
             diagnostics=_Diagnostics(),
         )
         app = await factory(1, vault.generation)
+        object.__setattr__(app, "enforce_repository_identity", False)
         common = {
             "protocol_version": "0.1",
             "schema_version": "1.0.0",
@@ -1203,10 +1291,10 @@ async def test_ready_factory_deterministic_check_records_semantic_not_requested_
 
 
 @pytest.mark.anyio
-async def test_ready_check_re_resolves_provider_activated_after_composition(
+async def test_ready_check_never_activates_provider_from_machine_policy_without_repository_grant(
     tmp_path: Path,
 ) -> None:
-    """A live registry update revives semantic check dispatch without rebuilding the app."""
+    """A configured provider and machine policy never outrun exact repository authority."""
 
     tmp_path.chmod(0o700)
     clock = _Clock()
@@ -1244,6 +1332,7 @@ async def test_ready_check_re_resolves_provider_activated_after_composition(
             diagnostics=_Diagnostics(),
         )
         app = await factory(1, vault.generation)
+        object.__setattr__(app, "enforce_repository_identity", False)
         common = {
             "protocol_version": "0.1",
             "schema_version": "1.0.0",
@@ -1283,8 +1372,8 @@ async def test_ready_check_re_resolves_provider_activated_after_composition(
             )
         )
         assert type(first) is CheckCommitResult, f"unexpected nonterminal check: {type(first)}"
-        assert first.semantic_status.value == "unavailable"
-        assert first.semantic_reason.value == "credential_unavailable"
+        assert first.semantic_status.value == "blocked_by_policy"
+        assert first.semantic_reason.value == "scope_not_authorized"
 
         evaluator = app.semantic_evaluator
         widened = replace(
@@ -1304,7 +1393,7 @@ async def test_ready_check_re_resolves_provider_activated_after_composition(
                 True,
             ),
         )
-        assert "fireworks" in cast(
+        assert "fireworks" not in cast(
             tuple[str, ...], tuple(getattr(gateway, "connected_provider_ids")())
         )
         credential_binding = provider_credential_profile_binding(
@@ -1351,12 +1440,14 @@ async def test_ready_check_re_resolves_provider_activated_after_composition(
         assert type(second) is CheckCommitResult, f"unexpected nonterminal check: {type(second)}"
 
         assert app.semantic_evaluator is evaluator
-        # The unchanged durable LOCAL_ONLY policy now supplies the next fence. Reaching this exact
-        # pair proves the same ready application crossed the refreshed provider-binding gate and
-        # entered privacy evaluation rather than repeating the stale credential result.
+        # Credential rotation/storage does not create repository authority or activate the
+        # provider. The second check fails at the same exact grant fence without a provider call.
         assert (second.semantic_status.value, second.semantic_reason.value) == (
             "blocked_by_policy",
-            "provider_binding_not_authorized",
+            "scope_not_authorized",
+        )
+        assert "fireworks" not in cast(
+            tuple[str, ...], tuple(getattr(gateway, "connected_provider_ids")())
         )
     finally:
         if app is not None:

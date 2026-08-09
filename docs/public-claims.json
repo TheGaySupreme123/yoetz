@@ -191,7 +191,7 @@
     },
     {
       "claim_id": "privacy.assisted_review_user_controlled",
-      "statement": "Every installation seeds zero-egress local_only with no human prompt required; only after a technical user deliberately confirms the inspectable assisted_review recipe for an exact endpoint with a current data-use record stating training prohibited and retention none or bounded to at most 30 days do ordinary in-policy checks and retries run without a repeated human prompt. Provider human-access and exception facts remain visible, and the data-use record is recommendation evidence, never a technical proof of provider conduct.",
+      "statement": "Every installation seeds zero-egress local_only for external LLM and task-content channels with no human prompt required. The machine policy is an installation ceiling, and ordinary in-policy checks and retries run without a repeated human prompt only after the exact repository has a granted row for the inspectable assisted_review recipe and an exact endpoint with a current data-use record stating training prohibited and retention none or bounded to at most 30 days. Repository identity is derived from the trusted session's canonical Git common root, never public workspace_ref; branches and linked worktrees share it while independent clones do not. Upgrade migration preserves accepted machine-policy bytes and may only narrow them onto bounded pre-upgrade route or one first-repository entitlement without reapproval. Provider human-access and exception facts remain visible, and the data-use record is recommendation evidence, never a technical proof of provider conduct.",
       "scope": {
         "profiles": [
           "local_only",

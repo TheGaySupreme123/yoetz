@@ -17,7 +17,12 @@ from yoetz.application.service import (
 from yoetz.domain.events import RuntimeProfile
 from yoetz.domain.privacy import LocalDisclosureSink
 from yoetz.domain.values import Frontier, JsonObject
-from yoetz.ports.control import ControlClientKind, ControlError, ControlMethod
+from yoetz.ports.control import (
+    ControlClientKind,
+    ControlError,
+    ControlMethod,
+    RepositoryPrivacyContext,
+)
 from yoetz.ports.publish_response_catalog import (
     PublishResponseCatalogPort,
     PublishResponseKey,
@@ -30,8 +35,12 @@ from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import (
     CheckRequest,
     PublishWorkAcceptedEventModel,
+    PublishWorkRequest,
     PublishWorkResult,
     PublishWorkVersionSliceModel,
+    ReceiptRequest,
+    RespondRequest,
+    StatusRequest,
     public_model_to_wire,
 )
 
@@ -67,7 +76,12 @@ class _Responses:
         return self.value
 
 
-def _route(*, task_id: str = _TASK, state: TaskRouteState = TaskRouteState.ACTIVE) -> TaskRoute:
+def _route(
+    *,
+    task_id: str = _TASK,
+    state: TaskRouteState = TaskRouteState.ACTIVE,
+    repository_privacy_commitment: str | None = None,
+) -> TaskRoute:
     return TaskRoute(
         task_id,
         _SESSION,
@@ -77,10 +91,16 @@ def _route(*, task_id: str = _TASK, state: TaskRouteState = TaskRouteState.ACTIV
         canonical_digest(
             {"task_id": task_id, "bundle_relpath": f"tasks/{task_id}", "route_generation": 1}
         ),
+        repository_privacy_commitment,
     )
 
 
-def _application(catalog: _Catalog, responses: _Responses | None = None) -> Application:
+def _application(
+    catalog: _Catalog,
+    responses: _Responses | None = None,
+    *,
+    enforce_repository_identity: bool = False,
+) -> Application:
     return Application(
         start_catalog=cast(StartCatalogPort, catalog),
         publish_responses=cast(PublishResponseCatalogPort, responses or catalog),
@@ -99,7 +119,37 @@ def _application(catalog: _Catalog, responses: _Responses | None = None) -> Appl
         profile=RuntimeProfile.TEST_FAKE,
         policy_packs=("research-evidence/0.1.0", "work-integrity/0.1.0"),
         version_manifest={},
+        enforce_repository_identity=enforce_repository_identity,
     )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("method", ("publish_work", "check", "respond", "status", "receipt"))
+async def test_task_workflows_reject_cross_repository_context_before_execution(
+    method: str,
+) -> None:
+    commitment_a = "hmac-sha256:" + "a" * 64
+    commitment_b = "hmac-sha256:" + "b" * 64
+    catalog = _Catalog(_route(repository_privacy_commitment=commitment_a))
+    app = _application(catalog, enforce_repository_identity=True)
+    context_b = RepositoryPrivacyContext(commitment_b, "git_common_root")
+    request_type = {
+        "publish_work": PublishWorkRequest,
+        "check": CheckRequest,
+        "respond": RespondRequest,
+        "status": StatusRequest,
+        "receipt": ReceiptRequest,
+    }[method]
+    request = request_type.model_construct(session_id=_SESSION, task_id=_TASK)
+
+    with pytest.raises(PublicOperationError) as failure:
+        await getattr(app, method)(
+            request,
+            repository_privacy_context=context_b,
+        )
+
+    assert failure.value.code is PublicErrorCode.SESSION_CONFLICT
+    assert catalog.calls == 1
 
 
 def _publish_internal() -> PublishWorkInternalResult:

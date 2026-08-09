@@ -22,6 +22,7 @@ from yoetz.ports.control import (
     ServiceState,
     ServiceStatus,
     ServiceStopResult,
+    WorkspaceLocator,
 )
 from yoetz.ports.privacy import LocalDisclosureReceiptView, PrivacyReceiptPage
 from yoetz.protocol.ids import IdKind, new_id
@@ -266,6 +267,37 @@ async def test_on_demand_connect_spawns_only_after_absent_service(
     connected = await connect_service_on_demand(ControlClientKind.MCP_BRIDGE, timeout_seconds=0.2)
     assert connected is expected
     assert spawned == 1
+
+
+@pytest.mark.anyio
+async def test_on_demand_reuses_workspace_locator_for_every_reconnect_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.service.client as client_module
+
+    expected = object()
+    locator = WorkspaceLocator("/private/repository")
+    observed: list[WorkspaceLocator | None] = []
+
+    async def scripted_connect(
+        kind: ControlClientKind, *, workspace_locator: WorkspaceLocator | None = None
+    ) -> object:
+        assert kind is ControlClientKind.MCP_BRIDGE
+        observed.append(workspace_locator)
+        if len(observed) == 1:
+            raise ControlError("service_unavailable", retryable=True)
+        return expected
+
+    monkeypatch.setattr(client_module, "connect_service", scripted_connect)
+    monkeypatch.setattr(client_module, "_spawn_service_process", lambda: None)
+    connected = await connect_service_on_demand(
+        ControlClientKind.MCP_BRIDGE,
+        workspace_locator=locator,
+        timeout_seconds=0.2,
+    )
+
+    assert connected is expected
+    assert observed == [locator, locator]
 
 
 def test_on_demand_service_environment_strips_secret_shaped_names(

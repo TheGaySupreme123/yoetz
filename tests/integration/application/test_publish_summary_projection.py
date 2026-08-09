@@ -269,6 +269,7 @@ async def _application() -> tuple[Application, PrivacyPolicy]:
         profile=RuntimeProfile.TEST_FAKE,
         policy_packs=("research-evidence/0.1.0", "work-integrity/0.1.0"),
         version_manifest=start_app.version_manifest,
+        enforce_repository_identity=False,
     )
     return app, policy
 

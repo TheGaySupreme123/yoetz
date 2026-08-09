@@ -84,7 +84,8 @@ def _id(kind: IdKind, value: int) -> str:
 def _sqlite_catalog(installation_id: str, clock: _Clock) -> SqliteStartCatalog:
     db = apsw.Connection(":memory:")
     root = Path(__file__).resolve().parents[3]
-    db.execute((root / "migrations/catalog/0001.sql").read_text(encoding="utf-8"))
+    for version in ("0001", "0002", "0003"):
+        db.execute((root / f"migrations/catalog/{version}.sql").read_text(encoding="utf-8"))
     db.executemany(
         "INSERT INTO catalog_meta(key, value) VALUES(?, ?)",
         (("installation_id", installation_id), ("owner_generation", "1")),
@@ -122,6 +123,7 @@ async def _command(
     mode: StartMode = StartMode.CREATE_OR_ATTACH,
     session_id: str | None = None,
     title: str = "Exact task",
+    repository_privacy_commitment: str | None = None,
 ) -> StartCommand:
     identity = StartIdentityInput(title, "workspace-A", "external-A")
     commitments = await catalog.commit_identity(identity)
@@ -133,10 +135,19 @@ async def _command(
                 "workspace": commitments.workspace_ref_commitment,
             },
             "mode": mode.value,
+            "repository_privacy_commitment": repository_privacy_commitment,
             "session_id": session_id,
         }
     )
-    return StartCommand(operation_id, digest, mode, identity, commitments, session_id)
+    return StartCommand(
+        operation_id,
+        digest,
+        mode,
+        identity,
+        commitments,
+        session_id,
+        repository_privacy_commitment,
+    )
 
 
 def _result(value: int = 900) -> EncryptedResultRef:
@@ -225,6 +236,56 @@ async def test_reserve_resume_complete_parity() -> None:
     assert memory_replay == sqlite_replay
     assert memory_replay.outcome == "replayed"
     assert memory_replay.replayed_result is not None
+
+
+@pytest.mark.anyio
+async def test_repository_binding_is_atomic_and_mismatch_precedes_operation_reservation() -> None:
+    installation_id = _id(IdKind.INSTALLATION, 705)
+    clock = _Clock(datetime(2026, 7, 19, 9, 30, tzinfo=UTC))
+    memory, memory_state = _memory_catalog(installation_id, clock)
+    sqlite = _sqlite_catalog(installation_id, _Clock(clock.current))
+    commitment_a = "hmac-sha256:" + "a" * 64
+    commitment_b = "hmac-sha256:" + "b" * 64
+
+    for catalog in (memory, sqlite):
+        created = await catalog.reserve_or_resume(
+            await _command(
+                catalog,
+                operation_id=_id(IdKind.REQUEST, 706),
+                repository_privacy_commitment=commitment_a,
+            )
+        )
+        route = await catalog.resolve_route(created.session_id)
+        assert route is not None
+        assert route.repository_privacy_commitment == commitment_a
+        if isinstance(catalog, MemoryStartCatalogAdapter):
+            before_operations = len(memory_state.operations)
+        else:
+            row = catalog._db.execute(  # pyright: ignore[reportPrivateUsage]
+                "SELECT COUNT(*) FROM start_operations"
+            ).fetchone()
+            assert row is not None
+            before_operations = int(row[0])
+        mismatch = await _command(
+            catalog,
+            operation_id=_id(IdKind.REQUEST, 707),
+            mode=StartMode.ATTACH,
+            session_id=created.session_id,
+            repository_privacy_commitment=commitment_b,
+        )
+        with pytest.raises(PublicOperationError) as failure:
+            await catalog.reserve_or_resume(mismatch)
+        assert failure.value.code is PublicErrorCode.SESSION_CONFLICT
+        if isinstance(catalog, MemoryStartCatalogAdapter):
+            after_operations = len(memory_state.operations)
+        else:
+            row = catalog._db.execute(  # pyright: ignore[reportPrivateUsage]
+                "SELECT COUNT(*) FROM start_operations"
+            ).fetchone()
+            assert row is not None
+            after_operations = int(row[0])
+        assert after_operations == before_operations
+        assert before_operations == after_operations == 1
 
 
 @pytest.mark.anyio

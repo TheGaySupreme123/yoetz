@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+"""Generate immutable service-control 2.0.0 schemas for repository authority."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import hashlib
+import json
+from pathlib import Path
+from typing import Any, Final, cast
+
+from yoetz.protocol.canonical import canonical_encode
+
+_ROOT: Final = Path(__file__).resolve().parents[1]
+_SERVICE: Final = _ROOT / "schemas" / "service"
+_PRIVACY_POLICY: Final = "https://schemas.yoetz.dev/0.1/privacy/privacy-policy-1.0.0.schema.json"
+_DIGEST: Final[dict[str, Any]] = {
+    "maxLength": 71,
+    "minLength": 71,
+    "pattern": "^sha256:[0-9a-f]{64}$",
+    "type": "string",
+}
+
+
+def _load(name: str) -> dict[str, Any]:
+    return json.loads((_SERVICE / f"{name}-1.0.0.schema.json").read_text(encoding="utf-8"))
+
+
+def _with_v2_id(name: str, document: dict[str, Any]) -> dict[str, Any]:
+    generated = copy.deepcopy(document)
+    generated["$id"] = f"https://schemas.yoetz.dev/0.1/service/{name}-2.0.0.schema.json"
+    return generated
+
+
+def _hello() -> dict[str, Any]:
+    generated = _with_v2_id("control-hello", _load("control-hello"))
+    generated["properties"]["workspace_locator"] = {
+        "additionalProperties": False,
+        "properties": {
+            "path": {
+                "maxLength": 8192,
+                "minLength": 1,
+                "pattern": "^/[^\\u0000\\r\\n]*$",
+                "type": "string",
+            },
+            "schema_version": {"const": "1.0.0"},
+        },
+        "required": ["schema_version", "path"],
+        "type": "object",
+    }
+    return generated
+
+
+def _request() -> dict[str, Any]:
+    generated = _with_v2_id("control-request", _load("control-request"))
+    definitions = generated["$defs"]
+    legacy_setup = definitions["privacy_get_setup_body"]
+    definitions["privacy_get_setup_body"] = {
+        "oneOf": [
+            legacy_setup,
+            {
+                "additionalProperties": False,
+                "properties": {"schema_version": {"const": "2.0.0"}},
+                "required": ["schema_version"],
+                "type": "object",
+            },
+        ]
+    }
+    legacy_proposal = definitions["privacy_propose_policy_body"]
+    definitions["privacy_propose_policy_body"] = {
+        "oneOf": [
+            legacy_proposal,
+            {
+                "additionalProperties": False,
+                "properties": {
+                    "authority_digest": copy.deepcopy(_DIGEST),
+                    "candidate_policy": {"$ref": _PRIVACY_POLICY},
+                    "schema_version": {"const": "2.0.0"},
+                },
+                "required": ["schema_version", "authority_digest", "candidate_policy"],
+                "type": "object",
+            },
+        ]
+    }
+    return generated
+
+
+def _setup_result() -> dict[str, Any]:
+    return {
+        "additionalProperties": False,
+        "properties": {
+            "allowed_blocked_examples": {
+                "items": {
+                    "additionalProperties": False,
+                    "properties": {
+                        "allowed": {"type": "boolean"},
+                        "code": {
+                            "maxLength": 64,
+                            "minLength": 1,
+                            "pattern": "^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$",
+                            "type": "string",
+                        },
+                    },
+                    "required": ["code", "allowed"],
+                    "type": "object",
+                },
+                "maxItems": 16,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "authority_digest": copy.deepcopy(_DIGEST),
+            "bound_scope": {
+                "allOf": [
+                    {"$ref": f"{_PRIVACY_POLICY}#/$defs/authorization_scope"},
+                    {
+                        "properties": {"kind": {"const": "workspace"}},
+                        "required": ["kind"],
+                        "type": "object",
+                    },
+                ]
+            },
+            "channel_choices": {
+                "items": {
+                    "additionalProperties": False,
+                    "properties": {
+                        "capability_state": {
+                            "enum": ["available", "unsupported"],
+                            "type": "string",
+                        },
+                        "channel": {"$ref": f"{_PRIVACY_POLICY}#/$defs/egress_channel"},
+                        "enabled": {"type": "boolean"},
+                    },
+                    "required": ["channel", "enabled", "capability_state"],
+                    "type": "object",
+                },
+                "maxItems": 8,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "composed_policy": {"$ref": _PRIVACY_POLICY},
+            "grant_state": {"enum": ["granted", "missing"], "type": "string"},
+            "migration_state": {
+                "enum": [
+                    "not_applicable",
+                    "legacy_route_available",
+                    "first_repository_available",
+                    "consumed",
+                ],
+                "type": "string",
+            },
+            "never_send_editable": {"const": False},
+            "recipes": {
+                "items": {
+                    "additionalProperties": False,
+                    "properties": {
+                        "privacy_profile": {"$ref": f"{_PRIVACY_POLICY}#/$defs/privacy_profile"},
+                        "recipe": {
+                            "enum": [
+                                "private",
+                                "metadata_only",
+                                "assisted_review",
+                                "expanded_review",
+                                "custom",
+                            ],
+                            "type": "string",
+                        },
+                        "review_context_profile": {
+                            "$ref": f"{_PRIVACY_POLICY}#/$defs/review_context_profile"
+                        },
+                        "review_selection": {
+                            "$ref": f"{_PRIVACY_POLICY}#/$defs/review_selection_policy"
+                        },
+                    },
+                    "required": [
+                        "recipe",
+                        "privacy_profile",
+                        "review_context_profile",
+                        "review_selection",
+                    ],
+                    "type": "object",
+                },
+                "maxItems": 5,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "schema_version": {"const": "2.0.0"},
+        },
+        "required": [
+            "schema_version",
+            "composed_policy",
+            "bound_scope",
+            "authority_digest",
+            "grant_state",
+            "migration_state",
+            "channel_choices",
+            "allowed_blocked_examples",
+            "recipes",
+            "never_send_editable",
+        ],
+        "type": "object",
+    }
+
+
+def _result() -> dict[str, Any]:
+    generated = _with_v2_id("control-result", _load("control-result"))
+    definitions = generated["$defs"]
+    definitions["privacy_get_setup_body"] = {
+        "oneOf": [definitions["privacy_get_setup_body"], _setup_result()]
+    }
+    legacy_proposal = definitions["privacy_propose_policy_body"]
+    v2_proposal = copy.deepcopy(legacy_proposal)
+    for branch in v2_proposal["oneOf"]:
+        branch["properties"]["schema_version"] = {"const": "2.0.0"}
+    definitions["privacy_propose_policy_body"] = {
+        "oneOf": [*legacy_proposal["oneOf"], *v2_proposal["oneOf"]]
+    }
+    return generated
+
+
+def _documents() -> dict[Path, bytes]:
+    documents = {
+        "control-hello": _hello(),
+        "control-hello-result": _with_v2_id("control-hello-result", _load("control-hello-result")),
+        "control-request": _request(),
+        "control-result": _result(),
+    }
+    return {
+        _SERVICE / f"{name}-2.0.0.schema.json": canonical_encode(document)
+        for name, document in documents.items()
+    }
+
+
+def _sync_manifest(documents: dict[Path, bytes], *, write: bool) -> list[Path]:
+    manifest_path = _ROOT / "schemas" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    members = cast(list[dict[str, Any]], manifest["members"])
+    by_path = {cast(str, member["path"]): member for member in members}
+    owning_models = {
+        "control-hello": "control hello wire helper",
+        "control-hello-result": "control hello result wire helper",
+        "control-request": "ControlRequest",
+        "control-result": "ControlResult",
+    }
+    mismatches: list[Path] = []
+    for path, payload in documents.items():
+        relative = path.relative_to(_ROOT / "schemas").as_posix()
+        name = path.name.removesuffix("-2.0.0.schema.json")
+        expected = {
+            "$id": f"https://schemas.yoetz.dev/0.1/{relative}",
+            "artifact_role": "local-control",
+            "byte_length": len(payload),
+            "media_type": "application/schema+json",
+            "owning_model": owning_models[name],
+            "path": relative,
+            "schema_kind": "request_result",
+            "schema_version": "2.0.0",
+            "sha256": "sha256:" + hashlib.sha256(payload).hexdigest(),
+        }
+        existing = by_path.get(relative)
+        if existing != expected:
+            mismatches.append(path.relative_to(_ROOT))
+            if write:
+                if existing is None:
+                    members.append(expected)
+                else:
+                    existing.clear()
+                    existing.update(expected)
+    if write:
+        members.sort(key=lambda member: cast(str, member["path"]).encode("ascii"))
+        manifest_path.write_bytes(canonical_encode(manifest))
+        return []
+    return mismatches
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--write", action="store_true")
+    mode.add_argument("--check", action="store_true")
+    args = parser.parse_args()
+    documents = _documents()
+    mismatches: list[Path] = []
+    for path, expected in documents.items():
+        if args.write:
+            path.write_bytes(expected)
+        elif not path.is_file() or path.read_bytes() != expected:
+            mismatches.append(path.relative_to(_ROOT))
+    mismatches.extend(_sync_manifest(documents, write=args.write))
+    if mismatches:
+        for path in mismatches:
+            print(f"generated schema stale: {path}")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

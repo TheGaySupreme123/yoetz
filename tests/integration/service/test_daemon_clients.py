@@ -29,6 +29,7 @@ from yoetz.ports.control import (
     ControlError,
     ControlMethod,
     McpRouteProfile,
+    RepositoryPrivacyContext,
     ServiceState,
 )
 from yoetz.protocol.canonical import canonical_digest
@@ -157,7 +158,13 @@ class _Application:
         self.cached_publish_response: PublishWorkResult | None = None
         self.publish_response_store_error: PublicOperationError | None = None
 
-    async def start(self, request: object) -> StartResult:
+    async def start(
+        self,
+        request: object,
+        *,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> StartResult:
+        del repository_privacy_context
         assert isinstance(request, StartRequest)
         self.start_calls += 1
         await asyncio.sleep(0)
@@ -176,19 +183,39 @@ class _Application:
             }
         )
 
-    async def check(self, request: object) -> JsonObject:
+    async def check(
+        self,
+        request: object,
+        *,
+        route_profile: object = "policy",
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> JsonObject:
+        del route_profile, repository_privacy_context
         assert isinstance(request, CheckRequest)
         await asyncio.sleep(0)
         # Unprojected stand-in only. Projection is forced to fail in the dedicated correlation
         # tests before any public CheckResult is required.
         return JsonObject({"ok": True, "request_id": request.request_id})
 
-    async def status(self, request: object) -> JsonObject:
+    async def status(
+        self,
+        request: object,
+        *,
+        route_profile: object = None,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> JsonObject:
+        del route_profile, repository_privacy_context
         assert isinstance(request, StatusRequest)
         await asyncio.sleep(0)
         return JsonObject({"ok": True, "request_id": request.request_id, "view": request.view})
 
-    async def publish_work(self, request: object) -> PublishWorkResult | PublishWorkInternalResult:
+    async def publish_work(
+        self,
+        request: object,
+        *,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> PublishWorkResult | PublishWorkInternalResult:
+        del repository_privacy_context
         assert isinstance(request, PublishWorkRequest)
         self.publish_work_calls += 1
         await asyncio.sleep(0)
@@ -355,7 +382,13 @@ async def test_ready_handler_preserves_check_route_default(
     seen: list[object] = []
     marker = object()
 
-    async def handler(_request: object, *, route_profile: object = "policy") -> object:
+    async def handler(
+        _request: object,
+        *,
+        route_profile: object = "policy",
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> object:
+        assert repository_privacy_context is None
         seen.append(route_profile)
         return marker
 
@@ -376,6 +409,67 @@ async def test_ready_handler_preserves_check_route_default(
 
     assert result is marker
     assert seen == [expected]
+
+
+@pytest.mark.anyio
+async def test_start_handler_receives_only_the_trusted_repository_context_keyword() -> None:
+    seen: list[object] = []
+    marker = object()
+    context = RepositoryPrivacyContext("hmac-sha256:" + "1" * 64, "git_common_root")
+
+    async def handler(
+        _request: object,
+        *,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> object:
+        seen.append(repository_privacy_context)
+        return marker
+
+    request = ControlCallRequest(
+        kind="call",
+        protocol_version="1.0",
+        rpc_id=new_id(IdKind.CONTROL_RPC),
+        service_instance_id=_INSTANCE_ID,
+        service_generation="7",
+        method=ControlMethod.START,
+        body=_start_body(),
+    )
+
+    result = await ServiceDaemon._invoke_ready_handler(  # pyright: ignore[reportPrivateUsage]
+        handler, request, context
+    )
+
+    assert result is marker
+    assert seen == [context]
+
+
+@pytest.mark.anyio
+async def test_locator_bound_session_keeps_v1_tighten_machine_only() -> None:
+    seen: list[object] = []
+    marker = object()
+    context = RepositoryPrivacyContext("hmac-sha256:" + "2" * 64, "git_common_root")
+
+    async def legacy_handler(request: object) -> object:
+        seen.append(request)
+        return marker
+
+    body = JsonObject({"schema_version": "1.0.0"})
+    request = ControlCallRequest(
+        kind="call",
+        protocol_version="1.0",
+        rpc_id=new_id(IdKind.CONTROL_RPC),
+        service_instance_id=_INSTANCE_ID,
+        service_generation="7",
+        method=ControlMethod.PRIVACY_TIGHTEN_POLICY,
+        body=body,
+    )
+
+    result = await ServiceDaemon._invoke_ready_handler(  # pyright: ignore[reportPrivateUsage]
+        legacy_handler, request, context
+    )
+
+    assert result is marker
+    assert seen == [body]
 
 
 def _daemon() -> tuple[ServiceDaemon, _Application, _Vault, _Listener]:

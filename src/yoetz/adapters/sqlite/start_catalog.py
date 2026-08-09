@@ -12,8 +12,19 @@ from typing import Final, Literal, cast
 
 import apsw
 
-from yoetz.domain.privacy import LocalDisclosureSink
-from yoetz.domain.values import format_rfc3339_millis, parse_rfc3339_millis, validate_commitment
+from yoetz.adapters.privacy.catalog import (
+    CatalogPrivacyPolicyStore,
+    _policy_for_repository,  # pyright: ignore[reportPrivateUsage]
+    _policy_from_bytes,  # pyright: ignore[reportPrivateUsage]
+    _scope_digest,  # pyright: ignore[reportPrivateUsage]
+)
+from yoetz.domain.privacy import AuthorizationScope, AuthorizationScopeKind, LocalDisclosureSink
+from yoetz.domain.values import (
+    format_rfc3339_millis,
+    parse_rfc3339_millis,
+    validate_commitment,
+    validate_sha256_digest,
+)
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.keys import MacKeyHandle
@@ -47,7 +58,7 @@ __all__ = [
     "workspace_ref_commitment",
 ]
 
-CATALOG_SCHEMA_VERSION: Final = 2
+CATALOG_SCHEMA_VERSION: Final = 3
 _LEASE_SECONDS: Final = 60
 _PHASE_SUCCESSOR: Final = {
     StartPhase.ROUTE_RESERVED: StartPhase.BUNDLE_READY,
@@ -75,6 +86,7 @@ class _RouteRow:
     route_generation: int
     route_identity_digest: str
     state: TaskRouteState
+    repository_privacy_commitment: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,7 +234,7 @@ def external_ref_commitment(lookup: MacKeyHandle, external_ref: JsonValue) -> st
 
 
 def _route_from_row(row: tuple[object, ...]) -> _RouteRow:
-    if len(row) != 8:
+    if len(row) != 9:
         raise _error(PublicErrorCode.STORAGE_CORRUPT)
     try:
         return _RouteRow(
@@ -234,6 +246,7 @@ def _route_from_row(row: tuple[object, ...]) -> _RouteRow:
             route_generation=_integer(row[5]),
             route_identity_digest=_text(row[6]),
             state=TaskRouteState(_text(row[7])),
+            repository_privacy_commitment=_optional_text(row[8]),
         )
     except ValueError as exc:
         raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
@@ -248,6 +261,7 @@ def _route_value(row: _RouteRow) -> TaskRoute:
             route_generation=row.route_generation,
             state=row.state,
             route_identity_digest=row.route_identity_digest,
+            repository_privacy_commitment=row.repository_privacy_commitment,
         )
     except (TypeError, ValueError) as exc:
         raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
@@ -409,11 +423,11 @@ def _quarantine_envelope(row: _OperationRow, reason: SafeReason) -> bytes:
     )
 
 
-_ROUTE_COLUMNS: Final = """
+_ROUTE_COLUMNS_V3: Final = """
 task_id, workspace_ref_commitment, external_ref_commitment, active_session_id,
-bundle_relpath, route_generation, active_route_identity_digest, state
+bundle_relpath, route_generation, active_route_identity_digest, state,
+repository_privacy_commitment
 """
-
 _OPERATION_COLUMNS: Final = """
 installation_id, operation_id, request_digest, requested_mode, route_action, state, phase,
 task_id, session_id, writer_id, lifecycle_event_id, route_generation, route_identity_digest,
@@ -446,6 +460,7 @@ class SqliteStartCatalog:
         self._lookup = lookup
         self._clock = clock
         self._ids = ids
+        self._route_columns = _ROUTE_COLUMNS_V3
         self._lease_owner_id = ids.new(IdKind.SERVICE_INSTANCE)
         validate_id(IdKind.SERVICE_INSTANCE, self._lease_owner_id)
 
@@ -470,7 +485,7 @@ class SqliteStartCatalog:
         except (TypeError, ValueError) as exc:
             raise _error(PublicErrorCode.INVALID_REQUEST) from exc
         rows = self._rows(
-            f"SELECT {_ROUTE_COLUMNS} FROM task_routes WHERE active_session_id = ? LIMIT 2",
+            f"SELECT {self._route_columns} FROM task_routes WHERE active_session_id = ? LIMIT 2",
             (session,),
         )
         if not rows:
@@ -502,6 +517,153 @@ class SqliteStartCatalog:
                 raise _error(PublicErrorCode.STORAGE_CORRUPT)
             task_ids.append(row[0])
         return tuple(task_ids)
+
+    def _bind_repository_privacy_in_transaction(
+        self,
+        route: _RouteRow,
+        repository_privacy_commitment: str,
+        now_wire: str,
+        *,
+        allow_unentitled: bool,
+    ) -> _RouteRow:
+        """Bind and consume any eligible migration grant inside the caller's transaction."""
+
+        existing = route.repository_privacy_commitment
+        if existing is not None:
+            if not hmac.compare_digest(existing, repository_privacy_commitment):
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            return route
+        entitlement = self._db.execute(
+            "SELECT route_identity_digest, migration_policy_digest, "
+            "migration_policy_canonical FROM privacy_legacy_route_entitlements "
+            "WHERE task_id = ? AND entitlement_state = 'available'",
+            (route.task_id,),
+        ).fetchone()
+        if entitlement is not None and entitlement[0] != route.route_identity_digest:
+            raise _error(PublicErrorCode.SESSION_CONFLICT)
+        first = self._db.execute(
+            "SELECT first_repository_carry_forward_state, migration_policy_digest, "
+            "migration_policy_canonical FROM privacy_installation_authority "
+            "WHERE installation_id = ?",
+            (self._installation_id,),
+        ).fetchone()
+        first_available = first is not None and first[0] == "available"
+        if entitlement is None and not first_available and not allow_unentitled:
+            raise _error(PublicErrorCode.SESSION_CONFLICT)
+
+        frontier_row = (
+            entitlement if entitlement is not None else first if first_available else None
+        )
+        scope = AuthorizationScope(
+            AuthorizationScopeKind.WORKSPACE,
+            self._installation_id,
+            repository_privacy_commitment,
+        )
+        if frontier_row is not None:
+            grant = self._db.execute(
+                "SELECT 1 FROM privacy_policy_versions WHERE scope_digest = ? "
+                "AND state = 'current'",
+                (_scope_digest(scope),),
+            ).fetchone()
+            if grant is None:
+                machine_row = self._db.execute(
+                    "SELECT policy_canonical FROM privacy_policy_versions "
+                    "WHERE installation_id = ? AND scope_kind = 'machine' "
+                    "AND state = 'current'",
+                    (self._installation_id,),
+                ).fetchone()
+                if machine_row is None or type(machine_row[0]) is not bytes:
+                    raise _error(PublicErrorCode.STORAGE_CORRUPT)
+                digest_index = 1
+                canonical_index = 2
+                if type(frontier_row[canonical_index]) is not bytes:
+                    raise _error(PublicErrorCode.STORAGE_CORRUPT)
+                machine = _policy_from_bytes(machine_row[0])
+                frontier = _policy_from_bytes(frontier_row[canonical_index])
+                if frontier.policy_digest != frontier_row[digest_index]:
+                    raise _error(PublicErrorCode.STORAGE_CORRUPT)
+                if machine.network_egress_permitted and frontier.network_egress_permitted:
+                    generation_row = self._db.execute(
+                        "SELECT COALESCE(MAX(policy_generation), 0) + 1 "
+                        "FROM privacy_policy_versions"
+                    ).fetchone()
+                    if generation_row is None or type(generation_row[0]) is not int:
+                        raise _error(PublicErrorCode.STORAGE_CORRUPT)
+                    policy = _policy_for_repository(frontier.meet(machine), scope)
+                    CatalogPrivacyPolicyStore(self._db, self._clock)._insert_policy(  # pyright: ignore[reportPrivateUsage]
+                        policy, generation_row[0], "seed", None
+                    )
+
+        self._db.execute(
+            "UPDATE task_routes SET repository_privacy_commitment = ?, updated_at = ? "
+            "WHERE task_id = ? AND active_route_identity_digest = ? "
+            "AND repository_privacy_commitment IS NULL",
+            (
+                repository_privacy_commitment,
+                now_wire,
+                route.task_id,
+                route.route_identity_digest,
+            ),
+        )
+        if entitlement is not None:
+            self._db.execute(
+                "UPDATE privacy_legacy_route_entitlements SET entitlement_state = 'consumed', "
+                "repository_privacy_commitment = ?, consumed_at = ? "
+                "WHERE task_id = ? AND entitlement_state = 'available'",
+                (repository_privacy_commitment, now_wire, route.task_id),
+            )
+        elif first_available:
+            self._db.execute(
+                "UPDATE privacy_installation_authority SET "
+                "first_repository_carry_forward_state = 'consumed', "
+                "first_repository_carry_forward_commitment = ?, updated_at = ? "
+                "WHERE installation_id = ? AND "
+                "first_repository_carry_forward_state = 'available'",
+                (repository_privacy_commitment, now_wire, self._installation_id),
+            )
+        rows = self._rows(
+            f"SELECT {self._route_columns} FROM task_routes WHERE task_id = ? LIMIT 2",
+            (route.task_id,),
+        )
+        if len(rows) != 1:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        bound = _route_from_row(rows[0])
+        if bound.repository_privacy_commitment != repository_privacy_commitment:
+            raise _error(PublicErrorCode.SESSION_CONFLICT)
+        return bound
+
+    async def bind_repository_privacy(
+        self,
+        task_id: str,
+        route_identity_digest: str,
+        repository_privacy_commitment: str,
+    ) -> TaskRoute:
+        try:
+            task = validate_id(IdKind.TASK, task_id)
+            validate_sha256_digest(route_identity_digest)
+            validate_commitment(repository_privacy_commitment)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        with _Transaction(self._db):
+            rows = self._rows(
+                f"SELECT {self._route_columns} FROM task_routes WHERE task_id = ? LIMIT 2", (task,)
+            )
+            if len(rows) != 1:
+                raise _error(
+                    PublicErrorCode.SESSION_NOT_FOUND
+                    if not rows
+                    else PublicErrorCode.STORAGE_CORRUPT
+                )
+            route = _route_from_row(rows[0])
+            if route.route_identity_digest != route_identity_digest:
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            route = self._bind_repository_privacy_in_transaction(
+                route,
+                repository_privacy_commitment,
+                format_rfc3339_millis(self._clock.now_utc()),
+                allow_unentitled=True,
+            )
+        return _route_value(route)
 
     async def lookup(self, key: PublishResponseKey) -> StoredPublishResponse | None:
         if type(key) is not PublishResponseKey:
@@ -566,6 +728,19 @@ class SqliteStartCatalog:
                 raise _error(PublicErrorCode.SESSION_NOT_FOUND)
             if route is not None:
                 self._require_no_exclusive_maintenance(route.task_id)
+                expected = route.repository_privacy_commitment
+                actual = request.repository_privacy_commitment
+                if expected is not None and (
+                    actual is None or not hmac.compare_digest(expected, actual)
+                ):
+                    raise _error(PublicErrorCode.SESSION_CONFLICT)
+                if expected is None and actual is not None:
+                    route = self._bind_repository_privacy_in_transaction(
+                        route,
+                        actual,
+                        now_wire,
+                        allow_unentitled=False,
+                    )
 
             created = route is None
             if created:
@@ -583,8 +758,9 @@ class SqliteStartCatalog:
                     """INSERT INTO task_routes (
                         task_id, workspace_ref_commitment, external_ref_commitment,
                         active_session_id, bundle_relpath, route_generation,
-                        active_route_identity_digest, state, quarantine_code, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, 1, ?, 'initializing', NULL, ?, ?)""",
+                        active_route_identity_digest, state, quarantine_code, created_at, updated_at,
+                        repository_privacy_commitment
+                    ) VALUES (?, ?, ?, ?, ?, 1, ?, 'initializing', NULL, ?, ?, NULL)""",
                     (
                         task_id,
                         request.identity_commitments.workspace_ref_commitment,
@@ -605,7 +781,15 @@ class SqliteStartCatalog:
                     1,
                     route_digest,
                     TaskRouteState.INITIALIZING,
+                    None,
                 )
+                if request.repository_privacy_commitment is not None:
+                    route = self._bind_repository_privacy_in_transaction(
+                        route,
+                        request.repository_privacy_commitment,
+                        now_wire,
+                        allow_unentitled=True,
+                    )
             else:
                 session_id = proposed[IdKind.SESSION]
 
@@ -904,7 +1088,7 @@ class SqliteStartCatalog:
         external = request.identity_commitments.external_ref_commitment
         if workspace is not None and external is not None:
             rows = self._rows(
-                f"SELECT {_ROUTE_COLUMNS} FROM task_routes "
+                f"SELECT {self._route_columns} FROM task_routes "
                 "WHERE workspace_ref_commitment = ? AND external_ref_commitment = ? LIMIT 2",
                 (workspace, external),
             )
@@ -915,7 +1099,8 @@ class SqliteStartCatalog:
         by_session: _RouteRow | None = None
         if request.session_id is not None:
             rows = self._rows(
-                f"SELECT {_ROUTE_COLUMNS} FROM task_routes WHERE active_session_id = ? LIMIT 2",
+                f"SELECT {self._route_columns} FROM task_routes "
+                "WHERE active_session_id = ? LIMIT 2",
                 (request.session_id,),
             )
             if len(rows) > 1:
@@ -1008,7 +1193,8 @@ class SqliteStartCatalog:
 
     def _require_current_route(self, row: _OperationRow) -> _RouteRow:
         rows = self._rows(
-            f"SELECT {_ROUTE_COLUMNS} FROM task_routes WHERE task_id = ? LIMIT 2", (row.task_id,)
+            f"SELECT {self._route_columns} FROM task_routes WHERE task_id = ? LIMIT 2",
+            (row.task_id,),
         )
         if len(rows) != 1:
             raise _error(PublicErrorCode.STORAGE_CORRUPT)

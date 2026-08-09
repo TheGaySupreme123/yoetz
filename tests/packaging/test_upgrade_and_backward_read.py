@@ -150,15 +150,15 @@ def test_each_migration_family_has_contiguous_versions(installed: _Installed) ->
         "}))\n"
     )
     payload = _run_probe(installed, probe)
-    assert payload["catalog_versions"] == ["0001", "0002"]
+    assert payload["catalog_versions"] == ["0001", "0002", "0003"]
     assert payload["bundle_versions"] == ["0001", "0002", "0003", "0004", "0005"]
-    assert payload["catalog_current"] == 2
+    assert payload["catalog_current"] == 3
     assert payload["bundle_current"] == 5
 
 
 def test_migration_ddl_contains_no_destructive_statement(installed: _Installed) -> None:
     for family, versions in (
-        ("catalog", ("0001", "0002")),
+        ("catalog", ("0001", "0002", "0003")),
         ("bundle", ("0001", "0002", "0003", "0004", "0005")),
     ):
         for version in versions:
@@ -204,7 +204,7 @@ def test_fresh_catalog_and_bundle_initialize_at_current_schema_version(
     payload = _run_probe(installed, probe)
     assert payload == {
         "catalog_state": "current",
-        "catalog_version": 2,
+        "catalog_version": 3,
         "bundle_state": "current",
         "bundle_version": 5,
     }
@@ -226,7 +226,7 @@ def test_replaying_migrations_on_an_already_current_database_is_a_verified_noop(
         "}))\n"
     )
     payload = _run_probe(installed, probe)
-    assert payload == {"from_version": 2, "to_version": 2, "applied_versions": []}
+    assert payload == {"from_version": 3, "to_version": 3, "applied_versions": []}
 
 
 def test_uninitialized_database_reports_uninitialized_not_current(installed: _Installed) -> None:
@@ -251,7 +251,7 @@ def test_newer_than_candidate_schema_fails_migration_and_identity_checks_honestl
         "from yoetz.adapters.sqlite.connection import verify_schema_identity, StorageUnsafeError\n"
         "catalog = apsw.Connection(':memory:')\n"
         "initialize_catalog(catalog)\n"
-        "catalog.execute('PRAGMA user_version = 3')\n"
+        "catalog.execute('PRAGMA user_version = 4')\n"
         "identity_reason = None\n"
         "try:\n"
         "    verify_schema_identity(catalog)\n"
@@ -290,8 +290,8 @@ def test_wrong_application_id_is_rejected_as_unsafe(installed: _Installed) -> No
 def test_unknown_older_than_current_user_version_requires_initialization_not_silent_read(
     installed: _Installed,
 ) -> None:
-    # Catalog current remains 1, so the only reachable "older" catalog state is 0
-    # (uninitialized); run_migrations must refuse to silently treat that as current.
+    # Version 0 is uninitialized, not an older initialized catalog; run_migrations must refuse to
+    # silently treat it as current.
     probe = (
         "import apsw, json\n"
         "from yoetz.adapters.sqlite.migrations import run_migrations, CATALOG_MIGRATIONS\n"

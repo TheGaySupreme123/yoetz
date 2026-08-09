@@ -61,7 +61,7 @@ PROJECTION_VERSION: Final = "yoetz/0.1.0"
 WORK_INTEGRITY_POLICY_VERSION: Final = "work-integrity/0.1.0"
 RESEARCH_EVIDENCE_POLICY_VERSION: Final = "research-evidence/0.1.0"
 OBJECT_FORMAT_VERSION: Final = "yoetz-object/1"
-CATALOG_SCHEMA_VERSION: Final = "2"
+CATALOG_SCHEMA_VERSION: Final = "3"
 BUNDLE_SCHEMA_VERSION: Final = "2"
 SQLITE_APPLICATION_ID: Final = "0x594F4554"
 
@@ -70,7 +70,7 @@ _SUPPORT_SCHEMA: Final = "yoetz.runtime-support/1"
 _RESOURCE_ROOT: Final = "yoetz.resources"
 _MANIFEST_LIMIT: Final = 1_048_576
 _RESOURCE_LIMIT: Final = 4_194_304
-_EXPECTED_RESOURCE_COUNT: Final = 83
+_EXPECTED_RESOURCE_COUNT: Final = 88
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -88,10 +88,10 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("check-request", "1.0.0"),
     ("check-result", "1.0.0"),
     ("client-info", "1.0.0"),
-    ("control-hello", "1.0.0"),
-    ("control-hello-result", "1.0.0"),
-    ("control-request", "1.0.0"),
-    ("control-result", "1.0.0"),
+    ("control-hello", "2.0.0"),
+    ("control-hello-result", "2.0.0"),
+    ("control-request", "2.0.0"),
+    ("control-result", "2.0.0"),
     ("coverage", "1.0.0"),
     ("egress-receipt", "1.0.0"),
     ("finding", "1.0.0"),
@@ -572,11 +572,11 @@ def _resource_counts(entries: tuple[_ResourceEntry, ...]) -> VersionPairs:
     expected = {
         "canonical_vectors": 9,
         "guidance_resources": 5,
-        "migrations": 7,
+        "migrations": 8,
         "runtime_support_resources": 1,
-        "schema_resources": 59,
+        "schema_resources": 63,
         "skill_resources": 2,
-        "total": 83,
+        "total": 88,
     }
     if counts != expected:
         raise ResourceIntegrityError("resource_counts_invalid")

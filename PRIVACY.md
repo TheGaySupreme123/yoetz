@@ -20,9 +20,20 @@ central path:
 
 This is the fail-safe installation seed, not a hidden choice on behalf of the user. If a technical
 user deliberately configures external semantic review, the CLI recommends an inspectable
-`assisted-review` recipe. It is committed once as a standing workspace policy and then runs ordinary
+`assisted-review` recipe. It is committed once as a standing exact-repository policy beneath the
+machine installation ceiling and then runs ordinary
 checks/retries without per-request human prompts. The user may choose a stricter, broader, custom,
 or forked configuration instead.
+
+Repository identity comes from the trusted client's actual/configured working directory, not from
+an agent-supplied task reference. Yoetz resolves Git's common root and immediately discards the raw
+path after creating an installation-keyed commitment. Branches and linked worktrees share one grant;
+independent clones and unrelated repositories need their own. Without the exact grant, Yoetz blocks
+before provider construction, credential-handle minting, authorization, or dispatch.
+
+Package upgrades preserve accepted machine-policy bytes. A bounded migration may automatically
+clone previously accepted authority onto an eligible pre-upgrade repository, or one first repository
+when no prior route existed. That is narrowing, not new consent; later repositories inherit nothing.
 
 Provider adapters receive an already approved bounded case through reviewed interfaces. The v0.1
 working design permits only bundled adapters and passes them no repository, storage, environment,

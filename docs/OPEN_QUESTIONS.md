@@ -231,16 +231,21 @@ that evidence.
   does not launch/download the model or perform DNS/IP networking. The separate runtime receives
   plaintext and is therefore an explicitly trusted disclosure sink unless its exact support cell
   proves enforceable network isolation; Yoetz does not claim away another process's authority.
-- **F-014:** Keep the zero-egress installation seed, but make `assisted` the upstream CLI's
+- **F-014:** Keep the external-LLM-denied installation seed, but make `assisted` the upstream CLI's
   recommended review-context recipe after an explicit technical-user setup decision. It uses a
-  standing workspace policy, public-structural plus ordinary-user-content classes, rich goal/
+  standing exact-repository policy beneath a machine installation ceiling, public-structural plus
+  ordinary-user-content classes, rich goal/
   obligation/claim/timeline/deterministic-basis context, bounded problem-local excerpts already
   recorded in the frozen case, and an exact endpoint whose current data-use record states training
   `prohibited`, retention `none|bounded`, and provider human access `prohibited|restricted`. The
   recipe's editable current-evidence guard is on. Known-broad, unknown, or stale posture removes the
   recommendation; an explicit custom loosening may turn the guard off without retaining that claim. It
   does not prompt per ordinary check/retry. Users may choose stricter, broader, custom, or forked
-  behavior; never-send and scope remain non-overridable for upstream-conforming builds.
+  behavior; never-send and scope remain non-overridable for upstream-conforming builds. Repository
+  identity is the installation-keyed commitment of the trusted session's canonical Git common root,
+  never public `workspace_ref`; linked worktrees share, independent clones do not. Upgrade migration
+  preserves machine bytes and may consume only bounded pre-upgrade route or one first-repository
+  carry-forward entitlement without reapproval. New repositories remain Private.
 - **F-015:** Harness integration is a port and Codex is its first adapter (ADR-010). Agent guidance
   is owned once, harness-neutrally, under `guidance/` with exactly one packaged copy;
   `IntegrationsPort` is parameterized by a closed `HarnessId` (v0.1: exactly `codex`) plus a

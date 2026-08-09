@@ -309,17 +309,23 @@ def _provider_menu() -> None:
     from yoetz.service.confidential_protocol import ProviderCredentialTarget
     from yoetz.service.vault import provider_credential_profile_binding
 
-    try:
+    async def run_credential_ceremony() -> object:
+        from yoetz.cli.privacy_setup import get_privacy_setup_snapshot
+        from yoetz.cli.unlock import rotate_provider_credential, set_provider_credential
+
         provider = load_config({}, {}, None).provider
         if provider is None:
-            typer.echo("provider_not_configured: choose provider and model first", err=True)
-            return
+            raise ValueError("provider_not_configured")
         binding = provider_credential_profile_binding(
             provider.provider_id,
             provider.model,
             provider.endpoint_profile_id,
             provider.endpoint_profile_version,
         )
+        snapshot = await get_privacy_setup_snapshot()
+        repository_commitment = snapshot.bound_scope.get("workspace_ref_commitment")
+        if type(repository_commitment) is not str:
+            raise ValueError("repository_privacy_scope_unavailable")
         target = ProviderCredentialTarget(
             action=action,
             provider_id=binding.provider_id,
@@ -329,15 +335,12 @@ def _provider_menu() -> None:
             purpose=binding.purpose,
             scope_digest=binding.authorization_scope_digest,
             purpose_digest=binding.purpose_digest,
+            repository_privacy_commitment=repository_commitment,
         )
-    except ValueError:
-        typer.echo("invalid_request: one of the identifiers is not valid", err=True)
-        return
+        operation = set_provider_credential if action == "set" else rotate_provider_credential
+        return await operation(target)
 
-    from yoetz.cli.unlock import rotate_provider_credential, set_provider_credential
-
-    operation = set_provider_credential if action == "set" else rotate_provider_credential
-    _run_ceremony(lambda: operation(target))
+    _run_ceremony(run_credential_ceremony)
 
 
 async def _privacy_show(method: str) -> None:

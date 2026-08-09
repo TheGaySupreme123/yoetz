@@ -76,7 +76,7 @@ line above the active one:
    system secure storage is available, and whether Yoetz is connected yet.
 2. **Which installation** — only if more than one was found. Friendly names first; the executable
    path appears when the row is selected, and in full under `D`.
-3. **Project trust.** The repository root, and what allowing project-local guidance and hooks
+3. **Project trust.** The canonical Git common root, and what allowing project-local guidance and hooks
    actually permits. If you started Yoetz in a subfolder, it says so and names the root the trust
    applies to.
 4. **The exact proposed change**, in words, with a `Safety` block stating what will *not* happen.
@@ -129,7 +129,8 @@ Guidance installed                  Provider binding saved
 Structural hooks installed          Credential stored
 Project consent active              Provider connection tested
 Approved-check policy trusted       Deeper-review evaluator composed
-                                    Privacy permits external review
+                                    Machine privacy ceiling permits review
+                                    Exact repository grant active
                                     Deeper review ready
 ```
 
@@ -153,11 +154,20 @@ The last lists the same five names the command line uses: Private, Metadata only
 Expanded review, and Custom. If the current policy already matches the recommendation, it is not
 offered as a change.
 
+The posture is for the repository derived by the service from the interface session's actual working
+directory. Branches and linked worktrees share the Git common root; independent clones do not. The
+screen shows machine ceiling, exact repository grant, and legacy migration state separately. It
+never uses task `workspace_ref` as privacy scope.
+
 This screen selects; it never authorizes. Choosing anything but *Keep current* suspends the
 interface and hands the controlling terminal to `yoetz privacy setup`, and that trusted ceremony is
 where the exact `before -> after` policy diff is rendered, where reauthentication happens, and where
 a widening is actually approved. If the terminal cannot be handed over, nothing changes and the
 interface prints the command to run.
+
+A first repository grant may preview both a machine-ceiling widening and insertion of the exact
+repository row. They commit atomically against one authority digest. Eligible legacy carry-forward
+is shown as bounded automatic narrowing; later repositories remain Private.
 
 Tightening also goes through that handoff, and commits only after an ordinary explicit
 confirmation.

@@ -45,16 +45,26 @@ def test_credential_human_display_uses_one_constant_mask() -> None:
     assert module.credential_human_display("a-real-key-must-never-be-reflected") == "unknown"
 
 
-def _policy(*, llm_inference_enabled: bool, profile: str = "local_only") -> dict[str, object]:
+def _policy(
+    *,
+    llm_inference_enabled: bool,
+    profile: str = "local_only",
+    grant_state: str = "granted",
+) -> dict[str, object]:
     return {
-        "policy": {
+        "schema_version": "2.0.0",
+        "composed_policy": {
             "profile": profile,
             "channel_policies": [
                 {"channel": "capability_testing", "enabled": False},
                 {"channel": "llm_inference", "enabled": llm_inference_enabled},
                 {"channel": "update_checks", "enabled": False},
             ],
-        }
+        },
+        "bound_scope": {"kind": "workspace"},
+        "authority_digest": "sha256:" + "d" * 64,
+        "grant_state": grant_state,
+        "migration_state": "not_applicable",
     }
 
 
@@ -80,8 +90,8 @@ class _Client:
             capabilities=self._capabilities,
         )
 
-    async def privacy_get_effective(self, request: object) -> dict[str, object]:
-        del request
+    async def privacy_get_setup(self, request: object) -> dict[str, object]:
+        assert request == {"schema_version": "2.0.0"}
         return self._policy
 
     async def close(self) -> None:
@@ -99,6 +109,7 @@ def _install(
     provider: ProviderProfileConfig | None = None,
     capabilities: tuple[str, ...] = ("external_provider",),
     llm_inference_enabled: bool = True,
+    grant_state: str = "granted",
     installation_state: str | None = None,
     service_state: str = "ready",
     service_state_reason: str = "none",
@@ -111,7 +122,7 @@ def _install(
     )
     client = _Client(
         capabilities,
-        _policy(llm_inference_enabled=llm_inference_enabled),
+        _policy(llm_inference_enabled=llm_inference_enabled, grant_state=grant_state),
         state=service_state,
         state_reason=service_state_reason,
     )
@@ -121,7 +132,8 @@ def _install(
 
     monkeypatch.setattr(module, "load_config", _load)
 
-    async def _connect(_kind: object) -> _Client:
+    async def _connect(_kind: object, *, workspace_locator: object = None) -> _Client:
+        assert workspace_locator is not None
         return client
 
     monkeypatch.setattr(module, "connect_service", _connect)
@@ -184,6 +196,24 @@ async def test_all_four_conditions_met_reports_ready(
     assert report["semantic_ready"] is True
     assert report["blockers"] == ()
     assert client.closed is True
+
+
+async def test_missing_repository_grant_keeps_external_review_off(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch, tmp_path, provider=_provider(), grant_state="missing")
+
+    report = await module.provider_status_report(workspace_locator=tmp_path)
+
+    assert report["repository_grant_state"] == "missing"
+    assert report["readiness_determinable"] is True
+    assert report["semantic_ready"] is False
+    blockers = cast(tuple[dict[str, object], ...], report["blockers"])
+    assert {
+        "condition": "repository_privacy_grant",
+        "state": "missing",
+        "next_command": "yoetz --privacy",
+    } in blockers
 
 
 async def test_llm_inference_channel_is_actually_read_from_canonical_policy(
@@ -290,27 +320,19 @@ async def test_exit_code_is_zero_when_ready(
     assert await module.run_provider_status(json_output=True) == 0
 
 
-async def test_missing_installation_state_reports_unknown_not_a_false_ready(
+async def test_repository_setup_does_not_trust_client_installation_state(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A scope that cannot be built must degrade to "unknown", never to a claimed condition.
-
-    ``privacy_get_effective`` requires a scope built from installation state. When that state is
-    unreadable the policy is never inspected, so every policy-derived condition has to read as
-    unknown and readiness has to be false — the report must not fill the gap with a guess.
-    """
+    """The service binds repository and installation; client state cannot choose either."""
 
     _install(monkeypatch, tmp_path, provider=_provider(), installation_state="")
 
     report = await module.provider_status_report()
 
-    assert report["llm_inference_enabled"] is None
-    assert report["semantic_ready"] is False
-    blockers = cast(tuple[dict[str, object], ...], report["blockers"])
-    channel = [item for item in blockers if item.get("condition") == "llm_inference_channel"]
-    assert len(channel) == 1
-    assert channel[0]["state"] == "unknown"
-    assert "next_command" not in channel[0]
+    assert report["llm_inference_enabled"] is True
+    assert report["repository_grant_state"] == "granted"
+    assert report["readiness_determinable"] is True
+    assert report["semantic_ready"] is True
 
 
 async def test_locked_service_reports_real_blocker_first_without_false_remediation(
@@ -341,6 +363,7 @@ async def test_locked_service_reports_real_blocker_first_without_false_remediati
     assert {item["condition"] for item in unknown} == {
         "provider_credential",
         "llm_inference_channel",
+        "repository_privacy_grant",
     }
     assert all("next_command" not in item for item in unknown)
     assert report["next_commands"] == ("yoetz service unlock",)
@@ -358,7 +381,8 @@ async def test_absent_service_names_the_probed_lifecycle_and_the_mcp_path(
 
     _install(monkeypatch, tmp_path, provider=_provider())
 
-    async def _refuse(_kind: object) -> object:
+    async def _refuse(_kind: object, *, workspace_locator: object = None) -> object:
+        assert workspace_locator is not None
         raise ControlError("service_unavailable", retryable=True)
 
     monkeypatch.setattr(module, "connect_service", _refuse)

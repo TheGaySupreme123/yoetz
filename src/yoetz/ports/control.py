@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal, Protocol, cast
 
-from yoetz.domain.values import JsonObject
+from yoetz.domain.values import JsonObject, validate_commitment
 from yoetz.protocol.canonical import parse_canonical_integer_string
 from yoetz.protocol.errors import SafeDetailValue, normalize_safe_details
 from yoetz.protocol.ids import IdKind, validate_id
@@ -41,6 +42,9 @@ __all__ = [
     "ServiceState",
     "ServiceStopResult",
     "ServiceStatus",
+    "RepositoryIdentityKind",
+    "RepositoryPrivacyContext",
+    "WorkspaceLocator",
 ]
 
 _CONTROL_PROTOCOL_VERSION = "1.0"
@@ -60,6 +64,42 @@ class ControlClientKind(str, Enum):  # noqa: UP042 - exact wire enum base
     CLI = "cli"
     MCP_BRIDGE = "mcp_bridge"
     UI = "ui"
+
+
+type RepositoryIdentityKind = Literal["git_common_root", "directory"]
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceLocator:
+    """Ephemeral client-provided locator consumed only by the service handshake."""
+
+    path: str = field(repr=False)
+    schema_version: Literal["1.0.0"] = "1.0.0"
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "1.0.0":
+            raise ValueError("workspace_locator_schema_version_invalid")
+        if type(self.path) is not str or not Path(self.path).is_absolute():
+            raise ValueError("workspace_locator_path_invalid")
+        try:
+            encoded = self.path.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("workspace_locator_path_invalid") from exc
+        if not encoded or len(encoded) > 8192 or any(marker in self.path for marker in "\x00\r\n"):
+            raise ValueError("workspace_locator_path_invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryPrivacyContext:
+    """Opaque repository identity safe to retain after handshake completion."""
+
+    commitment: str
+    identity_kind: RepositoryIdentityKind
+
+    def __post_init__(self) -> None:
+        validate_commitment(self.commitment)
+        if self.identity_kind not in {"git_common_root", "directory"}:
+            raise ValueError("repository_identity_kind_invalid")
 
 
 class ControlMethod(str, Enum):  # noqa: UP042 - exact wire enum base

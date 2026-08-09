@@ -11,7 +11,7 @@ from types import TracebackType
 from typing import Final, Protocol
 
 from yoetz.domain.privacy import LocalDisclosureSink
-from yoetz.domain.values import format_rfc3339_millis, validate_commitment
+from yoetz.domain.values import format_rfc3339_millis, validate_commitment, validate_sha256_digest
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.keys import MacKeyHandle
@@ -74,6 +74,7 @@ class _RouteRecord:
     quarantine_code: str | None
     created_at: datetime
     updated_at: datetime
+    repository_privacy_commitment: str | None = None
 
     def __repr__(self) -> str:
         return "_RouteRecord(<redacted>)"
@@ -180,6 +181,7 @@ def _route_value(record: _RouteRecord) -> TaskRoute:
             route_generation=record.route_generation,
             state=record.state,
             route_identity_digest=record.route_identity_digest,
+            repository_privacy_commitment=record.repository_privacy_commitment,
         )
     except (TypeError, ValueError) as exc:
         raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
@@ -371,6 +373,39 @@ class MemoryStartCatalogAdapter:
             )
         return tuple(task_ids)
 
+    async def bind_repository_privacy(
+        self,
+        task_id: str,
+        route_identity_digest: str,
+        repository_privacy_commitment: str,
+    ) -> TaskRoute:
+        try:
+            task = validate_id(IdKind.TASK, task_id)
+            validate_sha256_digest(route_identity_digest)
+            validate_commitment(repository_privacy_commitment)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        async with self._lock:
+            record = self._state.routes.get(task)
+            if record is None:
+                raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+            if record.route_identity_digest != route_identity_digest:
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            if record.repository_privacy_commitment not in {
+                None,
+                repository_privacy_commitment,
+            }:
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            if record.repository_privacy_commitment is None:
+                record = replace(
+                    record,
+                    repository_privacy_commitment=repository_privacy_commitment,
+                    updated_at=self._clock.now_utc(),
+                )
+                self._state.routes[task] = record
+                self._state.revision += 1
+        return _route_value(record)
+
     async def lookup(self, key: PublishResponseKey) -> StoredPublishResponse | None:
         if type(key) is not PublishResponseKey:
             raise _error(PublicErrorCode.INVALID_REQUEST)
@@ -425,6 +460,21 @@ class MemoryStartCatalogAdapter:
                 raise _error(PublicErrorCode.SESSION_CONFLICT)
             if request.mode is StartMode.ATTACH and route is None:
                 raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+            if route is not None:
+                expected = route.repository_privacy_commitment
+                actual = request.repository_privacy_commitment
+                if expected is not None and (
+                    actual is None or not hmac.compare_digest(expected, actual)
+                ):
+                    raise _error(PublicErrorCode.SESSION_CONFLICT)
+                if expected is None and actual is not None:
+                    route = replace(
+                        route,
+                        repository_privacy_commitment=actual,
+                        updated_at=now,
+                    )
+                    self._state.routes[route.task_id] = route
+                    self._state.revision += 1
 
             created = route is None
             if created:
@@ -450,6 +500,7 @@ class MemoryStartCatalogAdapter:
                     quarantine_code=None,
                     created_at=now,
                     updated_at=now,
+                    repository_privacy_commitment=request.repository_privacy_commitment,
                 )
                 self._install_route(route)
             else:

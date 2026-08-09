@@ -332,6 +332,7 @@ async def build_projection_application(
         profile=RuntimeProfile.TEST_FAKE,
         policy_packs=("research-evidence/0.1.0", "work-integrity/0.1.0"),
         version_manifest=start_app.version_manifest,
+        enforce_repository_identity=False,
         connected_provider_ids=() if semantic == "disabled" else ("fake",),
         provider_credential_connected=semantic != "disabled",
         semantic_ready=semantic != "disabled",

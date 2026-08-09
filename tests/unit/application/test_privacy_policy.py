@@ -3,17 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
+import pytest
+
+from yoetz.adapters.memory.privacy import MemoryPrivacyCatalogState, MemoryPrivacyPolicyStore
 from yoetz.application.privacy_policy import (
     GetPrivacyEffectiveRequest,
     GetPrivacyReceiptRequest,
+    GetPrivacySetupRequest,
     ListPrivacyReceiptsRequest,
+    PolicyDecisionRequired,
     PrivacyPolicyApplication,
     ProposePrivacyPolicyRequest,
     TightenPrivacyPolicyRequest,
     privacy_get_effective,
+    privacy_get_setup,
     privacy_propose_policy,
     privacy_receipts_get,
     privacy_receipts_list,
@@ -27,6 +35,7 @@ from yoetz.domain.privacy import (
     EgressChannel,
     PrivacyPolicy,
     PrivacyProfile,
+    ProviderBinding,
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
@@ -47,6 +56,8 @@ _PROPOSAL_ID = "ppr_20000000-0000-4000-8000-000000000003"
 _RECEIPT_ID = "egr_20000000-0000-4000-8000-000000000004"
 _DIGEST = f"sha256:{'3' * 64}"
 _NEW_DIGEST = f"sha256:{'4' * 64}"
+_REPOSITORY = f"hmac-sha256:{'5' * 64}"
+_REPOSITORY_POLICY_ID = "pvy_20000000-0000-4000-8000-000000000005"
 
 
 def _scope() -> AuthorizationScope:
@@ -95,6 +106,40 @@ def _policy(
     )
 
 
+def _external_policy(
+    *,
+    digest: str = _DIGEST,
+    categories: tuple[DataCategory, ...] = (
+        DataCategory.BOUNDED_STRUCTURAL_METADATA,
+        DataCategory.TASK_DESCRIPTION,
+    ),
+) -> PrivacyPolicy:
+    channels = {channel: _disabled(channel) for channel in EgressChannel}
+    channels[EgressChannel.LLM_INFERENCE] = ChannelPolicy(
+        EgressChannel.LLM_INFERENCE,
+        True,
+        categories,
+        (DataClass.ORDINARY_USER_CONTENT, DataClass.PUBLIC_STRUCTURAL),
+        ProviderBinding("fireworks", "test-model", "chat-completions", "1", "external"),
+        ("semantic-review",),
+        AuthorizationScopeKind.TASK,
+        False,
+        262_144,
+        4096,
+        300,
+    )
+    return replace(
+        _policy(digest=digest),
+        profile=PrivacyProfile.MINIMAL_EXTERNAL,
+        review_context_profile=ReviewContextProfile.ASSISTED,
+        review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.ASSISTED),
+        network_egress_permitted=True,
+        channel_policies=tuple(
+            channels[channel] for channel in sorted(EgressChannel, key=lambda item: item.value)
+        ),
+    )
+
+
 class _Clock:
     def now_utc(self) -> datetime:
         return _NOW
@@ -105,8 +150,11 @@ class _Clock:
 
 class _Ids:
     def new(self, kind: IdKind) -> str:
-        assert kind is IdKind.PRIVACY_PROPOSAL
-        return _PROPOSAL_ID
+        if kind is IdKind.PRIVACY_PROPOSAL:
+            return _PROPOSAL_ID
+        if kind is IdKind.PRIVACY_POLICY:
+            return _REPOSITORY_POLICY_ID
+        raise AssertionError(kind)
 
 
 class _Store:
@@ -114,6 +162,7 @@ class _Store:
         self.effective = EffectivePrivacyPolicy(policy, 5, policy.policy_digest)
         self.prepared: object | None = None
         self.tightened: object | None = None
+        self.events: list[str] = []
 
     async def effective_policy(self, scope: AuthorizationScope) -> EffectivePrivacyPolicy:
         assert scope == self.effective.policy.effective_scope
@@ -126,6 +175,7 @@ class _Store:
     async def tighten(
         self, scope: AuthorizationScope, overlay: object, expected_policy_digest: str
     ) -> PolicyCommitResult:
+        self.events.append("store_tighten")
         self.tightened = (scope, overlay, expected_policy_digest)
         policy = replace(self.effective.policy, policy_digest=_NEW_DIGEST)
         return PolicyCommitResult(policy, 6, 2, 1)
@@ -147,18 +197,29 @@ class _Audit:
 
 
 class _Gateway:
-    def __init__(self) -> None:
+    def __init__(self, events: list[str]) -> None:
         self.revoked: list[int] = []
+        self._events = events
 
     async def close_revoked(self, generation: int) -> None:
+        self._events.append("gateway_close")
         self.revoked.append(generation)
+
+    @asynccontextmanager
+    async def authority_mutation_fence(self) -> AsyncGenerator[None]:
+        self._events.append("gateway_fence_enter")
+        try:
+            yield
+        finally:
+            self._events.append("gateway_fence_exit")
 
 
 def _app(policy: PrivacyPolicy) -> PrivacyPolicyApplication:
+    store = _Store(policy)
     return PrivacyPolicyApplication(
-        _Store(policy),  # type: ignore[arg-type]
+        store,  # type: ignore[arg-type]
         _Audit(),  # type: ignore[arg-type]
-        _Gateway(),  # type: ignore[arg-type]
+        _Gateway(store.events),  # type: ignore[arg-type]
         _Clock(),
         _Ids(),
         _scope(),
@@ -207,4 +268,191 @@ def test_tightening_uses_expected_digest_cas_and_closes_old_generation() -> None
 
     assert result.generation == 6
     assert result.revoked_authorization_count == 2
-    assert app.gateway.revoked == [5]  # type: ignore[attr-defined]
+    assert app.gateway.revoked == []  # type: ignore[attr-defined]
+    assert app.policy_store.events == [  # type: ignore[attr-defined]
+        "gateway_fence_enter",
+        "store_tighten",
+        "gateway_fence_exit",
+    ]
+
+
+def test_missing_repository_private_candidate_inserts_without_human_ceremony() -> None:
+    state = MemoryPrivacyCatalogState()
+    store = MemoryPrivacyPolicyStore(state, _Clock())
+    repository_scope = AuthorizationScope(
+        AuthorizationScopeKind.WORKSPACE, _INSTALLATION, _REPOSITORY
+    )
+    app = PrivacyPolicyApplication(
+        store,
+        _Audit(),  # type: ignore[arg-type]
+        _Gateway([]),  # type: ignore[arg-type]
+        _Clock(),
+        _Ids(),
+        _scope(),
+    )
+
+    async def run() -> tuple[object, object]:
+        await store.seed_if_absent(_policy())
+        authority = await store.repository_authority(repository_scope)
+        result = await privacy_propose_policy(
+            app,
+            ProposePrivacyPolicyRequest(
+                authority.effective.effective_digest,
+                _policy(),
+                authority.authority_digest,
+                repository_scope,
+            ),
+        )
+        return result, await store.repository_authority(repository_scope)
+
+    result, authority = asyncio.run(run())
+    assert result.generation == 2  # type: ignore[union-attr]
+    assert authority.grant_state == "granted"  # type: ignore[attr-defined]
+    assert state.transitions == {}
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    (
+        _external_policy(),
+        _external_policy(
+            digest=_NEW_DIGEST,
+            categories=(DataCategory.BOUNDED_STRUCTURAL_METADATA,),
+        ),
+    ),
+)
+def test_missing_repository_external_candidate_requires_trusted_ceremony(
+    candidate: PrivacyPolicy,
+) -> None:
+    state = MemoryPrivacyCatalogState()
+    store = MemoryPrivacyPolicyStore(state, _Clock())
+    repository_scope = AuthorizationScope(
+        AuthorizationScopeKind.WORKSPACE, _INSTALLATION, _REPOSITORY
+    )
+    app = PrivacyPolicyApplication(
+        store,
+        _Audit(),  # type: ignore[arg-type]
+        _Gateway([]),  # type: ignore[arg-type]
+        _Clock(),
+        _Ids(),
+        _scope(),
+    )
+
+    async def run() -> tuple[object, object]:
+        await store.seed_if_absent(_external_policy())
+        authority = await store.repository_authority(repository_scope)
+        result = await privacy_propose_policy(
+            app,
+            ProposePrivacyPolicyRequest(
+                authority.effective.effective_digest,
+                candidate,
+                authority.authority_digest,
+                repository_scope,
+            ),
+        )
+        return result, await store.repository_authority(repository_scope)
+
+    result, authority = asyncio.run(run())
+    assert type(result) is PolicyDecisionRequired
+    assert authority.grant_state == "missing"  # type: ignore[attr-defined]
+    assert len(state.transitions) == 1
+
+
+def test_setup_read_reports_first_repository_migration_without_consuming_it() -> None:
+    state = MemoryPrivacyCatalogState()
+    store = MemoryPrivacyPolicyStore(state, _Clock())
+    repository_scope = AuthorizationScope(
+        AuthorizationScopeKind.WORKSPACE, _INSTALLATION, _REPOSITORY
+    )
+    app = PrivacyPolicyApplication(
+        store,
+        _Audit(),  # type: ignore[arg-type]
+        _Gateway([]),  # type: ignore[arg-type]
+        _Clock(),
+        _Ids(),
+        _scope(),
+    )
+
+    async def run() -> tuple[object, int, int]:
+        seeded = await store.seed_if_absent(_external_policy())
+        before_generation = state.generation
+        view = await privacy_get_setup(
+            app,
+            GetPrivacySetupRequest(
+                "setup-session",
+                "begin",
+                0,
+                _NOW + timedelta(minutes=5),
+                first_run=False,
+                current_policy_digest=seeded.policy_digest,
+                current_policy_version=seeded.version,
+                repository_scope=repository_scope,
+            ),
+        )
+        return view, before_generation, state.generation
+
+    view, before_generation, after_generation = asyncio.run(run())
+    assert view.authority is not None  # type: ignore[attr-defined]
+    assert view.authority.migration_state == "first_repository_available"  # type: ignore[attr-defined]
+    assert view.authority.grant_state == "missing"  # type: ignore[attr-defined]
+    assert before_generation == after_generation == 1
+    assert state.first_repository_carry_forward_state == "available"
+    assert state.first_repository_carry_forward_commitment is None
+
+
+def test_consumed_first_repository_provenance_is_not_reported_for_later_grants() -> None:
+    state = MemoryPrivacyCatalogState()
+    store = MemoryPrivacyPolicyStore(state, _Clock())
+    scope_a = AuthorizationScope(AuthorizationScopeKind.WORKSPACE, _INSTALLATION, _REPOSITORY)
+    scope_b = AuthorizationScope(
+        AuthorizationScopeKind.WORKSPACE,
+        _INSTALLATION,
+        f"hmac-sha256:{'6' * 64}",
+    )
+
+    async def run() -> tuple[object, object]:
+        await store.seed_if_absent(_external_policy())
+        await store.carry_forward_repository_authority(scope_a)
+        authority_b = await store.repository_authority(scope_b)
+        private_b = replace(_policy(), effective_scope=scope_b)
+        await store.insert_repository_tightening(scope_b, private_b, authority_b.authority_digest)
+        return (
+            await store.repository_authority(scope_a),
+            await store.repository_authority(scope_b),
+        )
+
+    authority_a, authority_b = asyncio.run(run())
+    assert authority_a.migration_state == "consumed"  # type: ignore[attr-defined]
+    assert authority_b.migration_state == "not_applicable"  # type: ignore[attr-defined]
+
+
+def test_v1_workspace_candidate_requires_trusted_repository_context() -> None:
+    workspace_candidate = replace(
+        _policy(digest=_NEW_DIGEST),
+        effective_scope=AuthorizationScope(
+            AuthorizationScopeKind.WORKSPACE, _INSTALLATION, _REPOSITORY
+        ),
+    )
+
+    with pytest.raises(ValueError, match="repository_privacy_context_required"):
+        asyncio.run(
+            privacy_propose_policy(
+                _app(_policy()), ProposePrivacyPolicyRequest(_DIGEST, workspace_candidate)
+            )
+        )
+
+
+def test_v1_workspace_tightening_requires_trusted_repository_context() -> None:
+    workspace_candidate = replace(
+        _policy(digest=_NEW_DIGEST),
+        effective_scope=AuthorizationScope(
+            AuthorizationScopeKind.WORKSPACE, _INSTALLATION, _REPOSITORY
+        ),
+    )
+
+    with pytest.raises(ValueError, match="repository_privacy_context_required"):
+        asyncio.run(
+            privacy_tighten_policy(
+                _app(_policy()), TightenPrivacyPolicyRequest(_DIGEST, workspace_candidate)
+            )
+        )

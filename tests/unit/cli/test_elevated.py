@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -379,10 +380,19 @@ def test_provider_secret_ingress_uses_only_the_trusted_review_ceremony(
         assert console is not None
         return ProviderCredentialResult(cast(Any, expected_action), 2, "stored")
 
+    async def privacy_snapshot() -> SimpleNamespace:
+        return SimpleNamespace(bound_scope={"workspace_ref_commitment": "hmac-sha256:" + "7" * 64})
+
     async def run() -> dict[str, object]:
-        with patch(
-            "yoetz.cli.elevated.run_human_ceremony_on_terminal",
-            side_effect=ceremony,
+        with (
+            patch(
+                "yoetz.cli.elevated.run_human_ceremony_on_terminal",
+                side_effect=ceremony,
+            ),
+            patch(
+                "yoetz.cli.privacy_setup.get_privacy_setup_snapshot",
+                side_effect=privacy_snapshot,
+            ),
         ):
             return cast(
                 dict[str, object],

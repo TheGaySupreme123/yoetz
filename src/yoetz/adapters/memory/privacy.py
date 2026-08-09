@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import hmac
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import cast
 
 from yoetz.adapters.privacy.catalog import (
     _json,  # pyright: ignore[reportPrivateUsage]
     _mac,  # pyright: ignore[reportPrivateUsage]
+    _policy_for_repository,  # pyright: ignore[reportPrivateUsage]
     _scope_digest,  # pyright: ignore[reportPrivateUsage]
 )
 from yoetz.domain.privacy import (
@@ -43,16 +44,19 @@ from yoetz.ports.privacy import (
     PendingDisclosurePage,
     PolicyCommitResult,
     PolicyOverlay,
+    PolicyTransitionMember,
     PolicyTransitionProposal,
     PreparedDisclosureReservation,
     PreparedPolicyTransition,
     PrivacyAuditObjectRoots,
     PrivacyAuditReservation,
     PrivacyAuditState,
+    PrivacyAuthorityAncestor,
     PrivacyReceiptAudience,
     PrivacyReceiptPage,
     PrivacyReceiptQuery,
     PrivacyReceiptView,
+    RepositoryPrivacyAuthority,
 )
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 
@@ -87,16 +91,30 @@ class _AuditRow:
     consumed_digest: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _MemoryTransition:
+    prepared: PreparedPolicyTransition
+    state: str = "pending"
+    decision_digest: str | None = None
+    result: PolicyCommitResult | None = None
+    decided_at: datetime | None = None
+
+
 @dataclass(slots=True, repr=False)
 class MemoryPrivacyCatalogState:
     policies: dict[str, _PolicyRow] = field(default_factory=dict[str, _PolicyRow])
-    transitions: dict[str, PreparedPolicyTransition] = field(
-        default_factory=dict[str, PreparedPolicyTransition]
-    )
+    transitions: dict[str, _MemoryTransition] = field(default_factory=dict[str, _MemoryTransition])
     audit: dict[str, _AuditRow] = field(default_factory=dict[str, _AuditRow])
     routes: dict[str, str] = field(default_factory=dict[str, str])
     root_generation: dict[str, int] = field(default_factory=dict[str, int])
     generation: int = 0
+    first_repository_carry_forward_state: str | None = None
+    first_repository_carry_forward_commitment: str | None = None
+    migration_frontier_policy: PrivacyPolicy | None = None
+    legacy_route_entitlements: dict[tuple[str, str], PrivacyPolicy] = field(
+        default_factory=dict[tuple[str, str], PrivacyPolicy]
+    )
+    consumed_legacy_repository_commitments: set[str] = field(default_factory=set[str])
 
     def __repr__(self) -> str:
         return "MemoryPrivacyCatalogState(<redacted>)"
@@ -149,24 +167,246 @@ class MemoryPrivacyPolicyStore:
         generation = ordered[-1].generation
         return EffectivePrivacyPolicy(composed, generation, composed.policy_digest)
 
+    async def repository_authority(self, scope: AuthorizationScope) -> RepositoryPrivacyAuthority:
+        if scope.kind is AuthorizationScopeKind.MACHINE or scope.workspace_ref_commitment is None:
+            raise ValueError("repository_privacy_scope_required")
+        rank = {
+            AuthorizationScopeKind.MACHINE: 0,
+            AuthorizationScopeKind.WORKSPACE: 1,
+            AuthorizationScopeKind.TASK: 2,
+            AuthorizationScopeKind.REQUEST: 3,
+        }
+        eligible = sorted(
+            (
+                row
+                for row in self._state.policies.values()
+                if row.policy.effective_scope.contains(scope)
+            ),
+            key=lambda row: (rank[row.policy.effective_scope.kind], row.generation),
+        )
+        if not eligible:
+            raise ValueError("privacy_policy_missing")
+        composed = eligible[0].policy
+        for row in eligible[1:]:
+            composed = composed.meet(row.policy)
+        exact = next(
+            (
+                row
+                for row in eligible
+                if row.policy.effective_scope.kind is AuthorizationScopeKind.WORKSPACE
+                and row.policy.effective_scope.workspace_ref_commitment
+                == scope.workspace_ref_commitment
+            ),
+            None,
+        )
+        if self._state.first_repository_carry_forward_state is None:
+            machine = next(
+                (
+                    row
+                    for row in eligible
+                    if row.policy.effective_scope.kind is AuthorizationScopeKind.MACHINE
+                ),
+                None,
+            )
+            self._state.first_repository_carry_forward_state = (
+                "not_applicable"
+                if machine is None
+                or not machine.policy.network_egress_permitted
+                or self._state.legacy_route_entitlements
+                else "available"
+            )
+            self._state.migration_frontier_policy = None if machine is None else machine.policy
+        first_state = self._state.first_repository_carry_forward_state
+        machine_policy = next(
+            (
+                row.policy
+                for row in eligible
+                if row.policy.effective_scope.kind is AuthorizationScopeKind.MACHINE
+            ),
+            None,
+        )
+        if (
+            machine_policy is None
+            or not machine_policy.network_egress_permitted
+            or self._state.migration_frontier_policy is None
+            or not self._state.migration_frontier_policy.network_egress_permitted
+        ):
+            migration_state = "not_applicable"
+        elif exact is not None:
+            migration_state = (
+                "consumed"
+                if scope.workspace_ref_commitment
+                == self._state.first_repository_carry_forward_commitment
+                or scope.workspace_ref_commitment
+                in self._state.consumed_legacy_repository_commitments
+                else "not_applicable"
+            )
+        elif self._state.legacy_route_entitlements:
+            migration_state = "legacy_route_available"
+        elif first_state == "available":
+            migration_state = "first_repository_available"
+        else:
+            migration_state = "not_applicable"
+        ancestors = tuple(
+            PrivacyAuthorityAncestor(
+                row.policy.effective_scope, row.generation, row.policy.policy_digest
+            )
+            for row in eligible
+        )
+        grant_state = "granted" if exact is not None else "missing"
+        authority_digest = canonical_digest(
+            {
+                "ancestors": [
+                    {
+                        "generation": item.generation,
+                        "policy_digest": item.policy_digest,
+                        "scope": _json(item.scope),
+                    }
+                    for item in ancestors
+                ],
+                "authority_mode": "repository_grants",
+                "grant_state": grant_state,
+                "migration_state": migration_state,
+                "repository_privacy_commitment": scope.workspace_ref_commitment,
+            }
+        )
+        return RepositoryPrivacyAuthority(
+            scope,
+            EffectivePrivacyPolicy(composed, eligible[-1].generation, composed.policy_digest),
+            scope.workspace_ref_commitment,
+            grant_state,
+            migration_state,
+            authority_digest,
+            ancestors,
+            None if exact is None else exact.generation,
+            None if exact is None else exact.policy.policy_digest,
+            None if exact is None else exact.policy,
+        )
+
+    async def carry_forward_repository_authority(
+        self,
+        scope: AuthorizationScope,
+        *,
+        task_id: str | None = None,
+        route_identity_digest: str | None = None,
+    ) -> RepositoryPrivacyAuthority:
+        if scope.kind is not AuthorizationScopeKind.WORKSPACE:
+            raise ValueError("repository_privacy_scope_required")
+        if (task_id is None) != (route_identity_digest is None):
+            raise ValueError("repository_privacy_route_binding_invalid")
+        current = await self.repository_authority(scope)
+        if current.grant_state == "granted":
+            return current
+        async with self._lock:
+            machine = next(
+                (
+                    row
+                    for row in self._state.policies.values()
+                    if row.policy.effective_scope.kind is AuthorizationScopeKind.MACHINE
+                    and row.policy.effective_scope.installation_id == scope.installation_id
+                ),
+                None,
+            )
+            if machine is None or not machine.policy.network_egress_permitted:
+                raise ValueError("repository_privacy_migration_unavailable")
+            if task_id is None:
+                if (
+                    self._state.first_repository_carry_forward_state != "available"
+                    or self._state.legacy_route_entitlements
+                ):
+                    raise ValueError("repository_privacy_migration_unavailable")
+                frontier = self._state.migration_frontier_policy
+                entitlement: tuple[str, str] | None = None
+            else:
+                entitlement = (task_id, cast(str, route_identity_digest))
+                if entitlement not in self._state.legacy_route_entitlements:
+                    raise ValueError("repository_privacy_migration_unavailable")
+                frontier = self._state.legacy_route_entitlements[entitlement]
+            if frontier is None:
+                raise ValueError("privacy_authority_state_corrupt")
+            if not frontier.network_egress_permitted:
+                raise ValueError("repository_privacy_migration_unavailable")
+            policy = _policy_for_repository(frontier.meet(machine.policy), scope)
+            self._state.generation += 1
+            self._state.policies[_scope_digest(scope)] = _PolicyRow(policy, self._state.generation)
+            if entitlement is None:
+                self._state.first_repository_carry_forward_state = "consumed"
+                self._state.first_repository_carry_forward_commitment = cast(
+                    str, scope.workspace_ref_commitment
+                )
+            else:
+                del self._state.legacy_route_entitlements[entitlement]
+                self._state.consumed_legacy_repository_commitments.add(
+                    cast(str, scope.workspace_ref_commitment)
+                )
+        return await self.repository_authority(scope)
+
+    async def insert_repository_tightening(
+        self,
+        scope: AuthorizationScope,
+        policy: PrivacyPolicy,
+        expected_authority_digest: str,
+    ) -> PolicyCommitResult:
+        if scope.kind is not AuthorizationScopeKind.WORKSPACE or policy.effective_scope != scope:
+            raise ValueError("repository_privacy_scope_required")
+        async with self._lock:
+            authority = await self.repository_authority(scope)
+            if (
+                authority.authority_digest != expected_authority_digest
+                or authority.grant_state != "missing"
+            ):
+                raise ValueError("privacy_policy_stale")
+            self._state.generation += 1
+            self._state.policies[_scope_digest(scope)] = _PolicyRow(policy, self._state.generation)
+            generation = self._state.generation
+        return PolicyCommitResult(policy, generation, 0, 0)
+
     async def prepare_transition(
         self, proposal: PolicyTransitionProposal
     ) -> PreparedPolicyTransition:
         if proposal.privacy_proposal_id is None or proposal.expected_policy_digest is None:
             raise ValueError("privacy_policy_proposal_identity_missing")
-        current = await self.effective_policy(proposal.scope)
-        if current.generation != proposal.expected_generation or (
-            current.effective_digest != proposal.expected_policy_digest
-        ):
-            raise ValueError("privacy_policy_stale")
+        members = proposal.members or (
+            PolicyTransitionMember(
+                "replace",
+                proposal.scope,
+                proposal.proposed_policy,
+                proposal.expected_generation,
+                proposal.expected_policy_digest,
+            ),
+        )
+        if proposal.authority_digest is not None:
+            authority = await self.repository_authority(proposal.scope)
+            if authority.authority_digest != proposal.authority_digest:
+                raise ValueError("privacy_policy_stale")
+        for member in members:
+            current = self._state.policies.get(_scope_digest(member.scope))
+            if member.action == "insert":
+                if current is not None:
+                    raise ValueError("privacy_policy_stale")
+            elif current is None or (
+                current.generation,
+                current.policy.policy_digest,
+            ) != (member.expected_generation, member.expected_policy_digest):
+                raise ValueError("privacy_policy_stale")
         exact_diff = canonical_digest(
             {
-                "base_policy_digest": current.effective_digest,
-                "candidate_policy_digest": proposal.proposed_policy.policy_digest,
+                "authority_digest": proposal.authority_digest,
+                "members": [
+                    {
+                        "action": member.action,
+                        "candidate_policy_digest": member.candidate_policy.policy_digest,
+                        "expected_generation": member.expected_generation,
+                        "expected_policy_digest": member.expected_policy_digest,
+                        "scope": _json(member.scope),
+                    }
+                    for member in members
+                ],
             }
         )
         prepared_digest = canonical_digest(
             {
+                "authority_digest": proposal.authority_digest,
                 "diff_digest": exact_diff,
                 "proposal_digest": proposal.proposal_digest,
                 "proposal_id": proposal.privacy_proposal_id,
@@ -174,16 +414,25 @@ class MemoryPrivacyPolicyStore:
         )
         prepared = PreparedPolicyTransition(proposal, prepared_digest, exact_diff, True)
         async with self._lock:
-            if proposal.privacy_proposal_id in self._state.transitions:
+            existing = self._state.transitions.get(proposal.privacy_proposal_id)
+            if existing is not None:
+                if existing.state == "pending" and existing.prepared == prepared:
+                    return prepared
                 raise ValueError("privacy_policy_transition_conflict")
-            self._state.transitions[proposal.privacy_proposal_id] = prepared
+            self._state.transitions[proposal.privacy_proposal_id] = _MemoryTransition(prepared)
         return prepared
 
     async def load_pending_transition(self, proposal_id: str) -> PreparedPolicyTransition:
-        prepared = self._state.transitions.get(proposal_id)
-        if prepared is None:
+        row = self._state.transitions.get(proposal_id)
+        if row is None or row.state != "pending":
             raise ValueError("privacy_policy_transition_unavailable")
-        return prepared
+        return row.prepared
+
+    async def load_transition(self, proposal_id: str) -> PreparedPolicyTransition:
+        row = self._state.transitions.get(proposal_id)
+        if row is None or row.state not in {"pending", "committed", "denied"}:
+            raise ValueError("privacy_policy_transition_unavailable")
+        return row.prepared
 
     async def commit_transition(
         self, prepared: PreparedPolicyTransition, decision: HumanPolicyDecision
@@ -192,22 +441,75 @@ class MemoryPrivacyPolicyStore:
         proposal_id = proposal.privacy_proposal_id
         if proposal_id is None or decision.prepared_digest != prepared.prepared_digest:
             raise ValueError("privacy_policy_decision_mismatch")
+        decision_digest = canonical_digest(
+            {
+                "approved": decision.approved,
+                "authority_commitment": decision.authority_commitment,
+                "prepared_digest": decision.prepared_digest,
+                "proposal_id": proposal_id,
+            }
+        )
         async with self._lock:
-            if self._state.transitions.get(proposal_id) != prepared:
+            stored = self._state.transitions.get(proposal_id)
+            if stored is None or stored.prepared != prepared:
                 raise ValueError("privacy_policy_transition_unavailable")
-            current = self._state.policies.get(_scope_digest(proposal.scope))
-            if current is None or current.generation != proposal.expected_generation:
+            if stored.state in {"committed", "denied"}:
+                if stored.decision_digest != decision_digest or stored.result is None:
+                    raise ValueError("privacy_policy_decision_mismatch")
+                return replace(stored.result, replayed=True)
+            if stored.state == "expired":
+                raise ValueError("privacy_policy_decision_expired")
+            if stored.state == "stale":
                 raise ValueError("privacy_policy_stale")
             if decision.decided_at >= proposal.expires_at:
+                self._state.transitions[proposal_id] = _MemoryTransition(prepared, "expired")
                 raise ValueError("privacy_policy_decision_expired")
-            del self._state.transitions[proposal_id]
-            if not decision.approved:
-                return PolicyCommitResult(current.policy, current.generation, 0, 0)
-            self._state.generation += 1
-            self._state.policies[_scope_digest(proposal.scope)] = _PolicyRow(
-                proposal.proposed_policy, self._state.generation
+            members = proposal.members or (
+                PolicyTransitionMember(
+                    "replace",
+                    proposal.scope,
+                    proposal.proposed_policy,
+                    proposal.expected_generation,
+                    proposal.expected_policy_digest,
+                ),
             )
-        return PolicyCommitResult(proposal.proposed_policy, self._state.generation, 0, 0)
+            if proposal.authority_digest is not None:
+                authority = await self.repository_authority(proposal.scope)
+                if authority.authority_digest != proposal.authority_digest:
+                    self._state.transitions[proposal_id] = _MemoryTransition(prepared, "stale")
+                    raise ValueError("privacy_policy_stale")
+            for member in members:
+                current = self._state.policies.get(_scope_digest(member.scope))
+                valid = (
+                    current is None
+                    if member.action == "insert"
+                    else current is not None
+                    and (current.generation, current.policy.policy_digest)
+                    == (member.expected_generation, member.expected_policy_digest)
+                )
+                if not valid:
+                    self._state.transitions[proposal_id] = _MemoryTransition(prepared, "stale")
+                    raise ValueError("privacy_policy_stale")
+            if not decision.approved:
+                current = await self.effective_policy(proposal.scope)
+                result = PolicyCommitResult(current.policy, current.generation, 0, 0)
+                self._state.transitions[proposal_id] = _MemoryTransition(
+                    prepared, "denied", decision_digest, result, decision.decided_at
+                )
+                return result
+            result: PolicyCommitResult | None = None
+            for member in members:
+                self._state.generation += 1
+                self._state.policies[_scope_digest(member.scope)] = _PolicyRow(
+                    member.candidate_policy, self._state.generation
+                )
+                result = PolicyCommitResult(member.candidate_policy, self._state.generation, 0, 0)
+            if result is None:
+                raise ValueError("privacy_policy_transition_base_missing")
+            self._state.transitions[proposal_id] = _MemoryTransition(
+                prepared, "committed", decision_digest, result, decision.decided_at
+            )
+        return result
 
     async def tighten(
         self, scope: AuthorizationScope, overlay: PolicyOverlay, expected_policy_digest: str

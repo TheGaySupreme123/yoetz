@@ -57,6 +57,11 @@ authority at all.
    privacy ceremonies through terminal suspension; the completion marker is not written when
    either ceremony is incomplete.
 
+   The privacy ceremony is scoped to the canonical repository derived by the service from the
+   interface session's actual working directory. Git branches and linked worktrees share the common
+   root; independent clones do not. The interface never derives privacy scope from public
+   `workspace_ref` and never retains the raw locator after handing it to trusted control.
+
 3. **`yoetz menu` opens the same interface (amends ADR-013 decision 2).** The command name is
    kept for compatibility. On a non-TTY it still fails closed with a usage error (exit 2) and
    never prompts.
@@ -76,6 +81,9 @@ authority at all.
    lifecycle uses the same client calls and the interface never spawns a
    service. A foreign MCP entry is a terminal block with no force-replace path anywhere in the
    surface.
+
+   Repository commitment, grant state, migration state, composed policy, and the authority digest
+   all come from the trusted service; the interface originates none of them.
 
    Connection display is true when any discovered installation is Yoetz-owned. Discovery order
    has no authority: a different first binary cannot make an owned `codex-testing` registration
@@ -107,7 +115,8 @@ authority at all.
 9. **Readiness layers are never collapsed.** Harness detected, MCP registered, MCP verified,
    plugin installed, hooks installed, project consent active, policy digest trusted, local
    service reachable, vault ready, provider binding saved, credential stored, provider transport
-   tested, semantic evaluator composed, privacy permission active, and semantic review ready
+   tested, semantic evaluator composed, machine privacy ceiling permits review, exact repository
+   grant active, and semantic review ready
    each render as their own line with their own certainty. A stored provider binding is never
    rendered as a working provider, and an unavailable deeper review is rendered as a limitation.
 
@@ -184,6 +193,11 @@ system does not have.
   `Keep current`, `Review recommended change`, and `Other privacy options`. Choosing anything but
   `Keep current` suspends the interface and hands the decision to the trusted CLI ceremony, which
   renders the complete `before → after` policy diff, reauthenticates, and commits.
+
+  For a repository with no grant, the diff may contain both a machine-ceiling change and insertion
+  of the first repository row. They are one authority-digest-bound transition; the interface never
+  presents either half as already effective. Eligible legacy carry-forward is separately labeled as
+  bounded no-reapproval narrowing, and new repositories after its entitlement remain Private.
 
   The interface takes **no approval of its own.** An earlier revision rendered a disclosure preview
   and took an explicit "yes, allow this" here, and then handed off to a second, differently worded

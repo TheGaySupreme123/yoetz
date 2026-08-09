@@ -14,7 +14,10 @@ and semantic/privacy capability and conformance tests.
    local minimization/redaction/secret scan, exact prepared-case approval when required, durable
    authorization, outbound gateway, and privacy-audit path. A provider adapter receives only an immutable
    `ApprovedOutboundCase`; composition supplies no repository, bundle, transcript, environment,
-   log, database, keyring, or application-state handle.
+   log, database, keyring, or application-state handle. Standing external evaluation additionally
+   requires an exact current grant for the service-derived repository-privacy commitment beneath
+   the machine ceiling. A missing or mismatched repository grant fails before provider construction,
+   credential-handle minting, authorization, or dispatch.
 2. **First external adapter:** official `openai` Python SDK (pinned `2.46.0`), Responses API with
    structured outputs (`responses.parse` + frozen `ProviderJudgmentModel` schema). A release names
    an exact tested provider/model/endpoint-profile tuple. A generic or merely
@@ -117,7 +120,10 @@ and semantic/privacy capability and conformance tests.
     model disclosure is authorized. `ReviewContextProfile` answers which useful facts the case
     builder selects before privacy enforcement. The closed values are `structural`, `goal_aware`,
     `assisted`, `expanded`, and `custom`. The official CLI recommends `assisted` only after the
-    user selects and confirms an exact provider, workspace scope, categories, classes, and limits.
+    user selects and confirms an exact provider, repository scope, categories, classes, and limits.
+    Repository scope is derived by the trusted service from the client session's actual working
+    directory, never from model-controlled `workspace_ref`: branches and linked worktrees resolve to
+    one Git common root, while independent clones and unrelated repositories do not share authority.
     The safe installation seed remains zero-egress `local_only`; a recommendation is never implicit
     consent.
 12. **The recommended packet is rich but problem-local:** `assisted` contains the task goal,
@@ -209,7 +215,8 @@ availability, coverage gaps, and bounded supporting refs. Later disclosure-time
 as `same`.
 
 Approval is bound to the exact minimized case digest, provider/model/endpoint profile, purpose,
-scope, policy version, and one dispatch. The provider is called outside every SQLite transaction.
+composed machine/repository/task/request authority, policy version, and one dispatch. The provider
+is called outside every SQLite transaction.
 Post-validation rejects invented IDs, out-of-case quotes, coverage upgrades, deterministic-status
 claims, challenges without a material discrepancy or requested next step, and stale frontiers.
 Rejected output never projects a finding.

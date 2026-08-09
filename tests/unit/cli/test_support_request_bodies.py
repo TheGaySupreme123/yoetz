@@ -124,6 +124,7 @@ async def test_privacy_setup_propose_sends_a_body_the_frozen_schema_accepts(
             sent.append(request)
             return JsonObject(
                 {
+                    "schema_version": "2.0.0",
                     "outcome": "decision_required",
                     "proposal_id": "ppr_00000000-0000-4000-8000-000000000001",
                 }
@@ -143,6 +144,6 @@ async def test_privacy_setup_propose_sends_a_body_the_frozen_schema_accepts(
     assert len(sent) == 1
     validate_schema_instance(
         "control-request",
-        "1.0.0",
+        "2.0.0",
         cast(JsonValue, _frame("privacy_propose_policy", sent[0])),
     )

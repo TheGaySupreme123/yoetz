@@ -30,7 +30,6 @@ from yoetz.domain.receipts import (
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
 )
-from yoetz.ports.keys import MacKeyHandle
 from yoetz.ports.ledger import CheckPhase, FrozenCase, OperationLease
 from yoetz.ports.privacy import EffectivePrivacyPolicy
 from yoetz.ports.start_catalog import StartCatalogPort, TaskRoute, TaskRouteState
@@ -42,6 +41,7 @@ _SESSION = "ses_53000000-0000-4000-8000-000000000001"
 _WRITER = "wri_53000000-0000-4000-8000-000000000001"
 _REQUEST = "req_53000000-0000-4000-8000-000000000001"
 _INSTALLATION = "ins_53000000-0000-4000-8000-000000000001"
+_REPOSITORY = "hmac-sha256:" + "b" * 64
 _PROVIDER = ProviderBinding(
     "sensitive-provider",
     "model",
@@ -59,7 +59,7 @@ def _test_effective_policy() -> EffectivePrivacyPolicy:
     scope = AuthorizationScope(
         AuthorizationScopeKind.TASK,
         _INSTALLATION,
-        "hmac-sha256:" + "b" * 64,
+        _REPOSITORY,
         _TASK,
     )
 
@@ -127,6 +127,15 @@ class _Privacy:
         # Real policy path is required for dispatch; never mint synthetic policy identity.
         self.policy_application = _PolicyApplication(_test_effective_policy())
 
+    async def activate_repository(self, scope: AuthorizationScope) -> bool:
+        assert scope == AuthorizationScope(
+            AuthorizationScopeKind.TASK,
+            _INSTALLATION,
+            _REPOSITORY,
+            _TASK,
+        )
+        return True
+
     async def evaluate_semantic(self, candidate: object, deadline: object) -> object:
         del deadline
         self.calls += 1
@@ -148,12 +157,6 @@ class _Catalog:
         return self.route
 
 
-class _Lookup:
-    def mac(self, domain: bytes, message: bytes) -> str:
-        del domain, message
-        return "hmac-sha256:" + "b" * 64
-
-
 def _route(state: TaskRouteState = TaskRouteState.ACTIVE) -> TaskRoute:
     route_generation = 1
     bundle_relpath = f"tasks/{_TASK}"
@@ -164,7 +167,15 @@ def _route(state: TaskRouteState = TaskRouteState.ACTIVE) -> TaskRoute:
             "route_generation": route_generation,
         }
     )
-    return TaskRoute(_TASK, _SESSION, bundle_relpath, route_generation, state, identity)
+    return TaskRoute(
+        _TASK,
+        _SESSION,
+        bundle_relpath,
+        route_generation,
+        state,
+        identity,
+        _REPOSITORY,
+    )
 
 
 def _frozen() -> FrozenCase:
@@ -203,7 +214,6 @@ def _evaluator(
         _INSTALLATION,
         resolve_provider,
         cast(StartCatalogPort, _Catalog(route)),
-        cast(MacKeyHandle, _Lookup()),
         ready_composition_module.IdPort(),
     )
 

@@ -12,12 +12,13 @@ import json
 import os
 import sys
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Final, cast
 
 from yoetz.config.load import load_config
 from yoetz.config.paths import state_dir
 from yoetz.domain.values import JsonObject
-from yoetz.ports.control import ControlClientKind, ControlError
+from yoetz.ports.control import ControlClientKind, ControlError, WorkspaceLocator
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.service.client import connect_service
 
@@ -58,6 +59,8 @@ def _emit(value: Mapping[str, JsonValue], *, json_output: bool) -> None:
         )
     print(f"credential: {credential_human_display(value.get('credential_connected'))}")
     print(f"llm_inference_enabled: {value.get('llm_inference_enabled')}")
+    print(f"repository_grant: {value.get('repository_grant_state')}")
+    print(f"repository_migration: {value.get('repository_migration_state')}")
     print(f"semantic_ready: {value.get('semantic_ready')}")
     route = value.get("mcp_route")
     if isinstance(route, Mapping):
@@ -201,7 +204,7 @@ def machine_scope_request() -> JsonObject:
     return JsonObject(body)
 
 
-async def provider_status_report() -> dict[str, JsonValue]:
+async def provider_status_report(*, workspace_locator: Path | None = None) -> dict[str, JsonValue]:
     """Compose a nonsecret readiness snapshot from config, service, and policy."""
 
     config = load_config({}, os.environ, None)
@@ -222,12 +225,23 @@ async def provider_status_report() -> dict[str, JsonValue]:
     credential_connected: bool | None = None
     llm_inference_enabled: bool | None = None
     policy_profile: str | None = None
+    repository_grant_state: str | None = None
+    repository_migration_state: str | None = None
     # Set only when a service actually answered, so presence is observed rather than inferred
     # from the shape of a refusal.
     service_observed = False
 
     try:
-        client = await connect_service(ControlClientKind.CLI)
+        client = await connect_service(
+            ControlClientKind.CLI,
+            workspace_locator=WorkspaceLocator(
+                str(
+                    (Path.cwd() if workspace_locator is None else workspace_locator).resolve(
+                        strict=True
+                    )
+                )
+            ),
+        )
         try:
             status = await client.service_status()
             service_observed = True
@@ -236,12 +250,25 @@ async def provider_status_report() -> dict[str, JsonValue]:
             if status.state.value == "ready":
                 credential_connected = "external_provider" in status.capabilities
                 try:
-                    effective = await client.privacy_get_effective(machine_scope_request())
+                    effective = await client.privacy_get_setup(
+                        JsonObject({"schema_version": "2.0.0"})
+                    )
                 except Exception:
                     effective = None
                 if isinstance(effective, Mapping):
                     plain = cast(Mapping[str, object], dict(effective))
-                    policy = plain.get("policy")
+                    raw_grant = plain.get("grant_state")
+                    raw_migration = plain.get("migration_state")
+                    if raw_grant in {"granted", "missing"}:
+                        repository_grant_state = cast(str, raw_grant)
+                    if raw_migration in {
+                        "not_applicable",
+                        "legacy_route_available",
+                        "first_repository_available",
+                        "consumed",
+                    }:
+                        repository_migration_state = cast(str, raw_migration)
+                    policy = plain.get("composed_policy")
                     if isinstance(policy, Mapping):
                         policy_map = cast(Mapping[str, object], policy)
                         profile = policy_map.get("profile")
@@ -323,6 +350,16 @@ async def provider_status_report() -> dict[str, JsonValue]:
                 "next_command": "yoetz --privacy",
             }
         )
+    if repository_grant_state is None:
+        blockers.append({"condition": "repository_privacy_grant", "state": "unknown"})
+    elif repository_grant_state == "missing":
+        blockers.append(
+            {
+                "condition": "repository_privacy_grant",
+                "state": "missing",
+                "next_command": "yoetz --privacy",
+            }
+        )
     if registered_profile == "strict":
         # Scoped to the agent route on purpose. ADR-018 decision 2 makes the route ceiling
         # process-local, so a strict Codex registration does not stop a CLI or terminal check
@@ -340,6 +377,7 @@ async def provider_status_report() -> dict[str, JsonValue]:
         service_state == "ready"
         and credential_connected is not None
         and llm_inference_enabled is not None
+        and repository_grant_state is not None
     )
     semantic_ready = (
         readiness_determinable
@@ -347,6 +385,7 @@ async def provider_status_report() -> dict[str, JsonValue]:
         and endpoint_bound
         and credential_connected is True
         and llm_inference_enabled is True
+        and repository_grant_state == "granted"
     )
     next_commands = tuple(
         cast(str, item["next_command"])
@@ -363,6 +402,8 @@ async def provider_status_report() -> dict[str, JsonValue]:
         "credential_connected": credential_connected,
         "llm_inference_enabled": llm_inference_enabled,
         "privacy_profile": policy_profile,
+        "repository_grant_state": repository_grant_state,
+        "repository_migration_state": repository_migration_state,
         "service_state": service_state,
         "service_state_reason": service_state_reason,
         "readiness_determinable": readiness_determinable,
@@ -377,7 +418,8 @@ async def provider_status_report() -> dict[str, JsonValue]:
             "A credential for a different provider than the bound endpoint does not count.",
             "unknown means the service could not be read, not that the step is incomplete.",
             "agent_route_semantic_ready describes the registered Codex MCP route only; "
-            "semantic_ready describes this installation. Neither substitutes for the other.",
+            "semantic_ready describes this repository-bound installation view. Neither "
+            "substitutes for the other.",
             "A strict registered route does not make this installation not-ready: CLI and "
             "terminal checks still dispatch, only the strict agent route cannot.",
             "mcp_route.observed false means the route was not read, not that none is registered.",

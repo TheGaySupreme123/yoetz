@@ -19,7 +19,7 @@ from yoetz.domain.privacy import (
     PrivacyPolicyChangeValue,
     validate_privacy_change_set,
 )
-from yoetz.domain.values import validate_sha256_digest
+from yoetz.domain.values import validate_commitment, validate_sha256_digest
 from yoetz.protocol.canonical import (
     JsonValue,
     canonical_digest,
@@ -74,6 +74,7 @@ __all__ = [
     "PrivacyDisclosureDecisionPreview",
     "PrivacyPendingTarget",
     "PrivacyPolicyDecisionPreview",
+    "PrivacyPolicyTransitionPreviewMember",
     "ProviderCredentialResult",
     "ProviderCredentialRotatePreview",
     "ProviderCredentialSetPreview",
@@ -260,6 +261,7 @@ class ProviderCredentialTarget:
     purpose: str
     scope_digest: str
     purpose_digest: str
+    repository_privacy_commitment: str | None = None
     kind: Literal["provider_credential"] = "provider_credential"
 
     def __post_init__(self) -> None:
@@ -277,8 +279,29 @@ class ProviderCredentialTarget:
         _require_token(self.purpose, "provider_credential_target_invalid")
         _require_digest(self.scope_digest, "provider_credential_target_invalid")
         _require_digest(self.purpose_digest, "provider_credential_target_invalid")
+        if self.repository_privacy_commitment is not None:
+            try:
+                validate_commitment(self.repository_privacy_commitment)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("provider_credential_target_invalid") from exc
         if self.purpose_digest != canonical_digest({"purpose": self.purpose}):
             raise ValueError("provider_credential_target_invalid")
+
+    def target_digest(self) -> str:
+        return canonical_digest(
+            {
+                "action": self.action,
+                "endpoint_profile_id": self.endpoint_profile_id,
+                "endpoint_profile_version": self.endpoint_profile_version,
+                "kind": self.kind,
+                "model_id": self.model_id,
+                "provider_id": self.provider_id,
+                "purpose": self.purpose,
+                "purpose_digest": self.purpose_digest,
+                "repository_privacy_commitment": self.repository_privacy_commitment,
+                "scope_digest": self.scope_digest,
+            }
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -492,31 +515,83 @@ class ProviderCredentialRotatePreview:
 
 
 @dataclass(frozen=True, slots=True)
+class PrivacyPolicyTransitionPreviewMember:
+    """One authority layer changed by a compound privacy decision.
+
+    The wire names only the layer and operation. Repository identity is deliberately absent:
+    the trusted control session already bound it, and neither a path nor its commitment helps a
+    person understand the disclosure boundary they are approving.
+    """
+
+    authority: Literal["machine_ceiling", "repository_grant"]
+    action: Literal["replace", "insert"]
+    changes: tuple[PrivacyPolicyChange, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            self.authority not in {"machine_ceiling", "repository_grant"}
+            or self.action not in {"replace", "insert"}
+            or (self.authority == "machine_ceiling" and self.action != "replace")
+            or (self.authority == "repository_grant" and self.action not in {"replace", "insert"})
+        ):
+            raise ValueError("privacy_policy_preview_member_invalid")
+        try:
+            validate_privacy_change_set(self.changes, require_widening=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("privacy_policy_preview_member_invalid") from exc
+        if self.action == "insert" and (
+            not self.changes or not any(change.widens for change in self.changes)
+        ):
+            raise ValueError("privacy_policy_preview_member_invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class PrivacyPolicyDecisionPreview:
     """The complete substantive policy diff a human approves a widening against.
 
-    ``changes`` is the whole security-relevant ``before → after`` diff the service derived
-    from the same comparison that classified the proposal as a widening — never a summary of
-    it. A widening preview with no widening change in it is refused here rather than rendered,
-    because the ceremony exists only for widenings and an incomplete set means the human would
-    be authorizing something the screen does not name. ``diff_digest`` stays as integrity
-    evidence binding the decision to exact bytes; it is not the human-readable description.
+    Legacy proposals carry their whole security-relevant ``before → after`` diff in ``changes``.
+    Repository proposals carry ordered ``members`` so one approval cannot hide either an
+    installation-ceiling replacement or repository-row insertion/replacement. An insertion is
+    compared with an explicit Private/no-egress baseline and must carry every resulting field
+    change. Every preview member must contain a widening field. ``diff_digest`` stays as integrity evidence binding
+    the decision to exact bytes; it is not the human-readable description.
     """
 
     pending_id: str
     diff_digest: str
     changes: tuple[PrivacyPolicyChange, ...]
+    members: tuple[PrivacyPolicyTransitionPreviewMember, ...] = ()
     kind: Literal["privacy_policy_decision"] = "privacy_policy_decision"
 
     def __post_init__(self) -> None:
         if type(self.pending_id) is not str or not self.pending_id:
             raise ValueError("privacy_policy_preview_invalid")
         _require_digest(self.diff_digest, "privacy_policy_preview_invalid")
+        if type(self.members) is not tuple or any(
+            type(member) is not PrivacyPolicyTransitionPreviewMember for member in self.members
+        ):
+            raise ValueError("privacy_policy_preview_invalid")
         try:
-            validate_privacy_change_set(self.changes, require_widening=True)
+            if self.members:
+                if self.changes or tuple(member.authority for member in self.members) not in {
+                    ("repository_grant",),
+                    ("machine_ceiling", "repository_grant"),
+                }:
+                    raise ValueError("privacy_policy_preview_invalid")
+                if not any(
+                    member.action == "insert" or any(change.widens for change in member.changes)
+                    for member in self.members
+                ):
+                    raise ValueError("privacy_policy_preview_invalid")
+                encoded_value: JsonValue = [
+                    _privacy_preview_member_to_json(member) for member in self.members
+                ]
+            else:
+                validate_privacy_change_set(self.changes, require_widening=True)
+                encoded_value = [_change_to_json(c) for c in self.changes]
         except (TypeError, ValueError) as exc:
             raise ValueError("privacy_policy_preview_invalid") from exc
-        encoded = canonical_encode(cast(JsonValue, [_change_to_json(c) for c in self.changes]))
+        encoded = canonical_encode(encoded_value)
         if len(encoded) > MAX_PRIVACY_PREVIEW_CHANGE_BYTES:
             raise ValueError("privacy_policy_preview_invalid")
 
@@ -1224,6 +1299,7 @@ def _target_to_json(target: HumanOpenTarget) -> dict[str, JsonValue]:
             "provider_id": target.provider_id,
             "purpose": target.purpose,
             "purpose_digest": target.purpose_digest,
+            "repository_privacy_commitment": target.repository_privacy_commitment,
             "scope_digest": target.scope_digest,
         }
     if type(target) is PrivacyPendingTarget:
@@ -1269,6 +1345,7 @@ def _target_from_json(value: JsonValue) -> HumanOpenTarget:
                 "provider_id",
                 "purpose",
                 "purpose_digest",
+                "repository_privacy_commitment",
                 "scope_digest",
             },
         )
@@ -1281,6 +1358,7 @@ def _target_from_json(value: JsonValue) -> HumanOpenTarget:
             purpose=cast(str, source["purpose"]),
             scope_digest=cast(str, source["scope_digest"]),
             purpose_digest=cast(str, source["purpose_digest"]),
+            repository_privacy_commitment=cast(str | None, source["repository_privacy_commitment"]),
         )
     if kind == "privacy_pending":
         _keys(source, {"decision_kind", "kind", "pending_id"})
@@ -1580,6 +1658,32 @@ def _change_from_json(value: JsonValue) -> PrivacyPolicyChange:
         raise ValueError("privacy_policy_preview_invalid") from exc
 
 
+def _privacy_preview_member_to_json(
+    value: PrivacyPolicyTransitionPreviewMember,
+) -> dict[str, JsonValue]:
+    return {
+        "action": value.action,
+        "authority": value.authority,
+        "changes": [_change_to_json(change) for change in value.changes],
+    }
+
+
+def _privacy_preview_member_from_json(value: JsonValue) -> PrivacyPolicyTransitionPreviewMember:
+    source = _closed_object(value)
+    _keys(source, {"action", "authority", "changes"})
+    raw_changes = source["changes"]
+    if type(raw_changes) is not list:
+        raise ValueError("privacy_policy_preview_invalid")
+    try:
+        return PrivacyPolicyTransitionPreviewMember(
+            authority=cast(Literal["machine_ceiling", "repository_grant"], source["authority"]),
+            action=cast(Literal["replace", "insert"], source["action"]),
+            changes=tuple(_change_from_json(item) for item in cast(list[JsonValue], raw_changes)),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("privacy_policy_preview_invalid") from exc
+
+
 def _preview_to_json(value: HumanPreview) -> dict[str, JsonValue]:
     if type(value) is VaultInitializePreview:
         return {
@@ -1606,12 +1710,18 @@ def _preview_to_json(value: HumanPreview) -> dict[str, JsonValue]:
         provider = cast(ProviderCredentialSetPreview | ProviderCredentialRotatePreview, value)
         return {"kind": provider.kind, "target": _target_to_json(provider.target)}
     if type(value) is PrivacyPolicyDecisionPreview:
-        return {
-            "changes": [_change_to_json(change) for change in value.changes],
+        encoded: dict[str, JsonValue] = {
             "diff_digest": value.diff_digest,
             "kind": value.kind,
             "pending_id": value.pending_id,
         }
+        if value.members:
+            encoded["members"] = [
+                _privacy_preview_member_to_json(member) for member in value.members
+            ]
+        else:
+            encoded["changes"] = [_change_to_json(change) for change in value.changes]
+        return encoded
     if type(value) is PrivacyDisclosureDecisionPreview:
         return {
             "authorization_change": value.authorization_change,
@@ -1687,6 +1797,20 @@ def _preview_from_json(value: JsonValue) -> HumanPreview:
             else ProviderCredentialRotatePreview(target)
         )
     if kind == "privacy_policy_decision":
+        if "members" in source:
+            _keys(source, {"diff_digest", "kind", "members", "pending_id"})
+            raw_members = source["members"]
+            if type(raw_members) is not list:
+                raise ValueError("privacy_policy_preview_invalid")
+            return PrivacyPolicyDecisionPreview(
+                pending_id=cast(str, source["pending_id"]),
+                diff_digest=cast(str, source["diff_digest"]),
+                changes=(),
+                members=tuple(
+                    _privacy_preview_member_from_json(item)
+                    for item in cast(list[JsonValue], raw_members)
+                ),
+            )
         _keys(source, {"changes", "diff_digest", "kind", "pending_id"})
         raw_changes = source["changes"]
         if type(raw_changes) is not list:

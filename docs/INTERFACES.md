@@ -1099,7 +1099,9 @@ crash resume before terminal catalog completion.
 
 Shared route values are `TaskRoute` and `TaskRouteState` (`initializing`, `active`,
 `quarantined`). `TaskRoute` carries task ID, active session ID, generated bundle route, positive
-route generation, state, and the stored active route-identity digest. That digest is SHA-256 over
+route generation, state, the optional installation-keyed `repository_privacy_commitment`, and the
+stored active route-identity digest. The repository commitment is supplied only by the trusted
+control-session binding and is never derived from the start request. That digest is SHA-256 over
 canonical task ID/bundle route/route generation; session/state transitions do not change it.
 `StartAllocation` freezes the same generation/digest selected at reservation.
 Its lease is the distinct `StartOperationLease(owner_generation: positive int, lease_owner_id,
@@ -1117,9 +1119,11 @@ external_ref_commitment?)` contains only domain-separated installation-keyed HMA
 The application builds the start `request_digest` from those commitments plus nonsecret logical
 fields. `reserve_or_resume` recomputes/verifies them before idempotency or route lookup, preventing
 low-entropy plaintext from leaking through an unkeyed structural request digest. `workspace_ref`
-is the stable project identity and `external_ref` the stable task identity within that project;
+is the caller-declared project identity and `external_ref` the stable task identity within that project;
 together they are the attach selector when `session_id` is absent (`mode=create_or_attach` or
-`attach` with the pair). Raw refs never land in durable state — only the commitments do.
+`attach` with the pair). Raw refs never land in durable state — only the commitments do. This
+model/agent-controlled `workspace_ref_commitment` is an attachment selector, not a
+repository-privacy commitment, and cannot select or inherit disclosure authority.
 
 ### Immutable objects and keys
 
@@ -1192,7 +1196,9 @@ and has no nonce. The sole `K_lookup` is installation-scoped. On each unlock the
 `b"yoetz/log-correlation/v1"`, and `b"yoetz/privacy-audit/v1"`, and output length 32; none is stored
 as a separate vault record. One opaque `MacKeyHandle` type is bound at minting to purpose,
 service/vault generation, optional bundle generation, and an exact domain allowlist. Catalog lookup
-owns `yoetz/start-title/v1\x00|yoetz/workspace-ref/v1\x00|yoetz/external-task-ref/v1\x00`; log correlation owns
+owns
+`yoetz/start-title/v1\x00|yoetz/workspace-ref/v1\x00|yoetz/external-task-ref/v1\x00|yoetz/repository-privacy/v1\x00`;
+log correlation owns
 `yoetz/session-log-id/v1\x00`; privacy audit owns `yoetz/privacy-egress-request/v1\x00`. Cross-
 purpose/domain use fails before MAC execution, and relock invalidates every handle.
 Every `MacKeyHandle.mac(domain, message)` computes exactly
@@ -1213,9 +1219,31 @@ privacy_pending_list|privacy_receipts_list|privacy_receipts_get`. The observatio
 `observation_ingest|observation_status|observation_pause|observation_resume|observation_revoke`
 (local CLI/UI only; never MCP tools — the public MCP surface remains six tools).
 It has no privacy decision, unlock, secret, credential, key-handle, decrypted-object,
-arbitrary-path, or policy-loosening field or method. `service_status` is available while locked;
+operation-body arbitrary-path, or policy-loosening field or method. The versioned handshake locator
+below is the sole narrow path-bearing exception. `service_status` is available while locked;
 task operations are not. MCP cannot invoke lifecycle, privacy-control, or observation-control
 methods.
+
+The versioned ordinary-control hello may carry one optional trusted `workspace_locator` derived by
+the client itself: CLI/UI use their actual process working directory and the MCP bridge uses its
+configured/session working directory. It is never populated from an operation body or public
+`workspace_ref`. The service resolves symlinks, resolves a Git worktree to its canonical common
+repository root (or a non-Git workspace to its resolved directory), computes the installation-keyed
+`repository_privacy_commitment`, and discards the raw locator before the handshake completes. The
+resulting `ControlSession` carries only `RepositoryPrivacyContext(commitment, identity_kind)`.
+Branches and
+linked worktrees share one commitment; independent clones and unrelated repositories do not. An
+older hello decoder or omitted locator produces an unbound session and cannot create, migrate, or
+consume repository disclosure authority.
+
+The `privacy_get_setup` version 2 result carries `PrivacySetupSnapshot`: exactly the composed policy,
+bound repository-backed workspace scope, `authority_digest`, `grant_state`, and `migration_state`
+beside the setup projection. The matching version 2 `privacy_propose_policy` request binds its
+candidate and any compound transition members to that `authority_digest`, not merely to one current
+policy digest. Decoders for the version 1 setup/propose bodies remain registered for compatibility,
+but a version 1 request cannot create a repository row, consume a migration entitlement, or
+authorize standing external LLM work; under repository-grant mode it fails closed with bounded
+upgrade guidance.
 
 Ordinary-control sessions are peer-authenticated over the fixed owner-only AF_UNIX control
 endpoint. Public connection liveness (enforced by the daemon, not a wire field): handshake must
@@ -1464,8 +1492,9 @@ span rather than a keystroke timeout. The seven fixed
 `3=portable_recovery`, `4=provider_reauthentication`, `5=provider_credential`,
 `6=privacy_reauthentication`, and `7=security_reauthentication`.
 
-`PrivacyPolicyDecisionPreview` is exactly `{kind, pending_id, diff_digest, changes}`. `changes`
-is the complete substantive policy diff as closed `PrivacyPolicyChange` records —
+`PrivacyPolicyDecisionPreview` is exactly `{kind, pending_id, diff_digest, changes, members}`.
+For a single-layer transition, `changes` is the complete substantive policy diff as closed
+`PrivacyPolicyChange` records —
 `{area, field, subject, before, after, widens}` — never a summary of it and never explanatory
 prose. `area` is one of `global|review|channel|local_model|agent_context|human_control`; `field`
 is an allowlisted token belonging to that area (`PRIVACY_CHANGE_FIELDS`); `subject` is the
@@ -1482,7 +1511,15 @@ cannot be absent from the screen a human approves it on. The set is deduplicated
 `(area, field, subject)`, sorted widenings-first by fixed impact rank, capped at 128 changes and
 32 KiB encoded, and a `privacy_policy_decision` preview whose change set contains no widening is
 rejected rather than rendered. Simultaneous tightenings are included so the human sees the whole
-diff; lineage-only fields (`policy_id`, `version`, `policy_digest`, `created_at`,
+diff. For a compound transition, top-level `changes` is empty and `members` is the complete ordered
+set of `PrivacyPolicyTransitionPreviewMember(authority, action, changes)` values. `authority` is
+`machine_ceiling|repository_grant`; `action` is `replace|insert`, subject to the closed valid
+combinations enforced by that type. A first repository grant may contain both a machine-ceiling
+replacement and repository-row insertion; those members are rendered together and commit
+atomically. The `PolicyTransitionProposal.authority_digest`, rather than an extra confidential
+preview field, binds that decision to the machine ceiling, repository commitment and current row,
+ancestors, migration frontier, and applicable bounded entitlement. Neither member can become
+effective alone. Lineage-only fields (`policy_id`, `version`, `policy_digest`, `created_at`,
 `supersedes_policy_digest`) are excluded because they always differ on a fresh candidate and
 describe no disclosure boundary. `diff_digest` remains integrity evidence binding the decision to
 exact bytes; it is not the human-readable description, and the trusted renderer says so. Fixed
@@ -1577,6 +1614,9 @@ The closed privacy enums are:
   `command_metadata`, `diff_metadata`, `repository_excerpt`, `transcript_excerpt`,
   `diagnostic_metadata`;
 - `AuthorizationScopeKind`: `machine`, `workspace`, `task`, `request`;
+- `RepositoryPrivacyAuthority.grant_state`: `granted`, `missing`;
+- `RepositoryPrivacyAuthority.migration_state`: `not_applicable`, `legacy_route_available`,
+  `first_repository_available`, `consumed`;
 - `ConsentSource`: `none`, `baseline_policy`, `scoped_local_human`,
   `per_request_local_human`;
 - `PrivacyOutcome`: `blocked_by_policy`, `blocked_forbidden_data`,
@@ -1618,10 +1658,21 @@ projection time against the frozen frontier and is never cached across frontiers
 projection still reserves and completes its `AgentProjectionAuditSubject` receipt.
 
 `PrivacyPolicyStorePort` alone loads/intersects and mutates the machine ceiling plus
-workspace/task/request overlays. Its `seed_if_absent(policy) -> PrivacyPolicy` transition is the
+repository/task/request overlays. Its `repository_authority(scope) -> RepositoryPrivacyAuthority`
+read returns the bound scope, composed `EffectivePrivacyPolicy`, repository commitment,
+`grant_state`, `migration_state`, `authority_digest`, ordered `PrivacyAuthorityAncestor` values,
+and optional grant generation/digest as one snapshot. Standing external LLM admission requires
+`grant_state == "granted"`; no machine row alone can satisfy it. Its
+`seed_if_absent(policy) -> PrivacyPolicy` transition is the
 only bootstrap write: it atomically commits the exact generation-1 denied machine policy when no
 row exists, returns an existing row only when it is byte/identity-equivalent, and otherwise fails
-with a bounded conflict without overwrite. `PrivacyAuditPort` durably reserves the closed
+with a bounded conflict without overwrite. First-child creation and a machine-ceiling plus
+repository-row proposal are exact replay-safe atomic transitions CAS-bound to the authority digest.
+The same transaction may consume one bounded pre-upgrade route or first-repository migration
+entitlement. Stale ancestor movement, expiry, denial, or injected crash rolls back every member.
+Legacy automatic carry-forward clones accepted bytes beneath the unchanged machine row and is
+therefore classified as narrowing rather than a new approval. `PrivacyAuditPort` durably reserves
+the closed
 `PrivacyAuditSubject = PreDispatchAuditDecision | AgentProjectionAuditSubject |
 DisclosureProposal` union, records exact
 human decisions, mints one-use `EgressAuthorization`, exposes atomic consumption only to the
@@ -1653,8 +1704,14 @@ input. `OutboundGatewayPort` is the only network-capable application effect, acc
 authorization through `PrivacyAuditPort` immediately before adapter I/O. Policy tightening and
 external/local consume share one generation CAS: tightening-first means no I/O; consume-first means
 one admitted attempt may send, is best-effort closed/nonselectable, and receives its actual receipt.
-`OutboundGatewayPort.reconcile_policy(policy, human_authority: HumanAuthorityCapability)` binds both
-policy and human-authority generations; unavailable authority yields an empty external registry.
+`OutboundGatewayPort.reconcile_policy(policy, human_authority: HumanAuthorityCapability)` remains
+the port's compatibility entry point and cannot invent repository authority. Repository-aware
+composition calls the concrete gateway's
+`reconcile_repository_policy(policy, human_authority, *, repository_privacy_commitment,
+authority_digest)`, which binds the machine/repository/task/request composition, exact repository
+commitment, authority snapshot, and human-authority generations. Unavailable authority or a
+missing or mismatched exact repository grant yields an empty external registry before credential
+minting.
 `PolicyEnforcingOutboundGateway.has_connected_provider_binding(binding)` is the composition-only
 exact-binding liveness query over that registry; it never probes or mints a credential.
 `OutboundGatewayPort.close()` is an idempotent terminal operation: it installs a deny fence before
@@ -1763,7 +1820,10 @@ these fields.
 has no URL, socket path, credential, header, or open options map. `AuthorizationScope` is one closed
 ancestor-preserving union: every kind carries `kind` plus `installation_id`; workspace/task/request
 add `workspace_ref_commitment`; task/request add `task_id`; and request adds `request_id`. Fields
-from a deeper kind are forbidden at shallower scope, and a generic `scope_ref` is never valid.
+from a deeper kind are forbidden at shallower scope, and a generic `scope_ref` is never valid. For
+privacy authority, `workspace_ref_commitment` is populated from the trusted
+`repository_privacy_commitment`, not from `StartIdentityInput.workspace_ref`; the shared wire field
+name does not make those two commitment domains substitutable.
 
 Every installed external endpoint profile also carries a nonsecret, versioned
 `ProviderDataUseProfile`: `data_use_profile_id`, `data_use_profile_version`,
@@ -2289,10 +2349,13 @@ schema tokens are `yoetz.setup-wizard-marker/1`, `yoetz.setup-wizard-report/1`,
 `integrate <harness> mcp status` body carries `state` and `route_profile`.
 
 `yoetz provider status` emits the read-only `yoetz.provider-status/1` schema token. It reports two
-non-substitutable verdicts. `semantic_ready` is installation-local and unchanged by route posture:
+non-substitutable verdicts. `semantic_ready` is repository-bound structural readiness:
 service ready and unlocked, `verification.semantic` not `disabled`, an endpoint bound, the bound
-provider's credential connected, and the `llm_inference` channel enabled. `agent_route_semantic_ready`
-is `semantic_ready` **and** `mcp_route.registered_profile == "policy"`, and describes only the
+provider's credential connected, the effective `llm_inference` channel enabled, and the trusted
+current-session repository binding's `repository_grant_state == "granted"`.
+`repository_grant_state` and `repository_migration_state` expose the separate repository-authority
+inputs without inventing another readiness verdict. `agent_route_semantic_ready` is
+`semantic_ready` **and** `mcp_route.registered_profile == "policy"`, and describes only the
 registered Codex MCP route; an unread route makes it `false`, because `registered_profile` is then
 `null` and an unobserved route is never treated as a policy route. The `mcp_route` object carries
 `registration_state`, `registered_profile`, `configured_profile`, and `observed`. `observed: false`
@@ -2306,6 +2369,10 @@ with `scope: "agent_route"` and never moves `semantic_ready` or the exit code, b
 decision 2 makes the route ceiling process-local — CLI and terminal checks still dispatch. Route
 observation is fail-soft by contract: no discovery failure, registration error, or unreadable entry
 may raise or change the exit code.
+
+An unbound repository session reports `repository_grant_state=null` and `semantic_ready=false`
+rather than treating the machine ceiling as authority. Provider status remains structural readiness
+evidence, not installed-wheel proof of dispatch or receipts.
 
 Every `integration_preview` preview/status body and every `integration_execute` body carries an
 explicit required `harness` discriminator. Its frozen v0.1 schema value is exactly `codex`; omission,
@@ -2422,8 +2489,9 @@ facade and are never MCP tools.
   `ports/maintenance.py` `MaintenanceHandle` after the catalog generation CAS, and owns catalog
   route-switch recovery.
 - `adapters/sqlite/migrations.py`: owns frozen shared `Migration` and `MigrationReport` values;
-  exact `CATALOG_MIGRATIONS` and `BUNDLE_MIGRATIONS` registries (`catalog`=`0001`; `bundle`=
-  `0001` then observation `0002` in v0.1); and `initialize_catalog`, `initialize_bundle`,
+  exact `CATALOG_MIGRATIONS` and `BUNDLE_MIGRATIONS` registries (catalog `0001`, `0002`, then
+  repository-authority `0003`; bundle `0001` through `0005`, unchanged by issue #139); and
+  `initialize_catalog`, `initialize_bundle`,
   `run_migrations`, and
   `current_schema_version`. No caller may extend a registry dynamically or execute unregistered
   SQL bytes.
@@ -2553,7 +2621,8 @@ facade and are never MCP tools.
 `version.py` exposes `VersionManifest`: package, protocol (`0.1`), local control protocol (`1.0`),
 privacy-policy schema (`1.0.0`), egress-receipt schema (`1.0.0`), engine (`0.1.0`), policy pack
 versions, projection (`yoetz/0.1.0`), object format (`yoetz-object/1`), storage schema
-(`user_version` bundle 4, catalog 2), Python, APSW/SQLite source ID, MCP SDK, provider adapter versions.
+(`user_version` bundle 2, catalog 3), Python, APSW/SQLite source ID, MCP SDK, provider adapter
+versions.
 Its shared support values are frozen `ResourceIdentity(name, media_type, size_bytes,
 sha256_digest)` and `CapabilitySet(name, supported_versions, tested_versions, denied_versions)`.
 Every capability collection is an exact ASCII-sorted set: membership is literal, with no SemVer

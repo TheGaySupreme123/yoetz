@@ -8,7 +8,11 @@ import pytest
 
 from yoetz.adapters.keys.encrypted_vault import EncryptedVaultStore
 from yoetz.adapters.keys.secret_memory import LocalSecretMemory
-from yoetz.ports.keys import KeyStoreError, MacKeyPurpose
+from yoetz.ports.keys import (
+    REPOSITORY_PRIVACY_MAC_DOMAIN,
+    KeyStoreError,
+    MacKeyPurpose,
+)
 from yoetz.ports.secret_memory import (
     HumanAuthorizationProof,
     ProviderAttemptAuthBinding,
@@ -100,6 +104,8 @@ async def test_bundle_and_installation_handles_are_generation_fenced(tmp_path: P
     assert privacy_audit.mac(
         b"yoetz/privacy-audit/authorization/v1\x00", b"authorization"
     ).startswith("hmac-sha256:")
+    repository = service.installation_mac_handle(MacKeyPurpose.CATALOG_LOOKUP)
+    assert repository.mac(REPOSITORY_PRIVACY_MAC_DOMAIN, b"repository").startswith("hmac-sha256:")
     with pytest.raises(KeyStoreError, match="mac_domain_forbidden"):
         catalog.mac(b"yoetz/session-log-id/v1\x00", b"title")
 
@@ -108,6 +114,8 @@ async def test_bundle_and_installation_handles_are_generation_fenced(tmp_path: P
         bundle.commitment_key.mac(b"yoetz/object/request/v1\x00", b"payload")
     with pytest.raises(KeyStoreError, match="stale_key_handle"):
         catalog.mac(b"yoetz/start-title/v1\x00", b"title")
+    with pytest.raises(KeyStoreError, match="stale_key_handle"):
+        repository.mac(REPOSITORY_PRIVACY_MAC_DOMAIN, b"repository")
 
 
 @pytest.mark.anyio

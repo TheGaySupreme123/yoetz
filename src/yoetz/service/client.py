@@ -55,6 +55,7 @@ from yoetz.ports.control import (
     McpRouteProfile,
     ServiceStatus,
     ServiceStopResult,
+    WorkspaceLocator,
 )
 from yoetz.ports.privacy import (
     LocalDisclosureReceiptView,
@@ -1048,15 +1049,23 @@ def _connected_client(
     )
 
 
-async def connect_service(client_kind: ControlClientKind) -> ServiceClient:
+async def connect_service(
+    client_kind: ControlClientKind,
+    *,
+    workspace_locator: WorkspaceLocator | None = None,
+) -> ServiceClient:
     """Connect only to the verified fixed ordinary endpoint and perform the handshake."""
 
     if type(client_kind) is not ControlClientKind:
         raise TypeError("control_client_kind_invalid")
+    if workspace_locator is not None and type(workspace_locator) is not WorkspaceLocator:
+        raise TypeError("workspace_locator_invalid")
     stream: AuthenticatedUnixStream | None = None
     try:
         stream = await connect_control()
-        session = await client_handshake(stream, client_kind, __version__)
+        session = await client_handshake(
+            stream, client_kind, __version__, workspace_locator=workspace_locator
+        )
         return _connected_client(stream, session, client_kind)
     except LocalControlTransportError as exc:
         if stream is not None:
@@ -1075,6 +1084,7 @@ async def connect_service(client_kind: ControlClientKind) -> ServiceClient:
 async def connect_service_on_demand(
     client_kind: ControlClientKind,
     *,
+    workspace_locator: WorkspaceLocator | None = None,
     timeout_seconds: float = _SERVICE_START_TIMEOUT_SECONDS,
 ) -> ServiceClient:
     """Connect to the fixed service, starting one detached successor only when absent.
@@ -1086,10 +1096,14 @@ async def connect_service_on_demand(
 
     if type(client_kind) is not ControlClientKind:
         raise TypeError("control_client_kind_invalid")
+    if workspace_locator is not None and type(workspace_locator) is not WorkspaceLocator:
+        raise TypeError("workspace_locator_invalid")
     if type(timeout_seconds) is not float or not 0.1 <= timeout_seconds <= 30.0:
         raise ValueError("service_start_timeout_invalid")
     try:
-        return await connect_service(client_kind)
+        if workspace_locator is None:
+            return await connect_service(client_kind)
+        return await connect_service(client_kind, workspace_locator=workspace_locator)
     except ControlError as exc:
         if exc.reason != "service_unavailable":
             raise
@@ -1103,7 +1117,9 @@ async def connect_service_on_demand(
     while time.monotonic() < deadline:
         await asyncio.sleep(_SERVICE_START_POLL_SECONDS)
         try:
-            return await connect_service(client_kind)
+            if workspace_locator is None:
+                return await connect_service(client_kind)
+            return await connect_service(client_kind, workspace_locator=workspace_locator)
         except ControlError as exc:
             last_error = exc
             if exc.reason != "service_unavailable":

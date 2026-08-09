@@ -118,7 +118,7 @@ type CallableInspect = Callable[[str], ObservationInspectFact | None]
 type CallablePlans = Callable[[str], tuple[str, ...]]
 type CallableSemantic = Callable[[str], ObservationAdviceSemanticAddon | None]
 type CallableSemanticReview = Callable[
-    [tuple[ObservationAdviceCandidate, ...], str, tuple[str, ...]],
+    [tuple[ObservationAdviceCandidate, ...], str, tuple[str, ...], str | None],
     ObservationAdviceSemanticAddon | None | Awaitable[ObservationAdviceSemanticAddon | None],
 ]
 
@@ -194,7 +194,7 @@ class ObservationAdviceContextBuilder:
                     "lifecycle": status.lifecycle.value,
                 },
             )
-            reviewed = self.semantic_review(candidates, basis, status.gaps)
+            reviewed = self.semantic_review(candidates, basis, status.gaps, yoetz_session_id)
             if inspect.isawaitable(reviewed):
                 semantic = await reviewed
             else:

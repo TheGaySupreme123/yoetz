@@ -1086,6 +1086,7 @@ async def _interactive_provider_setup(
     """Run trusted local setup ceremonies while keeping secrets out of wizard state."""
 
     from yoetz.adapters.keys.os_keyring import AutoUnlockPassphraseStore, OSKeyringError
+    from yoetz.cli.privacy_setup import get_privacy_setup_snapshot
     from yoetz.cli.provider_binding import (
         ProviderEndpointChoice,
         apply_provider_endpoint_choice,
@@ -1102,6 +1103,7 @@ async def _interactive_provider_setup(
     from yoetz.config.models import ConfigError
     from yoetz.config.paths import bundle_root
     from yoetz.config.write import provider_preset
+    from yoetz.ports.control import ControlError
     from yoetz.service.confidential_client import ConfidentialClientError
     from yoetz.service.confidential_protocol import ProviderCredentialTarget
     from yoetz.service.vault import provider_credential_profile_binding
@@ -1265,6 +1267,15 @@ async def _interactive_provider_setup(
         provider.endpoint_profile_id,
         provider.endpoint_profile_version,
     )
+    try:
+        repository_snapshot = await get_privacy_setup_snapshot()
+        repository_commitment = repository_snapshot.bound_scope.get("workspace_ref_commitment")
+    except ControlError, OSError, ValueError:
+        repository_commitment = None
+    if type(repository_commitment) is not str:
+        provider_report["credential_reason"] = "repository_privacy_scope_unavailable"
+        wipe_auto_passphrase()
+        return service, provider_report
     target = ProviderCredentialTarget(
         action="set",
         provider_id=storage.provider_id,
@@ -1274,6 +1285,7 @@ async def _interactive_provider_setup(
         purpose=storage.purpose,
         scope_digest=storage.authorization_scope_digest,
         purpose_digest=storage.purpose_digest,
+        repository_privacy_commitment=repository_commitment,
     )
     typer.echo("")
     typer.echo("Provider API key (hidden local-terminal input; stored only in the Yoetz vault)")
@@ -1595,6 +1607,8 @@ async def run_setup_wizard(
     privacy: dict[str, JsonValue] = {
         "outcome": "deferred" if not interactive else "not_changed",
         "profile": "unknown",
+        "grant_state": None,
+        "migration_state": None,
         "reason": None,
     }
     semantic_status: dict[str, JsonValue] | None = None
@@ -1628,6 +1642,8 @@ async def run_setup_wizard(
                 privacy = {
                     "outcome": "failed",
                     "profile": "unknown",
+                    "grant_state": None,
+                    "migration_state": None,
                     "reason": reason if type(reason) is str else "privacy_setup_failed",
                 }
                 return False
@@ -1635,6 +1651,8 @@ async def run_setup_wizard(
                 "outcome": privacy_result.outcome,
                 "profile": privacy_result.profile,
                 "proposal_id": privacy_result.proposal_id,
+                "grant_state": getattr(privacy_result, "grant_state", None),
+                "migration_state": getattr(privacy_result, "migration_state", None),
                 "reason": privacy_result.reason,
             }
             return privacy_result.outcome in {"configured", "unchanged"}

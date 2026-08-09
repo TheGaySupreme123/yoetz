@@ -259,13 +259,18 @@ def _request_digest(request: StartRequest, command: StartCommand) -> str:
             "mode": request.mode,
             "protocol_version": request.protocol_version,
             "requested_view": request.requested_view,
+            "repository_privacy_commitment": command.repository_privacy_commitment,
             "schema_version": request.schema_version,
             "session_id": request.session_id,
         }
     )
 
 
-async def _command(app: _StartApplication, request: StartRequest) -> StartCommand:
+async def _command(
+    app: _StartApplication,
+    request: StartRequest,
+    repository_privacy_commitment: str | None,
+) -> StartCommand:
     try:
         identity = StartIdentityInput(
             request.task_title,
@@ -286,6 +291,7 @@ async def _command(app: _StartApplication, request: StartRequest) -> StartComman
             identity_input=identity,
             identity_commitments=commitments,
             session_id=request.session_id,
+            repository_privacy_commitment=repository_privacy_commitment,
         )
         return StartCommand(
             operation_id=request.request_id,
@@ -294,6 +300,7 @@ async def _command(app: _StartApplication, request: StartRequest) -> StartComman
             identity_input=identity,
             identity_commitments=commitments,
             session_id=request.session_id,
+            repository_privacy_commitment=repository_privacy_commitment,
         )
     except PublicOperationError:
         raise
@@ -664,10 +671,15 @@ async def _reopen_result(
     return _decode_result(canonical), result_ref
 
 
-async def execute_start(app: _StartApplication, request: StartRequest) -> StartInternalResult:
+async def execute_start(
+    app: _StartApplication,
+    request: StartRequest,
+    *,
+    repository_privacy_commitment: str | None = None,
+) -> StartInternalResult:
     """Execute one seven-step start operation against service-owned ports."""
 
-    command = await _command(app, request)
+    command = await _command(app, request, repository_privacy_commitment)
     allocation = await _reserve(app.start_catalog, command)
     if allocation.outcome == "replayed":
         if allocation.replayed_result is None:

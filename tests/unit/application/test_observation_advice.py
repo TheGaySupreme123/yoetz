@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 from collections.abc import Mapping
@@ -11,6 +12,7 @@ from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.adapters.observation_semantic_advice import NullSemanticAdvice, OptionalSemanticAdvice
 from yoetz.application.observation_advice import (
     ObservationAdviceBuildInput,
+    ObservationAdviceContextBuilder,
     build_observation_advice_snapshot,
     minimized_semantic_evidence_packet,
     should_reissue_advice,
@@ -21,6 +23,7 @@ from yoetz.domain.observation import (
     ObservationEnvelope,
     ObservationLifecycle,
     ObservationSource,
+    ObservationStatus,
     ObservationStatusQuery,
 )
 from yoetz.domain.values import JsonObject, Timestamp
@@ -218,6 +221,52 @@ def test_deterministic_only_vs_configured_semantic() -> None:
     )
     assert snapshot is not None
     assert len(snapshot.ranked_finding_ids) >= 2
+
+
+def test_semantic_observation_review_receives_the_trusted_yoetz_session() -> None:
+    session_id = "ses_00000000-0000-4000-8000-000000000001"
+    observed: list[str | None] = []
+
+    class _Store:
+        def list_envelopes(self, workspace: str) -> tuple[ObservationEnvelope, ...]:
+            assert workspace == _COMMITMENT
+            return (
+                _envelope(
+                    "hook:fail",
+                    {"tool_name": "shell", "exit_status": 1, "correlation_id": "x1"},
+                ),
+            )
+
+        async def status(self, query: ObservationStatusQuery) -> ObservationStatus:
+            assert query.workspace_commitment == _COMMITMENT
+            return ObservationStatus(
+                ObservationLifecycle.ACTIVE,
+                _COMMITMENT,
+                {},
+                _TIME,
+                0,
+                (),
+                (),
+                None,
+            )
+
+        def load_advice_snapshot(self, workspace: str) -> None:
+            assert workspace == _COMMITMENT
+            return None
+
+    async def review(
+        candidates: object, basis: str, gaps: tuple[str, ...], yoetz_session_id: str | None
+    ) -> None:
+        del candidates, basis, gaps
+        observed.append(yoetz_session_id)
+
+    builder = ObservationAdviceContextBuilder(semantic_review=review)  # type: ignore[arg-type]
+    snapshot = asyncio.run(
+        builder.build(_COMMITMENT, _Store(), yoetz_session_id=session_id)  # type: ignore[arg-type]
+    )
+
+    assert snapshot is not None
+    assert observed == [session_id]
 
 
 def test_observe_hook_refresh_advice_without_mcp_tools(tmp_path: Path) -> None:

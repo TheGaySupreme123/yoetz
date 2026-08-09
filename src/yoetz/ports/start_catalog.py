@@ -149,6 +149,7 @@ class StartCommand:
     identity_input: StartIdentityInput
     identity_commitments: StartIdentityCommitments
     session_id: str | None = None
+    repository_privacy_commitment: str | None = None
 
     def __post_init__(self) -> None:
         _id(IdKind.REQUEST, self.operation_id)
@@ -164,6 +165,11 @@ class StartCommand:
             raise _invalid()
         if self.session_id is not None:
             _id(IdKind.SESSION, self.session_id)
+        if self.repository_privacy_commitment is not None:
+            try:
+                validate_commitment(self.repository_privacy_commitment)
+            except ValueError as exc:
+                raise _invalid() from exc
         input_has_refs = self.identity_input.workspace_ref is not None
         commitments_have_refs = self.identity_commitments.workspace_ref_commitment is not None
         if input_has_refs != commitments_have_refs:
@@ -180,6 +186,7 @@ class TaskRoute:
     route_generation: int
     state: TaskRouteState
     route_identity_digest: str
+    repository_privacy_commitment: str | None = None
 
     def __post_init__(self) -> None:
         task = _id(IdKind.TASK, self.task_id)
@@ -202,6 +209,11 @@ class TaskRoute:
         )
         if self.route_identity_digest != expected:
             raise _invalid()
+        if self.repository_privacy_commitment is not None:
+            try:
+                validate_commitment(self.repository_privacy_commitment)
+            except ValueError as exc:
+                raise _invalid() from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,6 +373,13 @@ class StartCatalogPort(Protocol):
     async def resolve_route(self, session_id: str) -> TaskRoute | None: ...
 
     async def list_workspace_task_ids(self, workspace_ref_commitment: str) -> tuple[str, ...]: ...
+
+    async def bind_repository_privacy(
+        self,
+        task_id: str,
+        route_identity_digest: str,
+        repository_privacy_commitment: str,
+    ) -> TaskRoute: ...
 
     async def reserve_or_resume(self, request: StartCommand) -> StartAllocation: ...
 

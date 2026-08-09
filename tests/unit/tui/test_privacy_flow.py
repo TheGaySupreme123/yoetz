@@ -29,7 +29,9 @@ class _Runtime:
     async def privacy_posture(self) -> PrivacyPosture:
         return self._posture
 
-    def privacy_recommendation(self) -> PrivacyRecommendation:
+    def privacy_recommendation(
+        self, _posture: PrivacyPosture | None = None
+    ) -> PrivacyRecommendation:
         return self._recommendation
 
     def project_root(self) -> str:
@@ -77,8 +79,19 @@ class _Harness:
         return "\n".join(f"{title}\n" + "\n".join(body) for _level, title, body in self.said)
 
 
-def _posture(profile: str | None = "minimal_external") -> PrivacyPosture:
-    return PrivacyPosture(profile=profile, llm_inference_enabled=True, readable=True)
+def _posture(
+    profile: str | None = "minimal_external",
+    *,
+    grant_state: str | None = None,
+    migration_state: str | None = None,
+) -> PrivacyPosture:
+    return PrivacyPosture(
+        profile=profile,
+        llm_inference_enabled=True,
+        readable=True,
+        repository_grant_state=grant_state,  # pyright: ignore[reportArgumentType]
+        repository_migration_state=migration_state,
+    )
 
 
 def _recommendation(recipe: str = "metadata_only") -> PrivacyRecommendation:
@@ -98,6 +111,22 @@ async def test_privacy_leads_with_the_current_posture_and_the_recommendation() -
     # A recommendation without its cost is advice, not a choice.
     assert "It costs detail." in harness.transcript
     assert harness.choices(0) == ["keep", "recommended", "other"]
+
+
+@pytest.mark.anyio
+async def test_privacy_names_repository_grant_and_automatic_migration_without_identity() -> None:
+    harness = _Harness(
+        _posture(grant_state="granted", migration_state="consumed"),
+        _recommendation(),
+    )
+    harness.answers = [None]
+
+    await harness.app.command_privacy()
+
+    assert "Repository grant: granted for this repository" in harness.transcript
+    assert "carried forward and narrowed" in harness.transcript
+    assert "sha256:" not in harness.transcript
+    assert "/srv/yoetz" not in harness.transcript
 
 
 @pytest.mark.anyio

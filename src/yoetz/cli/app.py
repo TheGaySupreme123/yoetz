@@ -26,7 +26,7 @@ from yoetz.cli.render import (
     render_human_status,
 )
 from yoetz.domain.values import JsonObject
-from yoetz.ports.control import ControlClientKind, ControlError
+from yoetz.ports.control import ControlClientKind, ControlError, WorkspaceLocator
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
 from yoetz.protocol.models import (
@@ -156,12 +156,32 @@ def run_async(operation: Callable[[], Awaitable[int]]) -> int:
     return anyio.run(operation)
 
 
+class _WorkspaceLocatorDefault:
+    __slots__ = ()
+
+
+_WORKSPACE_LOCATOR_DEFAULT: Final = _WorkspaceLocatorDefault()
+
+
 async def build_service_client(
     client_kind: ControlClientKind = ControlClientKind.CLI,
+    *,
+    workspace_locator: WorkspaceLocator | None | _WorkspaceLocatorDefault = (
+        _WORKSPACE_LOCATOR_DEFAULT
+    ),
 ) -> ServiceClient:
-    """Connect to the fixed same-user service endpoint; never spawn one."""
+    """Connect to the fixed same-user service endpoint; never spawn one.
 
-    return await connect_service(client_kind)
+    Ordinary CLI work is repository-bound by default. Passing ``None`` explicitly remains the
+    narrow escape hatch for callers whose operation genuinely has no workspace authority.
+    """
+
+    locator = (
+        WorkspaceLocator(os.fspath(Path.cwd().resolve(strict=True)))
+        if workspace_locator is _WORKSPACE_LOCATOR_DEFAULT
+        else cast(WorkspaceLocator | None, workspace_locator)
+    )
+    return await connect_service(client_kind, workspace_locator=locator)
 
 
 def _bounded_input(input_path: str | None, inline: str | None) -> JsonValue:

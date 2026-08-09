@@ -489,6 +489,61 @@ def _change_value_text(change: PrivacyPolicyChange, value: PrivacyPolicyChangeVa
 
 
 def _privacy_policy_change_text(preview: PrivacyPolicyDecisionPreview) -> str:
+    if preview.members:
+        compound = len(preview.members) == 2
+        lines = [
+            "Action: decide repository privacy authority widening",
+            f"Pending: {preview.pending_id}",
+            "",
+            (
+                "This single approval changes the installation ceiling and repository grant shown"
+                if compound
+                else "This approval inserts the repository grant shown"
+            ),
+            "below. The repository identity was bound by the trusted session and is not printed.",
+        ]
+        for member in preview.members:
+            if member.authority == "machine_ceiling":
+                lines.extend(
+                    (
+                        "",
+                        "Installation-wide ceiling (replace)",
+                        "  This is the maximum permission any repository grant may use.",
+                    )
+                )
+                _append_privacy_change_lines(lines, member.changes)
+            elif member.authority == "repository_grant" and member.action == "insert":
+                lines.extend(
+                    (
+                        "",
+                        "Repository grant (insert)",
+                        "  (!) Before: no repository grant; external model review is off.",
+                        "  (!) After: insert a repository grant bounded by the installation ceiling.",
+                    )
+                )
+                _append_privacy_change_lines(lines, member.changes)
+            elif member.authority == "repository_grant" and member.action == "replace":
+                lines.extend(
+                    (
+                        "",
+                        "Repository grant (replace)",
+                        "  This replaces the exact existing grant for this repository.",
+                    )
+                )
+                _append_privacy_change_lines(lines, member.changes)
+            else:
+                raise HumanCeremonyCliError("preview_invalid")
+        lines.extend(
+            (
+                "",
+                "The digest below identifies the exact compound proposal bytes. It is integrity",
+                "evidence, not a description of the change; the lines above are the change.",
+                f"Diff digest: {preview.diff_digest}",
+                "",
+            )
+        )
+        return "\n".join(lines)
+
     widening = tuple(change for change in preview.changes if change.widens)
     lines = [
         "Action: decide privacy policy widening",
@@ -498,23 +553,7 @@ def _privacy_policy_change_text(preview: PrivacyPolicyDecisionPreview) -> str:
         f"{len(widening)} of {len(preview.changes)} changes below make it less restrictive; "
         "they are marked (!).",
     ]
-    placed: set[tuple[str, str, str]] = set()
-    for heading, members in _CHANGE_GROUPS:
-        allowed = set(members)
-        rows = [change for change in preview.changes if (change.area, change.field) in allowed]
-        if not rows:
-            continue
-        lines.extend(("", heading))
-        for change in rows:
-            placed.add(change.identity)
-            marker = "(!)" if change.widens else "   "
-            before = _change_value_text(change, change.before)
-            after = _change_value_text(change, change.after)
-            lines.append(f"  {marker} {_change_line_label(change)}: {before}{_ARROW}{after}")
-    if len(placed) != len(preview.changes):
-        # A field the service is allowed to send but this screen has no group for would be
-        # silently dropped, which is the exact defect this renderer exists to close.
-        raise HumanCeremonyCliError("preview_invalid")
+    _append_privacy_change_lines(lines, preview.changes)
     lines.extend(
         (
             "",
@@ -525,6 +564,28 @@ def _privacy_policy_change_text(preview: PrivacyPolicyDecisionPreview) -> str:
         )
     )
     return "\n".join(lines)
+
+
+def _append_privacy_change_lines(
+    lines: list[str], changes: tuple[PrivacyPolicyChange, ...]
+) -> None:
+    placed: set[tuple[str, str, str]] = set()
+    for heading, members in _CHANGE_GROUPS:
+        allowed = set(members)
+        rows = [change for change in changes if (change.area, change.field) in allowed]
+        if not rows:
+            continue
+        lines.extend(("", heading))
+        for change in rows:
+            placed.add(change.identity)
+            marker = "(!)" if change.widens else "   "
+            before = _change_value_text(change, change.before)
+            after = _change_value_text(change, change.after)
+            lines.append(f"  {marker} {_change_line_label(change)}: {before}{_ARROW}{after}")
+    if len(placed) != len(changes):
+        # A field the service is allowed to send but this screen has no group for would be
+        # silently dropped, which is the exact defect this renderer exists to close.
+        raise HumanCeremonyCliError("preview_invalid")
 
 
 def _render_preview(terminal: _CeremonyTerminal, preview: HumanPreview) -> None:

@@ -141,8 +141,13 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    database contents, unrestricted logs/stderr/transcripts, and files outside the selected scope
    can never be placed in an approved external, local-model, or agent-context case. No profile,
    local-human click, provider trust label, plugin, or request override can weaken this set.
-6. **Policy composition:** the effective decision is the intersection of a machine policy ceiling
-   with workspace, task, and request overlays. Lower scopes may tighten immediately. Loosening any
+6. **Policy composition:** the machine policy is an installation ceiling, not a standing grant for
+   every repository. The effective decision is the intersection of that ceiling with repository,
+   task, and request overlays. Lower scopes may tighten immediately. External LLM admission under
+   any policy additionally requires an exact current repository row beneath the ceiling; absence or
+   mismatch denies before provider construction, credential-handle minting, authorization, or
+   dispatch. Machine-scoped structural channels such as update checks remain independently governed
+   by their channel rows and do not acquire this task-content authority. Loosening any
    effective permission requires a locally authenticated human on a trusted control surface,
    reauthentication, an exact diff, and a durable decision; MCP/agent/LLM calls can request more
    context but cannot approve or persist the expansion.
@@ -257,7 +262,13 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     `network_egress_permitted` ceiling; answering yes still leaves all five channels denied until
     they are chosen independently. Setup explains concrete allowed/blocked examples, all five
     channel decisions, local-model permission, provider/endpoint binding, content categories,
-    preview mode, telemetry, and scope.
+    preview mode, telemetry, and scope. CLI and TUI derive an optional trusted workspace locator from
+    their actual process working directory; the MCP bridge derives it from the configured/session
+    working directory. The locator is never accepted from public or model-controlled
+    `workspace_ref`. The service resolves symlinks, uses Git's canonical common repository root for
+    Git workspaces and the resolved directory otherwise, creates an installation-keyed
+    repository-privacy commitment, and immediately discards the raw path. Branches and linked
+    worktrees therefore share authority; independent clones and unrelated repositories do not.
 12. **Safe failure:** policy block, human denial/expiry, classifier uncertainty, scanner finding,
     provider refusal/timeout/invalid output, or audit failure cannot be treated as a semantic
     success. For `semantic_required`, the check returns deterministic results with
@@ -289,9 +300,12 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     `require_current_provider_data_use_evidence=true` runtime guard. A technical user may turn it
     off only through a trusted loosening/custom transition, after which the policy carries no
     upstream no-training recommendation. The user reviews and commits the expanded policy once.
-    Within that standing workspace policy, checks, retries, reviewer challenges, agent responses,
+    Within that standing exact-repository policy, checks, retries, reviewer challenges, agent responses,
     and rechecks run without per-request human prompts. `confirm_every_request` remains the
-    optional high-ceremony alternative.
+    optional high-ceremony alternative. A new repository proposal may need both to widen the machine
+    ceiling and to insert the first repository row. Those changes are one transition bundle, one
+    complete trusted preview, and one authority-digest-bound CAS commit; no intermediate state may
+    authorize every repository.
 15. **Structural subject-state hashing is a local non-disclosure support effect:** ADR-011 permits
     one explicit trusted local CLI command to read bounded Git/worktree bytes only into streaming
     hashers and return a versioned `SubjectStateRef`. It returns no source, diff, filename, path,
@@ -333,11 +347,26 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     the existing privacy gateway. Observation, trust, verification management, and local advice
     diagnostics are local control, not network-egress channels and not additional MCP tools.
 
+17. **Repository authority migration is bounded narrowing, not package consent:** package upgrades
+    preserve accepted machine-policy bytes. Catalog migration records only the pre-upgrade legacy
+    route frontier and bounded entitlements; it does not infer repository identity from
+    model-controlled workspace references. When an eligible legacy route next arrives with a trusted
+    repository locator, the service atomically clones the accepted machine policy into that exact
+    repository row, binds the route to the repository-privacy commitment, and consumes the entitlement.
+    If there was no eligible legacy route, exactly one bounded first-repository carry-forward may do
+    the same. This needs no new prompt because it narrows already accepted authority and never widens
+    or rewrites the machine row. Later repositories inherit nothing. Fresh `local_only` installations
+    enter repository-grant mode immediately; migration is a no-op for their disclosure authority.
+    Repeated startup and replay are idempotent. Missing locators, older control shapes, stale authority
+    digests, expiry, denial, crash rollback, or exhausted entitlements leave the prior rows unchanged
+    and external LLM admission blocked.
+
 ### Human involvement under the recommended recipe
 
 | Event | Human required? | Rule |
 |---|---:|---|
-| First `assisted` policy commit, later wider provider/category/class/scope, or credential set/rotate | yes | Exact trusted-local diff/credential ceremony |
+| First new-repository grant, first `assisted` commit, later wider provider/category/class/scope, or credential set/rotate | yes | Exact trusted-local compound diff/credential ceremony |
+| Eligible legacy machine authority narrowed onto its bounded pre-upgrade repository entitlement | no | Atomic carry-forward preserves machine bytes and grants no new repository |
 | Ordinary check, automatic retry inside the confirmed policy, reviewer challenge, agent response, or recheck | no | Direct agent-to-agent path with a fresh authorization and receipt per physical attempt |
 | Tightening policy | no | May apply immediately after the service proves it cannot widen |
 | `confirm_every_request` physical attempt | yes | Exact prepared-case foreground decision for that one attempt, on any ready vault |
@@ -367,7 +396,19 @@ The setup/conformance matrix additionally proves every `ReviewContextProfile`, t
 recipe expansion, problem-local selection, agent-context delivery of reviewer findings, current
 provider data-use recommendation metadata, and automatic no-prompt behavior after standing policy
 authorization. A data-use record is evidence for recommendation wording, not technical proof of a
-provider's downstream behavior.
+provider's downstream behavior. Repository-identity evidence additionally proves symlink
+normalization, Git-common-root sharing across branches and linked worktrees, non-transferability to
+independent clones, and non-Git resolved-directory behavior. Migration evidence proves bounded
+entitlement snapshot/consumption, the no-route one-time carry-forward, exact replay, stale CAS,
+crash rollback, no machine-byte rewrite, and no prompt for narrowing. A missing or mismatched grant
+must produce zero provider constructions, credential handles, authorizations, and dispatch attempts.
+Raw paths must remain absent from policy/catalog bytes, logs, receipts, errors, and agent projections.
+
+Installed-wheel proof remains a separate acceptance gate: two consecutive real semantic checks in
+one approved repository must show distinct one-use authorizations, credential handles, dispatch
+identities, semantic provenance, and terminal privacy receipts, while a second repository remains
+blocked. Router downstream/fallback authority and issue #141's foreground disclosure continuation
+remain out of scope for this decision.
 ADR-011 capability evidence additionally proves structural capture is read-only, bounded,
 network-free, path/content withholding, fail-closed on ambiguity, and incapable of strengthening
 publication/authorship/artifact-observation coverage.

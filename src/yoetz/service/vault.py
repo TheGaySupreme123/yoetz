@@ -37,6 +37,7 @@ from yoetz.adapters.keys.vault_passphrase import (
 from yoetz.domain.values import validate_sha256_digest
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.keys import (
+    REPOSITORY_PRIVACY_MAC_DOMAIN,
     BundleKeys,
     KeyStoreError,
     KeyStoreReason,
@@ -90,6 +91,7 @@ _INSTALLATION_DOMAINS: Final[Mapping[MacKeyPurpose, frozenset[bytes]]] = {
             b"yoetz/start-title/v1\x00",
             b"yoetz/workspace-ref/v1\x00",
             b"yoetz/external-task-ref/v1\x00",
+            REPOSITORY_PRIVACY_MAC_DOMAIN,
         }
     ),
     MacKeyPurpose.LOG_CORRELATION: frozenset({b"yoetz/session-log-id/v1\x00"}),
@@ -546,6 +548,8 @@ class VaultService:
         secret: SecretHandle,
         proof: HumanAuthorizationProof,
         now_monotonic: float,
+        *,
+        target_digest: str | None = None,
     ) -> None:
         if action not in {"set", "rotate"}:
             raise VaultError("record_binding_mismatch")
@@ -565,7 +569,7 @@ class VaultService:
             try:
                 proof.consume(
                     expected_purpose,
-                    binding.target_digest(action),
+                    binding.target_digest(action) if target_digest is None else target_digest,
                     self._service_generation,
                     generation,
                     None,

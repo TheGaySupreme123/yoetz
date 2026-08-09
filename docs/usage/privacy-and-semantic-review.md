@@ -7,8 +7,9 @@ defaults are, and what changes when you turn something on.
 
 ## Two defaults, deliberately separate
 
-An unconfigured installation is **zero-egress and deterministic**. Nothing leaves your machine.
-Deterministic checks, findings, and receipts all work in this state.
+An unconfigured installation is **external-LLM-egress-free and deterministic**. No task content
+leaves for a provider. The independent structural package update channel may be on unless disabled;
+deterministic checks, findings, and receipts all work in this state.
 
 Turning on external semantic review is a separate, explicit decision. It is not implied by
 installing, by binding a provider, or by having a credential.
@@ -44,7 +45,9 @@ Some content classes can never become model input or reach another sink — see 
 [`PRIVACY.md`](../../PRIVACY.md). No profile overrides it. No approval unlocks it. Authorship does
 not unlock it: sensitive and confidential content stays sensitive no matter who wrote it.
 
-Only a reauthenticated local human can loosen effective policy, and loosening is never silent.
+Only a reauthenticated local human can loosen effective policy, and loosening is never silent. The
+machine row is an installation ceiling; external LLM work also needs an exact granted row for the
+current repository beneath it.
 
 ## Commands
 
@@ -70,9 +73,14 @@ is the only surface that renders them.
 `export-desired` / `apply-desired` are the reviewable path for version-controlling policy. The
 asymmetry is the point: tightening can flow through gates, widening always requires a human.
 
+Privacy commands bind to the repository derived from their actual working directory. The service
+resolves symlinks and Git's common root, commits it under the installation key, and discards the raw
+path. Branches and linked worktrees share authority; independent clones and unrelated repositories
+do not. A task's public `workspace_ref` is not consulted.
+
 The CLI recommends **Assisted review** when the exact configured provider route has a current
 reviewed data-use record stating no default training and retention no longer than 30 days, and
-**Private** otherwise. Assisted review is workspace-scoped and problem-local, and does not prompt
+**Private** otherwise. Assisted review is exact-repository-scoped and problem-local, and does not prompt
 before each request once its policy is committed; its tradeoff is that selected ordinary user
 content may be sent. **Metadata only** remains available as the minimal-disclosure option —
 public structural metadata and declared file types, task scope, and a foreground approval before
@@ -113,13 +121,19 @@ description of the change.
 ## What semantic review actually sends
 
 When you accept the CLI's recommended `assisted-review` recipe, it shows and confirms a standing
-workspace policy that sends the reviewer a structured packet: the goal, obligations, claims, the
+exact-repository policy that sends the reviewer a structured packet: the goal, obligations, claims, the
 material timeline, deterministic findings and their exact bases, coverage gaps, and bounded
 problem-local excerpts of evidence, tests, diffs, or source **already recorded in the case**.
 
 Sensitive and confidential content is off. The never-send set remains absolute. The reviewer gets a
 packet built from the ledger, not a handle on your repository — composition passes bundled provider
 adapters no repository, storage, environment, or transcript handles.
+
+For the first grant, the trusted screen may show both a machine-ceiling change and insertion of the
+repository row. One authority digest binds the complete preview and one atomic CAS commits both or
+neither. An eligible upgrade carry-forward is labeled separately: it preserves the machine bytes,
+consumes one bounded pre-upgrade entitlement, and grants no new repository, so it needs no repeated
+approval. Older clients and missing repository locators fail closed.
 
 The recipe is only recommended for an exact endpoint profile with a data-use record satisfying
 `reviewed_at <= now < expires_at`, training `prohibited`, retention `none|bounded`, and a bounded
@@ -144,6 +158,12 @@ catalog keeps encrypted proposal objects and their structural sidecars enumerabl
 
 No control surface is required to trust a summary — the receipts, catalog, and policy file are the
 evidence, and they are on your machine.
+
+Installed-wheel proof for issue #139 remains outstanding until two consecutive real semantic checks
+in one approved repository have distinct authorizations, credential handles, dispatch identities,
+semantic provenance, and terminal privacy receipts, and a second repository is shown blocked.
+Router downstream/fallback grants and issue #141's foreground disclosure continuation remain
+separate work.
 
 When you are auditing a run rather than the installation, the
 [semantic dogfood runbook](../runbooks/semantic-dogfood.md) gives the preflight and the provenance

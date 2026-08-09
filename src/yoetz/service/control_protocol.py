@@ -7,7 +7,7 @@ import base64
 import binascii
 import secrets
 import struct
-from collections.abc import Buffer, Mapping
+from collections.abc import Awaitable, Buffer, Callable, Mapping
 from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 from typing import Final, Literal, Never, Protocol, cast
@@ -23,9 +23,11 @@ from yoetz.ports.control import (
     ControlMethod,
     ControlRequest,
     ControlResult,
+    RepositoryPrivacyContext,
     ServiceState,
     ServiceStatus,
     ServiceStopResult,
+    WorkspaceLocator,
 )
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, SafeDetailValue
@@ -78,6 +80,7 @@ MAX_CONTROL_FRAME_BYTES: Final = 6_291_456
 MAX_ORDINARY_CONTROL_FRAME_BYTES: Final = 1_048_576
 MAX_ACTIVE_REQUESTS_PER_SESSION: Final = 32
 
+_CONTROL_SCHEMA_VERSION: Final = "2.0.0"
 _SCHEMA_VERSION: Final = "1.0.0"
 _MAX_IMPORT_SOURCE_BYTES: Final = 4 * 1024 * 1024
 _ERROR_REASONS: Final = frozenset(
@@ -177,6 +180,9 @@ class ControlSession:
     allowed_methods: tuple[ControlMethod, ...]
     peer_identity: object = field(repr=False, compare=False)
     connection_nonce: str = field(repr=False, compare=False)
+    repository_privacy_context: RepositoryPrivacyContext | None = field(
+        default=None, repr=False, compare=False
+    )
     _active: dict[str, _PendingCall] = field(
         default_factory=_new_pending_calls, init=False, repr=False, compare=False
     )
@@ -187,6 +193,11 @@ class ControlSession:
             raise ValueError("control_protocol_version_invalid")
         if type(self.client_kind) is not ControlClientKind:
             raise TypeError("control_client_kind_invalid")
+        if (
+            self.repository_privacy_context is not None
+            and type(self.repository_privacy_context) is not RepositoryPrivacyContext
+        ):
+            raise TypeError("repository_privacy_context_invalid")
         if type(self.allowed_methods) is not tuple or not self.allowed_methods:
             raise ValueError("control_allowed_methods_invalid")
         expected = tuple(
@@ -354,7 +365,13 @@ def _validated_wire(value: object, schema_name: str) -> JsonObject:
         wire = _plain_wire_value(value)
         if not isinstance(wire, Mapping):
             _fail("frame_invalid")
-        validate_schema_instance(schema_name, _SCHEMA_VERSION, wire)
+        schema_version = (
+            _CONTROL_SCHEMA_VERSION
+            if schema_name
+            in {"control-hello", "control-hello-result", "control-request", "control-result"}
+            else _SCHEMA_VERSION
+        )
+        validate_schema_instance(schema_name, schema_version, wire)
         frozen = freeze_json(wire)
         if type(frozen) is not JsonObject:
             _fail("frame_invalid")
@@ -682,11 +699,15 @@ async def client_handshake(
     stream: ControlStream,
     client_kind: ControlClientKind,
     client_version: str,
+    *,
+    workspace_locator: WorkspaceLocator | None = None,
 ) -> ControlSession:
     """Negotiate an ordinary peer-authenticated client session."""
 
     if type(client_kind) is not ControlClientKind:
         raise TypeError("control_client_kind_invalid")
+    if workspace_locator is not None and type(workspace_locator) is not WorkspaceLocator:
+        raise TypeError("workspace_locator_invalid")
     nonce = secrets.token_hex(32)
     hello: dict[str, JsonValue] = {
         "protocol_version": CONTROL_PROTOCOL_VERSION,
@@ -695,6 +716,11 @@ async def client_handshake(
         "connection_nonce": nonce,
         "schema_manifest_digest": _manifest_digest(),
     }
+    if workspace_locator is not None:
+        hello["workspace_locator"] = {
+            "schema_version": workspace_locator.schema_version,
+            "path": workspace_locator.path,
+        }
     try:
         await write_control_frame(stream, hello)
         result = await read_control_frame(stream)
@@ -735,6 +761,11 @@ async def server_handshake(
     stream: ControlStream,
     peer_identity: object,
     service_status: ServiceStatus,
+    *,
+    repository_context_resolver: Callable[
+        [WorkspaceLocator], Awaitable[RepositoryPrivacyContext | None]
+    ]
+    | None = None,
 ) -> ControlSession:
     """Negotiate a server session only after transport peer authentication."""
 
@@ -748,6 +779,23 @@ async def server_handshake(
         if hello["schema_manifest_digest"] != _manifest_digest():
             _fail("manifest_mismatch")
         kind = ControlClientKind(cast(str, hello["client_kind"]))
+        raw_locator = hello.get("workspace_locator")
+        repository_context: RepositoryPrivacyContext | None = None
+        if raw_locator is not None and repository_context_resolver is not None:
+            if not isinstance(raw_locator, Mapping):
+                _fail("protocol_mismatch")
+            locator_wire = cast(Mapping[str, JsonValue], raw_locator)
+            repository_context = await repository_context_resolver(
+                WorkspaceLocator(
+                    path=cast(str, locator_wire["path"]),
+                    schema_version=cast(Literal["1.0.0"], locator_wire["schema_version"]),
+                )
+            )
+            if (
+                repository_context is not None
+                and type(repository_context) is not RepositoryPrivacyContext
+            ):
+                _fail("protocol_mismatch")
         status = _status_wire(service_status)
         allowed = _allowed_for(kind)
         response: dict[str, JsonValue] = {
@@ -766,6 +814,7 @@ async def server_handshake(
             service_instance_id=service_status.service_instance_id,
             service_generation=service_status.service_generation,
             allowed_methods=allowed,
+            repository_privacy_context=repository_context,
             peer_identity=peer_identity,
             connection_nonce=cast(str, hello["connection_nonce"]),
         )

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 from yoetz.domain.privacy import (
     AgentProjectionAuditSubject,
@@ -54,17 +55,20 @@ __all__ = [
     "OutboundGatewayPort",
     "PendingHumanDecision",
     "PolicyCommitResult",
+    "PolicyTransitionMember",
     "MinimizedDisclosure",
     "PolicyTransitionProposal",
     "PreparedOutboundCase",
     "PreparedDisclosureReservation",
     "PreparedPolicyTransition",
+    "PrivacyAuthorityAncestor",
     "PrivacyAuditObjectRoots",
     "PrivacyAuditPort",
     "PrivacyAuditReservation",
     "PrivacyAuditState",
     "PrivacyClassifierPort",
     "PrivacyPolicyStorePort",
+    "RepositoryPrivacyAuthority",
     "PrivacyReceiptAudience",
     "PendingDisclosureEntry",
     "PendingDisclosurePage",
@@ -123,6 +127,16 @@ def _time(value: object) -> datetime:
     return value
 
 
+def _scope_order_key(scope: AuthorizationScope) -> tuple[str, str, str, str, str]:
+    return (
+        scope.installation_id,
+        scope.workspace_ref_commitment or "",
+        scope.task_id or "",
+        scope.request_id or "",
+        scope.kind.value,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class EffectivePrivacyPolicy:
     policy: PrivacyPolicy
@@ -137,6 +151,100 @@ class EffectivePrivacyPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class PrivacyAuthorityAncestor:
+    scope: AuthorizationScope
+    generation: int
+    policy_digest: str
+
+    def __post_init__(self) -> None:
+        if type(self.scope) is not AuthorizationScope:
+            raise _invalid()
+        _positive(self.generation)
+        validate_sha256_digest(self.policy_digest)
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryPrivacyAuthority:
+    scope: AuthorizationScope
+    effective: EffectivePrivacyPolicy
+    repository_privacy_commitment: str
+    grant_state: Literal["granted", "missing"]
+    migration_state: Literal[
+        "not_applicable", "legacy_route_available", "first_repository_available", "consumed"
+    ]
+    authority_digest: str
+    ancestors: tuple[PrivacyAuthorityAncestor, ...]
+    grant_generation: int | None = None
+    grant_policy_digest: str | None = None
+    grant_policy: PrivacyPolicy | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.scope) is not AuthorizationScope
+            or self.scope.kind is AuthorizationScopeKind.MACHINE
+            or type(self.effective) is not EffectivePrivacyPolicy
+            or type(self.ancestors) is not tuple
+            or any(type(item) is not PrivacyAuthorityAncestor for item in self.ancestors)
+        ):
+            raise _invalid()
+        if self.scope.workspace_ref_commitment != self.repository_privacy_commitment:
+            raise _invalid()
+        validate_commitment(self.repository_privacy_commitment)
+        if self.grant_state not in {"granted", "missing"} or self.migration_state not in {
+            "not_applicable",
+            "legacy_route_available",
+            "first_repository_available",
+            "consumed",
+        }:
+            raise _invalid()
+        validate_sha256_digest(self.authority_digest)
+        if (self.grant_generation is None) != (self.grant_policy_digest is None):
+            raise _invalid()
+        if (self.grant_generation is None) != (self.grant_policy is None):
+            raise _invalid()
+        if self.grant_generation is not None:
+            _positive(self.grant_generation)
+            validate_sha256_digest(cast(str, self.grant_policy_digest))
+            if (
+                type(self.grant_policy) is not PrivacyPolicy
+                or self.grant_policy.policy_digest != self.grant_policy_digest
+                or self.grant_policy.effective_scope.kind is not AuthorizationScopeKind.WORKSPACE
+                or self.grant_policy.effective_scope.workspace_ref_commitment
+                != self.repository_privacy_commitment
+            ):
+                raise _invalid()
+        if (self.grant_state == "granted") != (self.grant_generation is not None):
+            raise _invalid()
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyTransitionMember:
+    action: Literal["replace", "insert"]
+    scope: AuthorizationScope
+    candidate_policy: PrivacyPolicy
+    expected_generation: int | None
+    expected_policy_digest: str | None
+
+    def __post_init__(self) -> None:
+        if (
+            self.action not in {"replace", "insert"}
+            or type(self.scope) is not AuthorizationScope
+            or type(self.candidate_policy) is not PrivacyPolicy
+            or self.candidate_policy.effective_scope != self.scope
+        ):
+            raise _invalid()
+        if self.action == "replace":
+            if self.expected_generation is None or self.expected_policy_digest is None:
+                raise _invalid()
+            _positive(self.expected_generation)
+            validate_sha256_digest(self.expected_policy_digest)
+        elif self.expected_generation is not None or self.expected_policy_digest is not None:
+            raise _invalid()
+        if self.candidate_policy.unsupported_enabled_channels:
+            raise ValueError("channel_unavailable")
+
+
+@dataclass(frozen=True, slots=True)
 class PolicyTransitionProposal:
     scope: AuthorizationScope
     expected_generation: int
@@ -146,6 +254,8 @@ class PolicyTransitionProposal:
     expires_at: datetime
     privacy_proposal_id: str | None = None
     expected_policy_digest: str | None = None
+    authority_digest: str | None = None
+    members: tuple[PolicyTransitionMember, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -161,6 +271,22 @@ class PolicyTransitionProposal:
             validate_id(IdKind.PRIVACY_PROPOSAL, self.privacy_proposal_id)
         if self.expected_policy_digest is not None:
             validate_sha256_digest(self.expected_policy_digest)
+        if self.authority_digest is not None:
+            validate_sha256_digest(self.authority_digest)
+        if type(self.members) is not tuple or any(
+            type(member) is not PolicyTransitionMember for member in self.members
+        ):
+            raise _invalid()
+        if self.members and self.members != tuple(
+            sorted(
+                self.members,
+                key=lambda member: (
+                    0 if member.scope.kind is AuthorizationScopeKind.MACHINE else 1,
+                    _scope_order_key(member.scope),
+                ),
+            )
+        ):
+            raise _invalid()
         # P0-4: unsupported v0.1 non-LLM enablement is rejected before a
         # prepared transition or any pending consent can exist.
         if self.proposed_policy.unsupported_enabled_channels:
@@ -204,6 +330,7 @@ class PolicyCommitResult:
     generation: int
     revoked_authorization_count: int
     closed_session_count: int
+    replayed: bool = field(default=False, compare=False)
 
     def __post_init__(self) -> None:
         if type(self.policy) is not PrivacyPolicy:
@@ -211,6 +338,8 @@ class PolicyCommitResult:
         _positive(self.generation)
         _nonnegative(self.revoked_authorization_count)
         _nonnegative(self.closed_session_count)
+        if type(self.replayed) is not bool:
+            raise _invalid()
 
 
 @dataclass(frozen=True, slots=True)
@@ -749,11 +878,32 @@ class PrivacyPolicyStorePort(Protocol):
 
     async def effective_policy(self, scope: AuthorizationScope) -> EffectivePrivacyPolicy: ...
 
+    async def repository_authority(
+        self, scope: AuthorizationScope
+    ) -> RepositoryPrivacyAuthority: ...
+
+    async def carry_forward_repository_authority(
+        self,
+        scope: AuthorizationScope,
+        *,
+        task_id: str | None = None,
+        route_identity_digest: str | None = None,
+    ) -> RepositoryPrivacyAuthority: ...
+
+    async def insert_repository_tightening(
+        self,
+        scope: AuthorizationScope,
+        policy: PrivacyPolicy,
+        expected_authority_digest: str,
+    ) -> PolicyCommitResult: ...
+
     async def prepare_transition(
         self, proposal: PolicyTransitionProposal
     ) -> PreparedPolicyTransition: ...
 
     async def load_pending_transition(self, proposal_id: str) -> PreparedPolicyTransition: ...
+
+    async def load_transition(self, proposal_id: str) -> PreparedPolicyTransition: ...
 
     async def commit_transition(
         self, prepared: PreparedPolicyTransition, decision: HumanPolicyDecision
@@ -856,6 +1006,8 @@ class HumanPrivacyControlPort(Protocol):
 
 
 class OutboundGatewayPort(Protocol):
+    def authority_mutation_fence(self) -> AbstractAsyncContextManager[None]: ...
+
     async def reconcile_policy(
         self, policy: EffectivePrivacyPolicy, human_authority: HumanAuthorityCapability
     ) -> ProviderReconciliation: ...

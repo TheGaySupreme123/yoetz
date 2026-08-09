@@ -201,6 +201,21 @@ def _version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     total = int(counts["total"])
     resources["maxItems"] = total
     resources["oneOf"] = [{"maxItems": 0}, {"maxItems": total, "minItems": total}]
+    properties = cast(dict[str, JsonValue], document["properties"])
+    for field_name in (
+        "application_id",
+        "bundle_schema_version",
+        "catalog_schema_version",
+        "control_protocol_version",
+        "egress_receipt_schema_version",
+        "engine_version",
+        "object_format_version",
+        "privacy_classifier_ruleset_version",
+        "privacy_policy_schema_version",
+        "projection_version",
+        "protocol_version",
+    ):
+        properties[field_name] = {"const": cast(JsonValue, getattr(manifest, field_name))}
     return document
 
 
@@ -1043,6 +1058,22 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         None,
     ),
     _RegistryEntry(
+        "service/control-hello-2.0.0.schema.json",
+        "control-hello",
+        "2.0.0",
+        "request_result",
+        "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "service/control-hello-result-2.0.0.schema.json",
+        "control-hello-result",
+        "2.0.0",
+        "request_result",
+        "local-control",
+        None,
+    ),
+    _RegistryEntry(
         "service/control-request-1.0.0.schema.json",
         "control-request",
         "1.0.0",
@@ -1057,6 +1088,22 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "request_result",
         "local-control",
         lambda: __import__("yoetz.ports.control", fromlist=["ControlResult"]).ControlResult,
+    ),
+    _RegistryEntry(
+        "service/control-request-2.0.0.schema.json",
+        "control-request",
+        "2.0.0",
+        "request_result",
+        "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "service/control-result-2.0.0.schema.json",
+        "control-result",
+        "2.0.0",
+        "request_result",
+        "local-control",
+        None,
     ),
     _RegistryEntry(
         "service/service-status-1.0.0.schema.json",

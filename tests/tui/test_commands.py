@@ -345,7 +345,9 @@ async def test_the_provider_flow_saves_a_binding_then_asks_for_the_key_separatel
         # The credential is a separate, explicit handoff.
         assert app.open_view is not None
         assert app.open_view.view_name == "confidential"
-        assert runtime.ceremonies == []
+        assert runtime.ceremonies == ["privacy:metadata_only+recommended"]
+        assert runtime.privacy.repository_grant_state == "granted"
+        assert "Exact repository grant: granted for this repository." in transcript(app)
 
 
 async def test_cancelling_the_credential_handoff_stores_no_key(
@@ -364,7 +366,7 @@ async def test_cancelling_the_credential_handoff_stores_no_key(
         await pilot.pause()
         await pilot.press("escape")  # decline the handoff
         await pilot.pause()
-        assert runtime.ceremonies == []
+        assert runtime.ceremonies == ["privacy:metadata_only+recommended"]
         text = transcript(app)
         assert "Nothing was stored." in text
         assert "without a key" in text
@@ -398,7 +400,7 @@ async def test_a_stored_provider_is_never_reported_as_a_tested_one(
         assert "External semantic review is not yet proven ready" in text
 
 
-async def test_an_unavailable_provider_test_is_never_reported_as_a_pass(
+async def test_provider_setup_ends_with_an_honest_readiness_summary(
     make_app: MakeApp,
 ) -> None:
     runtime = FakeRuntime()
@@ -409,13 +411,33 @@ async def test_an_unavailable_provider_test_is_never_reported_as_a_pass(
         for _ in range(4):  # provider, model, confirm, credential handoff
             await pilot.press("enter")
             await pilot.pause()
-        assert app.open_view is not None
-        assert app.open_view.view_name == "provider-test"
-        await pilot.press("enter")  # run the test
-        await pilot.pause()
+        assert app.open_view is None
+        assert runtime.ceremonies == [
+            "privacy:metadata_only+recommended",
+            "provider_credential",
+        ]
         text = transcript(app)
-        assert "not available from this build" in text
-        assert "will not report a connection as working without probing it" in text
+        assert "Live provider connection has not been tested" in text
+        assert "External semantic review is not yet proven ready" in text
+
+
+async def test_provider_setup_never_requests_a_key_without_an_exact_repository_grant(
+    make_app: MakeApp,
+) -> None:
+    runtime = FakeRuntime(privacy_setup_grant_state="missing")
+    app = make_app(runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await run_command(pilot, app, "/provider")
+        for _ in range(3):  # provider, model, endpoint confirmation
+            await pilot.press("enter")
+            await pilot.pause()
+        assert runtime.bindings == [("official_openai", "gpt-4.1-mini")]
+        assert runtime.ceremonies == ["privacy:metadata_only+recommended"]
+        assert app.open_view is None
+        text = transcript(app)
+        assert "Provider binding saved, without repository authority" in text
+        assert "no API key was requested" in text
 
 
 # ---------------------------------------------------------------------------
