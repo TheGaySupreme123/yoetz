@@ -167,11 +167,7 @@ def test_schema_registry_is_complete() -> None:
         expected = (
             "2.0.0"
             if path.startswith("consent/") or path.endswith("-2.0.0.schema.json")
-            else (
-                "1.1.0"
-                if path == "events/evidence-recorded-1.1.0.schema.json"
-                else "1.0.0"
-            )
+            else ("1.1.0" if path == "events/evidence-recorded-1.1.0.schema.json" else "1.0.0")
         )
         assert member["schema_version"] == expected
     for member in members:

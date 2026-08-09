@@ -142,9 +142,7 @@ async def test_completed_approved_check_forwards_bounded_result_for_ledger_mater
     from yoetz.application import observation_verification as verification_module
 
     state = "sha256:" + "d" * 64
-    approval_digest = approval_commitment(
-        "focused-tests", ("/usr/bin/true",), allow_network=False
-    )
+    approval_digest = approval_commitment("focused-tests", ("/usr/bin/true",), allow_network=False)
     result = ApprovedCheckResult(
         status=ApprovedCheckStatus.PASSED,
         outcome=ApprovedCheckOutcome.SUCCESS,
@@ -284,9 +282,7 @@ async def test_approved_check_materialization_is_service_owned_and_idempotent(
         ids=FixedIds(),
         state_root=tmp_path,
     )
-    approval_digest = approval_commitment(
-        "focused-tests", ("/usr/bin/true",), allow_network=False
-    )
+    approval_digest = approval_commitment("focused-tests", ("/usr/bin/true",), allow_network=False)
     result = ApprovedCheckResult(
         status=ApprovedCheckStatus.PASSED,
         outcome=ApprovedCheckOutcome.SUCCESS,
