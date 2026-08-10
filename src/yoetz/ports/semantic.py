@@ -9,6 +9,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Final, Literal, Protocol, cast
 
+from yoetz.domain.events import (
+    EvidenceContentAvailability,
+    EvidenceDigestProvenance,
+    EvidenceDigestSubject,
+    EvidenceKind,
+)
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
     CostFields,
@@ -34,7 +40,7 @@ from yoetz.kernel.deterministic_checks import (
 )
 from yoetz.kernel.policies.research_evidence import RESEARCH_EVIDENCE_FACT_CODES
 from yoetz.kernel.policies.work_integrity import WORK_INTEGRITY_FACT_CODES
-from yoetz.protocol.coverage import Coverage
+from yoetz.protocol.coverage import Coverage, EvidenceImmutability
 from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.ids import IdKind, validate_id
 from yoetz.protocol.models import (
@@ -64,6 +70,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ChangeObservation",
     "Deadline",
+    "ExcerptDigestProvenance",
     "ProviderAttemptProvenance",
     "ReviewAssessment",
     "ReviewAssessmentSkipped",
@@ -733,6 +740,65 @@ def project_review_assessment(
 
 
 @dataclass(frozen=True, slots=True)
+class ExcerptDigestProvenance:
+    """Digest-identity facts for an excerpt whose source evidence carries a typed binding."""
+
+    evidence_kind: EvidenceKind
+    strength: EvidenceImmutability
+    content_digest: str
+    digest_subject: EvidenceDigestSubject
+    content_availability: EvidenceContentAvailability
+    byte_count: int
+    provenance: EvidenceDigestProvenance
+    approval_commitment: str | None = None
+    approved_check_result_digest: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.evidence_kind) is not EvidenceKind:
+            raise _invalid_case()
+        if type(self.strength) is not EvidenceImmutability:
+            raise _invalid_case()
+        object.__setattr__(
+            self, "content_digest", _snapshot_digest(self.content_digest, error=_invalid_case())
+        )
+        if type(self.digest_subject) is not EvidenceDigestSubject:
+            raise _invalid_case()
+        if type(self.content_availability) is not EvidenceContentAvailability:
+            raise _invalid_case()
+        if type(self.byte_count) is not int or not 0 <= self.byte_count <= _MAX_SAFE_INTEGER:
+            raise _invalid_case()
+        if type(self.provenance) is not EvidenceDigestProvenance:
+            raise _invalid_case()
+        if self.approval_commitment is not None:
+            object.__setattr__(
+                self,
+                "approval_commitment",
+                _snapshot_digest(self.approval_commitment, error=_invalid_case()),
+            )
+        if self.approved_check_result_digest is not None:
+            object.__setattr__(
+                self,
+                "approved_check_result_digest",
+                _snapshot_digest(self.approved_check_result_digest, error=_invalid_case()),
+            )
+        approved = self.provenance is EvidenceDigestProvenance.APPROVED_CHECK
+        if approved is not (
+            self.approval_commitment is not None and self.approved_check_result_digest is not None
+        ):
+            raise _invalid_case()
+        if (
+            self.digest_subject is EvidenceDigestSubject.APPROVED_CHECK_RECEIPT
+            and self.provenance is not EvidenceDigestProvenance.APPROVED_CHECK
+        ):
+            raise _invalid_case()
+        if (
+            self.digest_subject is EvidenceDigestSubject.IMPORT_REPORT
+            and self.provenance is not EvidenceDigestProvenance.IMPORT_OBSERVED
+        ):
+            raise _invalid_case()
+
+
+@dataclass(frozen=True, slots=True)
 class TargetedExcerptRef:
     excerpt_item_id: str
     source_kind: ExcerptSourceKind
@@ -741,6 +807,7 @@ class TargetedExcerptRef:
     content_visibility: ContentVisibility
     content_digest: str
     content_bytes: int
+    digest_provenance: ExcerptDigestProvenance | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -774,6 +841,10 @@ class TargetedExcerptRef:
         if (
             type(self.content_bytes) is not int
             or not 1 <= self.content_bytes <= MAX_SEMANTIC_ITEM_BYTES
+        ):
+            raise _invalid_case()
+        if self.digest_provenance is not None and (
+            type(self.digest_provenance) is not ExcerptDigestProvenance
         ):
             raise _invalid_case()
 

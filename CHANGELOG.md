@@ -15,7 +15,11 @@ describes behavior intended for the first release rather than a change from a pr
   subject, availability, byte count, and authority that established each new digest. Kind/subject
   contradictions fail closed; approved checks publish bounded service-owned receipts; legacy,
   digest-only, withheld, redacted, and semantically omitted evidence remain explicit limitations
-  without changing frozen `evidence_recorded/1.0.0` bytes (ADR-020).
+  without changing frozen `evidence_recorded/1.0.0` bytes (ADR-020). In semantic review, a
+  digest-bound evidence record with a bounded caller `description` surfaces that description as
+  the excerpt text while the digest identity travels alongside on the excerpt ref
+  (`digest_provenance`), so honest provenance no longer hides the content from the reviewer
+  (issue #176).
 
 - The six-operation protocol (`start`, `publish_work`, `check`, `respond`, `status`, `receipt`) over
   both the CLI and MCP, with identical request/result contracts and a shared canonical

@@ -1923,7 +1923,12 @@ result); both sets and their union are case-digest inputs.
 
 `TargetedExcerptRef` identifies a bounded excerpt already captured or agent-published inside the
 frozen case and links it mechanically to a claim, obligation, finding, action, result, or evidence
-ref. It grants no live Git/filesystem access. `ChangeObservation` keeps `claimed_change`, existing
+ref. It grants no live Git/filesystem access. When the source evidence carries a typed
+`digest_binding`, the excerpt text prefers the bounded caller-authored `description` and the ref
+carries the digest identity facts as an optional `ExcerptDigestProvenance`
+(`evidence_kind`, `strength`, `content_digest`, `digest_subject`, `content_availability`,
+`byte_count`, `provenance`, and the approved-check pair when present); a digest-bound record
+without a description contributes its canonical provenance facts as the excerpt text, unchanged. `ChangeObservation` keeps `claimed_change`, existing
 three-valued `subject_state_relation`, and `content_visibility`
 (`available|not_recorded|not_selected|withheld_by_policy|redacted_never_send`) separate, so absent
 code can never become “no code changed.”
@@ -1963,7 +1968,8 @@ rejection → `semantic_judgment_rejected`; real transport/deadline timeout → 
 `incomplete` caused by the output token cap must not be labeled a transport timeout.
 
 Shared types are
-`SemanticCase`, `ReviewPacket`, `ReviewAssessment`, `SemanticCaseItem`, `TargetedExcerptRef`, `ChangeObservation`,
+`SemanticCase`, `ReviewPacket`, `ReviewAssessment`, `SemanticCaseItem`, `TargetedExcerptRef`,
+`ExcerptDigestProvenance`, `ChangeObservation`,
 `SemanticJudgment`, `ReviewerChallenge`, `ProviderJudgmentModel`, adapter-returned
 `ProviderAttemptProvenance`,
 receipt-finalized `SemanticProvenance`, and the single `SemanticStatus`/`SemanticReason` enums
