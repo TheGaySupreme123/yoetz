@@ -8,6 +8,7 @@ resolution for Grok/xAI, and interactive menu choice 6.
 from __future__ import annotations
 
 import contextlib
+import json
 import re
 import sys
 import tomllib
@@ -138,6 +139,28 @@ def test_non_tty_bare_endpoint_is_usage_failure() -> None:
     result = _RUNNER.invoke(cli.app, ["provider", "endpoint"])
     assert result.exit_code == 2
     assert "invalid_request" in _plain(result.output)
+
+
+def test_provider_catalog_exposes_the_installed_presets_and_suggestions() -> None:
+    """The agent-start command derives its output from the packaged preset catalog."""
+
+    result = _RUNNER.invoke(cli.app, ["provider", "catalog", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["schema"] == "yoetz.provider-catalog/1"
+    assert payload["limitations"] == [
+        "catalog_support_is_not_account_entitlement",
+        "catalog_support_is_not_live_provider_proof",
+    ]
+    assert [entry["preset"] for entry in payload["presets"]] == list(PROVIDER_PRESETS)
+    for entry in payload["presets"]:
+        preset = PROVIDER_PRESETS[entry["preset"]]
+        assert entry["provider_id"] == preset.provider_id
+        assert entry["endpoint_profile_id"] == preset.endpoint_profile_id
+        assert entry["endpoint_profile_version"] == preset.endpoint_profile_version
+        assert entry["suggested_models"] == list(preset.suggested_models)
+        assert entry["custom_model_id_supported"] is True
 
 
 def test_non_tty_grok_without_model_is_usage_failure() -> None:

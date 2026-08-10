@@ -17,6 +17,7 @@ import typer
 from pydantic import BaseModel, ValidationError
 
 from yoetz import __version__
+from yoetz.cli.agent_start import AGENT_START_HANDOFF
 from yoetz.cli.exits import ceremony_refusal_message, exit_code_for, remediation_message
 from yoetz.cli.render import (
     render_human_awaiting_human,
@@ -90,6 +91,7 @@ class _MutableBinaryReader(Protocol):
 app = typer.Typer(
     name="yoetz",
     help="Local-first evidence ledger and review engine.",
+    epilog=AGENT_START_HANDOFF,
     no_args_is_help=False,
     invoke_without_command=True,
     pretty_exceptions_enable=False,
@@ -1362,6 +1364,36 @@ def provider_status(json_output: _JSON = False) -> None:
     _finish(run_async(lambda: run_provider_status(json_output=json_output)))
 
 
+@provider_app.command("catalog")
+def provider_catalog(json_output: _JSON = False) -> None:
+    """List the installed reviewed presets and their suggested model IDs without network access."""
+
+    from yoetz.config.write import PROVIDER_PRESETS
+
+    presets = [
+        {
+            "preset": name,
+            "provider_id": preset.provider_id,
+            "endpoint_profile_id": preset.endpoint_profile_id,
+            "endpoint_profile_version": preset.endpoint_profile_version,
+            "suggested_models": list(preset.suggested_models),
+            "custom_model_id_supported": True,
+        }
+        for name, preset in PROVIDER_PRESETS.items()
+    ]
+    _human_or_json(
+        {
+            "schema": "yoetz.provider-catalog/1",
+            "presets": presets,
+            "limitations": [
+                "catalog_support_is_not_account_entitlement",
+                "catalog_support_is_not_live_provider_proof",
+            ],
+        },
+        json_output=json_output,
+    )
+
+
 @provider_app.command("endpoint")
 def provider_endpoint(
     official: Annotated[
@@ -1864,9 +1896,7 @@ def root(
     typer.echo(context.get_help())
     typer.echo(
         "Get started: run 'yoetz' in your own terminal to walk setup interactively.\n"
-        "Using an agentic tool? Setup questions appear only on the user's own terminal; "
-        "agents should follow the agent-start guide at "
-        "https://raw.githubusercontent.com/TheGaySupreme123/yoetz/main/docs/usage/agent-start.md"
+        + AGENT_START_HANDOFF
     )
     raise typer.Exit(0)
 
