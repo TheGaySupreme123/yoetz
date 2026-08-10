@@ -88,6 +88,231 @@ _NEXT_CREDENTIAL: Final = (
     "provider credential through the confidential ceremony"
 )
 _NEXT_RESTART: Final = "restart the Yoetz service so the configured semantic evaluator is composed"
+_PROVIDER_SETUP_DIRECT_REASONS: Final = frozenset(
+    {
+        "cancelled",
+        "confirmation_mismatch",
+        "credential_setup_failed",
+        "empty_input",
+        "eof",
+        "input_invalid",
+        "interrupted",
+        "model_selection_invalid",
+        "preview_invalid",
+        "provider_binding_invalid",
+        "repository_privacy_scope_unavailable",
+        "result_invalid",
+        "service_not_ready",
+        "stored_result_recovered",
+        "trusted_console_required",
+    }
+)
+_PROVIDER_SETUP_PRIVACY_REASONS: Final = frozenset(
+    {
+        "local_terminal_required",
+        "privacy_authority_required",
+        "privacy_decision_not_approved",
+        "privacy_policy_stale",
+        "privacy_proposal_stale",
+        "privacy_setup_candidate_invalid",
+        "privacy_setup_category_invalid",
+        "privacy_setup_channel_unsupported",
+        "privacy_setup_credential_probe_requires_provider",
+        "privacy_setup_data_class_invalid",
+        "privacy_setup_failed",
+        "privacy_setup_grant_missing",
+        "privacy_setup_incomplete",
+        "privacy_setup_local_model_binding_required",
+        "privacy_setup_proposal_invalid",
+        "privacy_setup_provider_binding_required",
+        "privacy_setup_recipe_invalid",
+        "privacy_setup_router_route_unconstrained",
+        "privacy_setup_snapshot_invalid",
+    }
+)
+_PROVIDER_SETUP_CONFIG_REASONS: Final = frozenset(
+    {
+        "config_value_invalid",
+        "https_origin_invalid",
+        "owner_declared_endpoint_forbidden",
+        "owner_declared_endpoint_required",
+        "provider_required_for_semantic",
+        "secret_in_config",
+        "unknown_config_key",
+    }
+)
+_PROVIDER_SETUP_AUTO_UNLOCK_REASONS: Final = frozenset(
+    {
+        "ambiguous_write",
+        "authority_mismatch",
+        "correlation_mismatch",
+        "entry_exists",
+        "entry_invalid",
+        "human_authority_unavailable",
+        "locked",
+        "migration_not_proven",
+        "missing",
+        "readback_failed",
+        "unsupported",
+        "unverified",
+    }
+)
+_PROVIDER_SETUP_CONFIDENTIAL_REASONS: Final = frozenset(
+    {
+        "ambiguous",
+        "cancelled",
+        "ceremony_unsupported",
+        "correlation_mismatch",
+        "kind_forbidden",
+        "peer_untrusted",
+        "pending_not_actionable",
+        "pending_unavailable",
+        "protocol_error",
+        "response_bytes",
+        "secret_rejected",
+        "service_unavailable",
+        "session_busy",
+        "session_closed",
+        "stale_generation",
+        "state_forbidden",
+        "timeout",
+    }
+)
+
+
+def _allowlisted_provider_setup_reason(reason: object) -> str:
+    """Return one reviewed nonsecret provider-setup reason, never caller text."""
+
+    if type(reason) is not str:
+        return "credential_setup_failed"
+    if (
+        reason in _PROVIDER_SETUP_DIRECT_REASONS
+        or reason in _PROVIDER_SETUP_CONFIG_REASONS
+        or reason in _PROVIDER_SETUP_PRIVACY_REASONS
+    ):
+        return reason
+    if reason.startswith("credential_"):
+        confidential_reason = reason.removeprefix("credential_")
+        if confidential_reason in _PROVIDER_SETUP_CONFIDENTIAL_REASONS:
+            return reason
+    if reason.startswith("auto_unlock_"):
+        auto_unlock_reason = reason.removeprefix("auto_unlock_")
+        if auto_unlock_reason in _PROVIDER_SETUP_AUTO_UNLOCK_REASONS:
+            return reason
+    return "credential_setup_failed"
+
+
+def _provider_setup_result(
+    service: dict[str, JsonValue],
+    report: dict[str, JsonValue],
+) -> tuple[dict[str, JsonValue], dict[str, JsonValue]]:
+    """Finalize a provider component report through the public reason allowlist."""
+
+    if "credential_reason" in report:
+        report["credential_reason"] = _allowlisted_provider_setup_reason(
+            report.get("credential_reason")
+        )
+    return service, report
+
+
+def _prompt_yes_no_before_credential(
+    prompt: str,
+    *,
+    default: bool,
+) -> bool:
+    """Read one visible yes/no choice without ever reflecting an invalid response."""
+
+    typer.echo("  This is a visible yes/no prompt. API-key entry has not started.")
+    typer.echo("  Enter only yes or no. A separate heading will announce hidden secret input.")
+    default_text = "Y" if default else "N"
+    suffix = "Y/n" if default else "y/N"
+    while True:
+        raw = typer.prompt(
+            f"{prompt} [{suffix}]",
+            default=default_text,
+            show_default=False,
+        )
+        answer = raw.strip().casefold()
+        if answer in {"y", "yes"}:
+            return True
+        if answer in {"n", "no"}:
+            return False
+        typer.echo(
+            "Not accepted: this was a yes/no consent prompt, not credential entry. "
+            "No API key was read or stored; enter only yes or no.",
+            err=True,
+        )
+
+
+def _prompt_credential_probe_authorization() -> bool:
+    """Collect credential-probe consent before the separately labelled hidden ceremony."""
+
+    typer.echo("")
+    typer.echo("Privacy and credential-verification consent")
+    return _prompt_yes_no_before_credential(
+        "After storage, permit one fixed, content-free request to verify this API key?",
+        default=True,
+    )
+
+
+def _emit_hidden_credential_transition() -> None:
+    """Make the first confidential-input boundary unmistakable."""
+
+    typer.echo("")
+    typer.echo("Hidden credential ceremony begins now")
+    typer.echo(
+        "  Secret prompts from this point use the trusted local terminal with input echo disabled."
+    )
+    typer.echo(
+        "  The ceremony may request vault reauthentication first. Enter the API key only at "
+        "the hidden 'Provider credential:' prompt."
+    )
+
+
+def _append_next_step(next_steps: list[JsonValue], step: str) -> None:
+    if step not in next_steps:
+        next_steps.append(step)
+
+
+def _semantic_status_next_steps(status: Mapping[str, object]) -> tuple[str, ...]:
+    """Translate authoritative provider-status blockers into wizard recovery guidance."""
+
+    steps: list[str] = []
+    blockers = status.get("blockers")
+    if isinstance(blockers, (list, tuple)):
+        for blocker_value in cast(list[object] | tuple[object, ...], blockers):
+            if not isinstance(blocker_value, Mapping):
+                continue
+            blocker = cast(Mapping[str, object], blocker_value)
+            condition = blocker.get("condition")
+            if condition == "provider_credential":
+                if blocker.get("state") == "not_connected":
+                    steps.append(_NEXT_CREDENTIAL)
+            elif condition == "provider_endpoint":
+                steps.append(_NEXT_PROVIDER_TOML)
+            elif condition in {"llm_inference_channel", "repository_privacy_grant"}:
+                if blocker.get("state") in {"disabled", "missing"}:
+                    steps.append(_NEXT_PRIVACY)
+            elif condition == "verification.semantic":
+                command = blocker.get("next_command")
+                if type(command) is str:
+                    steps.append(command)
+            elif condition == "mcp_route_profile":
+                steps.append(
+                    "run 'yoetz integrate codex mcp preview' and explicitly accept "
+                    "re-registration if you want the policy route to permit configured "
+                    "semantic review"
+                )
+    else:
+        if status.get("endpoint_bound") is False:
+            steps.append(_NEXT_PROVIDER_TOML)
+        if status.get("credential_connected") is False:
+            steps.append(_NEXT_CREDENTIAL)
+        if status.get("llm_inference_enabled") is False:
+            steps.append(_NEXT_PRIVACY)
+        if status.get("repository_grant_state") == "missing":
+            steps.append(_NEXT_PRIVACY)
+    return tuple(dict.fromkeys(steps))
 
 
 def _stdout_json(value: JsonValue) -> None:
@@ -1168,7 +1393,7 @@ async def _interactive_provider_setup(
                                 "Restore credential-store access, then rerun 'yoetz setup'.",
                                 err=True,
                             )
-                        return service, provider_report
+                        return _provider_setup_result(service, provider_report)
                     typer.echo("Platform credential store unavailable; choose a vault passphrase")
                     typer.echo("Secure vault setup (hidden local-terminal input)")
                     await initialize_passphrase_vault()
@@ -1204,27 +1429,27 @@ async def _interactive_provider_setup(
             if not selected_model:
                 provider_report["credential_reason"] = "model_selection_invalid"
                 wipe_auto_passphrase()
-                return service, provider_report
+                return _provider_setup_result(service, provider_report)
             written, _provider = apply_provider_endpoint_choice(choice, model=selected_model)
         except (ConfigError, OSError, ValueError) as error:
             provider_report["credential_reason"] = getattr(
                 error, "reason_code", "provider_binding_invalid"
             )
             wipe_auto_passphrase()
-            return service, provider_report
+            return _provider_setup_result(service, provider_report)
         typer.echo(f"{preset.provider_id} model: {selected_model}")
     else:
-        written = prompt_provider_endpoint_binding()
+        written = prompt_provider_endpoint_binding(show_standalone_next_step=False)
     if written is None:
         wipe_auto_passphrase()
-        return service, provider_report
+        return _provider_setup_result(service, provider_report)
     provider_report["binding"] = "configured"
     config = load_config({}, {}, written)
     provider = config.provider
     if provider is None or service.get("state") != "ready":
         provider_report.setdefault("credential_reason", "service_not_ready")
         wipe_auto_passphrase()
-        return service, provider_report
+        return _provider_setup_result(service, provider_report)
 
     # The service snapshots its configured provider and credential capability at composition
     # time. Refresh it after writing the binding before deciding whether this exact profile
@@ -1238,7 +1463,7 @@ async def _interactive_provider_setup(
         if blocked is not None:
             provider_report["credential_reason"] = blocked
             wipe_auto_passphrase()
-            return service, provider_report
+            return _provider_setup_result(service, provider_report)
     credential_before: bool | None = None
     if service.get("state") == "ready":
         from yoetz.cli.provider_status import provider_status_report
@@ -1253,11 +1478,14 @@ async def _interactive_provider_setup(
         from yoetz.cli.provider_status import credential_human_display
 
         typer.echo(f"  Credential: {credential_human_display(True)} (already stored)")
-        if typer.confirm("Use the stored credential for this provider and model?", default=True):
+        if _prompt_yes_no_before_credential(
+            "Use the stored credential for this provider and model?",
+            default=True,
+        ):
             provider_report["credential"] = "stored"
             provider_report["credential_display"] = credential_human_display(True)
             wipe_auto_passphrase()
-            return service, provider_report
+            return _provider_setup_result(service, provider_report)
         replacing_stored_credential = True
         typer.echo("Enter a new credential to replace the stored value.")
 
@@ -1285,7 +1513,7 @@ async def _interactive_provider_setup(
     if type(repository_commitment) is not str:
         provider_report["credential_reason"] = "repository_privacy_scope_unavailable"
         wipe_auto_passphrase()
-        return service, provider_report
+        return _provider_setup_result(service, provider_report)
     target = ProviderCredentialTarget(
         action="set",
         provider_id=storage.provider_id,
@@ -1297,8 +1525,7 @@ async def _interactive_provider_setup(
         purpose_digest=storage.purpose_digest,
         repository_privacy_commitment=repository_commitment,
     )
-    typer.echo("")
-    typer.echo("Provider API key (hidden local-terminal input; stored only in the Yoetz vault)")
+    _emit_hidden_credential_transition()
     try:
         result = await set_provider_credential(
             target,
@@ -1317,7 +1544,7 @@ async def _interactive_provider_setup(
             # from a committed replacement. Preserve that uncertainty instead of claiming success.
             provider_report["credential"] = "failed"
             provider_report["credential_reason"] = f"credential_{error.reason}"
-            return await _service_reachability(), provider_report
+            return _provider_setup_result(await _service_reachability(), provider_report)
         service = await _restart_service_for_semantic_composition()
         credential_after: bool | None = None
         if service.get("state") == "ready":
@@ -1346,7 +1573,7 @@ async def _interactive_provider_setup(
             provider_report["credential_display"] = credential_human_display(True)
     finally:
         wipe_auto_passphrase()
-    return await _service_reachability(), provider_report
+    return _provider_setup_result(await _service_reachability(), provider_report)
 
 
 def _semantic_openai_extra_state() -> str:
@@ -1419,10 +1646,7 @@ async def run_provider_setup(
 
         typer.echo("")
         typer.echo("Choose the exact disclosure policy before the API key can be tested.")
-        credential_probe_authorized = typer.confirm(
-            "After storage, permit one fixed, content-free request to verify this API key?",
-            default=True,
-        )
+        credential_probe_authorized = _prompt_credential_probe_authorization()
         try:
             privacy_result = await run_privacy_setup(
                 recipe_hint="assisted_review",
@@ -1442,6 +1666,7 @@ async def run_provider_setup(
         model=model,
         before_credential=authorize_provider_channel,
     )
+    service, provider_report = _provider_setup_result(service, provider_report)
     binding = provider_report.get("binding")
     credential = provider_report.get("credential")
     typer.echo("")
@@ -1632,10 +1857,7 @@ async def run_setup_wizard(
             from yoetz.cli.unlock import HumanCeremonyCliError
             from yoetz.ports.control import ControlError
 
-            credential_probe_authorized = typer.confirm(
-                "After storage, permit one fixed, content-free request to verify this API key?",
-                default=True,
-            )
+            credential_probe_authorized = _prompt_credential_probe_authorization()
             try:
                 privacy_result = await run_privacy_setup(
                     recipe_hint="assisted_review",
@@ -1675,46 +1897,65 @@ async def run_setup_wizard(
             service,
             before_credential=authorize_provider_channel,
         )
-        if (
-            service.get("state") == "ready"
-            and provider.get("binding") == "configured"
-            and provider.get("credential") == "stored"
-        ):
-            service = await _restart_service_for_semantic_composition()
+        service, provider = _provider_setup_result(service, provider)
+        if service.get("state") == "ready" and provider.get("binding") == "configured":
+            if provider.get("credential") == "stored":
+                service = await _restart_service_for_semantic_composition()
             if service.get("state") == "ready":
                 from yoetz.cli.provider_status import provider_status_report
+                from yoetz.ports.control import ControlError
 
-                semantic_status = await provider_status_report()
-        else:
-            privacy = {
-                "outcome": "failed",
-                "profile": "unknown",
-                "reason": "provider_setup_incomplete",
-            }
+                # This is a read-only structural status read. It never probes the provider or
+                # dispatches semantic work, and it supplies authoritative blockers after a
+                # credential ceremony fails or returns an ambiguous result.
+                try:
+                    semantic_status = await provider_status_report()
+                except ControlError, OSError, ValueError:
+                    semantic_status = None
 
     next_steps: list[JsonValue] = []
-    if not service["reachable"]:
-        next_steps.append(_NEXT_SERVICE)
+    if not service.get("reachable"):
+        _append_next_step(next_steps, _NEXT_SERVICE)
     if service.get("state") != "ready":
-        next_steps.append(_NEXT_UNLOCK)
-    if review_mode == "semantic" and (
-        semantic_status is None or semantic_status.get("semantic_ready") is not True
-    ):
-        next_steps.append(_NEXT_RESTART)
-    if privacy.get("outcome") not in {"configured", "unchanged", "not_changed"}:
-        next_steps.append(_NEXT_PRIVACY)
-    if review_mode != "local_only" and provider.get("binding") != "configured":
-        next_steps.append(_NEXT_PROVIDER_TOML)
-    if review_mode != "local_only" and provider.get("credential") != "stored":
-        next_steps.append(_NEXT_CREDENTIAL)
+        _append_next_step(next_steps, _NEXT_UNLOCK)
+    if review_mode == "semantic":
+        status_steps = (
+            _semantic_status_next_steps(cast(Mapping[str, object], semantic_status))
+            if semantic_status is not None
+            else ()
+        )
+        for step in status_steps:
+            _append_next_step(next_steps, step)
+        if semantic_status is None or (
+            semantic_status.get("semantic_ready") is not True and not status_steps
+        ):
+            # Fall back only to component results that this run committed or directly observed.
+            # A missing credential cannot be repaired by restarting a ready service, and a
+            # successful privacy result must stay successful even when the next component fails.
+            if privacy.get("outcome") not in {"configured", "unchanged", "not_changed"}:
+                _append_next_step(next_steps, _NEXT_PRIVACY)
+            if provider.get("binding") != "configured":
+                _append_next_step(next_steps, _NEXT_PROVIDER_TOML)
+            if provider.get("credential") != "stored":
+                _append_next_step(next_steps, _NEXT_CREDENTIAL)
+            elif provider.get("binding") == "configured":
+                _append_next_step(next_steps, _NEXT_RESTART)
+    elif review_mode != "local_only":
+        if privacy.get("outcome") not in {"configured", "unchanged", "not_changed"}:
+            _append_next_step(next_steps, _NEXT_PRIVACY)
+        if provider.get("binding") != "configured":
+            _append_next_step(next_steps, _NEXT_PROVIDER_TOML)
+        if provider.get("credential") != "stored":
+            _append_next_step(next_steps, _NEXT_CREDENTIAL)
     if (
         chosen is not None
         and provider.get("binding") == "configured"
         and registration.get("route_profile") == "strict"
     ):
-        next_steps.append(
+        _append_next_step(
+            next_steps,
             "run 'yoetz integrate codex mcp preview' and explicitly accept re-registration "
-            "if you want the policy route to permit configured semantic review"
+            "if you want the policy route to permit configured semantic review",
         )
 
     mutating_run = interactive or accept
@@ -1901,15 +2142,16 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
                 True if credential == "stored" else (False if credential == "failed" else None)
             )
         )
-        # The JSON report already carries this; dropping it here left the human run with a
-        # blank credential line and no stated cause.
         credential_reason = provider.get("credential_reason")
         if credential != "stored" and type(credential_reason) is str:
             typer.echo(f"  Credential reason: {credential_reason}")
     if isinstance(privacy, dict):
         line = f"  Privacy: {privacy.get('outcome')} ({privacy.get('profile')})"
+        grant_state = privacy.get("grant_state")
+        if type(grant_state) is str:
+            line += f"; repository grant: {grant_state}"
         if privacy.get("reason"):
-            line += f" — {privacy.get('reason')}"
+            line += f"; reason: {privacy.get('reason')}"
         typer.echo(line)
     steps = report["next_steps"]
     if isinstance(steps, list) and steps:

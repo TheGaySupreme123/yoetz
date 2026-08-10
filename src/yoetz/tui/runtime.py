@@ -776,7 +776,7 @@ class YoetzRuntime:
             set_provider_credential,
         )
 
-        snapshot = await get_privacy_setup_snapshot()
+        snapshot = await get_privacy_setup_snapshot(self._cwd)
         repository_commitment = snapshot.bound_scope.get("workspace_ref_commitment")
         if type(repository_commitment) is not str:
             raise RuntimeError_(

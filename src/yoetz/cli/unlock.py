@@ -77,6 +77,8 @@ _FIXED_ERROR_REASONS: Final = frozenset(
     {
         "cancelled",
         "confirmation_mismatch",
+        "empty_input",
+        "eof",
         "input_invalid",
         "interrupted",
         "preview_invalid",

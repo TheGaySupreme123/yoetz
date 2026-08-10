@@ -106,6 +106,7 @@ async def test_store_provider_credential_supplies_the_scoped_reauthentication_se
     """A Keychain-provisioned vault must not ask the TUI user for an unseen passphrase."""
 
     observed: list[tuple[object, object]] = []
+    observed_workspaces: list[Path | None] = []
 
     def configuration(*_args: object) -> SimpleNamespace:
         return SimpleNamespace(
@@ -117,7 +118,8 @@ async def test_store_provider_credential_supplies_the_scoped_reauthentication_se
             )
         )
 
-    async def snapshot() -> SimpleNamespace:
+    async def snapshot(workspace_locator: Path | None = None) -> SimpleNamespace:
+        observed_workspaces.append(workspace_locator)
         return SimpleNamespace(bound_scope={"workspace_ref_commitment": "hmac-sha256:" + "7" * 64})
 
     async def ceremony(
@@ -139,6 +141,7 @@ async def test_store_provider_credential_supplies_the_scoped_reauthentication_se
     status = await YoetzRuntime(cwd=tmp_path).store_provider_credential()
 
     assert status == "stored"
+    assert observed_workspaces == [tmp_path]
     assert len(observed) == 1
     credential, reauthentication = observed[0]
     assert credential is None

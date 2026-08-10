@@ -389,3 +389,30 @@ def test_interactive_menu_choice_6_writes_grok_preset(
     assert "xai" in joined
     assert "xai-openai-chat-completions" in joined
     assert "Custom model ID" in joined
+    assert "next: run 'yoetz provider credential set'" in joined
+
+
+def test_composed_endpoint_binding_suppresses_standalone_next_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "config.toml"
+    answers = iter(("2", "1"))
+    echoes: list[str] = []
+
+    def fake_prompt(*_args: object, **_kwargs: object) -> str:
+        return next(answers)
+
+    def fake_echo(value: object = "", **_kwargs: object) -> None:
+        echoes.append(str(value))
+
+    monkeypatch.setattr(provider_binding.typer, "prompt", fake_prompt)
+    monkeypatch.setattr(provider_binding.typer, "echo", fake_echo)
+
+    written = provider_binding.prompt_provider_endpoint_binding(
+        path=target,
+        show_standalone_next_step=False,
+    )
+
+    assert written == target
+    assert target.is_file()
+    assert all("next: run 'yoetz provider credential set'" not in line for line in echoes)
