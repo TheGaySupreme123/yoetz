@@ -254,9 +254,10 @@ def _semantic_status_next_steps(status: Mapping[str, object]) -> tuple[str, ...]
     steps: list[str] = []
     blockers = status.get("blockers")
     if isinstance(blockers, (list, tuple)):
-        for blocker in blockers:
-            if not isinstance(blocker, Mapping):
+        for blocker_value in cast(list[object] | tuple[object, ...], blockers):
+            if not isinstance(blocker_value, Mapping):
                 continue
+            blocker = cast(Mapping[str, object], blocker_value)
             condition = blocker.get("condition")
             if condition == "provider_credential":
                 if blocker.get("state") == "not_connected":

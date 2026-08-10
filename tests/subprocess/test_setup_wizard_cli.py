@@ -27,6 +27,7 @@ from yoetz.ports.integrations import (
     IntegrationTarget,
     SkillSource,
 )
+from yoetz.protocol.canonical import JsonValue
 from yoetz.service.client import ServiceClient
 
 _RUNNER = CliRunner()
@@ -37,6 +38,10 @@ def _plain(text: str) -> str:
     """Strip ANSI SGR sequences so Rich usage panels stay assertable."""
 
     return _ANSI_ESCAPE.sub("", text)
+
+
+def _skip_provider_binding(**_kwargs: object) -> None:
+    """Stand in for the interactive endpoint prompt without an untyped lambda."""
 
 
 async def _fake_repository_privacy_snapshot(*_args: object) -> SimpleNamespace:
@@ -324,13 +329,13 @@ def _wire_composed_provider_setup(
         state["stored"] = True
         return SimpleNamespace(activation_status="stored")
 
-    original_emit_human_report = setup_module._emit_human_report
+    original_emit_human_report = setup_module._emit_human_report  # pyright: ignore[reportPrivateUsage]
 
-    def capture_report(report: dict[str, object]) -> None:
+    def capture_report(report: dict[str, JsonValue]) -> None:
         cast(list[dict[str, object]], state["reports"]).append(
             cast(dict[str, object], json.loads(json.dumps(report)))
         )
-        original_emit_human_report(cast(dict[str, object], report))
+        original_emit_human_report(report)
 
     monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)
     monkeypatch.setattr(setup_module, "_service_reachability", ready)
@@ -562,7 +567,7 @@ def test_interactive_wizard_selects_harness_then_installation_and_requires_y_or_
 
     monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)
     monkeypatch.setattr(
-        provider_binding, "prompt_provider_endpoint_binding", lambda **_kwargs: None
+        provider_binding, "prompt_provider_endpoint_binding", _skip_provider_binding
     )
 
     # harness 1, installation 2, review mode 2 (local only), a rejected y/n, then confirm.
@@ -601,7 +606,7 @@ def test_interactive_registration_n_declines_without_mutation(
 
     monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)
     monkeypatch.setattr(
-        provider_binding, "prompt_provider_endpoint_binding", lambda **_kwargs: None
+        provider_binding, "prompt_provider_endpoint_binding", _skip_provider_binding
     )
 
     result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\n1\nN\n")
@@ -766,7 +771,7 @@ def test_composed_wizard_preserves_privacy_when_hidden_credential_input_is_empty
         credential_outcome="failed",
         credential_reason="empty_input",
     )
-    original_prompt = setup_module.typer.prompt
+    original_prompt = cast(Callable[..., object], setup_module.typer.prompt)
     probe_answers = iter((fake_credential, "yes"))
 
     def route_visible_prompts(prompt: str, *args: object, **kwargs: object) -> object:
@@ -1302,7 +1307,7 @@ def test_uninitialized_provider_setup_provisions_auto_unlock(
         fake_create_for_initialization,
     )
     monkeypatch.setattr(unlock_module, "initialize_passphrase_vault", fake_initialize)
-    monkeypatch.setattr(binding_module, "prompt_provider_endpoint_binding", lambda **_kwargs: None)
+    monkeypatch.setattr(binding_module, "prompt_provider_endpoint_binding", _skip_provider_binding)
     monkeypatch.setattr(config_module, "load_config", fake_load_config)
     monkeypatch.setattr(paths_module, "bundle_root", fake_bundle_root)
     monkeypatch.setattr(setup_module, "_service_reachability", fake_reachability)
@@ -1390,7 +1395,7 @@ def test_uninitialized_setup_refuses_preexisting_auto_unlock_entry(
 
     monkeypatch.setattr(keyring_module, "AutoUnlockPassphraseStore", fake_store)
     monkeypatch.setattr(unlock_module, "initialize_passphrase_vault", fake_initialize)
-    monkeypatch.setattr(binding_module, "prompt_provider_endpoint_binding", lambda **_kwargs: None)
+    monkeypatch.setattr(binding_module, "prompt_provider_endpoint_binding", _skip_provider_binding)
     monkeypatch.setattr(config_module, "load_config", fake_load_config)
     monkeypatch.setattr(paths_module, "bundle_root", fake_bundle_root)
     monkeypatch.setattr(setup_module, "_service_reachability", fake_reachability)
