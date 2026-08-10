@@ -123,9 +123,10 @@ folds the check's coverage, including `semantic_model_derived`, and carries the 
 `check_current_as_of_earlier_frontier` naming the subject frontier that was tested. The verdict is
 current as of that earlier frontier, not the receipt's, so the receipt is still coverage-incomplete.
 
-Any other material event after the check — published work, a new finding, or a response to a finding
-the check did not return — requires a re-check first. The receipt reports `check_not_applicable` and
-the check contributes nothing until it is re-run at the current frontier. `status` applies the same
+Any other material event after the check — published work, a new finding, a response to a finding
+the check did not return, or a response whose payload is redacted or unreadable (it cannot prove
+which finding it answered) — requires a re-check first. The receipt reports `check_not_applicable`
+and the check contributes nothing until it is re-run at the current frontier. `status` applies the same
 rule, so status and a receipt at the same frontier never disagree about what was checked.
 
 The cheapest finding is the one that never fires. Before the first `check`, confirm that every

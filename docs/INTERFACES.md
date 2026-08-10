@@ -836,12 +836,16 @@ deciding between the two, shared by the receipt and by compact status coverage.
   `availability` is the current `CaseAvailabilityFacts`, `coverage` is the weakest material fold,
   `gaps` is the exact sorted typed `CaseGap` tuple after check/semantic/availability accounting, and
   `applicable_check` is the exact readable `CheckRecordedPayload` that still applies to this
-  material state or `None`. A check applies when no event of a material family has been appended
-  after the check's own record: the check's atomic result events — the `finding_recorded` records
-  it returned and its `check_recorded` — land with it and never revoke it, and an immaterial
-  advance — `receipt_recorded`, `session_opened`, `session_resumed` — never revokes it either.
-  Frontier equality is not the rule: a check necessarily advances the frontier past the subject
-  it tested. The application constructs this context; the builder never imports a
+  material state or `None`. A check applies when no event appended after the check's own record
+  supersedes it under `kernel/reducers.invalidates_recorded_check`: the check's atomic result
+  events — the `finding_recorded` records it returned and its `check_recorded` — land with it and
+  never revoke it; an immaterial advance — `receipt_recorded`, `session_opened`,
+  `session_resumed` — never revokes it; and a readable `response_recorded` answering a finding the
+  check itself returned never revokes it, though the context then carries the
+  `check_current_as_of_earlier_frontier` gap. Every other material-family event revokes it,
+  including a response to a finding the check did not return and a response whose payload is
+  unreadable. Frontier equality is not the rule: a check necessarily advances the frontier past
+  the subject it tested. The application constructs this context; the builder never imports a
   port type or re-derives applicability.
 - `build_receipt(context, receipt_id, task_id, session_id, generated_at,
   versions: ReceiptVersionSlice, redaction_profile, include) -> ReceiptDocument`. Every

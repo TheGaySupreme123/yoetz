@@ -48,7 +48,7 @@ A recorded check remains attributable to a later receipt when the only events be
 
 That gap is a limitation, not a clean state: the verdict is current as of the tested frontier, not the receipt's, so the receipt is still coverage-incomplete and must not be described as a clean completion receipt.
 
-Any other material event after the check — published work, a new finding, or a response to a finding the check did not return — requires a re-check before the receipt. The receipt reports `check_not_applicable` and the check contributes nothing until you re-run it at the current frontier.
+Any other material event after the check — published work, a new finding, a response to a finding the check did not return, or a response whose payload is redacted or unreadable (it cannot prove which finding it answered) — requires a re-check before the receipt. The receipt reports `check_not_applicable` and the check contributes nothing until you re-run it at the current frontier.
 
 `status` applies the same rule, so a compact status view and a receipt taken at the same frontier never disagree about what was checked.
 
