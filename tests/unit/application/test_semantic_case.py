@@ -20,6 +20,7 @@ from builders.replay import replay_records
 from yoetz.application.check import CheckScope, allocate_findings, run_deterministic_policies
 from yoetz.application.semantic_case import (
     REVIEW_PACKET_ITEM_ID,
+    bounded_case_envelope,
     build_semantic_case,
     review_selection_digest,
     semantic_case_to_candidate_context,
@@ -284,7 +285,7 @@ def test_assisted_profile_includes_only_linked_recorded_capped_excerpts() -> Non
     assert set(excerpt.linked_subject_refs) <= (semantic.frontier_refs | semantic.local_check_refs)
 
 
-def test_assisted_digest_excerpt_uses_typed_provenance_not_description() -> None:
+def _typed_digest_case(*, description: str | None) -> DeterministicCase:
     case = _case_with_material(with_evidence=True)
     record = case.projection.evidence[evd(1)]
     assert record.payload is not None
@@ -294,7 +295,7 @@ def test_assisted_digest_excerpt_uses_typed_provenance_not_description() -> None
         strength=EvidenceImmutability.CONTENT_DIGEST,
         observed_at=record.payload.observed_at,
         content_digest="sha256:" + "1" * 64,
-        description="caller prose that must not be substituted for output",
+        description=description,
         digest_binding=EvidenceDigestBinding(
             subject=EvidenceDigestSubject.TEST_STDOUT,
             content_availability=EvidenceContentAvailability.DIGEST_ONLY,
@@ -302,13 +303,34 @@ def test_assisted_digest_excerpt_uses_typed_provenance_not_description() -> None
             provenance=EvidenceDigestProvenance.CALLER_ASSERTED,
         ),
     )
-    typed = make_case(
+    return make_case(
         plans=case.projection.plans,
         obligations=case.projection.obligations,
         claims=case.projection.claims,
         evidence={evd(1): evidence_record(typed_payload, 4)},
         extra_refs=(clm(1), obl(1), evd(1)),
     )
+
+
+def test_assisted_digest_excerpt_prefers_description_and_carries_provenance() -> None:
+    typed = _typed_digest_case(description="caller prose the reviewer must be able to read")
+    semantic = _build(typed, ReviewContextProfile.ASSISTED, findings=_findings_for(typed))
+    excerpt = semantic.packet.targeted_excerpts[0]
+    item = next(row for row in semantic.items if row.item_id == excerpt.excerpt_item_id)
+    assert item.content == b"caller prose the reviewer must be able to read"
+    provenance = excerpt.digest_provenance
+    assert provenance is not None
+    assert provenance.content_digest == "sha256:" + "1" * 64
+    assert provenance.digest_subject is EvidenceDigestSubject.TEST_STDOUT
+    assert provenance.content_availability is EvidenceContentAvailability.DIGEST_ONLY
+    assert provenance.byte_count == 512
+    assert provenance.provenance is EvidenceDigestProvenance.CALLER_ASSERTED
+    assert provenance.evidence_kind is EvidenceKind.TEST_RESULT
+    assert provenance.strength is EvidenceImmutability.CONTENT_DIGEST
+
+
+def test_assisted_digest_excerpt_without_description_keeps_typed_provenance_text() -> None:
+    typed = _typed_digest_case(description=None)
     semantic = _build(typed, ReviewContextProfile.ASSISTED, findings=_findings_for(typed))
     excerpt = semantic.packet.targeted_excerpts[0]
     item = next(row for row in semantic.items if row.item_id == excerpt.excerpt_item_id)
@@ -316,7 +338,30 @@ def test_assisted_digest_excerpt_uses_typed_provenance_not_description() -> None
     assert isinstance(document, Mapping)
     assert document["digest_subject"] == "test_stdout"
     assert document["content_availability"] == "digest_only"
-    assert b"caller prose" not in item.content
+    assert excerpt.digest_provenance is not None
+
+
+def test_case_envelope_serializes_excerpt_digest_provenance() -> None:
+    typed = _typed_digest_case(description="caller prose the reviewer must be able to read")
+    semantic = _build(typed, ReviewContextProfile.ASSISTED, findings=_findings_for(typed))
+    document = strict_json_parse(bounded_case_envelope(semantic))
+    assert isinstance(document, Mapping)
+    packet = document["review_packet"]
+    assert isinstance(packet, Mapping)
+    rows = packet["targeted_excerpts"]
+    assert isinstance(rows, list) and rows
+    row = rows[0]
+    assert isinstance(row, Mapping)
+    provenance = row["digest_provenance"]
+    assert isinstance(provenance, Mapping)
+    assert provenance["content_digest"] == "sha256:" + "1" * 64
+    assert provenance["digest_subject"] == "test_stdout"
+    assert provenance["content_availability"] == "digest_only"
+    assert provenance["byte_count"] == 512
+    assert provenance["provenance"] == "caller_asserted"
+    assert provenance["evidence_kind"] == "test_result"
+    assert provenance["strength"] == "content_digest"
+    assert "approval_commitment" not in provenance
 
 
 def test_assisted_legacy_digest_is_an_explicit_omission() -> None:

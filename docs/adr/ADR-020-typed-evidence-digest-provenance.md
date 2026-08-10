@@ -1,7 +1,8 @@
 # ADR-020 — Typed evidence digest provenance
 
 **Status:** Accepted (2026-08-09), acknowledged in
-[issue #131](https://github.com/TheGaySupreme123/yoetz/issues/131).
+[issue #131](https://github.com/TheGaySupreme123/yoetz/issues/131). Decision 7 amended
+(2026-08-10) for [issue #176](https://github.com/TheGaySupreme123/yoetz/issues/176).
 **Implemented by:** `src/yoetz/domain/events.py`, `src/yoetz/application/publish_work.py`,
 `src/yoetz/application/observation_coordinator.py`, `src/yoetz/kernel/deterministic_checks.py`,
 `src/yoetz/application/semantic_case.py`, and the public event schemas and guidance.
@@ -54,9 +55,18 @@ ordinary cooperative publication cannot claim.
    historical evidence does not weaken another conclusion. Redaction remains an independent
    availability limitation.
 
-7. **Semantic review never substitutes prose for digested bytes.** When selected, a typed digest
-   contributes only bounded canonical provenance facts; unavailable legacy provenance becomes an
-   explicit omission. Descriptions remain caller-authored narrative.
+7. **Semantic review never substitutes prose for digested bytes.** A typed digest contributes
+   only bounded canonical provenance facts; unavailable legacy provenance becomes an explicit
+   omission. Descriptions remain caller-authored narrative.
+
+   *Amended 2026-08-10 (issue #176).* The original wording made the provenance facts **replace**
+   the excerpt text, so publishing a digest made caller-authored narrative invisible to the
+   reviewer — honest provenance cost legibility. Now, when a digest-bound evidence record also
+   carries a bounded `description`, the excerpt item text is that description, and the digest
+   identity facts travel alongside it as `digest_provenance` on the excerpt ref. Provenance is
+   still never inferred from prose — it comes only from the typed binding — and the description is
+   still never treated as the digested bytes. A digest-bound record without a description, and
+   legacy provenance, behave exactly as before.
 
 8. **No storage migration or projection-version bump is required.** The new binding lives inside
    the existing encrypted event payload and current projection payload handle. Replay already

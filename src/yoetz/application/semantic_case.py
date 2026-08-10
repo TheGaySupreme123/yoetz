@@ -48,6 +48,7 @@ from yoetz.kernel.deterministic_checks import (
 )
 from yoetz.ports.semantic import (
     ChangeObservation,
+    ExcerptDigestProvenance,
     ReviewAssessment,
     ReviewAssessmentSkipped,
     ReviewOmission,
@@ -866,6 +867,7 @@ def build_semantic_case(
                         _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
                     )
                     continue
+            digest_provenance: ExcerptDigestProvenance | None = None
             if payload.content_digest is not None:
                 binding = payload.digest_binding
                 if binding is None:
@@ -873,35 +875,51 @@ def build_semantic_case(
                         _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_recorded")
                     )
                     continue
-                text = canonical_encode(
-                    cast(
-                        JsonValue,
-                        {
-                            "schema": "yoetz.evidence-digest-provenance/1",
-                            "evidence_kind": payload.evidence_kind.value,
-                            "strength": payload.strength.value,
-                            "content_digest": payload.content_digest,
-                            "digest_subject": binding.subject.value,
-                            "content_availability": binding.content_availability.value,
-                            "byte_count": binding.byte_count,
-                            "provenance": binding.provenance.value,
-                            **(
-                                {}
-                                if binding.approval_commitment is None
-                                else {"approval_commitment": binding.approval_commitment}
-                            ),
-                            **(
-                                {}
-                                if binding.approved_check_result_digest is None
-                                else {
-                                    "approved_check_result_digest": (
-                                        binding.approved_check_result_digest
-                                    )
-                                }
-                            ),
-                        },
-                    )
-                ).decode("utf-8")
+                digest_provenance = ExcerptDigestProvenance(
+                    evidence_kind=payload.evidence_kind,
+                    strength=payload.strength,
+                    content_digest=payload.content_digest,
+                    digest_subject=binding.subject,
+                    content_availability=binding.content_availability,
+                    byte_count=binding.byte_count,
+                    provenance=binding.provenance,
+                    approval_commitment=binding.approval_commitment,
+                    approved_check_result_digest=binding.approved_check_result_digest,
+                )
+                if payload.description:
+                    # Caller-authored narrative stays legible; digest identity rides on the
+                    # excerpt ref instead of replacing the content (issue #176).
+                    text = payload.description
+                else:
+                    text = canonical_encode(
+                        cast(
+                            JsonValue,
+                            {
+                                "schema": "yoetz.evidence-digest-provenance/1",
+                                "evidence_kind": payload.evidence_kind.value,
+                                "strength": payload.strength.value,
+                                "content_digest": payload.content_digest,
+                                "digest_subject": binding.subject.value,
+                                "content_availability": binding.content_availability.value,
+                                "byte_count": binding.byte_count,
+                                "provenance": binding.provenance.value,
+                                **(
+                                    {}
+                                    if binding.approval_commitment is None
+                                    else {"approval_commitment": binding.approval_commitment}
+                                ),
+                                **(
+                                    {}
+                                    if binding.approved_check_result_digest is None
+                                    else {
+                                        "approved_check_result_digest": (
+                                            binding.approved_check_result_digest
+                                        )
+                                    }
+                                ),
+                            },
+                        )
+                    ).decode("utf-8")
             else:
                 text = payload.description or payload.reference
             if text is None or not text:
@@ -963,6 +981,7 @@ def build_semantic_case(
                     content_visibility="available",
                     content_digest=item.content_digest,
                     content_bytes=item.content_bytes,
+                    digest_provenance=digest_provenance,
                 )
             )
             excerpt_bytes_used += item.content_bytes
@@ -1269,6 +1288,28 @@ def _assessment_to_json(assessment: ReviewAssessment) -> dict[str, JsonValue]:
     return body
 
 
+def _digest_provenance_json(provenance: ExcerptDigestProvenance) -> dict[str, JsonValue]:
+    return {
+        "byte_count": provenance.byte_count,
+        "content_availability": provenance.content_availability.value,
+        "content_digest": provenance.content_digest,
+        "digest_subject": provenance.digest_subject.value,
+        "evidence_kind": provenance.evidence_kind.value,
+        "provenance": provenance.provenance.value,
+        "strength": provenance.strength.value,
+        **(
+            {}
+            if provenance.approval_commitment is None
+            else {"approval_commitment": provenance.approval_commitment}
+        ),
+        **(
+            {}
+            if provenance.approved_check_result_digest is None
+            else {"approved_check_result_digest": provenance.approved_check_result_digest}
+        ),
+    }
+
+
 def _packet_to_json(packet: ReviewPacket) -> dict[str, JsonValue]:
     return cast(
         dict[str, JsonValue],
@@ -1312,6 +1353,11 @@ def _packet_to_json(packet: ReviewPacket) -> dict[str, JsonValue]:
                     "content_bytes": item.content_bytes,
                     "content_digest": item.content_digest,
                     "content_visibility": item.content_visibility,
+                    **(
+                        {}
+                        if item.digest_provenance is None
+                        else {"digest_provenance": _digest_provenance_json(item.digest_provenance)}
+                    ),
                     "excerpt_item_id": item.excerpt_item_id,
                     "linked_subject_refs": list(item.linked_subject_refs),
                     "source_kind": item.source_kind,
