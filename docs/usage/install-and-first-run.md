@@ -9,7 +9,9 @@ uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"
 yoetz
 ```
 
-`uvx yoetz` works for a one-off run. `npx yoetz` will delegate to the same `uvx` path once the
+`uvx yoetz` works for a one-off run. If you are a coding agent installing Yoetz on a user's
+behalf, follow [Agent start](agent-start.md) instead — setup's questions require the human's own
+terminal. `npx yoetz` will delegate to the same `uvx` path once the
 prepared launcher in [`support/npm-launcher/`](../../support/npm-launcher/) is published; it is
 deliberately unpublished today, so npm is not currently an install route. The launcher pins the
 exact Python distribution, passes arguments through unchanged, inherits stdio so the child sees
@@ -156,6 +158,7 @@ supported and covers the same operations.
 
 From here:
 
+- [Agent start](agent-start.md) — this same setup from the installing agent's side.
 - [The terminal interface](terminal-interface.md) — the interface in detail.
 - [The six operations](six-operations.md) — the actual workflow.
 - [Privacy and semantic review](privacy-and-semantic-review.md) — before you enable any egress.

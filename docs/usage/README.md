@@ -5,6 +5,8 @@ the decisions behind it see [`docs/adr/`](../adr/).
 
 - [Install and first run](install-and-first-run.md) — install, first run, starting the service,
   what a fresh installation will and will not do.
+- [Agent start](agent-start.md) — the same installation addressed to a coding agent: what it runs
+  itself, what it asks the user, and where it hands over the terminal.
 - [The terminal interface](terminal-interface.md) — the full-screen interface, its status
   vocabulary, keys, and slash commands.
 - [The six operations](six-operations.md) — `start`, `publish_work`, `check`, `respond`, `status`,
@@ -18,7 +20,9 @@ the decisions behind it see [`docs/adr/`](../adr/).
 - [Receipts and coverage](receipts-and-coverage.md) — how to read a receipt and why the wording is
   deliberately narrow.
 
-Agent-facing guidance is separate and lives in [`guidance/`](../../guidance/). It ships
+Agent-facing *runtime* guidance is separate and lives in [`guidance/`](../../guidance/). It ships
 byte-identically to every harness and over MCP, so it is the authority for how an agent should
-behave. Its `request-templates.md` fallback keeps requests authorable when a host drops schema
-metadata; these pages are for the human operating the installation.
+behave once Yoetz is running. Its `request-templates.md` fallback keeps requests authorable when a
+host drops schema metadata. These pages are for the human operating the installation, with one
+exception: [Agent start](agent-start.md) addresses the agent performing an installation, before any
+of that guidance is reachable.
