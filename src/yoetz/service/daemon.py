@@ -144,6 +144,7 @@ from yoetz.service.confidential_protocol import (
     VaultUnlockPreview,
     decode_human_frame,
     encode_human_frame,
+    human_target_json,
 )
 from yoetz.service.control_protocol import (
     ControlFrame,
@@ -1864,7 +1865,7 @@ class _LockedHumanEffects:
         if type(target) is EmptyVaultTarget:
             if target.expected_mode != mode:
                 raise HumanControlError("target_invalid")
-            digest = canonical_digest({"expected_mode": target.expected_mode, "kind": target.kind})
+            digest = canonical_digest(human_target_json(target))
             if request.ceremony_kind is HumanCeremonyKind.VAULT_INITIALIZE:
                 return VaultInitializePreview(), digest, None
             if request.ceremony_kind is HumanCeremonyKind.VAULT_UNLOCK:
@@ -1958,13 +1959,7 @@ class _LockedHumanEffects:
                     if len(proposal.approved_categories) == 1
                     else "mixed"
                 )
-                digest = canonical_digest(
-                    {
-                        "decision_kind": target.decision_kind,
-                        "kind": target.kind,
-                        "pending_id": target.pending_id,
-                    }
-                )
+                digest = canonical_digest(human_target_json(target))
                 try:
                     preview_disclosure = PrivacyDisclosureDecisionPreview(
                         target.pending_id,
@@ -1999,13 +1994,7 @@ class _LockedHumanEffects:
             # widen — so a dimension the classifier treats as widening cannot be absent from the
             # screen. The preview type refuses a change set with no widening in it, which turns a
             # future drift here into a closed failure rather than a silently empty approval.
-            digest = canonical_digest(
-                {
-                    "decision_kind": target.decision_kind,
-                    "kind": target.kind,
-                    "pending_id": target.pending_id,
-                }
-            )
+            digest = canonical_digest(human_target_json(target))
             try:
                 if proposal.members:
                     preview_members: list[PrivacyPolicyTransitionPreviewMember] = []
@@ -2332,13 +2321,7 @@ class _LockedHumanEffects:
             if exc.args == ("privacy_policy_transition_unavailable",):
                 raise HumanControlError("target_invalid") from exc
             raise HumanControlError("target_invalid") from exc
-        target_digest = canonical_digest(
-            {
-                "decision_kind": target.decision_kind,
-                "kind": target.kind,
-                "pending_id": target.pending_id,
-            }
-        )
+        target_digest = canonical_digest(human_target_json(target))
         approved = decision == "approve"
         if approved:
             if proof is None:

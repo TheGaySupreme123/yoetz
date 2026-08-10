@@ -92,9 +92,19 @@ an ordinary check as if it were an egress decision.
 ## When the user authorizes setup in this chat
 
 For non-default setup, read `yoetz consent catalog` and `yoetz consent status`. Prepare only an
-operation with `implemented=true`. A pending action whose `authorize_command` is non-null supports
-delegated current-chat authorization; otherwise guide the user to the supplied `review_command` or
-`yoetz --privacy`.
+operation with `implemented=true`, using the exact flags its `prepare_hint` names. A pending
+action whose `authorize_command` is non-null supports delegated current-chat authorization;
+otherwise guide the user to `yoetz --privacy`. Console `consent review` requires independently
+verified OS user presence, which the current runtime does not provide, so it fails closed rather
+than approving.
+
+For provider credential setup the working sequence is: prepare and authorize
+`repository_privacy_grant` first, then `yoetz consent prepare provider_credential_set
+--provider-id <id> --model-id <id> --endpoint-profile-id <id> --endpoint-profile-version
+<version>` — the purpose and its digests are derived from that exact profile. Run prepare and
+authorize from the same working directory: the repository commitment binds at prepare time and is
+re-checked at authorize. Only one pending action exists at a time, and each pending expires
+fifteen minutes after prepare.
 
 Before agent-chat approve, show the pending danger text, operation, danger and target digests, and
 exact repository recipe when present. Recommend the stronger trusted local path. If a provider

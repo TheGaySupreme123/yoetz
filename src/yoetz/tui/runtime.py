@@ -770,9 +770,13 @@ class YoetzRuntime:
         """Run the existing confidential ceremony. No secret crosses this call."""
 
         from yoetz.cli.privacy_setup import get_privacy_setup_snapshot
-        from yoetz.cli.unlock import HumanCeremonyCliError, set_provider_credential
+        from yoetz.cli.unlock import (
+            HumanCeremonyCliError,
+            load_auto_unlock_reauthentication,
+            set_provider_credential,
+        )
 
-        snapshot = await get_privacy_setup_snapshot()
+        snapshot = await get_privacy_setup_snapshot(self._cwd)
         repository_commitment = snapshot.bound_scope.get("workspace_ref_commitment")
         if type(repository_commitment) is not str:
             raise RuntimeError_(
@@ -781,7 +785,11 @@ class YoetzRuntime:
             )
         target = self.credential_target(repository_commitment)
         try:
-            result = await set_provider_credential(target)
+            # A Keychain-provisioned vault has a passphrase the human never saw; supply it here
+            # so the ceremony asks only for the provider key.
+            result = await set_provider_credential(
+                target, None, load_auto_unlock_reauthentication()
+            )
         except HumanCeremonyCliError as error:
             raise RuntimeError_(error.reason, "the credential ceremony did not complete")
         return str(getattr(result, "activation_status", "unknown"))

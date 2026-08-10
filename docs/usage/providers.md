@@ -37,14 +37,14 @@ previous Enter-to-accept behavior. The remaining entries are a repository-review
 recent provider-recommended/current model families, never more than ten total, followed by an
 explicit **Custom model ID** option. No popularity ranking is claimed.
 
-The catalog was reviewed on 2026-07-28 against provider-owned sources: OpenAI
+The catalog was reviewed on 2026-08-10 against the provider-owned model sources: OpenAI
 [model guidance](https://developers.openai.com/api/docs/guides/latest-model), Fireworks
 [Responses API documentation](https://docs.fireworks.ai/guides/response-api), Anthropic
 [models overview](https://platform.claude.com/docs/en/about-claude/models/overview), Google
 [latest Gemini models](https://ai.google.dev/gemini-api/docs/latest-model), OpenRouter's
 [model catalog contract](https://openrouter.ai/docs/guides/overview/models), xAI's
 [model list](https://docs.x.ai/developers/models), and Vercel's
-[AI Gateway model discovery documentation](https://vercel.com/docs/ai-gateway/models-and-providers).
+[AI Gateway model catalog](https://vercel.com/ai-gateway/models).
 The Fireworks list also retains `accounts/fireworks/models/minimax-m3`, which has prior
 repository-recorded live semantic provenance. The lists are static so setup stays deterministic
 and opens no new network or credential channel; they can age, may not match account entitlements,

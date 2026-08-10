@@ -151,7 +151,31 @@ def test_prepare_repository_grant_maps_privacy_snapshot_failure() -> None:
         )
     assert result.exit_code == 2
     assert "elevated_bootstrap: repository_privacy_scope_unavailable" in result.stderr
+    # The bare token alone left operators with nothing to run; the remediation half must follow it.
+    assert "yoetz --privacy" in result.stderr
     assert "private internal detail" not in result.stderr
+
+
+def test_catalog_prepare_hint_names_only_the_caller_supplied_provider_flags() -> None:
+    catalog = cast(dict[str, Any], elevated.catalog_elevated())
+    hints = {
+        cast(str, entry["operation"]): cast(str, entry["prepare_hint"])
+        for entry in cast(list[dict[str, Any]], catalog["operations"])
+    }
+
+    hint = hints["provider_credential_set"]
+    for flag in (
+        "--provider-id",
+        "--model-id",
+        "--endpoint-profile-id",
+        "--endpoint-profile-version",
+    ):
+        assert flag in hint
+    # Purpose, digests, and the repository commitment are derived by prepare; naming them sent
+    # agents hunting for internals they cannot know.
+    for derived in ("--purpose", "--scope-digest", "--purpose-digest"):
+        assert derived not in hint
+    assert hints["vault_initialize"] == "yoetz consent prepare vault_initialize"
 
 
 def test_chat_user_authorize_consumes_exact_provider_request_and_wipes_input(
@@ -734,6 +758,8 @@ def test_prepare_provider_binding_still_binds_exact_target(tmp_path: Path) -> No
             dict[str, Any],
             elevated.prepare_elevated("provider_credential_rotate", provider_binding=binding),
         )
+    # The pending digest is the exact digest the ceremony session will bind: one shape for
+    # bound and unbound bindings, with the absent repository commitment present as null.
     expected = canonical_digest(
         {
             "action": "rotate",
@@ -744,6 +770,7 @@ def test_prepare_provider_binding_still_binds_exact_target(tmp_path: Path) -> No
             "provider_id": "provider",
             "purpose": "semantic-review",
             "purpose_digest": canonical_digest({"purpose": "semantic-review"}),
+            "repository_privacy_commitment": None,
             "scope_digest": "sha256:" + ("b" * 64),
         }
     )
@@ -818,3 +845,201 @@ def test_provider_secret_ingress_uses_only_the_trusted_review_ceremony(
     assert result == {"action": expected_action, "generation": 2, "outcome": "stored"}
     assert len(observed) == 1
     assert observed[0][2] == {}
+
+
+def _configured_provider() -> SimpleNamespace:
+    return SimpleNamespace(
+        provider=SimpleNamespace(
+            provider_id="fireworks",
+            model="accounts/fireworks/models/minimax-m3",
+            endpoint_profile_id="fireworks-responses",
+            endpoint_profile_version="1.0.0",
+        )
+    )
+
+
+async def _bound_privacy_snapshot() -> SimpleNamespace:
+    return SimpleNamespace(bound_scope={"workspace_ref_commitment": "hmac-sha256:" + "7" * 64})
+
+
+@pytest.mark.parametrize(
+    ("action", "function_name"),
+    [("set", "set_provider_credential"), ("rotate", "rotate_provider_credential")],
+)
+def test_provider_credential_command_needs_no_flags_and_binds_the_installed_profile(
+    action: str,
+    function_name: str,
+) -> None:
+    """Seven mandatory options made the documented command unusable by hand."""
+
+    from yoetz.service.vault import provider_credential_profile_binding
+
+    observed: list[tuple[Any, bytearray | None, bytearray | None]] = []
+
+    async def ceremony(
+        target: Any,
+        credential: bytearray | None = None,
+        reauthentication: bytearray | None = None,
+    ) -> ProviderCredentialResult:
+        observed.append((target, credential, reauthentication))
+        return ProviderCredentialResult(cast(Any, action), 4, "stored")
+
+    with (
+        patch("yoetz.config.load.load_config", return_value=_configured_provider()),
+        patch(
+            "yoetz.cli.privacy_setup.get_privacy_setup_snapshot",
+            side_effect=_bound_privacy_snapshot,
+        ),
+        patch(
+            "yoetz.cli.unlock.load_auto_unlock_reauthentication",
+            return_value=bytearray(b"scoped-reauth"),
+        ),
+        patch(f"yoetz.cli.unlock.{function_name}", side_effect=ceremony),
+    ):
+        result = CliRunner().invoke(app, ["provider", "credential", action])
+
+    assert result.exit_code == 0
+    assert len(observed) == 1
+    target, credential, reauthentication = observed[0]
+    expected = provider_credential_profile_binding(
+        "fireworks",
+        "accounts/fireworks/models/minimax-m3",
+        "fireworks-responses",
+        "1.0.0",
+    )
+    assert target.action == action
+    assert target.provider_id == expected.provider_id
+    assert target.model_id == expected.model_id
+    assert target.purpose == expected.purpose
+    assert target.scope_digest == expected.authorization_scope_digest
+    assert target.purpose_digest == expected.purpose_digest
+    # Without this the daemon rejects the ceremony as unbound to the repository's privacy scope.
+    assert target.repository_privacy_commitment == "hmac-sha256:" + "7" * 64
+    assert credential is None
+    # A Keychain-provisioned vault must not prompt for a passphrase the human never saw.
+    assert reauthentication is not None
+    assert bytes(reauthentication) == b"scoped-reauth"
+
+
+def test_provider_credential_command_still_accepts_explicit_overrides() -> None:
+    observed: list[Any] = []
+
+    async def ceremony(
+        target: Any,
+        _credential: bytearray | None = None,
+        _reauthentication: bytearray | None = None,
+    ) -> ProviderCredentialResult:
+        observed.append(target)
+        return ProviderCredentialResult("set", 1, "stored")
+
+    with (
+        patch("yoetz.config.load.load_config", return_value=_configured_provider()),
+        patch(
+            "yoetz.cli.privacy_setup.get_privacy_setup_snapshot",
+            side_effect=_bound_privacy_snapshot,
+        ),
+        patch("yoetz.cli.unlock.load_auto_unlock_reauthentication", return_value=None),
+        patch("yoetz.cli.unlock.set_provider_credential", side_effect=ceremony),
+    ):
+        result = CliRunner().invoke(
+            app,
+            [
+                "provider",
+                "credential",
+                "set",
+                "--provider-id",
+                "provider",
+                "--model-id",
+                "model",
+                "--endpoint-profile-id",
+                "ep",
+                "--endpoint-profile-version",
+                "1",
+                "--purpose",
+                "semantic-review",
+                "--scope-digest",
+                "sha256:" + ("b" * 64),
+                "--purpose-digest",
+                canonical_digest({"purpose": "semantic-review"}),
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert len(observed) == 1
+    assert observed[0].provider_id == "provider"
+    assert observed[0].model_id == "model"
+    assert observed[0].purpose == "semantic-review"
+    assert observed[0].scope_digest == "sha256:" + ("b" * 64)
+
+
+def test_provider_credential_command_without_a_configured_provider_names_the_setup_command() -> (
+    None
+):
+    with (
+        patch("yoetz.config.load.load_config", return_value=SimpleNamespace(provider=None)),
+        patch("yoetz.cli.unlock.set_provider_credential") as ceremony,
+    ):
+        result = CliRunner().invoke(app, ["provider", "credential", "set"])
+
+    assert result.exit_code == 2
+    assert "provider_not_configured" in result.stderr
+    assert "yoetz --set" in result.stderr
+    ceremony.assert_not_called()
+
+
+def test_provider_credential_command_without_privacy_scope_names_the_privacy_command() -> None:
+    async def fail_snapshot() -> object:
+        raise RuntimeError("private internal detail")
+
+    with (
+        patch("yoetz.config.load.load_config", return_value=_configured_provider()),
+        patch(
+            "yoetz.cli.privacy_setup.get_privacy_setup_snapshot",
+            side_effect=fail_snapshot,
+        ),
+        patch("yoetz.cli.unlock.set_provider_credential") as ceremony,
+    ):
+        result = CliRunner().invoke(app, ["provider", "credential", "set"])
+
+    assert result.exit_code == 2
+    assert "repository_privacy_scope_unavailable" in result.stderr
+    assert "yoetz --privacy" in result.stderr
+    assert "private internal detail" not in result.stderr
+    ceremony.assert_not_called()
+
+
+def test_menu_credential_ceremony_supplies_the_scoped_reauthentication_secret() -> None:
+    """A Keychain-provisioned vault must not ask the menu user for an unseen passphrase."""
+
+    from yoetz.cli import menu
+
+    observed: list[tuple[Any, bytearray | None, bytearray | None]] = []
+
+    async def ceremony(
+        target: Any,
+        credential: bytearray | None = None,
+        reauthentication: bytearray | None = None,
+    ) -> ProviderCredentialResult:
+        observed.append((target, credential, reauthentication))
+        return ProviderCredentialResult("set", 2, "stored")
+
+    with (
+        patch("yoetz.cli.menu._ask", return_value="2"),
+        patch("yoetz.config.load.load_config", return_value=_configured_provider()),
+        patch(
+            "yoetz.cli.privacy_setup.get_privacy_setup_snapshot",
+            side_effect=_bound_privacy_snapshot,
+        ),
+        patch(
+            "yoetz.cli.unlock.load_auto_unlock_reauthentication",
+            return_value=bytearray(b"scoped-reauth"),
+        ),
+        patch("yoetz.cli.unlock.set_provider_credential", side_effect=ceremony),
+    ):
+        menu._provider_menu()  # pyright: ignore[reportPrivateUsage]
+
+    assert len(observed) == 1
+    _target, credential, reauthentication = observed[0]
+    assert credential is None
+    assert reauthentication is not None
+    assert bytes(reauthentication) == b"scoped-reauth"

@@ -162,9 +162,11 @@ async def test_auto_unlock_repair_proves_passphrase_before_saving_and_wipes_it(
 
 
 @pytest.mark.anyio
-async def test_auto_unlock_repair_maps_missing_trusted_tty_to_usage_failure(
+async def test_auto_unlock_repair_names_the_missing_trusted_tty_instead_of_bad_input(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """No console Yoetz owns is an environment fact; 'invalid input' sent operators hunting."""
+
     client = _Client(state="locked", reason="passphrase_required")
 
     def no_tty() -> bytearray:
@@ -179,7 +181,10 @@ async def test_auto_unlock_repair_maps_missing_trusted_tty_to_usage_failure(
         )
         == 2
     )
-    assert capsys.readouterr().err == "invalid_request: the command input is invalid\n"
+    captured = capsys.readouterr().err
+    assert captured.startswith("trusted_console_required: ")
+    assert "foreground terminal" in captured
+    assert "invalid_request" not in captured
 
 
 def test_foreground_terminal_accepts_macos_controlling_tty_alias(

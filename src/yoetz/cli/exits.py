@@ -10,8 +10,10 @@ from yoetz.protocol.errors import PublicErrorCode
 __all__ = [
     "CEREMONY_REFUSAL_MESSAGES",
     "PUBLIC_EXIT_CODES",
+    "REMEDIATION_MESSAGES",
     "ceremony_refusal_message",
     "exit_code_for",
+    "remediation_message",
 ]
 
 PUBLIC_EXIT_CODES: Final = MappingProxyType(
@@ -97,3 +99,67 @@ def ceremony_refusal_message(reason: str) -> str | None:
     """Return the operator-facing line for a structural ceremony refusal, or None."""
 
     return CEREMONY_REFUSAL_MESSAGES.get(reason)
+
+
+# Bounded elevated-bootstrap and human-ceremony tokens are stable contract, but a bare token on
+# stderr tells an operator nothing about what to do next. These are the remediation halves; the
+# caller keeps printing the token so existing machine-readable expectations stay intact.
+REMEDIATION_MESSAGES: Final = MappingProxyType(
+    {
+        "trusted_console_required": (
+            "this ceremony needs a foreground terminal Yoetz owns (stdin and stderr on the same "
+            "tty, in the foreground process group). From an agent session run "
+            "'yoetz consent prepare <operation>' then 'yoetz consent authorize' instead"
+        ),
+        "human_authority_unavailable": (
+            "no verified foreground console was found for this review; run "
+            "'yoetz consent review' directly on a local terminal"
+        ),
+        "chat_user_attestation_invalid": (
+            "the relayed attestation was not accepted; --client-kind must name an allowlisted "
+            "first-party client (currently 'codex')"
+        ),
+        "chat_user_target_mismatch": (
+            "the supplied pending id or digests do not match the pending decision; the pending "
+            "record is stale, or prepare and authorize ran from different working directories. "
+            "Run 'yoetz consent prepare' again and pass its exact digests"
+        ),
+        "chat_user_warning_required": (
+            "a credential-bearing approve requires --warning-acknowledged after showing the "
+            "danger text to the person instructing you"
+        ),
+        "chat_user_reauthentication_unavailable": (
+            "this installation has no keyring auto-unlock secret, so the credential cannot be "
+            "stored from an agent session; run the ceremony on a local terminal with "
+            "'yoetz provider credential set'"
+        ),
+        "repository_privacy_scope_unavailable": (
+            "this repository is not bound to privacy authority yet; run 'yoetz --privacy' "
+            "(or prepare and authorize 'repository_privacy_grant') with the service running"
+        ),
+        "provider_credential_required": (
+            "this operation stores a provider credential; pipe exactly one into "
+            "'yoetz consent authorize --provider-credential-stdin'"
+        ),
+        "provider_credential_invalid": (
+            "the piped credential must be 1..8192 bytes with no NUL, carriage return, or newline"
+        ),
+        "provider_not_configured": (
+            "no provider and model are configured for this installation; run 'yoetz --set' first"
+        ),
+        "pending_expired": (
+            "that pending decision expired before it was authorized; run "
+            "'yoetz consent prepare <operation>' again"
+        ),
+        "pending_already_active": (
+            "another pending decision is already active; authorize or deny it with "
+            "'yoetz consent authorize', or wait for it to expire"
+        ),
+    }
+)
+
+
+def remediation_message(reason: str) -> str | None:
+    """Return the next-step half of an operator-facing line for a bounded token, or None."""
+
+    return REMEDIATION_MESSAGES.get(reason)

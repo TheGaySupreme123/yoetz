@@ -849,6 +849,14 @@ def catalog_payload() -> dict[str, JsonValue]:
             hint += " --target-digest <sha256:...>"
         if spec.requires_grant_binding:
             hint += " --recipe <assisted_review|private|metadata_only>"
+        # Only the profile identity is caller input; the purpose, its digests, and the repository
+        # privacy commitment are derived by prepare. Naming them here sent agents hunting for
+        # internals they cannot know.
+        if spec.requires_provider_binding:
+            hint += (
+                " --provider-id <id> --model-id <id> --endpoint-profile-id <id>"
+                " --endpoint-profile-version <version>"
+            )
         operations.append(
             {
                 "operation": spec.operation,

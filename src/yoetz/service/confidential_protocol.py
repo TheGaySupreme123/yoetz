@@ -95,6 +95,7 @@ __all__ = [
     "decode_secret_header",
     "encode_human_frame",
     "encode_secret_header",
+    "human_target_json",
     "monotonic_milliseconds",
     "new_binding_expiry_ms",
     "validate_passphrase_buffer",
@@ -288,20 +289,7 @@ class ProviderCredentialTarget:
             raise ValueError("provider_credential_target_invalid")
 
     def target_digest(self) -> str:
-        return canonical_digest(
-            {
-                "action": self.action,
-                "endpoint_profile_id": self.endpoint_profile_id,
-                "endpoint_profile_version": self.endpoint_profile_version,
-                "kind": self.kind,
-                "model_id": self.model_id,
-                "provider_id": self.provider_id,
-                "purpose": self.purpose,
-                "purpose_digest": self.purpose_digest,
-                "repository_privacy_commitment": self.repository_privacy_commitment,
-                "scope_digest": self.scope_digest,
-            }
-        )
+        return canonical_digest(human_target_json(self))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1279,7 +1267,13 @@ def decode_secret_header(data: bytes | bytearray) -> tuple[SecretIngressBinding,
         raise ConfidentialProtocolError("binding_invalid") from exc
 
 
-def _target_to_json(target: HumanOpenTarget) -> dict[str, JsonValue]:
+def human_target_json(target: HumanOpenTarget) -> dict[str, JsonValue]:
+    """The one canonical JSON shape for a human ceremony target.
+
+    The service session binding digest, the wire encoding, and the trusted client's preview
+    verification must all hash exactly these bytes; a second hand-maintained copy of this
+    serialization is how the client ends up rejecting its own valid preview.
+    """
     if type(target) is EmptyVaultTarget:
         return {"expected_mode": target.expected_mode, "kind": target.kind}
     if type(target) is PortableRecoveryTarget:
@@ -1478,7 +1472,7 @@ def _human_to_json(envelope: HumanEnvelope) -> tuple[_HumanFrameType, dict[str, 
             "ceremony_kind": envelope.ceremony_kind.value,
             "connection_nonce": envelope.connection_nonce,
             "protocol_version": envelope.protocol_version,
-            "target": _target_to_json(envelope.target),
+            "target": human_target_json(envelope.target),
         }
     if type(envelope) is ServerOpenedEnvelope:
         return _HumanFrameType.SERVER_OPENED, {
@@ -1708,7 +1702,7 @@ def _preview_to_json(value: HumanPreview) -> dict[str, JsonValue]:
         }
     if type(value) in {ProviderCredentialSetPreview, ProviderCredentialRotatePreview}:
         provider = cast(ProviderCredentialSetPreview | ProviderCredentialRotatePreview, value)
-        return {"kind": provider.kind, "target": _target_to_json(provider.target)}
+        return {"kind": provider.kind, "target": human_target_json(provider.target)}
     if type(value) is PrivacyPolicyDecisionPreview:
         encoded: dict[str, JsonValue] = {
             "diff_digest": value.diff_digest,

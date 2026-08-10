@@ -99,13 +99,35 @@ _PROVIDER_SETUP_DIRECT_REASONS: Final = frozenset(
         "interrupted",
         "model_selection_invalid",
         "preview_invalid",
-        "privacy_setup_incomplete",
         "provider_binding_invalid",
         "repository_privacy_scope_unavailable",
         "result_invalid",
         "service_not_ready",
         "stored_result_recovered",
         "trusted_console_required",
+    }
+)
+_PROVIDER_SETUP_PRIVACY_REASONS: Final = frozenset(
+    {
+        "local_terminal_required",
+        "privacy_authority_required",
+        "privacy_decision_not_approved",
+        "privacy_policy_stale",
+        "privacy_proposal_stale",
+        "privacy_setup_candidate_invalid",
+        "privacy_setup_category_invalid",
+        "privacy_setup_channel_unsupported",
+        "privacy_setup_credential_probe_requires_provider",
+        "privacy_setup_data_class_invalid",
+        "privacy_setup_failed",
+        "privacy_setup_grant_missing",
+        "privacy_setup_incomplete",
+        "privacy_setup_local_model_binding_required",
+        "privacy_setup_proposal_invalid",
+        "privacy_setup_provider_binding_required",
+        "privacy_setup_recipe_invalid",
+        "privacy_setup_router_route_unconstrained",
+        "privacy_setup_snapshot_invalid",
     }
 )
 _PROVIDER_SETUP_CONFIG_REASONS: Final = frozenset(
@@ -163,7 +185,11 @@ def _allowlisted_provider_setup_reason(reason: object) -> str:
 
     if type(reason) is not str:
         return "credential_setup_failed"
-    if reason in _PROVIDER_SETUP_DIRECT_REASONS or reason in _PROVIDER_SETUP_CONFIG_REASONS:
+    if (
+        reason in _PROVIDER_SETUP_DIRECT_REASONS
+        or reason in _PROVIDER_SETUP_CONFIG_REASONS
+        or reason in _PROVIDER_SETUP_PRIVACY_REASONS
+    ):
         return reason
     if reason.startswith("credential_"):
         confidential_reason = reason.removeprefix("credential_")
@@ -1275,12 +1301,18 @@ async def _restart_service_for_semantic_composition() -> dict[str, JsonValue]:
     return {"reachable": False, "state": None, "vault_mode": None}
 
 
+def _privacy_block_reason(reason: object) -> str:
+    """Name the exact privacy cause that blocked the credential step, never free text."""
+
+    return reason if type(reason) is str and reason else "privacy_setup_incomplete"
+
+
 async def _interactive_provider_setup(
     service: dict[str, JsonValue],
     *,
     provider_choice: str | None = None,
     model: str | None = None,
-    before_credential: Callable[[], Awaitable[bool]] | None = None,
+    before_credential: Callable[[], Awaitable[str | None]] | None = None,
 ) -> tuple[dict[str, JsonValue], dict[str, JsonValue]]:
     """Run trusted local setup ceremonies while keeping secrets out of wizard state."""
 
@@ -1424,10 +1456,14 @@ async def _interactive_provider_setup(
     # already has a credential. This also makes a repeated setup run idempotent: an existing
     # credential is shown as present and is never requested again.
     service = await _restart_service_for_semantic_composition()
-    if before_credential is not None and not await before_credential():
-        provider_report["credential_reason"] = "privacy_setup_incomplete"
-        wipe_auto_passphrase()
-        return _provider_setup_result(service, provider_report)
+    if before_credential is not None:
+        # The privacy step reports its own bounded reason; keep it instead of flattening every
+        # cause to privacy_setup_incomplete.
+        blocked = await before_credential()
+        if blocked is not None:
+            provider_report["credential_reason"] = blocked
+            wipe_auto_passphrase()
+            return _provider_setup_result(service, provider_report)
     credential_before: bool | None = None
     if service.get("state") == "ready":
         from yoetz.cli.provider_status import provider_status_report
@@ -1602,7 +1638,7 @@ async def run_provider_setup(
         return 20
     privacy_result: object | None = None
 
-    async def authorize_provider_channel() -> bool:
+    async def authorize_provider_channel() -> str | None:
         nonlocal privacy_result
         from yoetz.cli.privacy_setup import run_privacy_setup
         from yoetz.cli.unlock import HumanCeremonyCliError
@@ -1619,8 +1655,10 @@ async def run_provider_setup(
             )
         except (ControlError, HumanCeremonyCliError, OSError, ValueError) as error:
             typer.echo(f"privacy_setup_failed: {type(error).__name__}", err=True)
-            return False
-        return getattr(privacy_result, "outcome", "failed") in {"configured", "unchanged"}
+            return _privacy_block_reason(getattr(error, "reason", None))
+        if getattr(privacy_result, "outcome", "failed") in {"configured", "unchanged"}:
+            return None
+        return _privacy_block_reason(getattr(privacy_result, "reason", None))
 
     service, provider_report = await _interactive_provider_setup(
         service,
@@ -1813,7 +1851,7 @@ async def run_setup_wizard(
     semantic_status: dict[str, JsonValue] | None = None
     if interactive and review_mode == "semantic":
 
-        async def authorize_provider_channel() -> bool:
+        async def authorize_provider_channel() -> str | None:
             nonlocal privacy
             from yoetz.cli.privacy_setup import run_privacy_setup
             from yoetz.cli.unlock import HumanCeremonyCliError
@@ -1842,7 +1880,7 @@ async def run_setup_wizard(
                     "migration_state": None,
                     "reason": reason if type(reason) is str else "privacy_setup_failed",
                 }
-                return False
+                return _privacy_block_reason(reason)
             privacy = {
                 "outcome": privacy_result.outcome,
                 "profile": privacy_result.profile,
@@ -1851,7 +1889,9 @@ async def run_setup_wizard(
                 "migration_state": getattr(privacy_result, "migration_state", None),
                 "reason": privacy_result.reason,
             }
-            return privacy_result.outcome in {"configured", "unchanged"}
+            if privacy_result.outcome in {"configured", "unchanged"}:
+                return None
+            return _privacy_block_reason(privacy_result.reason)
 
         service, provider = await _interactive_provider_setup(
             service,
@@ -2103,7 +2143,7 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
             )
         )
         credential_reason = provider.get("credential_reason")
-        if type(credential_reason) is str:
+        if credential != "stored" and type(credential_reason) is str:
             typer.echo(f"  Credential reason: {credential_reason}")
     if isinstance(privacy, dict):
         line = f"  Privacy: {privacy.get('outcome')} ({privacy.get('profile')})"

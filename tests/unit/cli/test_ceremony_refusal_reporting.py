@@ -13,7 +13,8 @@ from __future__ import annotations
 import pytest
 
 from yoetz.cli.app import _trusted_exception_failure
-from yoetz.cli.exits import ceremony_refusal_message, exit_code_for
+from yoetz.cli.exits import ceremony_refusal_message, exit_code_for, remediation_message
+from yoetz.cli.unlock import HumanCeremonyCliError
 from yoetz.protocol.errors import PublicErrorCode
 from yoetz.service.confidential_client import ConfidentialClientError
 
@@ -82,6 +83,64 @@ def test_cancellation_is_not_a_refusal(capsys: pytest.CaptureFixture[str]) -> No
 
 def test_unknown_reasons_have_no_refusal_message() -> None:
     assert ceremony_refusal_message("timeout") is None
+
+
+def test_trusted_console_required_is_not_reported_as_bad_command_input(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A missing foreground console is an environment fact, not a malformed command."""
+
+    code = _trusted_exception_failure(HumanCeremonyCliError("trusted_console_required"))
+
+    captured = capsys.readouterr().err
+    assert "trusted_console_required" in captured
+    assert "invalid_request: the command input is invalid" not in captured
+    assert "yoetz consent prepare" in captured
+    assert "yoetz consent authorize" in captured
+    assert code == exit_code_for(PublicErrorCode.INVALID_REQUEST)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "confirmation_mismatch",
+        "input_invalid",
+    ],
+)
+def test_genuine_input_errors_still_report_invalid_request(
+    reason: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = _trusted_exception_failure(HumanCeremonyCliError(reason))
+
+    assert "invalid_request: the command input is invalid" in capsys.readouterr().err
+    assert code == exit_code_for(PublicErrorCode.INVALID_REQUEST)
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("chat_user_attestation_invalid", "--client-kind"),
+        ("chat_user_reauthentication_unavailable", "local terminal"),
+        ("chat_user_target_mismatch", "yoetz consent prepare"),
+        ("pending_already_active", "yoetz consent authorize"),
+        ("pending_expired", "yoetz consent prepare"),
+        ("provider_credential_invalid", "8192"),
+        ("provider_not_configured", "yoetz --set"),
+        ("repository_privacy_scope_unavailable", "yoetz --privacy"),
+        ("trusted_console_required", "yoetz consent prepare"),
+    ],
+)
+def test_bare_tokens_carry_the_exact_next_command(reason: str, expected: str) -> None:
+    """Every mapped token must name what to run next, not restate the token."""
+
+    message = remediation_message(reason)
+
+    assert message is not None
+    assert expected in message
+
+
+def test_unmapped_tokens_have_no_remediation() -> None:
+    assert remediation_message("authorize_failed") is None
 
 
 def test_secret_rejected_names_the_credential_and_the_retry() -> None:
