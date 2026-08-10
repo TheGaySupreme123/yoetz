@@ -34,6 +34,7 @@ from yoetz.adapters.integrations.codex_skill import (
 from yoetz.application.codex_plugin import CodexPluginService
 from yoetz.application.harness_mcp import HarnessMcpService, McpRegistrationConfirmation
 from yoetz.application.observation_check_policy import load_observation_check_policy
+from yoetz.cli.agent_start import AGENT_START_HANDOFF
 from yoetz.config.load import load_config
 from yoetz.config.paths import PathSafetyError, setup_marker_path
 from yoetz.domain.values import RequestId, request_id
@@ -88,11 +89,7 @@ _NEXT_CREDENTIAL: Final = (
     "provider credential through the confidential ceremony"
 )
 _NEXT_RESTART: Final = "restart the Yoetz service so the configured semantic evaluator is composed"
-_NEXT_AGENT_GUIDE: Final = (
-    "coding agent: setup questions appear only on the user's own terminal; follow the "
-    "agent-start guide at "
-    "https://raw.githubusercontent.com/TheGaySupreme123/yoetz/main/docs/usage/agent-start.md"
-)
+_NEXT_AGENT_GUIDE: Final = AGENT_START_HANDOFF
 _PROVIDER_SETUP_DIRECT_REASONS: Final = frozenset(
     {
         "cancelled",

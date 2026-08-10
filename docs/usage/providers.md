@@ -5,6 +5,16 @@ awkward ceremony. The two never mix.
 
 ## Reviewed presets
 
+To inspect the reviewed providers and suggested models bundled in the installed package without
+making a network request or changing configuration, run:
+
+```text
+yoetz provider catalog --json
+```
+
+The catalog includes the custom-model escape hatch. Its entries are structural support, not proof
+of account entitlement, configured readiness, or live provider interoperability.
+
 ```text
 yoetz provider endpoint --provider openai            # or: fireworks, anthropic, gemini,
                         --model <model-id>           #     openrouter, grok, vercel-ai-gateway

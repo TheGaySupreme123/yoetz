@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 
 import yoetz.application.privacy_policy as privacy_policy
 import yoetz.cli.app as cli
+from yoetz.cli.agent_start import AGENT_START_GUIDE_URL, AGENT_START_HANDOFF
 from yoetz.cli.exits import PUBLIC_EXIT_CODES, exit_code_for
 from yoetz.domain.privacy import PrivacyProfile, ReviewContextProfile
 from yoetz.mcp.descriptors import TOOL_DESCRIPTORS
@@ -50,6 +51,9 @@ def test_command_matrix_matches_six_operations() -> None:
     runner = CliRunner()
     root = runner.invoke(cli.app, ["--help"])
     assert root.exit_code == 0
+    root_plain = "".join(re.sub(r"\x1b\[[0-9;]*m", "", root.stdout).split())
+    assert "".join(AGENT_START_HANDOFF.split()) in root_plain
+    assert "".join(AGENT_START_GUIDE_URL.split()) in root_plain
     for command in _OPERATION_COMMANDS + _SUPPORT_COMMANDS:
         assert command in root.stdout
     # No undocumented convenience command sneaks into the frozen matrix.
@@ -82,6 +86,7 @@ def test_bare_invocation_without_tty_still_prints_help() -> None:
     result = CliRunner().invoke(cli.app, [])
     assert result.exit_code == 0
     assert "Usage" in result.stdout
+    assert AGENT_START_HANDOFF in result.stdout
 
 
 def test_privacy_command_and_recipe_matrix() -> None:
