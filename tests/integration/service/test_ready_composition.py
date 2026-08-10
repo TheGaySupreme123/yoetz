@@ -1354,6 +1354,94 @@ async def test_ready_factory_deterministic_check_records_semantic_not_requested_
 
 
 @pytest.mark.anyio
+async def test_ready_composition_reports_exact_configured_credential_presence(
+    tmp_path: Path,
+) -> None:
+    """Status can read exact vault presence without inventing repository authority."""
+
+    tmp_path.chmod(0o700)
+    clock = _Clock()
+    memory = LocalSecretMemory()
+    lifecycle = ServiceLifecycle(
+        clock,
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "d" * 64,
+        instance_id=_INSTANCE_ID,
+    )
+    await lifecycle.acquire_singleton()
+    await lifecycle.transition(ServiceState.LOCKED)
+    vault = VaultService(
+        installation_id=_INSTALLATION_ID,
+        service_generation=1,
+        mode=VaultMode.UNINITIALIZED,
+        secret_memory=memory,
+        clock=clock,
+        vault_store_factory=lambda: EncryptedVaultStore(tmp_path / "vault"),
+        pristine_state_digest="sha256:" + "e" * 64,
+    )
+    initialize = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"correct horse battery"))
+    await vault.initialize_passphrase(initialize, "sha256:" + "f" * 64)
+    provider = fireworks_provider(model="accounts/fireworks/models/minimax-m3")
+    config = YoetzConfig(profile="local-openai", provider=provider)
+
+    def application_factory(provider_config: YoetzConfig):
+        return build_ready_application_factory(
+            lifecycle=lifecycle,
+            vault=vault,
+            config=provider_config,
+            paths=_Paths(tmp_path),
+            clock=clock,
+            secret_memory=memory,
+            diagnostics=_Diagnostics(),
+        )
+
+    app = None
+    try:
+        app = await application_factory(config)(1, vault.generation)
+        assert app.provider_credential_connected is False
+        await app.close()
+        app = None
+
+        credential_binding = provider_credential_profile_binding(
+            provider.provider_id,
+            provider.model,
+            provider.endpoint_profile_id,
+            provider.endpoint_profile_version,
+        )
+        proof = HumanAuthorizationProof(
+            "provider-proof-before-recomposition",
+            "provider_credential_set",
+            credential_binding.target_digest("set"),
+            1,
+            vault.generation,
+            None,
+            1.0,
+            60.0,
+        )
+        credential = memory.capture(
+            SecretPurpose.PROVIDER_CREDENTIAL,
+            bytearray(b"test-provider-token-for-status"),
+        )
+        await vault.store_provider_credential("set", credential_binding, credential, proof, 2.0)
+
+        app = await application_factory(config)(1, vault.generation)
+        assert app.provider_credential_connected is True
+        await app.close()
+        app = None
+
+        other_provider = fireworks_provider(model="accounts/fireworks/models/a-different-model")
+        other_config = YoetzConfig(profile="local-openai", provider=other_provider)
+        app = await application_factory(other_config)(1, vault.generation)
+        assert app.provider_credential_connected is False
+    finally:
+        if app is not None:
+            await app.close()
+        await vault.close()
+        memory.close()
+        await lifecycle.close()
+
+
+@pytest.mark.anyio
 async def test_ready_check_never_activates_provider_from_machine_policy_without_repository_grant(
     tmp_path: Path,
 ) -> None:

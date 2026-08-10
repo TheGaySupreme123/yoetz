@@ -2249,6 +2249,17 @@ async def provide_service_ready_context(
     def binding_not_connected(_binding: ProviderBinding) -> bool:
         return False
 
+    async def configured_provider_credential_present() -> bool:
+        if candidate_binding is None:
+            return False
+        credential_binding = provider_credential_profile_binding(
+            candidate_binding.provider_id,
+            candidate_binding.model_id,
+            candidate_binding.endpoint_profile_id,
+            candidate_binding.endpoint_profile_version,
+        )
+        return await vault.has_provider_credential(credential_binding)
+
     async def resolve_provider_binding() -> ProviderBinding | None:
         if candidate_binding is None:
             return None
@@ -2258,21 +2269,15 @@ async def provide_service_ready_context(
         )
         if binding_connected(candidate_binding) is not True:
             return None
-        credential_binding = provider_credential_profile_binding(
-            candidate_binding.provider_id,
-            candidate_binding.model_id,
-            candidate_binding.endpoint_profile_id,
-            candidate_binding.endpoint_profile_version,
-        )
-        if not await vault.has_provider_credential(credential_binding):
+        if not await configured_provider_credential_present():
             return None
         return candidate_binding
 
-    # Repository authority is session-specific, so ready-time composition cannot truthfully claim
-    # a connected external provider or inspect its credential. Those facts are resolved only after
-    # a task route supplies its trusted repository commitment.
+    # Repository authority is session-specific, so ready-time composition cannot activate a
+    # provider binding or claim semantic readiness. Exact configured-credential presence is a
+    # separate structural vault fact: it neither decrypts the record nor grants dispatch authority.
     provider_binding: ProviderBinding | None = None
-    provider_credential_connected = False
+    provider_credential_connected = await configured_provider_credential_present()
     semantic_ready = False
     capabilities = {
         RuntimeCapability.STRUCTURAL_READ,
