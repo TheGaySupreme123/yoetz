@@ -60,11 +60,15 @@ is caller-authored narrative and is never treated as the bytes identified by `co
 ### Making a change reviewable
 
 When semantic review is expected, one evidence record can carry both legibility and identity: put
-the smallest problem-local changed hunk or test slice (at most roughly 3,500 bytes) in
-`description`, and publish the matching `content_digest` with its `digest_binding`. The review
-excerpt shown to the reviewer is the `description`; the digest identity facts travel alongside it
-as excerpt provenance. A digest-bound record without a `description` contributes only its bounded
-provenance facts, so the reviewer sees identity but no content.
+the smallest problem-local changed hunk or test slice in `description`, and publish the matching
+`content_digest` with its `digest_binding`. The review excerpt shown to the reviewer is the
+`description`; the digest identity facts travel alongside it as excerpt provenance. A digest-bound
+record without a `description` contributes only its bounded provenance facts, so the reviewer sees
+identity but no content.
+
+The excerpt is truncated to at most 4,096 UTF-8 bytes, silently and possibly mid-content. Keep the
+slice within 4,096 UTF-8 bytes so the reviewer receives it intact; `description` itself accepts up
+to 8,192 characters, so the field limit does not protect against excerpt truncation.
 
 Cite the evidence id in the claim's `supporting_refs`. Evidence referenced only from
 `result_recorded.evidence_refs` does not qualify for excerpt selection under linked-subject

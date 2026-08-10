@@ -786,6 +786,16 @@ class ExcerptDigestProvenance:
             self.approval_commitment is not None and self.approved_check_result_digest is not None
         ):
             raise _invalid_case()
+        if (
+            self.digest_subject is EvidenceDigestSubject.APPROVED_CHECK_RECEIPT
+            and self.provenance is not EvidenceDigestProvenance.APPROVED_CHECK
+        ):
+            raise _invalid_case()
+        if (
+            self.digest_subject is EvidenceDigestSubject.IMPORT_REPORT
+            and self.provenance is not EvidenceDigestProvenance.IMPORT_OBSERVED
+        ):
+            raise _invalid_case()
 
 
 @dataclass(frozen=True, slots=True)

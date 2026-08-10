@@ -6,6 +6,8 @@ import inspect
 from collections.abc import Mapping, Sequence
 from typing import cast
 
+import pytest
+
 from builders.policy_cases import (
     clm,
     evd,
@@ -55,7 +57,7 @@ from yoetz.kernel.deterministic_checks import (
 )
 from yoetz.kernel.projections import EvidenceProjectionRecord
 from yoetz.kernel.reducers import replay
-from yoetz.ports.semantic import SemanticCase
+from yoetz.ports.semantic import ExcerptDigestProvenance, SemanticCase
 from yoetz.protocol.canonical import JsonValue, strict_json_parse
 from yoetz.protocol.coverage import EvidenceImmutability
 from yoetz.protocol.ids import IdKind, new_id
@@ -339,6 +341,56 @@ def test_assisted_digest_excerpt_without_description_keeps_typed_provenance_text
     assert document["digest_subject"] == "test_stdout"
     assert document["content_availability"] == "digest_only"
     assert excerpt.digest_provenance is not None
+
+
+def _excerpt_provenance(**overrides: object) -> ExcerptDigestProvenance:
+    fields: dict[str, object] = {
+        "evidence_kind": EvidenceKind.TEST_RESULT,
+        "strength": EvidenceImmutability.CONTENT_DIGEST,
+        "content_digest": "sha256:" + "1" * 64,
+        "digest_subject": EvidenceDigestSubject.TEST_STDOUT,
+        "content_availability": EvidenceContentAvailability.DIGEST_ONLY,
+        "byte_count": 512,
+        "provenance": EvidenceDigestProvenance.CALLER_ASSERTED,
+    }
+    fields.update(overrides)
+    return ExcerptDigestProvenance(**fields)  # type: ignore[arg-type]
+
+
+def test_excerpt_digest_provenance_rejects_binding_invariant_violations() -> None:
+    approval = {
+        "approval_commitment": "sha256:" + "a" * 64,
+        "approved_check_result_digest": "sha256:" + "b" * 64,
+    }
+    # Reserved subjects require their owning provenance.
+    for subject, wrong in (
+        (EvidenceDigestSubject.APPROVED_CHECK_RECEIPT, EvidenceDigestProvenance.CALLER_ASSERTED),
+        (EvidenceDigestSubject.APPROVED_CHECK_RECEIPT, EvidenceDigestProvenance.IMPORT_OBSERVED),
+        (EvidenceDigestSubject.IMPORT_REPORT, EvidenceDigestProvenance.CALLER_ASSERTED),
+        (EvidenceDigestSubject.IMPORT_REPORT, EvidenceDigestProvenance.APPROVED_CHECK),
+    ):
+        with pytest.raises(ValueError, match="semantic_case_invalid"):
+            _excerpt_provenance(
+                digest_subject=subject,
+                provenance=wrong,
+                **(approval if wrong is EvidenceDigestProvenance.APPROVED_CHECK else {}),
+            )
+    # approved_check requires both approval digests, exactly.
+    with pytest.raises(ValueError, match="semantic_case_invalid"):
+        _excerpt_provenance(provenance=EvidenceDigestProvenance.APPROVED_CHECK)
+    with pytest.raises(ValueError, match="semantic_case_invalid"):
+        _excerpt_provenance(
+            provenance=EvidenceDigestProvenance.APPROVED_CHECK,
+            approval_commitment="sha256:" + "a" * 64,
+        )
+    with pytest.raises(ValueError, match="semantic_case_invalid"):
+        _excerpt_provenance(**approval)
+    accepted = _excerpt_provenance(
+        digest_subject=EvidenceDigestSubject.APPROVED_CHECK_RECEIPT,
+        provenance=EvidenceDigestProvenance.APPROVED_CHECK,
+        **approval,
+    )
+    assert accepted.provenance is EvidenceDigestProvenance.APPROVED_CHECK
 
 
 def test_case_envelope_serializes_excerpt_digest_provenance() -> None:
