@@ -242,12 +242,61 @@ def test_provider_preset_aliases_and_unknown_choices_are_bounded() -> None:
     assert caught.value.reason_code == "config_value_invalid"
 
 
-def test_provider_model_catalog_is_default_first_unique_and_capped() -> None:
-    assert len(PROVIDER_PRESETS) == 7
-    for preset in PROVIDER_PRESETS.values():
-        assert 1 <= len(preset.suggested_models) <= 10
-        assert preset.suggested_models[0] == preset.default_model
-        assert len(set(preset.suggested_models)) == len(preset.suggested_models)
+def test_provider_model_catalog_matches_august_2026_review() -> None:
+    expected_models = {
+        "official_openai": (
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+        ),
+        "fireworks": (
+            "accounts/fireworks/models/qwen3-235b-a22b",
+            "accounts/fireworks/models/minimax-m3",
+        ),
+        "anthropic": (
+            "claude-sonnet-5",
+            "claude-opus-5",
+            "claude-fable-5",
+            "claude-haiku-4-5-20251001",
+        ),
+        "google_gemini": (
+            "gemini-3.6-flash",
+            "gemini-3.5-flash-lite",
+        ),
+        "openrouter": (
+            "openai/gpt-5.6-sol",
+            "openai/gpt-5.6-terra",
+            "openai/gpt-5.6-luna",
+            "anthropic/claude-sonnet-5",
+            "anthropic/claude-opus-5",
+            "anthropic/claude-fable-5",
+            "google/gemini-3.6-flash",
+            "x-ai/grok-4.5",
+        ),
+        "grok": (
+            "grok-4.5",
+            "grok-4.3",
+            "grok-4.20-0309-reasoning",
+            "grok-4.20-0309-non-reasoning",
+        ),
+        "vercel_ai_gateway": (
+            "anthropic/claude-sonnet-5",
+            "anthropic/claude-fable-5",
+            "openai/gpt-5.6-sol",
+            "openai/gpt-5.6-terra",
+            "openai/gpt-5.6-luna",
+            "xai/grok-4.5",
+            "google/gemini-3.6-flash",
+        ),
+    }
+
+    assert set(PROVIDER_PRESETS) == set(expected_models)
+    for choice, expected in expected_models.items():
+        preset = PROVIDER_PRESETS[choice]
+        assert preset.suggested_models == expected
+        assert preset.default_model == expected[0]
+        assert 1 <= len(expected) <= 10
+        assert len(set(expected)) == len(expected)
 
 
 def test_owner_declared_data_use_never_assisted_eligible() -> None:
