@@ -23,6 +23,7 @@ from yoetz.domain.findings import (
     rank_key,
 )
 from yoetz.domain.receipts import (
+    CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP,
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
     COMPLETION_SCOPE_UNDECLARED_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
@@ -232,6 +233,10 @@ def _validate_applicable_check(context: ReceiptBuildContext) -> None:
     check = context.applicable_check
     if check is None:
         if not (_CHECK_ABSENCE_GAPS & set(context.coverage.known_gaps)):
+            raise ValueError(_CONTEXT_INVALID)
+        # The earlier-frontier gap qualifies a check that does contribute; it can never stand in
+        # for one that is absent, or the limitations wording would describe a check that is gone.
+        if CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP in context.coverage.known_gaps:
             raise ValueError(_CONTEXT_INVALID)
         return
     if latest is None:
@@ -707,13 +712,24 @@ def _count_phrase(count: int, singular: str, plural: str) -> str:
     return f"{count} {plural}"
 
 
-def _check_absence_sentence(
+def _check_coverage_sentence(
     gap_codes: tuple[str, ...],
     frontier: Frontier,
     tested_subject_sequence: str | None,
 ) -> str:
-    """State why no check contributes to this receipt's coverage, in the reader's terms."""
+    """State what the recorded check does or does not cover here, in the reader's terms."""
 
+    if CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP in gap_codes:
+        tested = (
+            "an earlier subject frontier"
+            if tested_subject_sequence is None
+            else f"subject frontier {tested_subject_sequence}"
+        )
+        return (
+            f"A check is recorded at {tested} and still contributes here: only responses to the "
+            f"findings it returned were published after it. Its verdict is current as of {tested}, "
+            f"not frontier {frontier.sequence}. Re-run check at this frontier to close the gap."
+        )
     if "check_not_applicable" in gap_codes:
         tested = (
             "an earlier subject frontier"
@@ -875,9 +891,9 @@ def _sections(
         # A check that ran and succeeded still contributes nothing once material work lands
         # after it. Saying only `check_not_applicable` next to a fresh successful check reads as
         # a contradiction; the 2026-07-27 dogfood could not tell which of four readings was meant.
-        check_absence = _check_absence_sentence(gap_codes, frontier, tested_subject_sequence)
-        if check_absence:
-            gap_body = f"{check_absence} Coverage is limited by: {', '.join(gap_codes)}."
+        check_sentence = _check_coverage_sentence(gap_codes, frontier, tested_subject_sequence)
+        if check_sentence:
+            gap_body = f"{check_sentence} Coverage is limited by: {', '.join(gap_codes)}."
         elif not_requested:
             gap_body = (
                 "Semantic review was not requested (deterministic-only check). "

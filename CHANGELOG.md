@@ -258,6 +258,19 @@ carried them; they are listed because each one describes the behavior that now s
   for what it tested, and that re-running `check` at this frontier is what makes it contribute.
   `check_not_recorded` and `check_payload_unavailable` are explained the same way.
 
+- **Answering a finding no longer discards the check that raised it.** `response_recorded` is a
+  material family, so the guidance-mandated `check` → `respond` → `receipt` sequence always ended
+  in `check_not_applicable`: a successful semantic check's
+  `check_types: ["deterministic", "semantic_model_derived"]` never reached the receipt, which
+  claimed only the `["deterministic"]` baseline it would have carried with no check at all. A
+  response to a finding the applicable check itself returned now leaves that check attributable —
+  its coverage and semantic gaps fold into the receipt — and the receipt declares the new gap
+  `check_current_as_of_earlier_frontier`, stating that the verdict is current as of the subject
+  frontier it tested rather than the receipt's. Responses to findings the check did not return,
+  responses whose payloads are redacted or unreadable (they cannot prove which finding they
+  answered), and every other material event still require a re-check. Compact status uses the same predicate, so
+  status and a receipt at one frontier cannot disagree (issue #172).
+
 - **A read is no longer told to replay a write.** A projection failure on `status` (or a privacy
   receipt read) advertised the same-`request_id` replay remedy as an accepted write, but a read
   appends nothing, so no operation record exists to replay against and the caller waited on a

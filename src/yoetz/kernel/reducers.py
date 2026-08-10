@@ -71,6 +71,7 @@ __all__ = [
     "ReplayIndex",
     "empty_replay_index",
     "extend_replay_index",
+    "invalidates_recorded_check",
     "is_material_event_family",
     "reduce_event",
     "replay",
@@ -97,6 +98,31 @@ _MATERIAL_FAMILIES: Final = frozenset(
 def is_material_event_family(name: str) -> bool:
     """True when an event of this family invalidates a previously recorded check."""
     return name in _MATERIAL_FAMILIES
+
+
+def invalidates_recorded_check(
+    record: LedgerRecord,
+    check_sequence: int,
+    returned_finding_ids: tuple[FindingId, ...],
+) -> bool:
+    """True when *record* supersedes the check recorded at *check_sequence*.
+
+    Answering a finding the check itself returned reports on that check's own output rather than
+    publishing untested work, so such a response leaves the check attributable to a later receipt.
+    Every other material-family record appended after the check supersedes it, including a
+    response to a finding the check did not return and a response whose payload is unreadable.
+    """
+
+    if record.ledger.ingestion_sequence <= check_sequence:
+        return False
+    if not is_material_event_family(record.schema.name):
+        return False
+    if record.schema.name != "response_recorded":
+        return True
+    payload = record.payload
+    if type(payload) is not ResponseRecordedPayload:
+        return True
+    return payload.finding_id not in returned_finding_ids
 
 
 def _corrupt() -> ValueError:

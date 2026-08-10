@@ -83,7 +83,7 @@ from yoetz.kernel.projections import (
     empty_projection_state,
     projection_digest,
 )
-from yoetz.kernel.reducers import is_material_event_family, replay
+from yoetz.kernel.reducers import invalidates_recorded_check, replay
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
@@ -681,10 +681,11 @@ def compact_status_coverage(
     The newest record's envelope (often an engine-derived ``receipt_recorded``) hardcodes
     ``check_types=(none,)`` even immediately after a rich check; the check's real coverage
     lives in its payload. The receipt applicability rule decides whether the projected latest
-    check still covers this state: it does unless material work was appended after it.
+    check still covers this state: it does unless material work superseded it.
 
     Shared by the memory status view and the durable SQLite ``p1_projection_state`` mirror so
-    a restart cannot disagree with the in-process projection about what was checked.
+    a restart cannot disagree with the in-process projection about what was checked, and it uses
+    the same predicate as the receipt so status and receipts cannot disagree either.
     """
 
     baseline = records[-1].coverage
@@ -698,8 +699,9 @@ def compact_status_coverage(
     if check_record is None or type(check_record.payload) is not CheckRecordedPayload:
         return baseline
     if any(
-        is_material_event_family(record.schema.name)
-        and record.ledger.ingestion_sequence > check_record.ledger.ingestion_sequence
+        invalidates_recorded_check(
+            record, check_record.ledger.ingestion_sequence, latest.returned_finding_ids
+        )
         for record in records
     ):
         return baseline

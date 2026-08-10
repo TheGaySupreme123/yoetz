@@ -27,6 +27,7 @@ from yoetz.domain.findings import (
     ResponseDisposition,
 )
 from yoetz.domain.receipts import (
+    CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP,
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
     COMPLETION_SCOPE_UNDECLARED_GAP,
     PolicyVersionEntry,
@@ -455,6 +456,48 @@ def test_applicable_check_at_earlier_subject_frontier_builds() -> None:
     receipt = _build(_context(check=check))
     assert receipt.conclusion is ReceiptConclusion.NO_UNRESOLVED_DETERMINISTIC_FINDINGS
     assert receipt.suppressed_finding_count == 0
+
+
+def test_check_current_as_of_earlier_frontier_names_the_tested_frontier() -> None:
+    """The attributed-check gap must read as a qualification, never as a clean re-check: it names
+    the frontier the verdict is current as of and still blocks the strong conclusion."""
+
+    code = CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP
+    coverage = _coverage(gaps=(code,))
+    check = replace(
+        _check(CheckVerdict.NO_ISSUE_DETECTED, coverage),
+        subject_frontier=Frontier(1, _DIGEST),
+    )
+    receipt = _build(_context(coverage=coverage, gaps=(CaseGap(code, code, ()),), check=check))
+    assert receipt.conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE
+    limitations = next(
+        section.body
+        for section in receipt.sections
+        if section.key is ReceiptSectionKey.LIMITATIONS_AND_COVERAGE
+    )
+    assert "A check is recorded at subject frontier 1 and still contributes here" in limitations
+    assert "only responses to the findings it returned were published after it" in limitations
+    assert "Its verdict is current as of subject frontier 1, not frontier 2." in limitations
+
+
+def test_check_current_as_of_earlier_frontier_without_a_check_is_rejected() -> None:
+    """The gap qualifies a check that contributes; it can never stand in for an absent one."""
+
+    code = CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP
+    coverage = _coverage(gaps=(code, "check_not_recorded"))
+    with pytest.raises(ValueError, match="receipt_build_context_invalid"):
+        ReceiptBuildContext(
+            projection=cast("ProjectionState", _projection()),
+            subject_frontier=_FRONTIER,
+            availability=CaseAvailabilityFacts(),
+            coverage=coverage,
+            gaps=(
+                CaseGap(code, code, ()),
+                CaseGap("check_not_recorded", "check_not_recorded", ()),
+            ),
+            finding_states=(),
+            applicable_check=None,
+        )
 
 
 def test_applicable_check_ahead_of_context_is_rejected() -> None:

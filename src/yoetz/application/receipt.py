@@ -19,6 +19,7 @@ from yoetz.domain.events import (
 )
 from yoetz.domain.findings import Finding, rank_key
 from yoetz.domain.receipts import (
+    CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP,
     ReceiptDocument,
     ReceiptVersionSlice,
     receipt_document_from_json,
@@ -43,7 +44,11 @@ from yoetz.kernel.receipt_builder import (
     ReceiptFindingState,
     build_receipt,
 )
-from yoetz.kernel.reducers import is_material_event_family, replay
+from yoetz.kernel.reducers import (
+    invalidates_recorded_check,
+    is_material_event_family,
+    replay,
+)
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
@@ -310,17 +315,34 @@ def _context(
     if latest is None:
         gaps.append(CaseGap("check_not_recorded", "check_not_recorded", ()))
     elif check_record is not None and any(
-        is_material_event_family(record.schema.name)
-        and record.ledger.ingestion_sequence > check_record.ledger.ingestion_sequence
+        invalidates_recorded_check(
+            record, check_record.ledger.ingestion_sequence, latest.returned_finding_ids
+        )
         for record in records
     ):
         # Applicability follows the material state, not frontier equality: a check applies to
-        # this receipt when no material-family event was appended after the check itself. Its
-        # own events (returned findings plus check_recorded) land atomically right after the
-        # tested frontier, so anything later is genuinely newer work that supersedes it.
+        # this receipt when no material-family event superseded it. Its own events (returned
+        # findings plus check_recorded) land atomically right after the tested frontier, so
+        # anything later is genuinely newer work, except a response answering a finding the
+        # check itself returned, which reports on that check rather than replacing what it read.
         gaps.append(CaseGap("check_not_applicable", "check_not_applicable", ()))
     elif check_record is not None and type(check_record.payload) is CheckRecordedPayload:
         applicable = check_record.payload
+        if any(
+            is_material_event_family(record.schema.name)
+            and record.ledger.ingestion_sequence > check_record.ledger.ingestion_sequence
+            for record in records
+        ):
+            # Only check-answering responses can reach here. The verdict still covers the
+            # frontier it tested rather than this one, so the receipt names that frontier
+            # instead of reading as though the work were re-checked here.
+            gaps.append(
+                CaseGap(
+                    CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP,
+                    CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP,
+                    (),
+                )
+            )
     else:
         gaps.append(
             CaseGap(
